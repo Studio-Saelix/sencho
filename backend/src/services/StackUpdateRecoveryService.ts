@@ -70,9 +70,13 @@ function sanitizeServiceSlug(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '-').toLowerCase() || 'svc';
 }
 
+/** Same short form used in the opaque rollback tag, so the UI's "Generation" label matches the Docker tag. */
+export function shortGenerationId(generationId: string): string {
+  return generationId.replace(/-/g, '').slice(0, 12);
+}
+
 function opaqueRollbackTag(generationId: string, serviceName: string): string {
-  const short = generationId.replace(/-/g, '').slice(0, 12);
-  return `sencho-rb/${short}/${sanitizeServiceSlug(serviceName)}:hold`;
+  return `sencho-rb/${shortGenerationId(generationId)}/${sanitizeServiceSlug(serviceName)}:hold`;
 }
 
 function parseServicesJson(raw: string): StackRecoveryServiceCapture[] {
@@ -284,6 +288,8 @@ export class StackUpdateRecoveryService {
         updated_at: now,
         created_by: createdBy,
         artifacts_retired: 0,
+        released_at: null,
+        released_by: null,
       };
       DatabaseService.getInstance().insertStackUpdateRecoveryGeneration(row);
       return row;
@@ -329,7 +335,7 @@ export class StackUpdateRecoveryService {
       throw new Error('Stack directory escapes compose base');
     }
 
-    const short = generationId.replace(/-/g, '').slice(0, 12);
+    const short = shortGenerationId(generationId);
     if (!/^[a-f0-9]{12}$/i.test(short)) {
       throw new Error('Invalid recovery generation id');
     }
@@ -398,6 +404,74 @@ export class StackUpdateRecoveryService {
     return ok;
   }
 
+  /**
+   * Informational mirror of releaseStackUpdateRecoveryGeneration's WHERE
+   * clause, for the list endpoint to grey out a row it already knows is
+   * ineligible. Not authoritative: releaseGeneration revalidates for real.
+   */
+  public isReleaseEligible(row: StackUpdateRecoveryGenerationRow): boolean {
+    if (row.released_at !== null || row.artifacts_retired !== 0) return false;
+    if (row.phase !== 'immediate_verified') return false;
+    if (!['active', 'restored_current', 'superseded'].includes(row.status)) return false;
+    if (row.health_gate_id) {
+      const gate = DatabaseService.getInstance().getHealthGateRun(row.node_id, row.stack_name, row.health_gate_id);
+      if (gate?.status === 'observing') return false;
+    }
+    return true;
+  }
+
+  /**
+   * Operator-initiated release of rollback protection, current generation
+   * included. The DB transition (releaseStackUpdateRecoveryGeneration)
+   * atomically revalidates eligibility and clears is_current, which is what
+   * stops getCurrent()/isRestoredCurrentPinActive() from reporting a released
+   * row as the live rollback point. Docker tag + override cleanup reuses the
+   * same idempotent retireGenerationArtifacts() that abandon() already relies
+   * on, so a mid-cleanup Docker failure leaves artifacts_retired at 0 and is
+   * retried by the next reconcileIncomplete() sweep rather than silently
+   * "succeeding" in the UI.
+   */
+  public async releaseGeneration(
+    id: string,
+    releasedBy: string | null,
+  ): Promise<
+    | { ok: true; row: StackUpdateRecoveryGenerationRow; artifactsCleaned: boolean }
+    | { ok: false; reason: 'not_found' | 'already_released' | 'not_eligible' }
+  > {
+    const before = this.get(id);
+    if (!before) return { ok: false, reason: 'not_found' };
+    if (before.released_at !== null) return { ok: false, reason: 'already_released' };
+
+    const released = DatabaseService.getInstance().releaseStackUpdateRecoveryGeneration(id, releasedBy);
+    if (!released) return { ok: false, reason: 'not_eligible' };
+
+    const row = this.get(id);
+    if (!row) return { ok: false, reason: 'not_found' };
+    const artifactsCleaned = await this.retireGenerationArtifacts(row);
+
+    const wasCurrent = before.is_current === 1;
+    try {
+      DatabaseService.getInstance().addNotificationHistory(row.node_id, {
+        level: wasCurrent ? 'warning' : 'info',
+        category: 'rollback_generation_released',
+        message: wasCurrent
+          ? `${row.stack_name}: current rollback protection released. Automatic rollback is unavailable until the next successful full-stack update.`
+          : `${row.stack_name}: rollback protection released for generation ${shortGenerationId(row.id)}.`,
+        timestamp: Date.now(),
+        stack_name: row.stack_name,
+        actor_username: releasedBy,
+      });
+    } catch (error) {
+      console.warn(
+        '[StackUpdateRecovery] Failed to record release activity for %s:',
+        sanitizeForLog(id),
+        sanitizeForLog(getErrorMessage(error, 'unknown')),
+      );
+    }
+
+    return { ok: true, row, artifactsCleaned };
+  }
+
   public linkHealthGate(id: string, healthGateId: string): void {
     DatabaseService.getInstance().linkStackUpdateRecoveryHealthGate(id, healthGateId);
   }
@@ -458,22 +532,6 @@ export class StackUpdateRecoveryService {
       );
       return null;
     }
-  }
-
-  /**
-   * Unified held-image predicate: service-scoped + full-stack holds.
-   * Fail closed (skip prune) when either lookup fails.
-   */
-  public buildUnifiedHeldImagePredicate(nodeId: number): (imageId: string) => boolean {
-    // Dynamic require avoids a static cycle with ServiceUpdateRecoveryService.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { ServiceUpdateRecoveryService } = require('./ServiceUpdateRecoveryService') as typeof import('./ServiceUpdateRecoveryService');
-    const serviceHeld = ServiceUpdateRecoveryService.getInstance().getHeldImageIds(nodeId);
-    const stackHeld = this.getHeldImageIds(nodeId);
-    if (serviceHeld === null || stackHeld === null) {
-      return () => true;
-    }
-    return (imageId: string) => serviceHeld.has(imageId) || stackHeld.has(imageId);
   }
 
   /**
@@ -655,7 +713,20 @@ export class StackUpdateRecoveryService {
       }
     }
     if (!tagsOk || !overrideOk) return false;
-    DatabaseService.getInstance().markStackUpdateRecoveryArtifactsRetired(row.id);
+    try {
+      DatabaseService.getInstance().markStackUpdateRecoveryArtifactsRetired(row.id);
+    } catch (error) {
+      // Tags/override are already gone at this point; a DB write failure here
+      // must not surface as "release/abandon failed" to the caller (the
+      // mutation it asked for already happened). Leave artifacts_retired at 0
+      // so the next reconcileIncomplete() sweep retries the DB write alone.
+      console.warn(
+        '[StackUpdateRecovery] Failed to mark artifacts retired for %s: %s',
+        sanitizeForLog(row.id),
+        sanitizeForLog(getErrorMessage(error, 'unknown')),
+      );
+      return false;
+    }
     return true;
   }
 
@@ -680,16 +751,38 @@ export class StackUpdateRecoveryService {
         });
         flagged += 1;
       }
+      let capped = 0;
+      const maxGenerations = db.getRecoveryMaxGenerations();
+      if (maxGenerations > 0) {
+        // The current generation always counts as one of the cap, so the
+        // superseded budget is one less; it can never itself be evicted here.
+        const supersededBudget = Math.max(0, maxGenerations - 1);
+        const byStack = new Map<string, StackUpdateRecoveryGenerationRow[]>();
+        for (const row of db.listActiveSupersededGenerations()) {
+          const key = `${row.node_id}:${row.stack_name}`;
+          const list = byStack.get(key) ?? [];
+          list.push(row);
+          byStack.set(key, list);
+        }
+        for (const rows of byStack.values()) {
+          for (const row of rows.slice(supersededBudget)) {
+            if (row.artifact_expires_at === null || row.artifact_expires_at > now) {
+              db.updateStackUpdateRecoveryGeneration(row.id, { artifact_expires_at: now });
+              capped += 1;
+            }
+          }
+        }
+      }
       let retired = 0;
       for (const row of db.listStackUpdateRecoveryGenerationsForArtifactRetirement(now)) {
         // Never retire an active/current or recovery_required hold target.
         if (row.is_current === 1 || row.status === 'recovery_required') continue;
         if (await this.retireGenerationArtifacts(row)) retired += 1;
       }
-      if (abandoned > 0 || flagged > 0 || retired > 0) {
+      if (abandoned > 0 || flagged > 0 || capped > 0 || retired > 0) {
         console.log(
           `[StackUpdateRecovery] Reconciled ${abandoned} stale candidate(s), `
-          + `${flagged} stuck generation(s), retired ${retired} artifact set(s)`,
+          + `${flagged} stuck generation(s), ${capped} generation(s) over cap, retired ${retired} artifact set(s)`,
         );
       }
     } catch (error) {

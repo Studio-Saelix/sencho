@@ -71,6 +71,8 @@ export interface StackUpdateDetail {
 }
 
 const SERVICES_JSON_VERSION = 1;
+const DEFAULT_RECOVERY_RETENTION_DAYS = 7;
+const DEFAULT_RECOVERY_MAX_GENERATIONS = 0;
 
 function isStackServiceStatus(value: unknown): value is StackServiceStatus {
     if (!value || typeof value !== 'object') return false;
@@ -253,6 +255,9 @@ export interface StackUpdateRecoveryGenerationRow {
     updated_at: number;
     created_by: string | null;
     artifacts_retired: number;
+    /** Set when an operator manually released rollback protection early (see releaseStackUpdateRecoveryGeneration). */
+    released_at: number | null;
+    released_by: string | null;
 }
 
 /** Durable cleanup tombstone for stack/node deletion artifact sweep. */
@@ -1898,6 +1903,12 @@ export class DatabaseService {
         `);
 
         maybeAddCol('stack_update_recovery_generations', 'artifacts_retired', 'INTEGER NOT NULL DEFAULT 0');
+        // Manual release (operator gave up rollback protection early). Additive
+        // columns rather than a new `status` enum value, since `status` carries a
+        // CHECK constraint that would need the heavier table-rebuild migration
+        // pattern used for health_gate_runs below.
+        maybeAddCol('stack_update_recovery_generations', 'released_at', 'INTEGER');
+        maybeAddCol('stack_update_recovery_generations', 'released_by', 'TEXT');
         maybeAddCol('stack_update_cleanup_pending', 'required_blueprint_id', 'INTEGER');
 
         // Distributed API model columns
@@ -2040,6 +2051,11 @@ export class DatabaseService {
         stmt.run('reclaim_hero', '0');
         stmt.run('health_gate_enabled', '1');
         stmt.run('health_gate_window_seconds', '90');
+        // Superseded-generation retention (days) and a per-stack cap on total
+        // retained generations (0 = unlimited). Never applies to the current
+        // generation, which stays protected until superseded or released.
+        stmt.run('recovery_retention_days', '7');
+        stmt.run('recovery_max_generations', '0');
         stmt.run('image_update_check_interval_minutes', '120');
         stmt.run('image_update_check_mode', 'interval');
         stmt.run('image_update_check_cron', '');
@@ -4213,16 +4229,39 @@ export class DatabaseService {
         return result.changes === 1;
     }
 
+    /** Days a superseded generation's Docker/FS artifacts are retained before automatic cleanup. Never applies to the current generation. */
+    public getRecoveryRetentionDays(): number {
+        try {
+            const raw = parseInt(this.getGlobalSettings()['recovery_retention_days'] ?? '', 10);
+            return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 90) : DEFAULT_RECOVERY_RETENTION_DAYS;
+        } catch (e) {
+            console.warn('[DatabaseService] recovery_retention_days read failed; using default:', (e as Error).message);
+            return DEFAULT_RECOVERY_RETENTION_DAYS;
+        }
+    }
+
+    /** Total generations retained per stack, current included (0 = unlimited). */
+    public getRecoveryMaxGenerations(): number {
+        try {
+            const raw = parseInt(this.getGlobalSettings()['recovery_max_generations'] ?? '', 10);
+            return Number.isFinite(raw) && raw >= 0 ? Math.min(raw, 50) : DEFAULT_RECOVERY_MAX_GENERATIONS;
+        } catch (e) {
+            console.warn('[DatabaseService] recovery_max_generations read failed; using default:', (e as Error).message);
+            return DEFAULT_RECOVERY_MAX_GENERATIONS;
+        }
+    }
+
     public casHandoffGeneration(candidateId: string, nodeId: number, stackName: string): boolean {
         const handoff = this.db.transaction(() => {
             const candidate = this.getStackUpdateRecoveryGeneration(candidateId);
             if (!candidate || candidate.node_id !== nodeId || candidate.stack_name !== stackName) return false;
             if (candidate.status !== 'candidate' || candidate.phase !== 'acquired') return false;
+            const retentionMs = this.getRecoveryRetentionDays() * 24 * 60 * 60 * 1000;
             this.db.prepare(
                 `UPDATE stack_update_recovery_generations
                  SET status = 'superseded', is_current = 0, artifact_expires_at = ?, updated_at = ?
                  WHERE node_id = ? AND stack_name = ? AND is_current = 1 AND id != ?`
-            ).run(Date.now() + 7 * 24 * 60 * 60 * 1000, Date.now(), nodeId, stackName, candidateId);
+            ).run(Date.now() + retentionMs, Date.now(), nodeId, stackName, candidateId);
             const result = this.db.prepare(
                 `UPDATE stack_update_recovery_generations
                  SET status = 'active', is_current = 1, phase = 'handoff_committed', updated_at = ?
@@ -4234,16 +4273,39 @@ export class DatabaseService {
     }
 
 
-    /** Generations whose Docker/FS artifacts can be retired (not actively held). */
+    /**
+     * Generations whose Docker/FS artifacts can be retired (not actively held).
+     * A manually released row (released_at set) is swept immediately regardless
+     * of its expiry timers; a naturally abandoned/superseded row still waits out
+     * artifact_expires_at / gate_retain_until.
+     */
     public listStackUpdateRecoveryGenerationsForArtifactRetirement(now: number): StackUpdateRecoveryGenerationRow[] {
         return this.db.prepare(
             `SELECT * FROM stack_update_recovery_generations
              WHERE artifacts_retired = 0
                AND is_current = 0
-               AND status IN ('abandoned', 'superseded')
-               AND (artifact_expires_at IS NULL OR artifact_expires_at <= ?)
-               AND (gate_retain_until IS NULL OR gate_retain_until <= ?)`
+               AND (
+                 released_at IS NOT NULL
+                 OR (
+                   status IN ('abandoned', 'superseded')
+                   AND (artifact_expires_at IS NULL OR artifact_expires_at <= ?)
+                   AND (gate_retain_until IS NULL OR gate_retain_until <= ?)
+                 )
+               )`
         ).all(now, now) as StackUpdateRecoveryGenerationRow[];
+    }
+
+    /**
+     * Superseded, not-yet-retired, not-released generations across every node
+     * for cap enforcement (mirrors the other reconcile-sweep list methods,
+     * which are also unscoped by node), newest first per (node_id, stack_name).
+     */
+    public listActiveSupersededGenerations(): StackUpdateRecoveryGenerationRow[] {
+        return this.db.prepare(
+            `SELECT * FROM stack_update_recovery_generations
+             WHERE status = 'superseded' AND artifacts_retired = 0 AND released_at IS NULL
+             ORDER BY node_id, stack_name, created_at DESC, id DESC`
+        ).all() as StackUpdateRecoveryGenerationRow[];
     }
 
     public markStackUpdateRecoveryArtifactsRetired(id: string): boolean {
@@ -4263,6 +4325,33 @@ export class DatabaseService {
                  operation_lease_expires_at = NULL, updated_at = ?
              WHERE id = ? AND status = 'candidate'`
         ).run(now, now, id);
+        return result.changes === 1;
+    }
+
+    /**
+     * Operator-initiated release of rollback protection. A single conditional
+     * UPDATE both revalidates eligibility and performs the transition
+     * atomically, so a stale caller can never release a row that has since
+     * become ineligible (e.g. it started a health gate observation, or moved
+     * to recovery_required). Only clears is_current/timestamps; Docker tag and
+     * override-file cleanup is the caller's job via retireGenerationArtifacts,
+     * matching how abandon() already separates the DB transition from cleanup.
+     */
+    public releaseStackUpdateRecoveryGeneration(id: string, releasedBy: string | null): boolean {
+        const now = Date.now();
+        const result = this.db.prepare(
+            `UPDATE stack_update_recovery_generations
+             SET released_at = ?, released_by = ?, is_current = 0, updated_at = ?
+             WHERE id = ?
+               AND released_at IS NULL
+               AND artifacts_retired = 0
+               AND phase = 'immediate_verified'
+               AND status IN ('active', 'restored_current', 'superseded')
+               AND (health_gate_id IS NULL OR NOT EXISTS (
+                 SELECT 1 FROM health_gate_runs g
+                 WHERE g.id = stack_update_recovery_generations.health_gate_id AND g.status = 'observing'
+               ))`
+        ).run(now, releasedBy, now, id);
         return result.changes === 1;
     }
 
@@ -4303,6 +4392,7 @@ export class DatabaseService {
         const rows = this.db.prepare(
             `SELECT services_json FROM stack_update_recovery_generations
              WHERE node_id = ?
+               AND released_at IS NULL
                AND status IN ('candidate','active','restored_current','recovery_required')
                AND (artifact_expires_at IS NULL OR artifact_expires_at > ? OR gate_retain_until > ? OR is_current = 1)`
         ).all(nodeId, now, now) as Array<{ services_json: string }>;
@@ -4438,7 +4528,7 @@ export class DatabaseService {
         const categories = [
             'deploy_success', 'deploy_failure', 'stack_started', 'stack_stopped', 'stack_restarted',
             'image_update_applied', 'update_started', 'health_gate_passed', 'health_gate_failed',
-            'network_auto_created',
+            'network_auto_created', 'rollback_generation_released',
         ];
         const placeholders = categories.map(() => '?').join(', ');
         const sql = `

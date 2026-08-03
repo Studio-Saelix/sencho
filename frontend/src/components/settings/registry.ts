@@ -131,7 +131,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         group: 'infrastructure',
         label: 'Stacks',
         description: 'Stack editor, lifecycle workflow preferences, and deploy guardrails.',
-        keywords: ['stack', 'compose', 'deploy', 'guardrail', 'health gate', 'observation', 'env', 'required variable', 'progress', 'modal', 'inline', 'diff', 'preview', 'save', 'editor', 'workflow'],
+        keywords: ['stack', 'compose', 'deploy', 'guardrail', 'health gate', 'observation', 'env', 'required variable', 'progress', 'modal', 'inline', 'diff', 'preview', 'save', 'editor', 'workflow', 'rollback', 'retention', 'generation'],
         tier: null,
         scope: 'node',
     },

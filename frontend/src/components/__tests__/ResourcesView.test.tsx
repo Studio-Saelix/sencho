@@ -474,4 +474,41 @@ describe('ResourcesView', () => {
     await screen.findByText('off-img:latest');
     expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument();
   });
+
+  it('badges a rollback-protected image without changing its managed/unused status', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({
+          images: [{ ...image('nginx:1.25'), managedStatus: 'unused', rollbackProtected: true, rollbackProtectionKind: 'stack' }],
+          volumes: [],
+          networks: [],
+        }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<ResourcesView />);
+    await screen.findByText('nginx:1.25');
+    expect(screen.getByText('Rollback protected')).toBeInTheDocument();
+    expect(screen.getByText('Unused')).toBeInTheDocument();
+  });
+
+  it('shows rollback generations in the Rollback tab, admin-gated release button included', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/rollback/generations') {
+        return Promise.resolve(jsonResponse([
+          { id: 'gen-1', shortId: 'abc123456789', stackName: 'seerr', status: 'active', isCurrent: true, phase: 'immediate_verified', createdAt: Date.now(), artifactExpiresAt: null, releasable: true },
+        ]));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<ResourcesView />);
+    await userEvent.click(await screen.findByRole('tab', { name: /rollback/i }));
+
+    expect(await screen.findByText('seerr')).toBeInTheDocument();
+    expect(screen.getByText('abc123456789')).toBeInTheDocument();
+    expect(screen.getByText('Current')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /release rollback protection/i })).toBeInTheDocument();
+  });
 });

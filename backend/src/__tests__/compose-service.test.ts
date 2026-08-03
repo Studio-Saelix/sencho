@@ -181,6 +181,10 @@ vi.mock('../services/MeshService', () => ({
   },
 }));
 
+vi.mock('../services/recoveryHeldImages', () => ({
+  buildUnifiedHeldImagePredicate: mockBuildUnifiedHeldImagePredicate,
+}));
+
 vi.mock('../services/StackUpdateRecoveryService', () => ({
   StackUpdateRecoveryService: {
     getInstance: () => ({
@@ -191,7 +195,6 @@ vi.mock('../services/StackUpdateRecoveryService', () => ({
       markImmediateVerified: mockMarkImmediateVerified,
       abandon: mockAbandon,
       compensateWithCandidate: mockCompensateWithCandidate,
-      buildUnifiedHeldImagePredicate: mockBuildUnifiedHeldImagePredicate,
       get: mockGetRecovery,
       linkGateOrRetain: vi.fn(),
     }),

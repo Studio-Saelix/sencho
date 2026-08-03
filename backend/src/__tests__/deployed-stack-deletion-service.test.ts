@@ -60,6 +60,8 @@ describe('DeployedStackDeletionService ready transaction', () => {
       updated_at: now,
       created_by: null,
       artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
     };
     db().insertStackUpdateRecoveryGeneration(gen);
     const svc: ServiceUpdateRecoveryRow = {

@@ -27,6 +27,8 @@ export const SETTING_WRITE_PERMISSIONS: Record<string, PermissionAction> = {
   env_block_deploy_on_missing_required: 'node:manage',
   auto_create_missing_external_networks: 'node:manage',
   notification_dispatch_retries: 'node:manage',
+  recovery_retention_days: 'node:manage',
+  recovery_max_generations: 'node:manage',
   developer_mode: 'system:settings',
   metrics_retention_hours: 'system:settings',
   log_retention_days: 'system:settings',
@@ -114,6 +116,8 @@ const SettingsPatchSchema = z.object({
   env_block_deploy_on_missing_required: z.enum(['0', '1']),
   auto_create_missing_external_networks: z.enum(['0', '1']),
   image_update_sidebar_indicators: z.enum(['0', '1']),
+  recovery_retention_days: z.coerce.number().int().min(1).max(90).transform(String),
+  recovery_max_generations: z.coerce.number().int().min(0).max(50).transform(String),
   // Strict: do not use bare z.coerce.number() (null/false/'' become 0; true becomes 1).
   notification_dispatch_retries: z.unknown().superRefine((v, ctx) => {
     if (parseNotificationDispatchRetries(v) === null) {

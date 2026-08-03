@@ -143,6 +143,9 @@ export interface ClassifiedImage {
   managedBy: string | null;
   managedStatus: 'managed' | 'unmanaged' | 'unused';
   isSencho: boolean;
+  /** True when a StackUpdateRecoveryService/ServiceUpdateRecoveryService hold protects this image from pruning. Additive: does not change managedStatus semantics. */
+  rollbackProtected: boolean;
+  rollbackProtectionKind?: 'stack' | 'service';
 }
 
 export interface PortInUseInfo {
@@ -561,23 +564,52 @@ class DockerController {
 
     const selfIdentity = SelfIdentityService.getInstance();
 
-    const images: ClassifiedImage[] = this.validateApiData<any[]>(rawImages).map((img: any) => {
-      const usedByStacks = [...(imageToStacks.get(img.Id) ?? [])].sort((a, b) => a.localeCompare(b));
-      const managedBy = usedByStacks[0] ?? null;
-      const managedStatus: ClassifiedImage['managedStatus'] =
-        img.Containers === 0 ? 'unused' :
-        managedBy ? 'managed' : 'unmanaged';
-      return {
-        Id: img.Id,
-        RepoTags: img.RepoTags ?? [],
-        Size: img.Size ?? 0,
-        Containers: img.Containers ?? 0,
-        usedByStacks,
-        managedBy,
-        managedStatus,
-        isSencho: selfIdentity.isOwnImage(img.Id),
-      };
-    });
+    // Dynamic (async) imports avoid a static cycle: StackUpdateRecoveryService
+    // imports DockerController directly, and ServiceUpdateRecoveryService
+    // reaches it transitively through ComposeService. It must be `await import`
+    // rather than require(), which does not resolve under Vitest's loader.
+    const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+    const { ServiceUpdateRecoveryService } = await import('./ServiceUpdateRecoveryService');
+    const stackHeld = StackUpdateRecoveryService.getInstance().getHeldImageIds(this.nodeId);
+    const serviceHeld = ServiceUpdateRecoveryService.getInstance().getHeldImageIds(this.nodeId);
+    // A null lookup means "held state unknown" (the DB read failed); treat it
+    // as held so the badge never disagrees with the delete guard, which fails
+    // the same way (recoveryHeldImages.ts's buildUnifiedHeldImagePredicate).
+    const rollbackKind = (imageId: string): ClassifiedImage['rollbackProtectionKind'] => {
+      if (stackHeld === null || stackHeld.has(imageId)) return 'stack';
+      if (serviceHeld === null || serviceHeld.has(imageId)) return 'service';
+      return undefined;
+    };
+
+    // Only hide an image from the generic inventory when every visible tag is
+    // a synthetic sencho-rb hold tag; an image that also carries a normal
+    // registry tag stays visible here (with the badge below) so the generic
+    // inventory stays complete. Its generation still surfaces in the Rollback tab.
+    const isFullySyntheticHoldImage = (repoTags: string[]): boolean =>
+      repoTags.length > 0 && repoTags.every((tag) => tag.startsWith('sencho-rb/'));
+
+    const images: ClassifiedImage[] = this.validateApiData<any[]>(rawImages)
+      .map((img: any) => {
+        const usedByStacks = [...(imageToStacks.get(img.Id) ?? [])].sort((a, b) => a.localeCompare(b));
+        const managedBy = usedByStacks[0] ?? null;
+        const managedStatus: ClassifiedImage['managedStatus'] =
+          img.Containers === 0 ? 'unused' :
+          managedBy ? 'managed' : 'unmanaged';
+        const rollbackProtectionKind = rollbackKind(img.Id);
+        return {
+          Id: img.Id,
+          RepoTags: img.RepoTags ?? [],
+          Size: img.Size ?? 0,
+          Containers: img.Containers ?? 0,
+          usedByStacks,
+          managedBy,
+          managedStatus,
+          isSencho: selfIdentity.isOwnImage(img.Id),
+          rollbackProtected: rollbackProtectionKind !== undefined,
+          rollbackProtectionKind,
+        };
+      })
+      .filter((img) => !isFullySyntheticHoldImage(img.RepoTags));
 
     const volumes: ClassifiedVolume[] = rawVolumes.map((vol: any) => {
       const stack = DockerController.resolveProjectLabel(vol.Labels?.['com.docker.compose.project'], knownSet, projectToStack);
@@ -1502,6 +1534,23 @@ class DockerController {
     const image = this.docker.getImage(id);
     const [inspect, history] = await Promise.all([image.inspect(), image.history()]);
     return { inspect, history };
+  }
+
+  /**
+   * Resolve any valid Docker image reference (full ID, short ID, digest, or
+   * tag) to its canonical full sha256 ID. isValidDockerResourceId accepts
+   * short IDs down to 12 hex chars, which a held-image-id set lookup (always
+   * keyed on the full 64-char form) would miss without this resolve step.
+   * Returns null when the image does not exist.
+   */
+  public async resolveImageId(id: string): Promise<string | null> {
+    try {
+      const info = await this.docker.getImage(id).inspect();
+      return info.Id;
+    } catch (error) {
+      if ((error as { statusCode?: number })?.statusCode === 404) return null;
+      throw error;
+    }
   }
 
   public async removeVolume(name: string) {
