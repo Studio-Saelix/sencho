@@ -36,6 +36,17 @@ function formatTimestamp(ms: number): string {
     return new Date(ms).toLocaleString();
 }
 
+// `FleetNode.last_successful_contact` and `FleetNode.pilot_last_seen` come from
+// the fleet-overview endpoint in Unix SECONDS (DatabaseService.updateNodeLastContact
+// writes Math.floor(Date.now()/1000); fleet.ts's pilotLastSeenSeconds() divides the
+// millisecond DB value by 1000 for this same response). `formatTimeAgo`/`formatTimestamp`
+// both expect milliseconds, so any FleetNode-sourced timestamp must convert here before
+// use. `registryNode`-sourced timestamps (e.g. pilot_last_seen from /api/nodes) are
+// already in milliseconds and must NOT be passed through this helper.
+function fleetSecondsToMs(seconds: number): number {
+    return seconds * 1000;
+}
+
 function UsageBar({ percent, color }: { percent: number; color: string }) {
     return (
         <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
@@ -96,7 +107,7 @@ export function NodeDetailsSheet({
     const footerContext = node.status === 'online'
         ? 'Live · refreshes with the fleet overview'
         : node.last_successful_contact
-            ? `Last seen ${formatTimeAgo(node.last_successful_contact)}`
+            ? `Last seen ${formatTimeAgo(fleetSecondsToMs(node.last_successful_contact))}`
             : 'Never contacted';
 
     return (
@@ -141,16 +152,18 @@ export function NodeDetailsSheet({
                             <p className="font-mono text-xs mt-0.5 tabular-nums">{node.latency_ms} ms</p>
                         </Field>
                     )}
-                    <Field label="Last successful contact">
-                        <p className="text-xs mt-0.5" title={node.last_successful_contact ? formatTimestamp(node.last_successful_contact) : undefined}>
-                            {node.last_successful_contact ? formatTimeAgo(node.last_successful_contact) : 'Never'}
-                        </p>
-                    </Field>
+                    {!isLocal && (
+                        <Field label="Last successful contact">
+                            <p className="text-xs mt-0.5" title={node.last_successful_contact ? formatTimestamp(fleetSecondsToMs(node.last_successful_contact)) : undefined}>
+                                {node.last_successful_contact ? formatTimeAgo(fleetSecondsToMs(node.last_successful_contact)) : 'Never'}
+                            </p>
+                        </Field>
+                    )}
                     {isPilot && (
                         <>
                             <Field label="Pilot heartbeat">
                                 <p className="text-xs mt-0.5">
-                                    {node.pilot_last_seen ? formatTimeAgo(node.pilot_last_seen) : 'Never'}
+                                    {node.pilot_last_seen ? formatTimeAgo(fleetSecondsToMs(node.pilot_last_seen)) : 'Never'}
                                 </p>
                             </Field>
                             <Field label="Pilot Agent version">
@@ -254,9 +267,11 @@ export function NodeDetailsSheet({
                     </Field>
                     <Field label="Update status">
                         <p className="text-xs mt-0.5">
-                            {updateStatus?.updateBlocked ? (
+                            {!updateStatus ? (
+                                <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 text-muted-foreground">Unknown</Badge>
+                            ) : updateStatus.updateBlocked ? (
                                 <PinnedUpdateBadge reason={updateStatus.updateBlockedReason} className="text-[10px] px-1.5 py-0 h-5" />
-                            ) : updateStatus?.updateAvailable ? (
+                            ) : updateStatus.updateAvailable ? (
                                 <Badge className="text-[10px] px-1.5 py-0 h-5 bg-warning/15 text-warning border-warning/30">Update available</Badge>
                             ) : (
                                 <Badge className="text-[10px] px-1.5 py-0 h-5 bg-success-muted text-success border-success/30">Up to date</Badge>
