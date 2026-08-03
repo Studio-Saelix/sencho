@@ -12,7 +12,9 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 interface BlueprintDeploymentTableProps {
     deployments: BlueprintDeployment[];
     classification: BlueprintClassification;
-    canEdit: boolean;
+    canDeploy: (nodeId: number) => boolean;
+    canWithdraw: (nodeId: number) => boolean;
+    canRetry: boolean;
     busyNodeId: number | null;
     onWithdraw: (nodeId: number) => void;
     onAcceptStateReview: (nodeId: number) => void;
@@ -51,7 +53,7 @@ function statusDotClass(status: BlueprintDeploymentStatus): string {
 }
 
 export function BlueprintDeploymentTable({
-    deployments, classification, canEdit, busyNodeId, onWithdraw, onAcceptStateReview, onRetry, pinnedNodeId = null,
+    deployments, classification, canDeploy, canWithdraw, canRetry, busyNodeId, onWithdraw, onAcceptStateReview, onRetry, pinnedNodeId = null,
 }: BlueprintDeploymentTableProps) {
     const { nodes } = useNodes();
     const nodesById = new Map(nodes.map(n => [n.id, n]));
@@ -122,7 +124,7 @@ export function BlueprintDeploymentTable({
                                 </TableCell>
                                 <TableCell className="align-top">
                                     <div className="flex items-center justify-end gap-1">
-                                        {dep.status === 'pending_state_review' && canEdit && (
+                                        {dep.status === 'pending_state_review' && canDeploy(dep.node_id) && (
                                             <Button
                                                 size="sm"
                                                 variant="default"
@@ -138,7 +140,7 @@ export function BlueprintDeploymentTable({
                                                 Resolve manually
                                             </span>
                                         )}
-                                        {dep.status === 'failed' && canEdit && (
+                                        {dep.status === 'failed' && canRetry && (
                                             <Button
                                                 size="sm"
                                                 variant="outline"
@@ -148,7 +150,7 @@ export function BlueprintDeploymentTable({
                                                 Retry
                                             </Button>
                                         )}
-                                        {(dep.status === 'active' || dep.status === 'drifted' || dep.status === 'evict_blocked' || dep.status === 'failed') && canEdit && (
+                                        {(dep.status === 'active' || dep.status === 'drifted' || dep.status === 'evict_blocked' || dep.status === 'failed') && canWithdraw(dep.node_id) && (
                                             <Button
                                                 size="sm"
                                                 variant="ghost"

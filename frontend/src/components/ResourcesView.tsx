@@ -29,10 +29,13 @@ import { cn } from '@/lib/utils';
 import { ReclaimHero } from './resources/ReclaimHero';
 import { FootprintTreemap } from './resources/FootprintTreemap';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
+import { RollbackGenerationsTab, type RollbackGeneration } from './resources/RollbackGenerationsTab';
+import { TableSkeleton } from './resources/TableSkeleton';
 import { VolumeBrowserSheet } from './resources/VolumeBrowserSheet';
 import { VolumeNameLabel } from './resources/VolumeNameLabel';
 import { useTableSort } from '@/hooks/useTableSort';
 import { SortableTableHead } from '@/components/ui/sortable-table';
+import { isPrunePlan, type PrunePlan, type PruneScope, type PruneTarget } from '@/lib/prunePlan';
 
 // ── Interfaces ─────────────────────────────────────────────────────────────────
 
@@ -58,6 +61,9 @@ interface DockerImage {
     managedBy: string | null;
     managedStatus: 'managed' | 'unmanaged' | 'unused';
     isSencho: boolean;
+    /** True when a rollback hold protects this image from pruning; additive, independent of managedStatus. */
+    rollbackProtected: boolean;
+    rollbackProtectionKind?: 'stack' | 'service';
 }
 
 interface DockerVolume {
@@ -90,25 +96,6 @@ interface UnmanagedContainer {
 }
 
 type ResourceFilter = 'all' | 'managed' | 'unmanaged';
-type PruneTarget = 'containers' | 'images' | 'networks' | 'volumes';
-type PruneScope = 'managed' | 'all';
-
-interface PrunePlanItem {
-    target: PruneTarget;
-    id: string;
-    name: string;
-    sizeBytes?: number;
-}
-
-interface PrunePlan {
-    scope: PruneScope;
-    targets: PruneTarget[];
-    items: PrunePlanItem[];
-    reclaimableBytes: number;
-    fingerprint: string;
-    createdAt: number;
-    nodeId: number;
-}
 
 const PLAN_PREVIEW_CAP = 30;
 
@@ -290,6 +277,26 @@ function SenchoBadge() {
     );
 }
 
+function RollbackProtectedBadge({ kind }: { kind?: 'stack' | 'service' }) {
+    return (
+        <TooltipProvider>
+            <Tooltip>
+                <TooltipTrigger asChild>
+                    <Badge variant="outline" className="text-[10px] h-5 gap-1 border-brand/40 text-brand">
+                        <ShieldCheck className="w-3 h-3" strokeWidth={2} />
+                        Rollback protected
+                    </Badge>
+                </TooltipTrigger>
+                <TooltipContent>
+                    {kind === 'stack'
+                        ? 'Held as a full-stack rollback point. See Resources → Rollback.'
+                        : 'Held for a pending per-service update rollback.'}
+                </TooltipContent>
+            </Tooltip>
+        </TooltipProvider>
+    );
+}
+
 // ── Severity Badge ─────────────────────────────────────────────────────────────
 
 // ── Quick Clean Prune Button ───────────────────────────────────────────────────
@@ -345,24 +352,6 @@ function PruneButton({ target, icon, label, accentClass, onManaged, onAll }: Pru
     );
 }
 
-// ── Table Skeleton ─────────────────────────────────────────────────────────────
-
-function TableSkeleton({ cols, rows = 5 }: { cols: number; rows?: number }) {
-    return (
-        <TableBody>
-            {Array.from({ length: rows }).map((_, r) => (
-                <TableRow key={r} className="animate-in fade-in-0" style={{ animationDelay: `${r * 40}ms` }}>
-                    {Array.from({ length: cols }).map((_, c) => (
-                        <TableCell key={c}>
-                            <Skeleton className={cn('h-4', c === 0 ? 'w-24' : c === 1 ? 'w-48' : 'w-16')} />
-                        </TableCell>
-                    ))}
-                </TableRow>
-            ))}
-        </TableBody>
-    );
-}
-
 // Stable comparator maps for the resource tables (module scope so useTableSort
 // does not re-sort on every render). Mirrors the Security Images sort standard.
 const IMAGE_COMPARATORS: Record<'repo' | 'size' | 'status', (a: DockerImage, b: DockerImage) => number> = {
@@ -384,14 +373,18 @@ interface ResourcesViewProps {
 
 export default function ResourcesView({ headerActions }: ResourcesViewProps = {}) {
     const isMobile = useIsMobile();
-    const [resourceTab, setResourceTab] = useState<'images' | 'volumes' | 'unmanaged'>('images');
-    const { isAdmin } = useAuth();
+    const [resourceTab, setResourceTab] = useState<'images' | 'volumes' | 'unmanaged' | 'rollback'>('images');
+    const { isAdmin, can } = useAuth();
+    const canReadResources = can('stack:read');
+    const canDeployResources = can('stack:deploy');
+    const canEditSecurityPolicy = can('stack:edit');
     const { activeNode } = useNodes();
     const [usage, setUsage] = useState<UsageData | null>(null);
     const [images, setImages] = useState<DockerImage[]>([]);
     const [volumes, setVolumes] = useState<DockerVolume[]>([]);
     const [networks, setNetworks] = useState<DockerNetwork[]>([]);
     const [orphans, setOrphans] = useState<Record<string, UnmanagedContainer[]>>({});
+    const [rollbackGenerations, setRollbackGenerations] = useState<RollbackGeneration[]>([]);
 
     const [isLoading, setIsLoading] = useState(true);
     const [isActioning, setIsActioning] = useState(false);
@@ -453,12 +446,13 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         const generation = ++fetchGenerationRef.current;
         setIsLoading(true);
         try {
-            const [usageRes, resourcesRes, orphansRes, summariesRes, settingsRes] = await Promise.all([
+            const [usageRes, resourcesRes, orphansRes, summariesRes, settingsRes, rollbackRes] = await Promise.all([
                 apiFetch('/system/docker-df'),
                 apiFetch('/system/resources'),
                 apiFetch('/system/orphans'),
                 apiFetch('/security/image-summaries').catch(() => null),
                 apiFetch('/settings').catch(() => null),
+                apiFetch('/system/rollback/generations').catch(() => null),
             ]);
 
             // Resolve every body before the staleness check so a stale
@@ -468,6 +462,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             const orphansData = orphansRes.ok ? await orphansRes.json() : null;
             const summariesData = summariesRes && summariesRes.ok ? await summariesRes.json() : null;
             const settingsData = settingsRes && settingsRes.ok ? await settingsRes.json() : null;
+            const rollbackData = rollbackRes && rollbackRes.ok ? await rollbackRes.json() : null;
 
             if (fetchGenerationRef.current !== generation) return;
 
@@ -486,6 +481,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 setSelectedOrphans([]);
             }
             if (summariesData) setScanSummaries(summariesData);
+            setRollbackGenerations(Array.isArray(rollbackData) ? rollbackData : []);
         } catch (err) {
             if (fetchGenerationRef.current !== generation) return;
             console.error('Failed to fetch data', err);
@@ -530,8 +526,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             if (!res.ok) {
                 throw new Error(data?.error || 'Failed to build prune plan');
             }
-            setPrunePlan(data as PrunePlan);
-            return data as PrunePlan;
+            if (!isPrunePlan(data)) throw new Error('The node returned a malformed prune plan');
+            setPrunePlan(data);
+            return data;
         } catch (error) {
             if (planFetchGenRef.current !== generation) return null;
             const err = error as { message?: string };
@@ -942,6 +939,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             { value: 'images', label: 'Images', count: images.length },
                             { value: 'volumes', label: 'Volumes', count: volumes.length },
                             { value: 'unmanaged', label: 'Unmanaged', count: totalOrphansCount },
+                            { value: 'rollback', label: 'Rollback', count: rollbackGenerations.length },
                         ]}
                     />
                 ) : (
@@ -962,6 +960,12 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 <TabsTrigger value="unmanaged" className="relative">
                                     Unmanaged
                                     <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{totalOrphansCount}</span>
+                                </TabsTrigger>
+                            </TabsHighlightItem>
+                            <TabsHighlightItem value="rollback">
+                                <TabsTrigger value="rollback" className="relative">
+                                    Rollback
+                                    <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{rollbackGenerations.length}</span>
                                 </TabsTrigger>
                             </TabsHighlightItem>
                         </TabsHighlight>
@@ -1064,6 +1068,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                         ) : undefined}
                                                     />
                                                     {img.isSencho && <SenchoBadge />}
+                                                    {img.rollbackProtected && <RollbackProtectedBadge kind={img.rollbackProtectionKind} />}
                                                     {(() => {
                                                         const tag = img.RepoTags?.[0];
                                                         const summary = tag ? scanSummaries[tag] : undefined;
@@ -1093,7 +1098,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                             <TooltipContent>Inspect image</TooltipContent>
                                                         </Tooltip>
                                                     </TooltipProvider>
-                                                    {trivy.available && isAdmin && img.RepoTags?.[0] && img.RepoTags[0] !== '<none>:<none>' && (
+                                                    {trivy.available && canDeployResources && img.RepoTags?.[0] && img.RepoTags[0] !== '<none>:<none>' && (
                                                         <DropdownMenu>
                                                             <TooltipProvider>
                                                                 <Tooltip>
@@ -1231,7 +1236,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                             </TableCell>
                                             <TableCell className="text-right">
                                                 <div className="flex items-center justify-end gap-1">
-                                                    {isAdmin && (
+                                                    {canReadResources && (
                                                         <TooltipProvider>
                                                             <Tooltip>
                                                                 <TooltipTrigger asChild>
@@ -1365,6 +1370,17 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         )}
                         </div>
                     </TabsContent>
+
+                    {/* Rollback */}
+                    <TabsContent value="rollback" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
+                        <RollbackGenerationsTab
+                            generations={rollbackGenerations}
+                            isLoading={isLoading}
+                            isAdmin={isAdmin}
+                            nodeId={activeNode?.id}
+                            onReleased={fetchAllData}
+                        />
+                    </TabsContent>
                 </div>
             </Tabs>
         </>
@@ -1496,11 +1512,11 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             <VulnerabilityScanSheet
                 scanId={inspectScanId}
                 onClose={() => setInspectScanId(null)}
-                onRescan={isAdmin ? (imageRef) => { setInspectScanId(null); handleScanImage(imageRef, { force: true }); } : undefined}
-                canGenerateSbom={isAdmin}
-                canExportSarif={isAdmin}
+                onRescan={canDeployResources ? (imageRef) => { setInspectScanId(null); handleScanImage(imageRef, { force: true }); } : undefined}
+                canGenerateSbom={canReadResources}
+                canExportSarif={canReadResources}
                 canCompare
-                canManageSuppressions={isAdmin}
+                canManageSuppressions={canEditSecurityPolicy}
             />
         </>
     );

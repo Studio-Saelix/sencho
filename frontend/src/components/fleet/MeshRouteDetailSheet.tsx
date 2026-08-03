@@ -15,7 +15,7 @@ interface Props {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     alias: string | null;
-    /** Removing a route opts its owning stack out of the mesh; admin-only, mirrors the backend gate. */
+    /** Whether the user may start the mesh-wide opt-out cascade. */
     canManage: boolean;
     status: MeshNodeStatus[];
     aliases: MeshAlias[];

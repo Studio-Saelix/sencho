@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin, requireBody } from '../middleware/tierGates';
+import { requireBody } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
 import {
     DatabaseService,
@@ -136,6 +136,7 @@ function summarizeBlueprint(blueprintId: number) {
 }
 
 blueprintsRouter.get('/', (req: Request, res: Response): void => {
+    if (!requirePermission(req, res, 'node:read')) return;
     try {
         const blueprints = DatabaseService.getInstance().listBlueprints();
         const summaries = blueprints.map(b => {
@@ -159,7 +160,7 @@ blueprintsRouter.get('/', (req: Request, res: Response): void => {
 });
 
 blueprintsRouter.post('/', (req: Request, res: Response): void => {
-    if (!requireAdmin(req, res)) return;
+    if (!requirePermission(req, res, 'stack:create')) return;
     if (!requireBody(req, res)) return;
     const body = req.body as BlueprintBody;
     const nameError = validateName(body.name);
@@ -198,6 +199,7 @@ blueprintsRouter.post('/', (req: Request, res: Response): void => {
 });
 
 blueprintsRouter.get('/:id', (req: Request, res: Response): void => {
+    if (!requirePermission(req, res, 'node:read')) return;
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
     try {
@@ -211,7 +213,7 @@ blueprintsRouter.get('/:id', (req: Request, res: Response): void => {
 });
 
 blueprintsRouter.put('/:id', (req: Request, res: Response): void => {
-    if (!requireAdmin(req, res)) return;
+    if (!requirePermission(req, res, 'stack:edit')) return;
     if (!requireBody(req, res)) return;
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
@@ -293,7 +295,7 @@ blueprintsRouter.put('/:id', (req: Request, res: Response): void => {
 });
 
 blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmin(req, res)) return;
+    if (!requirePermission(req, res, 'stack:delete')) return;
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
     try {
@@ -461,7 +463,8 @@ blueprintsRouter.post('/withdraw-local', async (req: Request, res: Response): Pr
 });
 
 blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmin(req, res)) return;
+    if (!requirePermission(req, res, 'stack:create')) return;
+    if (!requirePermission(req, res, 'stack:deploy')) return;
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
     try {
@@ -547,7 +550,6 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
 });
 
 blueprintsRouter.post('/:id/withdraw/:nodeId', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmin(req, res)) return;
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
     const nodeId = parseIntParam(req, res, 'nodeId');
@@ -560,6 +562,7 @@ blueprintsRouter.post('/:id/withdraw/:nodeId', async (req: Request, res: Respons
     try {
         const blueprint = DatabaseService.getInstance().getBlueprint(id);
         if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
+        if (!requirePermission(req, res, 'stack:delete', 'stack', blueprint.name, nodeId)) return;
         const node = DatabaseService.getInstance().getNode(nodeId);
         if (!node) { res.status(404).json({ error: 'Node not found' }); return; }
         const isStateful = blueprint.classification === 'stateful' || blueprint.classification === 'unknown';
@@ -636,7 +639,6 @@ blueprintsRouter.post('/:id/withdraw/:nodeId', async (req: Request, res: Respons
 });
 
 blueprintsRouter.post('/:id/accept/:nodeId', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmin(req, res)) return;
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
     const nodeId = parseIntParam(req, res, 'nodeId');
@@ -649,6 +651,7 @@ blueprintsRouter.post('/:id/accept/:nodeId', async (req: Request, res: Response)
     try {
         const blueprint = DatabaseService.getInstance().getBlueprint(id);
         if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
+        if (!requirePermission(req, res, 'stack:deploy', 'stack', blueprint.name, nodeId)) return;
         const guard = BlueprintReconciler.getInstance().validateGuardConfirmation(id, nodeId, 'accept');
         if (!guard.ok) {
             res.status(409).json({ error: guard.error, code: guard.code });
@@ -665,6 +668,7 @@ blueprintsRouter.post('/:id/accept/:nodeId', async (req: Request, res: Response)
 });
 
 blueprintsRouter.get('/:id/preview', async (req: Request, res: Response): Promise<void> => {
+    if (!requirePermission(req, res, 'node:read')) return;
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
     try {
@@ -678,7 +682,6 @@ blueprintsRouter.get('/:id/preview', async (req: Request, res: Response): Promis
 });
 
 blueprintsRouter.put('/:id/pin', async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
@@ -692,6 +695,7 @@ blueprintsRouter.put('/:id/pin', async (req: Request, res: Response): Promise<vo
         res.status(400).json({ error: 'nodeId must be a positive integer or null' });
         return;
     }
+    if (!requirePermission(req, res, 'node:manage', nodeId === null ? undefined : 'node', nodeId === null ? undefined : String(nodeId))) return;
     try {
         const blueprint = DatabaseService.getInstance().getBlueprint(id);
         if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }

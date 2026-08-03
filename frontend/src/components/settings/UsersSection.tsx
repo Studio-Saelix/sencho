@@ -36,6 +36,7 @@ interface RoleAssignmentItem {
     role: UserRole;
     resource_type: 'stack' | 'node';
     resource_id: string;
+    node_id: number | null;
     created_at: number;
 }
 
@@ -209,6 +210,11 @@ export function UsersSection() {
         setFormRole('viewer');
         setEditingUser(null);
         setShowForm(false);
+        setRoleAssignments([]);
+        setScopeResourceType('stack');
+        setScopeNodeId('');
+        setScopeResourceId('');
+        setAvailableStacks([]);
     };
 
     const handleSave = async () => {
@@ -313,16 +319,18 @@ export function UsersSection() {
         setFormConfirmPassword('');
         setShowForm(true);
         fetchRoleAssignments(u.id);
-        fetchScopeResources();
+        void fetchAvailableNodes();
     };
 
     // --- Scoped Role Assignments ---
     const [roleAssignments, setRoleAssignments] = useState<RoleAssignmentItem[]>([]);
     const [scopeResourceType, setScopeResourceType] = useState<'stack' | 'node'>('stack');
+    const [scopeNodeId, setScopeNodeId] = useState<string>('');
     const [scopeResourceId, setScopeResourceId] = useState('');
     const [scopeRole, setScopeRole] = useState<UserRole>('deployer');
     const [availableStacks, setAvailableStacks] = useState<string[]>([]);
     const [availableNodes, setAvailableNodes] = useState<{ id: number; name: string }[]>([]);
+    const [loadingStacks, setLoadingStacks] = useState(false);
     const [addingScope, setAddingScope] = useState(false);
 
     const fetchRoleAssignments = async (userId: number) => {
@@ -333,16 +341,9 @@ export function UsersSection() {
         } catch { setRoleAssignments([]); }
     };
 
-    const fetchScopeResources = async () => {
+    const fetchAvailableNodes = async () => {
         try {
-            const [stacksRes, nodesRes] = await Promise.all([
-                apiFetch('/stacks', { localOnly: true }),
-                apiFetch('/nodes', { localOnly: true }),
-            ]);
-            if (stacksRes.ok) {
-                const data = await stacksRes.json();
-                setAvailableStacks(Array.isArray(data) ? data.filter((s: unknown): s is string => typeof s === 'string') : []);
-            }
+            const nodesRes = await apiFetch('/nodes', { localOnly: true });
             if (nodesRes.ok) {
                 const data = await nodesRes.json();
                 setAvailableNodes(Array.isArray(data) ? data.map((n: { id: number; name: string }) => ({ id: n.id, name: n.name })) : []);
@@ -350,14 +351,51 @@ export function UsersSection() {
         } catch { /* ignore */ }
     };
 
+    const fetchStacksForNode = async (nodeIdStr: string) => {
+        if (!nodeIdStr) {
+            setAvailableStacks([]);
+            return;
+        }
+        const nodeId = parseInt(nodeIdStr, 10);
+        if (!Number.isInteger(nodeId)) {
+            setAvailableStacks([]);
+            return;
+        }
+        setLoadingStacks(true);
+        try {
+            const stacksRes = await apiFetch('/stacks', { nodeId });
+            if (stacksRes.ok) {
+                const data = await stacksRes.json();
+                setAvailableStacks(Array.isArray(data) ? data.filter((s: unknown): s is string => typeof s === 'string') : []);
+            } else {
+                setAvailableStacks([]);
+                toast.error('Failed to load stacks for the selected node.');
+            }
+        } catch {
+            setAvailableStacks([]);
+            toast.error('Failed to load stacks for the selected node.');
+        } finally {
+            setLoadingStacks(false);
+        }
+    };
+
     const addRoleAssignment = async () => {
         if (!editingUser || !scopeResourceId) return;
+        if (scopeResourceType === 'stack' && !scopeNodeId) return;
         setAddingScope(true);
         try {
+            const body: Record<string, unknown> = {
+                role: scopeRole,
+                resource_type: scopeResourceType,
+                resource_id: scopeResourceId,
+            };
+            if (scopeResourceType === 'stack') {
+                body.node_id = parseInt(scopeNodeId, 10);
+            }
             const res = await apiFetch(`/users/${editingUser.id}/roles`, {
                 method: 'POST',
                 localOnly: true,
-                body: JSON.stringify({ role: scopeRole, resource_type: scopeResourceType, resource_id: scopeResourceId }),
+                body: JSON.stringify(body),
             });
             if (!res.ok) {
                 const err = await res.json();
@@ -476,21 +514,29 @@ export function UsersSection() {
 
                                 {roleAssignments.length > 0 && (
                                     <div className="space-y-1">
-                                        {roleAssignments.map((a) => (
+                                        {roleAssignments.map((a) => {
+                                            const nodeLabel = a.resource_type === 'stack' && a.node_id != null
+                                                ? (availableNodes.find((n) => n.id === a.node_id)?.name ?? `node ${a.node_id}`)
+                                                : null;
+                                            return (
                                             <div key={a.id} className="flex items-center justify-between text-sm bg-muted/50 rounded px-3 py-1.5">
                                                 <span>
                                                     <Badge variant="outline" className="text-xs mr-2 capitalize">{a.role}</Badge>
                                                     on <span className="font-medium capitalize">{a.resource_type}</span>: <span className="font-mono text-xs">{a.resource_id}</span>
+                                                    {nodeLabel != null && (
+                                                        <span className="text-muted-foreground"> @ {nodeLabel}</span>
+                                                    )}
                                                 </span>
                                                 <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => removeRoleAssignment(a.id)}>
                                                     <Trash2 className="w-3 h-3 text-destructive" strokeWidth={1.5} />
                                                 </Button>
                                             </div>
-                                        ))}
+                                            );
+                                        })}
                                     </div>
                                 )}
 
-                                <div className="flex items-end gap-2">
+                                <div className="flex items-end gap-2 flex-wrap">
                                     <div className="space-y-1">
                                         <Label className="text-xs">Role</Label>
                                         <Combobox
@@ -513,13 +559,35 @@ export function UsersSection() {
                                                 { value: 'node', label: 'Node' },
                                             ]}
                                             value={scopeResourceType}
-                                            onValueChange={(v) => { setScopeResourceType(v as 'stack' | 'node'); setScopeResourceId(''); fetchScopeResources(); }}
+                                            onValueChange={(v) => {
+                                                setScopeResourceType(v as 'stack' | 'node');
+                                                setScopeResourceId('');
+                                                setScopeNodeId('');
+                                                setAvailableStacks([]);
+                                                void fetchAvailableNodes();
+                                            }}
                                             placeholder="Type..."
                                             className="h-8 text-xs w-[100px]"
                                         />
                                     </div>
-                                    <div className="space-y-1 flex-1">
-                                        <Label className="text-xs">Resource</Label>
+                                    {scopeResourceType === 'stack' && (
+                                        <div className="space-y-1">
+                                            <Label className="text-xs">Node</Label>
+                                            <Combobox
+                                                options={availableNodes.map((n) => ({ value: String(n.id), label: n.name }))}
+                                                value={scopeNodeId}
+                                                onValueChange={(v) => {
+                                                    setScopeNodeId(v);
+                                                    setScopeResourceId('');
+                                                    void fetchStacksForNode(v);
+                                                }}
+                                                placeholder="Select node..."
+                                                className="h-8 text-xs w-[140px]"
+                                            />
+                                        </div>
+                                    )}
+                                    <div className="space-y-1 flex-1 min-w-[140px]">
+                                        <Label className="text-xs">{scopeResourceType === 'stack' ? 'Stack' : 'Node'}</Label>
                                         <Combobox
                                             options={scopeResourceType === 'stack'
                                                 ? availableStacks.map((s) => ({ value: s, label: s }))
@@ -527,11 +595,25 @@ export function UsersSection() {
                                             }
                                             value={scopeResourceId}
                                             onValueChange={setScopeResourceId}
-                                            placeholder="Select..."
+                                            placeholder={
+                                                scopeResourceType === 'stack'
+                                                    ? (loadingStacks ? 'Loading stacks...' : (!scopeNodeId ? 'Select a node first...' : 'Select stack...'))
+                                                    : 'Select...'
+                                            }
                                             className="h-8 text-xs"
+                                            disabled={scopeResourceType === 'stack' && (!scopeNodeId || loadingStacks)}
                                         />
                                     </div>
-                                    <Button size="sm" className="h-8" onClick={addRoleAssignment} disabled={addingScope || !scopeResourceId}>
+                                    <Button
+                                        size="sm"
+                                        className="h-8"
+                                        onClick={addRoleAssignment}
+                                        disabled={
+                                            addingScope
+                                            || !scopeResourceId
+                                            || (scopeResourceType === 'stack' && !scopeNodeId)
+                                        }
+                                    >
                                         <Plus className="w-3 h-3 mr-1" strokeWidth={1.5} />
                                         Add
                                     </Button>

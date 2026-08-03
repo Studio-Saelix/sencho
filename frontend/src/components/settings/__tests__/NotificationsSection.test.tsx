@@ -25,7 +25,12 @@ const { masthead, nodeState } = vi.hoisted(() => ({
 vi.mock('@/context/NodeContext', () => ({
     useNodes: () => ({ activeNode: nodeState.activeNode }),
 }));
-const authState = { isAdmin: true };
+const authState = {
+    isAdmin: true,
+    permissionsReady: true,
+    permissionsStatus: 'ready' as const,
+    can: (action: string) => authState.isAdmin || action === 'never',
+};
 vi.mock('@/context/AuthContext', () => ({
     useAuth: () => authState,
 }));

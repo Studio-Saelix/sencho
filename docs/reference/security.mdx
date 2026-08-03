@@ -61,7 +61,7 @@ Every self-hosted instance includes the full security stack. Some advanced gover
 </Card>
 
 <Card title="Fleet Secrets" icon="key-skeleton" href="/features/fleet-secrets">
-  Limited-availability encrypted, versioned env-var bundles pushed to labeled nodes' stacks when the surface is present. Sealed with the same data key as MFA and registry credentials.
+  Encrypted, versioned env-var bundles pushed to labeled nodes' stacks. Sealed with the same data key as MFA and registry credentials.
 </Card>
 
 <Card title="Webhook signatures" icon="signature" href="/features/webhooks">
@@ -212,7 +212,7 @@ For user management and scoped permissions, see [RBAC & User Management](/featur
 
 Every POST, PUT, DELETE, and PATCH request to the API is recorded in the audit log with the acting username, IP address, HTTP method, response status, and an auto-generated summary. GET requests are excluded to keep the log focused on mutations.
 
-The audit log is searchable by keyword (actions, paths, usernames) and filterable by HTTP method and date range. The recent-activity log, scoped to the last 14 days, is available on every tier. With Admiral, results can be exported as CSV or JSON (up to 10,000 entries per export), entries carry anomaly annotations, and retention defaults to 90 days and is configurable from 1 to 365 days in **Settings · Operations · Data Retention**.
+The audit log is searchable by keyword (actions, paths, usernames) and filterable by HTTP method and date range. Users with the `system:audit` permission can open **Audit** from navigation. Community shows the last 14 days of activity; with Admiral, results can be exported as CSV or JSON (up to 10,000 entries per export), entries carry anomaly annotations, and retention defaults to 90 days and is configurable from 1 to 365 days in **Settings · Operations · Data Retention**.
 
 The **Auditor** role provides read-only access to the audit log without any other administrative privileges, making it suitable for compliance reviewers who should not have access to system settings.
 

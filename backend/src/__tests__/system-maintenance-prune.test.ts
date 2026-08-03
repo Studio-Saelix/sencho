@@ -16,12 +16,16 @@ let app: import('express').Express;
 let authHeader: string;
 let DockerController: typeof import('../services/DockerController').default;
 let FileSystemService: typeof import('../services/FileSystemService').FileSystemService;
+let CacheService: typeof import('../services/CacheService').CacheService;
+let activeBulkActions: typeof import('../helpers/bulkActionLocks').activeBulkActions;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ app } = await import('../index'));
   ({ default: DockerController } = await import('../services/DockerController'));
   ({ FileSystemService } = await import('../services/FileSystemService'));
+  ({ CacheService } = await import('../services/CacheService'));
+  ({ activeBulkActions } = await import('../helpers/bulkActionLocks'));
   // 10-minute expiry survives the full file even when two timeout tests
   // burn ~8.5s each in real-timer mode.
   const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '10m' });
@@ -31,6 +35,7 @@ beforeAll(async () => {
 afterAll(() => cleanupTestDb(tmpDir));
 
 afterEach(() => {
+  activeBulkActions.clear();
   vi.restoreAllMocks();
 });
 
@@ -150,6 +155,7 @@ describe('Prune plan routes', () => {
       buildPrunePlan: vi.fn().mockResolvedValue(plan),
       executePrunePlan,
     } as unknown as ReturnType<typeof DockerController.getInstance>);
+    const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate');
 
     const res = await request(app)
       .post('/api/system/prune/system')
@@ -161,6 +167,45 @@ describe('Prune plan routes', () => {
     expect(res.body.reclaimedBytes).toBe(42);
     expect(res.body.outcomes).toHaveLength(1);
     expect(executePrunePlan).toHaveBeenCalled();
+    expect(invalidate).toHaveBeenCalledWith('stats:1');
+    expect(invalidate).toHaveBeenCalledWith('stack-statuses:1');
+  });
+
+  it('rejects an overlapping destructive prune on the same node', async () => {
+    stubFsStacks();
+    const plan = samplePlan('fp-lock');
+    let releaseExecution!: () => void;
+    const executionBlocked = new Promise<void>((resolve) => {
+      releaseExecution = resolve;
+    });
+    const executePrunePlan = vi.fn().mockImplementation(async () => {
+      await executionBlocked;
+      return { outcomes: [], reclaimedBytes: 0, success: true };
+    });
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      buildPrunePlan: vi.fn().mockResolvedValue(plan),
+      executePrunePlan,
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const firstRequest = request(app)
+      .post('/api/system/prune/system')
+      .set('Authorization', authHeader)
+      .send({ target: 'volumes', scope: 'managed', planFingerprint: 'fp-lock' });
+    const firstResponse = firstRequest.then((response) => response);
+    await vi.waitFor(() => expect(executePrunePlan).toHaveBeenCalledTimes(1));
+
+    const overlapping = await request(app)
+      .post('/api/system/prune/system')
+      .set('Authorization', authHeader)
+      .send({ target: 'volumes', scope: 'managed', planFingerprint: 'fp-lock' });
+
+    expect(overlapping.status).toBe(409);
+    expect(overlapping.body.code).toBe('PRUNE_ALREADY_RUNNING');
+    expect(executePrunePlan).toHaveBeenCalledTimes(1);
+
+    releaseExecution();
+    expect((await firstResponse).status).toBe(200);
+    expect(activeBulkActions.size).toBe(0);
   });
 
   it('POST /api/system/prune/system returns 409 PRUNE_PLAN_STALE on fingerprint mismatch', async () => {

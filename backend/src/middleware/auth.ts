@@ -8,10 +8,20 @@ import {
   type ApiTokenScope,
 } from '../services/DatabaseService';
 import { getErrorMessage } from '../utils/errors';
-import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER, PROXY_DEPLOY_SOURCE_HEADER, PROXY_DEPLOY_ACTOR_HEADER, isDeploySourceHeader } from '../services/license-headers';
+import {
+  PROXY_TIER_HEADER,
+  PROXY_ROLE_HEADER,
+  PROXY_DEPLOY_SOURCE_HEADER,
+  PROXY_DEPLOY_ACTOR_HEADER,
+  PROXY_SCOPED_STACK_NAME_HEADER,
+  PROXY_SCOPED_STACK_ACTIONS_HEADER,
+  isDeploySourceHeader,
+} from '../services/license-headers';
 import type { DeployInvocationContext } from '../services/network/missingExternalNetworksError';
 import { isLicenseTier, normalizeTier } from '../services/license-normalize';
 import { isDebugEnabled } from '../utils/debug';
+import { parseScopedStackActionsHeader } from '../helpers/stackRouteAuth';
+import { isValidStackName } from '../utils/validation';
 import {
   COOKIE_NAME,
   MFA_PENDING_COOKIE_NAME,
@@ -148,6 +158,19 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
             : null,
         };
         req.deployContext = ctx;
+      }
+
+      // Scoped stack auth evidence: only trust on this machine-auth path.
+      // Malformed or incomplete pairs are treated as absent (never as auth).
+      const scopedNameRaw = req.headers[PROXY_SCOPED_STACK_NAME_HEADER];
+      const scopedActionsRaw = req.headers[PROXY_SCOPED_STACK_ACTIONS_HEADER];
+      const scopedName = typeof scopedNameRaw === 'string' ? scopedNameRaw.trim() : '';
+      const scopedActionsStr = typeof scopedActionsRaw === 'string' ? scopedActionsRaw : '';
+      if (scopedName && isValidStackName(scopedName) && scopedActionsStr) {
+        const actions = parseScopedStackActionsHeader(scopedActionsStr);
+        if (actions && actions.length > 0) {
+          req.scopedStackEvidence = { stackName: scopedName, actions: new Set(actions) };
+        }
       }
 
       next();

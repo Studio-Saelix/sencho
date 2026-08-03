@@ -40,6 +40,7 @@ export const CAPABILITIES = [
   'guided-external-network-preflight',
   'service-scoped-update',
   'service-scoped-stack-alert',
+  'scoped-stack-auth-evidence',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -54,3 +55,4 @@ export const STACK_DOWN_REMOVE_VOLUMES_CAPABILITY = 'stack-down-remove-volumes' 
 export const GUIDED_EXTERNAL_NETWORK_PREFLIGHT_CAPABILITY = 'guided-external-network-preflight' as const satisfies Capability;
 export const SERVICE_SCOPED_UPDATE_CAPABILITY = 'service-scoped-update' as const satisfies Capability;
 export const SERVICE_SCOPED_STACK_ALERT_CAPABILITY = 'service-scoped-stack-alert' as const satisfies Capability;
+export const SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY = 'scoped-stack-auth-evidence' as const satisfies Capability;

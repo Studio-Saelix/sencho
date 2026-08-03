@@ -10,7 +10,19 @@ export interface FleetNodeStats {
 
 export interface FleetNodeSystemStats {
     cpu: { usage: string; cores: number };
-    memory: { total: number; used: number; free: number; usagePercent: string };
+    memory: {
+        total: number;
+        used: number;
+        free: number;
+        usagePercent: string;
+        arcReclaimable?: number;
+        ballooned?: number;
+        effectiveTotal?: number;
+        effectiveUsed?: number;
+        effectiveFree?: number;
+        effectiveUsagePercent?: string;
+        balloonSource?: string;
+    };
     disk: { total: number; used: number; free: number; usagePercent: string } | null;
 }
 

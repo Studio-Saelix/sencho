@@ -93,7 +93,7 @@ export function MobileStackDetail(props: EditorViewProps) {
     const safeContainers = containers || [];
     const isMultiContainerLayout = safeContainers.length > 1 || effectiveServices.length > 1;
     const isRunning = safeContainers.some(c => c.State === 'running');
-    const canEditStack = can('stack:edit', 'stack', stackName);
+    const canEditStack = can('stack:edit', 'stack', stackName, activeNode?.id);
 
     // The writable editor layer renders only for an editor; a stale editingCompose
     // while the user lacks stack:edit falls back to the read-only Compose segment.
@@ -147,7 +147,6 @@ export function MobileStackDetail(props: EditorViewProps) {
                         safeContainers={safeContainers}
                         isRunning={isRunning}
                         can={can}
-                        isAdmin={isAdmin}
                         trivy={trivy}
                         backupInfo={backupInfo}
                         loadingAction={loadingAction}
@@ -182,7 +181,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                             result={recoveryResult}
                             activeNode={activeNode}
                             backupInfo={backupInfo}
-                            canDeploy={can('stack:deploy', 'stack', stackName)}
+                            canDeploy={can('stack:deploy', 'stack', stackName, activeNode?.id)}
                             onRetry={retryHandlerFor(recoveryResult.action, { deployStack, restartStack, updateStack, rollbackStack })}
                             onRestart={restartStack}
                             onRollback={rollbackStack}

@@ -14,7 +14,14 @@ vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({
     toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
 }));
-vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ isAdmin: true }) }));
+vi.mock('@/context/AuthContext', () => ({
+    useAuth: () => ({
+        isAdmin: true,
+        permissionsReady: true,
+        permissionsStatus: 'ready',
+        can: () => true,
+    }),
+}));
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 'local' } }) }));
 vi.mock('@/context/LicenseContext', () => ({ useLicense: vi.fn(() => ({ isPaid: true })) }));
 vi.mock('../MastheadStatsContext', () => ({ useMastheadStats: () => {} }));
@@ -115,6 +122,8 @@ describe('split section save payloads', () => {
             'env_block_deploy_on_missing_required',
             'health_gate_enabled',
             'health_gate_window_seconds',
+            'recovery_max_generations',
+            'recovery_retention_days',
         ]);
     });
 

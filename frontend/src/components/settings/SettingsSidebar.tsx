@@ -1,10 +1,8 @@
 import { Search } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
-import { useNodes } from '@/context/NodeContext';
 import { SETTINGS_GROUPS, SETTINGS_ITEMS, isItemVisible, isItemLocked } from './registry';
-import type { VisibilityContext, SettingsItemMeta } from './registry';
+import type { SettingsItemMeta } from './registry';
+import { useSettingsVisibility } from './useSettingsVisibility';
 import type { SectionId } from './types';
 import { cn } from '@/lib/utils';
 
@@ -16,17 +14,7 @@ interface SettingsSidebarProps {
 }
 
 export function SettingsSidebar({ currentSection, onSectionChange, dirtyFlags, onOpenPalette }: SettingsSidebarProps) {
-    const { isAdmin } = useAuth();
-    const { isPaid } = useLicense();
-    const { activeNode } = useNodes();
-
-    const isRemote = activeNode?.type === 'remote';
-
-    const visibility: VisibilityContext = {
-        isAdmin,
-        isPaid,
-        isRemote,
-    };
+    const visibility = useSettingsVisibility();
 
     // An item appears in the sidebar only if its registry visibility predicate
     // passes AND the operator has the entitlement for it. Tier-locked items

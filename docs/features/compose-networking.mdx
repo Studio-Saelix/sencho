@@ -153,7 +153,7 @@ When the node is reachable, the tab compares the declared effective model agains
 | **Declared but unused** | A network is declared in the Compose file but no currently running service is connected to it. Often seen when a service is stopped or removed without `docker compose down`. |
 | **Missing from runtime** | A network is declared but does not exist in Docker. The stack may not have been deployed, or the network was deleted externally. |
 
-System-managed networks (`bridge`, `host`, `none`) and Docker's implicit default bridge are excluded from all drift findings.
+System-managed networks (`bridge`, `host`, `none`) and Docker's implicit default bridge are excluded from all drift findings. Attachments to `sencho_mesh` are also excluded when Sencho verifies that the container is its own instance or that the stack is opted into Sencho Mesh. A manual attachment from an opted-out stack remains visible as drift.
 
 When the runtime matches the Compose file, the section shows a green **runtime matches compose** card.
 

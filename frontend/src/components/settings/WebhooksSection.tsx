@@ -43,7 +43,8 @@ interface WebhookExecution {
 }
 
 export function WebhooksSection() {
-    const { isAdmin } = useAuth();
+    const { can } = useAuth();
+    const canManageWebhooks = can('system:webhooks');
     const { activeNode, nodes } = useNodes();
     const [webhooks, setWebhooks] = useState<WebhookItem[]>([]);
     const [loading, setLoading] = useState(true);
@@ -74,7 +75,7 @@ export function WebhooksSection() {
     };
 
     useEffect(() => { fetchWebhooks(); fetchStacks(); }, [activeNode?.id]);
-    useEffect(() => { if (!isAdmin) setShowForm(false); }, [isAdmin]);
+    useEffect(() => { if (!canManageWebhooks) setShowForm(false); }, [canManageWebhooks]);
 
     const enabledCount = webhooks.filter(w => w.enabled).length;
     useMastheadStats(
@@ -160,7 +161,7 @@ export function WebhooksSection() {
 
     return (
         <div className="flex flex-col gap-10">
-            {isAdmin && (
+            {canManageWebhooks && (
                 <div className="flex justify-end">
                     <SettingsPrimaryButton size="sm" onClick={() => setShowForm(!showForm)}>
                         <Plus className="w-4 h-4" /> Create webhook
@@ -168,7 +169,7 @@ export function WebhooksSection() {
                 </div>
             )}
 
-            {isAdmin && showForm && (
+            {canManageWebhooks && showForm && (
                 <SettingsSection title="New webhook">
                     <SettingsField label="Name" helper="Shown in execution history and notifications." htmlFor="webhook-name">
                         <Input id="webhook-name" placeholder="Deploy on push" value={formName} onChange={e => setFormName(e.target.value)} />
@@ -243,9 +244,9 @@ export function WebhooksSection() {
                 <SettingsCallout
                     icon={<Webhook className="h-4 w-4" />}
                     title="No webhooks yet"
-                    subtitle={isAdmin
+                    subtitle={canManageWebhooks
                         ? 'Create one to trigger stack actions from CI/CD.'
-                        : 'An admin operator can create webhooks for this instance.'}
+                        : 'An operator with webhook permission can create webhooks for this instance.'}
                 />
             )}
 
@@ -274,7 +275,7 @@ export function WebhooksSection() {
                                                 </span>
                                             </div>
                                             <div className="flex items-center gap-2 shrink-0">
-                                                {isAdmin ? (
+                                                {canManageWebhooks ? (
                                                     <>
                                                         <TogglePill checked={wh.enabled} onChange={(c) => handleToggle(wh.id!, c)} />
                                                         <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => handleDelete(wh.id!)}>

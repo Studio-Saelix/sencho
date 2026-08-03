@@ -1,7 +1,8 @@
 import { Router, type Request, type Response } from 'express';
 import { LicenseService } from '../services/LicenseService';
 import SelfUpdateService from '../services/SelfUpdateService';
-import { requireAdmin, requireUserSession } from '../middleware/tierGates';
+import { requireUserSession } from '../middleware/tierGates';
+import { requirePermission } from '../middleware/permissions';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { parseRequestedTargetVersion } from '../utils/targetVersion';
 import type { SelfUpdatePreflight } from '../services/SelfUpdateService';
@@ -26,7 +27,7 @@ licenseRouter.get('/', (_req: Request, res: Response): void => {
 
 licenseRouter.post('/activate', async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, LICENSE_SCOPE_MESSAGE)) return;
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:license')) return;
   try {
     const { license_key } = req.body;
     if (!license_key || typeof license_key !== 'string') {
@@ -47,7 +48,7 @@ licenseRouter.post('/activate', async (req: Request, res: Response): Promise<voi
 
 licenseRouter.post('/deactivate', async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, LICENSE_SCOPE_MESSAGE)) return;
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:license')) return;
   try {
     const result = await LicenseService.getInstance().deactivate();
     if (result.success) {
@@ -121,7 +122,7 @@ export function scheduleLocalUpdate(res: Response, message: string, targetVersio
 export const systemUpdateRouter = Router();
 
 systemUpdateRouter.post('/update', async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:license')) return;
   const selfUpdate = SelfUpdateService.getInstance();
   if (!selfUpdate.isAvailable()) {
     res.status(503).json({ error: 'Self-update unavailable. Sencho must be deployed via Docker Compose.' });
@@ -177,7 +178,7 @@ systemUpdateRouter.post('/update', async (req: Request, res: Response): Promise<
 });
 
 systemUpdateRouter.post('/reapply-compose', async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:license')) return;
   const selfUpdate = SelfUpdateService.getInstance();
   if (!selfUpdate.isAvailable()) {
     res.status(503).json({ error: 'Compose reapply unavailable. Sencho must be deployed via Docker Compose.' });

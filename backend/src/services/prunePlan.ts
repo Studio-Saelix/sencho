@@ -3,12 +3,46 @@ import { createHash } from 'crypto';
 export type PruneTarget = 'images' | 'volumes' | 'networks' | 'containers';
 export type PruneScope = 'managed' | 'all';
 
-export interface PrunePlanItem {
-  target: PruneTarget;
+interface PrunePlanItemBase {
   id: string;
   name: string;
   sizeBytes?: number;
+  managed: boolean;
+  reason: string;
+  stackName?: string;
 }
+
+export type PrunePlanItem =
+  | (PrunePlanItemBase & { target: 'containers'; image?: never; volume?: never; network?: never })
+  | (PrunePlanItemBase & {
+    target: 'images';
+    image: {
+    references: string[];
+    digest?: string;
+    createdAt?: number;
+    };
+    volume?: never;
+    network?: never;
+  })
+  | (PrunePlanItemBase & {
+    target: 'volumes';
+    volume: {
+    driver?: string;
+    ownershipLabels?: Record<string, string>;
+    };
+    image?: never;
+    network?: never;
+  })
+  | (PrunePlanItemBase & {
+    target: 'networks';
+    network: {
+    driver?: string;
+    scope?: string;
+    ownershipLabels?: Record<string, string>;
+    };
+    image?: never;
+    volume?: never;
+  });
 
 export interface PrunePlan {
   scope: PruneScope;
@@ -33,6 +67,36 @@ export const PRUNE_TARGETS: readonly PruneTarget[] = ['images', 'volumes', 'netw
 export const PRUNE_EXECUTION_ORDER: readonly PruneTarget[] = ['volumes', 'containers', 'images', 'networks'];
 
 export const PRUNEABLE_CONTAINER_STATES = new Set(['created', 'exited', 'dead']);
+
+const COMPOSE_OWNERSHIP_LABEL_KEYS = new Set([
+  'com.docker.compose.project',
+  'com.docker.compose.project.working_dir',
+  'com.docker.compose.project.config_files',
+  'com.docker.compose.volume',
+  'com.docker.compose.network',
+  'com.docker.compose.service',
+]);
+
+/**
+ * Disclosure allowlist for ownership evidence returned to API clients.
+ * Do not broaden it without reviewing Docker label values for sensitive data.
+ */
+export function projectPruneOwnershipLabels(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const projected = Object.entries(value).filter(
+    (entry): entry is [string, string] => COMPOSE_OWNERSHIP_LABEL_KEYS.has(entry[0])
+      && typeof entry[1] === 'string' && entry[1].length > 0,
+  );
+  return projected.length > 0 ? Object.fromEntries(projected) : undefined;
+}
+
+export function hasOnlyPruneOwnershipLabels(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.entries(value).every(
+    ([key, label]) => COMPOSE_OWNERSHIP_LABEL_KEYS.has(key) && typeof label === 'string' && label.length > 0,
+  );
+}
 
 export function isPruneTarget(value: unknown): value is PruneTarget {
   return typeof value === 'string' && (PRUNE_TARGETS as readonly string[]).includes(value);

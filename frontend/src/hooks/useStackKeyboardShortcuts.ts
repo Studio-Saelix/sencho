@@ -54,12 +54,15 @@ export function useStackKeyboardShortcuts(
       }
 
       if (key === 'a') {
+        if (!ctx.canViewMonitor) return;
         e.preventDefault();
         ctx.openAlertSheet();
       } else if (key === 'h') {
+        if (!ctx.canViewMonitor) return;
         e.preventDefault();
         ctx.openAutoHeal();
       } else if (key === 'u') {
+        if (!ctx.canCheckUpdates) return;
         e.preventDefault();
         ctx.checkUpdates();
       } else if (key === 'p') {

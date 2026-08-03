@@ -42,6 +42,7 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
     const { isAdmin } = useAuth();
     const { experimental, experimentalReady } = useExperimental();
     const showMesh = experimentalReady && experimental;
+    // Admin role only (section is adminOnly in the registry). Do not swap to can().
     const readOnly = !isAdmin;
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<FleetMeshFields>({ ...DEFAULT_FLEET_MESH });
     const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);

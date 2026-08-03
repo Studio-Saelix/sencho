@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin, requireBody } from '../middleware/tierGates';
+import { requireBody } from '../middleware/tierGates';
+import { checkPermission, requirePermission, type PermissionAction } from '../middleware/permissions';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { MAX_ASSIGNMENTS } from '../helpers/constants';
@@ -14,10 +15,26 @@ import { runLocalLabelAssign, validateLabelTemplate, type LabelLocalAssignRespon
 // because their path must sit behind the `/api/fleet/` proxy-exempt prefix.
 export const fleetActionsRouter = Router();
 
+function requireExactStacks(
+  req: Request,
+  res: Response,
+  action: PermissionAction,
+  stackNames: Iterable<string>,
+  nodeId: number,
+): boolean {
+  for (const stackName of stackNames) {
+    if (!checkPermission(req, action, 'stack', stackName, nodeId)) {
+      res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+      return false;
+    }
+  }
+  return true;
+}
+
 // Per-node label-matched stop. A control instance calls this on each remote
 // node during a fleet-wide stop-by-label so the destructive work runs under the
-// remote's own admin auth and per-node bulk lock. Admin-only and available on
-// every license, matching the rest of the Fleet Actions surface. The paid
+// remote's own auth and per-node bulk lock. Every confirmed stack requires
+// stack:deploy. The paid
 // label-driven action lives at `POST /api/labels/:id/action`; this receiver is
 // the fleet-plumbing equivalent the control fans out to, so a fleet-stop on a
 // Community fleet stops remote stacks instead of 403'ing on the remote leg.
@@ -25,7 +42,6 @@ fleetActionsRouter.post(
   '/labels/local-stop',
   authMiddleware,
   async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     const { labelName, dryRun, stackNames } = req.body as { labelName?: unknown; dryRun?: unknown; stackNames?: unknown };
     if (typeof labelName !== 'string' || labelName.trim().length === 0) {
@@ -44,6 +60,12 @@ fleetActionsRouter.post(
       allowedStacks = new Set(stackNames as string[]);
     }
     const nodeId = req.nodeId ?? 0;
+    if (allowedStacks) {
+      if (allowedStacks.size === 0 && !requirePermission(req, res, dryRun === true ? 'node:read' : 'stack:deploy')) return;
+      if (!requireExactStacks(req, res, 'stack:deploy', allowedStacks, nodeId)) return;
+    } else if (!requirePermission(req, res, dryRun === true ? 'node:read' : 'stack:deploy')) {
+      return;
+    }
     const trimmedLabel = labelName.trim();
     try {
       const outcome = await runLocalLabelStop(nodeId, trimmedLabel, dryRun === true, allowedStacks);
@@ -60,15 +82,14 @@ fleetActionsRouter.post(
 // Per-node label assign. A control instance calls this on each target node
 // during a fleet-wide bulk label assign so the label is resolved or created
 // under the node's own database, by name, and assigned to the given stacks while
-// preserving their existing labels (add semantics). Admin-only and available on
-// every license, matching the rest of the Fleet Actions surface. Labels are
+// preserving their existing labels (add semantics). Every target stack requires
+// stack:edit. Labels are
 // node-local, so the control never reuses a local label id on a remote: the
 // receiver owns label resolution for its own node.
 fleetActionsRouter.post(
   '/labels/local-assign',
   authMiddleware,
   async (req: Request, res: Response): Promise<void> => {
-    if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     const { label, stackNames } = req.body as { label?: unknown; stackNames?: unknown };
     const validated = validateLabelTemplate(label);
@@ -85,8 +106,11 @@ fleetActionsRouter.post(
       return;
     }
     const nodeId = req.nodeId ?? 0;
+    const uniqueStacks = new Set(stackNames as string[]);
+    if (uniqueStacks.size === 0 && !requirePermission(req, res, 'stack:edit')) return;
+    if (!requireExactStacks(req, res, 'stack:edit', uniqueStacks, nodeId)) return;
     try {
-      const outcome = await runLocalLabelAssign(nodeId, validated.template, stackNames as string[]);
+      const outcome = await runLocalLabelAssign(nodeId, validated.template, [...uniqueStacks]);
       if (isDebugEnabled()) console.debug('[FleetActions:debug] local-assign:', { nodeId, label: validated.template.name, created: outcome.created, stacks: outcome.stackResults.length });
       const body: LabelLocalAssignResponse = { created: outcome.created, results: outcome.stackResults };
       res.json(body);

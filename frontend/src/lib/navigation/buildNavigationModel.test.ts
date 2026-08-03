@@ -14,6 +14,7 @@ function makeCtx(overrides: Partial<ReachabilityContext> = {}): ReachabilityCont
     licenseStatus: 'ready',
     experimental: true,
     experimentalReady: true,
+    scheduledOpsAccessible: true,
     ...overrides,
   };
 }
@@ -78,30 +79,34 @@ describe('buildNavigationModel', () => {
   });
 
   it('includes Console for system:console regardless of experimental discovery', () => {
-    expect(
-      buildNavigationModel(makeCtx({
-        experimentalReady: true,
-        experimental: false,
-        isPaid: false,
-        can: (a) => a === 'system:console' || a === 'node:read',
-      }))
-        .allPageItems.map((i) => i.value),
-    ).toContain('host-console');
-    expect(
-      buildNavigationModel(makeCtx({
-        experimentalReady: false,
-        experimental: false,
-        can: (a) => a === 'system:console' || a === 'node:read',
-      }))
-        .allPageItems.map((i) => i.value),
-    ).toContain('host-console');
+    const canConsole = (a: string) => a === 'system:console' || a === 'node:read';
+    for (const experimentalReady of [true, false]) {
+      const values = buildNavigationModel(
+        makeCtx({ experimentalReady, experimental: false, isPaid: false, can: canConsole }),
+      ).allPageItems.map((i) => i.value);
+      expect(values).toContain('host-console');
+    }
+  });
+
+  it('includes Audit for system:audit on Community', () => {
+    const values = buildNavigationModel(
+      makeCtx({ isPaid: false, can: (a) => a === 'system:audit' || a === 'node:read' }),
+    ).allPageItems.map((i) => i.value);
+    expect(values).toContain('audit-log');
+  });
+
+  it('omits Audit without system:audit', () => {
+    const values = buildNavigationModel(
+      makeCtx({ isPaid: true, can: (a) => a === 'node:read' }),
+    ).allPageItems.map((i) => i.value);
+    expect(values).not.toContain('audit-log');
   });
 
   it('omits Console without system:console', () => {
-    expect(
-      buildNavigationModel(makeCtx({ can: () => false, isAdmin: false }))
-        .allPageItems.map((i) => i.value),
-    ).not.toContain('host-console');
+    const values = buildNavigationModel(
+      makeCtx({ can: () => false, isAdmin: false }),
+    ).allPageItems.map((i) => i.value);
+    expect(values).not.toContain('host-console');
   });
 
   it('excludes hidden views from quick-link candidates', () => {

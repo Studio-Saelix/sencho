@@ -91,10 +91,11 @@ describe('settings registry', () => {
         expect(SETTINGS_ITEMS.some(i => (i.id as string) === 'security')).toBe(false);
     });
 
-    it('opens Registries to Community while keeping it admin-only', () => {
+    it('opens Registries to Community behind system:registries', () => {
         const registries = SETTINGS_ITEMS.find(i => i.id === 'registries');
         expect(registries?.tier).toBeNull();
-        expect(registries?.adminOnly).toBe(true);
+        expect(registries?.adminOnly).toBeUndefined();
+        expect(registries?.requiredPermission).toBe('system:registries');
     });
 
     it('registers the Stacks section under Infrastructure with searchable workflow keywords', () => {
@@ -139,5 +140,36 @@ describe('scopeLabel', () => {
 
     it('reads global for other non-node, non-browser groups', () => {
         expect(scopeLabel(item({ scope: 'global', group: 'access' }))).toBe('global');
+    });
+});
+
+describe('requiredPermission registry mapping', () => {
+    it('declares matrix permissions for access and credential sections', () => {
+        const byId = new Map(SETTINGS_ITEMS.map(i => [i.id, i]));
+        expect(byId.get('users')?.requiredPermission).toBe('system:users');
+        expect(byId.get('users')?.adminOnly).toBeUndefined();
+        expect(byId.get('license')?.requiredPermission).toBe('system:license');
+        expect(byId.get('api-tokens')?.requiredPermission).toBe('system:tokens');
+        expect(byId.get('api-tokens')?.adminOnly).toBeUndefined();
+        expect(byId.get('webhooks')?.requiredPermission).toBe('system:webhooks');
+        expect(byId.get('nodes')?.requiredPermission).toBe('node:read');
+        expect(byId.get('developer')?.requiredPermission).toBe('system:settings');
+        expect(byId.get('data-retention')?.requiredPermission).toBe('system:settings');
+        expect(byId.get('image-updates')?.requiredPermission).toBe('system:settings');
+        expect(byId.get('labels')?.requiredPermission).toBe('stack:read');
+    });
+
+    it('keeps adminOnly on identity, credentials, and emergency surfaces', () => {
+        for (const id of [
+            'sso',
+            'cloud-backup',
+            'recovery',
+            'fleet-mesh',
+            'notification-routing',
+            'notification-suppression',
+        ] as const) {
+            expect(SETTINGS_ITEMS.find(i => i.id === id)?.adminOnly, id).toBe(true);
+            expect(SETTINGS_ITEMS.find(i => i.id === id)?.requiredPermission, id).toBeUndefined();
+        }
     });
 });

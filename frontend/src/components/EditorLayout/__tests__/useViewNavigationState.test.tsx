@@ -21,55 +21,58 @@ function mockActiveNode(type: 'local' | 'remote' | null) {
   } as unknown as ReturnType<typeof NodeContext.useNodes>);
 }
 
-// A community non-admin user with node:read (e.g. a viewer): sees Fleet, no
-// admin-only items.
-function mockCommunityUser() {
-  vi.mocked(AuthContext.useAuth).mockReturnValue({
-    isAdmin: false,
-    can: (p: string) => p === 'node:read',
-    permissionsStatus: 'ready',
-  } as unknown as ReturnType<typeof AuthContext.useAuth>);
+function mockLicense(isPaid: boolean, licenseStatus: 'ready' | 'loading' | 'error' = 'ready') {
   vi.mocked(LicenseContext.useLicense).mockReturnValue({
-    isPaid: false,
-    licenseStatus: 'ready',
+    isPaid,
+    licenseStatus,
   } as unknown as ReturnType<typeof LicenseContext.useLicense>);
 }
 
-// A deployer: stack permissions but no node:read, so no Fleet affordance.
-function mockDeployer() {
+function mockAuth(
+  isAdmin: boolean,
+  can: (p: string) => boolean,
+  permissionsStatus: 'ready' | 'loading' | 'error' = 'ready',
+) {
   vi.mocked(AuthContext.useAuth).mockReturnValue({
-    isAdmin: false,
-    can: (p: string) => p === 'stack:read' || p === 'stack:deploy',
-    permissionsStatus: 'ready',
+    isAdmin,
+    can,
+    permissionsStatus,
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
-  vi.mocked(LicenseContext.useLicense).mockReturnValue({
-    isPaid: false,
-    licenseStatus: 'ready',
-  } as unknown as ReturnType<typeof LicenseContext.useLicense>);
+}
+
+// Community non-admin with node:read (viewer): Fleet yes, admin-only no.
+function mockCommunityUser() {
+  mockAuth(false, (p) => p === 'node:read');
+  mockLicense(false);
+}
+
+// Deployer: stack permissions but no node:read, so no Fleet affordance.
+function mockDeployer() {
+  mockAuth(false, (p) => p === 'stack:read' || p === 'stack:deploy');
+  mockLicense(false);
 }
 
 function mockPaidAdmin() {
-  vi.mocked(AuthContext.useAuth).mockReturnValue({
-    isAdmin: true,
-    can: (p: string) => p === 'system:audit' || p === 'system:console' || p === 'node:read',
-    permissionsStatus: 'ready',
-  } as unknown as ReturnType<typeof AuthContext.useAuth>);
-  vi.mocked(LicenseContext.useLicense).mockReturnValue({
-    isPaid: true,
-    licenseStatus: 'ready',
-  } as unknown as ReturnType<typeof LicenseContext.useLicense>);
+  mockAuth(
+    true,
+    (p) => p === 'system:audit' || p === 'system:console' || p === 'node:read' || p === 'stack:deploy' || p === 'node:manage',
+  );
+  mockLicense(true);
 }
 
+// Synthetic gate-isolation helper: omits system:audit so tests can assert the
+// Audit hide path. Real Admin always includes system:audit in the permission matrix.
 function mockCommunityAdmin() {
-  vi.mocked(AuthContext.useAuth).mockReturnValue({
-    isAdmin: true,
-    can: (p: string) => p === 'system:console' || p === 'node:read',
-    permissionsStatus: 'ready',
-  } as unknown as ReturnType<typeof AuthContext.useAuth>);
-  vi.mocked(LicenseContext.useLicense).mockReturnValue({
-    isPaid: false,
-    licenseStatus: 'ready',
-  } as unknown as ReturnType<typeof LicenseContext.useLicense>);
+  mockAuth(true, (p) => p === 'system:console' || p === 'node:read' || p === 'stack:deploy');
+  mockLicense(false);
+}
+
+function mockCommunityAdminWithAudit() {
+  mockAuth(
+    true,
+    (p) => p === 'system:audit' || p === 'system:console' || p === 'node:read' || p === 'stack:deploy',
+  );
+  mockLicense(false);
 }
 
 describe('useViewNavigationState', () => {
@@ -269,7 +272,7 @@ describe('useViewNavigationState', () => {
     expect(result.current.navItems.map(i => i.value)).toContain('global-observability');
   });
 
-  it('shows Update, Schedules, and Console for a community admin; Audit stays paid', () => {
+  it('hides Audit for a community admin without system:audit', () => {
     mockCommunityAdmin();
     const { result } = renderHook(() => useViewNavigationState());
     const values = result.current.navItems.map(i => i.value);
@@ -279,6 +282,55 @@ describe('useViewNavigationState', () => {
     expect(values).not.toContain('audit-log');
     // The auto-updates nav item surfaces under the short label "Update".
     expect(result.current.navItems.find(i => i.value === 'auto-updates')?.label).toBe('Update');
+  });
+
+  it('shows Audit for a community admin with system:audit and keeps deep-links', () => {
+    mockCommunityAdminWithAudit();
+    const onNavigateToDashboard = vi.fn();
+    const { result } = renderHook(() =>
+      useViewNavigationState({ onNavigateToDashboard }),
+    );
+    expect(result.current.navItems.map((i) => i.value)).toContain('audit-log');
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'audit-log' } }),
+      );
+    });
+    expect(result.current.activeView).toBe('audit-log');
+    expect(onNavigateToDashboard).not.toHaveBeenCalled();
+  });
+
+  it('does not normalize audit-log away while permissions are still loading', () => {
+    mockAuth(true, () => false, 'loading');
+    mockLicense(false);
+
+    const onNavigateToDashboard = vi.fn();
+    const { result } = renderHook(() =>
+      useViewNavigationState({ onNavigateToDashboard }),
+    );
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'audit-log' } }),
+      );
+    });
+    expect(result.current.activeView).toBe('audit-log');
+    expect(onNavigateToDashboard).not.toHaveBeenCalled();
+  });
+
+  it('redirects a user without system:audit off the Audit view reached via a deep-link event', () => {
+    const onNavigateToDashboard = vi.fn();
+    mockCommunityAdmin();
+    const { result } = renderHook(() =>
+      useViewNavigationState({ onNavigateToDashboard }),
+    );
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'audit-log' } }),
+      );
+    });
+    expect(result.current.activeView).toBe('dashboard');
+    expect(onNavigateToDashboard).toHaveBeenCalled();
   });
 
   it('redirects a non-admin off the Logs view when reached via a deep-link event', () => {

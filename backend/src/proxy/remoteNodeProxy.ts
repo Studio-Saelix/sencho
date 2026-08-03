@@ -1,17 +1,41 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER, PROXY_DEPLOY_SOURCE_HEADER, PROXY_DEPLOY_ACTOR_HEADER } from '../services/license-headers';
+import {
+  PROXY_TIER_HEADER,
+  PROXY_ROLE_HEADER,
+  PROXY_DEPLOY_SOURCE_HEADER,
+  PROXY_DEPLOY_ACTOR_HEADER,
+  PROXY_SCOPED_STACK_NAME_HEADER,
+  PROXY_SCOPED_STACK_ACTIONS_HEADER,
+} from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
 import { remoteSupportsCrossNodeRbac, remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
-import { STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY, SERVICE_SCOPED_STACK_ALERT_CAPABILITY } from '../services/CapabilityRegistry';
+import {
+  STACK_DOWN_REMOVE_VOLUMES_CAPABILITY,
+  SERVICE_SCOPED_UPDATE_CAPABILITY,
+  SERVICE_SCOPED_STACK_ALERT_CAPABILITY,
+  SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
+} from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { DatabaseService } from '../services/DatabaseService';
 import { redactSensitiveText } from '../utils/safeLog';
+import { isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { logDebugTiming, templatizeHydrationPath } from '../utils/requestTiming';
 import { invalidateFleetUpdateCache, isFullStackUpdatePath, isUpdatePreviewPath } from '../helpers/fleetUpdateCache';
+import {
+  classifyStackApiPath,
+  formatScopedStackActionsHeader,
+} from '../helpers/stackRouteAuth';
+import {
+  checkPermission,
+  ROLE_PERMISSIONS,
+  scopedActionsForStack,
+} from '../middleware/permissions';
+import type { PermissionAction } from '../middleware/permissions';
+import { SETTING_WRITE_PERMISSIONS } from '../routes/settings';
 
 /**
  * Per-request hop timing for the critical hydration GETs, kept off the Request
@@ -119,7 +143,9 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         // re-set from the authenticated session (authGate runs before this proxy,
         // so req.user is always resolved here).
         proxyReq.removeHeader(PROXY_ROLE_HEADER);
-        if (req.user?.role) {
+        if (req.proxyElevatedRole) {
+          proxyReq.setHeader(PROXY_ROLE_HEADER, req.proxyElevatedRole);
+        } else if (req.user?.role) {
           proxyReq.setHeader(PROXY_ROLE_HEADER, req.user.role);
         }
         // Deploy provenance: always strip client-supplied values, then set
@@ -131,6 +157,17 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         proxyReq.setHeader(PROXY_DEPLOY_SOURCE_HEADER, 'manual');
         if (req.user?.username) {
           proxyReq.setHeader(PROXY_DEPLOY_ACTOR_HEADER, req.user.username);
+        }
+        // Scoped stack evidence: always strip client-supplied values, then
+        // attach hub-built evidence when the gate stashed elevation for this hop.
+        proxyReq.removeHeader(PROXY_SCOPED_STACK_NAME_HEADER);
+        proxyReq.removeHeader(PROXY_SCOPED_STACK_ACTIONS_HEADER);
+        if (req.proxyScopedStackEvidence) {
+          proxyReq.setHeader(PROXY_SCOPED_STACK_NAME_HEADER, req.proxyScopedStackEvidence.stackName);
+          proxyReq.setHeader(
+            PROXY_SCOPED_STACK_ACTIONS_HEADER,
+            formatScopedStackActionsHeader(req.proxyScopedStackEvidence.actions),
+          );
         }
         // Strip the ?nodeId= query param so the remote's nodeContextMiddleware
         // doesn't reject the request with 404 ("Node X not found") - the remote
@@ -187,6 +224,23 @@ export function createRemoteProxyMiddleware(): RequestHandler {
           && (isFullStackUpdatePath(req.path) || isUpdatePreviewPath(req.path))
         ) {
           invalidateFleetUpdateCache();
+        }
+        // Successful remote stack DELETE: clear hub grants for this (node, stack)
+        // only. Failed / non-2xx responses must preserve assignments. Use the
+        // gate-stashed classification: pathRewrite mutates req.url before this
+        // callback, so re-running classifyStackApiPath(req.path) would miss.
+        if (req.method === 'DELETE' && status >= 200 && status < 300) {
+          const route = req.proxyNamedStackRoute;
+          if (route?.action === 'stack:delete') {
+            try {
+              DatabaseService.getInstance().deleteRoleAssignmentsByStack(req.nodeId, route.stackName);
+            } catch (cleanupErr) {
+              console.warn(
+                '[Proxy] Failed to clear role assignments after remote stack delete:',
+                getErrorMessage(cleanupErr, 'unknown'),
+              );
+            }
+          }
         }
       },
       error: (err, req, proxyRes) => {
@@ -282,6 +336,49 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         }
       }
 
+      // Named-stack hub pre-check + optional scoped-evidence elevation.
+      const classified = classifyStackApiPath(req.method, req.path);
+      if (classified.kind === 'unknown-named') {
+        res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+        return;
+      }
+      if (classified.kind === 'named-stack') {
+        if (!checkPermission(req, classified.action, 'stack', classified.stackName)) {
+          res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+          return;
+        }
+        // Stash before pathRewrite so proxyRes DELETE cleanup can see the route.
+        req.proxyNamedStackRoute = {
+          stackName: classified.stackName,
+          action: classified.action,
+        };
+        const globalRole = req.user?.role;
+        const globalGrantsPrimary =
+          globalRole === 'admin'
+          || (globalRole != null && (ROLE_PERMISSIONS[globalRole]?.includes(classified.action) ?? false));
+        if (!globalGrantsPrimary) {
+          const evidenceSupported = await remoteAdvertisesCapability(
+            req.nodeId,
+            SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
+          );
+          if (!evidenceSupported) {
+            res.status(403).json({
+              error: `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
+            });
+            return;
+          }
+          if (!req.user) {
+            res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+            return;
+          }
+          const actions = scopedActionsForStack(req.user.userId, req.nodeId, classified.stackName);
+          req.proxyScopedStackEvidence = {
+            stackName: classified.stackName,
+            actions,
+          };
+        }
+      }
+
       // POST /alerts bodies are not on req.body for remote hops (JSON parsing
       // is skipped so the stream can be piped). Buffer once under the same
       // 100 KB cap as express.json(), gate on service_name, then rewrite
@@ -325,6 +422,169 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         }
       }
 
+      // Settings-write pre-auth gate: when a non-admin, non-global-node-admin
+      // user writes settings on a remote node, the remote only sees the global
+      // role header and cannot verify scoped assignments. Check hub-side first
+      // and elevate PROXY_ROLE_HEADER to node-admin when the scoped check passes.
+      if (isSettingsWrite(req) && req.user?.role !== 'admin' && req.user?.role !== 'node-admin') {
+        if (hasNonIdentityContentEncoding(req)) {
+          await drainRequestBody(req);
+          res.status(415).json({
+            error: 'Compressed request bodies are not supported for remote settings writes',
+            code: 'encoding_unsupported',
+          });
+          return;
+        }
+        try {
+          req.rawBody = await bufferRequestBody(req, SETTINGS_PROXY_BODY_LIMIT);
+        } catch (err) {
+          const status = Number((err as { status?: number }).status);
+          if (status === 413) {
+            res.status(413).json({ error: 'Settings payload too large', code: 'entity_too_large' });
+            return;
+          }
+          if (status === 400) {
+            res.status(400).json({ error: 'Incomplete request body' });
+            return;
+          }
+          throw err;
+        }
+        const needed = settingsBodyPermissions(req.rawBody);
+        // Fail-closed on empty/unparseable body: require hub-side node:manage on
+        // the target node (mirrors requireSettingsWritePermission's empty-keys
+        // branch in routes/settings.ts:62-68). A user with no scoped grant is
+        // denied; a user with a scoped grant passes through elevated.
+        let preAuthOk = true;
+        if (needed.length === 0) {
+          preAuthOk = checkNodeManageOnHub(req);
+        } else {
+          for (const action of needed) {
+            const ok = action === 'node:manage'
+              ? checkNodeManageOnHub(req)
+              : checkPermission(req, action);
+            if (!ok) {
+              preAuthOk = false;
+              break;
+            }
+          }
+        }
+        if (!preAuthOk) {
+          res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+          return;
+        }
+        req.proxyElevatedRole = 'node-admin';
+      }
+
+      // Alerts POST scoped-evidence gate: when a non-admin, non-node-admin user
+      // creates a stack-scoped alert on a remote node, forward the scoped grant
+      // as evidence so the remote can authorize the write. The body was already
+      // buffered by the isAlertCreateRoute block above; this gate only inspects
+      // the stack_name field from the buffered JSON. Non-stack-scoped creates
+      // (no stack_name in body) pass through without evidence.
+      if (isAlertCreateRoute(req) && req.user?.role !== 'admin' && req.user?.role !== 'node-admin') {
+        const globalGrantsEdit =
+          req.user?.role != null
+          && (ROLE_PERMISSIONS[req.user.role]?.includes('stack:edit') ?? false);
+        if (!globalGrantsEdit) {
+          const stackName = req.rawBody ? parseBodyStackName(req.rawBody) : null;
+          if (stackName === undefined) {
+            // Body is non-empty but not valid JSON; client error, not auth.
+            console.error('[remoteNodeProxy] alert body is not valid JSON');
+            res.status(400).json({ error: 'Request body is not valid JSON' });
+            return;
+          }
+          if (stackName) {
+            const evidenceSupported = await remoteAdvertisesCapability(
+              req.nodeId,
+              SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
+            );
+            if (!evidenceSupported) {
+              res.status(403).json({
+                error: `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
+              });
+              return;
+            }
+            if (!checkPermission(req, 'stack:edit', 'stack', stackName)) {
+              res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+              return;
+            }
+            req.proxyScopedStackEvidence = { stackName, actions: ['stack:edit'] };
+          }
+        }
+      }
+
+      // Auto-heal POST scoped-evidence gate: same pattern as alerts but
+      // auto-heal has no pre-existing body buffering, so this gate handles
+      // its own encoding rejection and buffering.
+      if (isAutoHealCreateRoute(req) && req.user?.role !== 'admin' && req.user?.role !== 'node-admin') {
+        const globalGrantsEdit =
+          req.user?.role != null
+          && (ROLE_PERMISSIONS[req.user.role]?.includes('stack:edit') ?? false);
+        if (!globalGrantsEdit) {
+          if (hasNonIdentityContentEncoding(req)) {
+            await drainRequestBody(req);
+            console.error('[remoteNodeProxy] auto-heal body rejected: compressed encoding');
+            res.status(415).json({
+              error: 'Compressed request bodies are not supported for remote auto-heal creates',
+              code: 'encoding_unsupported',
+            });
+            return;
+          }
+          try {
+            req.rawBody = await bufferRequestBody(req, AUTO_HEAL_PROXY_BODY_LIMIT);
+          } catch (err) {
+            const status = Number((err as { status?: number }).status);
+            if (status === 413) {
+              console.error('[remoteNodeProxy] auto-heal body rejected as too large:', err);
+              res.status(413).json({ error: 'Auto-heal payload too large', code: 'entity_too_large' });
+              return;
+            }
+            if (status === 400) {
+              console.error('[remoteNodeProxy] auto-heal body incomplete:', err);
+              res.status(400).json({ error: 'Incomplete request body' });
+              return;
+            }
+            throw err;
+          }
+          const stackName = parseBodyStackName(req.rawBody);
+          if (stackName === undefined) {
+            console.error('[remoteNodeProxy] auto-heal body is not valid JSON');
+            res.status(400).json({ error: 'Request body is not valid JSON' });
+            return;
+          }
+          if (stackName) {
+            const evidenceSupported = await remoteAdvertisesCapability(
+              req.nodeId,
+              SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
+            );
+            if (!evidenceSupported) {
+              res.status(403).json({
+                error: `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
+              });
+              return;
+            }
+            if (!checkPermission(req, 'stack:edit', 'stack', stackName)) {
+              res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+              return;
+            }
+            req.proxyScopedStackEvidence = { stackName, actions: ['stack:edit'] };
+          }
+        }
+      }
+
+      // Node-wide image refresh elevation gate: when a non-admin, non-node-admin
+      // user triggers a manual refresh on a remote node, check the hub-side
+      // scoped node:manage grant and elevate PROXY_ROLE_HEADER so the remote
+      // sees the user as node-admin for this hop (matching the pattern used
+      // for scoped Settings writes).
+      if (isImageRefreshNodeWide(req) && req.user?.role !== 'admin' && req.user?.role !== 'node-admin') {
+        if (!checkNodeManageOnHub(req)) {
+          res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+          return;
+        }
+        req.proxyElevatedRole = 'node-admin';
+      }
+
       req.proxyTarget = target;
       beginProxyTiming(req, res);
       proxy(req, res, next);
@@ -332,6 +592,50 @@ export function createRemoteProxyMiddleware(): RequestHandler {
 
     runGatedProxy().catch(next);
   };
+}
+
+/** Max request body size for buffered settings writes (same as ALERT_PROXY_BODY_LIMIT). */
+const SETTINGS_PROXY_BODY_LIMIT = 100 * 1024;
+
+/** True when the request is a settings write destined for a remote node (path is post-/api strip). */
+function isSettingsWrite(req: Request): boolean {
+  if (req.method !== 'POST' && req.method !== 'PATCH') return false;
+  return /^\/settings\/?$/.test(req.path);
+}
+
+/**
+ * Hub-side `node:manage` resolve against the active node so scoped Node Admin
+ * grants on the target remote node are detected before the hop.
+ */
+function checkNodeManageOnHub(req: Request): boolean {
+  if (typeof req.nodeId === 'number') {
+    return checkPermission(req, 'node:manage', 'node', String(req.nodeId));
+  }
+  return checkPermission(req, 'node:manage');
+}
+
+/**
+ * Extract the set of required PermissionAction values from a buffered settings
+ * body. Returns the distinct actions for a valid body, or an empty array when
+ * the body is empty or JSON.parse fails (caller must then fall back to requiring
+ * checkNodeManageOnHub, fail-closed).
+ */
+function settingsBodyPermissions(rawBody: Buffer): PermissionAction[] {
+  if (rawBody.length === 0) return [];
+  try {
+    const parsed = JSON.parse(rawBody.toString('utf-8')) as Record<string, unknown>;
+    // POST /api/settings sends { key, value }; PATCH sends a flat key/value map.
+    const keys = typeof parsed.key === 'string' ? [parsed.key] : Object.keys(parsed);
+    if (keys.length === 0) return [];
+    const needed = new Set<PermissionAction>();
+    for (const key of keys) {
+      const action = SETTING_WRITE_PERMISSIONS[key];
+      if (action) needed.add(action);
+    }
+    return [...needed];
+  } catch {
+    return [];
+  }
 }
 
 /** POST /stacks/:stackName/down with ?removeVolumes=true (path is post-/api strip). */
@@ -359,6 +663,37 @@ function isAlertCreateRoute(req: Request): boolean {
 
 /** Same default as express.json(); remote alert creates must not exceed it. */
 const ALERT_PROXY_BODY_LIMIT = 100 * 1024;
+
+/** Same limit for auto-heal policy creates. */
+const AUTO_HEAL_PROXY_BODY_LIMIT = 100 * 1024;
+
+/** POST /auto-heal/policies (path is post-/api strip). */
+function isAutoHealCreateRoute(req: Request): boolean {
+  return req.method === 'POST' && /^\/auto-heal\/policies\/?$/.test(req.path);
+}
+
+/** POST /image-updates/refresh with no stack-name segment (node-wide, not per-stack). */
+function isImageRefreshNodeWide(req: Request): boolean {
+  return req.method === 'POST' && /^\/image-updates\/refresh\/?$/.test(req.path);
+}
+
+/**
+ * Extract the stack_name from a buffered JSON POST body.
+ * Returns a valid stack name, `null` when the field is absent or
+ * invalid (pass-through, remote enforces), or `undefined` when the
+ * body is not valid JSON (fail-closed, callers must 403).
+ */
+function parseBodyStackName(rawBody: Buffer): string | null | undefined {
+  if (rawBody.length === 0) return null;
+  try {
+    const parsed = JSON.parse(rawBody.toString('utf-8')) as { stack_name?: unknown };
+    const raw = typeof parsed.stack_name === 'string' ? parsed.stack_name.trim() : '';
+    if (!raw || !isValidStackName(raw)) return null;
+    return raw;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Max time to wait for leftover body bytes after a size/encoding reject. */
 const DRAIN_TIMEOUT_MS = 5_000;

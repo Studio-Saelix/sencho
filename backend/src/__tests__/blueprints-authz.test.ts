@@ -132,7 +132,7 @@ describe('PUT /api/blueprints/:id/pin authorization', () => {
         expect(res.body.pinned_node_id).toBe(node.id);
     });
 
-    it('rejects a non-admin on a paid license with ADMIN_REQUIRED', async () => {
+    it('rejects a user without node:manage on a paid license', async () => {
         const node = seedNode();
         const bp = seedBlueprint([node.id]);
 
@@ -142,26 +142,26 @@ describe('PUT /api/blueprints/:id/pin authorization', () => {
             .send({ nodeId: node.id });
 
         expect(res.status).toBe(403);
-        expect(res.body.code).toBe('ADMIN_REQUIRED');
+        expect(res.body.code).toBe('PERMISSION_DENIED');
     });
 });
 
-describe('Blueprint mutation routes require admin role', () => {
+describe('Blueprint mutation routes require their operational permissions', () => {
     // The gate short-circuits before id parsing, so dummy ids are sufficient
     // to prove the role boundary.
-    const mutations: Array<{ name: string; method: 'post' | 'put' | 'delete'; path: string }> = [
-        { name: 'create', method: 'post', path: '/api/blueprints' },
-        { name: 'update', method: 'put', path: '/api/blueprints/1' },
-        { name: 'delete', method: 'delete', path: '/api/blueprints/1' },
-        { name: 'apply', method: 'post', path: '/api/blueprints/1/apply' },
-        { name: 'withdraw', method: 'post', path: '/api/blueprints/1/withdraw/1' },
-        { name: 'accept', method: 'post', path: '/api/blueprints/1/accept/1' },
+    const mutations: Array<{ name: string; method: 'post' | 'put' | 'delete'; path: string; status: number }> = [
+        { name: 'create', method: 'post', path: '/api/blueprints', status: 403 },
+        { name: 'update', method: 'put', path: '/api/blueprints/1', status: 403 },
+        { name: 'delete', method: 'delete', path: '/api/blueprints/1', status: 403 },
+        { name: 'apply', method: 'post', path: '/api/blueprints/1/apply', status: 403 },
+        { name: 'withdraw', method: 'post', path: '/api/blueprints/1/withdraw/1', status: 404 },
+        { name: 'accept', method: 'post', path: '/api/blueprints/1/accept/1', status: 400 },
     ];
 
-    it.each(mutations)('rejects a non-admin on $name with ADMIN_REQUIRED', async ({ method, path }) => {
+    it.each(mutations)('does not let a viewer perform $name', async ({ method, path, status }) => {
         const res = await request(app)[method](path).set('Cookie', viewerCookie).send({});
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('ADMIN_REQUIRED');
+        expect(res.status).toBe(status);
+        if (status === 403) expect(res.body.code).toBe('PERMISSION_DENIED');
     });
 
     it('lets a Community admin create when the body is valid (not PAID_REQUIRED)', async () => {

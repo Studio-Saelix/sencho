@@ -115,13 +115,14 @@ describe('POST /api/system/update', () => {
 
     expect(res.status).toBe(202);
     expect(res.body?.message).toMatch(/restart/i);
-    // triggerUpdate runs on res finish + delay; flush the microtask queue.
-    await new Promise(r => setTimeout(r, 600));
-    expect(triggerSpy).toHaveBeenCalledWith(expect.objectContaining({
-      targetVersion: '0.99.0',
-      successMarkerFile: expect.stringMatching(/image-op-success-[\w-]+\.json$/),
-      successMarkerContent: expect.stringMatching(/"operationId":"[\w-]+"/),
-    }));
+    // The route schedules triggerUpdate 500ms after responding, so poll for it.
+    await vi.waitFor(() => {
+      expect(triggerSpy).toHaveBeenCalledWith(expect.objectContaining({
+        targetVersion: '0.99.0',
+        successMarkerFile: expect.stringMatching(/image-op-success-[\w-]+\.json$/),
+        successMarkerContent: expect.stringMatching(/"operationId":"[\w-]+"/),
+      }));
+    }, { timeout: 5_000 });
   });
 });
 

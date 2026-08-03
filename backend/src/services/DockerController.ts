@@ -13,6 +13,7 @@ import SelfIdentityService from './SelfIdentityService';
 import {
   fingerprintPrunePlan,
   normalizePruneTargets,
+  projectPruneOwnershipLabels,
   PRUNEABLE_CONTAINER_STATES,
   PrunePlanStaleError,
   type PruneItemOutcome,
@@ -142,6 +143,9 @@ export interface ClassifiedImage {
   managedBy: string | null;
   managedStatus: 'managed' | 'unmanaged' | 'unused';
   isSencho: boolean;
+  /** True when a StackUpdateRecoveryService/ServiceUpdateRecoveryService hold protects this image from pruning. Additive: does not change managedStatus semantics. */
+  rollbackProtected: boolean;
+  rollbackProtectionKind?: 'stack' | 'service';
 }
 
 export interface PortInUseInfo {
@@ -560,23 +564,52 @@ class DockerController {
 
     const selfIdentity = SelfIdentityService.getInstance();
 
-    const images: ClassifiedImage[] = this.validateApiData<any[]>(rawImages).map((img: any) => {
-      const usedByStacks = [...(imageToStacks.get(img.Id) ?? [])].sort((a, b) => a.localeCompare(b));
-      const managedBy = usedByStacks[0] ?? null;
-      const managedStatus: ClassifiedImage['managedStatus'] =
-        img.Containers === 0 ? 'unused' :
-        managedBy ? 'managed' : 'unmanaged';
-      return {
-        Id: img.Id,
-        RepoTags: img.RepoTags ?? [],
-        Size: img.Size ?? 0,
-        Containers: img.Containers ?? 0,
-        usedByStacks,
-        managedBy,
-        managedStatus,
-        isSencho: selfIdentity.isOwnImage(img.Id),
-      };
-    });
+    // Dynamic (async) imports avoid a static cycle: StackUpdateRecoveryService
+    // imports DockerController directly, and ServiceUpdateRecoveryService
+    // reaches it transitively through ComposeService. It must be `await import`
+    // rather than require(), which does not resolve under Vitest's loader.
+    const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+    const { ServiceUpdateRecoveryService } = await import('./ServiceUpdateRecoveryService');
+    const stackHeld = StackUpdateRecoveryService.getInstance().getHeldImageIds(this.nodeId);
+    const serviceHeld = ServiceUpdateRecoveryService.getInstance().getHeldImageIds(this.nodeId);
+    // A null lookup means "held state unknown" (the DB read failed); treat it
+    // as held so the badge never disagrees with the delete guard, which fails
+    // the same way (recoveryHeldImages.ts's buildUnifiedHeldImagePredicate).
+    const rollbackKind = (imageId: string): ClassifiedImage['rollbackProtectionKind'] => {
+      if (stackHeld === null || stackHeld.has(imageId)) return 'stack';
+      if (serviceHeld === null || serviceHeld.has(imageId)) return 'service';
+      return undefined;
+    };
+
+    // Only hide an image from the generic inventory when every visible tag is
+    // a synthetic sencho-rb hold tag; an image that also carries a normal
+    // registry tag stays visible here (with the badge below) so the generic
+    // inventory stays complete. Its generation still surfaces in the Rollback tab.
+    const isFullySyntheticHoldImage = (repoTags: string[]): boolean =>
+      repoTags.length > 0 && repoTags.every((tag) => tag.startsWith('sencho-rb/'));
+
+    const images: ClassifiedImage[] = this.validateApiData<any[]>(rawImages)
+      .map((img: any) => {
+        const usedByStacks = [...(imageToStacks.get(img.Id) ?? [])].sort((a, b) => a.localeCompare(b));
+        const managedBy = usedByStacks[0] ?? null;
+        const managedStatus: ClassifiedImage['managedStatus'] =
+          img.Containers === 0 ? 'unused' :
+          managedBy ? 'managed' : 'unmanaged';
+        const rollbackProtectionKind = rollbackKind(img.Id);
+        return {
+          Id: img.Id,
+          RepoTags: img.RepoTags ?? [],
+          Size: img.Size ?? 0,
+          Containers: img.Containers ?? 0,
+          usedByStacks,
+          managedBy,
+          managedStatus,
+          isSencho: selfIdentity.isOwnImage(img.Id),
+          rollbackProtected: rollbackProtectionKind !== undefined,
+          rollbackProtectionKind,
+        };
+      })
+      .filter((img) => !isFullySyntheticHoldImage(img.RepoTags));
 
     const volumes: ClassifiedVolume[] = rawVolumes.map((vol: any) => {
       const stack = DockerController.resolveProjectLabel(vol.Labels?.['com.docker.compose.project'], knownSet, projectToStack);
@@ -921,17 +954,18 @@ class DockerController {
         if (selfIdentity.isOwnContainer(c.Id)) continue;
         const state = String(c.State ?? '').toLowerCase();
         if (!PRUNEABLE_CONTAINER_STATES.has(state)) continue;
-        if (scope === 'managed') {
-          const stack = DockerController.resolveContainerStack(
-            c.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
-          );
-          if (!stack) continue;
-        }
+        const stack = DockerController.resolveContainerStack(
+          c.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
+        );
+        if (scope === 'managed' && !stack) continue;
         items.push({
           target: 'containers',
           id: c.Id,
           name: containerName(c),
           sizeBytes: typeof c.SizeRw === 'number' && c.SizeRw > 0 ? c.SizeRw : undefined,
+          managed: Boolean(stack),
+          reason: `Container is ${state} and no longer running`,
+          stackName: stack ?? undefined,
         });
       }
     }
@@ -946,23 +980,29 @@ class DockerController {
       const rawVolumeData = await this.docker.listVolumes();
       const rawVolumes = (this.validateApiData<{ Volumes?: Array<{
         Name: string;
+        Driver?: string;
         Labels?: Record<string, string>;
       }> }>(rawVolumeData)).Volumes || [];
       for (const vol of rawVolumes) {
         if (selfIdentity.isOwnVolume(vol.Name)) continue;
         const usage = volumeUsage.get(vol.Name);
         if (!usage || usage.refCount !== 0) continue;
-        if (scope === 'managed') {
-          const stack = DockerController.resolveProjectLabel(
-            vol.Labels?.['com.docker.compose.project'], knownSet, projectToStack,
-          );
-          if (!stack) continue;
-        }
+        const stack = DockerController.resolveContainerStack(
+          vol.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
+        );
+        if (scope === 'managed' && !stack) continue;
         items.push({
           target: 'volumes',
           id: vol.Name,
           name: vol.Name,
           sizeBytes: usage.size > 0 ? usage.size : undefined,
+          managed: Boolean(stack),
+          reason: 'Volume is not referenced by any container',
+          stackName: stack ?? undefined,
+          volume: {
+            driver: vol.Driver,
+            ownershipLabels: projectPruneOwnershipLabels(vol.Labels),
+          },
         });
       }
     }
@@ -971,6 +1011,8 @@ class DockerController {
       const rawNetworks = await this.docker.listNetworks() as Array<{
         Id: string;
         Name: string;
+        Driver?: string;
+        Scope?: string;
         Labels?: Record<string, string>;
       }>;
       const networksInUse = new Set<string>();
@@ -998,19 +1040,30 @@ class DockerController {
           );
           continue;
         }
-        if (scope === 'managed') {
-          const stack = DockerController.resolveProjectLabel(
-            net.Labels?.['com.docker.compose.project'], knownSet, projectToStack,
-          );
-          if (!stack) continue;
-        }
-        items.push({ target: 'networks', id: net.Id, name: net.Name });
+        const stack = DockerController.resolveContainerStack(
+          net.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
+        );
+        if (scope === 'managed' && !stack) continue;
+        items.push({
+          target: 'networks',
+          id: net.Id,
+          name: net.Name,
+          managed: Boolean(stack),
+          reason: 'Network has no attached containers',
+          stackName: stack ?? undefined,
+          network: {
+            driver: net.Driver,
+            scope: net.Scope,
+            ownershipLabels: projectPruneOwnershipLabels(net.Labels),
+          },
+        });
       }
     }
 
     if (ordered.includes('images')) {
       const unmanagedImageIds = new Set<string>();
       const managedImageIds = new Set<string>();
+      const imageToStack = new Map<string, string>();
       const imageToContainerIds = new Map<string, string[]>();
       for (const c of allContainers) {
         if (!c.ImageID) continue;
@@ -1020,7 +1073,10 @@ class DockerController {
         const stack = DockerController.resolveContainerStack(
           c.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
         );
-        if (stack) managedImageIds.add(c.ImageID);
+        if (stack) {
+          managedImageIds.add(c.ImageID);
+          if (!imageToStack.has(c.ImageID)) imageToStack.set(c.ImageID, stack);
+        }
         else unmanagedImageIds.add(c.ImageID);
       }
       const plannedContainerIds = new Set(
@@ -1029,10 +1085,12 @@ class DockerController {
       const rawImages = await this.docker.listImages({ all: false }) as Array<{
         Id: string;
         RepoTags?: string[] | null;
+        RepoDigests?: string[] | null;
         Labels?: Record<string, string>;
         Size?: number;
         VirtualSize?: number;
         Containers?: number;
+        Created?: number;
       }>;
       // An image becomes free only when every container that references it is
       // also in this plan (not merely when any planned container uses it).
@@ -1040,31 +1098,39 @@ class DockerController {
       for (const img of rawImages) {
         if (selfIdentity.isOwnImage(img.Id)) continue;
         if (isImageHeld?.(img.Id)) continue;
-        const containers = img.Containers ?? 0;
         const refs = imageToContainerIds.get(img.Id) ?? [];
         const becomesFree = freeingImages
           && refs.length > 0
-          && refs.length >= containers
           && refs.every((id) => plannedContainerIds.has(id));
-        if (containers > 0 && !becomesFree) continue;
+        if (refs.length > 0 && !becomesFree) continue;
+        const labeled = DockerController.resolveContainerStack(
+          img.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
+        );
+        const stack = labeled ?? imageToStack.get(img.Id) ?? null;
         if (scope === 'managed') {
           if (unmanagedImageIds.has(img.Id)) continue;
-          const labeled = DockerController.resolveProjectLabel(
-            img.Labels?.['com.docker.compose.project'], knownSet, projectToStack,
-          );
           // Unattributed unused images (no managed container, no compose label)
           // are not Sencho-managed; keep them out of managed prune.
-          if (!becomesFree && !labeled && !managedImageIds.has(img.Id)) continue;
+          if (!becomesFree && !stack && !managedImageIds.has(img.Id)) continue;
         }
-        const name = img.RepoTags?.[0] && img.RepoTags[0] !== '<none>:<none>'
-          ? img.RepoTags[0]
-          : img.Id.slice(0, 12);
+        const references = (img.RepoTags ?? []).filter((ref) => ref && ref !== '<none>:<none>');
+        const name = references[0] ?? '<none>:<none>';
         const unique = DockerController.imageUniqueBytes(img, sharedSizes);
         items.push({
           target: 'images',
           id: img.Id,
           name,
           sizeBytes: unique > 0 ? unique : undefined,
+          managed: Boolean(stack || managedImageIds.has(img.Id)),
+          reason: becomesFree
+            ? 'Image becomes unused after planned container removal'
+            : 'Image is not used by any container',
+          stackName: stack ?? undefined,
+          image: {
+            references,
+            digest: img.RepoDigests?.find((digest) => Boolean(digest)),
+            createdAt: typeof img.Created === 'number' ? img.Created : undefined,
+          },
         });
       }
     }
@@ -1093,7 +1159,8 @@ class DockerController {
 
   /**
    * Rebuild the plan with the same targets/scope. Returns the fresh plan when
-   * the fingerprint still matches, otherwise null (caller maps to 409).
+   * the fingerprint still matches, otherwise null so the caller can report
+   * staleness through its route-specific response contract.
    */
   public async assertPlanFresh(
     plan: PrunePlan,
@@ -1173,14 +1240,18 @@ class DockerController {
         }
 
         if (target === 'volumes') {
-          const outcome = await this.executePlannedVolume(item, fresh.scope, knownSet, projectToStack, selfIdentity);
+          const outcome = await this.executePlannedVolume(
+            item, fresh.scope, knownSet, projectToStack, absDirToStack, resolvedBase, selfIdentity,
+          );
           outcomes.push(outcome);
           if (outcome.status === 'removed') reclaimedBytes += outcome.sizeBytes ?? item.sizeBytes ?? 0;
           continue;
         }
 
         if (target === 'networks') {
-          outcomes.push(await this.executePlannedNetwork(item, fresh.scope, knownSet, projectToStack, selfIdentity));
+          outcomes.push(await this.executePlannedNetwork(
+            item, fresh.scope, knownSet, projectToStack, absDirToStack, resolvedBase, selfIdentity,
+          ));
           continue;
         }
 
@@ -1207,7 +1278,7 @@ class DockerController {
             }
           }
           const outcome = await this.executePlannedImage(
-            item, fresh.scope, knownSet, projectToStack, absDirToStack, resolvedBase, selfIdentity,
+            item, selfIdentity,
           );
           outcomes.push(outcome);
           if (outcome.status === 'removed') reclaimedBytes += outcome.sizeBytes ?? item.sizeBytes ?? 0;
@@ -1238,9 +1309,10 @@ class DockerController {
 
   private async imageStillReferenced(imageId: string): Promise<boolean> {
     try {
-      const images = await this.docker.listImages({ all: false }) as Array<{ Id: string; Containers?: number }>;
-      const match = images.find((img) => img.Id === imageId || img.Id.startsWith(imageId) || imageId.startsWith(img.Id));
-      return (match?.Containers ?? 0) > 0;
+      const containers = await this.docker.listContainers({ all: true }) as Array<{ ImageID?: string }>;
+      return containers.some((container) => container.ImageID === imageId
+        || Boolean(container.ImageID?.startsWith(imageId))
+        || imageId.startsWith(container.ImageID ?? ''));
     } catch {
       return true;
     }
@@ -1250,8 +1322,8 @@ class DockerController {
     item: PrunePlanItem,
     scope: PruneScope,
     knownSet: Set<string>,
-    projectToStack: Record<string, string>,
-    absDirToStack: Record<string, string>,
+    projectToStack: Map<string, string>,
+    absDirToStack: Map<string, string>,
     resolvedBase: string,
     selfIdentity: SelfIdentityService,
   ): Promise<
@@ -1305,7 +1377,9 @@ class DockerController {
     item: PrunePlanItem,
     scope: PruneScope,
     knownSet: Set<string>,
-    projectToStack: Record<string, string>,
+    projectToStack: Map<string, string>,
+    absDirToStack: Map<string, string>,
+    resolvedBase: string,
     selfIdentity: SelfIdentityService,
   ): Promise<PruneItemOutcome> {
     if (selfIdentity.isOwnVolume(item.id)) {
@@ -1325,8 +1399,8 @@ class DockerController {
       return { id: item.id, target: 'volumes', status: 'skipped', reason: 'Volume is in use' };
     }
     if (scope === 'managed') {
-      const stack = DockerController.resolveProjectLabel(
-        vol.Labels?.['com.docker.compose.project'], knownSet, projectToStack,
+      const stack = DockerController.resolveContainerStack(
+        vol.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
       );
       if (!stack) {
         return { id: item.id, target: 'volumes', status: 'skipped', reason: 'No longer a managed volume' };
@@ -1340,7 +1414,9 @@ class DockerController {
     item: PrunePlanItem,
     scope: PruneScope,
     knownSet: Set<string>,
-    projectToStack: Record<string, string>,
+    projectToStack: Map<string, string>,
+    absDirToStack: Map<string, string>,
+    resolvedBase: string,
     selfIdentity: SelfIdentityService,
   ): Promise<PruneItemOutcome> {
     if (selfIdentity.isOwnNetwork(item.id)) {
@@ -1363,8 +1439,8 @@ class DockerController {
       return { id: item.id, target: 'networks', status: 'skipped', reason: 'Network is in use' };
     }
     if (scope === 'managed') {
-      const stack = DockerController.resolveProjectLabel(
-        inspected.Labels?.['com.docker.compose.project'], knownSet, projectToStack,
+      const stack = DockerController.resolveContainerStack(
+        inspected.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
       );
       if (!stack) {
         return { id: item.id, target: 'networks', status: 'skipped', reason: 'No longer a managed network' };
@@ -1376,11 +1452,6 @@ class DockerController {
 
   private async executePlannedImage(
     item: PrunePlanItem,
-    scope: PruneScope,
-    knownSet: Set<string>,
-    projectToStack: Record<string, string>,
-    absDirToStack: Record<string, string>,
-    resolvedBase: string,
     selfIdentity: SelfIdentityService,
   ): Promise<PruneItemOutcome> {
     if (selfIdentity.isOwnImage(item.id)) {
@@ -1389,29 +1460,20 @@ class DockerController {
     const rawImages = await this.docker.listImages({ all: false }) as Array<{
       Id: string;
       Size?: number;
-      Containers?: number;
     }>;
     const img = rawImages.find((i) => i.Id === item.id || i.Id.startsWith(item.id) || item.id.startsWith(i.Id));
     if (!img) {
       return { id: item.id, target: 'images', status: 'skipped', reason: 'Image no longer exists' };
     }
-    if ((img.Containers ?? 0) > 0) {
+    const allContainers = await this.docker.listContainers({ all: true }) as Array<{
+      ImageID?: string;
+      Labels?: Record<string, string>;
+    }>;
+    const references = allContainers.filter((container) => container.ImageID === img.Id
+      || Boolean(container.ImageID?.startsWith(img.Id))
+      || img.Id.startsWith(container.ImageID ?? ''));
+    if (references.length > 0) {
       return { id: item.id, target: 'images', status: 'skipped', reason: 'Image still has container references' };
-    }
-    if (scope === 'managed') {
-      const allContainers = await this.docker.listContainers({ all: true }) as Array<{
-        ImageID?: string;
-        Labels?: Record<string, string>;
-      }>;
-      for (const c of allContainers) {
-        if (c.ImageID !== img.Id) continue;
-        const stack = DockerController.resolveContainerStack(
-          c.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
-        );
-        if (!stack) {
-          return { id: item.id, target: 'images', status: 'skipped', reason: 'Image referenced by unmanaged container' };
-        }
-      }
     }
     await this.docker.getImage(item.id).remove({ force: false });
     // Prefer plan unique-bytes; do not fall back to full Size (shared layers).
@@ -1472,6 +1534,23 @@ class DockerController {
     const image = this.docker.getImage(id);
     const [inspect, history] = await Promise.all([image.inspect(), image.history()]);
     return { inspect, history };
+  }
+
+  /**
+   * Resolve any valid Docker image reference (full ID, short ID, digest, or
+   * tag) to its canonical full sha256 ID. isValidDockerResourceId accepts
+   * short IDs down to 12 hex chars, which a held-image-id set lookup (always
+   * keyed on the full 64-char form) would miss without this resolve step.
+   * Returns null when the image does not exist.
+   */
+  public async resolveImageId(id: string): Promise<string | null> {
+    try {
+      const info = await this.docker.getImage(id).inspect();
+      return info.Id;
+    } catch (error) {
+      if ((error as { statusCode?: number })?.statusCode === 404) return null;
+      throw error;
+    }
   }
 
   public async removeVolume(name: string) {
@@ -1925,19 +2004,20 @@ class DockerController {
   private static resolveProjectLabel(
     project: string | undefined,
     knownSet: Set<string>,
-    projectToStack: Record<string, string>,
+    projectToStack: Map<string, string>,
   ): string | null {
     if (!project) return null;
     if (knownSet.has(project)) return project;
-    if (projectToStack[project]) return projectToStack[project];
-    return null;
+    return projectToStack.get(project) ?? null;
   }
 
   /** Builds a map from absolute stack directory paths to stack names. */
-  private static buildAbsDirMap(stackNames: string[]): Record<string, string> {
-    const map: Record<string, string> = {};
+  private static buildAbsDirMap(stackNames: string[]): Map<string, string> {
+    const map = new Map<string, string>();
     for (const stackDir of stackNames) {
-      map[path.join(COMPOSE_DIR, stackDir)] = stackDir;
+      const stackPath = path.join(COMPOSE_DIR, stackDir);
+      map.set(stackPath, stackDir);
+      map.set(path.resolve(stackPath), stackDir);
     }
     return map;
   }
@@ -1948,21 +2028,24 @@ class DockerController {
    */
   private static resolveContainerStack(
     containerLabels: Record<string, string> | undefined,
-    projectToStack: Record<string, string>,
+    projectToStack: Map<string, string>,
     knownStackSet: Set<string>,
-    absDirToStack: Record<string, string>,
+    absDirToStack: Map<string, string>,
     resolvedBase: string,
   ): string | null {
     if (!containerLabels) return null;
 
     // Primary: match by project name (handles name: overrides and standard directory-based names)
     const project = containerLabels['com.docker.compose.project'];
-    if (project && projectToStack[project]) return projectToStack[project];
+    if (project) {
+      const stack = projectToStack.get(project);
+      if (stack) return stack;
+    }
 
     // Fallback 1: match by working_dir
     const workingDir = containerLabels['com.docker.compose.project.working_dir'];
     if (workingDir) {
-      const match = absDirToStack[workingDir] ?? absDirToStack[path.resolve(workingDir)];
+      const match = absDirToStack.get(workingDir) ?? absDirToStack.get(path.resolve(workingDir));
       if (match) return match;
     }
 
@@ -1989,15 +2072,15 @@ class DockerController {
    * Builds (or returns cached) mapping from Docker project name to Sencho stack directory name.
    * Compose files with a top-level `name:` field override the default project name.
    */
-  private static async resolveProjectNameMap(stackNames: string[]): Promise<Record<string, string>> {
+  private static async resolveProjectNameMap(stackNames: string[]): Promise<Map<string, string>> {
     return CacheService.getInstance().getOrFetch(
       PROJECT_NAME_CACHE_KEY,
       PROJECT_NAME_CACHE_TTL_MS,
       async () => {
-        const map: Record<string, string> = {};
+        const map = new Map<string, string>();
 
         await Promise.all(stackNames.map(async (stackDir) => {
-          map[stackDir] = stackDir;
+          map.set(stackDir, stackDir);
 
           for (const fileName of COMPOSE_FILE_NAMES) {
             const filePath = path.join(COMPOSE_DIR, stackDir, fileName);
@@ -2005,7 +2088,7 @@ class DockerController {
               const content = await fs.readFile(filePath, 'utf-8');
               const parsed = yaml.parse(content);
               if (parsed?.name && typeof parsed.name === 'string') {
-                map[parsed.name] = stackDir;
+                map.set(parsed.name, stackDir);
               }
               break;
             } catch (err: unknown) {

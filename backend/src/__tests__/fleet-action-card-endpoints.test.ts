@@ -19,6 +19,8 @@ const pruneManagedOnly = vi.fn();
 const pruneSystem = vi.fn();
 const estimateManagedReclaim = vi.fn();
 const estimateSystemReclaim = vi.fn();
+const buildPrunePlan = vi.fn();
+const executePrunePlan = vi.fn();
 const getContainersByStack = vi.fn();
 const stopContainer = vi.fn();
 const restartContainer = vi.fn();
@@ -47,6 +49,8 @@ vi.mock('../services/DockerController', () => ({
       pruneSystem,
       estimateManagedReclaim,
       estimateSystemReclaim,
+      buildPrunePlan,
+      executePrunePlan,
       getContainersByStack,
       stopContainer,
       restartContainer,
@@ -90,6 +94,11 @@ beforeEach(() => {
   pruneSystem.mockResolvedValue({ success: true, reclaimedBytes: 0 });
   estimateManagedReclaim.mockResolvedValue({ reclaimableBytes: 0 });
   estimateSystemReclaim.mockResolvedValue({ reclaimableBytes: 0 });
+  buildPrunePlan.mockResolvedValue({
+    nodeId: 1, scope: 'managed', targets: ['images'], items: [], reclaimableBytes: 0,
+    fingerprint: 'empty-plan', createdAt: 1,
+  });
+  executePrunePlan.mockResolvedValue({ success: true, reclaimedBytes: 0, outcomes: [] });
   getContainersByStack.mockResolvedValue([{ Id: 'container-1' }]);
   stopContainer.mockResolvedValue(undefined);
   restartContainer.mockResolvedValue(undefined);
@@ -304,14 +313,14 @@ describe('GET /api/fleet/labels/suggestions', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 for a non-admin (viewer) user', async () => {
+  it('allows a viewer with node:read to load suggestions', async () => {
     const viewerName = `viewer-sugg-${++labelCounter}`;
     db.addUser({ username: viewerName, password_hash: 'x', role: 'viewer' });
     const viewerAuth = `Bearer ${jwt.sign({ username: viewerName }, TEST_JWT_SECRET, { expiresIn: '1m' })}`;
     const res = await request(app)
       .get('/api/fleet/labels/suggestions')
       .set('Authorization', viewerAuth);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
   });
 
   it('is reachable on community tier for admins (no PAID_REQUIRED)', async () => {
@@ -1000,8 +1009,19 @@ describe('POST /api/fleet/labels/fleet-stop with dryRun: true', () => {
 });
 
 describe('POST /api/fleet/labels/fleet-prune with dryRun: true', () => {
-  it('routes to estimateManagedReclaim and marks each target dryRun: true', async () => {
-    estimateManagedReclaim.mockResolvedValue({ reclaimableBytes: 2048 });
+  it('returns one multi-target itemized plan without calling prune methods', async () => {
+    buildPrunePlan.mockResolvedValue({
+      nodeId: 1,
+      scope: 'managed',
+      targets: ['volumes', 'images'],
+      items: [
+        { target: 'volumes', id: 'data', name: 'data', sizeBytes: 512, managed: true, reason: 'unused' },
+        { target: 'images', id: 'image', name: 'app:latest', sizeBytes: 1536, managed: true, reason: 'unused' },
+      ],
+      reclaimableBytes: 2048,
+      fingerprint: 'itemized-plan',
+      createdAt: 1,
+    });
     const res = await request(app)
       .post('/api/fleet/labels/fleet-prune')
       .set('Authorization', authHeader)
@@ -1009,41 +1029,105 @@ describe('POST /api/fleet/labels/fleet-prune with dryRun: true', () => {
     expect(res.status).toBe(200);
     const node = res.body.results[0];
     expect(node.reachable).toBe(true);
+    expect(node.fingerprint).toBe('itemized-plan');
+    expect(node.items).toHaveLength(2);
     expect(node.targets).toHaveLength(2);
-    for (const t of node.targets) {
-      expect(t.success).toBe(true);
-      expect(t.reclaimedBytes).toBe(2048);
-      expect(t.dryRun).toBe(true);
-    }
+    expect(node.targets).toEqual([
+      { target: 'images', success: true, reclaimedBytes: 1536, dryRun: true },
+      { target: 'volumes', success: true, reclaimedBytes: 512, dryRun: true },
+    ]);
     expect(pruneManagedOnly).not.toHaveBeenCalled();
     expect(pruneSystem).not.toHaveBeenCalled();
-    expect(estimateManagedReclaim).toHaveBeenCalledTimes(2);
+    expect(buildPrunePlan).toHaveBeenCalledTimes(1);
     expect(invalidateNodeCaches).not.toHaveBeenCalled();
   });
 
-  it('routes to estimateSystemReclaim when scope is "all"', async () => {
-    estimateSystemReclaim.mockResolvedValue({ reclaimableBytes: 8192 });
+  it('loads known stacks and builds attribution even when scope is "all"', async () => {
     const res = await request(app)
       .post('/api/fleet/labels/fleet-prune')
       .set('Authorization', authHeader)
       .send({ targets: ['images'], scope: 'all', dryRun: true });
     expect(res.status).toBe(200);
     expect(estimateManagedReclaim).not.toHaveBeenCalled();
-    expect(estimateSystemReclaim).toHaveBeenCalled();
+    expect(estimateSystemReclaim).not.toHaveBeenCalled();
+    expect(buildPrunePlan).toHaveBeenCalledWith(['images'], 'all', ['alpha', 'beta'], expect.any(Number), expect.any(Function));
     expect(pruneManagedOnly).not.toHaveBeenCalled();
     expect(pruneSystem).not.toHaveBeenCalled();
-    expect(res.body.results[0].targets[0].reclaimedBytes).toBe(8192);
   });
 
-  it('still invokes pruneManagedOnly when dryRun is omitted', async () => {
-    pruneManagedOnly.mockResolvedValue({ success: true, reclaimedBytes: 512 });
+  it('requires reviewed roster and fingerprints when dryRun is omitted', async () => {
     const res = await request(app)
       .post('/api/fleet/labels/fleet-prune')
       .set('Authorization', authHeader)
       .send({ targets: ['images'], scope: 'managed' });
-    expect(res.status).toBe(200);
-    expect(pruneManagedOnly).toHaveBeenCalled();
+    expect(res.status).toBe(400);
+    expect(pruneManagedOnly).not.toHaveBeenCalled();
+    expect(executePrunePlan).not.toHaveBeenCalled();
     expect(estimateManagedReclaim).not.toHaveBeenCalled();
-    expect(res.body.results[0].targets[0].dryRun).toBeUndefined();
+  });
+
+  it('invalidates local caches only after an item is removed', async () => {
+    const local = db.getNodes().find((node) => node.type === 'local')!;
+    buildPrunePlan.mockResolvedValue({
+      nodeId: local.id,
+      scope: 'managed',
+      targets: ['images'],
+      items: [{ target: 'images', id: 'image', name: 'app:latest', managed: true, reason: 'unused' }],
+      reclaimableBytes: 0,
+      fingerprint: 'reviewed-plan',
+      createdAt: 1,
+    });
+    executePrunePlan.mockResolvedValue({
+      success: true,
+      reclaimedBytes: 0,
+      outcomes: [{ target: 'images', id: 'image', status: 'removed' }],
+    });
+    const res = await request(app)
+      .post('/api/fleet/labels/fleet-prune')
+      .set('Authorization', authHeader)
+      .send({
+        targets: ['images'],
+        scope: 'managed',
+        dryRun: false,
+        reviewedNodes: [{ nodeId: local.id, reachable: true }],
+        plans: [{ nodeId: local.id, fingerprint: 'reviewed-plan' }],
+      });
+    expect(res.status).toBe(200);
+    expect(executePrunePlan).toHaveBeenCalledTimes(1);
+    expect(invalidateNodeCaches).toHaveBeenCalledWith(local.id);
+  });
+
+  it('does not invalidate local caches for empty, skipped, or failed outcomes', async () => {
+    const local = db.getNodes().find((node) => node.type === 'local')!;
+    const cases = [
+      { items: [], outcomes: [] },
+      {
+        items: [{ target: 'images', id: 'image', name: 'app:latest', managed: true, reason: 'unused', image: { references: ['app:latest'] } }],
+        outcomes: [{ target: 'images', id: 'image', status: 'skipped', reason: 'became active' }],
+      },
+      {
+        items: [{ target: 'images', id: 'image', name: 'app:latest', managed: true, reason: 'unused', image: { references: ['app:latest'] } }],
+        outcomes: [{ target: 'images', id: 'image', status: 'failed', error: 'remove failed' }],
+      },
+    ] as const;
+    for (const [index, testCase] of cases.entries()) {
+      const fingerprint = `reviewed-plan-${index}`;
+      buildPrunePlan.mockResolvedValue({
+        nodeId: local.id, scope: 'managed', targets: ['images'], items: [...testCase.items],
+        reclaimableBytes: 0, fingerprint, createdAt: 1,
+      });
+      executePrunePlan.mockResolvedValue({ success: true, reclaimedBytes: 0, outcomes: [...testCase.outcomes] });
+      invalidateNodeCaches.mockClear();
+      const res = await request(app)
+        .post('/api/fleet/labels/fleet-prune')
+        .set('Authorization', authHeader)
+        .send({
+          targets: ['images'], scope: 'managed', dryRun: false,
+          reviewedNodes: [{ nodeId: local.id, reachable: true }],
+          plans: [{ nodeId: local.id, fingerprint }],
+        });
+      expect(res.status).toBe(200);
+      expect(invalidateNodeCaches).not.toHaveBeenCalled();
+    }
   });
 });

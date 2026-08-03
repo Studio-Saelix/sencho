@@ -80,7 +80,7 @@ export function HealthStatusBar({
   const unreadAlerts = countVisibleUnread(notifications);
   const running = `${stats.active}/${stats.total}`;
   const cpuLabel = systemStats ? `${parseFloat(systemStats.cpu.usage).toFixed(0)}%` : '--';
-  const memLabel = systemStats ? formatGib(systemStats.memory.used) : '--';
+  const memLabel = systemStats ? formatGib(systemStats.memory.effectiveUsed ?? systemStats.memory.used) : '--';
   const lastSyncLabel = lastSyncAt ? `last sync ${formatAgo(now - lastSyncAt)}` : 'connecting…';
   const metaLine = `${activeNodeName} · ${nodeCount} ${nodeCount === 1 ? 'node' : 'nodes'} · ${lastSyncLabel}`;
   const reasonsLine = reasons.join(' · ');

@@ -2,46 +2,93 @@ import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { DatabaseService } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin, requirePaid } from '../middleware/tierGates';
+import { requirePaid } from '../middleware/tierGates';
+import { requirePermission, checkPermission, type PermissionAction } from '../middleware/permissions';
 import { parseNotificationDispatchRetries } from '../helpers/notificationDispatchRetries';
 
-// Strict allowlist of keys readable and writable via the generic settings
-// API. This is the single source of truth for what the endpoint exposes:
-// reads project only these keys, so secrets written to global_settings by
-// other subsystems (the cloud_backup_* credentials stored by the cloud-backup
-// route, the auth_* login secrets) are never returned here; writes are
-// rejected for anything outside the list.
-const ALLOWED_SETTING_KEYS = new Set([
-  'host_cpu_limit',
-  'host_ram_limit',
-  'host_disk_limit',
-  'host_alerts_enabled',
-  'host_alert_suppression_mins',
-  'docker_janitor_gb',
-  'global_crash',
-  'developer_mode',
-  'template_registry_url',
-  'metrics_retention_hours',
-  'log_retention_days',
-  'audit_retention_days',
-  'mesh_auto_recreate',
-  'scan_history_per_image_limit',
-  'prune_orphaned_scans',
-  'prune_on_update',
-  'reclaim_hero',
-  'snapshot_documentation',
-  'health_gate_enabled',
-  'health_gate_window_seconds',
-  'env_block_deploy_on_missing_required',
-  'auto_create_missing_external_networks',
-  'image_update_sidebar_indicators',
-  'notification_dispatch_retries',
-  'session_sliding_refresh',
-]);
+// Allowlist of keys readable/writable via the generic settings API, each
+// mapped to the permission required to write it. Reads project only these
+// keys so secrets written to global_settings by other subsystems (cloud
+// backup credentials, auth_* login secrets) are never returned; writes
+// outside the map are rejected.
+export const SETTING_WRITE_PERMISSIONS: Record<string, PermissionAction> = {
+  host_cpu_limit: 'node:manage',
+  host_ram_limit: 'node:manage',
+  host_disk_limit: 'node:manage',
+  host_alerts_enabled: 'node:manage',
+  host_alert_suppression_mins: 'node:manage',
+  docker_janitor_gb: 'node:manage',
+  global_crash: 'node:manage',
+  template_registry_url: 'node:manage',
+  prune_on_update: 'node:manage',
+  reclaim_hero: 'node:manage',
+  health_gate_enabled: 'node:manage',
+  health_gate_window_seconds: 'node:manage',
+  env_block_deploy_on_missing_required: 'node:manage',
+  auto_create_missing_external_networks: 'node:manage',
+  notification_dispatch_retries: 'node:manage',
+  recovery_retention_days: 'node:manage',
+  recovery_max_generations: 'node:manage',
+  developer_mode: 'system:settings',
+  metrics_retention_hours: 'system:settings',
+  log_retention_days: 'system:settings',
+  audit_retention_days: 'system:settings',
+  mesh_auto_recreate: 'system:settings',
+  scan_history_per_image_limit: 'system:settings',
+  prune_orphaned_scans: 'system:settings',
+  snapshot_documentation: 'system:settings',
+  image_update_sidebar_indicators: 'system:settings',
+  session_sliding_refresh: 'system:settings',
+};
 
-// Keys whose write requires a paid license, not just an admin role.
+const ALLOWED_SETTING_KEYS = new Set(Object.keys(SETTING_WRITE_PERMISSIONS));
+
+/** Resolve node:manage against the active node so scoped Node Admin grants apply. */
+function checkNodeManage(req: Request): boolean {
+  const nodeId = req.nodeId;
+  if (typeof nodeId === 'number') {
+    return checkPermission(req, 'node:manage', 'node', String(nodeId));
+  }
+  return checkPermission(req, 'node:manage');
+}
+
+function requireNodeManage(req: Request, res: Response): boolean {
+  const nodeId = req.nodeId;
+  if (typeof nodeId === 'number') {
+    return requirePermission(req, res, 'node:manage', 'node', String(nodeId));
+  }
+  return requirePermission(req, res, 'node:manage');
+}
+
+/** Fail closed if any key lacks its required permission. */
+function requireSettingsWritePermission(req: Request, res: Response, keys: string[]): boolean {
+  // Empty no-op still requires write capability (prior requireAdmin behavior).
+  if (keys.length === 0) {
+    if (checkNodeManage(req) || checkPermission(req, 'system:settings')) return true;
+    res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+    return false;
+  }
+  const needed = new Set<PermissionAction>();
+  for (const key of keys) {
+    const action = SETTING_WRITE_PERMISSIONS[key];
+    if (!action) {
+      res.status(400).json({ error: `Invalid or disallowed setting key: ${key}` });
+      return false;
+    }
+    needed.add(action);
+  }
+  for (const action of needed) {
+    const ok = action === 'node:manage'
+      ? requireNodeManage(req, res)
+      : requirePermission(req, res, action);
+    if (!ok) return false;
+  }
+  return true;
+}
+
+// Keys whose write requires a paid license, not just a permission.
 // audit_retention_days configures the paid audit log, so a Community admin
-// must not be able to set it.
+// must not be able to set it. Checked after the permission bucket.
 const PAID_ONLY_SETTING_KEYS = new Set(['audit_retention_days']);
 
 // Bulk PATCH schema. All keys optional; present keys are fully validated.
@@ -69,6 +116,8 @@ const SettingsPatchSchema = z.object({
   env_block_deploy_on_missing_required: z.enum(['0', '1']),
   auto_create_missing_external_networks: z.enum(['0', '1']),
   image_update_sidebar_indicators: z.enum(['0', '1']),
+  recovery_retention_days: z.coerce.number().int().min(1).max(90).transform(String),
+  recovery_max_generations: z.coerce.number().int().min(0).max(50).transform(String),
   // Strict: do not use bare z.coerce.number() (null/false/'' become 0; true becomes 1).
   notification_dispatch_retries: z.unknown().superRefine((v, ctx) => {
     if (parseNotificationDispatchRetries(v) === null) {
@@ -102,13 +151,13 @@ settingsRouter.get('/', authMiddleware, async (_req: Request, res: Response): Pr
 });
 
 settingsRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
   try {
     const { key, value } = req.body;
     if (!key || typeof key !== 'string' || !ALLOWED_SETTING_KEYS.has(key)) {
       res.status(400).json({ error: `Invalid or disallowed setting key: ${key}` });
       return;
     }
+    if (!requireSettingsWritePermission(req, res, [key])) return;
     if (PAID_ONLY_SETTING_KEYS.has(key) && !requirePaid(req, res)) return;
     if (value === undefined || value === null) {
       res.status(400).json({ error: 'Setting value is required' });
@@ -146,7 +195,6 @@ settingsRouter.post('/', authMiddleware, async (req: Request, res: Response): Pr
 });
 
 settingsRouter.patch('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
   try {
     // Reject unknown/disallowed keys outright rather than letting Zod silently
     // strip them. This keeps the bulk path fail-closed and consistent with the
@@ -165,7 +213,9 @@ settingsRouter.patch('/', authMiddleware, async (req: Request, res: Response): P
       res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
       return;
     }
-    if (Object.keys(parsed.data).some(k => PAID_ONLY_SETTING_KEYS.has(k)) && !requirePaid(req, res)) return;
+    const keys = Object.keys(parsed.data);
+    if (!requireSettingsWritePermission(req, res, keys)) return;
+    if (keys.some(k => PAID_ONLY_SETTING_KEYS.has(k)) && !requirePaid(req, res)) return;
     const db = DatabaseService.getInstance();
     const updateMany = db.getDb().transaction((entries: [string, string][]) => {
       for (const [k, v] of entries) {

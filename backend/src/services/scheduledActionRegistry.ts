@@ -1,14 +1,18 @@
 /**
  * Single source of truth for scheduled-operation action metadata that the
- * backend needs for validation. The route layer derives its allow-list and
- * action/target compatibility checks from this table, so adding a new action
- * means adding one entry here (plus its execution logic in SchedulerService).
+ * backend needs for validation and authorization. The route layer derives its
+ * allow-list, action/target compatibility checks, and permission enforcement
+ * from this table, so adding a new action means adding one entry here
+ * (plus its execution logic in SchedulerService).
  *
  * The frontend keeps its own richer registry (labels, categories, tones) in
  * `frontend/src/lib/scheduledActions.ts`; the two cannot share a module because
  * the packages build in isolation. The shapes are kept in lockstep by tests on
  * each side.
  */
+
+import type { PermissionAction } from '../middleware/permissions';
+import type { ResourceType } from './DatabaseService';
 
 export const VALID_TARGET_TYPES = ['stack', 'fleet', 'system', 'container'] as const;
 export type TargetType = typeof VALID_TARGET_TYPES[number];
@@ -19,6 +23,19 @@ export interface BackendScheduledActionDefinition {
   readonly targetTypes: readonly TargetType[];
   readonly requiresNode: boolean;
   readonly nodeScope?: 'local';
+  /** Permission required to create, edit, enable, run, or delete a schedule for this action. */
+  readonly permission: PermissionAction;
+}
+
+/**
+ * Permission scope resolved from a task's action, target, and node identity.
+ * When `resourceType` is omitted the check is unscoped (global role matrix only).
+ */
+export interface ScheduledActionPermissionScope {
+  readonly action: PermissionAction;
+  readonly resourceType?: ResourceType;
+  readonly resourceId?: string;
+  readonly resourceNodeId?: number | null;
 }
 
 /**
@@ -26,15 +43,15 @@ export interface BackendScheduledActionDefinition {
  * in `routes/scheduledTasks.ts` ("Must be restart, snapshot, prune, ...").
  */
 export const BACKEND_SCHEDULED_ACTIONS = [
-  { id: 'restart', targetTypes: ['stack', 'container'], requiresNode: true },
-  { id: 'snapshot', targetTypes: ['fleet'], requiresNode: false },
-  { id: 'prune', targetTypes: ['system'], requiresNode: true, nodeScope: 'local' },
-  { id: 'update', targetTypes: ['stack', 'fleet'], requiresNode: true },
-  { id: 'scan', targetTypes: ['system'], requiresNode: true, nodeScope: 'local' },
-  { id: 'auto_backup', targetTypes: ['stack'], requiresNode: true },
-  { id: 'auto_stop', targetTypes: ['stack', 'container'], requiresNode: true },
-  { id: 'auto_down', targetTypes: ['stack'], requiresNode: true },
-  { id: 'auto_start', targetTypes: ['stack', 'container'], requiresNode: true },
+  { id: 'restart',    targetTypes: ['stack', 'container'], requiresNode: true,  permission: 'stack:deploy' as const },
+  { id: 'snapshot',   targetTypes: ['fleet'],              requiresNode: false, permission: 'node:manage' as const },
+  { id: 'prune',      targetTypes: ['system'],             requiresNode: true,  nodeScope: 'local' as const, permission: 'system:settings' as const },
+  { id: 'update',     targetTypes: ['stack', 'fleet'],     requiresNode: true,  permission: 'stack:deploy' as const },
+  { id: 'scan',       targetTypes: ['system'],             requiresNode: true,  nodeScope: 'local' as const, permission: 'node:manage' as const },
+  { id: 'auto_backup',targetTypes: ['stack'],              requiresNode: true,  permission: 'stack:deploy' as const },
+  { id: 'auto_stop',  targetTypes: ['stack', 'container'], requiresNode: true,  permission: 'stack:deploy' as const },
+  { id: 'auto_down',  targetTypes: ['stack'],              requiresNode: true,  permission: 'stack:deploy' as const },
+  { id: 'auto_start', targetTypes: ['stack', 'container'], requiresNode: true,  permission: 'stack:deploy' as const },
 ] as const satisfies readonly BackendScheduledActionDefinition[];
 
 export type BackendScheduledAction = typeof BACKEND_SCHEDULED_ACTIONS[number]['id'];
@@ -82,4 +99,59 @@ export function validateActionTarget(action: BackendScheduledAction, targetType:
 
 export function getScheduledActionDefinition(action: BackendScheduledAction): BackendScheduledActionDefinition | undefined {
   return ACTION_BY_ID.get(action);
+}
+
+/**
+ * Resolve the permission scope for a scheduled action + target combination.
+ * This is the single source of truth consumed by the route layer and the
+ * scheduler revalidation path. Scope resolution is per-action, not per
+ * target-type bucket.
+ */
+export function resolveTaskPermissionScope(
+  action: BackendScheduledAction,
+  targetType: TargetType,
+  targetId: string | null,
+  nodeId: number | null,
+  _selectorType?: string | null,
+): ScheduledActionPermissionScope {
+  const def = ACTION_BY_ID.get(action);
+  const basePermission = def?.permission ?? 'stack:deploy';
+
+  switch (action) {
+    case 'restart':
+    case 'auto_stop':
+    case 'auto_start': {
+      if (targetType === 'container') {
+        return { action: 'node:manage', resourceType: 'node', resourceId: nodeId != null ? String(nodeId) : undefined, resourceNodeId: nodeId };
+      }
+      return { action: basePermission, resourceType: 'stack', resourceId: targetId ?? undefined, resourceNodeId: nodeId };
+    }
+    case 'auto_down':
+    case 'auto_backup':
+      return { action: basePermission, resourceType: 'stack', resourceId: targetId ?? undefined, resourceNodeId: nodeId };
+
+    case 'update': {
+      if (targetType === 'stack') {
+        return { action: basePermission, resourceType: 'stack', resourceId: targetId ?? undefined, resourceNodeId: nodeId };
+      }
+      if (nodeId != null) {
+        return { action: 'node:manage', resourceType: 'node', resourceId: String(nodeId), resourceNodeId: nodeId };
+      }
+      return { action: 'node:manage' };
+    }
+
+    case 'scan':
+      return { action: basePermission, resourceType: 'node', resourceId: nodeId != null ? String(nodeId) : undefined, resourceNodeId: nodeId };
+
+    case 'prune':
+      return { action: basePermission };
+
+    case 'snapshot':
+      return { action: basePermission };
+
+    default: {
+      const exhaustive: never = action;
+      return { action: exhaustive as never };
+    }
+  }
 }

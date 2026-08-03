@@ -37,6 +37,7 @@ function props(overrides: Partial<React.ComponentProps<typeof OverviewTab>> = {}
     onNavigateToNode: vi.fn(),
     onOpenNodeNetworking: vi.fn(),
     networkingByNode: new Map(),
+    onOpenNodeDetails: vi.fn(),
     updatingNodeId: null,
     topologyMode: 'hub' as const,
     onTopologyModeChange: vi.fn(),

@@ -20,6 +20,7 @@ interface Props {
     onTestUpstream: (alias: string) => Promise<void>;
     onChanged: () => void;
     canManage: boolean;
+    canManageMembership?: boolean;
 }
 
 const REVERSE_BRIDGE: Record<MeshNodeStatus['reverseCallbackStatus'], RoutingNodeCardMeta['reverseBridge']> = {
@@ -60,7 +61,7 @@ function buildFooterContext(
 }
 
 export function RoutingNodeCard({
-    status, aliases, onAddStack, onShowDiagnostics, onShowAlias, onTestUpstream, onChanged, canManage,
+    status, aliases, onAddStack, onShowDiagnostics, onShowAlias, onTestUpstream, onChanged, canManage, canManageMembership = canManage,
 }: Props) {
     const [toggling, setToggling] = useState(false);
     const [testingAlias, setTestingAlias] = useState<string | null>(null);
@@ -200,6 +201,7 @@ export function RoutingNodeCard({
             footerContext={footerContext}
             offlineReason={status.reachableReason}
             canManage={canManage}
+            canManageMembership={canManageMembership}
         />
     );
 }

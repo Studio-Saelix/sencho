@@ -7,6 +7,7 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
+import { canManageNode } from '@/lib/canManageNode';
 import { useDeployFeedbackEnabled } from '@/hooks/use-deploy-feedback-enabled';
 import { useDeployFeedbackStyle, type DeployFeedbackStyle } from '@/hooks/use-deploy-feedback-style';
 import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-enabled';
@@ -31,11 +32,13 @@ interface StacksSectionProps {
     onDirtyChange?: (dirty: boolean) => void;
 }
 
-type GuardrailFields = Pick<PatchableSettings, 'health_gate_enabled' | 'health_gate_window_seconds' | 'env_block_deploy_on_missing_required' | 'auto_create_missing_external_networks'>;
+type GuardrailFields = Pick<PatchableSettings, 'health_gate_enabled' | 'health_gate_window_seconds' | 'recovery_retention_days' | 'recovery_max_generations' | 'env_block_deploy_on_missing_required' | 'auto_create_missing_external_networks'>;
 
 const DEFAULT_GUARDRAILS: GuardrailFields = {
     health_gate_enabled: DEFAULT_SETTINGS.health_gate_enabled,
     health_gate_window_seconds: DEFAULT_SETTINGS.health_gate_window_seconds,
+    recovery_retention_days: DEFAULT_SETTINGS.recovery_retention_days,
+    recovery_max_generations: DEFAULT_SETTINGS.recovery_max_generations,
     env_block_deploy_on_missing_required: DEFAULT_SETTINGS.env_block_deploy_on_missing_required,
     auto_create_missing_external_networks: DEFAULT_SETTINGS.auto_create_missing_external_networks,
 };
@@ -58,8 +61,8 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
 
     // Node-scoped deploy guardrails
     const { activeNode } = useNodes();
-    const { isAdmin } = useAuth();
-    const readOnly = !isAdmin;
+    const { can } = useAuth();
+    const readOnly = !canManageNode(can, activeNode?.id);
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<GuardrailFields>({ ...DEFAULT_GUARDRAILS });
     const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);
     const [isSaving, setIsSaving] = useState(false);
@@ -91,6 +94,8 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
             const safe: GuardrailFields = {
                 health_gate_enabled: (nodeData.health_gate_enabled as '0' | '1') ?? DEFAULT_SETTINGS.health_gate_enabled,
                 health_gate_window_seconds: nodeData.health_gate_window_seconds ?? DEFAULT_SETTINGS.health_gate_window_seconds,
+                recovery_retention_days: nodeData.recovery_retention_days ?? DEFAULT_SETTINGS.recovery_retention_days,
+                recovery_max_generations: nodeData.recovery_max_generations ?? DEFAULT_SETTINGS.recovery_max_generations,
                 env_block_deploy_on_missing_required: (nodeData.env_block_deploy_on_missing_required as '0' | '1') ?? DEFAULT_SETTINGS.env_block_deploy_on_missing_required,
                 auto_create_missing_external_networks: (nodeData.auto_create_missing_external_networks as '0' | '1') ?? DEFAULT_SETTINGS.auto_create_missing_external_networks,
             };
@@ -219,6 +224,30 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
                             />
                         </SettingsField>
                         <SettingsField
+                            label="Superseded rollback retention"
+                            helper="Days an older rollback generation is retained after a newer update supersedes it, before its held image is cleaned up automatically. The current generation stays protected until it is superseded or manually released from Resources → Rollback. Default 7 days."
+                        >
+                            <NumberChip
+                                value={settings.recovery_retention_days || '7'}
+                                onChange={(v) => onGuardrailChange('recovery_retention_days', v)}
+                                suffix="d"
+                                min={1}
+                                max={90}
+                            />
+                        </SettingsField>
+                        <SettingsField
+                            label="Maximum retained rollback generations per stack"
+                            helper="Caps how many rollback generations a stack keeps at once, current generation included (so 1 keeps only the current, 2 keeps the current plus one superseded). The oldest superseded generations beyond the cap are cleaned up early, ahead of the retention window above. 0 = unlimited (retention window only)."
+                        >
+                            <NumberChip
+                                value={settings.recovery_max_generations || '0'}
+                                onChange={(v) => onGuardrailChange('recovery_max_generations', v)}
+                                suffix="generations"
+                                min={0}
+                                max={50}
+                            />
+                        </SettingsField>
+                        <SettingsField
                             label="Block deploy on missing required env vars"
                             helper="When on, a deploy or update is refused before it starts if a required ${VAR:?message} variable is unset or empty, so the stack fails fast with a clear message instead of mid-deploy. Off by default."
                         >
@@ -238,7 +267,7 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
                         </SettingsField>
                     </SettingsSection>
 
-                    <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
+                    <SettingsActions hint={readOnly ? 'Read-only · permission required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
                         {!readOnly && (
                             <SettingsPrimaryButton onClick={saveGuardrails} disabled={isSaving || !hasChanges || !isCurrentNodeLoaded}>
                                 {isSaving ? (

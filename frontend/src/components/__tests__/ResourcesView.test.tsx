@@ -28,7 +28,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 
 const licenseState = { isPaid: true };
 vi.mock('@/context/LicenseContext', () => ({ useLicense: () => licenseState }));
-vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ isAdmin: true }) }));
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ isAdmin: true, can: () => true }) }));
 
 const nodesState: { activeNode: { id: number } | null } = { activeNode: { id: 1 } };
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => nodesState }));
@@ -120,7 +120,10 @@ function samplePrunePlan(overrides: Record<string, unknown> = {}) {
   return {
     scope: 'managed',
     targets: ['images'],
-    items: [{ target: 'images', id: 'img1', name: 'old:v1', sizeBytes: 1000 }],
+    items: [{
+      target: 'images', id: 'img1', name: 'old:v1', sizeBytes: 1000,
+      managed: true, reason: 'Image is not used by any container', image: { references: ['old:v1'] },
+    }],
     reclaimableBytes: 1000,
     fingerprint: 'fp-test',
     createdAt: Date.now(),
@@ -134,8 +137,14 @@ function reclaimPlan() {
     scope: 'all',
     targets: ['volumes', 'containers', 'images'],
     items: [
-      { target: 'volumes', id: 'v1', name: 'v1', sizeBytes: 500 },
-      { target: 'images', id: 'img1', name: 'old:v1', sizeBytes: 1000 },
+      {
+        target: 'volumes', id: 'v1', name: 'v1', sizeBytes: 500,
+        managed: true, reason: 'Volume is not referenced by any container', volume: {},
+      },
+      {
+        target: 'images', id: 'img1', name: 'old:v1', sizeBytes: 1000,
+        managed: true, reason: 'Image is not used by any container', image: { references: ['old:v1'] },
+      },
     ],
     reclaimableBytes: 1500,
     fingerprint: 'fp-reclaim',
@@ -464,5 +473,42 @@ describe('ResourcesView', () => {
     render(<ResourcesView />);
     await screen.findByText('off-img:latest');
     expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument();
+  });
+
+  it('badges a rollback-protected image without changing its managed/unused status', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({
+          images: [{ ...image('nginx:1.25'), managedStatus: 'unused', rollbackProtected: true, rollbackProtectionKind: 'stack' }],
+          volumes: [],
+          networks: [],
+        }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<ResourcesView />);
+    await screen.findByText('nginx:1.25');
+    expect(screen.getByText('Rollback protected')).toBeInTheDocument();
+    expect(screen.getByText('Unused')).toBeInTheDocument();
+  });
+
+  it('shows rollback generations in the Rollback tab, admin-gated release button included', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/rollback/generations') {
+        return Promise.resolve(jsonResponse([
+          { id: 'gen-1', shortId: 'abc123456789', stackName: 'seerr', status: 'active', isCurrent: true, phase: 'immediate_verified', createdAt: Date.now(), artifactExpiresAt: null, releasable: true },
+        ]));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<ResourcesView />);
+    await userEvent.click(await screen.findByRole('tab', { name: /rollback/i }));
+
+    expect(await screen.findByText('seerr')).toBeInTheDocument();
+    expect(screen.getByText('abc123456789')).toBeInTheDocument();
+    expect(screen.getByText('Current')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /release rollback protection/i })).toBeInTheDocument();
   });
 });

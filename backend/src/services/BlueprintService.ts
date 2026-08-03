@@ -657,6 +657,7 @@ export class BlueprintService {
             );
         }
         if (res.status === 200) {
+            DatabaseService.getInstance().deleteRoleAssignmentsByStack(node.id, blueprint.name);
             return { status: 'withdrawn' };
         }
         if (res.status === 409) {

@@ -8,6 +8,23 @@ import { isDebugEnabled } from '../utils/debug';
 import { rejectUpgrade as reject } from './reject';
 
 /**
+ * Scoped JWTs allowed on the generic `/ws` upgrade after the upgrade handler's
+ * earlier gates. Deny-by-default: mfa_pending, pilot_enroll, node_proxy (also
+ * rejected via isProxyToken), and any unknown future scope must not skip the
+ * session admin check.
+ *
+ * - api_token: restricted scopes blocked upstream for /ws
+ * - console_session: path + one-time jti consumed upstream
+ * - pilot_tunnel: machine credential for agent loopback; no further path gate
+ *   (must stay allowed so hub-forwarded /ws still works on pilot agents)
+ */
+const GENERIC_WS_ALLOWED_SCOPES = new Set([
+  'api_token',
+  'console_session',
+  'pilot_tunnel',
+]);
+
+/**
  * Header the deploy/update/down routes carry the per-deploy correlation id on,
  * mirroring the `sessionId` the frontend sends in `{action:'connectTerminal'}`.
  * Must stay in sync with `DEPLOY_SESSION_HEADER` in `frontend/src/lib/api.ts`.
@@ -53,18 +70,24 @@ export function handleGenericWs(
 
   if (isProxyToken) return reject(socket, 403, 'Forbidden');
 
-  // Admin enforcement: container exec requires admin role.
-  // console_session tokens are already admin-gated at creation time and
-  // path/jti-gated in upgradeHandler. API tokens reaching this point have
-  // full-admin scope (read-only / deploy-only are blocked by the upgrade
-  // handler's scope gate).
-  if (!decoded.scope) {
+  // Admin enforcement for unscoped session JWTs: DB user must be admin.
+  // Scoped JWTs are deny-by-default via GENERIC_WS_ALLOWED_SCOPES (each
+  // allowed scope is reduced earlier in the upgrade pipeline, except
+  // pilot_tunnel which is the loopback machine credential itself).
+  if (decoded.scope) {
+    if (!GENERIC_WS_ALLOWED_SCOPES.has(decoded.scope)) {
+      console.warn('[Exec] Rejected scoped token on /ws:', decoded.scope);
+      return reject(socket, 403, 'Forbidden');
+    }
+  } else {
     const execUser = decoded.username ? DatabaseService.getInstance().getUserByUsername(decoded.username) : undefined;
     if (!execUser) {
       console.warn('[Exec] User account not found:', decoded.username);
       return reject(socket, 401, 'Unauthorized');
     }
-    if (decoded.tv !== undefined && execUser.token_version !== decoded.tv) {
+    // Missing `tv` is a pre-migration legacy token at version 1, same default
+    // as `authMiddleware`; a bumped account version must reject it.
+    if (execUser.token_version !== (decoded.tv ?? 1)) {
       console.warn('[Exec] Session invalidated (token version mismatch):', decoded.username);
       return reject(socket, 401, 'Unauthorized');
     }

@@ -8,8 +8,9 @@
  */
 import type { EffectiveModel } from '../preflight/effectiveModel';
 import type { DeclaredCompose } from '../../helpers/composeDependencyParse';
-import type { DependencySnapshot } from '../DockerController';
+import type { DependencyContainer, DependencySnapshot } from '../DockerController';
 import type { NetworkDriftFacts } from './types';
+import { SENCHO_MESH_NETWORK } from '../MeshComposeOverride';
 
 /** Container states that count as "deployed" for drift, matching DriftDetectionService. */
 const RUNNING_STATES = new Set(['running', 'restarting']);
@@ -62,6 +63,11 @@ export interface NormalizedNetworkModel {
   services: { name: string; networkKeys: string[]; networkMode?: string }[];
 }
 
+export type ManagedNetworkAttachmentPredicate = (
+  container: DependencyContainer,
+  networkName: string,
+) => boolean;
+
 /** Rendered model: resource names are already resolved by `docker compose config`. */
 export function fromEffectiveModel(m: EffectiveModel): NormalizedNetworkModel {
   const networks: NormalizedNetworkModel['networks'] = {};
@@ -97,6 +103,7 @@ export function compareStackNetworks(
   declared: NormalizedNetworkModel,
   snapshot: DependencySnapshot,
   stackName: string,
+  isManagedAttachment: ManagedNetworkAttachmentPredicate = () => false,
 ): NetworkDriftFacts {
   const runtimeOnlyAttachments: NetworkDriftFacts['runtimeOnlyAttachments'] = [];
   const foreignNetworkAttachments: NetworkDriftFacts['foreignNetworkAttachments'] = [];
@@ -118,6 +125,7 @@ export function compareStackNetworks(
       const net = networkByName.get(attached.name);
       if (SYSTEM_NETWORK_NAMES.has(attached.name) || net?.isSystem) continue;
       if (declaredRuntimeNames.has(attached.name)) { usedRuntimeNames.add(attached.name); continue; }
+      if (attached.name === SENCHO_MESH_NETWORK && isManagedAttachment(c, attached.name)) continue;
       if (net?.stack === stackName || attached.name.startsWith(`${declared.projectName}_`)) {
         runtimeOnlyAttachments.push({ container: c.name, service: c.service, network: attached.name });
       } else {

@@ -52,7 +52,9 @@ interface SuppressionsPanelProps {
 }
 
 export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
-  const { isAdmin } = useAuth();
+  const { can } = useAuth();
+  const canRead = can('stack:read');
+  const canManage = can('stack:edit');
   const [rows, setRows] = useState<CveSuppression[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -228,16 +230,20 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
         title="CVE suppressions"
         subtitle="Accept known-benign CVEs so they stop triggering alerts. Suppressions apply at read time across the fleet and never modify stored scan data."
         action={
-          isAdmin && !isReplica ? (
+          !isReplica && (canRead || canManage) ? (
             <div className="flex items-center gap-2">
-              <Button size="sm" variant="outline" onClick={handleExportVex}>
-                <Download className="w-4 h-4 mr-1.5" />
-                Export VEX
-              </Button>
-              <Button size="sm" onClick={openCreate}>
-                <Plus className="w-4 h-4 mr-1.5" />
-                Add suppression
-              </Button>
+              {canRead && (
+                <Button size="sm" variant="outline" onClick={handleExportVex}>
+                  <Download className="w-4 h-4 mr-1.5" />
+                  Export VEX
+                </Button>
+              )}
+              {canManage && (
+                <Button size="sm" onClick={openCreate}>
+                  <Plus className="w-4 h-4 mr-1.5" />
+                  Add suppression
+                </Button>
+              )}
             </div>
           ) : undefined
         }
@@ -325,7 +331,7 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
                       by {row.created_by} - expires {formatExpiry(row)}
                     </div>
                   </div>
-                  {isAdmin && !isReplica && row.replicated_from_control === 0 && (
+                  {canManage && !isReplica && row.replicated_from_control === 0 && (
                     <div className="flex items-center gap-1 shrink-0">
                       <TooltipProvider>
                         <Tooltip>

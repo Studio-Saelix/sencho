@@ -152,7 +152,7 @@ Configure threshold-based alerts per stack and route notifications to Discord, S
 
 ### Audit log
 
-Track mutating actions across your Sencho instance with a searchable trail: who deployed, stopped, deleted, or changed settings, with timestamps, user attribution, and node context. Community keeps a rolling 14-day recent-activity audit API window. The Audit navigation view, plus CSV/JSON export, anomaly detection, and configurable retention, is Admiral governance. [Learn more →](/features/audit-log)
+Track mutating actions across your Sencho instance with a searchable trail: who deployed, stopped, deleted, or changed settings, with timestamps, user attribution, and node context. Users with `system:audit` can open Audit from navigation. Community shows a rolling 14-day window; Admiral adds the 24h signal rail, export, anomaly detection, and configurable retention. [Learn more →](/features/audit-log)
 
 ## Fleet management
 
@@ -194,7 +194,7 @@ When several Sencho instances run as a fleet, the control instance is the source
 
 ### Fleet Secrets
 
-Centralized, encrypted, versioned env-var bundles you push to labeled nodes' stacks. Every save bumps a version, and every push records a per-node diff in the audit log using overlay merge semantics. Limited-availability surface when present; admin role required to manage. [Learn more →](/features/fleet-secrets)
+Centralized, encrypted, versioned env-var bundles you push to labeled nodes' stacks. Every save bumps a version, and every push records a per-node diff in the audit log using overlay merge semantics. Available on every installation; admin role required to manage. [Learn more →](/features/fleet-secrets)
 
 ### Fleet-wide backups
 

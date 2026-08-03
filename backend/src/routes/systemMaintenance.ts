@@ -9,9 +9,13 @@ import DockerController, {
 import { isPruneTarget } from '../services/prunePlan';
 import { FileSystemService } from '../services/FileSystemService';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
+import { StackUpdateRecoveryService, shortGenerationId } from '../services/StackUpdateRecoveryService';
+import { buildUnifiedHeldImagePredicate } from '../services/recoveryHeldImages';
+import { DatabaseService } from '../services/DatabaseService';
 import SelfIdentityService from '../services/SelfIdentityService';
 import { requireAdmin } from '../middleware/tierGates';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import { activeBulkActions } from '../helpers/bulkActionLocks';
 import { isValidDockerResourceId, isValidCidr, isValidIPv4 } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
@@ -58,6 +62,7 @@ function rejectIfSelf(kind: 'image' | 'volume' | 'network', id: string, res: Res
 }
 
 systemMaintenanceRouter.get('/orphans', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     const dockerController = DockerController.getInstance(req.nodeId);
@@ -155,6 +160,7 @@ systemMaintenanceRouter.post('/prune/plan', async (req: Request, res: Response) 
 
 systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response) => {
   if (!requireAdmin(req, res)) return;
+  let pruneLockHeld = false;
   try {
     const body = req.body as {
       target?: unknown;
@@ -200,8 +206,17 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
       return;
     }
 
-    // Resources path: fingerprint-bound execute. Fleet still calls without a
-    // fingerprint and keeps the legacy pruneManagedOnly / pruneSystem path.
+    const pruneLockKey = `bulk-prune:${req.nodeId}`;
+    if (activeBulkActions.has(pruneLockKey)) {
+      return res.status(409).json({
+        error: 'A prune is already running on this node',
+        code: 'PRUNE_ALREADY_RUNNING',
+      });
+    }
+    activeBulkActions.add(pruneLockKey);
+    pruneLockHeld = true;
+
+    // Fingerprint-bound execute used by Resources and Fleet.
     if (planFingerprint) {
       const built = await withTimeout(
         dockerController.buildPrunePlan(targets, pruneScope, knownStacks, req.nodeId, isImageHeld),
@@ -231,7 +246,7 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
           success: result.success,
         });
       }
-      if (built.targets.includes('containers')) {
+      if (result.outcomes.some((outcome) => outcome.status === 'removed')) {
         invalidateNodeCaches(req.nodeId);
       }
       res.json({
@@ -250,7 +265,7 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
       });
     }
     const target = targets[0];
-    console.log(`[Resources] System prune: ${target} (scope: ${pruneScope})`);
+    console.log(`[Resources] System prune: ${sanitizeForLog(target)} (scope: ${pruneScope})`);
     const pruneStartedAt = Date.now();
     let result: { success: boolean; reclaimedBytes: number };
     if (pruneScope === 'managed' && target !== 'containers') {
@@ -268,7 +283,7 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
       result = await dockerController.pruneSystem(target, undefined, isImageHeld);
     }
 
-    console.log(`[Resources] System prune completed: ${target}, reclaimed ${result.reclaimedBytes} bytes`);
+    console.log(`[Resources] System prune completed: ${sanitizeForLog(target)}, reclaimed ${result.reclaimedBytes} bytes`);
     if (isDebugEnabled()) {
       console.debug('[Resources:debug] System prune', {
         target, scope: pruneScope, ms: Date.now() - pruneStartedAt, reclaimedBytes: result.reclaimedBytes,
@@ -288,6 +303,8 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
     }
     console.error('System prune error:', error);
     res.status(500).json({ error: 'System prune failed' });
+  } finally {
+    if (pruneLockHeld) activeBulkActions.delete(`bulk-prune:${req.nodeId}`);
   }
 });
 
@@ -337,6 +354,7 @@ systemMaintenanceRouter.post('/prune/estimate', async (req: Request, res: Respon
 });
 
 systemMaintenanceRouter.get('/docker-df', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     const df = await DockerController.getInstance(req.nodeId).getDiskUsageClassified(knownStacks);
@@ -361,6 +379,7 @@ systemMaintenanceRouter.get('/container-labels', async (req: Request, res: Respo
 });
 
 systemMaintenanceRouter.get('/resources', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     const result = await DockerController.getInstance(req.nodeId).getClassifiedResources(knownStacks);
@@ -372,6 +391,7 @@ systemMaintenanceRouter.get('/resources', async (req: Request, res: Response) =>
 });
 
 systemMaintenanceRouter.get('/images', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     const { images } = await DockerController.getInstance(req.nodeId).getClassifiedResources(knownStacks);
@@ -383,6 +403,7 @@ systemMaintenanceRouter.get('/images', async (req: Request, res: Response) => {
 });
 
 systemMaintenanceRouter.get('/volumes', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     const { volumes } = await DockerController.getInstance(req.nodeId).getClassifiedResources(knownStacks);
@@ -394,6 +415,7 @@ systemMaintenanceRouter.get('/volumes', async (req: Request, res: Response) => {
 });
 
 systemMaintenanceRouter.get('/networks', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     const { networks } = await DockerController.getInstance(req.nodeId).getClassifiedResources(knownStacks);
@@ -405,6 +427,7 @@ systemMaintenanceRouter.get('/networks', async (req: Request, res: Response) => 
 });
 
 systemMaintenanceRouter.get('/images/:id', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const rawId = req.params.id as string;
     if (!rawId) return res.status(400).json({ error: 'Invalid image ID format' });
@@ -439,14 +462,101 @@ systemMaintenanceRouter.post('/images/delete', async (req: Request, res: Respons
       return res.status(400).json({ error: 'Invalid image ID format' });
     }
     if (rejectIfSelf('image', id, res)) return;
-    console.log(`[Resources] Delete image: ${hexId.substring(0, 12)}`);
     const dockerController = DockerController.getInstance(req.nodeId);
-    await dockerController.removeImage(id);
+    // Resolve to the canonical full image ID before the held-image check: the
+    // submitted id can be a short/truncated form (isValidDockerResourceId
+    // accepts 12-64 hex chars), which a full-64-char held-set lookup would miss.
+    const canonicalId = await dockerController.resolveImageId(id);
+    if (!canonicalId) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+    const isImageHeld = buildUnifiedHeldImagePredicate(req.nodeId);
+    if (isImageHeld(canonicalId)) {
+      return res.status(409).json({
+        error: 'Image is held for a pending update rollback and cannot be deleted manually. It is removed automatically once the rollback window expires, or can be released from Resources → Rollback.',
+        code: 'IMAGE_HELD_FOR_ROLLBACK',
+      });
+    }
+    console.log(`[Resources] Delete image: ${hexId.substring(0, 12)}`);
+    await dockerController.removeImage(canonicalId);
     invalidateNodeCaches(req.nodeId);
     res.json({ success: true, message: 'Image deleted' });
   } catch (error: unknown) {
     console.error('Failed to delete image:', error);
     res.status(500).json({ error: 'Failed to delete image' });
+  }
+});
+
+// Full-stack rollback generations (the sencho-rb/<id>/<service>:hold images).
+// Global read under stack:read, matching the rest of the Docker resource
+// inventory on this page (/system/resources, /system/images); release is
+// requireAdmin, matching every other host-destructive Docker action here.
+systemMaintenanceRouter.get('/rollback/generations', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
+  try {
+    const service = StackUpdateRecoveryService.getInstance();
+    const rows = DatabaseService.getInstance()
+      .listStackUpdateRecoveryGenerationsForNode(req.nodeId)
+      .filter((row) => row.artifacts_retired === 0
+        && (row.status === 'active' || row.status === 'restored_current'
+          || row.status === 'superseded' || row.status === 'recovery_required'));
+    res.json(rows.map((row) => ({
+      id: row.id,
+      shortId: shortGenerationId(row.id),
+      stackName: row.stack_name,
+      status: row.status,
+      isCurrent: row.is_current === 1,
+      phase: row.phase,
+      createdAt: row.created_at,
+      artifactExpiresAt: row.artifact_expires_at,
+      releasable: service.isReleaseEligible(row),
+    })));
+  } catch (error) {
+    console.error('Failed to fetch rollback generations:', error);
+    res.status(500).json({ error: 'Failed to fetch rollback generations' });
+  }
+});
+
+systemMaintenanceRouter.post('/rollback/generations/:id/release', async (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const id = req.params.id as string;
+    const service = StackUpdateRecoveryService.getInstance();
+    const row = service.get(id);
+    if (!row || row.node_id !== req.nodeId) {
+      return res.status(404).json({ error: 'Rollback generation not found' });
+    }
+    const result = await service.releaseGeneration(id, req.user?.username ?? null);
+    if (!result.ok) {
+      switch (result.reason) {
+        case 'not_found':
+          return res.status(404).json({ error: 'Rollback generation not found' });
+        case 'already_released':
+          return res.status(409).json({
+            error: 'Rollback protection was already released for this generation.',
+            code: 'ALREADY_RELEASED',
+          });
+        case 'not_eligible':
+          return res.status(409).json({
+            error: 'This rollback generation cannot be released right now (it may be observing a health gate, mid-recovery, or already in progress).',
+            code: 'NOT_ELIGIBLE',
+          });
+        default: {
+          const _exhaustive: never = result.reason;
+          throw new Error(`Unhandled release reason: ${_exhaustive}`);
+        }
+      }
+    }
+    console.log(`[Resources] Released rollback generation ${sanitizeForLog(shortGenerationId(id))} for ${sanitizeForLog(result.row.stack_name)}`);
+    invalidateNodeCaches(req.nodeId);
+    res.json({
+      success: true,
+      message: result.artifactsCleaned ? 'Rollback protection released' : 'Rollback protection released; cleanup will finish shortly',
+      artifactsCleaned: result.artifactsCleaned,
+    });
+  } catch (error) {
+    console.error('Failed to release rollback generation:', error);
+    res.status(500).json({ error: 'Failed to release rollback generation' });
   }
 });
 
@@ -503,6 +613,7 @@ systemMaintenanceRouter.post('/networks/delete', async (req: Request, res: Respo
 });
 
 systemMaintenanceRouter.get('/networks/topology', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const includeSystem = req.query.includeSystem === 'true';
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
@@ -518,6 +629,7 @@ systemMaintenanceRouter.get('/networks/topology', async (req: Request, res: Resp
 });
 
 systemMaintenanceRouter.get('/networks/:id', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const id = req.params.id as string;
     if (!id) return res.status(400).json({ error: 'Network ID is required' });

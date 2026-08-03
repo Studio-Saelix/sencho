@@ -321,23 +321,68 @@ describe('WebSocket upgrade - exec auth enforcement', () => {
     expect(code).toBe(401);
   });
 
-  it('rejects WebSocket upgrade with non-admin token (403)', async () => {
-    // Add a non-admin user
+  // All five built-in roles: container exec requires admin. Every non-admin
+  // role must be rejected at upgrade time by generic.ts's role === 'admin' gate.
+  const NON_ADMIN_EXEC_ROLES = ['viewer', 'deployer', 'node-admin', 'auditor'] as const;
+
+  for (const role of NON_ADMIN_EXEC_ROLES) {
+    it(`rejects /ws upgrade with ${role} token (403)`, async () => {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      const bcrypt = await import('bcrypt');
+      const username = `exec_${role.replace('-', '_')}`;
+      const hash = bcrypt.hashSync('password123', 1);
+      try {
+        DatabaseService.getInstance().addUser({ username, password_hash: hash, role });
+      } catch {
+        // User may already exist from a prior run in the same worker
+      }
+
+      const token = jwt.sign(
+        { username, role },
+        TEST_JWT_SECRET,
+        { expiresIn: '1m' },
+      );
+      const ws = new WebSocket(getWsUrl(), { headers: { Cookie: `sencho_token=${token}` } });
+      const code = await new Promise<number>((resolve) => {
+        ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
+        ws.on('error', () => resolve(0));
+      });
+      expect(code).toBe(403);
+    });
+  }
+
+  it('rejects legacy no-tv admin JWT after token_version bump (401)', async () => {
+    // A legacy token without a tv claim is treated as version 1; once the
+    // account version is bumped it must be rejected on /ws like on HTTP.
     const { DatabaseService } = await import('../services/DatabaseService');
     const bcrypt = await import('bcrypt');
-    const hash = await bcrypt.hash('viewerpass', 1);
-    try {
-      DatabaseService.getInstance().addUser({ username: 'viewer', password_hash: hash, role: 'viewer' });
-    } catch {
-      // User may already exist
-    }
+    const db = DatabaseService.getInstance();
+    const username = `legacy-tv-admin-${Date.now()}`;
+    const id = db.addUser({
+      username,
+      password_hash: await bcrypt.hash('password123', 1),
+      role: 'admin',
+    });
+    db.bumpTokenVersion(id);
 
-    const token = jwt.sign(
-      { username: 'viewer', role: 'viewer' },
+    const legacyNoTv = jwt.sign(
+      { username, role: 'admin' },
       TEST_JWT_SECRET,
       { expiresIn: '1m' },
     );
-    const ws = new WebSocket(getWsUrl(), { headers: { Cookie: `sencho_token=${token}` } });
+    const ws = new WebSocket(getWsUrl(), { headers: { Cookie: `sencho_token=${legacyNoTv}` } });
+    const code = await new Promise<number>((resolve) => {
+      ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
+      // A regression (upgrade accepted) must fail fast with 200, not hang.
+      ws.on('open', () => { ws.close(); resolve(200); });
+      ws.on('error', () => resolve(0));
+    });
+    expect(code).toBe(401);
+  });
+
+  it('rejects WebSocket upgrade with node_proxy token (403)', async () => {
+    const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const ws = new WebSocket(getWsUrl(), { headers: { Authorization: `Bearer ${token}` } });
     const code = await new Promise<number>((resolve) => {
       ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
       ws.on('error', () => resolve(0));
@@ -345,8 +390,81 @@ describe('WebSocket upgrade - exec auth enforcement', () => {
     expect(code).toBe(403);
   });
 
-  it('rejects WebSocket upgrade with node_proxy token (403)', async () => {
-    const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+  it('rejects WebSocket upgrade with mfa_pending token (403)', async () => {
+    // Partial-auth must not open /ws (upgrade early-reject + generic deny-by-default).
+    // Pre-fix: any set scope skipped the admin check and unlocked execContainer.
+    const token = jwt.sign(
+      { scope: 'mfa_pending', user_id: 1, username: 'viewer' },
+      TEST_JWT_SECRET,
+      { expiresIn: '5m' },
+    );
+    const ws = new WebSocket(getWsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+    const code = await new Promise<number>((resolve) => {
+      ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
+      ws.on('error', () => resolve(0));
+    });
+    expect(code).toBe(403);
+  });
+
+  it('rejects WebSocket upgrade with pilot_enroll token (403)', async () => {
+    const token = jwt.sign(
+      { scope: 'pilot_enroll', nodeId: 1, enrollNonce: 'test-nonce' },
+      TEST_JWT_SECRET,
+      { expiresIn: '15m' },
+    );
+    const ws = new WebSocket(getWsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+    const code = await new Promise<number>((resolve) => {
+      ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
+      ws.on('error', () => resolve(0));
+    });
+    expect(code).toBe(403);
+  });
+
+  it('rejects WebSocket upgrade with an unknown scoped JWT (403)', async () => {
+    const token = jwt.sign({ scope: 'future_machine_scope' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const ws = new WebSocket(getWsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+    const code = await new Promise<number>((resolve) => {
+      ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
+      ws.on('error', () => resolve(0));
+    });
+    expect(code).toBe(403);
+  });
+
+  it('accepts WebSocket upgrade with pilot_tunnel token (pilot loopback)', async () => {
+    // Agent loopback injects pilot_tunnel on every forwarded WS, including /ws.
+    const token = jwt.sign({ scope: 'pilot_tunnel', nodeId: 1 }, TEST_JWT_SECRET, { expiresIn: '1h' });
+    const ws = new WebSocket(getWsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+    const connected = await new Promise<boolean>((resolve) => {
+      ws.on('open', () => {
+        ws.close();
+        resolve(true);
+      });
+      ws.on('error', () => resolve(false));
+      ws.on('unexpected-response', () => resolve(false));
+    });
+    expect(connected).toBe(true);
+  });
+
+  it('accepts WebSocket upgrade with container-exec console_session (remote exec)', async () => {
+    const { mintConsoleSession } = await import('../helpers/consoleSession');
+    const token = mintConsoleSession({ path: 'container-exec' });
+    const ws = new WebSocket(getWsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+    const connected = await new Promise<boolean>((resolve) => {
+      ws.on('open', () => {
+        ws.close();
+        resolve(true);
+      });
+      ws.on('error', () => resolve(false));
+      ws.on('unexpected-response', () => resolve(false));
+    });
+    expect(connected).toBe(true);
+  });
+
+  it('rejects host-console console_session on /ws (path gate before allowlist)', async () => {
+    // Path mismatch is enforced in upgradeHandler (consoleSessionPathForPathname)
+    // before the generic allowlist; allowlist must not be the sole path gate.
+    const { mintConsoleSession } = await import('../helpers/consoleSession');
+    const token = mintConsoleSession({ path: 'host-console' });
     const ws = new WebSocket(getWsUrl(), { headers: { Authorization: `Bearer ${token}` } });
     const code = await new Promise<number>((resolve) => {
       ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));

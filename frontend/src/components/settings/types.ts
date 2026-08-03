@@ -19,6 +19,8 @@ export interface PatchableSettings {
     snapshot_documentation?: '0' | '1';
     health_gate_enabled?: '0' | '1';
     health_gate_window_seconds?: string;
+    recovery_retention_days?: string;
+    recovery_max_generations?: string;
     env_block_deploy_on_missing_required?: '0' | '1';
     auto_create_missing_external_networks?: '0' | '1';
     image_update_sidebar_indicators?: '0' | '1';
@@ -47,6 +49,8 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     snapshot_documentation: '0',
     health_gate_enabled: '1',
     health_gate_window_seconds: '90',
+    recovery_retention_days: '7',
+    recovery_max_generations: '0',
     env_block_deploy_on_missing_required: '0',
     auto_create_missing_external_networks: '0',
     image_update_sidebar_indicators: '1',

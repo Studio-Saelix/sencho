@@ -8,6 +8,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { FleetMasthead } from './fleet/FleetMasthead';
 import { ReconnectingOverlay } from './FleetView/ReconnectingOverlay';
 import { NodeUpdatesSheet } from './FleetView/NodeUpdatesSheet';
+import { NodeDetailsSheet } from './FleetView/NodeDetailsSheet';
 import { LocalUpdateConfirmDialog } from './FleetView/LocalUpdateConfirmDialog';
 import { OverviewTab } from './FleetView/OverviewTab';
 import { useFleetPreferences } from './FleetView/hooks/useFleetPreferences';
@@ -63,13 +64,14 @@ export function FleetView({
     onFleetActiveTabChange,
 }: FleetViewProps) {
     const { isPaid, licenseStatus } = useLicense();
-    const { isAdmin } = useAuth();
-    const { hasCapability } = useNodes();
+    const { isAdmin, can } = useAuth();
+    const canManageFleet = can('node:manage');
+    const canExportDossier = can('node:read') && can('stack:read');
+    const { hasCapability, nodes: registryNodes } = useNodes();
     const { experimental, experimentalReady } = useExperimental();
     const containerLabelsEnabled = hasCapability('container-label-inventory');
     // Visual fail-closed while /meta loads; paid/admin gates still apply when on.
     const canDiscoverRouting = experimentalReady && experimental && isPaid;
-    const canDiscoverSecrets = experimentalReady && experimental && isPaid && isAdmin;
 
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
@@ -92,6 +94,7 @@ export function FleetView({
     });
 
     const [initialUpdatesTab, setInitialUpdatesTab] = useState<'nodes' | 'changelog'>('nodes');
+    const [detailsNodeId, setDetailsNodeId] = useState<number | null>(null);
 
     const [internalTab, setInternalTab] = useState<FleetTab>('overview');
     const activeTab = controlledTab ?? internalTab;
@@ -100,9 +103,9 @@ export function FleetView({
         if (controlledTab === undefined) setInternalTab(tab);
     };
 
-    // Fall back only after experimental readiness settles. When experimental is
-    // on, also wait for license (and admin for secrets) so a paid deep link is
-    // not rewritten to Overview while isPaid is still the cold-load false.
+    // Fall back Routing deep links when experimental/license gates resolve false.
+    // Wait for license during cold load so a paid deep link is not rewritten to
+    // Overview while isPaid is still the cold-load false.
     useEffect(() => {
         if (!experimentalReady) return;
         if (activeTab === 'routing') {
@@ -112,19 +115,10 @@ export function FleetView({
             }
             if (licenseStatus !== 'ready') return;
             if (!isPaid) setActiveTab('overview');
-            return;
-        }
-        if (activeTab === 'secrets') {
-            if (!experimental) {
-                setActiveTab('overview');
-                return;
-            }
-            if (licenseStatus !== 'ready') return;
-            if (!isPaid || !isAdmin) setActiveTab('overview');
         }
     // setActiveTab closes over onFleetActiveTabChange; listing deps explicitly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [experimentalReady, experimental, licenseStatus, isPaid, isAdmin, activeTab]);
+    }, [experimentalReady, experimental, licenseStatus, isPaid, activeTab]);
 
     useEffect(() => {
         if (fleetUpdatesIntent) {
@@ -213,7 +207,7 @@ export function FleetView({
                                     <Wrench className="w-4 h-4 mr-1.5" />Actions
                                 </TabsTrigger>
                             </TabsHighlightItem>
-                            {canDiscoverSecrets && (
+                            {isAdmin && (
                                 <TabsHighlightItem value="secrets">
                                     <TabsTrigger value="secrets">
                                         <KeyRound className="w-4 h-4 mr-1.5" />Secrets
@@ -240,7 +234,7 @@ export function FleetView({
                                 <TooltipContent>Refresh</TooltipContent>
                             </Tooltip>
                         </TooltipProvider>
-                        {isAdmin && (
+                        {canExportDossier && (
                             <TooltipProvider>
                                 <Tooltip>
                                     <TooltipTrigger asChild>
@@ -289,9 +283,10 @@ export function FleetView({
                         onRetryUpdate={updateStatus.retryNodeUpdate}
                         onDismissUpdate={updateStatus.dismissNodeUpdate}
                         onCordonChange={() => { void overview.fetchOverview(true); }}
-                        onEditNode={isAdmin ? openEdit : undefined}
-                        onDeleteNode={isAdmin ? openDelete : undefined}
+                        onEditNode={openEdit}
+                        onDeleteNode={openDelete}
                         onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
+                        onOpenNodeDetails={setDetailsNodeId}
                         onAddNode={isAdmin && onOpenSettingsSection ? () => onOpenSettingsSection('nodes') : undefined}
                         onCheckUpdates={updateStatus.checkUpdates}
                         checkingUpdates={updateStatus.checkingUpdates}
@@ -324,19 +319,25 @@ export function FleetView({
                 {canDiscoverRouting && (
                     <TabsContent value="routing">
                         <PaidGate>
-                            <RoutingTab canManage={isAdmin} />
+                            <RoutingTab
+                                canManageNode={(nodeId) => can('node:manage', 'node', String(nodeId))}
+                                canManageMembership={isAdmin}
+                            />
                         </PaidGate>
                     </TabsContent>
                 )}
                 <TabsContent value="federation">
-                    <FederationTab canManage={isAdmin} />
+                    <FederationTab
+                        canManage={canManageFleet}
+                        canManageNode={(nodeId) => can('node:manage', 'node', String(nodeId))}
+                    />
                 </TabsContent>
                 <TabsContent value="actions">
                     {/* Fleet Actions runs against the whole fleet, so it takes the
                         unfiltered node list rather than the overview-filtered view. */}
                     <FleetActionsTab nodes={overview.nodes} />
                 </TabsContent>
-                {canDiscoverSecrets && (
+                {isAdmin && (
                     <TabsContent value="secrets">
                         <SecretsTab />
                     </TabsContent>
@@ -364,6 +365,18 @@ export function FleetView({
                 retryNodeUpdate={updateStatus.retryNodeUpdate}
                 dismissNodeUpdate={updateStatus.dismissNodeUpdate}
                 triggerUpdateAll={updateStatus.triggerUpdateAll}
+            />
+
+            <NodeDetailsSheet
+                open={detailsNodeId !== null}
+                onOpenChange={(open) => { if (!open) setDetailsNodeId(null); }}
+                node={detailsNodeId !== null ? (overview.allNodes.find(n => n.id === detailsNodeId) ?? null) : null}
+                registryNode={detailsNodeId !== null ? (registryNodes.find(n => n.id === detailsNodeId) ?? null) : null}
+                updateStatus={detailsNodeId !== null ? overview.updateStatusMap.get(detailsNodeId) : undefined}
+                networkingSignal={detailsNodeId !== null ? overview.networkingByNode.get(detailsNodeId) : undefined}
+                canManageNode={detailsNodeId !== null && can('node:manage', 'node', String(detailsNodeId))}
+                onOpenNetworking={onOpenNodeNetworking}
+                onEdit={openEdit}
             />
 
             <LocalUpdateConfirmDialog

@@ -10,6 +10,7 @@ import { FileSystemService } from '../FileSystemService';
 import { DatabaseService } from '../DatabaseService';
 import { parseComposeDependencies } from '../../helpers/composeDependencyParse';
 import { assembleStackDrift } from '../DriftDetectionService';
+import { resolveManagedMeshAttachment } from './managedMeshAttachment';
 import { isHostNetwork, isLoopback } from './normalize';
 import { getErrorMessage } from '../../utils/errors';
 import { sanitizeForLog } from '../../utils/safeLog';
@@ -86,7 +87,14 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
     if (snapshot) {
       // declared.parseError is already excluded above, so the drift report is authoritative.
       const containers = snapshot.containers.filter(c => c.stack === stack);
-      const report = assembleStackDrift({ stack, declared, containers, networks: snapshot.networks });
+      const managedNetworkAttachment = await resolveManagedMeshAttachment(nodeId, stack);
+      const report = assembleStackDrift({
+        stack,
+        declared,
+        containers,
+        networks: snapshot.networks,
+        managedNetworkAttachment,
+      });
       if (report.findings.some(f => f.kind === 'network-undeclared' || f.kind === 'network-missing')) networkDrift.push(stack);
     }
   }

@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo, useRef } from 'react';
 import { apiFetch } from '@/lib/api';
 import { useFleetLabels, labelPaletteKey } from './useFleetLabels';
 import { useNodeLabels } from './useNodeLabels';
-import { isCritical, getNodeCpu, getNodeMem, getNodeDisk } from '../nodeUtils';
+import { isCritical, getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk } from '../nodeUtils';
 import type { FleetNode, ViewMode, FleetPreferences, NodeUpdateStatus } from '../types';
 
 interface MastheadStats {
@@ -96,8 +96,8 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
         const worstCpu = worstCpuNode
             ? { name: worstCpuNode.name, percent: getNodeCpu(worstCpuNode) }
             : null;
-        const totalMemUsed = onlineNodes.reduce((sum, n) => sum + (n.systemStats?.memory.used ?? 0), 0);
-        const totalMemTotal = onlineNodes.reduce((sum, n) => sum + (n.systemStats?.memory.total ?? 0), 0);
+        const totalMemUsed = onlineNodes.reduce((sum, n) => sum + getNodeMemUsed(n), 0);
+        const totalMemTotal = onlineNodes.reduce((sum, n) => sum + getNodeMemTotal(n), 0);
         return {
             nodeCount: nodes.length,
             onlineCount,

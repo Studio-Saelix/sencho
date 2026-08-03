@@ -105,6 +105,168 @@ describe('normalizePruneTargets', () => {
 });
 
 describe('DockerController.buildPrunePlan', () => {
+  it('projects target metadata and only safe ownership labels in all scope', async () => {
+    mockDocker.listImages.mockResolvedValue([{
+      Id: 'sha256:dangling',
+      RepoTags: ['<none>:<none>'],
+      RepoDigests: ['example/app@sha256:digest'],
+      Created: 1_700_000_000,
+      Size: 100,
+      Containers: 0,
+      Labels: { 'com.docker.compose.project': 'my-stack', secret: 'do-not-return' },
+    }]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [{
+      Name: 'my-stack_data',
+      Driver: 'local',
+      Labels: { 'com.docker.compose.project': 'my-stack', secret: 'do-not-return' },
+    }] });
+    mockDocker.listNetworks.mockResolvedValue([{
+      Id: 'network-id',
+      Name: 'my-stack_default',
+      Driver: 'bridge',
+      Scope: 'local',
+      Labels: {
+        'com.docker.compose.project': 'my-stack',
+        'com.docker.compose.network': 'default',
+        secret: 'do-not-return',
+      },
+    }]);
+    mockDocker.getNetwork.mockReturnValue({ inspect: vi.fn().mockResolvedValue({ Containers: {} }) });
+    mockDocker.df.mockResolvedValue({
+      Volumes: [{ Name: 'my-stack_data', UsageData: { RefCount: 0, Size: 42 } }],
+      Images: [{ Id: 'sha256:dangling', SharedSize: 10 }],
+      LayersSize: 0,
+    });
+
+    const plan = await DockerController.getInstance(1).buildPrunePlan(
+      ['images', 'volumes', 'networks'], 'all', ['my-stack'], 1,
+    );
+
+    expect(plan.items.find((entry) => entry.target === 'images')).toMatchObject({
+      name: '<none>:<none>',
+      managed: true,
+      stackName: 'my-stack',
+      image: {
+        references: [],
+        digest: 'example/app@sha256:digest',
+        createdAt: 1_700_000_000,
+      },
+    });
+    expect(plan.items.find((entry) => entry.target === 'volumes')).toMatchObject({
+      managed: true,
+      stackName: 'my-stack',
+      volume: {
+        driver: 'local',
+        ownershipLabels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    });
+    expect(plan.items.find((entry) => entry.target === 'networks')).toMatchObject({
+      managed: true,
+      stackName: 'my-stack',
+      network: {
+        driver: 'bridge',
+        scope: 'local',
+        ownershipLabels: {
+          'com.docker.compose.project': 'my-stack',
+          'com.docker.compose.network': 'default',
+        },
+      },
+    });
+    expect(JSON.stringify(plan.items)).not.toContain('do-not-return');
+    expect(plan.reclaimableBytes).toBe(
+      plan.items.reduce((sum, entry) => sum + (entry.sizeBytes ?? 0), 0),
+    );
+  });
+
+  it('uses Compose path ownership fallbacks for non-container resources', async () => {
+    const ownershipLabels = {
+      'com.docker.compose.project.working_dir': '/app/compose/my-stack',
+      'com.docker.compose.project.config_files': '/app/compose/my-stack/compose.yml',
+    };
+    mockDocker.listImages.mockResolvedValue([{
+      Id: 'sha256:path-owned', RepoTags: ['example/path:latest'], Size: 100, Containers: 0, Labels: ownershipLabels,
+    }]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [{ Name: 'path_data', Labels: ownershipLabels }] });
+    mockDocker.listNetworks.mockResolvedValue([{ Id: 'path-network', Name: 'path_default', Labels: ownershipLabels }]);
+    mockDocker.getNetwork.mockReturnValue({ inspect: vi.fn().mockResolvedValue({ Containers: {} }) });
+    mockDocker.df.mockResolvedValue({
+      Volumes: [{ Name: 'path_data', UsageData: { RefCount: 0, Size: 42 } }],
+      Images: [{ Id: 'sha256:path-owned', SharedSize: 0 }],
+      LayersSize: 0,
+    });
+
+    const plan = await DockerController.getInstance(1).buildPrunePlan(
+      ['images', 'volumes', 'networks'], 'managed', ['my-stack'], 1,
+    );
+
+    expect(plan.items).toHaveLength(3);
+    expect(plan.items.every((entry) => entry.managed && entry.stackName === 'my-stack')).toBe(true);
+  });
+
+  it.each(['__proto__', 'constructor', 'toString', 'prototype'])(
+    'does not attribute inherited project key %s to a managed stack',
+    async (project) => {
+      const labels = { 'com.docker.compose.project': project };
+      mockDocker.listVolumes.mockResolvedValue({ Volumes: [{ Name: `${project}_data`, Labels: labels }] });
+      mockDocker.df.mockResolvedValue({
+        Volumes: [{ Name: `${project}_data`, UsageData: { RefCount: 0, Size: 42 } }],
+        Images: [],
+        LayersSize: 0,
+      });
+
+      const managedPlan = await DockerController.getInstance(1).buildPrunePlan(
+        ['volumes'], 'managed', ['my-stack'], 1,
+      );
+      const allPlan = await DockerController.getInstance(1).buildPrunePlan(
+        ['volumes'], 'all', ['my-stack'], 1,
+      );
+
+      expect(managedPlan.items).toEqual([]);
+      expect(allPlan.items).toEqual([
+        expect.objectContaining({ id: `${project}_data`, managed: false }),
+      ]);
+      expect(allPlan.items[0].stackName).toBeUndefined();
+    },
+  );
+
+  it('does not plan an image referenced by a container when Docker reports Containers as unknown', async () => {
+    mockDocker.listContainers.mockResolvedValue([{ Id: 'container', ImageID: 'sha256:in-use' }]);
+    mockDocker.listImages.mockResolvedValue([{
+      Id: 'sha256:in-use', RepoTags: ['example/in-use:latest'], Size: 100, Containers: -1,
+    }]);
+    mockDocker.df.mockResolvedValue({
+      Volumes: [], Images: [{ Id: 'sha256:in-use', SharedSize: 0 }], LayersSize: 0,
+    });
+
+    const plan = await DockerController.getInstance(1).buildPrunePlan(['images'], 'all', [], 1);
+    expect(plan.items).toEqual([]);
+  });
+
+  it('preserves Compose path ownership fallback during volume and network execution', async () => {
+    const labels = { 'com.docker.compose.project.working_dir': '/app/compose/my-stack' };
+    const volumeRemove = vi.fn().mockResolvedValue(undefined);
+    const networkRemove = vi.fn().mockResolvedValue(undefined);
+    const networkInspect = vi.fn().mockResolvedValue({ Name: 'path_default', Labels: labels, Containers: {} });
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [{ Name: 'path_data', Labels: labels }] });
+    mockDocker.listNetworks.mockResolvedValue([{ Id: 'path-network', Name: 'path_default', Labels: labels }]);
+    mockDocker.df.mockResolvedValue({
+      Volumes: [{ Name: 'path_data', UsageData: { RefCount: 0, Size: 42 } }], Images: [], LayersSize: 0,
+    });
+    mockDocker.getVolume.mockReturnValue({ remove: volumeRemove });
+    mockDocker.getNetwork.mockReturnValue({ inspect: networkInspect, remove: networkRemove });
+
+    const controller = DockerController.getInstance(1);
+    const plan = await controller.buildPrunePlan(['volumes', 'networks'], 'managed', ['my-stack'], 1);
+    const result = await controller.executePrunePlan(plan, ['my-stack']);
+
+    expect(result.outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ target: 'volumes', status: 'removed' }),
+      expect.objectContaining({ target: 'networks', status: 'removed' }),
+    ]));
+    expect(volumeRemove).toHaveBeenCalledWith({ force: false });
+    expect(networkRemove).toHaveBeenCalled();
+  });
+
   it('enumerates managed stopped containers and never calls pruneSystem', async () => {
     mockDocker.listContainers.mockResolvedValue([
       {

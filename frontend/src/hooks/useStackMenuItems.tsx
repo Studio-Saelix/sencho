@@ -20,8 +20,8 @@ import type { MenuGroup, MenuItem, StackMenuCtx } from '@/components/sidebar/sid
 
 export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[] {
   const {
-    stackStatus, isSelfStack, canOpenApp, isBusy, isAdmin, canDelete, canDeploy, canEditLabels, isPinned, labels,
-    openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
+    stackStatus, isSelfStack, canOpenApp, isBusy, canDelete, canDeploy, canEditLabels, isPinned, labels,
+    openAlertSheet, openAutoHeal, canViewMonitor, canCheckUpdates, checkUpdates, openStackApp,
     deploy, stop, restart, update, takeDown, remove, pin, unpin, toggleLabel,
     menuVisibility, openScheduleTask,
     canMuteNotifications, muteStackAll, muteStackDeploySuccess, muteStackMonitor, openStackMuteRules,
@@ -31,11 +31,14 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
   return useMemo(() => {
     const groups: MenuGroup[] = [];
 
-    const inspect: MenuItem[] = [
-      { id: 'alerts', label: 'Alerts', icon: BellRing, shortcut: 'A', onSelect: openAlertSheet },
-      { id: 'auto-heal', label: 'Auto-Heal', icon: Activity, shortcut: 'H', onSelect: openAutoHeal },
-    ];
-    inspect.push({ id: 'check-updates', label: 'Check updates', icon: RefreshCw, shortcut: 'U', onSelect: checkUpdates });
+    const inspect: MenuItem[] = [];
+    if (canViewMonitor) {
+      inspect.push({ id: 'alerts', label: 'Alerts', icon: BellRing, shortcut: 'A', onSelect: openAlertSheet });
+      inspect.push({ id: 'auto-heal', label: 'Auto-Heal', icon: Activity, shortcut: 'H', onSelect: openAutoHeal });
+    }
+    if (canCheckUpdates) {
+      inspect.push({ id: 'check-updates', label: 'Check updates', icon: RefreshCw, shortcut: 'U', onSelect: checkUpdates });
+    }
     if (stackStatus === 'running' && canOpenApp) {
       inspect.push({ id: 'open-app', label: 'Open App', icon: ArrowUpRight, shortcut: '↗', onSelect: openStackApp });
     }
@@ -86,7 +89,7 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
       if (showUpdate) lifecycle.push({ id: 'update', label: 'Update', icon: Download, shortcut: '⌘↑', onSelect: update, disabled: isBusy });
       if (showTakeDown) lifecycle.push({ id: 'take-down', label: 'Take down', icon: ArrowDownToLine, shortcut: '⌘↓', onSelect: takeDown, disabled: isBusy || isSelfStack });
     }
-    if (isAdmin) lifecycle.push({ id: 'schedule', label: 'Schedule task', icon: CalendarClock, onSelect: openScheduleTask });
+    if (canDeploy) lifecycle.push({ id: 'schedule', label: 'Schedule task', icon: CalendarClock, onSelect: openScheduleTask });
     if (lifecycle.length > 0) groups.push({ id: 'lifecycle', items: lifecycle });
 
     if (canDelete) {
@@ -106,9 +109,9 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
 
     return groups;
   }, [
-    stackStatus, isSelfStack, canOpenApp, isBusy, isAdmin, canDelete, canDeploy, canEditLabels, isPinned, labels,
+    stackStatus, isSelfStack, canOpenApp, isBusy, canDelete, canDeploy, canEditLabels, isPinned, labels,
     showDeploy, showStop, showRestart, showUpdate, showTakeDown,
-    openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
+    openAlertSheet, openAutoHeal, canViewMonitor, canCheckUpdates, checkUpdates, openStackApp,
     deploy, stop, restart, update, takeDown, remove, pin, unpin, toggleLabel, openScheduleTask,
     canMuteNotifications, muteStackAll, muteStackDeploySuccess, muteStackMonitor, openStackMuteRules,
   ]);

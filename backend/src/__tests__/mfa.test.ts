@@ -18,6 +18,7 @@ import {
   setupTestDb,
   cleanupTestDb,
   seedMfaUser,
+  seedMfaUserWithToken,
   TEST_USERNAME,
   TEST_JWT_SECRET,
 } from './helpers/setupTestDb';
@@ -567,6 +568,30 @@ describe('POST /api/users/:id/mfa/reset', () => {
     const resetRows = entries.filter((e) => e.path === `/api/users/${userId}/mfa/reset`);
     expect(resetRows).toHaveLength(1);
     expect(resetRows[0].summary).toBe(`Reset two-factor authentication: ${userId}`);
+  });
+
+  it('invalidates target pre-reset JWT after admin MFA reset', async () => {
+    const { userId, token } = await seedMfaUserWithToken('victim4', 'victim4pass123');
+    const adminJwt = adminToken(); // Pre-minted so we prove the admin session survives the reset.
+    const stacksWith = (jwt: string) =>
+      request(app).get('/api/stacks').set('Authorization', `Bearer ${jwt}`);
+
+    // Pre-reset JWT is accepted (viewer role grants stack:read).
+    expect((await stacksWith(token)).status).toBe(200);
+
+    // Admin reset bumps the target's token_version, invalidating their sessions.
+    const reset = await request(app)
+      .post(`/api/users/${userId}/mfa/reset`)
+      .set('Authorization', `Bearer ${adminJwt}`);
+    expect(reset.status).toBe(200);
+
+    // The same pre-reset JWT is now rejected.
+    const after = await stacksWith(token);
+    expect(after.status).toBe(401);
+    expect(after.body.error).toContain('Session invalidated');
+
+    // Admin session is untouched (only the target's token_version was bumped).
+    expect((await stacksWith(adminJwt)).status).toBe(200);
   });
 });
 

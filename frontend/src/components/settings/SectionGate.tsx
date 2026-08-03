@@ -1,9 +1,7 @@
 import React from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
-import { useNodes } from '@/context/NodeContext';
 import { getSettingsItem, isItemVisible, isItemLocked } from './registry';
-import type { VisibilityContext } from './registry';
+import { useSettingsVisibility } from './useSettingsVisibility';
 import type { SectionId } from './types';
 
 interface SectionGateProps {
@@ -18,19 +16,14 @@ interface SectionGateProps {
  * guards remain the authoritative enforcement.
  */
 export function SectionGate({ sectionId, children }: SectionGateProps) {
-    const { isAdmin } = useAuth();
-    const { isPaid } = useLicense();
-    const { activeNode } = useNodes();
-
-    const isRemote = activeNode?.type === 'remote';
-
-    const visibility: VisibilityContext = {
-        isAdmin,
-        isPaid,
-        isRemote,
-    };
+    const { permissionsStatus } = useAuth();
+    const visibility = useSettingsVisibility();
 
     const item = getSettingsItem(sectionId);
+
+    if (permissionsStatus === 'loading') {
+        return <div className="h-48 animate-pulse rounded-lg bg-card" aria-busy="true" />;
+    }
 
     if (!item || !isItemVisible(item, visibility)) return null;
     if (isItemLocked(item, visibility)) return null;

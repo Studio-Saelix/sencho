@@ -45,10 +45,10 @@ const DEFAULT_DATA_RETENTION: DataRetentionFields = {
 };
 
 export function DataRetentionSection({ onDirtyChange }: DataRetentionSectionProps) {
-    const { isAdmin } = useAuth();
+    const { can, permissionsReady } = useAuth();
     const { isPaid } = useLicense();
     const { activeNode } = useNodes();
-    const readOnly = !isAdmin;
+    const readOnly = !permissionsReady || !can('system:settings');
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<DataRetentionFields>({ ...DEFAULT_DATA_RETENTION });
     const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);
     const [isSaving, setIsSaving] = useState(false);
@@ -222,7 +222,7 @@ export function DataRetentionSection({ onDirtyChange }: DataRetentionSectionProp
                 )}
             </SettingsSection>
 
-            <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
+            <SettingsActions hint={readOnly ? 'Read-only · permission required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
                 {!readOnly && (
                     <SettingsPrimaryButton onClick={saveSettings} disabled={isSaving || !hasChanges || !isCurrentNodeLoaded}>
                         {isSaving ? (

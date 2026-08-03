@@ -17,6 +17,7 @@ import {
   type ReachabilityContext,
 } from '@/lib/routing/reachability';
 import { useExperimental } from '@/hooks/useExperimental';
+import { canScheduleAny } from '@/lib/scheduledActions';
 import { buildNavigationModel } from '@/lib/navigation/buildNavigationModel';
 import type { NavDestination } from '@/lib/navigation/appNavRegistry';
 
@@ -34,11 +35,17 @@ interface UseViewNavigationStateOptions {
 
 export function useViewNavigationState(options?: UseViewNavigationStateOptions) {
   const { onNavigateToDashboard, hasFleetCapability = false, containerLabelsEnabled = false } = options ?? {};
-  const { isAdmin, can, permissionsStatus } = useAuth();
+  const { isAdmin, can, permissionsStatus, permissions } = useAuth();
   const { isPaid, licenseStatus } = useLicense();
   const { activeNode } = useNodes();
   const isRemote = activeNode?.type === 'remote';
   const { experimental, experimentalReady } = useExperimental();
+
+  const scheduledOpsAccessible = useMemo(() => canScheduleAny(
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
+    (action, resourceType, resourceId, nodeId) => can(action as Parameters<typeof can>[0], resourceType, resourceId, nodeId),
+    permissions,
+  ), [can, permissions]);
 
   const initialRoute = readUrlRouteState();
 
@@ -62,7 +69,8 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     licenseStatus,
     experimental,
     experimentalReady,
-  }), [isAdmin, isPaid, can, isRemote, hasFleetCapability, containerLabelsEnabled, permissionsStatus, licenseStatus, experimental, experimentalReady]);
+    scheduledOpsAccessible,
+  }), [isAdmin, isPaid, can, isRemote, hasFleetCapability, containerLabelsEnabled, permissionsStatus, licenseStatus, experimental, experimentalReady, scheduledOpsAccessible]);
 
   const handleOpenSettings = useCallback((section?: SectionId) => {
     if (section) setSettingsSection(section);

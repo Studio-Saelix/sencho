@@ -7,7 +7,8 @@ import { cordonNode, uncordonNode } from '@/lib/nodesApi';
 import { toast } from '@/components/ui/toast-store';
 import { ConfirmModal } from '@/components/ui/modal';
 import { formatBytes } from '@/lib/utils';
-import { getNodeCpu, getNodeMem, getNodeDisk, isCritical } from '@/components/FleetView/nodeUtils';
+import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from '@/components/FleetView/nodeUtils';
+import { NodeDetailsSheet } from '@/components/FleetView/NodeDetailsSheet';
 import type { FleetNode } from '@/components/FleetView/types';
 import { Bar, BackChip, Kicker, Masthead, MBtn, SectionHead, StateDot, StatePill } from './mobile-ui';
 import type { Tone as UiTone } from './mobile-ui';
@@ -159,9 +160,12 @@ function NodeDetail({
   onCordonChange: () => void;
 }) {
   const { can } = useAuth();
+  const { nodes: registryNodes } = useNodes();
+  const registryNode = registryNodes.find(n => n.id === node.id) ?? null;
   const canCordon = can('node:manage', 'node', String(node.id));
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   const tone = nodeTone(node);
   const online = node.status === 'online';
@@ -207,6 +211,7 @@ function NodeDetail({
       <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden p-[14px]">
         <div className="flex gap-2">
           <MBtn kind="primary" full onClick={() => onInspectNode(node.id)}>Inspect</MBtn>
+          <MBtn kind="outline" full onClick={() => setDetailsOpen(true)}>Details</MBtn>
           {canCordon ? (
             <MBtn kind="outline" full onClick={() => setConfirmOpen(true)}>
               {node.cordoned ? 'Uncordon' : 'Drain'}
@@ -221,7 +226,7 @@ function NodeDetail({
             <ResourceRow
               label="mem"
               pct={getNodeMem(node)}
-              detail={`${formatBytes(node.systemStats.memory.used, 1)} / ${formatBytes(node.systemStats.memory.total, 1)}`}
+              detail={`${formatBytes(getNodeMemUsed(node), 1)} / ${formatBytes(getNodeMemTotal(node), 1)}`}
             />
             {node.systemStats.disk ? (
               <ResourceRow
@@ -271,6 +276,14 @@ function NodeDetail({
         confirming={submitting}
         onConfirm={handleCordon}
       />
+
+      <NodeDetailsSheet
+        open={detailsOpen}
+        onOpenChange={setDetailsOpen}
+        node={node}
+        registryNode={registryNode}
+        canManageNode={canCordon}
+      />
     </div>
   );
 }
@@ -309,8 +322,8 @@ export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: Mo
   const totalStacks = nodes.reduce((sum, n) => sum + (n.stacks?.length ?? 0), 0);
   const running = nodes.reduce((sum, n) => sum + (n.stats?.active ?? 0), 0);
   const avgCpu = onlineNodes.length > 0 ? onlineNodes.reduce((s, n) => s + getNodeCpu(n), 0) / onlineNodes.length : 0;
-  const memUsed = onlineNodes.reduce((s, n) => s + (n.systemStats?.memory.used ?? 0), 0);
-  const memTotal = onlineNodes.reduce((s, n) => s + (n.systemStats?.memory.total ?? 0), 0);
+  const memUsed = onlineNodes.reduce((s, n) => s + getNodeMemUsed(n), 0);
+  const memTotal = onlineNodes.reduce((s, n) => s + getNodeMemTotal(n), 0);
   const memPct = memTotal > 0 ? (memUsed / memTotal) * 100 : 0;
   const syncLabel = lastSyncAt ? `last sync ${formatAgo(now - lastSyncAt)}` : 'connecting…';
 

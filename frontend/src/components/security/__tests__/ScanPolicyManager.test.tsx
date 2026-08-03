@@ -28,7 +28,7 @@ function jsonResponse(status: number, body: unknown): Response {
 }
 
 function setup() {
-  vi.mocked(AuthContext.useAuth).mockReturnValue({ isAdmin: true } as unknown as ReturnType<typeof AuthContext.useAuth>);
+  vi.mocked(AuthContext.useAuth).mockReturnValue({ isAdmin: true, can: () => true } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(NodeContext.useNodes).mockReturnValue({ activeNode: { type: 'local', id: 1, name: 'local' } } as unknown as ReturnType<typeof NodeContext.useNodes>);
   vi.mocked(TrivyStatus.useTrivyStatus).mockReturnValue({
     status: { available: true, version: '1', source: 'managed', autoUpdate: false, honorSuppressionsOnDeploy: false, preDeployScanAdvisory: false, cveIntelEnabled: true, busy: false },

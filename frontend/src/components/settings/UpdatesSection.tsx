@@ -46,8 +46,8 @@ function SectionSkeleton() {
 
 export function UpdatesSection() {
     const { activeNode } = useNodes();
-    const { isAdmin } = useAuth();
-    const readOnly = !isAdmin;
+    const { can, permissionsReady } = useAuth();
+    const readOnly = !permissionsReady || !can('system:settings');
     const [status, setStatus] = useState<ImageUpdateStatus | null>(null);
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);

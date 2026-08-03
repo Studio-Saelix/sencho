@@ -19,6 +19,7 @@ import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 export const templatesRouter = Router();
 
 templatesRouter.get('/', authMiddleware, async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const templates = await templateService.getTemplates();
 
@@ -66,6 +67,7 @@ templatesRouter.post('/refresh-cache', authMiddleware, (req: Request, res: Respo
 
 templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:create')) return;
+  if (!requirePermission(req, res, 'stack:deploy')) return;
   try {
     const { stackName, template, envVars, skip_scan } = req.body;
 

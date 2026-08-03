@@ -1,11 +1,10 @@
 /**
  * Render-gate coverage for MeshOptInSheet's opt-in/out controls.
  *
- * Opting a stack in or out is admin-only on the backend
- * (POST /api/mesh/nodes/:id/stacks/:stack/opt-in|opt-out require admin). This
- * test locks the matching UI gate: a manager sees Add/Remove buttons, a
+ * Opting a stack in or out is Admin-only because it cascades across mesh stacks.
+ * This test locks the matching UI gate: an Admin sees Add/Remove buttons, while a user without
  * non-manager sees the membership read-only with a hint. The read-only branch
- * must never issue the admin-only mutation.
+ * must never issue the mutation.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -51,7 +50,7 @@ describe('MeshOptInSheet canManage gate', () => {
         expect(await screen.findByText('web')).toBeInTheDocument();
         expect(screen.getByRole('button', { name: /Remove from mesh/i })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: /Add to mesh/i })).toBeInTheDocument();
-        expect(screen.queryByText(/Changing mesh membership requires an administrator/i)).not.toBeInTheDocument();
+        expect(screen.queryByText(/changing mesh membership requires an administrator/i)).not.toBeInTheDocument();
     });
 
     it('renders the membership read-only for a non-manager', async () => {
@@ -59,7 +58,7 @@ describe('MeshOptInSheet canManage gate', () => {
         expect(await screen.findByText('web')).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /Remove from mesh/i })).not.toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /Add to mesh/i })).not.toBeInTheDocument();
-        expect(screen.getByText(/Changing mesh membership requires an administrator/i)).toBeInTheDocument();
+        expect(screen.getByText(/changing mesh membership requires an administrator/i)).toBeInTheDocument();
         // The read-only branch must never issue an opt-in/opt-out request.
         expect(vi.mocked(apiFetch)).not.toHaveBeenCalledWith(
             expect.stringContaining('/opt-'),

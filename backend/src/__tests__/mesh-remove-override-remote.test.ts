@@ -96,7 +96,7 @@ describe('MeshService.removeOverrideFromNode (remote dispatch)', () => {
         db.deleteNode(remoteNodeId);
     });
 
-    it('swallows network errors from the remote so the disable cascade can continue', async () => {
+    it('rejects network errors so callers can preserve authoritative opt-in state', async () => {
         const svc = MeshService.getInstance();
         const db = DatabaseService.getInstance();
         const remoteNodeId = db.addNode({
@@ -117,10 +117,36 @@ describe('MeshService.removeOverrideFromNode (remote dispatch)', () => {
         vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('ECONNREFUSED'));
         const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
 
-        // Must not throw: the remote being offline is a tolerable condition;
-        // the cascade upstream uses Promise.allSettled and continues.
-        await expect(svc.removeOverrideFromNode(remoteNodeId, 'sample-stack')).resolves.toBeUndefined();
+        await expect(svc.removeOverrideFromNode(remoteNodeId, 'sample-stack')).rejects.toThrow('ECONNREFUSED');
         expect(warnSpy).toHaveBeenCalled();
+
+        db.deleteNode(remoteNodeId);
+    });
+
+    it('rejects a non-success response from a busy remote target', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'remove-override-busy-test',
+            type: 'remote',
+            mode: 'proxy',
+            compose_dir: '/tmp',
+            is_default: false,
+            api_url: 'https://remote.example.com:1852',
+            api_token: 'remote-tok',
+        });
+
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
+            apiUrl: 'https://remote.example.com:1852',
+            apiToken: 'remote-tok',
+        });
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+            new Response('another operation is already in progress', { status: 500 }),
+        );
+        vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+
+        await expect(svc.removeOverrideFromNode(remoteNodeId, 'sample-stack'))
+            .rejects.toThrow('HTTP 500');
 
         db.deleteNode(remoteNodeId);
     });

@@ -142,8 +142,9 @@ describe('DELETE /api/stacks/:stackName clears stack-scoped role assignments', (
             name: 'stack-del-rbac-node', type: 'remote', api_url: 'http://test:1852',
             api_token: '', compose_dir: '/tmp', is_default: false,
         });
-        db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'api' });
-        db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'other-stack' });
+        const defaultNodeId = db.getDefaultNode()!.id;
+        db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'api', node_id: defaultNodeId });
+        db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'other-stack', node_id: defaultNodeId });
         db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'node', resource_id: String(otherNodeId) });
 
         const res = await request(app)
@@ -152,8 +153,8 @@ describe('DELETE /api/stacks/:stackName clears stack-scoped role assignments', (
 
         expect(res.status).toBe(200);
         const remaining = db.getAllRoleAssignments(userId);
-        expect(remaining.some((a) => a.resource_type === 'stack' && a.resource_id === 'api')).toBe(false);
-        expect(remaining.some((a) => a.resource_type === 'stack' && a.resource_id === 'other-stack')).toBe(true);
+        expect(remaining.some((a) => a.resource_type === 'stack' && a.resource_id === 'api' && a.node_id === defaultNodeId)).toBe(false);
+        expect(remaining.some((a) => a.resource_type === 'stack' && a.resource_id === 'other-stack' && a.node_id === defaultNodeId)).toBe(true);
         expect(remaining.some((a) => a.resource_type === 'node' && a.resource_id === String(otherNodeId))).toBe(true);
 
         db.deleteUser(userId);

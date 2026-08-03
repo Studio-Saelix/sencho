@@ -3,6 +3,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { MeshError, MeshService, type MeshGlobalAlias, type MeshRegenSummary } from '../services/MeshService';
 import { requireAdmin, requirePaid } from '../middleware/tierGates';
+import { requirePermission } from '../middleware/permissions';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
 
@@ -15,6 +16,7 @@ function actorFor(req: Request): string {
 
 meshRouter.get('/status', async (_req: Request, res: Response): Promise<void> => {
     if (!requirePaid(_req, res)) return;
+    if (!requirePermission(_req, res, 'node:read')) return;
     try {
         const mesh = MeshService.getInstance();
         const status = await mesh.getStatus();
@@ -34,7 +36,7 @@ meshRouter.get('/status', async (_req: Request, res: Response): Promise<void> =>
  */
 meshRouter.post('/regen-overrides', async (req: Request, res: Response): Promise<void> => {
     if (!requirePaid(req, res)) return;
-    if (!requireAdmin(req, res)) return;
+    if (!requirePermission(req, res, 'node:manage')) return;
     const actor = actorFor(req);
     let summary: MeshRegenSummary | null = null;
     let outcome: 'success' | 'skipped' | 'partial' | 'error' = 'error';
@@ -68,9 +70,9 @@ meshRouter.post('/regen-overrides', async (req: Request, res: Response): Promise
 
 meshRouter.post('/nodes/:nodeId/enable', async (req: Request, res: Response): Promise<void> => {
     if (!requirePaid(req, res)) return;
-    if (!requireAdmin(req, res)) return;
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
     if (!Number.isFinite(nodeId)) { res.status(400).json({ error: 'Invalid node id' }); return; }
+    if (!requirePermission(req, res, 'node:manage', 'node', String(nodeId))) return;
     try {
         await MeshService.getInstance().enableForNode(nodeId);
         res.json({ ok: true });
@@ -81,9 +83,9 @@ meshRouter.post('/nodes/:nodeId/enable', async (req: Request, res: Response): Pr
 
 meshRouter.post('/nodes/:nodeId/disable', async (req: Request, res: Response): Promise<void> => {
     if (!requirePaid(req, res)) return;
-    if (!requireAdmin(req, res)) return;
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
     if (!Number.isFinite(nodeId)) { res.status(400).json({ error: 'Invalid node id' }); return; }
+    if (!requirePermission(req, res, 'node:manage', 'node', String(nodeId))) return;
     try {
         await MeshService.getInstance().disableForNode(nodeId, actorFor(req));
         res.json({ ok: true });
@@ -103,6 +105,7 @@ meshRouter.get('/local-services/:stackName', async (req: Request, res: Response)
     if (!requirePaid(req, res)) return;
     const stackName = req.params.stackName as string;
     if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
+    if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
     try {
         const services = await MeshService.getInstance().inspectLocalStackServices(stackName);
         res.json({ services });
@@ -121,6 +124,7 @@ meshRouter.get('/local-services/:stackName', async (req: Request, res: Response)
  */
 meshRouter.get('/local-stacks', async (req: Request, res: Response): Promise<void> => {
     if (!requirePaid(req, res)) return;
+    if (!requirePermission(req, res, 'stack:read')) return;
     try {
         const stacks = await MeshService.getInstance().listLocalStacks();
         res.json({ stacks });
@@ -158,6 +162,7 @@ meshRouter.put('/local-override/:stackName', async (req: Request, res: Response)
     if (!requirePaid(req, res)) return;
     const stackName = req.params.stackName as string;
     if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
+    if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
     const body = req.body as { aliases?: unknown; portAliases?: unknown };
     if (!Array.isArray(body?.aliases)) { res.status(400).json({ error: 'Missing aliases array in body' }); return; }
     if (body.aliases.length > MAX_ALIASES_PER_PUSH) {
@@ -210,6 +215,7 @@ meshRouter.delete('/local-override/:stackName', async (req: Request, res: Respon
     if (!requirePaid(req, res)) return;
     const stackName = req.params.stackName as string;
     if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
+    if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
     try {
         await MeshService.getInstance().removeLocalOverride(stackName);
         res.json({ ok: true });
@@ -223,6 +229,7 @@ meshRouter.get('/nodes/:nodeId/stacks', async (req: Request, res: Response): Pro
     if (!requirePaid(req, res)) return;
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
     if (!Number.isFinite(nodeId)) { res.status(400).json({ error: 'Invalid node id' }); return; }
+    if (!requirePermission(req, res, 'node:read', 'node', String(nodeId))) return;
     try {
         const db = DatabaseService.getInstance();
         const optedIn = new Set(db.listMeshStacks(nodeId).map((s) => s.stack_name));
@@ -241,10 +248,10 @@ meshRouter.get('/nodes/:nodeId/stacks', async (req: Request, res: Response): Pro
 
 meshRouter.post('/nodes/:nodeId/stacks/:stackName/opt-in', async (req: Request, res: Response): Promise<void> => {
     if (!requirePaid(req, res)) return;
-    if (!requireAdmin(req, res)) return;
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
     const stackName = req.params.stackName as string;
     if (!Number.isFinite(nodeId) || !stackName) { res.status(400).json({ error: 'Invalid params' }); return; }
+    if (!requireAdmin(req, res)) return;
     try {
         await MeshService.getInstance().optInStack(nodeId, stackName, actorFor(req));
         res.json({ ok: true });
@@ -268,10 +275,10 @@ meshRouter.post('/nodes/:nodeId/stacks/:stackName/opt-in', async (req: Request, 
 
 meshRouter.post('/nodes/:nodeId/stacks/:stackName/opt-out', async (req: Request, res: Response): Promise<void> => {
     if (!requirePaid(req, res)) return;
-    if (!requireAdmin(req, res)) return;
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
     const stackName = req.params.stackName as string;
     if (!Number.isFinite(nodeId) || !stackName) { res.status(400).json({ error: 'Invalid params' }); return; }
+    if (!requireAdmin(req, res)) return;
     try {
         await MeshService.getInstance().optOutStack(nodeId, stackName, actorFor(req));
         res.json({ ok: true });
@@ -283,6 +290,7 @@ meshRouter.post('/nodes/:nodeId/stacks/:stackName/opt-out', async (req: Request,
 
 meshRouter.get('/aliases', async (req: Request, res: Response): Promise<void> => {
     if (!requirePaid(req, res)) return;
+    if (!requirePermission(req, res, 'node:read')) return;
     try {
         const aliases = await MeshService.getInstance().listAliases();
         res.json({ aliases });
@@ -294,6 +302,7 @@ meshRouter.get('/aliases', async (req: Request, res: Response): Promise<void> =>
 
 meshRouter.get('/aliases/:alias/diagnostic', async (req: Request, res: Response): Promise<void> => {
     if (!requirePaid(req, res)) return;
+    if (!requirePermission(req, res, 'node:read')) return;
     try {
         const diag = await MeshService.getInstance().getRouteDiagnostic(req.params.alias as string);
         res.json(diag);
@@ -304,6 +313,7 @@ meshRouter.get('/aliases/:alias/diagnostic', async (req: Request, res: Response)
 
 meshRouter.post('/aliases/:alias/test', async (req: Request, res: Response): Promise<void> => {
     if (!requirePaid(req, res)) return;
+    if (!requirePermission(req, res, 'node:read')) return;
     try {
         const sourceNodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const result = await MeshService.getInstance().testUpstream(req.params.alias as string, sourceNodeId);
@@ -317,6 +327,7 @@ meshRouter.get('/nodes/:nodeId/diagnostic', async (req: Request, res: Response):
     if (!requirePaid(req, res)) return;
     const nodeId = Number.parseInt(req.params.nodeId as string, 10);
     if (!Number.isFinite(nodeId)) { res.status(400).json({ error: 'Invalid node id' }); return; }
+    if (!requirePermission(req, res, 'node:read', 'node', String(nodeId))) return;
     try {
         const diag = await MeshService.getInstance().getNodeDiagnostic(nodeId);
         res.json(diag);
@@ -327,6 +338,7 @@ meshRouter.get('/nodes/:nodeId/diagnostic', async (req: Request, res: Response):
 
 meshRouter.get('/activity', (req: Request, res: Response): void => {
     if (!requirePaid(req, res)) return;
+    if (!requirePermission(req, res, 'node:read')) return;
     const alias = typeof req.query.alias === 'string' ? req.query.alias : undefined;
     const source = typeof req.query.source === 'string' ? (req.query.source as 'pilot' | 'mesh') : undefined;
     const level = typeof req.query.level === 'string' ? (req.query.level as 'info' | 'warn' | 'error') : undefined;
@@ -337,6 +349,7 @@ meshRouter.get('/activity', (req: Request, res: Response): void => {
 
 meshRouter.get('/activity/stream', (req: Request, res: Response): void => {
     if (!requirePaid(req, res)) return;
+    if (!requirePermission(req, res, 'node:read')) return;
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');

@@ -5,6 +5,7 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
+import { canManageNode } from '@/lib/canManageNode';
 import { DEFAULT_SETTINGS } from './types';
 import type { PatchableSettings } from './types';
 import { SettingsSection } from './SettingsSection';
@@ -41,8 +42,8 @@ const DEFAULT_DOCKER_STORAGE: DockerStorageFields = {
 
 export function DockerStorageSection({ onDirtyChange }: DockerStorageSectionProps) {
     const { activeNode } = useNodes();
-    const { isAdmin } = useAuth();
-    const readOnly = !isAdmin;
+    const { can } = useAuth();
+    const readOnly = !canManageNode(can, activeNode?.id);
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<DockerStorageFields>({ ...DEFAULT_DOCKER_STORAGE });
     const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);
     const [isSaving, setIsSaving] = useState(false);
@@ -153,7 +154,7 @@ export function DockerStorageSection({ onDirtyChange }: DockerStorageSectionProp
                 </SettingsField>
             </SettingsSection>
 
-            <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
+            <SettingsActions hint={readOnly ? 'Read-only · permission required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
                 {!readOnly && (
                     <SettingsPrimaryButton onClick={saveSettings} disabled={isSaving || !hasChanges || !isCurrentNodeLoaded}>
                         {isSaving ? (

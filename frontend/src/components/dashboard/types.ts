@@ -16,6 +16,13 @@ export interface SystemStats {
     used: number;
     free: number;
     usagePercent: string;
+    arcReclaimable?: number;
+    ballooned?: number;
+    effectiveTotal?: number;
+    effectiveUsed?: number;
+    effectiveFree?: number;
+    effectiveUsagePercent?: string;
+    balloonSource?: string;
   };
   disk: {
     fs: string;
@@ -60,6 +67,7 @@ export type NotificationCategory =
     | 'update_started'
     | 'health_gate_passed'
     | 'health_gate_failed'
+    | 'rollback_generation_released'
     | 'node_update_available'
     | 'system';
 

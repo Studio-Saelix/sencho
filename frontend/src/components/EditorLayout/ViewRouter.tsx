@@ -149,7 +149,7 @@ export function ViewRouter({
     isFileLoading,
     quickLinkCandidates,
 }: ViewRouterProps): ReactNode {
-    const { can } = useAuth();
+    const { can, permissionsStatus } = useAuth();
     const { isPaid, licenseReady } = useLicense();
     const { activeNode, activeNodeMeta } = useNodes();
     if (activeView === 'settings') {
@@ -192,6 +192,7 @@ export function ViewRouter({
         // remote meta; null activeNode must not be treated as local (wrong-node
         // or doomed WebSocket). Stack deep links hydrate selectedFile async:
         // wait so we never open a compose-root shell, then reconnect into the stack.
+        if (permissionsStatus === 'loading') return <ViewSkeleton />;
         if (!can('system:console')) return null;
         if (urlHydratingStack != null || (isHostConsoleStackDeepLink() && !selectedFile)) {
             return <ViewSkeleton />;

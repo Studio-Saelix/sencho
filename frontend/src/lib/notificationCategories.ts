@@ -17,6 +17,7 @@ export const CATEGORY_LABELS: Record<NotificationCategory, string> = {
     update_started: 'Update started',
     health_gate_passed: 'Health gate passed',
     health_gate_failed: 'Health gate failed',
+    rollback_generation_released: 'Rollback protection released',
     node_update_available: 'Node update',
     system: 'System',
 };

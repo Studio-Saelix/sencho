@@ -1,6 +1,6 @@
 import type { FleetTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
-import { getSettingsItem } from '@/components/settings/registry';
+import { getSettingsItem, isItemVisible, isItemLocked } from '@/components/settings/registry';
 import type { ActiveView } from '@/lib/router/routeTypes';
 import { HUB_ONLY_VIEWS } from '@/lib/router/routeTypes';
 
@@ -19,6 +19,8 @@ export interface ReachabilityContext {
   experimental: boolean;
   /** True once /meta experimental has settled (success or fail-closed). */
   experimentalReady: boolean;
+  /** Whether the user can reach the Scheduled Operations view (global or scoped grants). */
+  scheduledOpsAccessible: boolean;
 }
 
 /** RBAC/tier gates apply only when permission and license metadata are ready. */
@@ -39,17 +41,17 @@ export function experimentalDiscoveryReady(ctx: ReachabilityContext): boolean {
 export function isViewHidden(view: ActiveView, ctx: ReachabilityContext): boolean {
   if (!authzReady(ctx)) return false;
   if (ctx.isRemote && HUB_ONLY_VIEWS.has(view)) return true;
-  if (!ctx.isAdmin && view === 'global-observability') return true;
-  if (!ctx.isAdmin && (view === 'auto-updates' || view === 'scheduled-ops')) return true;
-  if (!ctx.can('node:read') && view === 'fleet') return true;
-  if (view === 'host-console') {
-    return !ctx.can('system:console');
+  if (
+    !ctx.isAdmin &&
+    (view === 'global-observability' || view === 'auto-updates')
+  ) {
+    return true;
   }
-  if (!ctx.isPaid) {
-    if (view === 'audit-log') return true;
-  } else {
-    if (view === 'audit-log' && !ctx.can('system:audit')) return true;
-  }
+  if (view === 'scheduled-ops' && !ctx.scheduledOpsAccessible) return true;
+  if (!ctx.can('node:read') && (view === 'fleet' || view === 'networking')) return true;
+  if (view === 'host-console') return !ctx.can('system:console');
+  // Permission-driven on Community and Admiral (14-day window vs paid depth is in-view).
+  if (view === 'audit-log') return !ctx.can('system:audit');
   return false;
 }
 
@@ -63,8 +65,9 @@ export function isViewCapabilityLocked(view: ActiveView, ctx: ReachabilityContex
 export function isFleetTabHidden(tab: FleetTab, ctx: ReachabilityContext): boolean {
   if (!authzReady(ctx)) return false;
   if (tab === 'container-labels' && !ctx.containerLabelsEnabled) return true;
+  if (tab === 'secrets' && !ctx.isAdmin) return true;
   // Defer experimental hide until ready so deep links survive cold load.
-  if ((tab === 'routing' || tab === 'secrets') && experimentalDiscoveryReady(ctx) && !ctx.experimental) {
+  if (tab === 'routing' && experimentalDiscoveryReady(ctx) && !ctx.experimental) {
     return true;
   }
   return false;
@@ -74,9 +77,14 @@ export function isSettingsSectionHidden(section: SectionId, ctx: ReachabilityCon
   if (!authzReady(ctx)) return false;
   const item = getSettingsItem(section);
   if (!item) return true;
-  if (ctx.isRemote && item.hiddenOnRemote) return true;
-  if (item.adminOnly && !ctx.isAdmin) return true;
-  if (item.tier === 'paid' && !ctx.isPaid) return true;
+  const visibility = {
+    isRemote: ctx.isRemote,
+    isAdmin: ctx.isAdmin,
+    isPaid: ctx.isPaid,
+    can: ctx.can,
+  };
+  if (!isItemVisible(item, visibility)) return true;
+  if (isItemLocked(item, visibility)) return true;
   // fleet-mesh stays reachable: snapshot_documentation lives there even when
   // Mesh discovery is off.
   return false;

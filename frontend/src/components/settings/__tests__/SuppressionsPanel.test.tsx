@@ -26,7 +26,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 vi.mock('@/context/AuthContext', () => ({
-  useAuth: () => ({ isAdmin: true }),
+  useAuth: () => ({ isAdmin: true, can: () => true }),
 }));
 
 import { apiFetch } from '@/lib/api';

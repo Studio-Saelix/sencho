@@ -40,6 +40,8 @@ let proxyNodeId: number;
 let NodeRegistry: typeof import('../services/NodeRegistry').NodeRegistry;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let LicenseService: typeof import('../services/LicenseService').LicenseService;
+let DockerController: typeof import('../services/DockerController').default;
+let FileSystemService: typeof import('../services/FileSystemService').FileSystemService;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
@@ -47,6 +49,8 @@ beforeAll(async () => {
   ({ NodeRegistry } = await import('../services/NodeRegistry'));
   ({ DatabaseService } = await import('../services/DatabaseService'));
   ({ LicenseService } = await import('../services/LicenseService'));
+  ({ default: DockerController } = await import('../services/DockerController'));
+  ({ FileSystemService } = await import('../services/FileSystemService'));
 
   const db = DatabaseService.getInstance();
   pilotNodeId = db.addNode({
@@ -259,7 +263,19 @@ describe('POST /api/fleet/labels/fleet-prune (pilot-agent dispatch)', () => {
     mockFetch((url, init) => {
       const headers = (init?.headers as Record<string, string>) ?? {};
       calls.push({ url, auth: headers.Authorization });
-      return new Response(JSON.stringify({ success: true, reclaimedBytes: 999, dryRun: true }), {
+      return new Response(JSON.stringify({
+        nodeId: 1,
+        scope: 'managed',
+        targets: ['images'],
+        items: [{
+          target: 'images', id: 'sha256:pilot', name: 'pilot/app:latest', sizeBytes: 999,
+          managed: true, reason: 'Image is not used by any container', stackName: 'app',
+          image: { references: ['pilot/app:latest'] },
+        }],
+        reclaimableBytes: 999,
+        fingerprint: 'pilot-plan',
+        createdAt: 1,
+      }), {
         status: 200, headers: { 'content-type': 'application/json' },
       });
     });
@@ -272,10 +288,74 @@ describe('POST /api/fleet/labels/fleet-prune (pilot-agent dispatch)', () => {
     expect(res.status).toBe(200);
     const pilotCall = calls.find(c => c.url.startsWith(PILOT_LOOPBACK));
     expect(pilotCall).toBeDefined();
+    expect(pilotCall?.url).toBe(`${PILOT_LOOPBACK}/api/system/prune/plan`);
     expect(pilotCall?.auth).toBeUndefined();
     const pilotResult = res.body.results.find((r: { nodeId: number }) => r.nodeId === pilotNodeId);
     expect(pilotResult.reachable).toBe(true);
     expect(pilotResult.targets[0].reclaimedBytes).toBe(999);
+  });
+
+  it('uses one plan request and one fingerprint-bound execute request per remote', async () => {
+    mockPaidTier();
+    mockTargets();
+    const local = DatabaseService.getInstance().getNodes().find((node) => node.type === 'local')!;
+    const localPlan = {
+      nodeId: local.id, scope: 'managed' as const, targets: ['images' as const], items: [],
+      reclaimableBytes: 0, fingerprint: 'local-plan', createdAt: 1,
+    };
+    const executePrunePlan = vi.fn().mockResolvedValue({ success: true, reclaimedBytes: 0, outcomes: [] });
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      buildPrunePlan: vi.fn().mockResolvedValue(localPlan),
+      executePrunePlan,
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+    vi.spyOn(FileSystemService.prototype, 'getStacks').mockResolvedValue([]);
+
+    const calls: Array<{ url: string; auth: string | undefined; body: Record<string, unknown> }> = [];
+    mockFetch((url, init) => {
+      const headers = (init?.headers as Record<string, string>) ?? {};
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      calls.push({ url, auth: headers.Authorization, body });
+      const pilot = url.startsWith(PILOT_LOOPBACK);
+      if (url.endsWith('/api/system/prune/plan')) {
+        return new Response(JSON.stringify({
+          nodeId: 1, scope: 'managed', targets: ['images'], items: [], reclaimableBytes: 0,
+          fingerprint: pilot ? 'pilot-plan' : 'proxy-plan', createdAt: 1,
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ success: true, reclaimedBytes: 0, outcomes: [] }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const res = await request(app)
+      .post('/api/fleet/labels/fleet-prune')
+      .set('Authorization', authHeader)
+      .send({
+        targets: ['images'], scope: 'managed', dryRun: false,
+        reviewedNodes: [
+          { nodeId: local.id, reachable: true },
+          { nodeId: pilotNodeId, reachable: true },
+          { nodeId: proxyNodeId, reachable: true },
+        ],
+        plans: [
+          { nodeId: local.id, fingerprint: 'local-plan' },
+          { nodeId: pilotNodeId, fingerprint: 'pilot-plan' },
+          { nodeId: proxyNodeId, fingerprint: 'proxy-plan' },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(executePrunePlan).toHaveBeenCalledTimes(1);
+    const pilotCalls = calls.filter((call) => call.url.startsWith(PILOT_LOOPBACK));
+    expect(pilotCalls.map((call) => call.url)).toEqual([
+      `${PILOT_LOOPBACK}/api/system/prune/plan`,
+      `${PILOT_LOOPBACK}/api/system/prune/system`,
+    ]);
+    expect(pilotCalls.every((call) => call.auth === undefined)).toBe(true);
+    expect(pilotCalls[1].body).toMatchObject({ targets: ['images'], planFingerprint: 'pilot-plan' });
+    const proxyCalls = calls.filter((call) => call.url.startsWith(PROXY_URL));
+    expect(proxyCalls).toHaveLength(2);
+    expect(proxyCalls.every((call) => call.auth === `Bearer ${PROXY_TOKEN}`)).toBe(true);
   });
 });
 

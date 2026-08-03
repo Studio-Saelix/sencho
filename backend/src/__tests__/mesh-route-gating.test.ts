@@ -1,9 +1,9 @@
 /**
  * Gate coverage for the mesh router.
  *
- * Every /api/mesh route is tier-gated (requirePaid). The five operator
- * mutations are additionally role-gated (requireAdmin): node enable/disable,
- * stack opt-in/opt-out, and the override regen. The operator read routes
+ * Every /api/mesh route is tier-gated (requirePaid). Node enable/disable and
+ * override regeneration are permission-gated. Stack membership remains Admin-only
+ * because a membership change redeploys every affected mesh stack. The read routes
  * (status, aliases, activity, diagnostics) stay reachable for any paid-tier
  * user regardless of role, which is what lets a non-admin see a read-only
  * Routing tab. The node-to-node routes that central calls over the proxy on the
@@ -103,17 +103,29 @@ describe('mesh read routes are visible to a non-admin paid user', () => {
     });
 });
 
-describe('mesh mutation routes require the admin role (requireAdmin)', () => {
-    const mutationRoutes: { name: string; path: () => string }[] = [
+describe('mesh mutation authorization', () => {
+    const permissionRoutes: { name: string; path: () => string }[] = [
         { name: 'POST /regen-overrides', path: () => '/api/mesh/regen-overrides' },
         { name: 'POST /nodes/:id/enable', path: () => `/api/mesh/nodes/${defaultNodeId}/enable` },
         { name: 'POST /nodes/:id/disable', path: () => `/api/mesh/nodes/${defaultNodeId}/disable` },
+    ];
+    const adminRoutes: { name: string; path: () => string }[] = [
         { name: 'POST /nodes/:id/stacks/:stack/opt-in', path: () => `/api/mesh/nodes/${defaultNodeId}/stacks/demo/opt-in` },
         { name: 'POST /nodes/:id/stacks/:stack/opt-out', path: () => `/api/mesh/nodes/${defaultNodeId}/stacks/demo/opt-out` },
     ];
 
-    for (const route of mutationRoutes) {
-        it(`${route.name} rejects a non-admin paid user with ADMIN_REQUIRED`, async () => {
+    for (const route of permissionRoutes) {
+        it(`${route.name} rejects a paid user without the required operational permission`, async () => {
+            const res = await request(app)
+                .post(route.path())
+                .set('Authorization', `Bearer ${userToken('mesh-viewer')}`);
+            expect(res.status).toBe(403);
+            expect(res.body.code).toBe('PERMISSION_DENIED');
+        });
+    }
+
+    for (const route of adminRoutes) {
+        it(`${route.name} remains Admin-only`, async () => {
             const res = await request(app)
                 .post(route.path())
                 .set('Authorization', `Bearer ${userToken('mesh-viewer')}`);

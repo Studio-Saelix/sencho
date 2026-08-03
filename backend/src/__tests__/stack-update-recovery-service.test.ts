@@ -152,6 +152,8 @@ describe('StackUpdateRecoveryService', () => {
       updated_at: Date.now(),
       created_by: null,
       artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
     };
 
     vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue(row);
@@ -193,6 +195,8 @@ describe('StackUpdateRecoveryService', () => {
       updated_at: Date.now(),
       created_by: null,
       artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
     };
     vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue(row);
     const update = vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
@@ -354,6 +358,8 @@ describe('StackUpdateRecoveryService', () => {
       updated_at: Date.now(),
       created_by: null,
       artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
     };
     mockRemove.mockRejectedValueOnce(Object.assign(new Error('docker busy'), { statusCode: 500 }));
     const markRetired = vi.spyOn(DatabaseService.prototype, 'markStackUpdateRecoveryArtifactsRetired')

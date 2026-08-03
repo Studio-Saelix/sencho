@@ -342,7 +342,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
               <TableBody>
                 {topFindings.map((finding) => {
                   const primary = finding.recommendedActions.find((action) =>
-                    isNetworkingActionVisible(action, isAdmin, (stack) => can('stack:edit', 'stack', stack)),
+                    isNetworkingActionVisible(action, isAdmin, (stack) => can('stack:edit', 'stack', stack, nodeId)),
                   );
                   return (
                     <TableRow key={finding.id}>

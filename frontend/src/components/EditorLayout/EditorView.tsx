@@ -311,7 +311,7 @@ export function EditorView(props: EditorViewProps) {
         hasUnsavedChanges,
     } = props;
     const monacoEditorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
-    const canEditCompose = can('stack:edit', 'stack', stackName);
+    const canEditCompose = can('stack:edit', 'stack', stackName, activeNode?.id);
 
     // Dispose the underlying Monaco model when EditorView unmounts. The
     // @monaco-editor/react wrapper reuses a single model per editor instance
@@ -358,7 +358,7 @@ export function EditorView(props: EditorViewProps) {
     const safeContent = content || '';
     const safeEnvContent = envContent || '';
     const isRunning = safeContainers.some(c => c.State === 'running');
-    const canRead = can('stack:read', 'stack', stackName);
+    const canRead = can('stack:read', 'stack', stackName, activeNode?.id);
 
     useEffect(() => {
         if (activeTab === 'files' && !canRead) {
@@ -443,7 +443,6 @@ export function EditorView(props: EditorViewProps) {
                                         safeContainers={safeContainers}
                                         isRunning={isRunning}
                                         can={can}
-                                        isAdmin={isAdmin}
                                         trivy={trivy}
                                         backupInfo={backupInfo}
                                         loadingAction={loadingAction}
@@ -469,7 +468,7 @@ export function EditorView(props: EditorViewProps) {
                                             result={recoveryResult}
                                             activeNode={activeNode}
                                             backupInfo={backupInfo}
-                                            canDeploy={can('stack:deploy', 'stack', stackName)}
+                                            canDeploy={can('stack:deploy', 'stack', stackName, activeNode?.id)}
                                             onRetry={retryHandlerFor(recoveryResult.action, { deployStack, restartStack, updateStack, rollbackStack })}
                                             onRestart={restartStack}
                                             onRollback={rollbackStack}
@@ -663,7 +662,7 @@ export function EditorView(props: EditorViewProps) {
                             {activeTab === 'files' && canRead ? (
                                 <StackFileExplorer
                                     stackName={stackName}
-                                    canEdit={can('stack:edit', 'stack', stackName)}
+                                    canEdit={can('stack:edit', 'stack', stackName, activeNode?.id)}
                                     isDarkMode={isDarkMode}
                                     onNavigateToCompose={() => setActiveTab('compose')}
                                     onNavigateToEnv={() => setActiveTab('env')}
@@ -732,7 +731,7 @@ export function EditorView(props: EditorViewProps) {
                         onOpenGitSource={() => setGitSourceOpen(true)}
                         onApplyUpdate={() => { void updateStack(); }}
                         applying={loadingAction === 'update'}
-                        canEdit={can('stack:edit', 'stack', stackName)}
+                        canEdit={can('stack:edit', 'stack', stackName, activeNode?.id)}
                         notifications={notifications}
                         requestedTab={props.requestedAnatomyTab}
                     />

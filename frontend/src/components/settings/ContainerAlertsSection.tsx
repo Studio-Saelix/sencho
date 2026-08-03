@@ -4,6 +4,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/context/AuthContext';
 import { RefreshCw } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
+import { canManageNode } from '@/lib/canManageNode';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
 import { DEFAULT_SETTINGS } from './types';
@@ -35,9 +36,9 @@ const DEFAULT_CONTAINER_ALERTS: ContainerAlertFields = {
 };
 
 export function ContainerAlertsSection({ onDirtyChange }: ContainerAlertsSectionProps) {
-    const { isAdmin } = useAuth();
+    const { can } = useAuth();
     const { activeNode } = useNodes();
-    const readOnly = !isAdmin;
+    const readOnly = !canManageNode(can, activeNode?.id);
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<ContainerAlertFields>({ ...DEFAULT_CONTAINER_ALERTS });
     const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);
     const [isSaving, setIsSaving] = useState(false);
@@ -121,7 +122,7 @@ export function ContainerAlertsSection({ onDirtyChange }: ContainerAlertsSection
                 </SettingsField>
             </SettingsSection>
 
-            <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
+            <SettingsActions hint={readOnly ? 'Read-only · permission required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
                 {!readOnly && (
                     <SettingsPrimaryButton onClick={saveSettings} disabled={isSaving || !hasChanges || !isCurrentNodeLoaded}>
                         {isSaving ? (

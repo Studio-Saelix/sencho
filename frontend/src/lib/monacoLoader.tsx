@@ -26,7 +26,7 @@ function setupMonaco(): Promise<void> {
       const [monacoMod, reactMonaco, editorWorkerMod] = await Promise.all([
         import('monaco-editor'),
         import('@monaco-editor/react'),
-        import('monaco-editor/esm/vs/editor/editor.worker?worker'),
+        import('monaco-editor/editor/editor.worker?worker'),
       ]);
       window.MonacoEnvironment = {
         getWorker(): Worker {

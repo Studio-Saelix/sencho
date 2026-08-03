@@ -1,5 +1,6 @@
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import { markMilestone } from '@/lib/hydrationTiming';
+import { resolveCan } from '@/lib/resolveCan';
 
 type AppStatus = 'loading' | 'needsSetup' | 'notAuthenticated' | 'mfaChallenge' | 'authenticated';
 
@@ -33,7 +34,8 @@ interface AuthContextType {
   permissions: PermissionsData | null;
   permissionsStatus: PermissionsStatus;
   permissionsReady: boolean;
-  can: (action: PermissionAction, resourceType?: string, resourceId?: string) => boolean;
+  can: (action: PermissionAction, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean;
+  retryPermissions: () => Promise<void>;
   login: (username: string, password: string, remember?: boolean) => Promise<{ success: boolean; error?: string; mfaRequired?: boolean }>;
   ssoLdapLogin: (username: string, password: string, remember?: boolean) => Promise<{ success: boolean; error?: string; mfaRequired?: boolean }>;
   submitMfa: (code: string, opts?: { isBackupCode?: boolean }) => Promise<{ success: boolean; error?: string; retryAfter?: number }>;
@@ -50,10 +52,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<UserInfo | null>(null);
   const [permissions, setPermissions] = useState<PermissionsData | null>(null);
   const [permissionsStatus, setPermissionsStatus] = useState<PermissionsStatus>('loading');
+  const permissionRequestRef = useRef(0);
 
   const resetPermissions = useCallback(() => {
+    permissionRequestRef.current += 1;
     setPermissions(null);
     setPermissionsStatus('loading');
+  }, []);
+
+  const loadPermissions = useCallback(async () => {
+    const requestId = ++permissionRequestRef.current;
+    setPermissions(null);
+    setPermissionsStatus('loading');
+
+    try {
+      const response = await fetch('/api/permissions/me', { credentials: 'include' });
+      if (!response.ok) {
+        console.error('[Auth] Permission metadata request failed:', response.status);
+        if (requestId === permissionRequestRef.current) setPermissionsStatus('error');
+        return;
+      }
+      const data = await response.json();
+      if (requestId !== permissionRequestRef.current) return;
+      setPermissions(data);
+      setPermissionsStatus('ready');
+    } catch (error) {
+      console.error('[Auth] Permission metadata request failed:', error);
+      if (requestId === permissionRequestRef.current) setPermissionsStatus('error');
+    }
   }, []);
 
   const checkAuth = async () => {
@@ -78,26 +104,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      const authPromise = fetch('/api/auth/check', { credentials: 'include' });
-      const permsPromise = fetch('/api/permissions/me', { credentials: 'include' });
-
-      const authResponse = await authPromise;
+      const authResponse = await fetch('/api/auth/check', { credentials: 'include' });
       if (authResponse.ok) {
         const data = await authResponse.json();
         setUser(data.user ?? null);
         setAppStatus('authenticated');
-
-        try {
-          const res = await permsPromise;
-          if (res.ok) {
-            setPermissions(await res.json());
-            setPermissionsStatus('ready');
-          } else {
-            setPermissionsStatus('error');
-          }
-        } catch {
-          setPermissionsStatus('error');
-        }
+        await loadPermissions();
       } else {
         setUser(null);
         resetPermissions();
@@ -128,20 +140,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('sencho-unauthorized', handleUnauthorized);
   }, []);
 
-  const can = useCallback((action: PermissionAction, resourceType?: string, resourceId?: string): boolean => {
-    if (!permissions) return false;
-
-    if (permissions.globalRole === 'admin') return true;
-
-    if (permissions.globalPermissions.includes(action)) return true;
-
-    if (resourceType && resourceId) {
-      const key = `${resourceType}:${resourceId}`;
-      return permissions.scopedPermissions[key]?.includes(action) ?? false;
-    }
-
-    return false;
-  }, [permissions]);
+  const can = useCallback((
+    action: PermissionAction,
+    resourceType?: string,
+    resourceId?: string,
+    nodeId?: number | null,
+  ): boolean => {
+    if (permissionsStatus !== 'ready' || !permissions) return false;
+    return resolveCan(permissions, action, resourceType, resourceId, nodeId);
+  }, [permissions, permissionsStatus]);
 
   const login = async (username: string, password: string, remember = false): Promise<{ success: boolean; error?: string; mfaRequired?: boolean }> => {
     try {
@@ -259,11 +266,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAuthenticated: appStatus === 'authenticated',
       needsSetup: appStatus === 'needsSetup',
       user,
-      isAdmin: user?.role === 'admin',
+      isAdmin: permissionsStatus === 'ready' && permissions?.globalRole === 'admin',
       permissions,
       permissionsStatus,
-      permissionsReady: permissionsStatus !== 'loading',
+      permissionsReady: permissionsStatus === 'ready',
       can,
+      retryPermissions: loadPermissions,
       login,
       ssoLdapLogin,
       submitMfa,

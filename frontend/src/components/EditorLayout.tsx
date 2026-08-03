@@ -84,7 +84,7 @@ const NetworkingView = lazy(() => import('./networking/NetworkingView').then(m =
 const GlobalObservabilityView = lazy(() => import('./GlobalObservabilityView').then(m => ({ default: m.GlobalObservabilityView })));
 
 export default function EditorLayout() {
-  const { isAdmin, can, permissions } = useAuth();
+  const { isAdmin, can, permissions, permissionsStatus } = useAuth();
   const { status: trivy } = useTrivyStatus();
   const { runWithLog, panelState, logRows, healthGate } = useDeployFeedback();
 
@@ -296,7 +296,7 @@ export default function EditorLayout() {
     hasServiceScopedUpdate: hasCapability('service-scoped-update'),
     canEditStack: (stackNameOrFilename) => {
       const stackName = stackNameOrFilename.replace(/\.(ya?ml)$/, '');
-      return can('stack:edit', 'stack', stackName);
+      return can('stack:edit', 'stack', stackName, activeNode?.id);
     },
     canOfferVolumeRemoval,
     onDeletedOpenStack: () => onDeletedOpenStackRef.current(),
@@ -837,12 +837,14 @@ export default function EditorLayout() {
     }
   }, [permissions, can]);
 
-  const createStackSlot = can('stack:create') ? (
+  const canCreateStack = can('stack:create');
+  const createStackSlot = (canCreateStack || permissionsStatus === 'loading') ? (
     <>
       <Button
         variant="outline"
         className="rounded-lg w-full"
         onClick={() => openCreateDialog('empty')}
+        disabled={!canCreateStack}
       >
         <Plus className="w-4 h-4" />
         Create Stack
@@ -904,7 +906,7 @@ export default function EditorLayout() {
           createStackSlot={createStackSlot}
           onScan={handleScanStacks}
           isScanning={isScanning}
-          canCreate={can('stack:create')}
+          canCreate={canCreateStack}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           filterChip={filterChip}
@@ -935,10 +937,10 @@ export default function EditorLayout() {
               if (node) void stackActions.loadFileOnNode(node, file);
             },
             filterChip,
-            onOpenCreate: can('stack:create') ? () => openCreateDialog('empty') : undefined,
+            onOpenCreate: canCreateStack ? () => openCreateDialog('empty') : undefined,
             onOpenAdopt: can('stack:read') ? openAdoptDialog : undefined,
             onScan: handleScanStacks,
-            canCreate: can('stack:create'),
+            canCreate: canCreateStack,
             activeNodeId: activeNode?.id ?? null,
             openMuteRulesWithPrefill,
             stacksLoadStatus,
@@ -1059,6 +1061,7 @@ export default function EditorLayout() {
           can={can}
           selectedFile={selectedFile}
           stackName={stackName}
+          activeNodeId={activeNode?.id ?? null}
           gitSourceOpen={gitSourceOpen}
           setGitSourceOpen={setGitSourceOpen}
           canSelfUpdate={hasCapability('self-update')}

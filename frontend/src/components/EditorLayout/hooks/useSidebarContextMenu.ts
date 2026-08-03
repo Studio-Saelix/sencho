@@ -31,7 +31,7 @@ interface UseSidebarContextMenuOptions {
   stackActions: StackActionsHook;
   activeNode: Node | null | undefined;
   isAdmin: boolean;
-  can: (action: PermissionAction, resourceType?: string, resourceId?: string) => boolean;
+  can: (action: PermissionAction, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean;
 }
 
 export function useSidebarContextMenu({
@@ -61,9 +61,10 @@ export function useSidebarContextMenu({
       canOpenApp: mainPort !== undefined && buildServiceUrl({ node: activeNode, publicPort: mainPort }) !== null,
       isBusy: stackListState.isStackBusy(file),
       isAdmin,
-      canDelete: can('stack:delete', 'stack', sName),
-      canDeploy: can('stack:deploy', 'stack', sName),
-      canEditLabels: can('stack:edit', 'stack', sName),
+      canDelete: can('stack:delete', 'stack', sName, nodeId),
+      canDeploy: can('stack:deploy', 'stack', sName, nodeId),
+      canEditLabels: can('stack:edit', 'stack', sName, nodeId),
+      canViewMonitor: can('stack:read', 'stack', sName, nodeId),
       // POST /api/labels (the inline "New label" entry) is guarded by the
       // unscoped requirePermission('stack:edit'); a user with only per-stack
       // scoped edit can toggle existing labels but cannot create new ones.
@@ -74,7 +75,8 @@ export function useSidebarContextMenu({
       menuVisibility: stackActions.getStackMenuVisibility(file),
       openAlertSheet: () => overlayState.openAlertSheet(file),
       openAutoHeal: () => overlayState.openAutoHeal(file),
-      checkUpdates: () => stackActions.checkUpdatesForStack(),
+      canCheckUpdates: can('stack:deploy', 'stack', sName, nodeId),
+      checkUpdates: () => stackActions.checkUpdatesForStack(sName),
       openStackApp: () => stackActions.openStackApp(file),
       deploy: () => stackActions.executeStackActionByFile(file, 'deploy', 'deploy'),
       stop: () => stackActions.executeStackActionByFile(file, 'stop', 'stop'),
@@ -179,7 +181,7 @@ export function useSidebarContextMenu({
     // deps would force a rebuild on every parent render and defeat the memo.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    stackListState.stackStatuses, stackListState.stackPorts, stackListState.stackSelfFlags, isAdmin,
+    stackListState.stackStatuses, stackListState.stackPorts, stackListState.stackSelfFlags, isAdmin, can,
     stackListState.isPinned, stackListState.labels, stackListState.stackLabelMap,
     stackListState.pin, stackListState.unpin, activeNode?.type, activeNode?.api_url, activeNode?.id,
     hasCapability, navState.openMuteRulesWithPrefill,

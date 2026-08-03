@@ -26,12 +26,12 @@ function formatTimestamp(ms: number | null): string {
 }
 
 interface FederationTabProps {
-    /** Whether the current user may change pin placement. Pinning is admin-only on the backend
-     * (PUT /api/blueprints/:id/pin requires admin); non-admins see the placement read-only. */
+    /** Whether the current user may change pin placement. */
     canManage: boolean;
+    canManageNode?: (nodeId: number) => boolean;
 }
 
-export function FederationTab({ canManage }: FederationTabProps) {
+export function FederationTab({ canManage, canManageNode }: FederationTabProps) {
     const [nodes, setNodes] = useState<NodeRecord[]>([]);
     const [blueprints, setBlueprints] = useState<BlueprintListItem[]>([]);
     const [loading, setLoading] = useState(true);
@@ -61,6 +61,7 @@ export function FederationTab({ canManage }: FederationTabProps) {
         for (const node of nodes) map.set(node.id, node.name);
         return map;
     }, [nodes]);
+    const canManageAnyNode = canManage || nodes.some(node => canManageNode?.(node.id));
 
     const handlePinChange = useCallback(async (blueprintId: number, value: string) => {
         const nodeId = value === UNPINNED ? null : Number.parseInt(value, 10);
@@ -149,7 +150,7 @@ export function FederationTab({ canManage }: FederationTabProps) {
                     <h3 className="text-sm font-medium">Pin policy</h3>
                     <span className="text-xs text-muted-foreground">
                         Force a blueprint onto a specific node, overriding its selector.
-                        {!canManage && ' Pin changes require an administrator.'}
+                        {!canManageAnyNode && ' You do not have permission to change pin placement.'}
                     </span>
                 </div>
                 <div className="p-4">
@@ -188,7 +189,7 @@ export function FederationTab({ canManage }: FederationTabProps) {
                                                     {describeSelector(bp.selector)}
                                                 </td>
                                                 <td className="py-2 pr-4 align-top">
-                                                    {canManage ? (
+                                                    {canManageAnyNode ? (
                                                         <Select
                                                             value={bp.pinned_node_id !== null ? String(bp.pinned_node_id) : UNPINNED}
                                                             onValueChange={(value) => void handlePinChange(bp.id, value)}
@@ -198,9 +199,13 @@ export function FederationTab({ canManage }: FederationTabProps) {
                                                                 <SelectValue placeholder="(unpinned)" />
                                                             </SelectTrigger>
                                                             <SelectContent>
-                                                                <SelectItem value={UNPINNED}>(unpinned)</SelectItem>
+                                                                <SelectItem value={UNPINNED} disabled={!canManage}>(unpinned)</SelectItem>
                                                                 {nodes.map(node => (
-                                                                    <SelectItem key={node.id} value={String(node.id)}>
+                                                                    <SelectItem
+                                                                        key={node.id}
+                                                                        value={String(node.id)}
+                                                                        disabled={!canManage && !canManageNode?.(node.id)}
+                                                                    >
                                                                         {node.name}
                                                                         {node.cordoned ? ' · cordoned' : ''}
                                                                     </SelectItem>

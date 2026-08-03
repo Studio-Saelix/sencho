@@ -184,8 +184,9 @@ export function StackAlertSheet({
 }
 
 function AlertsTab({ stackName, initialService }: { stackName: string; initialService?: string }) {
-    const { isAdmin } = useAuth();
+    const { can } = useAuth();
     const { activeNode, activeNodeMeta } = useNodes();
+    const canEditAlerts = can('stack:edit', 'stack', stackName, activeNode?.id);
     const isRemote = activeNode?.type === 'remote';
     const canScopeService = activeNodeMeta?.capabilities.includes(SERVICE_SCOPED_STACK_ALERT_CAPABILITY) === true;
 
@@ -443,13 +444,14 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
                                         {' '}&bull; Trigger after {alert.duration_mins}m &bull; Cooldown {alert.cooldown_mins}m
                                     </div>
                                 </div>
-                                {isAdmin && (
+                                {canEditAlerts && (
                                     <Button
                                         variant="ghost"
                                         size="icon"
                                         className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
                                         onClick={() => alert.id && setConfirmDeleteId(alert.id)}
                                         disabled={isLoading}
+                                        aria-label="Delete alert"
                                     >
                                         <Trash2 className="h-4 w-4" strokeWidth={1.5} />
                                     </Button>
@@ -460,7 +462,7 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
                 )}
             </SheetSection>
 
-            {isAdmin && (
+            {canEditAlerts && (
                 <SheetSection title="Add new rule">
                     <div className="space-y-3">
                         {canScopeService && (
@@ -595,7 +597,9 @@ function AutoHealTab({
     open: boolean;
     initialService?: string;
 }) {
-    const { isAdmin } = useAuth();
+    const { can } = useAuth();
+    const { activeNode } = useNodes();
+    const canEditAutoHeal = can('stack:edit', 'stack', stackName, activeNode?.id);
     const [policies, setPolicies] = useState<AutoHealPolicy[]>([]);
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -739,14 +743,14 @@ function AutoHealTab({
                                 onToggle={handleToggle}
                                 deleting={deleting}
                                 saving={saving}
-                                isAdmin={isAdmin}
+                                canEdit={canEditAutoHeal}
                             />
                         ))}
                     </div>
                 )}
             </SheetSection>
 
-            {isAdmin && (
+            {canEditAutoHeal && (
             <SheetSection title="Add new policy">
                 <div className="space-y-3">
                     <div className="space-y-2">
@@ -835,10 +839,11 @@ interface PolicyRowProps {
     onToggle: (id: number, enabled: boolean) => void;
     deleting: boolean;
     saving: boolean;
-    isAdmin: boolean;
+    /** True when the caller may toggle/delete this policy (stack:edit). */
+    canEdit: boolean;
 }
 
-function PolicyRow({ policy, onDelete, onToggle, deleting, saving, isAdmin }: PolicyRowProps) {
+function PolicyRow({ policy, onDelete, onToggle, deleting, saving, canEdit }: PolicyRowProps) {
     const [historyOpen, setHistoryOpen] = useState(false);
     const [history, setHistory] = useState<AutoHealHistoryEntry[]>([]);
     const [loadingHistory, setLoadingHistory] = useState(false);
@@ -886,7 +891,7 @@ function PolicyRow({ policy, onDelete, onToggle, deleting, saving, isAdmin }: Po
                     )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                    {isAdmin && (
+                    {canEdit && (
                         <TogglePill
                             checked={policy.enabled === 1}
                             onChange={(checked) => policy.id != null && onToggle(policy.id, checked)}
@@ -910,7 +915,7 @@ function PolicyRow({ policy, onDelete, onToggle, deleting, saving, isAdmin }: Po
                             <ChevronDown className="h-4 w-4" strokeWidth={1.5} />
                         )}
                     </Button>
-                    {isAdmin && (
+                    {canEdit && (
                         <Button
                             variant="ghost"
                             size="icon"

@@ -35,7 +35,8 @@ interface MisconfigAckPanelProps {
 }
 
 export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
-  const { isAdmin } = useAuth();
+  const { can } = useAuth();
+  const canManage = can('stack:edit');
   const [rows, setRows] = useState<MisconfigAcknowledgement[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -179,7 +180,7 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
         title="Misconfig acknowledgements"
         subtitle="Accept known-benign misconfigurations so they stop triggering alerts. Acknowledgements apply at read time across the fleet and never modify stored scan data."
         action={
-          isAdmin && !isReplica ? (
+          canManage && !isReplica ? (
             <Button size="sm" onClick={openCreate}>
               <Plus className="w-4 h-4 mr-1.5" />
               Add acknowledgement
@@ -255,7 +256,7 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
                     by {row.created_by} · expires {formatExpiry(row)}
                   </div>
                 </div>
-                {isAdmin && !isReplica && row.replicated_from_control === 0 && (
+                {canManage && !isReplica && row.replicated_from_control === 0 && (
                   <div className="flex items-center gap-1 shrink-0">
                     <Button
                       variant="ghost"

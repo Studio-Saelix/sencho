@@ -493,10 +493,10 @@ describe('BlueprintService local withdraw clears stack-scoped role assignments',
         const userId = db.addUser({ username: `bp-rbac-${counter}`, password_hash: hash, role: 'viewer' });
         const otherNodeId = seedNode();
         db.addRoleAssignment({
-            user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: bp.name,
+            user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: bp.name, node_id: nodeId,
         });
         db.addRoleAssignment({
-            user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'other-stack',
+            user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'other-stack', node_id: nodeId,
         });
         db.addRoleAssignment({
             user_id: userId, role: 'deployer', resource_type: 'node', resource_id: String(otherNodeId),
@@ -552,33 +552,42 @@ describe('BlueprintService local withdraw clears stack-scoped role assignments',
         const { bp, node, nodeId, userId, deleteStackSpy, db } = await arrangeLocalWithdraw();
         const fsErr = Object.assign(new Error('permission denied'), { code: 'EACCES' });
         deleteStackSpy.mockRejectedValue(fsErr);
-        const rbacSpy = vi.spyOn(db, 'deleteRoleAssignmentsByResource');
+        const rbacSpy = vi.spyOn(db, 'deleteRoleAssignmentsByStack');
 
-        const outcome = await BlueprintService.getInstance().withdrawFromNode(bp, node);
+        try {
+            const outcome = await BlueprintService.getInstance().withdrawFromNode(bp, node);
 
-        expect(outcome.status).toBe('failed');
-        expect(rbacSpy).not.toHaveBeenCalled();
-        expect(db.getDeployment(bp.id, nodeId)?.status).toBe('failed');
-        expect(hasAssignment(userId, 'stack', bp.name)).toBe(true);
-        db.deleteUser(userId);
+            expect(outcome.status).toBe('failed');
+            expect(rbacSpy).not.toHaveBeenCalled();
+            expect(db.getDeployment(bp.id, nodeId)?.status).toBe('failed');
+            expect(hasAssignment(userId, 'stack', bp.name)).toBe(true);
+        } finally {
+            rbacSpy.mockRestore();
+            db.deleteUser(userId);
+        }
     });
 
     it('fails withdraw and keeps the deployment when role-assignment cleanup throws', async () => {
         const { bp, node, nodeId, userId, db } = await arrangeLocalWithdraw();
-        vi.spyOn(db, 'deleteRoleAssignmentsByResource')
+        const rbacSpy = vi.spyOn(db, 'deleteRoleAssignmentsByStack')
             .mockImplementation(() => { throw new Error('simulated rbac cleanup failure'); });
         const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-        const outcome = await BlueprintService.getInstance().withdrawFromNode(bp, node);
+        try {
+            const outcome = await BlueprintService.getInstance().withdrawFromNode(bp, node);
 
-        expect(outcome.status).toBe('failed');
-        expect(db.getDeployment(bp.id, nodeId)).toBeDefined();
-        expect(db.getDeployment(bp.id, nodeId)?.status).toBe('failed');
-        expect(errorSpy.mock.calls.some((args) =>
-            typeof args[0] === 'string' && args[0].includes('Secondary DB cleanup failed'),
-        )).toBe(true);
-        expect(hasAssignment(userId, 'stack', bp.name)).toBe(true);
-        db.deleteUser(userId);
+            expect(outcome.status).toBe('failed');
+            expect(db.getDeployment(bp.id, nodeId)).toBeDefined();
+            expect(db.getDeployment(bp.id, nodeId)?.status).toBe('failed');
+            expect(errorSpy.mock.calls.some((args) =>
+                typeof args[0] === 'string' && args[0].includes('Secondary DB cleanup failed'),
+            )).toBe(true);
+            expect(hasAssignment(userId, 'stack', bp.name)).toBe(true);
+        } finally {
+            rbacSpy.mockRestore();
+            errorSpy.mockRestore();
+            db.deleteUser(userId);
+        }
     });
 });
 

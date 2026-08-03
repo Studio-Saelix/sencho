@@ -39,6 +39,7 @@ interface OverviewTabProps {
     onEditNode?: (node: Node) => void;
     onDeleteNode?: (node: Node) => void;
     onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
+    onOpenNodeDetails: (nodeId: number) => void;
     topologyMode: LayoutMode;
     onTopologyModeChange: (mode: LayoutMode) => void;
     topologyPositions: SavedPositions;
@@ -77,6 +78,7 @@ export function OverviewTab({
     onEditNode,
     onDeleteNode,
     onOpenMuteRulesWithPrefill,
+    onOpenNodeDetails,
     topologyMode,
     onTopologyModeChange,
     topologyPositions,
@@ -159,6 +161,7 @@ export function OverviewTab({
                                     onEdit={onEditNode}
                                     onDelete={onDeleteNode}
                                     onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
+                                    onOpenDetails={onOpenNodeDetails}
                                 />
                             ))}
                         </div>

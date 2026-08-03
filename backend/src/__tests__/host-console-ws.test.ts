@@ -65,17 +65,39 @@ describe('WebSocket upgrade - host console auth enforcement', () => {
     expect(await expectRejected(ws)).toBe(403);
   });
 
-  it('rejects a non-admin user without system:console (403)', async () => {
+  // All five built-in roles: only admin (system:console) is accepted on host
+  // console. Every other role must be rejected at upgrade time.
+  const NON_ADMIN_HOST_CONSOLE_ROLES = ['viewer', 'deployer', 'node-admin', 'auditor'] as const;
+
+  for (const role of NON_ADMIN_HOST_CONSOLE_ROLES) {
+    it(`rejects ${role} user without system:console (403)`, async () => {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      const username = `hc_${role.replace('-', '_')}`;
+      const hash = await bcrypt.hash('password123', 1);
+      try {
+        DatabaseService.getInstance().addUser({ username, password_hash: hash, role });
+      } catch {
+        // already exists from a prior run in the same worker
+      }
+      const token = jwt.sign({ username, role }, TEST_JWT_SECRET, { expiresIn: '1m' });
+      const ws = new WebSocket(wsUrl(), { headers: { Cookie: `sencho_token=${token}` } });
+      expect(await expectRejected(ws)).toBe(403);
+    });
+  }
+
+  it('rejects a legacy no-tv admin JWT after token_version bump (401)', async () => {
     const { DatabaseService } = await import('../services/DatabaseService');
-    const hash = await bcrypt.hash('viewerpass', 1);
-    try {
-      DatabaseService.getInstance().addUser({ username: 'hc_viewer', password_hash: hash, role: 'viewer' });
-    } catch {
-      // already exists from a prior run in the same worker
-    }
-    const token = jwt.sign({ username: 'hc_viewer', role: 'viewer' }, TEST_JWT_SECRET, { expiresIn: '1m' });
-    const ws = new WebSocket(wsUrl(), { headers: { Cookie: `sencho_token=${token}` } });
-    expect(await expectRejected(ws)).toBe(403);
+    const db = DatabaseService.getInstance();
+    const username = `hc-legacy-tv-${Date.now()}`;
+    const id = db.addUser({
+      username,
+      password_hash: await bcrypt.hash('password123', 1),
+      role: 'admin',
+    });
+    db.bumpTokenVersion(id);
+    const legacyNoTv = jwt.sign({ username, role: 'admin' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const ws = new WebSocket(wsUrl(), { headers: { Cookie: `sencho_token=${legacyNoTv}` } });
+    expect(await expectRejected(ws)).toBe(401);
   });
 
   it('accepts a Community-tier admin', async () => {

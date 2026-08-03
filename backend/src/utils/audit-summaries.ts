@@ -40,6 +40,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /system/images/delete': 'Deleted images',
   'POST /system/volumes/delete': 'Deleted volumes',
   'POST /system/networks/delete': 'Deleted networks',
+  'POST /system/rollback/generations/*/release': 'Released rollback protection',
   'POST /system/networks': 'Created network',
   'POST /system/console-token': 'Generated console token',
   'POST /system/reapply-compose': 'Triggered compose reapply',

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, Send, ChevronDown, ChevronRight, CheckCircle2, AlertCircle, MinusCircle, type LucideIcon } from 'lucide-react';
 import { SystemSheet, SheetSection, type SystemSheetTab } from '@/components/ui/system-sheet';
 import { Input } from '@/components/ui/input';
@@ -59,6 +59,7 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
     const [plan, setPlan] = useState<SecretPushPlanEntry[]>([]);
     const [results, setResults] = useState<SecretPushResultEntry[]>([]);
     const [expanded, setExpanded] = useState<Set<number>>(new Set());
+    const inputVersionRef = useRef(0);
 
     useEffect(() => {
         if (!open) return;
@@ -74,6 +75,14 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
             .then(setAllLabels)
             .catch(() => setAllLabels([]));
     }, [open]);
+
+    // Invalidate preview/results computed from the old inputs: clear them and
+    // bump a version counter so an in-flight request for the old inputs is dropped.
+    useEffect(() => {
+        setPlan([]);
+        setResults([]);
+        inputVersionRef.current += 1;
+    }, [selectedLabels, labelMode, stackName, envFile]);
 
     const labelOptions: MultiSelectOption[] = useMemo(
         () => allLabels.map((l) => ({ value: l, label: l })),
@@ -134,12 +143,14 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
             return;
         }
         setPreviewLoading(true);
+        const version = inputVersionRef.current;
         try {
             const result = await previewPush(secret.id, {
                 selector: buildSelector(),
                 stackName: stackName.trim(),
                 envFileBasename: envFile,
             });
+            if (inputVersionRef.current !== version) return;
             if (result.length === 0) {
                 toast.error('No nodes match this selector');
                 return;

@@ -19,8 +19,9 @@ import { BlueprintEditor } from './BlueprintEditor';
 import { useAuth } from '@/context/AuthContext';
 
 export function DeploymentsTab() {
-    const { isAdmin } = useAuth();
-    const canEdit = isAdmin;
+    const { can } = useAuth();
+    const canCreate = can('stack:create');
+    const canEdit = can('stack:edit');
     const [blueprints, setBlueprints] = useState<BlueprintListItem[]>([]);
     const [distinctLabels, setDistinctLabels] = useState<string[]>([]);
     const [loading, setLoading] = useState(true);
@@ -100,7 +101,7 @@ export function DeploymentsTab() {
                     <FleetTabHeading
                         title="Blueprints"
                         subtitle="Declare compose templates once and keep matching nodes in sync."
-                        action={canEdit ? (
+                        action={canCreate ? (
                             <Button size="sm" className="gap-1.5" onClick={() => setCreateOpen(true)}>
                                 <Plus className="w-4 h-4" strokeWidth={1.5} />
                                 New Blueprint
@@ -108,7 +109,7 @@ export function DeploymentsTab() {
                         ) : undefined}
                     />
                     <FleetEmptyState>
-                        <BlueprintEmptyState onCreate={() => setCreateOpen(true)} canCreate={canEdit} />
+                        <BlueprintEmptyState onCreate={() => setCreateOpen(true)} canCreate={canCreate} />
                     </FleetEmptyState>
                 </>
             ) : (
@@ -116,7 +117,7 @@ export function DeploymentsTab() {
                     blueprints={blueprints}
                     onSelect={setSelectedId}
                     onCreate={() => setCreateOpen(true)}
-                    canCreate={canEdit}
+                    canCreate={canCreate}
                 />
             )}
 
@@ -127,6 +128,7 @@ export function DeploymentsTab() {
                     onOpenChange={(o) => { if (!o) setSelectedId(null); }}
                     onChanged={refresh}
                     canEdit={canEdit}
+                    can={can}
                     distinctLabels={distinctLabels}
                 />
             )}

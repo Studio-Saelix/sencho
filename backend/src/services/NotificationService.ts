@@ -48,6 +48,9 @@ export type NotificationCategory =
     | 'update_started'
     | 'health_gate_passed'
     | 'health_gate_failed'
+    // Manual rollback-generation release (Resources → Rollback). History-only
+    // for the same reason as the drift pair above.
+    | 'rollback_generation_released'
     // Automatic external-network creation during deploy. History-only.
     | 'network_auto_created'
     | 'node_update_available'
@@ -67,7 +70,7 @@ export const ALL_SUPPRESSIBLE_CATEGORIES: readonly NotificationCategory[] = [
     ...ALL_NOTIFICATION_CATEGORIES,
     'drift_detected', 'drift_resolved',
     'update_started', 'health_gate_passed', 'health_gate_failed',
-    'network_auto_created',
+    'network_auto_created', 'rollback_generation_released',
 ];
 
 /** Webhook timeout: 10 seconds per external dispatch call. */

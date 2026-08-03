@@ -1,3 +1,4 @@
+import type { PermissionAction } from '@/context/AuthContext';
 import type { SectionId } from './types';
 
 export type SettingsGroupId =
@@ -41,7 +42,10 @@ export interface SettingsItemMeta {
     keywords: string[];
     tier: TierGate;
     scope: Scope;
+    /** Built-in Admin role only (credentials, identity, emergency). Not a matrix permission. */
     adminOnly?: boolean;
+    /** Matrix permission required to see the section. Independent of adminOnly. */
+    requiredPermission?: PermissionAction;
     hiddenOnRemote?: boolean;
 }
 
@@ -75,6 +79,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['admiral', 'assurance', 'hardened', 'agpl', 'license', 'activation', 'subscription', 'billing'],
         tier: null,
         scope: 'global',
+        requiredPermission: 'system:license',
         hiddenOnRemote: true,
     },
     {
@@ -85,7 +90,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['operators', 'team', 'rbac', 'roles', 'permissions', 'session', 'sliding refresh', 'stay signed in', 'sign out', 'logout'],
         tier: null,
         scope: 'global',
-        adminOnly: true,
+        requiredPermission: 'system:users',
         hiddenOnRemote: true,
     },
     {
@@ -106,7 +111,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['bearer', 'automation', 'ci', 'scripts', 'scopes'],
         tier: null,
         scope: 'global',
-        adminOnly: true,
+        requiredPermission: 'system:tokens',
         hiddenOnRemote: true,
     },
     // Infrastructure
@@ -118,6 +123,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['fleet', 'remote', 'proxy', 'node', 'cluster'],
         tier: null,
         scope: 'global',
+        requiredPermission: 'node:read',
         hiddenOnRemote: true,
     },
     {
@@ -125,7 +131,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         group: 'infrastructure',
         label: 'Stacks',
         description: 'Stack editor, lifecycle workflow preferences, and deploy guardrails.',
-        keywords: ['stack', 'compose', 'deploy', 'guardrail', 'health gate', 'observation', 'env', 'required variable', 'progress', 'modal', 'inline', 'diff', 'preview', 'save', 'editor', 'workflow'],
+        keywords: ['stack', 'compose', 'deploy', 'guardrail', 'health gate', 'observation', 'env', 'required variable', 'progress', 'modal', 'inline', 'diff', 'preview', 'save', 'editor', 'workflow', 'rollback', 'retention', 'generation'],
         tier: null,
         scope: 'node',
     },
@@ -147,7 +153,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['docker', 'ghcr', 'ecr', 'private', 'pull', 'auth'],
         tier: null,
         scope: 'global',
-        adminOnly: true,
+        requiredPermission: 'system:registries',
         hiddenOnRemote: true,
     },
     {
@@ -239,6 +245,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['image', 'update', 'registry', 'check', 'interval', 'cadence', 'poll', 'auto-update', 'detection', 'recheck', 'sidebar', 'badge', 'dot', 'indicator', 'status'],
         tier: null,
         scope: 'node',
+        requiredPermission: 'system:settings',
     },
     {
         id: 'webhooks',
@@ -248,6 +255,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['webhook', 'incoming', 'trigger', 'ci', 'cd', 'pipeline', 'deploy', 'hmac', 'signature', 'action'],
         tier: null,
         scope: 'global',
+        requiredPermission: 'system:webhooks',
         hiddenOnRemote: true,
     },
     // Organization
@@ -259,6 +267,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['labels', 'tags', 'palette', 'organisation'],
         tier: null,
         scope: 'node',
+        requiredPermission: 'stack:read',
     },
     // Operations
     {
@@ -269,6 +278,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['retention', 'metrics', 'logs', 'scans', 'audit', 'history', 'prune', 'window'],
         tier: null,
         scope: 'node',
+        requiredPermission: 'system:settings',
     },
     {
         id: 'developer',
@@ -278,6 +288,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['developer', 'debug', 'diagnostics', 'metrics', 'verbose'],
         tier: null,
         scope: 'node',
+        requiredPermission: 'system:settings',
     },
     {
         id: 'recovery',
@@ -323,11 +334,14 @@ export interface VisibilityContext {
     isRemote: boolean;
     isAdmin: boolean;
     isPaid: boolean;
+    /** Required so construction sites cannot omit permission checks. */
+    can: (action: PermissionAction) => boolean;
 }
 
 export function isItemVisible(item: SettingsItemMeta, ctx: VisibilityContext): boolean {
     if (ctx.isRemote && item.hiddenOnRemote) return false;
     if (item.adminOnly && !ctx.isAdmin) return false;
+    if (item.requiredPermission && !ctx.can(item.requiredPermission)) return false;
     return true;
 }
 

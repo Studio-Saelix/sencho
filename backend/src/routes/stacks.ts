@@ -72,6 +72,7 @@ import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 import { isSelfStack, refuseIfSelfStack, selfStackProtectedBulkResult } from '../helpers/selfStackGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
+import { classifyStackApiPath } from '../helpers/stackRouteAuth';
 
 // Authenticated users with edit permission can write arbitrarily large compose
 // files. Refuse to YAML.parse anything beyond this bound so a malformed (or
@@ -277,6 +278,24 @@ function getRelPath(req: Request): string {
 }
 
 export const stacksRouter = Router();
+
+stacksRouter.use((req: Request, res: Response, next: NextFunction): void => {
+  const classified = classifyStackApiPath(req.method, `/stacks${req.path}`);
+  if (classified.kind === 'static') {
+    next();
+    return;
+  }
+  if (classified.kind === 'unknown-named') {
+    if (req.user?.role === 'admin') {
+      next();
+      return;
+    }
+    res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+    return;
+  }
+  if (!requirePermission(req, res, classified.action, 'stack', classified.stackName)) return;
+  next();
+});
 
 stacksRouter.param('stackName', (req, res, next, stackName) => {
   if (typeof stackName !== 'string' || !isValidStackName(stackName)) {
@@ -607,6 +626,11 @@ stacksRouter.post('/bulk', async (req: Request, res: Response) => {
 
   const typedAction = action as BulkLifecycleAction;
   const typedNames = Array.from(new Set(stackNames as string[]));
+  const denied = typedNames.some(name =>
+    isValidStackName(name) && !checkPermission(req, 'stack:deploy', 'stack', name));
+  if (denied) {
+    return res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+  }
 
   const results = await runWithBoundedParallelism(
     typedNames,

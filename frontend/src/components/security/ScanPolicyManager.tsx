@@ -57,7 +57,8 @@ const EMPTY_FORM: PolicyFormState = {
  * mirroring how the rest of the fleet-governance UI behaves.
  */
 export function ScanPolicyManager() {
-  const { isAdmin } = useAuth();
+  const { isAdmin, can } = useAuth();
+  const canManagePolicies = can('stack:edit');
   const { activeNode } = useNodes();
   const isRemote = activeNode?.type === 'remote';
   const { status: trivy, refresh: refreshTrivy } = useTrivyStatus();
@@ -264,7 +265,7 @@ export function ScanPolicyManager() {
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <h3 className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle">Deploy enforcement policies</h3>
-        {isAdmin && !isRemote && !isReplica && (
+        {canManagePolicies && !isRemote && !isReplica && (
           <Button size="sm" onClick={openCreate}>
             <Plus className="w-4 h-4 mr-1.5" />
             Add policy
@@ -387,7 +388,7 @@ export function ScanPolicyManager() {
                   </Badge>
                 )}
               </div>
-              {isAdmin && !isReplica && (
+              {canManagePolicies && !isReplica && (
                 <div className="flex items-center gap-1 shrink-0">
                   <Button
                     variant="ghost"

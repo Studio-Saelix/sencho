@@ -241,6 +241,88 @@ describe('prune_on_update (auto-prune after updates)', () => {
   });
 });
 
+describe('recovery_retention_days (superseded rollback generation retention)', () => {
+  it('defaults to 7 days in a freshly seeded database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().recovery_retention_days).toBe('7');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.recovery_retention_days).toBeDefined();
+  });
+
+  it('accepts a well-formed write and persists it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'recovery_retention_days', value: '14' });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().recovery_retention_days).toBe('14');
+    DatabaseService.getInstance().updateGlobalSetting('recovery_retention_days', '7');
+  });
+
+  it('rejects an out-of-range value (400) and does not write it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'recovery_retention_days', value: '91' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Validation failed');
+    expect(DatabaseService.getInstance().getGlobalSettings().recovery_retention_days).not.toBe('91');
+  });
+
+  it('rejects a non-numeric value (400) and does not write it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'recovery_retention_days', value: 'banana' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Validation failed');
+  });
+});
+
+describe('recovery_max_generations (cap on retained rollback generations per stack)', () => {
+  it('defaults to 0 (unlimited) in a freshly seeded database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().recovery_max_generations).toBe('0');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.recovery_max_generations).toBeDefined();
+  });
+
+  it('accepts a well-formed write and persists it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'recovery_max_generations', value: '3' });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().recovery_max_generations).toBe('3');
+    DatabaseService.getInstance().updateGlobalSetting('recovery_max_generations', '0');
+  });
+
+  it('rejects a negative value (400) and does not write it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'recovery_max_generations', value: '-1' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Validation failed');
+    expect(DatabaseService.getInstance().getGlobalSettings().recovery_max_generations).not.toBe('-1');
+  });
+
+  it('rejects an out-of-range value (400) and does not write it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'recovery_max_generations', value: '51' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Validation failed');
+  });
+});
+
 describe('session_sliding_refresh (keep active sessions alive)', () => {
   it('defaults to ON in a freshly seeded database', () => {
     expect(DatabaseService.getInstance().getGlobalSettings().session_sliding_refresh).toBe('1');

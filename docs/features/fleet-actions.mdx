@@ -5,7 +5,7 @@ description: "Bulk operations across the fleet from one tab: stop stacks by labe
 
 The **Actions** tab on the Fleet view groups bulk operations that touch more than a single stack on a single node. Each action lives in its own card, orchestrates from the control instance, and reports per-node and per-stack results inline so you never have to click through a modal to learn what happened.
 
-Three cards ship today: **Prune Docker resources fleet-wide**, **Bulk label assign**, and **Stop by label**. Every card follows the same discipline before it touches anything: a live, debounced readout resolves the exact blast radius as you type or select, and the destructive or state-changing button stays disabled until that readout resolves to a concrete node and stack list. You confirm against real names, not a label string or a byte estimate.
+Three cards ship today: **Prune Docker resources fleet-wide**, **Bulk label assign**, and **Stop by label**. Every card resolves its blast radius before it touches anything. Fleet Prune also requires an itemized dry run, so its destructive button stays disabled until every reachable node has returned the exact resources and fingerprint that will authorize execution.
 
 <Frame>
   <img src="/images/fleet-actions/fleet-actions-overview.png" alt="Fleet view with the Actions tab selected. A two-column grid: Prune fleet-wide (top left, Maintenance chip), Bulk label assign (top right, Transformative chip), and Stop by label (bottom, Destructive chip). Each card shows a toolbar row with an action-class chip, a live blast-radius readout, a Dry run or Reset button, and the primary action." />
@@ -26,17 +26,17 @@ Fleet Actions is the home for operations that span the fleet but don't fit anywh
 | Trigger a Sencho self-update across remote nodes | **Check Updates** button on the Fleet masthead |
 | Steer where new blueprint deployments land | [Fleet Federation](/features/fleet-federation) |
 | Replicate scan policies and CVE suppressions to remotes | [Fleet Sync](/features/fleet-sync) |
-| Reclaim disk space on a single node with an itemized, undo-safe preview | **Resources → Prune** on that node (a different endpoint and flow from the fleet-wide card; see [Prune Docker resources fleet-wide](#prune-docker-resources-fleet-wide)) |
+| Reclaim disk space on a single node with an itemized preview | **Resources → Prune** on that node (the single-node version of the fingerprint-bound flow described in [Prune Docker resources fleet-wide](#prune-docker-resources-fleet-wide)) |
 
 ## How every card works: preview, confirm, execute
 
 All three cards share one execution model, and understanding it explains every result panel, timeout, and edge case below.
 
 1. **You describe the target.** A stack label name (Stop by label), a label plus checked stacks (Bulk label assign), or a set of resource targets and a scope (Prune).
-2. **A live, debounced readout resolves the real blast radius.** Typing a label name or checking a target fires a non-destructive preview call (`POST /api/fleet/labels/match-preview` or `POST /api/fleet/prune/estimate`) roughly 350-500ms after you stop changing input. The readout in the card's toolbar shows `awaiting target` until something is selected, `resolving…` while the call is in flight, and then a concrete count (`7 stacks · 1 nodes`, `~ 6.09 GB reclaimable`). The primary button stays disabled until this resolves to a non-zero, non-loading result.
-3. **You confirm against the resolved list, not the input.** Clicking the primary button opens a confirmation dialog that lists the actual nodes and stacks (Stop, Bulk assign) or restates the scope (Prune). For Stop by label specifically, the confirmation carries the exact node/stack list the preview resolved, and the real stop only touches stacks that are still in that list *and* still carry the label at execution time: a stack that gains the label after you opened the confirmation is never touched, and a node that reconnects after the preview does not get pulled into the stop.
-4. **The control instance fans the confirmed action out to every node in parallel.** The local node runs in-process; each remote node is called over the standard Bearer-token proxy path. A node that cannot be reached, returns a non-2xx response, or returns a shape Sencho does not recognize is reported as a failure for that node only; the fan-out to every other node still completes.
-5. **Results render per node, grouped and expandable**, in a `Per-node breakdown` section below the form. Stop and Prune also expose a **Dry run** button that walks the identical code path and locks without performing the destructive step, so you can rehearse the exact fan-out before committing.
+2. **A live, debounced readout estimates the blast radius.** Typing a label name or checking a target fires a non-destructive preview call (`POST /api/fleet/labels/match-preview` or `POST /api/fleet/prune/estimate`) roughly 350-500ms after you stop changing input. The toolbar shows a stack count or approximate reclaimable bytes while you refine the action.
+3. **You review the resolved list, not only the input.** Stop and Bulk assign resolve concrete stacks. Prune requires **Dry run**, which lists every candidate image, volume, and network for each reachable node. Changing the targets, scope, node roster, or node reachability clears that authorization.
+4. **The control instance verifies before mutation.** Fleet Prune rebuilds every reviewed plan and checks the complete node roster before any node starts deleting. A stale plan or changed reachability rejects the whole preflight. A later race can still produce an explicit partial result because each node revalidates again immediately before deletion.
+5. **Results render per node, grouped and expandable.** Prune retains the reviewed item identity and, when the node returns item outcomes, marks each candidate Removed, Skipped, or Failed after execution. Unreachable nodes remain visible as excluded rather than appearing as successful empty plans.
 
 ## The three cards
 
@@ -46,7 +46,7 @@ All three cards share one execution model, and understanding it explains every r
 | Bulk label assign | Transformative | `POST /api/fleet/labels/bulk-assign` | (computed client-side from `/api/labels` and `/api/fleet/node/:id/stacks` per node) | Only the nodes whose stacks you select |
 | Prune Docker resources fleet-wide | Maintenance | `POST /api/fleet/labels/fleet-prune` | `POST /api/fleet/prune/estimate` | Every configured node |
 
-Every card is admin-only and available on every license tier. Stop and Prune iterate every node in **Settings → Nodes**; Bulk label assign iterates only the nodes whose stacks you actually checked. Each card runs the authoritative work on the executing node (the local node in process, every remote over the node proxy), so an unreachable node shows up in the results with a transport error rather than blocking the rest of the batch.
+Every card is admin-only and available on every license tier. Stop and Prune iterate every node in **Settings → Nodes**; Bulk label assign iterates only the nodes whose stacks you actually checked. Each card runs the authoritative work on the executing node (the local node in process, every remote over the node proxy). Stop and Bulk label assign report unreachable nodes without blocking work elsewhere. Fleet Prune excludes unreachable nodes during review, then rejects execution if that reviewed reachability changes.
 
 ## Stop by label
 
@@ -120,7 +120,7 @@ A single Apply accepts up to **1,000 stack assignments** summed across every tar
 
 ## Prune Docker resources fleet-wide
 
-Reclaim disk space on every reachable node by deleting unused images, volumes, and networks. The control instance fans out to each node and reports reclaimed bytes per node and per target.
+Reclaim disk space on every reachable node by deleting unused images, volumes, and networks. A dry run lists the exact candidates on each node, and the real prune is authorized by the fingerprint of each reviewed plan.
 
 <Frame>
   <img src="/images/fleet-actions/fleet-actions-prune.png" alt="Prune fleet-wide card with Images and Volumes targets checked, scope set to All unused, and a live per-node estimate: Local 153.85 MB, Opsix 3.06 GB, Pitt-Moba 1.37 GB, SLX-Mars 1.51 GB, totaling roughly 6.09 GB reclaimable in the toolbar readout." />
@@ -135,33 +135,48 @@ The **Targets** checkboxes are independent and at least one must be ticked: **Im
 Scope is a segmented control with two options:
 
 - **Managed only** (default). Sencho looks up the stacks it knows about on the node, then prunes only resources owned by those stacks. Active containers and resources placed by other tools are untouched.
-- **All unused**. Sencho runs the equivalent of `docker system prune` for each selected target. Any image, volume, or network not currently in use is deleted, including resources from workloads Sencho does not manage. The confirmation title flips to **Prune ALL unused resources across the fleet?**.
+- **All unused**. Sencho applies the target-specific Docker prune eligibility rules to each selected resource type. Any selected image, volume, or network not currently in use is deleted, including resources from workloads Sencho does not manage. The confirmation title flips to **Prune ALL unused resources across the fleet?**.
 
-### Live estimate and behaviour
+### Review the itemized dry run
 
-- Changing a target or the scope re-triggers a debounced call to `POST /api/fleet/prune/estimate`, which walks the same Docker enumeration the destructive path uses so the estimate matches what pruning would actually reclaim. A completed real prune that succeeds on at least one target re-triggers the same estimate so the toolbar total and per-node list reflect post-prune Docker state. **Prune fleet** stays disabled until the estimate resolves: you cannot confirm a destructive fleet-wide prune with no context on what it will reclaim.
-- Each remote node receives one `POST /api/system/prune/system` call per selected target, with a 120-second timeout. If a transport error fires for one target, the remaining targets on that node are short-circuited with the same error rather than retried, so a dead node doesn't absorb the full multi-target timeout budget.
-- Local nodes serialize against a per-node lock (`bulk-prune:<nodeId>`). A second fleet prune launched against the same local node while the first is still in flight returns *A prune is already running on this node* for each target.
-- Reclaimed bytes are reported by the Docker daemon and are approximate. Per-node rows in the results panel sum the per-target reclaim; the per-target children show how much each individual prune actually freed.
+Click **Dry run** after choosing targets and scope. Each reachable node returns one multi-target plan grouped into Images, Volumes, and Networks. Candidate rows show the stable ID, display name, reclaimable size when Docker provides one, why the resource is unused, managed or unmanaged ownership, and the associated stack when it can be resolved. Images also show available digest and creation details; volumes show their driver; networks show driver and scope. Only Compose ownership labels are shown, not arbitrary Docker labels.
 
-<Note>
-Fleet Actions' prune card calls the same node-local prune route as the single-node **Resources → Prune** page, but without that page's itemized plan-and-fingerprint flow. It never returns the `PRUNE_PLAN_STALE` (409) error you can see on Resources; each fleet prune call targets exactly one resource type per node and executes immediately. If you want an itemized, reviewable plan before pruning a specific node, use that node's own Resources page instead.
-</Note>
+An untagged image is identified as `<none>:<none>` alongside its short ID. Under **All unused**, unmanaged candidates carry an **UNMANAGED** badge. Nodes that cannot be reached are shown as **excluded** and never as zero-candidate success. A reachable plan with zero items is still valid.
+
+The node total is the sum of the sizes shown in that node's candidate rows. Image totals are estimates because Docker layers may be shared; the actual bytes reclaimed can differ after Docker accounts for layers still referenced by other images.
+
+### Fingerprint-bound execution
+
+**Prune fleet** remains disabled until the current targets, scope, and node roster have a valid reviewed plan for every reachable node. Execution sends one fingerprint per reviewed reachable node. Before deletion begins, the control instance rebuilds all plans, confirms that reviewed-unreachable nodes are still unreachable, and compares the complete configured-node roster.
+
+If a node was added, removed, connected, disconnected, or changed candidates after the dry run, no node starts pruning. Run **Dry run** again to review the new state. Once fleet-wide preflight passes, each node revalidates immediately before deletion. A race at that point can produce a partial result, which is reported rather than hidden.
+
+Local plan enumeration has an eight-second Docker-daemon timeout. Real local execution holds the per-node prune lock from preflight through mutation. Proxy remotes and Pilot nodes use one multi-target plan request and one fingerprint-bound execute request through their normal fleet transport. Mesh-managed stacks follow the transport of the node that hosts them.
+
+### Read post-prune outcomes
+
+The result keeps the reviewed name and metadata for every candidate and adds one outcome when the node returns itemized outcomes:
+
+- **Removed** means the reviewed resource was deleted.
+- **Skipped** means it became active, was already absent, or became protected before deletion.
+- **Failed** includes the resource-level error returned by the node.
+
+If a remote reports only its reclaimed total, the node shows that total without inventing per-item statuses. A completed mutation refreshes the live estimate.
 
 ## Prerequisites
 
 | Requirement | Why it matters |
 |---|---|
-| **Configured remote nodes in Settings → Nodes** | Stop and Prune iterate the configured node list; Bulk label assign iterates whichever nodes you select stacks on. A node missing its `api_url` or `api_token`, or one that cannot be reached, is reported once per node as unreachable and never blocks the reachable nodes. |
+| **Configured remote nodes in Settings → Nodes** | Stop and Prune iterate the configured node list; Bulk label assign iterates whichever nodes you select stacks on. Stop and Bulk label assign report an unreachable node without blocking other nodes. Prune excludes it from the reviewed plan and rejects execution if its reachability later changes. |
 | **Admin role** | Every card requires the admin role to apply. |
 | **Labels you intend to target** | Stop by label and its autocomplete depend on stack labels existing on at least one node; Bulk label assign depends on at least one stack label existing anywhere in the fleet. See [Stack Labels](/features/stack-labels) for the authoring flow. |
 
 ## Behaviour and lifecycle
 
-- **Always returns 200.** Every destructive endpoint is structured so the HTTP status reflects the request shape, not the operational outcome. Partial failure is encoded in per-row fields, not in the status code.
+- **Operational outcomes are itemized.** Normal fan-out results use per-node and per-item fields. Fleet Prune uses `409` when the reviewed roster, reachability, or fingerprint changes before mutation, because that rejection guarantees no node has started deleting.
 - **No retry, no scheduling, no undo.** Fleet Actions runs synchronously and is operator-driven; there is no background scheduler and no roll-back. For recurrence, use [Scheduled Operations](/features/scheduled-operations).
-- **Offline remotes still receive the request.** A node that is down at the moment of the action returns a transport-error row but does not block the fan-out across the rest of the fleet.
-- **Concurrent runs serialize per node.** All three cards take per-node locks before touching Docker or the label tables, so kicking off a second prune, a second fleet stop, or a fleet stop overlapping a per-label stop on the same node yields a calm "already running on this node" row rather than silent double-execution.
+- **Offline remotes stay visible.** Dry run marks an unreachable node as excluded. If its reachability changes before Prune executes, the reviewed authorization is rejected and must be rebuilt.
+- **Concurrent mutations serialize per node.** A real local Fleet Prune holds its prune lock through preflight and execution. Dry-run enumeration stays outside the destructive lock.
 
 ## Limitations and non-goals
 
@@ -174,7 +189,7 @@ Fleet Actions is intentionally narrow. The following are deliberately out of sco
 - **No undo.** A stopped stack stays stopped until you start it again; a pruned image is gone until it is pulled or rebuilt.
 - **Approximate reclaim numbers.** The bytes the Prune card reports come from the Docker daemon and are best-effort, not authoritative.
 - **Confirmed-target stops need a current remote.** A real (non-dry-run) stop bound to specific stacks refuses to run against a remote that doesn't advertise support for confirmed-target binding; upgrade the remote to retry.
-- **Timeouts scale with the fan-out, not with any one node.** 60 seconds per remote on fleet-stop and bulk-assign, 120 seconds per remote per prune target. A remote with many stacks or a very slow filesystem may produce a timeout row before the underlying work fully completes; the action itself usually still finishes on the remote, the control instance just stopped waiting.
+- **Timeouts scale with the fan-out, not with any one node.** Remote fleet-stop and bulk-assign calls allow 60 seconds. Fleet Prune allows 120 seconds for each node's combined multi-target plan or execute request. A remote with many stacks or a very slow filesystem may produce a timeout row before the underlying work fully completes; during execution, check that remote's logs before retrying because the control instance may have stopped waiting after mutation began.
 
 ## Practical workflows
 
@@ -184,7 +199,7 @@ Tag the stacks you want to bring down with a dedicated label (for example `eveni
 
 ### Rehearse a destructive action before committing
 
-For Stop and Prune, click **Dry run** first. It walks the identical lock, fan-out, and per-node logic as the real action but skips the destructive leaf call, so the results panel shows exactly what would happen (including which nodes are unreachable right now) before you commit to it.
+For Stop and Prune, click **Dry run** first. Fleet Prune shows the exact Docker candidates, including which nodes are excluded, and stores the fingerprints needed to unlock the destructive action.
 
 ### Propagate a label across the fleet
 
@@ -192,7 +207,7 @@ Define a label like `Media` on one node (for example the local node) under **Set
 
 ### Free disk before a heavy deploy
 
-Run **Prune Docker resources fleet-wide** with **Images** selected and **Managed only** scope, and check the live per-node estimate before confirming. It gives a quick read on which hosts have accumulated the most stale layers. Switch to **All unused** if you want the prune to reach workloads that Sencho does not manage.
+Run **Prune Docker resources fleet-wide** with **Images** selected and **Managed only** scope. Check the live estimate, run the itemized dry run, and review each image before confirming. Switch to **All unused** if you want the plan to include workloads that Sencho does not manage.
 
 ## Common questions
 
@@ -201,13 +216,13 @@ Run **Prune Docker resources fleet-wide** with **Images** selected and **Managed
     Bulk mode operates on a hand-picked set of stacks **on one node** and supports start, stop, restart, and update. Fleet Actions operates **across every configured node** by selector (a label, or a checked cross-node set), and only Stop is a lifecycle action here (Bulk mode covers restart and update, Fleet Actions does not).
   </Accordion>
   <Accordion title="Does Dry run touch anything?">
-    No. Dry run walks the same code path, including acquiring the per-node lock, but every card skips the destructive Docker or label-table call and returns what it would have done instead. It is safe to run repeatedly.
+    No. Fleet Prune enumerates candidates without calling Docker remove methods or invalidating caches. It is safe to run repeatedly.
   </Accordion>
   <Accordion title="Why is the primary button disabled even though I typed a label or checked a target?">
-    Every destructive or state-changing button stays disabled until the live preview or estimate resolves to a non-zero, non-loading result. This is deliberate: you always confirm against a concrete, current blast radius rather than an unresolved input.
+    Fleet Prune requires a successful **Dry run** for the current targets, scope, and node roster. Run it again after any of those inputs or a node's reachability changes.
   </Accordion>
-  <Accordion title="Why does Fleet's Prune never show the 'stale plan' error I've seen on Resources?">
-    Resources → Prune builds an itemized plan with a fingerprint and re-validates it at execute time, which is where that error comes from. Fleet Actions' prune card calls the simpler legacy single-target path on each node instead, so there is no plan to go stale.
+  <Accordion title="Why did Fleet Prune ask for another dry run?">
+    The reviewed node roster, reachability, or candidate fingerprint changed before deletion began. Sencho rejected the entire fleet preflight so you can review the current candidates before trying again.
   </Accordion>
 </AccordionGroup>
 
@@ -239,7 +254,7 @@ Run **Prune Docker resources fleet-wide** with **Images** selected and **Managed
     Fleet Actions runs admin-only. Confirm the active user has the admin role under **Settings → Users**; operator and viewer roles see every card but cannot apply them.
   </Accordion>
   <Accordion title="A node is reported as unreachable">
-    The node is in **Settings → Nodes** but its `api_url` or `api_token` is missing, expired, or unreachable. Stop by label reports it once as a single `<node> (unreachable)` row; Prune reports it per target. Open **Settings → Nodes** on the control instance and test the connection for the remote; fix the credential or the reachability, then re-run the action.
+    The node is in **Settings → Nodes** but its `api_url` or `api_token` is missing, expired, or unreachable. Stop by label reports one `<node> (unreachable)` row. Fleet Prune keeps the node visible as excluded from the reviewed plan; its target rows carry the same reachability error. Open **Settings → Nodes** on the control instance and test the connection for the remote; fix the credential or reachability, then run a new dry run.
   </Accordion>
 </AccordionGroup>
 

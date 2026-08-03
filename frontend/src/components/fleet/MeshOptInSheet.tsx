@@ -13,7 +13,7 @@ interface Props {
     nodeId: number;
     nodeName: string;
     onChanged: () => void;
-    /** Opt-in/out is admin-only on the backend; non-admins see the list read-only. */
+    /** Whether the user may start the mesh-wide membership cascade. */
     canManage: boolean;
 }
 

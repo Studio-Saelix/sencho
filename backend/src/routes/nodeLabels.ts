@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin, requireBody } from '../middleware/tierGates';
+import { requireBody } from '../middleware/tierGates';
+import { requirePermission } from '../middleware/permissions';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeLabelService } from '../services/NodeLabelService';
 import { parseIntParam } from '../utils/parseIntParam';
@@ -10,6 +11,7 @@ export const nodeLabelsRouter = Router();
 nodeLabelsRouter.use(authMiddleware);
 
 nodeLabelsRouter.get('/', (req: Request, res: Response): void => {
+    if (!requirePermission(req, res, 'node:read')) return;
     try {
         const map = NodeLabelService.getInstance().listAll();
         res.json(map);
@@ -20,6 +22,7 @@ nodeLabelsRouter.get('/', (req: Request, res: Response): void => {
 });
 
 nodeLabelsRouter.get('/all', (req: Request, res: Response): void => {
+    if (!requirePermission(req, res, 'node:read')) return;
     try {
         const labels = NodeLabelService.getInstance().listDistinct();
         res.json({ labels });
@@ -32,6 +35,7 @@ nodeLabelsRouter.get('/all', (req: Request, res: Response): void => {
 nodeLabelsRouter.get('/:nodeId', (req: Request, res: Response): void => {
     const nodeId = parseIntParam(req, res, 'nodeId');
     if (nodeId === null) return;
+    if (!requirePermission(req, res, 'node:read', 'node', String(nodeId))) return;
     try {
         const node = DatabaseService.getInstance().getNode(nodeId);
         if (!node) {
@@ -47,10 +51,10 @@ nodeLabelsRouter.get('/:nodeId', (req: Request, res: Response): void => {
 });
 
 nodeLabelsRouter.post('/:nodeId', (req: Request, res: Response): void => {
-    if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     const nodeId = parseIntParam(req, res, 'nodeId');
     if (nodeId === null) return;
+    if (!requirePermission(req, res, 'node:manage', 'node', String(nodeId))) return;
     const label = typeof req.body.label === 'string' ? req.body.label : '';
     try {
         const node = DatabaseService.getInstance().getNode(nodeId);
@@ -71,9 +75,9 @@ nodeLabelsRouter.post('/:nodeId', (req: Request, res: Response): void => {
 });
 
 nodeLabelsRouter.delete('/:nodeId/:label', (req: Request, res: Response): void => {
-    if (!requireAdmin(req, res)) return;
     const nodeId = parseIntParam(req, res, 'nodeId');
     if (nodeId === null) return;
+    if (!requirePermission(req, res, 'node:manage', 'node', String(nodeId))) return;
     const labelParam = req.params.label;
     const label = typeof labelParam === 'string' ? labelParam : '';
     if (!label) {

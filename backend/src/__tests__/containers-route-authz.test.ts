@@ -21,6 +21,7 @@ let ROLE_PERMISSIONS: typeof import('../middleware/permissions').ROLE_PERMISSION
 
 const VIEWER = 'container-read-viewer';
 const READ_PATHS = ['/api/containers', '/api/containers/abc123/logs', '/api/ports/in-use'];
+const MUTATION_PATHS = ['/api/containers/abc123/start', '/api/containers/abc123/stop', '/api/containers/abc123/restart'];
 
 /** Sign a viewer JWT using the live token_version so authMiddleware accepts it. */
 function viewerToken(): string {
@@ -118,5 +119,15 @@ describe('container/ports reads reject unauthenticated requests', () => {
   it.each(READ_PATHS)('GET %s without a token is 401', async (path) => {
     const res = await request(app).get(path);
     expect(res.status).toBe(401);
+  });
+});
+
+describe('generic container-id mutations remain Admin-only', () => {
+  it.each(MUTATION_PATHS)('POST %s rejects a non-admin before Docker work', async (path) => {
+    const { docker } = stubDockerAndFs();
+    const res = await request(app).post(path).set('Authorization', `Bearer ${viewerToken()}`);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('ADMIN_REQUIRED');
+    expect(docker).not.toHaveBeenCalled();
   });
 });

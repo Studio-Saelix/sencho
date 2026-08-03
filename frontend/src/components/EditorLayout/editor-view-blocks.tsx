@@ -127,7 +127,6 @@ export interface StackIdentityHeaderProps {
     safeContainers: ContainerInfo[];
     isRunning: boolean;
     can: ReturnType<typeof useAuth>['can'];
-    isAdmin: boolean;
     trivy: { available: boolean };
     backupInfo: { exists: boolean; timestamp: number | null };
     loadingAction: StackAction | null;
@@ -156,7 +155,6 @@ export function StackIdentityHeader({
     safeContainers,
     isRunning,
     can,
-    isAdmin,
     trivy,
     backupInfo,
     loadingAction,
@@ -203,10 +201,10 @@ export function StackIdentityHeader({
                 backend permissions so a delete-only or deploy-only persona sees
                 exactly what they can act on. */}
             {(() => {
-                const canDeploy = can('stack:deploy', 'stack', stackName);
-                const canDelete = can('stack:delete', 'stack', stackName);
+                const canDeploy = can('stack:deploy', 'stack', stackName, activeNode?.id);
+                const canDelete = can('stack:delete', 'stack', stackName, activeNode?.id);
                 const canRollback = canDeploy && backupInfo.exists;
-                const canScan = trivy.available && isAdmin;
+                const canScan = trivy.available && canDeploy;
                 const canMute = stackMuteActions?.canMute ?? false;
                 const hasOverflowExtras = canRollback || canScan;
                 const hasOverflow = hasOverflowExtras || canDelete || canMute || onOpenMonitor;
@@ -307,6 +305,18 @@ export function StackIdentityHeader({
             })()}
         </div>
     );
+}
+
+/** Optional per-card Update/Rebuild affordance for flattened single-container
+ *  multi-service rows. Pass only from that call site; leave undefined on
+ *  multi-replica nested children and the single-service flat path. */
+export interface ServiceUpdateAffordance {
+    hasUpdate: boolean;
+    mode: 'update' | 'rebuild';
+    showUpdateAction: boolean;
+    busy: boolean;
+    replicaCopy: string;
+    onRequest: () => void;
 }
 
 export interface ContainersHealthProps {
@@ -466,10 +476,73 @@ export function ContainersHealth({
     ) : null;
 
     // One container card. `hideServiceMenu` drops the per-container
-    // Start/Stop/Restart kebab on multi-service stacks; the declared-service
-    // header above owns lifecycle actions. Child cards keep logs, shell, ports,
-    // and metrics only.
-    const renderContainerCard = (container: ContainerInfo, hideServiceMenu: boolean) => {
+    // Start/Stop/Restart kebab on multi-replica nested children; the
+    // declared-service header above owns lifecycle actions there. Flattened
+    // single-container multi-service rows pass updateAffordance and keep the
+    // kebab (`hideServiceMenu=false`). Single-service flat rows leave
+    // updateAffordance undefined.
+    const renderServiceUpdateButton = (affordance: ServiceUpdateAffordance) => {
+        if (!affordance.showUpdateAction) return null;
+        return (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 rounded-md px-2 max-md:h-11"
+                    onClick={affordance.onRequest}
+                    disabled={affordance.busy}
+                  >
+                    <CloudDownload className="h-3.5 w-3.5 mr-1.5" strokeWidth={1.5} />
+                    {affordance.busy
+                        ? (affordance.mode === 'rebuild' ? 'Rebuilding...' : 'Updating...')
+                        : (affordance.mode === 'rebuild' ? 'Rebuild' : 'Update')}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{affordance.replicaCopy}</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+        );
+    };
+
+    const renderServiceLifecycleMenu = (serviceName: string, isServiceActive: boolean) => (
+        <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+                <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
+                    aria-label="Service actions"
+                >
+                    <MoreVertical className="h-3.5 w-3.5" strokeWidth={1.5} />
+                </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+                {isServiceActive ? (
+                    <>
+                        <DropdownMenuItem onSelect={() => serviceAction('restart', serviceName)}>
+                            Restart service
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => serviceAction('stop', serviceName)}>
+                            Stop service
+                        </DropdownMenuItem>
+                    </>
+                ) : (
+                    <DropdownMenuItem onSelect={() => serviceAction('start', serviceName)}>
+                        Start service
+                    </DropdownMenuItem>
+                )}
+            </DropdownMenuContent>
+        </DropdownMenu>
+    );
+
+    const renderContainerCard = (
+        container: ContainerInfo,
+        hideServiceMenu: boolean,
+        updateAffordance?: ServiceUpdateAffordance,
+    ) => {
                         let mainPort: number | undefined;
                         let mainPortPrivate: number | undefined;
                         let mainPortProto: string | undefined;
@@ -519,7 +592,14 @@ export function ContainersHealth({
                                             {badgeGlyph}
                                         </div>
                                         <div className="flex min-w-0 flex-col gap-0.5">
-                                            <div className="truncate font-mono text-sm text-foreground">{containerName}</div>
+                                            <div className="flex min-w-0 items-center gap-2">
+                                                <div className="truncate font-mono text-sm text-foreground">{containerName}</div>
+                                                {updateAffordance?.hasUpdate && (
+                                                    <span className="shrink-0 rounded-full border border-brand/30 bg-brand/10 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-brand">
+                                                        Update
+                                                    </span>
+                                                )}
+                                            </div>
                                             <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px] text-stat-subtitle">
                                                 {uptime ? <span>{uptime}</span> : <span>{(container.State || 'unknown').toLowerCase()}</span>}
                                                 {hcLabel ? <><span>·</span><span>{hcLabel}</span></> : null}
@@ -565,6 +645,7 @@ export function ContainersHealth({
                                         </div>
                                     </div>
                                     <div className="flex shrink-0 items-center gap-1">
+                                        {updateAffordance ? renderServiceUpdateButton(updateAffordance) : null}
                                         <ImageSourceMenu
                                             imageRef={container.Image}
                                             imageId={container.ImageID}
@@ -625,34 +706,10 @@ export function ContainersHealth({
                                           </TooltipProvider>
                                         )}
                                         {!hideServiceMenu && container.Service && (
-                                            <DropdownMenu>
-                                                <DropdownMenuTrigger asChild>
-                                                    <Button
-                                                        size="icon"
-                                                        variant="ghost"
-                                                        className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
-                                                        aria-label="Service actions"
-                                                    >
-                                                        <MoreVertical className="h-3.5 w-3.5" strokeWidth={1.5} />
-                                                    </Button>
-                                                </DropdownMenuTrigger>
-                                                <DropdownMenuContent align="end">
-                                                    {isActive ? (
-                                                        <>
-                                                            <DropdownMenuItem onSelect={() => serviceAction('restart', container.Service!)}>
-                                                                Restart service
-                                                            </DropdownMenuItem>
-                                                            <DropdownMenuItem onSelect={() => serviceAction('stop', container.Service!)}>
-                                                                Stop service
-                                                            </DropdownMenuItem>
-                                                        </>
-                                                    ) : (
-                                                        <DropdownMenuItem onSelect={() => serviceAction('start', container.Service!)}>
-                                                            Start service
-                                                        </DropdownMenuItem>
-                                                    )}
-                                                </DropdownMenuContent>
-                                            </DropdownMenu>
+                                            renderServiceLifecycleMenu(
+                                                container.Service,
+                                                isActive,
+                                            )
                                         )}
                                     </div>
                                 </div>
@@ -752,13 +809,63 @@ export function ContainersHealth({
                         const busy = serviceUpdateInProgress?.service === spec.name;
                         const hasUpdate = status ? isConfirmedServiceUpdate(status) : false;
                         const mode: 'update' | 'rebuild' = !hasUpdate && spec.hasBuild ? 'rebuild' : 'update';
-                        const showUpdateAction = spec.declaredImage !== null || spec.hasBuild;
+                        // Registry Update only when a check confirmed a pending
+                        // image update (clears after a successful recheck). Rebuild
+                        // stays available for build-backed services without one.
+                        // Stack-level Update in the identity header remains the
+                        // always-on full-stack pull path.
+                        const showUpdateAction = hasUpdate || spec.hasBuild;
                         const isServiceActive = group.some(c => c.State === 'running' || c.State === 'paused');
                         const runningCount = group.filter(c => c.State === 'running').length;
                         const replicaWord = spec.expectedReplicas === 1 ? 'replica' : 'replicas';
                         const replicaCopy = mode === 'rebuild'
                             ? `Rebuilds all ${spec.expectedReplicas} ${replicaWord}`
                             : `Updates all ${spec.expectedReplicas} ${replicaWord}`;
+                        const updateAffordance: ServiceUpdateAffordance = {
+                            hasUpdate,
+                            mode,
+                            showUpdateAction,
+                            busy,
+                            replicaCopy,
+                            onRequest: () => onRequestServiceUpdate?.(spec.name, mode),
+                        };
+
+                        // Single-container declared service: one flat card with
+                        // Update left of ImageSourceMenu and the lifecycle kebab.
+                        if (group.length === 1) {
+                            return (
+                                <div key={spec.name}>
+                                    {renderContainerCard(group[0], false, updateAffordance)}
+                                </div>
+                            );
+                        }
+
+                        // Zero containers: compact row (name + Update + kebab),
+                        // not renderContainerCard (no ContainerInfo).
+                        if (group.length === 0) {
+                            return (
+                                <div
+                                    key={spec.name}
+                                    className="flex items-center justify-between gap-3 rounded-lg border border-card-border bg-muted/40 px-3 py-2"
+                                >
+                                    <div className="flex min-w-0 items-center gap-2">
+                                        <span className="truncate font-mono text-sm font-medium text-foreground">{spec.name}</span>
+                                        {hasUpdate && (
+                                            <span className="rounded-full border border-brand/30 bg-brand/10 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-brand">
+                                                Update
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="flex shrink-0 items-center gap-1">
+                                        {renderServiceUpdateButton(updateAffordance)}
+                                        {renderServiceLifecycleMenu(spec.name, false)}
+                                    </div>
+                                </div>
+                            );
+                        }
+
+                        // Multi-replica: keep header + nested children (no
+                        // updateAffordance on child cards).
                         return (
                             <div key={spec.name} className="flex flex-col gap-2">
                                 <div className="flex items-center justify-between gap-3 rounded-lg border border-card-border bg-muted/40 px-3 py-2">
@@ -774,67 +881,13 @@ export function ContainersHealth({
                                         )}
                                     </div>
                                     <div className="flex shrink-0 items-center gap-1">
-                                        {showUpdateAction && (
-                                            <TooltipProvider>
-                                              <Tooltip>
-                                                <TooltipTrigger asChild>
-                                                  <Button
-                                                    type="button"
-                                                    size="sm"
-                                                    variant="outline"
-                                                    className="h-7 rounded-md px-2 max-md:h-11"
-                                                    onClick={() => onRequestServiceUpdate?.(spec.name, mode)}
-                                                    disabled={busy}
-                                                  >
-                                                    <CloudDownload className="h-3.5 w-3.5 mr-1.5" strokeWidth={1.5} />
-                                                    {busy
-                                                        ? (mode === 'rebuild' ? 'Rebuilding...' : 'Updating...')
-                                                        : (mode === 'rebuild' ? 'Rebuild' : 'Update')}
-                                                  </Button>
-                                                </TooltipTrigger>
-                                                <TooltipContent>{replicaCopy}</TooltipContent>
-                                              </Tooltip>
-                                            </TooltipProvider>
-                                        )}
-                                        <DropdownMenu>
-                                            <DropdownMenuTrigger asChild>
-                                                <Button
-                                                    size="icon"
-                                                    variant="ghost"
-                                                    className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
-                                                    aria-label="Service actions"
-                                                >
-                                                    <MoreVertical className="h-3.5 w-3.5" strokeWidth={1.5} />
-                                                </Button>
-                                            </DropdownMenuTrigger>
-                                            <DropdownMenuContent align="end">
-                                                {isServiceActive ? (
-                                                    <>
-                                                        <DropdownMenuItem onSelect={() => serviceAction('restart', spec.name)}>
-                                                            Restart service
-                                                        </DropdownMenuItem>
-                                                        <DropdownMenuItem onSelect={() => serviceAction('stop', spec.name)}>
-                                                            Stop service
-                                                        </DropdownMenuItem>
-                                                    </>
-                                                ) : (
-                                                    <DropdownMenuItem onSelect={() => serviceAction('start', spec.name)}>
-                                                        Start service
-                                                    </DropdownMenuItem>
-                                                )}
-                                            </DropdownMenuContent>
-                                        </DropdownMenu>
+                                        {renderServiceUpdateButton(updateAffordance)}
+                                        {renderServiceLifecycleMenu(spec.name, isServiceActive)}
                                     </div>
                                 </div>
-                                {group.length > 0 ? (
-                                    <div className="ml-2 flex flex-col gap-2 border-l border-hairline pl-3">
-                                        {group.map(container => renderContainerCard(container, true))}
-                                    </div>
-                                ) : (
-                                    <div className="ml-2 pl-3 font-mono text-xs text-muted-foreground">
-                                        No containers running for this service.
-                                    </div>
-                                )}
+                                <div className="ml-2 flex flex-col gap-2 border-l border-hairline pl-3">
+                                    {group.map(container => renderContainerCard(container, true))}
+                                </div>
                             </div>
                         );
                     })}
@@ -846,6 +899,7 @@ export function ContainersHealth({
                     {safeContainers.map(container => renderContainerCard(container, false))}
                 </div>
             )}
+
         </div>
     );
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { DatabaseService, type ServiceUpdateRecoveryRow } from './DatabaseService';
 import { getComposeCommandTimeoutMs } from './ComposeService';
+import { buildUnifiedHeldImagePredicate } from './recoveryHeldImages';
 import { getErrorMessage } from '../utils/errors';
 
 const SWEEP_INTERVAL_MS = 5 * 60_000;
@@ -229,26 +230,13 @@ export class ServiceUpdateRecoveryService {
   /**
    * A predicate a pruner can call immediately before deleting each candidate
    * image. Re-reads the held set on every call (rather than snapshotting it
-   * once) so a snapshot that becomes eligible between plan and delete is
-   * still honored. When the held set cannot be read, returns true for every
-   * id so prune skips deletes (fail closed).
+   * once, unlike recoveryHeldImages.buildUnifiedHeldImagePredicate) so a
+   * generation that becomes eligible between plan and delete is still
+   * honored. When the held set cannot be read, returns true for every id so
+   * prune skips deletes (fail closed).
    */
   public buildHeldImagePredicate(nodeId: number): (imageId: string) => boolean {
-    return (imageId: string) => {
-      const held = this.getHeldImageIds(nodeId);
-      if (held === null) return true;
-      if (held.has(imageId)) return true;
-      try {
-        // Dynamic import avoids a static cycle with StackUpdateRecoveryService.
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { StackUpdateRecoveryService } = require('./StackUpdateRecoveryService') as typeof import('./StackUpdateRecoveryService');
-        const stackHeld = StackUpdateRecoveryService.getInstance().getHeldImageIds(nodeId);
-        if (stackHeld === null) return true;
-        return stackHeld.has(imageId);
-      } catch {
-        return true;
-      }
-    };
+    return (imageId: string) => buildUnifiedHeldImagePredicate(nodeId)(imageId);
   }
 
   private nextClaimExpiry(now: number): number {

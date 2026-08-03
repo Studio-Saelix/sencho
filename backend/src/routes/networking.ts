@@ -19,6 +19,7 @@ export const networkingRouter = Router();
 // calling the underlying service in-process and reaches each remote through
 // this route, so a remote is summarized on the node that owns its stacks.
 networkingRouter.get('/summary', async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     res.json(await computeNodeNetworkingSummary(req.nodeId));
   } catch (error) {
@@ -28,7 +29,7 @@ networkingRouter.get('/summary', async (req: Request, res: Response): Promise<vo
 });
 
 networkingRouter.get('/overview', async (req: Request, res: Response): Promise<void> => {
-  if (!requirePermission(req, res, 'stack:read')) return;
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const aggregate = await buildNodeNetworkingAggregate(req.nodeId, {});
     res.json(okEnvelope(aggregate.runtimeAvailable, {
@@ -44,7 +45,7 @@ networkingRouter.get('/overview', async (req: Request, res: Response): Promise<v
 });
 
 networkingRouter.get('/networks', async (req: Request, res: Response): Promise<void> => {
-  if (!requirePermission(req, res, 'stack:read')) return;
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const aggregate = await buildNodeNetworkingAggregate(req.nodeId, {});
     res.json(okEnvelope(aggregate.runtimeAvailable, { networks: aggregate.networks }));
@@ -55,7 +56,7 @@ networkingRouter.get('/networks', async (req: Request, res: Response): Promise<v
 });
 
 networkingRouter.get('/networks/:id', async (req: Request, res: Response): Promise<void> => {
-  if (!requirePermission(req, res, 'stack:read')) return;
+  if (!requirePermission(req, res, 'node:read')) return;
   const id = req.params.id as string;
   if (!id || (!isValidDockerResourceId(id) && !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(id))) {
     res.status(400).json({ error: 'Invalid network ID format' });
@@ -82,7 +83,7 @@ networkingRouter.get('/networks/:id', async (req: Request, res: Response): Promi
 });
 
 networkingRouter.get('/topology', async (req: Request, res: Response): Promise<void> => {
-  if (!requirePermission(req, res, 'stack:read')) return;
+  if (!requirePermission(req, res, 'node:read')) return;
   const includeSystem = req.query.includeSystem === 'true';
   try {
     const aggregate = await buildNodeNetworkingAggregate(req.nodeId, {
@@ -100,7 +101,7 @@ networkingRouter.get('/topology', async (req: Request, res: Response): Promise<v
 });
 
 networkingRouter.get('/findings', async (req: Request, res: Response): Promise<void> => {
-  if (!requirePermission(req, res, 'stack:read')) return;
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const aggregate = await buildNodeNetworkingAggregate(req.nodeId, {});
     res.json(okEnvelope(aggregate.runtimeAvailable, { findings: aggregate.findings }));
@@ -111,7 +112,7 @@ networkingRouter.get('/findings', async (req: Request, res: Response): Promise<v
 });
 
 networkingRouter.get('/findings/:id', async (req: Request, res: Response): Promise<void> => {
-  if (!requirePermission(req, res, 'stack:read')) return;
+  if (!requirePermission(req, res, 'node:read')) return;
   const findingId = req.params.id as string;
   if (!findingId) {
     res.status(400).json({ error: 'Finding ID is required' });

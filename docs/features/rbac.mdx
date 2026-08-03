@@ -20,8 +20,8 @@ Sencho ships with five built-in roles that map to the permissions most operators
 |------|----------------|------|
 | **Admin** | Full operator access: deploy, edit compose, manage users, configure nodes, view audit log, every system setting | Community |
 | **Viewer** | Read-only access to stacks, logs, stats, file contents, and node listings | Community |
-| **Deployer** | Deploy, restart, stop, and start stacks. Cannot edit compose files, create or delete stacks, or view nodes | Admiral |
-| **Node Admin** | Full stack and node management across the fleet. No access to system settings, users, or license | Admiral |
+| **Deployer** | Deploy, restart, stop, and start stacks, and check individual stacks for image updates. Cannot edit compose files, create or delete stacks, view nodes, or manage alert and auto-heal rules | Admiral |
+| **Node Admin** | Full stack and node management across the fleet, including node-scoped operational Settings. No access to users, licensing, credentials, or system-only Settings | Admiral |
 | **Auditor** | Read-only access to stacks, nodes, and the audit log. No write access anywhere | Admiral |
 
 ### Permission matrix
@@ -31,8 +31,8 @@ Each row is one of the permission keys the backend checks. The matrix below is t
 | Permission | Admin | Node Admin | Deployer | Auditor | Viewer |
 |------------|:-----:|:----------:|:--------:|:-------:|:------:|
 | View stacks, logs, stats (`stack:read`) | Yes | Yes | Yes | Yes | Yes |
-| Deploy, restart, stop, start, take down (`stack:deploy`) | Yes | Yes | Yes | No | No |
-| Edit compose and `.env` files (`stack:edit`) | Yes | Yes | No | No | No |
+| Deploy, restart, stop, start, take down, check a stack for image updates (`stack:deploy`) | Yes | Yes | Yes | No | No |
+| Edit compose and `.env` files, manage alert rules and auto-heal policies (`stack:edit`) | Yes | Yes | No | No | No |
 | Create stacks (`stack:create`) | Yes | Yes | No | No | No |
 | Delete stacks (`stack:delete`) | Yes | Yes | No | No | No |
 | View nodes (`node:read`) | Yes | Yes | No | Yes | Yes |
@@ -115,29 +115,30 @@ Click **Update user** to save. Changing the role takes effect on the next API re
 
 Scoped permissions let you grant a user a higher role on a specific stack or node without elevating them globally. A Viewer can be granted Deployer on one stack; a Deployer can be granted Node Admin on one server.
 
+**Stack scopes are node-specific.** The same stack name on two different nodes is two independent grants. Assigning a stack scope means choosing the node first, then picking a stack that exists on that node. Display form conceptually: stack name @ node name (for example `frontend @ prod`).
+
+**Node scopes are node-wide.** The resource is the node itself. There is no separate node qualifier on a node assignment row. Granting Node Admin (or Deployer, or Admin) on `staging-server` authorizes that role's stack and node operations for every stack on that node, without a separate per-stack grant.
+
 The box appears below the user form whenever you are editing a user on Admiral.
 
-<Frame>
-  <img src="/images/rbac/scoped-permissions.png" alt="Edit User form for the viewer account with a Scoped Permissions box below. The box contains an existing assignment row (a Deployer badge with the text on Stack: bazarr and a destructive trash icon on the right) and a three-column add-scope row underneath (Role combobox set to Deployer, Resource Type combobox set to Stack, Resource combobox showing Select..., and a disabled Add button)." />
-</Frame>
-
-The add-scope form has three controls and an **Add** button:
+The add-scope form has these controls and an **Add** button:
 
 | Control | Options |
 |---------|---------|
 | **Role** | Deployer, Node Admin, or Admin. The scoped role picker is narrower than the global role picker. Viewer and Auditor cannot be scoped (they are floor-only roles). |
 | **Resource Type** | `Stack` or `Node`. |
-| **Resource** | The picker shows stacks (when type is `Stack`) or remote nodes (when type is `Node`) the gateway knows about. Resource names match what you see in the sidebar. |
+| **Node** | Shown when Resource Type is `Stack`. Choose the node that hosts the stack before the stack picker unlocks. |
+| **Stack** or **Node** | When type is `Stack`, the picker lists stacks on the selected node. When type is `Node`, the picker lists nodes the gateway knows about. Names match what you see in the sidebar. |
 
-Click **Add** to save the assignment. Existing scopes render as a row with the role badge, the line `on <type>: <resource>`, and a trash icon for removal. Removing an assignment is instant; the user's effective permissions are recomputed on their next request.
+Click **Add** to save the assignment. Existing scopes render as a row with the role badge, the line `on <type>: <resource>`, and for stacks the node name after an `@`, plus a trash icon for removal. Removing an assignment is instant; the user's effective permissions are recomputed on their next request.
 
-Scoped assignments are **additive only**. A Viewer with a scoped Deployer on `frontend` can deploy `frontend` but stays read-only on every other resource. Scopes never reduce the global role.
+Scoped assignments are **additive only**. A Viewer with a scoped Deployer on `frontend` at a given node can deploy that stack on that node but stays read-only on every other resource. Scopes never reduce the global role.
 
 ### Example scenarios
 
-- A **Viewer** with a scoped **Deployer** assignment on the `frontend` stack can deploy, restart, and stop only that stack. They cannot edit compose or delete it.
+- A **Viewer** with a scoped **Deployer** assignment on the `frontend` stack at node `prod` can deploy, restart, and stop only that stack on `prod`. The same name on another node needs its own grant. They cannot edit compose or delete it.
 - A **Deployer** with a scoped **Node Admin** assignment on node `staging-server` can manage every stack and node operation on that server, while keeping plain Deployer rights on the rest of the fleet.
-- A **Node Admin** without any scoped assignments has full stack and node management across every node, but still cannot reach system settings, the user list, or the audit log.
+- A **Node Admin** without any scoped assignments has full stack and node management across every node, including node-scoped operational Settings, but still cannot reach users, licensing, credentials, or system-only Settings.
 
 ## Two-factor reset
 
@@ -224,6 +225,9 @@ Entries include the acting user, IP address, HTTP method and path, response stat
 ## Troubleshooting
 
 <AccordionGroup>
+  <Accordion title="Permission controls are unavailable">
+    Sencho could not verify your current permissions. Existing pages stay open, but changes remain disabled until verification succeeds. Select **Retry** in the notification bar. If the notice returns, check that the Sencho instance is reachable and sign in again if your session has expired.
+  </Accordion>
   <Accordion title="The Users entry is missing from the Settings sidebar">
     The Users entry is hidden in two cases. **One,** you are signed in as a non-admin (Viewer, Deployer, Auditor): the entry is admin-only. **Two,** you have a remote node selected: the panel is hub-only and is hidden in the sidebar when any remote node is active. Switch back to the local node via the node switcher in the masthead.
   </Accordion>
@@ -237,7 +241,7 @@ Entries include the acting user, IP address, HTTP method and path, response stat
     Check whether **Session policy > Keep active sessions alive** was turned off in **Settings > Users**. With it off, every session hits a strict, fixed 24-hour (or 30-day, with **Stay signed in**) ceiling regardless of activity. Turn it back on so an active session renews itself instead of hard-expiring, or have the user check **Stay signed in** at their next sign-in for a longer session between visits.
   </Accordion>
   <Accordion title="A scoped Deployer cannot deploy a stack they were granted">
-    Two causes. **One,** the assignment was created on Admiral but the license has since dropped to Community. The permission resolver only consults scoped assignments when the effective tier is Admiral; on Community the scope is ignored and the user falls back to their global role. **Two,** the resource type or name on the assignment does not match the request's resource. Re-open the user in the edit form and check the existing-scope row matches the stack name (case-sensitive) exactly.
+    Three causes. **One,** the assignment was created on Admiral but the license has since dropped to Community. The permission resolver only consults scoped assignments when the effective tier is Admiral; on Community the scope is ignored and the user falls back to their global role. **Two,** the resource type or stack name on the assignment does not match the request's resource (names are case-sensitive). **Three,** the stack grant is tied to a different node than the one the user is acting on: the same stack name on another node is a separate grant. Re-open the user in the edit form and confirm the existing-scope row shows the expected stack name at the expected node.
   </Accordion>
   <Accordion title="The shield (Reset 2FA) icon is missing on a user I expected to see it on">
     The icon only appears for users with a finished TOTP enrollment. If the user started enrollment but never confirmed their first code, the enrollment is incomplete and the icon stays hidden. Ask the user to finish enrollment from their account settings, or, if they cannot, leave the row alone: there is nothing to reset.

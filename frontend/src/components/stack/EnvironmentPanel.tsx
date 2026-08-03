@@ -110,7 +110,7 @@ export default function EnvironmentPanel({ stackName }: { stackName: string }) {
 
   // Project env file selection
   const projectEnvCapable = hasCapability('project-env-files');
-  const canEdit = can('stack:edit', 'stack', stackName);
+  const canEdit = can('stack:edit', 'stack', stackName, nodeId);
   const [projectEnvFiles, setProjectEnvFiles] = useState<string[]>([]);
   const [candidates, setCandidates] = useState<string[]>([]);
   const [savingProjectEnv, setSavingProjectEnv] = useState(false);

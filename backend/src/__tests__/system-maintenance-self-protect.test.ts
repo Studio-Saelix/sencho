@@ -13,6 +13,8 @@ let app: import('express').Express;
 let authHeader: string;
 let SelfIdentityService: typeof import('../services/SelfIdentityService').default;
 let DockerController: typeof import('../services/DockerController').default;
+let ServiceUpdateRecoveryService: typeof import('../services/ServiceUpdateRecoveryService').ServiceUpdateRecoveryService;
+let StackUpdateRecoveryService: typeof import('../services/StackUpdateRecoveryService').StackUpdateRecoveryService;
 
 const SELF_IMAGE = 'a'.repeat(64);
 const SELF_NETWORK = 'b'.repeat(64);
@@ -26,6 +28,8 @@ beforeAll(async () => {
   ({ app } = await import('../index'));
   ({ default: SelfIdentityService } = await import('../services/SelfIdentityService'));
   ({ default: DockerController } = await import('../services/DockerController'));
+  ({ ServiceUpdateRecoveryService } = await import('../services/ServiceUpdateRecoveryService'));
+  ({ StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService'));
   const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
   authHeader = `Bearer ${token}`;
 });
@@ -48,6 +52,10 @@ function stubSelfIdentity(opts: { imageId?: string; networkId?: string; containe
 function stubDockerControllerNoops() {
   const fake = {
     removeImage: vi.fn().mockResolvedValue(undefined),
+    // Identity resolver by default: canonicalId === the submitted id, so
+    // existing removeImage(id) assertions keep working. Tests that need
+    // short-id canonicalization override this per-test.
+    resolveImageId: vi.fn().mockImplementation(async (id: string) => id),
     removeNetwork: vi.fn().mockResolvedValue(undefined),
     removeVolume: vi.fn().mockResolvedValue(undefined),
     removeContainers: vi.fn().mockResolvedValue([]),
@@ -206,6 +214,74 @@ describe('Self-protection in dev mode (SelfIdentityService empty)', () => {
 
     expect(res.status).toBe(200);
     expect(docker.removeImage).toHaveBeenCalledWith(SELF_IMAGE);
+  });
+});
+
+describe('Held-image protection on /api/system/images/delete', () => {
+  it('refuses to delete a rollback-held image with 409 IMAGE_HELD_FOR_ROLLBACK', async () => {
+    stubSelfIdentity({});
+    const docker = stubDockerControllerNoops();
+    const heldId = 'sha256:' + OTHER_IMAGE;
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set([heldId]));
+    vi.spyOn(ServiceUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set());
+
+    const res = await request(app)
+      .post('/api/system/images/delete')
+      .set('Authorization', authHeader)
+      .send({ id: heldId });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('IMAGE_HELD_FOR_ROLLBACK');
+    expect(docker.removeImage).not.toHaveBeenCalled();
+  });
+
+  it('still deletes an unrelated image when a held predicate is active', async () => {
+    stubSelfIdentity({});
+    const docker = stubDockerControllerNoops();
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds')
+      .mockReturnValue(new Set(['sha256:' + 'z'.repeat(64)]));
+    vi.spyOn(ServiceUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set());
+
+    const res = await request(app)
+      .post('/api/system/images/delete')
+      .set('Authorization', authHeader)
+      .send({ id: OTHER_IMAGE });
+
+    expect(res.status).toBe(200);
+    expect(docker.removeImage).toHaveBeenCalledWith(OTHER_IMAGE);
+  });
+
+  it('canonicalizes a short/truncated id before checking the held predicate, closing the bypass', async () => {
+    stubSelfIdentity({});
+    const docker = stubDockerControllerNoops();
+    const shortId = OTHER_IMAGE.slice(0, 12);
+    const canonicalId = 'sha256:' + OTHER_IMAGE;
+    docker.resolveImageId.mockImplementation(async (id: string) => (id === shortId ? canonicalId : id));
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set([canonicalId]));
+    vi.spyOn(ServiceUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set());
+
+    const res = await request(app)
+      .post('/api/system/images/delete')
+      .set('Authorization', authHeader)
+      .send({ id: shortId });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('IMAGE_HELD_FOR_ROLLBACK');
+    expect(docker.removeImage).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the image no longer exists', async () => {
+    stubSelfIdentity({});
+    const docker = stubDockerControllerNoops();
+    docker.resolveImageId.mockResolvedValue(null);
+
+    const res = await request(app)
+      .post('/api/system/images/delete')
+      .set('Authorization', authHeader)
+      .send({ id: OTHER_IMAGE });
+
+    expect(res.status).toBe(404);
+    expect(docker.removeImage).not.toHaveBeenCalled();
   });
 });
 

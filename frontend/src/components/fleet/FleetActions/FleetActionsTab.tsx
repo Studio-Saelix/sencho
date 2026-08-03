@@ -2,12 +2,14 @@ import type { FleetNode } from '@/components/FleetView/types';
 import { LabelFleetStopCard } from './cards/LabelFleetStopCard';
 import { BulkLabelAssignCard } from './cards/BulkLabelAssignCard';
 import { FleetPruneCard } from './cards/FleetPruneCard';
+import { useAuth } from '@/context/AuthContext';
 
 interface Props {
   nodes: FleetNode[];
 }
 
 export function FleetActionsTab({ nodes }: Props) {
+  const { isAdmin } = useAuth();
   if (nodes.length === 0) {
     return (
       <div className="text-sm text-stat-subtitle">Add a node to the fleet to use bulk actions.</div>
@@ -22,7 +24,7 @@ export function FleetActionsTab({ nodes }: Props) {
   // Order: Prune top-left, Bulk top-right, Stop on row 2.
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-[18px] auto-rows-fr">
-      <FleetPruneCard nodes={nodes} />
+      {isAdmin && <FleetPruneCard nodes={nodes} />}
       <BulkLabelAssignCard nodes={nodes} />
       <LabelFleetStopCard />
     </div>

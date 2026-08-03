@@ -10,8 +10,7 @@ import { FleetUpdateTrackerService, type UpdateTracker, type TerminalStatus, UPD
 import { NodeRegistry } from '../services/NodeRegistry';
 import { computeNodeNetworkingSummary, type NodeNetworkingSummary } from '../services/network/networkingSummary';
 import DockerController from '../services/DockerController';
-import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
-import { getHostMemory } from '../helpers/hostMemory';
+import { getHostMemory, memoryToWire, type MemoryWire } from '../helpers/hostMemory';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { StackOpLockService } from '../services/StackOpLockService';
@@ -19,7 +18,7 @@ import SelfUpdateService, { type PinInfo } from '../services/SelfUpdateService';
 import { getSenchoVersion, isValidVersion } from '../services/CapabilityRegistry';
 import { authMiddleware } from '../middleware/auth';
 import { requirePaid, requireAdmin, requireNodeProxy, requireUserSession } from '../middleware/tierGates';
-import { requirePermission } from '../middleware/permissions';
+import { checkPermission, requirePermission } from '../middleware/permissions';
 import { respondSelfUpdatePreflight } from './license';
 import { ImageOperationService } from '../services/ImageOperationService';
 import { classifyImageChannel } from '../helpers/imageChannel';
@@ -47,8 +46,14 @@ import { sanitizeForLog, redactSensitiveText } from '../utils/safeLog';
 import { formatNoTargetError } from '../utils/remoteTarget';
 import { CloudBackupService } from '../services/CloudBackupService';
 import { NotificationService } from '../services/NotificationService';
-import { invalidateNodeCaches, invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
+import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { activeBulkActions } from './labels';
+import {
+  FLEET_PRUNE_TARGETS,
+  parseFleetPruneRequest,
+  runFleetPrune,
+  type FleetPruneTarget,
+} from '../helpers/fleetPrune';
 import { runLocalLabelStop, isLabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
 import { collectFleetLabelSummaries } from '../helpers/fleetLabelSummary';
 import { runLocalLabelAssign, validateLabelTemplate, validateRemoteAssignResults, failAllAssign, type AssignNodeResult } from '../helpers/fleetLabelAssign';
@@ -227,7 +232,7 @@ interface FleetNodeOverview {
   } | null;
   systemStats: {
     cpu: { usage: string; cores: number };
-    memory: { total: number; used: number; free: number; usagePercent: string };
+    memory: MemoryWire;
     disk: { total: number; used: number; free: number; usagePercent: string } | null;
   } | null;
   stacks: string[] | null;
@@ -296,14 +301,9 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
       stats: { active, managed, unmanaged, exited, total },
       systemStats: {
         cpu: { usage: currentLoad.currentLoad.toFixed(1), cores: currentLoad.cpus.length },
-        memory: {
-          total: hostMem.total,
-          // ZFS ARC aware: reclaimable ARC is added back into available so a
-          // large ARC cache is not reported as hard-used. See helpers/hostMemory.ts.
-          used: hostMem.used,
-          free: hostMem.free,
-          usagePercent: hostMem.usagePercent.toFixed(1),
-        },
+        // ARC/balloon aware: reclaimable ARC is added back into available,
+        // and ballooned memory is subtracted from used. See helpers/hostMemory.ts.
+        memory: memoryToWire(hostMem),
         disk: mainDisk ? {
           total: mainDisk.size,
           used: mainDisk.used,
@@ -384,7 +384,7 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
 
     interface RemoteSystemStats {
       cpu: { usage: string; cores: number };
-      memory: { total: number; used: number; free: number; usagePercent: string };
+      memory: MemoryWire;
       disk?: { total: number; used: number; free: number; usagePercent: string } | null;
     }
 
@@ -1883,9 +1883,9 @@ type FleetStopNodeResult = {
 // on its own Docker via its local-stop receiver. Remote label rows are never
 // mirrored to the control, so there is no central pre-check; unreachable nodes
 // are reported at the node level and never block the reachable ones.
-// Tier: requireAdmin (admin-only fleet plumbing; available on every license).
+// Permission: every confirmed stack requires stack:deploy. Discovery-only dry
+// runs require node:read.
 fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
   const body = req.body as { labelName?: unknown; dryRun?: unknown; targets?: unknown } | undefined;
   if (!body || typeof body !== 'object') {
     res.status(400).json({ error: 'Request body is required' });
@@ -1929,6 +1929,19 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
   }
   const trimmed = labelName.trim();
   const isDryRun = dryRun === true;
+  if (confirmedStacksByNode) {
+    const denied = [...confirmedStacksByNode].some(([nodeId, stackNames]) =>
+      [...stackNames].some(stackName =>
+        !checkPermission(req, 'stack:deploy', 'stack', stackName, nodeId)));
+    if (denied) {
+      res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+      return;
+    }
+  } else if (isDryRun) {
+    if (!requirePermission(req, res, 'node:read')) return;
+  } else if (!requirePermission(req, res, 'stack:deploy')) {
+    return;
+  }
   try {
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
@@ -1962,7 +1975,7 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
         }
       }
 
-      // Remote node. Ask the remote authoritatively via its admin-only local-stop
+      // Remote node. Ask the remote authoritatively via its permission-checked local-stop
       // receiver, which name-matches under the remote's own bulk lock. There is no
       // control-side pre-check: remote label rows are never mirrored to the
       // control, so a mirror lookup would skip every remote. A node we cannot
@@ -2082,9 +2095,8 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
 // Per-node failures (unknown node, no proxy target, unreachable, mixed-version
 // remote, malformed response) degrade that node only and never discard the rest
 // of the fan-out.
-// Tier: requireAdmin (admin-only fleet plumbing; available on every license).
+// Permission: every target stack requires stack:edit.
 fleetRouter.post('/labels/bulk-assign', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
   const body = req.body as { label?: unknown; targets?: unknown } | undefined;
   if (!body || typeof body !== 'object') {
     res.status(400).json({ error: 'Request body is required' });
@@ -2129,6 +2141,12 @@ fleetRouter.post('/labels/bulk-assign', authMiddleware, async (req: Request, res
   }
   if (totalStacks > MAX_ASSIGNMENTS) {
     res.status(400).json({ error: `targets may not exceed ${MAX_ASSIGNMENTS} stack assignments` });
+    return;
+  }
+  const denied = targets.some(target => target.stackNames.some(stackName =>
+    !checkPermission(req, 'stack:edit', 'stack', stackName, target.nodeId)));
+  if (denied) {
+    res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
     return;
   }
   const { template } = validated;
@@ -2202,167 +2220,23 @@ fleetRouter.post('/labels/bulk-assign', authMiddleware, async (req: Request, res
   }
 });
 
-// Fleet-wide Docker prune. Fans out to every node, running per-target prune
-// (images/volumes/networks) under the chosen scope. Local nodes call
-// DockerController directly under a per-node bulk-prune lock; remote nodes
-// receive one POST /api/system/prune/system per target via the standard
-// Bearer-token path. Concurrent execution against the per-node prune route in
-// systemMaintenance.ts is safe because Docker's prune API is internally
-// serialized and idempotent (the worst case is a duplicate call returning 0
-// reclaimed bytes).
+// Fleet-wide Docker prune. Dry runs collect one itemized plan per node. Execute
+// validates the reviewed roster, preflights every plan, then starts mutation.
 // Tier: requireAdmin (admin-only fleet plumbing; available on every license).
-const FLEET_PRUNE_TARGETS = ['images', 'volumes', 'networks'] as const;
-type FleetPruneTarget = (typeof FLEET_PRUNE_TARGETS)[number];
-
 fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
-
-  const body = req.body as { targets?: unknown; scope?: unknown; dryRun?: unknown } | undefined;
-  if (!body || typeof body !== 'object') {
-    res.status(400).json({ error: 'Request body is required' });
-    return;
-  }
-  const rawTargets = Array.isArray(body.targets) ? body.targets : null;
-  if (!rawTargets || rawTargets.length === 0) {
-    res.status(400).json({ error: 'targets must be a non-empty array' });
-    return;
-  }
-  const dedup = new Set<FleetPruneTarget>();
-  for (const t of rawTargets) {
-    if (typeof t !== 'string' || !(FLEET_PRUNE_TARGETS as readonly string[]).includes(t)) {
-      res.status(400).json({ error: `Invalid target: ${typeof t === 'string' ? t : typeof t}` });
+  try {
+    const parsed = parseFleetPruneRequest(req.body);
+    if ('error' in parsed) {
+      res.status(400).json({ error: parsed.error });
       return;
     }
-    dedup.add(t as FleetPruneTarget);
-  }
-  const targets: FleetPruneTarget[] = Array.from(dedup);
-  const scope: 'managed' | 'all' = body.scope === 'all' ? 'all' : 'managed';
-  const isDryRun = body.dryRun === true;
-
-  type TargetResult = { target: FleetPruneTarget; success: boolean; reclaimedBytes: number; error?: string; dryRun?: boolean };
-  type NodeResult = {
-    nodeId: number; nodeName: string; reachable: boolean; error?: string; targets: TargetResult[];
-  };
-
-  try {
-    const db = DatabaseService.getInstance();
-    const nodes = db.getNodes();
-    if (isDebugEnabled()) console.debug('[Fleet:debug] fleet-prune:', { targets, scope, dryRun: isDryRun, nodes: nodes.length });
-
-    const results: NodeResult[] = await Promise.all(nodes.map(async (node): Promise<NodeResult> => {
-      if (node.type === 'local') {
-        const lockKey = `bulk-prune:${node.id}`;
-        if (activeBulkActions.has(lockKey)) {
-          return {
-            nodeId: node.id, nodeName: node.name, reachable: true,
-            targets: targets.map(t => ({ target: t, success: false, reclaimedBytes: 0, error: 'A prune is already running on this node' })),
-          };
-        }
-        activeBulkActions.add(lockKey);
-        try {
-          const knownStacks = scope === 'managed' ? await FileSystemService.getInstance(node.id).getStacks() : [];
-          const dockerController = DockerController.getInstance(node.id);
-          const targetResults: TargetResult[] = [];
-          let anySuccess = false;
-          for (const target of targets) {
-            try {
-              if (isDryRun) {
-                // estimateSystemReclaim hits `docker system df`; bound it
-                // so a slow local daemon doesn't hang the fleet admin tab
-                // (F-6). estimateManagedReclaim is fast (no df) and stays
-                // unwrapped.
-                const estimate = scope === 'managed'
-                  ? await dockerController.estimateManagedReclaim(target, knownStacks)
-                  : await withTimeout(
-                      dockerController.estimateSystemReclaim(target, knownStacks),
-                      FLEET_DF_TIMEOUT_MS,
-                      'docker disk usage',
-                    );
-                targetResults.push({ target, success: true, reclaimedBytes: estimate.reclaimableBytes, dryRun: true });
-                continue;
-              }
-              const isImageHeld = ServiceUpdateRecoveryService.getInstance().buildHeldImagePredicate(node.id);
-              const result = scope === 'managed'
-                ? await dockerController.pruneManagedOnly(target, knownStacks, isImageHeld)
-                : await dockerController.pruneSystem(target, undefined, isImageHeld);
-              targetResults.push({ target, success: true, reclaimedBytes: result.reclaimedBytes });
-              if (result.reclaimedBytes > 0 || result.success) anySuccess = true;
-            } catch (err) {
-              const error = err instanceof TimeoutError
-                ? 'Docker daemon is busy. Please try again in a moment.'
-                : getErrorMessage(err, 'Prune failed');
-              targetResults.push({ target, success: false, reclaimedBytes: 0, error });
-            }
-          }
-          if (anySuccess && !isDryRun) invalidateNodeCaches(node.id);
-          return { nodeId: node.id, nodeName: node.name, reachable: true, targets: targetResults };
-        } finally {
-          activeBulkActions.delete(lockKey);
-        }
-      }
-
-      // Remote node: POST /api/system/prune/system per target, short-circuiting
-      // on the first transport-level failure so we don't hammer a dead node.
-      const proxyTarget = NodeRegistry.getInstance().getProxyTarget(node.id);
-      if (!proxyTarget) {
-        const error = formatNoTargetError(node);
-        return {
-          nodeId: node.id, nodeName: node.name, reachable: false, error,
-          targets: targets.map(t => ({ target: t, success: false, reclaimedBytes: 0, error })),
-        };
-      }
-      const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
-      const remoteHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (proxyTarget.apiToken) remoteHeaders.Authorization = `Bearer ${proxyTarget.apiToken}`;
-      const targetResults: TargetResult[] = [];
-      let nodeUnreachable: string | null = null;
-      for (const target of targets) {
-        if (nodeUnreachable) {
-          targetResults.push({ target, success: false, reclaimedBytes: 0, error: nodeUnreachable });
-          continue;
-        }
-        try {
-          const response = await fetch(`${baseUrl}/api/system/prune/system`, {
-            method: 'POST',
-            headers: remoteHeaders,
-            body: JSON.stringify({ target, scope, dryRun: isDryRun }),
-            signal: AbortSignal.timeout(120000),
-          });
-          if (!response.ok) {
-            const errBody = (await response.json().catch(() => ({}))) as { error?: string };
-            const message = errBody.error || `Remote returned ${response.status}`;
-            nodeUnreachable = message;
-            targetResults.push({ target, success: false, reclaimedBytes: 0, error: message });
-            continue;
-          }
-          const remote = (await response.json().catch(() => null)) as { success?: boolean; reclaimedBytes?: number; dryRun?: boolean } | null;
-          if (!remote || typeof remote.reclaimedBytes !== 'number') {
-            targetResults.push({ target, success: false, reclaimedBytes: 0, error: 'Invalid response from remote node' });
-            continue;
-          }
-          const entry: TargetResult = { target, success: remote.success !== false, reclaimedBytes: remote.reclaimedBytes };
-          if (remote.dryRun) entry.dryRun = true;
-          targetResults.push(entry);
-        } catch (err) {
-          const message = getErrorMessage(err, 'Failed to reach remote node');
-          nodeUnreachable = message;
-          targetResults.push({ target, success: false, reclaimedBytes: 0, error: message });
-        }
-      }
-      return {
-        nodeId: node.id, nodeName: node.name,
-        reachable: nodeUnreachable === null,
-        error: nodeUnreachable ?? undefined,
-        targets: targetResults,
-      };
-    }));
-
-    if (isDebugEnabled()) {
-      const reachable = results.filter(r => r.reachable).length;
-      const reclaimed = results.reduce((n, r) => n + r.targets.reduce((m, t) => m + t.reclaimedBytes, 0), 0);
-      console.debug('[Fleet:debug] fleet-prune complete:', { reachable, unreachable: results.length - reachable, reclaimedBytes: reclaimed });
-    }
-    res.json({ results });
+    const response = await runFleetPrune(
+      DatabaseService.getInstance().getNodes(),
+      parsed.request,
+      activeBulkActions,
+    );
+    res.status(response.status).json(response.body);
   } catch (error) {
     console.error('[Fleet] fleet-prune error:', error);
     res.status(500).json({ error: getErrorMessage(error, 'Failed to run fleet prune') });
@@ -2381,7 +2255,7 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
 // uses these to distinguish "0 matching stacks" from "label exists but no
 // stacks assigned" from "remote unavailable".
 fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'node:read')) return;
   const body = req.body as { labelName?: unknown } | undefined;
   if (!body || typeof body !== 'object') {
     res.status(400).json({ error: 'Request body is required' });
@@ -2429,7 +2303,7 @@ fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, r
 // them is a no-op). `unreachableNodes`/`partial` tell the card the counts cover
 // only the nodes it could reach.
 fleetRouter.get('/labels/suggestions', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const summaries = await collectFleetLabelSummaries();
     const agg = new Map<string, { nodeCount: number; stackCount: number; nodes: string[] }>();

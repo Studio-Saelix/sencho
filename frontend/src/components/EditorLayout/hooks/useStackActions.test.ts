@@ -15,7 +15,7 @@ vi.mock('@/lib/api', () => ({
   }),
 }));
 vi.mock('@/components/ui/toast-store', () => ({
-  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), loading: vi.fn(() => 'loading-id'), dismiss: vi.fn() },
 }));
 
 import { apiFetch } from '@/lib/api';
@@ -246,6 +246,87 @@ describe('useStackActions.handleSaveAndDeploy', () => {
     await result.current.handleSaveAndDeploy({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
     const calls = vi.mocked(apiFetch).mock.calls.map(c => c[0]);
     expect(calls.some(c => String(c).includes('/deploy'))).toBe(true);
+  });
+});
+
+describe('useStackActions.checkUpdatesForStack', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('hits the per-stack refresh endpoint and shows success when the stack is cleared', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(JSON.stringify({ outcome: 'cleared', warning: null }), { status: 200 }),
+    );
+    const { result, stackListState } = setup();
+    await result.current.checkUpdatesForStack('web');
+    expect(apiFetch).toHaveBeenCalledWith('/image-updates/refresh/web', { method: 'POST' });
+    expect(stackListState.fetchImageUpdates).toHaveBeenCalled();
+    expect(toast.dismiss).toHaveBeenCalledWith('loading-id');
+    expect(toast.success).toHaveBeenCalledWith('Image update check complete.');
+    expect(toast.info).not.toHaveBeenCalled();
+  });
+
+  it('shows the warning via toast.info instead of success when verification did not cleanly complete', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({ outcome: 'verification_failed', warning: 'Could not verify the update.' }),
+        { status: 200 },
+      ),
+    );
+    const { result } = setup();
+    await result.current.checkUpdatesForStack('web');
+    expect(toast.dismiss).toHaveBeenCalledWith('loading-id');
+    expect(toast.info).toHaveBeenCalledWith('Could not verify the update.');
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('replaces the generic post-update warning copy for an incomplete verification too', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          outcome: 'verification_incomplete',
+          warning: 'The update command completed, but Sencho could not fully verify whether an image update remains.',
+        }),
+        { status: 200 },
+      ),
+    );
+    const { result } = setup();
+    await result.current.checkUpdatesForStack('web');
+    expect(toast.info).toHaveBeenCalledWith('Could not fully verify update status for web.');
+    expect(toast.info).not.toHaveBeenCalledWith(expect.stringContaining('update command completed'));
+  });
+
+  it('uses stack-scoped copy instead of the backend post-update warning when an update is still present', async () => {
+    // The backend reuses its post-update reconciliation result for this
+    // manual pre-update check, so its "still_present" warning text ("The
+    // update command completed...") does not apply here; the frontend must
+    // not forward it verbatim.
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          outcome: 'still_present',
+          warning: 'The update command completed, but Sencho still detects an available image update.',
+        }),
+        { status: 200 },
+      ),
+    );
+    const { result } = setup();
+    await result.current.checkUpdatesForStack('web');
+    expect(toast.dismiss).toHaveBeenCalledWith('loading-id');
+    expect(toast.info).toHaveBeenCalledWith('web still has an update available.');
+    expect(toast.info).not.toHaveBeenCalledWith(expect.stringContaining('update command completed'));
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('shows a loading toast immediately and dismisses it on error', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({ error: 'nope' }), { status: 500 }));
+    const { result } = setup();
+    await result.current.checkUpdatesForStack('web');
+    expect(toast.loading).toHaveBeenCalledWith('Checking web for image updates...');
+    expect(toast.dismiss).toHaveBeenCalledWith('loading-id');
+    expect(toast.error).toHaveBeenCalledWith('nope');
   });
 });
 
