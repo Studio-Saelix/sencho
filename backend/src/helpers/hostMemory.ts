@@ -34,6 +34,8 @@ export interface HostMemory {
   free: number;
   /** Effective used as a percentage of total (0 when total is 0). */
   usagePercent: number;
+  /** Reclaimable ARC bytes (from ZFS kstat). Present only when > 0. */
+  arcReclaimable?: number;
   /** Balloon-reclaimed bytes (from /proc/meminfo). Present only when > 0. */
   ballooned?: number;
   /** Total memory (same as `total`; provided for symmetric UI code). */
@@ -215,7 +217,8 @@ export function adjustForArc(mem: Pick<MemData, 'total' | 'available'>, arcRecla
   const effectiveAvailable = Math.min(mem.total, mem.available + Math.max(arcReclaimable, 0));
   const effectiveUsed = Math.max(mem.total - effectiveAvailable, 0);
   const usagePercent = mem.total > 0 ? (effectiveUsed / mem.total) * 100 : 0;
-  return { total: mem.total, used: effectiveUsed, free: effectiveAvailable, usagePercent };
+  if (arcReclaimable <= 0) return { total: mem.total, used: effectiveUsed, free: effectiveAvailable, usagePercent };
+  return { total: mem.total, used: effectiveUsed, free: effectiveAvailable, usagePercent, arcReclaimable };
 }
 
 /**
@@ -247,6 +250,7 @@ export interface MemoryWire {
   used: number;
   free: number;
   usagePercent: string;
+  arcReclaimable?: number;
   ballooned?: number;
   effectiveTotal?: number;
   effectiveUsed?: number;
@@ -266,6 +270,7 @@ export function memoryToWire(hostMem: HostMemory): MemoryWire {
     used: hostMem.used,
     free: hostMem.free,
     usagePercent: hostMem.usagePercent.toFixed(1),
+    ...(hostMem.arcReclaimable !== undefined ? { arcReclaimable: hostMem.arcReclaimable } : {}),
     ...(hostMem.ballooned !== undefined
       ? {
           ballooned: hostMem.ballooned,

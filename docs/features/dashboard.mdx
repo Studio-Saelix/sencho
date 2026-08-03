@@ -48,7 +48,7 @@ The gauge bars (and the corresponding numeric values) pick up amber at 80% and r
 While the dashboard is loading the CPU tile reads `--` and the caption shows `collecting metrics…`; bars and sparklines render once the first sample arrives.
 
 <Note>
-  **ZFS hosts:** the memory tile and host RAM alerts are ZFS ARC-aware. Reclaimable ARC cache is treated as available memory rather than used, so a large ARC does not inflate the gauge or trigger false low-memory alerts. See [ZFS ARC-aware host memory](/getting-started/configuration#zfs-arc-aware-host-memory) for how to expose ARC stats to a Docker install.
+  **ZFS hosts:** the memory tile and host RAM alerts are ZFS ARC-aware. Reclaimable ARC cache is treated as available memory rather than used, so a large ARC does not inflate the gauge or trigger false low-memory alerts. The memory tile shows the reclaimable amount as a context line when ARC stats are readable. See [ZFS ARC-aware host memory](/getting-started/configuration#zfs-arc-aware-host-memory) for how to expose ARC stats to a Docker install.
 
   **Virtual machines:** the memory tile shows hypervisor-ballooned memory (TrueNAS/KVM, Proxmox) as informational context. Unlike ARC, ballooned pages are host-reclaimed and the guest cannot get them back on demand, so the gauge, health verdict, and alerts continue to use the standard working-set percentage. See [VM memory ballooning](/getting-started/configuration#vm-memory-ballooning) for details.
 </Note>

@@ -15,6 +15,7 @@ export interface FleetNodeSystemStats {
         used: number;
         free: number;
         usagePercent: string;
+        arcReclaimable?: number;
         ballooned?: number;
         effectiveTotal?: number;
         effectiveUsed?: number;

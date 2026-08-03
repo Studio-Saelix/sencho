@@ -116,6 +116,11 @@ export function ResourceGauges({ systemStats, cpuHistory, netHistory, historyEnd
             {ramEffectivePercent !== null ? ` (effective ${parseFloat(ramEffectivePercent).toFixed(0)}%)` : ''}
           </div>
         ) : null}
+        {systemStats?.memory.arcReclaimable && systemStats.memory.arcReclaimable > 0 ? (
+          <div className="mt-1 font-mono text-[10px] text-stat-subtitle/70">
+            ZFS ARC reclaimable: {formatBytes(systemStats.memory.arcReclaimable)}
+          </div>
+        ) : null}
         {systemStats ? <GaugeBar value={ramVal} /> : null}
       </div>
 
