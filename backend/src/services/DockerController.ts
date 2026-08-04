@@ -14,6 +14,7 @@ import {
   fingerprintPrunePlan,
   normalizePruneTargets,
   projectPruneOwnershipLabels,
+  pruneImageReferencesEqual,
   PRUNEABLE_CONTAINER_STATES,
   PrunePlanStaleError,
   type PruneItemOutcome,
@@ -1557,25 +1558,80 @@ class DockerController {
     if (selfIdentity.isOwnImage(item.id)) {
       return { id: item.id, target: 'images', status: 'skipped', reason: 'Sencho self image' };
     }
+    if (item.target !== 'images') {
+      return { id: item.id, target: 'images', status: 'failed', error: 'Plan item is not an image target' };
+    }
+    const plannedRefs = item.image.references;
     const rawImages = await this.docker.listImages({ all: false }) as Array<{
       Id: string;
       Size?: number;
+      RepoTags?: string[] | null;
     }>;
     const img = rawImages.find((i) => i.Id === item.id || i.Id.startsWith(item.id) || item.id.startsWith(i.Id));
     if (!img) {
       return { id: item.id, target: 'images', status: 'skipped', reason: 'Image no longer exists' };
     }
+    // Defense in depth when fleet preflight/assertPlanFresh already matched:
+    // refuse mutation if live tags drifted from the reviewed reference set.
+    if (!pruneImageReferencesEqual(plannedRefs, img.RepoTags)) {
+      return {
+        id: item.id,
+        target: 'images',
+        status: 'failed',
+        error: 'Image references changed since the plan was built; refresh and confirm again',
+      };
+    }
     const allContainers = await this.docker.listContainers({ all: true }) as Array<{
       ImageID?: string;
       Labels?: Record<string, string>;
     }>;
-    const references = allContainers.filter((container) => container.ImageID === img.Id
+    const containerRefs = allContainers.filter((container) => container.ImageID === img.Id
       || Boolean(container.ImageID?.startsWith(img.Id))
       || img.Id.startsWith(container.ImageID ?? ''));
-    if (references.length > 0) {
+    if (containerRefs.length > 0) {
       return { id: item.id, target: 'images', status: 'skipped', reason: 'Image still has container references' };
     }
-    await this.docker.getImage(item.id).remove({ force: false });
+    try {
+      await this.docker.getImage(item.id).remove({ force: false });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      // Re-read tags so a multi-repository conflict that partially untagged is not
+      // reported as a no-op when live names already diverged.
+      let afterTags: string[] | null | undefined;
+      try {
+        const afterList = await this.docker.listImages({ all: false }) as Array<{
+          Id: string;
+          RepoTags?: string[] | null;
+        }>;
+        afterTags = afterList.find((i) => i.Id === img.Id || i.Id.startsWith(img.Id) || img.Id.startsWith(i.Id))
+          ?.RepoTags;
+      } catch {
+        afterTags = undefined;
+      }
+      if (afterTags !== undefined && !pruneImageReferencesEqual(plannedRefs, afterTags)) {
+        return {
+          id: item.id,
+          target: 'images',
+          status: 'failed',
+          error: 'Image delete did not fully remove the reviewed image; some repository tags changed. '
+            + 'Refresh the plan and confirm remaining references before pruning again. '
+            + message,
+        };
+      }
+      const lower = message.toLowerCase();
+      if (lower.includes('multiple repositories') || lower.includes('must be forced') || lower.includes('conflict')) {
+        return {
+          id: item.id,
+          target: 'images',
+          status: 'failed',
+          error: 'Docker refused to delete this image because it is tagged in multiple repositories. '
+            + 'Reviewed tags: ' + (plannedRefs.join(', ') || '(none)') + '. '
+            + 'Resolve tags on the host or re-scope the plan, then dry-run again. '
+            + message,
+        };
+      }
+      throw e;
+    }
     // Prefer plan unique-bytes; do not fall back to full Size (shared layers).
     return { id: item.id, target: 'images', status: 'removed', sizeBytes: item.sizeBytes ?? 0 };
   }

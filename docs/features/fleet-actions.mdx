@@ -149,7 +149,7 @@ The node total is the sum of the sizes shown in that node's candidate rows. Imag
 
 ### Fingerprint-bound execution
 
-**Prune fleet** remains disabled until the current targets, scope, and node roster have a valid reviewed plan for every reachable node. Execution sends one fingerprint per reviewed reachable node. Before deletion begins, the control instance rebuilds all plans, confirms that reviewed-unreachable nodes are still unreachable, and compares the complete configured-node roster.
+**Prune fleet** remains disabled until the current targets, scope, and node roster have a valid reviewed plan for every reachable node. Execution sends one fingerprint per reviewed reachable node. Image fingerprints bind the image Id plus the full reviewed tag set (and digest when present), so retagging a planned free image after Dry run invalidates that node fingerprint and rejects the whole fleet execute before any node deletes. Before deletion begins, the control instance rebuilds all plans, confirms that reviewed-unreachable nodes are still unreachable, and compares the complete configured-node roster.
 
 If a node was added, removed, connected, disconnected, or changed candidates after the dry run, no node starts pruning. Run **Dry run** again to review the new state. Once fleet-wide preflight passes, each node revalidates immediately before deletion. A race at that point can produce a partial result, which is reported rather than hidden.
 

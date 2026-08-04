@@ -75,12 +75,12 @@ beforeEach(() => {
 describe('fingerprintPrunePlan', () => {
   it('is stable for the same sorted target:id pairs regardless of input order', () => {
     const a = fingerprintPrunePlan(1, 'managed', ['volumes', 'images'], [
-      { target: 'images', id: 'img-b' },
+      { target: 'images', id: 'img-b', image: { references: ['app:1'] } },
       { target: 'volumes', id: 'vol-a' },
     ]);
     const b = fingerprintPrunePlan(1, 'managed', ['volumes', 'images'], [
       { target: 'volumes', id: 'vol-a' },
-      { target: 'images', id: 'img-b' },
+      { target: 'images', id: 'img-b', image: { references: ['app:1'] } },
     ]);
     expect(a).toBe(b);
     expect(a).toMatch(/^[a-f0-9]{64}$/);
@@ -92,6 +92,31 @@ describe('fingerprintPrunePlan', () => {
     expect(fingerprintPrunePlan(1, 'all', ['volumes'], [{ target: 'volumes', id: 'v1' }])).not.toBe(base);
     expect(fingerprintPrunePlan(1, 'managed', ['images'], [{ target: 'volumes', id: 'v1' }])).not.toBe(base);
     expect(fingerprintPrunePlan(1, 'managed', ['volumes'], [{ target: 'volumes', id: 'v2' }])).not.toBe(base);
+  });
+
+  it('changes when an image gains or loses RepoTags without changing the image id', () => {
+    const sameId = 'sha256:abc';
+    const before = fingerprintPrunePlan(1, 'managed', ['images'], [
+      { target: 'images', id: sameId, image: { references: ['app:v0'] } },
+    ]);
+    const afterAddTag = fingerprintPrunePlan(1, 'managed', ['images'], [
+      { target: 'images', id: sameId, image: { references: ['app:v0', 'extra:v0'] } },
+    ]);
+    const afterReorder = fingerprintPrunePlan(1, 'managed', ['images'], [
+      { target: 'images', id: sameId, image: { references: ['extra:v0', 'app:v0'] } },
+    ]);
+    expect(afterAddTag).not.toBe(before);
+    expect(afterReorder).toBe(afterAddTag);
+  });
+
+  it('changes when the image digest differs for the same id and tags', () => {
+    const base = fingerprintPrunePlan(1, 'managed', ['images'], [
+      { target: 'images', id: 'img1', image: { references: ['app:1'], digest: 'd1' } },
+    ]);
+    const other = fingerprintPrunePlan(1, 'managed', ['images'], [
+      { target: 'images', id: 'img1', image: { references: ['app:1'], digest: 'd2' } },
+    ]);
+    expect(other).not.toBe(base);
   });
 });
 
@@ -825,5 +850,75 @@ describe('DockerController.executePrunePlan', () => {
     expect(result.outcomes).toEqual([
       expect.objectContaining({ id: 'img1', target: 'images', status: 'skipped', reason: expect.stringMatching(/held/i) }),
     ]);
+  });
+
+  it('marks the plan stale when a free image gains a new RepoTag between plan and rebuild', async () => {
+    const img = {
+      Id: 'img-retag',
+      RepoTags: ['qa1769/app:v0'],
+      Size: 100,
+      Containers: 0,
+    };
+    mockDocker.listImages.mockResolvedValue([img]);
+    mockDocker.listContainers.mockResolvedValue([]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1);
+    expect(plan.items).toHaveLength(1);
+
+    mockDocker.listImages.mockResolvedValue([{
+      ...img,
+      RepoTags: ['qa1769/app:v0', 'qa1769-external/keep:v0'],
+    }]);
+    await expect(dc.assertPlanFresh(plan, [])).resolves.toBeNull();
+    await expect(dc.executePrunePlan(plan, [])).rejects.toBeInstanceOf(PrunePlanStaleError);
+  });
+
+  it('refuses image remove and does not call Docker delete when tags differ under a forced-fresh plan', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-multi', RepoTags: ['qa1769/app:v0'], Size: 50, Containers: 0 },
+    ]);
+    const imageRemove = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getImage.mockReturnValue({ remove: imageRemove });
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-multi', RepoTags: ['qa1769/app:v0', 'qa1769-external/keep:v0'], Size: 50, Containers: 0 },
+    ]);
+    vi.spyOn(dc, 'assertPlanFresh').mockResolvedValue(plan);
+    const result = await dc.executePrunePlan(plan, []);
+    expect(imageRemove).not.toHaveBeenCalled();
+    expect(result.outcomes[0]).toEqual(expect.objectContaining({
+      id: 'img-multi',
+      status: 'failed',
+      error: expect.stringMatching(/references changed/i),
+    }));
+  });
+
+  it('surfaces multi-repository refuse without a silent partial untag report', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      {
+        Id: 'img-multi',
+        RepoTags: ['qa1769/app:v0', 'qa1769-external/keep:v0'],
+        Size: 50,
+        Containers: 0,
+      },
+    ]);
+    const imageRemove = vi.fn().mockRejectedValue(
+      Object.assign(new Error('conflict: unable to delete (must be forced) - image is referenced in multiple repositories'), { statusCode: 409 }),
+    );
+    mockDocker.getImage.mockReturnValue({ remove: imageRemove });
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1);
+    vi.spyOn(dc, 'assertPlanFresh').mockResolvedValue(plan);
+    const result = await dc.executePrunePlan(plan, []);
+    expect(imageRemove).toHaveBeenCalled();
+    expect(result.outcomes[0]).toEqual(expect.objectContaining({
+      status: 'failed',
+      error: expect.stringMatching(/multiple repositories/i),
+    }));
+    expect(String(result.outcomes[0] && 'error' in result.outcomes[0] ? result.outcomes[0].error : '')).toMatch(/qa1769\/app:v0/);
   });
 });
