@@ -1,6 +1,7 @@
 import { Sparkles } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import { useWhatsNewPreference } from '@/hooks/useWhatsNewPreference';
+import { whatsNewEntries } from '@/whats-new/entries';
 import { cn } from '@/lib/utils';
 
 interface WhatsNewTriggerProps {
@@ -13,6 +14,11 @@ export function WhatsNewTrigger({ onClick }: WhatsNewTriggerProps) {
   // Turning the feature off removes the affordance entirely, which is what
   // "Never show again" means everywhere else. Settings > About is the way back.
   if (!enabled) return null;
+
+  // With nothing authored yet there is nothing to announce, so the icon stays
+  // out of the top bar rather than offering an empty modal. The modal keeps its
+  // own empty state as a fallback for entries that fail validation at runtime.
+  if (whatsNewEntries.length === 0) return null;
 
   return (
     <TooltipProvider delayDuration={300} disableHoverableContent>

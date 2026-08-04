@@ -7,6 +7,12 @@ vi.mock('@/hooks/useWhatsNewPreference', () => ({
   useWhatsNewPreference: () => mockPreference(),
 }));
 
+// The committed entries.json is empty, which the trigger treats as "nothing to
+// announce". Every case below except the empty-file one needs an entry to exist.
+vi.mock('@/whats-new/entries', () => ({
+  whatsNewEntries: [{ id: 'entry-a', title: 'A feature', blurb: 'Does a thing.' }],
+}));
+
 import { WhatsNewTrigger } from '../WhatsNewTrigger';
 
 function givenPreference(enabled: boolean, hasUnseen: boolean) {
