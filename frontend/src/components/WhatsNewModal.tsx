@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { ExternalLink } from 'lucide-react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
@@ -16,6 +16,10 @@ const linkClassName = 'inline-flex items-center gap-1 text-xs text-brand hover:u
 
 export function WhatsNewModal({ open, onOpenChange, onViewChangelog }: WhatsNewModalProps) {
   const { markSeen, setEnabled } = useWhatsNewPreference();
+  // Screenshots are authored by hand alongside the entry, so a typo'd or
+  // not-yet-added filename is a realistic mistake. Drop the image instead of
+  // leaving the browser's broken-image placeholder in the card.
+  const [failedScreenshots, setFailedScreenshots] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (open) markSeen();
@@ -40,12 +44,13 @@ export function WhatsNewModal({ open, onOpenChange, onViewChangelog }: WhatsNewM
             <div key={entry.id} className="space-y-2 border-b border-card-border/40 pb-6 last:border-b-0 last:pb-0">
               <h3 className="text-sm font-medium text-stat-value">{entry.title}</h3>
               <p className="text-sm leading-relaxed text-stat-subtitle">{entry.blurb}</p>
-              {entry.screenshot && (
+              {entry.screenshot && !failedScreenshots.has(entry.id) && (
                 <img
                   src={`/whats-new/${entry.screenshot}`}
                   alt={entry.title}
                   className="rounded-md border border-card-border/60"
                   loading="lazy"
+                  onError={() => setFailedScreenshots((prev) => new Set(prev).add(entry.id))}
                 />
               )}
               {entry.docUrl && (

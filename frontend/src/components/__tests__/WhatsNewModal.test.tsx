@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 // vi.mock factories are hoisted above all other module-scope code, so a plain
@@ -37,6 +37,15 @@ describe('WhatsNewModal', () => {
     expect(screen.getAllByRole('link', { name: /Learn more/ })).toHaveLength(1);
     expect(screen.getAllByRole('img')).toHaveLength(1);
     expect(screen.getByRole('img')).toHaveAttribute('src', '/whats-new/second.png');
+  });
+
+  it('drops a screenshot that fails to load instead of leaving a broken image', () => {
+    render(<WhatsNewModal open onOpenChange={vi.fn()} onViewChangelog={vi.fn()} />);
+    fireEvent.error(screen.getByRole('img'));
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    // The rest of the entry must survive; only the image is dropped.
+    expect(screen.getByText('Does the second thing.')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Learn more/ })).toBeInTheDocument();
   });
 
   it('marks the newest entry seen when opened', () => {
