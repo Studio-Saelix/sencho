@@ -33,6 +33,16 @@ describe('useWhatsNewPreference', () => {
     expect(result.current.hasUnseen).toBe(false);
   });
 
+  it('a release that shipped with zero entries stamps a "" watermark, so the next release\'s first real entry is detected as unseen for an existing install', () => {
+    // Simulates: release N had entries.json === [], the hook already ran once
+    // on this install and (per the fixed initializer) stamped '' as the
+    // watermark. Release N+1 now adds the first real entry. The install is
+    // NOT fresh (a key already exists), so it must not silently catch up.
+    localStorage.setItem('sencho.whatsNew.lastSeenId', '');
+    const { result } = renderHook(() => useWhatsNewPreference());
+    expect(result.current.hasUnseen).toBe(true);
+  });
+
   it('an existing watermark behind the latest entry reports hasUnseen true', () => {
     localStorage.setItem('sencho.whatsNew.lastSeenId', 'entry-a');
     const { result } = renderHook(() => useWhatsNewPreference());
