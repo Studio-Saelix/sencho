@@ -1056,6 +1056,8 @@ export default function EditorLayout() {
         <ShellOverlays
           overlayState={overlayState}
           stackActions={stackActions}
+          stackActionMap={stackActionMap}
+          stackFiles={files}
           isDarkMode={isDarkMode}
           isAdmin={isAdmin}
           can={can}

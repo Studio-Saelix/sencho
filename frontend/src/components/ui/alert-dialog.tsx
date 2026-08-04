@@ -93,10 +93,12 @@ AlertDialogDescription.displayName = AlertDialogPrimitive.Description.displayNam
 const AlertDialogAction = React.forwardRef<
   React.ElementRef<typeof AlertDialogPrimitive.Action>,
   React.ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Action>
->(({ className, ...props }, ref) => (
+>(({ className, asChild, ...props }, ref) => (
   <AlertDialogPrimitive.Action
     ref={ref}
-    className={cn(buttonVariants(), className)}
+    asChild={asChild}
+    // When asChild, child (e.g. BusyButton) owns buttonVariants; do not stack defaults.
+    className={cn(asChild ? undefined : buttonVariants(), className)}
     {...props}
   />
 ));

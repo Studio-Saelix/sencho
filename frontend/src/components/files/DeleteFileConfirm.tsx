@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { AlertTriangle, Loader2 } from 'lucide-react';
+import { AlertTriangle } from 'lucide-react';
 import { Modal, ModalDestructiveHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
+import { BusyButton } from '@/components/ui/busy-button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from '@/components/ui/toast-store';
@@ -69,6 +70,7 @@ export function DeleteFileConfirm({
   const protectedOk = !isProtected || confirmInput === entryName;
 
   const deleteLabel = notEmpty ? 'Delete all' : 'Delete';
+  const busyDeleteLabel = notEmpty ? 'Deleting all...' : 'Deleting...';
 
   const titleNode = entryName ? (
     <>
@@ -130,18 +132,17 @@ export function DeleteFileConfirm({
           </Button>
         }
         primary={
-          <Button
+          <BusyButton
             variant="destructive"
             size="sm"
             data-testid="delete-confirm-btn"
             onClick={handleDelete}
-            disabled={deleting || !protectedOk}
+            pending={deleting}
+            busyLabel={busyDeleteLabel}
+            disabled={!protectedOk}
           >
-            {deleting && (
-              <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} />
-            )}
             {deleteLabel}
-          </Button>
+          </BusyButton>
         }
       />
     </Modal>

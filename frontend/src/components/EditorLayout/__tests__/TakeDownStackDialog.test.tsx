@@ -88,4 +88,11 @@ describe('TakeDownStackDialog', () => {
         await user.click(screen.getByRole('button', { name: 'Take down' }));
         expect(onConfirm).toHaveBeenCalledWith(false);
     });
+
+    it('disables Take down, Cancel, and volume checkbox while confirming', () => {
+        renderDialog(true, { confirming: true });
+        expect(screen.getByRole('button', { name: /Take down/i })).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+        expect(screen.getByTestId('take-down-remove-volumes')).toBeDisabled();
+    });
 });

@@ -8,6 +8,8 @@ export interface TakeDownStackDialogProps {
     stackName: string | null;
     showVolumeOption: boolean;
     onConfirm: (removeVolumes: boolean) => void | Promise<void>;
+    /** True while the take-down request owns the flow (from stackActionMap). */
+    confirming?: boolean;
 }
 
 export function TakeDownStackDialog({
@@ -16,6 +18,7 @@ export function TakeDownStackDialog({
     stackName,
     showVolumeOption,
     onConfirm,
+    confirming = false,
 }: TakeDownStackDialogProps) {
     const [removeVolumes, setRemoveVolumes] = useState(false);
 
@@ -30,7 +33,6 @@ export function TakeDownStackDialog({
             open={open}
             onOpenChange={onOpenChange}
             variant="destructive"
-            data-testid="take-down-dialog"
             kicker={`${(stackName ?? 'STACK').toUpperCase()} · TAKE DOWN${removeVolumes ? '' : ' · REVERSIBLE'}`}
             title={
                 stackName ? (
@@ -44,6 +46,8 @@ export function TakeDownStackDialog({
             description="This removes running containers and compose-created networks. The stack configuration stays on disk so you can deploy again later."
             hint={removeVolumes ? 'VOLUMES REMOVED' : 'VOLUMES KEPT'}
             confirmLabel="Take down"
+            busyConfirmLabel="Taking down..."
+            confirming={confirming}
             onConfirm={() => onConfirm(removeVolumes)}
         >
             {showVolumeOption && (
@@ -52,6 +56,7 @@ export function TakeDownStackDialog({
                         id="take-down-remove-volumes"
                         data-testid="take-down-remove-volumes"
                         checked={removeVolumes}
+                        disabled={confirming}
                         onCheckedChange={(v) => setRemoveVolumes(v === true)}
                     />
                     <label
