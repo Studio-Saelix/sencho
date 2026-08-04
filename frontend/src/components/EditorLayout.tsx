@@ -35,7 +35,7 @@ import {
 import { SENCHO_OPEN_LOGS_EVENT, SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
 import type { SenchoOpenLogsDetail, SenchoOpenStackDetail } from '@/lib/events';
 import { useNodes } from '@/context/NodeContext';
-import { STACK_DOWN_REMOVE_VOLUMES_CAPABILITY } from '@/lib/capabilities';
+import { STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, STACK_DELETE_PRUNE_VOLUMES_CAPABILITY } from '@/lib/capabilities';
 import { useAuth } from '@/context/AuthContext';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
@@ -166,6 +166,8 @@ export default function EditorLayout() {
   const { nodes, activeNode, setActiveNode, hasCapability, activeNodeMeta, isLoading: nodesLoading } = useNodes();
   const canOfferVolumeRemoval =
     activeNodeMeta?.capabilities.includes(STACK_DOWN_REMOVE_VOLUMES_CAPABILITY) === true;
+  const canOfferVolumeRemovalOnDelete =
+    activeNodeMeta?.capabilities.includes(STACK_DELETE_PRUNE_VOLUMES_CAPABILITY) === true;
 
   // One-shot boot milestone: the app shell has mounted. Developer mode gates the
   // hydration-timing overlay for the active node; it follows node switches.
@@ -299,6 +301,7 @@ export default function EditorLayout() {
       return can('stack:edit', 'stack', stackName, activeNode?.id);
     },
     canOfferVolumeRemoval,
+    canOfferVolumeRemovalOnDelete,
     onDeletedOpenStack: () => onDeletedOpenStackRef.current(),
     removeNotificationsForStack,
     isAdmin,
@@ -1070,6 +1073,7 @@ export default function EditorLayout() {
           composeReapply={composeReapply}
           canSaveAndReapply={canSaveAndReapply}
           canOfferVolumeRemoval={canOfferVolumeRemoval}
+          canOfferVolumeRemovalOnDelete={canOfferVolumeRemovalOnDelete}
           onOpenFleetNodeUpdates={() => {
             if (isMobile) {
               navigateMobileAware('fleet');

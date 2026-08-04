@@ -59,6 +59,7 @@ export const CAPABILITIES = [
   'compose-storage',
   'cross-node-rbac',
   'stack-down-remove-volumes',
+  'stack-delete-prune-volumes',
   'guided-external-network-preflight',
   'service-scoped-update',
   'service-scoped-stack-alert',
@@ -96,6 +97,11 @@ export const NOTIFICATION_SUPPRESSION_REPLICA_RETRACTION_CAPABILITY =
 
 /** Capability for optional `?removeVolumes=true` on POST /stacks/:name/down. */
 export const STACK_DOWN_REMOVE_VOLUMES_CAPABILITY = 'stack-down-remove-volumes' as const satisfies Capability;
+
+/** Capability for honoring `?pruneVolumes` on DELETE /stacks/:name. Nodes without this
+ *  capability always destroy volumes on delete (pre-existing behavior); nodes with it
+ *  honor the operator's checkbox choice. */
+export const STACK_DELETE_PRUNE_VOLUMES_CAPABILITY = 'stack-delete-prune-volumes' as const satisfies Capability;
 
 /** Capability for the nested per-service update/restore routes and the `effective-services` model they read. */
 export const SERVICE_SCOPED_UPDATE_CAPABILITY = 'service-scoped-update' as const satisfies Capability;

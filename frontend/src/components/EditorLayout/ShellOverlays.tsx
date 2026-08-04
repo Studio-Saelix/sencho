@@ -41,6 +41,7 @@ interface ShellOverlaysProps {
   composeReapply: ReturnType<typeof useComposeReapplyAction>;
   canSaveAndReapply: boolean;
   canOfferVolumeRemoval: boolean;
+  canOfferVolumeRemovalOnDelete: boolean;
   onOpenFleetNodeUpdates: () => void;
 }
 
@@ -61,6 +62,7 @@ export function ShellOverlays({
   composeReapply,
   canSaveAndReapply,
   canOfferVolumeRemoval,
+  canOfferVolumeRemovalOnDelete,
   onOpenFleetNodeUpdates,
 }: ShellOverlaysProps) {
   const {
@@ -93,6 +95,7 @@ export function ShellOverlays({
         open={deleteDialogOpen}
         onOpenChange={(open) => { if (!open) closeDeleteDialog(); }}
         stackName={stackToDelete}
+        showVolumeOption={canOfferVolumeRemovalOnDelete}
         onConfirm={stackActions.deleteStack}
         confirming={isDeleteConfirming}
       />

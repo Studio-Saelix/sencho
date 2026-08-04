@@ -37,6 +37,7 @@ export const CAPABILITIES = [
   'compose-storage',
   'cross-node-rbac',
   'stack-down-remove-volumes',
+  'stack-delete-prune-volumes',
   'guided-external-network-preflight',
   'service-scoped-update',
   'service-scoped-stack-alert',
@@ -52,6 +53,7 @@ export const HOST_CONSOLE_CAPABILITY = 'host-console' as const satisfies Capabil
 export const HOST_CONSOLE_COMMUNITY_CAPABILITY = 'host-console-community' as const satisfies Capability;
 
 export const STACK_DOWN_REMOVE_VOLUMES_CAPABILITY = 'stack-down-remove-volumes' as const satisfies Capability;
+export const STACK_DELETE_PRUNE_VOLUMES_CAPABILITY = 'stack-delete-prune-volumes' as const satisfies Capability;
 export const GUIDED_EXTERNAL_NETWORK_PREFLIGHT_CAPABILITY = 'guided-external-network-preflight' as const satisfies Capability;
 export const SERVICE_SCOPED_UPDATE_CAPABILITY = 'service-scoped-update' as const satisfies Capability;
 export const SERVICE_SCOPED_STACK_ALERT_CAPABILITY = 'service-scoped-stack-alert' as const satisfies Capability;

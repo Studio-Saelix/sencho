@@ -6,6 +6,7 @@ export interface DeleteStackDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     stackName: string | null;
+    showVolumeOption?: boolean;
     onConfirm: (pruneVolumes: boolean) => void | Promise<void>;
     /** True while the stack delete request owns the flow (from stackActionMap). */
     confirming?: boolean;
@@ -15,6 +16,7 @@ export function DeleteStackDialog({
     open,
     onOpenChange,
     stackName,
+    showVolumeOption = false,
     onConfirm,
     confirming = false,
 }: DeleteStackDialogProps) {
@@ -52,20 +54,26 @@ export function DeleteStackDialog({
             confirmLabel="Delete"
             busyConfirmLabel="Deleting..."
             confirming={confirming}
-            onConfirm={() => onConfirm(pruneVolumes)}
+            onConfirm={() => {
+                const shouldPrune = pruneVolumes && showVolumeOption;
+                setPruneVolumes(false);
+                onConfirm(shouldPrune);
+            }}
         >
             <p className="text-sm text-muted-foreground">This action cannot be undone.</p>
-            <div className="flex items-center gap-2">
-                <Checkbox
-                    id="prune-volumes"
-                    checked={pruneVolumes}
-                    disabled={confirming}
-                    onCheckedChange={(v) => setPruneVolumes(v === true)}
-                />
-                <label htmlFor="prune-volumes" className="text-sm text-muted-foreground cursor-pointer select-none">
-                    Also remove associated volumes
-                </label>
-            </div>
+            {showVolumeOption && (
+                <div className="flex items-center gap-2">
+                    <Checkbox
+                        id="prune-volumes"
+                        checked={pruneVolumes}
+                        disabled={confirming}
+                        onCheckedChange={(v) => setPruneVolumes(v === true)}
+                    />
+                    <label htmlFor="prune-volumes" className="text-sm text-muted-foreground cursor-pointer select-none">
+                        Also remove associated volumes
+                    </label>
+                </div>
+            )}
         </ConfirmModal>
     );
 }
