@@ -1952,12 +1952,13 @@ export function useStackActions(options: UseStackActionsOptions) {
     const deleteKey = resolveStackFileKey(stackListState.files, stackToDelete);
     const canonicalName = deleteKey.replace(/\.(yml|yaml)$/, '');
     if (stackListState.isStackBusy(deleteKey)) return;
+    const opNodeId = activeNode?.id ?? null;
     stackListState.setStackAction(deleteKey, 'delete');
     try {
       const url = pruneVolumes
         ? `/stacks/${stackToDelete}?pruneVolumes=true`
         : `/stacks/${stackToDelete}`;
-      const response = await apiFetch(url, { method: 'DELETE' });
+      const response = await apiFetch(url, { method: 'DELETE', nodeId: opNodeId });
       if (!response.ok) {
         const errText = await response.text();
         if (isSelfStackProtectedResponse(errText, response.status)) {
@@ -1965,7 +1966,7 @@ export function useStackActions(options: UseStackActionsOptions) {
           overlayState.closeDeleteDialog();
           return;
         }
-        throw new Error(errText || 'Failed to delete stack');
+        throw parseStackActionError(errText, 'Failed to delete stack', response.status);
       }
       toast.success('Stack deleted successfully!');
       overlayState.closeDeleteDialog();

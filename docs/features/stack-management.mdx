@@ -383,7 +383,7 @@ The stack header groups actions by frequency of use. The most common action is t
 | Overflow | **Scan config** | Trivy config scan | Scans the compose file for misconfigurations (admin role). |
 | Overflow | **Monitor** | Opens Monitor sheet | Opens the stack **Monitor** sheet on the Alerts tab (alert rules and Auto-heal). Same sheet as sidebar **Alerts** / **Auto-Heal**. |
 | Overflow | **Mute** | Creates a mute rule | Quick presets to mute notifications, deploy-success noise, or monitor alerts for this stack, plus a link to manage its mute rules in full. See [Alerts and Notifications](/features/alerts-notifications). |
-| Overflow | **Delete** | `down --volumes` + removes files | Stops and removes containers and volumes, then deletes the stack directory. |
+| Overflow | **Delete** | `down --remove-orphans` + removes files | Stops and removes containers, then deletes the stack directory. Volumes are removed only when the operator opts in from the confirmation dialog. On a node too old to guarantee that (see [Node Compatibility](/features/node-compatibility)), the dialog says so and volumes are always removed. |
 
 **When stopped:**
 

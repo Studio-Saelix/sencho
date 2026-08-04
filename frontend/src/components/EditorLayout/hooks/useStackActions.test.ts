@@ -1729,13 +1729,28 @@ describe('useStackActions.deleteStack', () => {
       await result.current.deleteStack(false);
     });
 
-    expect(apiFetch).toHaveBeenCalledWith('/stacks/web.yml', { method: 'DELETE' });
+    expect(apiFetch).toHaveBeenCalledWith('/stacks/web.yml', { method: 'DELETE', nodeId: 1 });
     expect(stackListState.setSelectedFile).toHaveBeenCalledWith(null);
     expect(navState.setActiveView).toHaveBeenCalledWith('dashboard');
     expect(navState.setActiveView).toHaveBeenCalledTimes(1);
     expect(onDeletedOpenStack).toHaveBeenCalledTimes(1);
     expect(overlayState.closeDeleteDialog).toHaveBeenCalled();
     expect(stackListState.refreshStacks).toHaveBeenCalled();
+  });
+
+  it('passes pruneVolumes=true through unconditionally, including on nodes without the capability', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
+    const { result } = setup({
+      overlay: { stackToDelete: 'web.yml' },
+      stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
+      navState: { activeView: 'editor' },
+    });
+
+    await act(async () => {
+      await result.current.deleteStack(true);
+    });
+
+    expect(apiFetch).toHaveBeenCalledWith('/stacks/web.yml?pruneVolumes=true', { method: 'DELETE', nodeId: 1 });
   });
 
   it('clears isFileLoading on delete-leave so the URL writer is not blocked', async () => {
@@ -1766,7 +1781,7 @@ describe('useStackActions.deleteStack', () => {
       await result.current.deleteStack(false);
     });
 
-    expect(apiFetch).toHaveBeenCalledWith('/stacks/web', { method: 'DELETE' });
+    expect(apiFetch).toHaveBeenCalledWith('/stacks/web', { method: 'DELETE', nodeId: 1 });
     expect(stackListState.setSelectedFile).toHaveBeenCalledWith(null);
     expect(navState.setActiveView).toHaveBeenCalledWith('dashboard');
     expect(onDeletedOpenStack).toHaveBeenCalledTimes(1);
@@ -1830,6 +1845,30 @@ describe('useStackActions.deleteStack', () => {
     expect(overlayState.closeDeleteDialog).not.toHaveBeenCalled();
     expect(stackListState.refreshStacks).not.toHaveBeenCalled();
     expect(toast.error).toHaveBeenCalled();
+  });
+
+  it('surfaces the parsed error message, not the raw JSON body, on a non-OK delete response', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: 'This node cannot guarantee volumes are preserved on delete.',
+          code: 'capability_unavailable',
+        }),
+        { status: 400 },
+      ),
+    );
+    const { toast } = await import('@/components/ui/toast-store');
+    const { result } = setup({
+      overlay: { stackToDelete: 'web.yml' },
+      stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
+      navState: { activeView: 'editor' },
+    });
+
+    await act(async () => {
+      await result.current.deleteStack(true);
+    });
+
+    expect(toast.error).toHaveBeenCalledWith('This node cannot guarantee volumes are preserved on delete.');
   });
 
   it('does not navigate on a self-stack-protected response', async () => {

@@ -52,7 +52,7 @@ function evidenceRemote(): http.Server {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         version: '0.93.0',
-        capabilities: ['cross-node-rbac', 'scoped-stack-auth-evidence'],
+        capabilities: ['cross-node-rbac', 'scoped-stack-auth-evidence', 'stack-delete-prune-volumes'],
       }));
       return;
     }
@@ -88,7 +88,7 @@ function failDeleteRemote(): http.Server {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         version: '0.93.0',
-        capabilities: ['cross-node-rbac', 'scoped-stack-auth-evidence'],
+        capabilities: ['cross-node-rbac', 'scoped-stack-auth-evidence', 'stack-delete-prune-volumes'],
       }));
       return;
     }

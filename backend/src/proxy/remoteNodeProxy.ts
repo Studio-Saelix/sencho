@@ -14,6 +14,7 @@ import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
 import { remoteSupportsCrossNodeRbac, remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
 import {
   STACK_DOWN_REMOVE_VOLUMES_CAPABILITY,
+  STACK_DELETE_PRUNE_VOLUMES_CAPABILITY,
   SERVICE_SCOPED_UPDATE_CAPABILITY,
   SERVICE_SCOPED_STACK_ALERT_CAPABILITY,
   SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
@@ -312,6 +313,17 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         const supported = await remoteAdvertisesCapability(req.nodeId, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY);
         if (!supported) {
           res.status(400).json({ error: 'Volume removal is not supported on this node' });
+          return;
+        }
+      }
+
+      if (isUnacknowledgedStackDelete(req)) {
+        const supported = await remoteAdvertisesCapability(req.nodeId, STACK_DELETE_PRUNE_VOLUMES_CAPABILITY);
+        if (!supported) {
+          res.status(400).json({
+            error: 'This node cannot guarantee volumes are preserved on delete. Upgrade it before deleting this stack.',
+            code: 'capability_unavailable',
+          });
           return;
         }
       }
@@ -643,6 +655,21 @@ function isStackDownWithRemoveVolumes(req: Request): boolean {
   if (req.method !== 'POST') return false;
   if (!/^\/stacks\/[^/]+\/down$/.test(req.path)) return false;
   return req.query.removeVolumes === 'true';
+}
+
+/**
+ * DELETE /stacks/:stackName without an explicit ?pruneVolumes=true (path is post-/api
+ * strip). downStack() hardcoded --volumes on every delete before stack-delete-prune-volumes
+ * existed, unlike runDown which was already volume-safe. So an unacknowledged delete
+ * forwarded to a remote lacking the capability would silently destroy volumes the
+ * operator asked to keep, with no local route or UI check able to catch it. Gate the
+ * unacknowledged path here; an explicit pruneVolumes=true matches what an unsupported
+ * remote will do anyway and needs no gate.
+ */
+function isUnacknowledgedStackDelete(req: Request): boolean {
+  if (req.method !== 'DELETE') return false;
+  if (!/^\/stacks\/[^/]+\/?$/.test(req.path)) return false;
+  return req.query.pruneVolumes !== 'true';
 }
 
 /** Nested service update/restore/recovery routes (path is post-/api strip). */

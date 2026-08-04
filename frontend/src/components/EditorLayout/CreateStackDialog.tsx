@@ -316,9 +316,17 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
             });
             if (!saveResponse.ok) {
                 // Roll back the empty stack we just created so we don't leave an orphan.
-                await apiFetch(`/stacks/${encodeURIComponent(stackName)}`, { method: 'DELETE' }).catch((cleanupError) => {
+                // pruneVolumes=true: nothing has been deployed yet, so there is no volume
+                // to preserve, and passing it avoids nodes that require an explicit
+                // acknowledgement to delete without a guaranteed-preserving capability.
+                try {
+                    const cleanupRes = await apiFetch(`/stacks/${encodeURIComponent(stackName)}?pruneVolumes=true`, { method: 'DELETE' });
+                    if (!cleanupRes.ok) {
+                        console.error('Failed to roll back orphan stack after save failure:', await cleanupRes.text());
+                    }
+                } catch (cleanupError) {
                     console.error('Failed to roll back orphan stack after save failure:', cleanupError);
-                });
+                }
                 createdStack = false;
                 throw new Error('Could not save the converted YAML. Please try again.');
             }

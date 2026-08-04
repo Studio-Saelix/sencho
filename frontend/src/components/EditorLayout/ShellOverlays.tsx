@@ -6,7 +6,7 @@ import { UpdateReadinessDialog } from '../stack/UpdateReadinessDialog';
 import { SelfStackProtectedDialog } from '../stack/SelfStackProtectedDialog';
 import { LocalUpdateConfirmDialog } from '../FleetView/LocalUpdateConfirmDialog';
 import { ReconnectingOverlay } from '../FleetView/ReconnectingOverlay';
-import { DeleteStackDialog } from './DeleteStackDialog';
+import { DeleteStackDialog, type VolumePreservationOnDelete } from './DeleteStackDialog';
 import { TakeDownStackDialog } from './TakeDownStackDialog';
 import { UnsavedChangesDialog } from './UnsavedChangesDialog';
 import { StackAlertSheet } from '../StackAlertSheet';
@@ -41,6 +41,7 @@ interface ShellOverlaysProps {
   composeReapply: ReturnType<typeof useComposeReapplyAction>;
   canSaveAndReapply: boolean;
   canOfferVolumeRemoval: boolean;
+  deleteVolumePreservation: VolumePreservationOnDelete;
   onOpenFleetNodeUpdates: () => void;
 }
 
@@ -61,6 +62,7 @@ export function ShellOverlays({
   composeReapply,
   canSaveAndReapply,
   canOfferVolumeRemoval,
+  deleteVolumePreservation,
   onOpenFleetNodeUpdates,
 }: ShellOverlaysProps) {
   const {
@@ -93,6 +95,7 @@ export function ShellOverlays({
         open={deleteDialogOpen}
         onOpenChange={(open) => { if (!open) closeDeleteDialog(); }}
         stackName={stackToDelete}
+        volumePreservation={deleteVolumePreservation}
         onConfirm={stackActions.deleteStack}
         confirming={isDeleteConfirming}
       />
