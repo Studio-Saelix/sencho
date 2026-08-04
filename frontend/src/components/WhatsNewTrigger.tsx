@@ -9,7 +9,10 @@ interface WhatsNewTriggerProps {
 
 export function WhatsNewTrigger({ onClick }: WhatsNewTriggerProps) {
   const { enabled, hasUnseen } = useWhatsNewPreference();
-  const breathing = enabled && hasUnseen;
+
+  // Turning the feature off removes the affordance entirely, which is what
+  // "Never show again" means everywhere else. Settings > About is the way back.
+  if (!enabled) return null;
 
   return (
     <TooltipProvider delayDuration={300} disableHoverableContent>
@@ -19,10 +22,11 @@ export function WhatsNewTrigger({ onClick }: WhatsNewTriggerProps) {
             type="button"
             onClick={onClick}
             aria-label="What's new"
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:text-foreground"
+            // Matches the sibling search trigger in the same TopBar cluster.
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-foreground/80 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           >
             <Sparkles
-              className={cn('h-4 w-4', breathing && 'animate-whats-new-breathe')}
+              className={cn('h-4 w-4', hasUnseen && 'animate-whats-new-breathe')}
               strokeWidth={1.5}
             />
           </button>

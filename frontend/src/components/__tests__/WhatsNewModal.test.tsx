@@ -6,7 +6,7 @@ import userEvent from '@testing-library/user-event';
 // array literal referenced from the factory would hit a temporal-dead-zone
 // ReferenceError; vi.hoisted() hoists the declaration itself alongside it.
 const mockEntries = vi.hoisted(() => [
-  { id: 'entry-a', title: 'First feature', blurb: 'Does the first thing.' },
+  { id: 'entry-a', title: 'First feature', blurb: 'Does the first thing.', screenshot: 'first.png' },
   { id: 'entry-b', title: 'Second feature', blurb: 'Does the second thing.', docUrl: 'https://docs.sencho.io/features/second', screenshot: 'second.png' },
 ]);
 vi.mock('@/whats-new/entries', () => ({ whatsNewEntries: mockEntries }));
@@ -32,18 +32,23 @@ describe('WhatsNewModal', () => {
     expect(screen.getByText('Does the second thing.')).toBeInTheDocument();
   });
 
-  it('renders a doc link and screenshot only for entries that have them', () => {
+  it('renders a doc link only for entries that have one, and a screenshot for each that does', () => {
     render(<WhatsNewModal open onOpenChange={vi.fn()} onViewChangelog={vi.fn()} />);
     expect(screen.getAllByRole('link', { name: /Learn more/ })).toHaveLength(1);
-    expect(screen.getAllByRole('img')).toHaveLength(1);
-    expect(screen.getByRole('img')).toHaveAttribute('src', '/whats-new/second.png');
+    expect(screen.getAllByRole('img').map((i) => i.getAttribute('src'))).toEqual([
+      '/whats-new/second.png',
+      '/whats-new/first.png',
+    ]);
   });
 
-  it('drops a screenshot that fails to load instead of leaving a broken image', () => {
+  it('drops only the screenshot that fails to load, leaving the rest of the entry and other images intact', () => {
     render(<WhatsNewModal open onOpenChange={vi.fn()} onViewChangelog={vi.fn()} />);
-    fireEvent.error(screen.getByRole('img'));
-    expect(screen.queryByRole('img')).not.toBeInTheDocument();
-    // The rest of the entry must survive; only the image is dropped.
+    fireEvent.error(screen.getByAltText('Second feature'));
+    expect(screen.queryByAltText('Second feature')).not.toBeInTheDocument();
+    // A sibling entry's screenshot must survive, which is what makes the
+    // failure set per-entry rather than a single global flag.
+    expect(screen.getByAltText('First feature')).toBeInTheDocument();
+    // The failed entry keeps everything except its image.
     expect(screen.getByText('Does the second thing.')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /Learn more/ })).toBeInTheDocument();
   });
@@ -58,10 +63,22 @@ describe('WhatsNewModal', () => {
     expect(mockMarkSeen).not.toHaveBeenCalled();
   });
 
-  it('"Never show again" disables the preference', async () => {
-    render(<WhatsNewModal open onOpenChange={vi.fn()} onViewChangelog={vi.fn()} />);
+  it('"Never show again" disables the preference and closes the modal', async () => {
+    const onOpenChange = vi.fn();
+    render(<WhatsNewModal open onOpenChange={onOpenChange} onViewChangelog={vi.fn()} />);
     await userEvent.click(screen.getByRole('button', { name: 'Never show again' }));
     expect(mockSetEnabled).toHaveBeenCalledWith(false);
+    // The nav trigger disappears with the preference, so the modal must not
+    // be left open behind it.
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('"Got it" closes the modal without touching the preference', async () => {
+    const onOpenChange = vi.fn();
+    render(<WhatsNewModal open onOpenChange={onOpenChange} onViewChangelog={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Got it' }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(mockSetEnabled).not.toHaveBeenCalled();
   });
 
   it('"View full changelog" calls the callback', async () => {

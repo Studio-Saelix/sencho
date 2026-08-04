@@ -887,6 +887,8 @@ export default function EditorLayout() {
     />
   );
 
+  // Desktop only: the trigger lives in the TopBar, which the bespoke mobile
+  // screens drop, so this is rendered in the desktop branch alone.
   const whatsNewModalEl = (
     <WhatsNewModal
       open={whatsNewOpen}
@@ -1290,7 +1292,6 @@ export default function EditorLayout() {
               onSettings={openSettingsMobileAware}
             />
             {adoptDialogEl}
-            {whatsNewModalEl}
             {shellOverlaysEl}
             {hydrationOverlay}
           </div>

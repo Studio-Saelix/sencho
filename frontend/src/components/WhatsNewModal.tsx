@@ -30,11 +30,11 @@ export function WhatsNewModal({ open, onOpenChange, onViewChangelog }: WhatsNewM
   return (
     // xl (max-w-xl w-[95vw]), not the md default (max-w-md): cards carry
     // screenshots and need more width than the default confirm-dialog size.
-    // className bounds the dialog to 85vh and makes it a flex column so
+    // className bounds the dialog to 85dvh and makes it a flex column so
     // ModalBody's `fill` (flex-1 min-h-0) can actually constrain the body to
     // scroll while the header and footer stay pinned, matching the pattern
     // ConfirmModal uses (flex max-h-[85dvh] flex-col).
-    <Modal open={open} onOpenChange={onOpenChange} size="xl" className="max-h-[85vh] flex flex-col">
+    <Modal open={open} onOpenChange={onOpenChange} size="xl" className="max-h-[85dvh] flex flex-col">
       <ModalHeader kicker="Sencho" title="What's New" />
       <ModalBody fill className="space-y-6">
         {entries.length === 0 ? (
@@ -69,7 +69,16 @@ export function WhatsNewModal({ open, onOpenChange, onViewChangelog }: WhatsNewM
           </button>
         }
         secondary={
-          <Button variant="ghost" size="sm" onClick={() => setEnabled(false)}>
+          // Turning the feature off also removes the nav icon, so leaving the
+          // modal open would strand the user in a surface they just dismissed.
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setEnabled(false);
+              onOpenChange(false);
+            }}
+          >
             Never show again
           </Button>
         }

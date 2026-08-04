@@ -17,11 +17,10 @@ describe('WhatsNewTrigger', () => {
     expect(icon).toHaveClass('animate-whats-new-breathe');
   });
 
-  it('does not breathe when the preference is disabled', () => {
+  it('renders nothing at all when the preference is disabled', () => {
     mockPreference.mockReturnValue({ enabled: false, hasUnseen: true, setEnabled: vi.fn(), markSeen: vi.fn() });
     render(<WhatsNewTrigger onClick={vi.fn()} />);
-    const icon = screen.getByRole('button', { name: "What's new" }).querySelector('svg');
-    expect(icon).not.toHaveClass('animate-whats-new-breathe');
+    expect(screen.queryByRole('button', { name: "What's new" })).not.toBeInTheDocument();
   });
 
   it('does not breathe when there is nothing unseen', () => {
@@ -31,11 +30,17 @@ describe('WhatsNewTrigger', () => {
     expect(icon).not.toHaveClass('animate-whats-new-breathe');
   });
 
-  it('is clickable even when disabled', async () => {
-    mockPreference.mockReturnValue({ enabled: false, hasUnseen: false, setEnabled: vi.fn(), markSeen: vi.fn() });
+  it('opens the modal when clicked', async () => {
+    mockPreference.mockReturnValue({ enabled: true, hasUnseen: false, setEnabled: vi.fn(), markSeen: vi.fn() });
     const onClick = vi.fn();
     render(<WhatsNewTrigger onClick={onClick} />);
     await userEvent.click(screen.getByRole('button', { name: "What's new" }));
     expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('exposes a visible keyboard focus state', () => {
+    mockPreference.mockReturnValue({ enabled: true, hasUnseen: false, setEnabled: vi.fn(), markSeen: vi.fn() });
+    render(<WhatsNewTrigger onClick={vi.fn()} />);
+    expect(screen.getByRole('button', { name: "What's new" })).toHaveClass('focus-visible:ring-2');
   });
 });
