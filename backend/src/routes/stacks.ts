@@ -2639,6 +2639,9 @@ function sendFsError(
       console.error('[files] %s (helper failure): %s', sanitizeForLog(fallback), sanitizeForLog(e.message));
       return res.status(status).json({ error: fallback });
     }
+    if (status === 409 && /not empty/i.test(e.message)) {
+      return res.status(409).json({ error: e.message, code: 'NOT_EMPTY' satisfies FsErrorCode });
+    }
     return res.status(status).json({ error: e.message });
   }
   console.error(`[files] ${fallback}:`, sanitizeForLog(e.message));
