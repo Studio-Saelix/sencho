@@ -380,6 +380,20 @@ export async function writeStackFile(
   return { version, mtimeMs };
 }
 
+/**
+ * Thrown by deleteStackPath when the server refuses to delete a non-empty
+ * directory without the recursive flag (HTTP 409, code NOT_EMPTY). The
+ * DeleteFileConfirm dialog promotes its confirm button to "Delete all" on
+ * this signal and retries with recursive=true.
+ */
+export class NotEmptyError extends Error {
+  readonly code = 'NOT_EMPTY' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotEmptyError';
+  }
+}
+
 export async function deleteStackPath(
   stackName: string,
   relPath: string,
@@ -392,6 +406,15 @@ export async function deleteStackPath(
     stackFilesUrl(stackName, `?path=${encodeURIComponent(relPath)}${recursiveSuffix}${rootParam(rootId)}`),
     { method: 'DELETE' },
   );
+  if (res.status === 409) {
+    let body: { code?: string; error?: string } = {};
+    try { body = await res.clone().json(); } catch { /* ignore */ }
+    if (body.code === 'NOT_EMPTY') {
+      throw new NotEmptyError(body.error ?? 'Directory is not empty.');
+    }
+    // PROTECTED_FILE and any other 409 fall through to the generic Error path
+    // so the caller surfaces the server message as a toast.
+  }
   if (!res.ok) throw new Error(await parseApiError(res));
 }
 

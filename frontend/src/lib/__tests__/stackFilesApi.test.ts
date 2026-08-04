@@ -14,6 +14,8 @@ import {
   nextDuplicateName,
   createEmptyStackFile,
   UploadConflictError,
+  deleteStackPath,
+  NotEmptyError,
 } from '../stackFilesApi';
 
 describe('isClientSafeRelPath', () => {
@@ -191,5 +193,79 @@ describe('createEmptyStackFile', () => {
     const err = await createEmptyStackFile('my-stack', 'configs', 'app').catch((e) => e);
     expect(err).toBeInstanceOf(Error);
     expect(err).not.toBeInstanceOf(UploadConflictError);
+  });
+});
+
+describe('deleteStackPath', () => {
+  function stubFetch(status: number, body?: object) {
+    const res = {
+      status,
+      ok: status >= 200 && status < 300,
+      headers: { get: () => null },
+      clone() { return this; },
+      json: async () => body ?? {},
+    };
+    const fetchMock = vi.fn().mockResolvedValue(res);
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  beforeEach(() => localStorage.clear());
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('resolves on success without throwing', async () => {
+    const fetchMock = stubFetch(204);
+    await expect(deleteStackPath('my-stack', 'nonempty')).resolves.toBeUndefined();
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(new URL(url, 'http://x').searchParams.get('path')).toBe('nonempty');
+    expect(init).toMatchObject({ method: 'DELETE' });
+  });
+
+  it('throws NotEmptyError when the server reports the directory is not empty', async () => {
+    stubFetch(409, { code: 'NOT_EMPTY', error: 'Directory is not empty' });
+    await expect(deleteStackPath('my-stack', 'nonempty')).rejects.toBeInstanceOf(NotEmptyError);
+  });
+
+  it('includes the server error message in NotEmptyError', async () => {
+    stubFetch(409, { code: 'NOT_EMPTY', error: 'Directory is not empty' });
+    const err = await deleteStackPath('my-stack', 'nonempty').catch((e) => e);
+    expect(err).toBeInstanceOf(NotEmptyError);
+    expect((err as Error).message).toBe('Directory is not empty');
+  });
+
+  it('uses a fallback message when the server omits the error field', async () => {
+    stubFetch(409, { code: 'NOT_EMPTY' });
+    const err = await deleteStackPath('my-stack', 'nonempty').catch((e) => e);
+    expect(err).toBeInstanceOf(NotEmptyError);
+    expect((err as Error).message).toBe('Directory is not empty.');
+  });
+
+  it('throws a generic error (not NotEmptyError) for other 409 codes', async () => {
+    stubFetch(409, { code: 'PROTECTED_FILE', error: 'This is a protected stack file.' });
+    const err = await deleteStackPath('my-stack', 'compose.yaml').catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(NotEmptyError);
+    expect((err as Error).message).toBe('This is a protected stack file.');
+  });
+
+  it('passes recursive=1 in the query string when recursive is true', async () => {
+    const fetchMock = stubFetch(204);
+    await deleteStackPath('my-stack', 'nonempty', true);
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(new URL(url, 'http://x').searchParams.get('recursive')).toBe('1');
+  });
+
+  it('omits the recursive query param when recursive is false', async () => {
+    const fetchMock = stubFetch(204);
+    await deleteStackPath('my-stack', 'nonempty', false);
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(new URL(url, 'http://x').searchParams.get('recursive')).toBeNull();
+  });
+
+  it('includes rootId in the query string when provided', async () => {
+    const fetchMock = stubFetch(204);
+    await deleteStackPath('my-stack', 'nonempty', undefined, 'vol-abc');
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(new URL(url, 'http://x').searchParams.get('rootId')).toBe('vol-abc');
   });
 });
