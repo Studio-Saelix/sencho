@@ -1729,7 +1729,7 @@ describe('useStackActions.deleteStack', () => {
       await result.current.deleteStack(false);
     });
 
-    expect(apiFetch).toHaveBeenCalledWith('/stacks/web.yml', { method: 'DELETE' });
+    expect(apiFetch).toHaveBeenCalledWith('/stacks/web.yml', { method: 'DELETE', nodeId: 1 });
     expect(stackListState.setSelectedFile).toHaveBeenCalledWith(null);
     expect(navState.setActiveView).toHaveBeenCalledWith('dashboard');
     expect(navState.setActiveView).toHaveBeenCalledTimes(1);
@@ -1766,7 +1766,7 @@ describe('useStackActions.deleteStack', () => {
       await result.current.deleteStack(false);
     });
 
-    expect(apiFetch).toHaveBeenCalledWith('/stacks/web', { method: 'DELETE' });
+    expect(apiFetch).toHaveBeenCalledWith('/stacks/web', { method: 'DELETE', nodeId: 1 });
     expect(stackListState.setSelectedFile).toHaveBeenCalledWith(null);
     expect(navState.setActiveView).toHaveBeenCalledWith('dashboard');
     expect(onDeletedOpenStack).toHaveBeenCalledTimes(1);

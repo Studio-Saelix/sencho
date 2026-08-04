@@ -35,6 +35,7 @@ describe('DeleteStackDialog', () => {
                 open
                 onOpenChange={vi.fn()}
                 stackName="web"
+                showVolumeOption={true}
                 onConfirm={vi.fn()}
                 confirming
             />,
