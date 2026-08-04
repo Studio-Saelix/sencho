@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from '@/components/ui/toast-store';
-import { deleteStackPath } from '@/lib/stackFilesApi';
+import { deleteStackPath, NotEmptyError } from '@/lib/stackFilesApi';
 import type { FileEntry } from '@/lib/stackFilesApi';
 
 interface DeleteFileConfirmProps {
@@ -54,7 +54,7 @@ export function DeleteFileConfirm({
       onOpenChange(false);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Delete failed.';
-      if (!recursive && msg.toUpperCase().includes('NOT_EMPTY')) {
+      if (!recursive && e instanceof NotEmptyError) {
         setNotEmpty(true);
       } else {
         toast.error(msg);

@@ -191,6 +191,19 @@ export class FileConflictError extends Error {
   }
 }
 
+/**
+ * Thrown by deleteStackPath when attempting to delete a non-empty directory
+ * without the recursive flag. The caller (DeleteFileConfirm) catches this
+ * to surface the two-step "Delete all" confirmation.
+ */
+export class NotEmptyError extends Error {
+  readonly code = 'NOT_EMPTY' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotEmptyError';
+  }
+}
+
 export async function parseApiError(res: Response): Promise<string> {
   try {
     const data = await res.json();
@@ -392,7 +405,16 @@ export async function deleteStackPath(
     stackFilesUrl(stackName, `?path=${encodeURIComponent(relPath)}${recursiveSuffix}${rootParam(rootId)}`),
     { method: 'DELETE' },
   );
-  if (!res.ok) throw new Error(await parseApiError(res));
+  if (!res.ok) {
+    if (res.status === 409) {
+      let body: { code?: string; error?: string } = {};
+      try { body = await res.clone().json(); } catch { /* ignore */ }
+      if (body.code === 'NOT_EMPTY') {
+        throw new NotEmptyError(body.error ?? 'Directory is not empty');
+      }
+    }
+    throw new Error(await parseApiError(res));
+  }
 }
 
 export async function mkdirStackPath(

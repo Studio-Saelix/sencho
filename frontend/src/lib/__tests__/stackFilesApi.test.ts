@@ -13,7 +13,9 @@ import {
   relPathParentDir,
   nextDuplicateName,
   createEmptyStackFile,
+  deleteStackPath,
   UploadConflictError,
+  NotEmptyError,
 } from '../stackFilesApi';
 
 describe('isClientSafeRelPath', () => {
@@ -191,5 +193,57 @@ describe('createEmptyStackFile', () => {
     const err = await createEmptyStackFile('my-stack', 'configs', 'app').catch((e) => e);
     expect(err).toBeInstanceOf(Error);
     expect(err).not.toBeInstanceOf(UploadConflictError);
+  });
+});
+
+describe('deleteStackPath', () => {
+  function stubFetch(status: number, body?: object) {
+    const res = {
+      status,
+      ok: status >= 200 && status < 300,
+      headers: { get: () => null },
+      clone() { return this; },
+      json: async () => body ?? {},
+    };
+    const fetchMock = vi.fn().mockResolvedValue(res);
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  beforeEach(() => localStorage.clear());
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('rejects with NotEmptyError on 409 NOT_EMPTY', async () => {
+    stubFetch(409, { code: 'NOT_EMPTY', error: 'Directory is not empty' });
+    await expect(deleteStackPath('my-stack', 'data')).rejects.toBeInstanceOf(NotEmptyError);
+    const err = await deleteStackPath('my-stack', 'data').catch((e) => e);
+    expect(err.message).toBe('Directory is not empty');
+  });
+
+  it('does not throw NotEmptyError for other 409 codes', async () => {
+    stubFetch(409, { code: 'PROTECTED_FILE', error: 'Protected file' });
+    const err = await deleteStackPath('my-stack', 'compose.yaml').catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(NotEmptyError);
+    expect(err.message).toBe('Protected file');
+  });
+
+  it('resolves on success', async () => {
+    stubFetch(204);
+    await expect(deleteStackPath('my-stack', 'file.txt')).resolves.toBeUndefined();
+  });
+
+  it('includes recursive=1 in the URL when recursive is true', async () => {
+    const fetchMock = stubFetch(204);
+    await deleteStackPath('my-stack', 'data', true);
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toContain('recursive=1');
+  });
+
+  it('does not include recursive in the URL when recursive is false', async () => {
+    const fetchMock = stubFetch(204);
+    await deleteStackPath('my-stack', 'data', false);
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).not.toContain('recursive=');
   });
 });
