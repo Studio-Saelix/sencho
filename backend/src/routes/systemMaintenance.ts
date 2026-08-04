@@ -28,10 +28,12 @@ import { buildStackNetworkFacts } from '../services/network/composeNetworkInspec
 import { evaluateNetworkDeleteGuard } from '../services/network/networkDeleteGuards';
 import { loadNetworkingSnapshot } from '../services/network/networkingAggregate';
 
-// `docker system df` (the call backing estimateSystemReclaim) can take 30+
-// seconds on Docker Desktop with many volumes; 8s matches the MonitorService
-// janitor timeout so the daemon never has more than ~16s of concurrent
-// pressure from Sencho's own paths even when prune and janitor collide.
+// The prune estimate and plan paths are bounded at 8 s to match the
+// MonitorService janitor timeout (JANITOR_TIMEOUT_MS), so Sencho's own
+// await never holds the event loop for more than ~16 s even when prune
+// and janitor collide. The `all`-scope estimate fast-path uses only
+// `docker system df` via getDiskUsage(); the managed scope and plan
+// paths do heavier enumeration under the same budget.
 const PRUNE_ESTIMATE_TIMEOUT_MS = 8_000;
 
 function respondDfSlow(res: Response): Response {
@@ -324,24 +326,19 @@ systemMaintenanceRouter.post('/prune/estimate', async (req: Request, res: Respon
     const dockerController = DockerController.getInstance(req.nodeId);
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
 
-    let result: { reclaimableBytes: number };
-    if (pruneScope === 'managed' && target !== 'containers') {
-      result = await dockerController.estimateManagedReclaim(
-        target as 'images' | 'volumes' | 'networks',
-        knownStacks,
-      );
-    } else {
-      // estimateSystemReclaim calls `docker system df`; bound it so a slow
-      // daemon doesn't hang the admin's tab (F-6).
-      result = await withTimeout(
-        dockerController.estimateSystemReclaim(
+    // Both estimate paths run under the same 8 s budget (F-6). The all-scope
+    // fast path uses only `docker system df` via getDiskUsage(); the managed
+    // path enumerates stacks but stays within the same bound.
+    const estimate = pruneScope === 'managed' && target !== 'containers'
+      ? dockerController.estimateManagedReclaim(
+          target as 'images' | 'volumes' | 'networks',
+          knownStacks,
+        )
+      : dockerController.estimateSystemReclaim(
           target as 'containers' | 'images' | 'networks' | 'volumes',
           knownStacks,
-        ),
-        PRUNE_ESTIMATE_TIMEOUT_MS,
-        'docker disk usage',
-      );
-    }
+        );
+    const result = await withTimeout(estimate, PRUNE_ESTIMATE_TIMEOUT_MS, 'docker disk usage');
     res.json({ reclaimableBytes: result.reclaimableBytes });
   } catch (error: unknown) {
     if (error instanceof TimeoutError) {

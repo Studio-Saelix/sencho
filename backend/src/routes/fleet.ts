@@ -2370,15 +2370,13 @@ fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Re
           const dockerController = DockerController.getInstance(node.id);
           let nodeBytes = 0;
           for (const target of targets) {
-            // estimateSystemReclaim hits `docker system df`; bound it so a
-            // slow local daemon doesn't hang the fleet estimate (F-6).
-            const result = scope === 'managed'
-              ? await dockerController.estimateManagedReclaim(target, knownStacks)
-              : await withTimeout(
-                  dockerController.estimateSystemReclaim(target, knownStacks),
-                  FLEET_DF_TIMEOUT_MS,
-                  'docker disk usage',
-                );
+            // Bound so a slow local daemon does not hang the fleet
+            // estimate (F-6). Both managed and all scopes bound each
+            // per-target call at the same 8 s.
+            const estimate = scope === 'managed'
+              ? dockerController.estimateManagedReclaim(target, knownStacks)
+              : dockerController.estimateSystemReclaim(target, knownStacks);
+            const result = await withTimeout(estimate, FLEET_DF_TIMEOUT_MS, 'docker disk usage');
             nodeBytes += result.reclaimableBytes;
           }
           return { nodeId: node.id, nodeName: node.name, reclaimableBytes: nodeBytes, reachable: true };

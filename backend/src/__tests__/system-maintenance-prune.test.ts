@@ -4,7 +4,7 @@
  *
  * Uses real timers because supertest dispatches lazily and vi.useFakeTimers
  * does not compose cleanly with that pattern. Each timeout test waits the
- * full 8s withTimeout budget, so two such tests add ~17s to the file.
+ * full 8s withTimeout budget, so three such tests add ~25s to the file.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
@@ -45,9 +45,12 @@ function stubFsStacks() {
   } as unknown as ReturnType<typeof FileSystemService.getInstance>);
 }
 
-function stubEstimate(impl: () => Promise<{ reclaimableBytes: number }>) {
+function stubEstimate(
+  impl: () => Promise<{ reclaimableBytes: number }>,
+  method: 'estimateSystemReclaim' | 'estimateManagedReclaim' = 'estimateSystemReclaim',
+) {
   vi.spyOn(DockerController, 'getInstance').mockReturnValue({
-    estimateSystemReclaim: vi.fn().mockImplementation(impl),
+    [method]: vi.fn().mockImplementation(impl),
   } as unknown as ReturnType<typeof DockerController.getInstance>);
 }
 
@@ -122,6 +125,27 @@ describe('Prune estimate endpoints return 503 on slow docker df (F-6)', () => {
     expect(res.status).toBe(500);
     expect(res.body.code).not.toBe('docker_df_slow');
   });
+
+  it('managed images estimate returns 503 docker_df_slow when estimateManagedReclaim never settles', async () => {
+    stubFsStacks();
+    stubEstimate(
+      () => new Promise(() => { /* never resolves */ }),
+      'estimateManagedReclaim',
+    );
+
+    const t0 = Date.now();
+    const res = await request(app)
+      .post('/api/system/prune/estimate')
+      .set('Authorization', authHeader)
+      .send({ target: 'images', scope: 'managed' });
+    const elapsed = Date.now() - t0;
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('docker_df_slow');
+    expect(res.body.error).toMatch(/Docker daemon is busy/);
+    expect(elapsed).toBeGreaterThanOrEqual(7_500);
+    expect(elapsed).toBeLessThan(15_000);
+  }, 20_000);
 });
 
 describe('Prune plan routes', () => {
