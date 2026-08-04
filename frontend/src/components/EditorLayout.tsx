@@ -9,6 +9,7 @@ import { CreateStackDialog, type CreateMode } from './EditorLayout/CreateStackDi
 import { AdoptExistingDialog } from './EditorLayout/AdoptExistingDialog';
 import { EditorView } from './EditorLayout/EditorView';
 import { ShellOverlays } from './EditorLayout/ShellOverlays';
+import type { VolumePreservationOnDelete } from './EditorLayout/DeleteStackDialog';
 import { classifyFailedGate } from './EditorLayout/failed-gate-recovery';
 import { useEditorViewState } from './EditorLayout/hooks/useEditorViewState';
 import { useStackListState } from './EditorLayout/hooks/useStackListState';
@@ -82,6 +83,17 @@ const AuditLogView = lazy(() => import('./AuditLogView').then(m => ({ default: m
 const ResourcesView = lazy(() => import('./ResourcesView'));
 const NetworkingView = lazy(() => import('./networking/NetworkingView').then(m => ({ default: m.NetworkingView })));
 const GlobalObservabilityView = lazy(() => import('./GlobalObservabilityView').then(m => ({ default: m.GlobalObservabilityView })));
+
+/**
+ * NodeContext records an unfetched or failed /api/meta as an empty capability list, so an
+ * empty list means "not confirmed either way", never "confirmed without the capability".
+ * Reporting that as 'unsupported' would force the destructive delete default onto a node
+ * that may well preserve volumes, so it maps to 'unknown' instead.
+ */
+function resolveDeleteVolumePreservation(capabilities: string[] | undefined): VolumePreservationOnDelete {
+  if (capabilities == null || capabilities.length === 0) return 'unknown';
+  return capabilities.includes(STACK_DELETE_PRUNE_VOLUMES_CAPABILITY) ? 'supported' : 'unsupported';
+}
 
 export default function EditorLayout() {
   const { isAdmin, can, permissions, permissionsStatus } = useAuth();
@@ -166,8 +178,7 @@ export default function EditorLayout() {
   const { nodes, activeNode, setActiveNode, hasCapability, activeNodeMeta, isLoading: nodesLoading } = useNodes();
   const canOfferVolumeRemoval =
     activeNodeMeta?.capabilities.includes(STACK_DOWN_REMOVE_VOLUMES_CAPABILITY) === true;
-  const canOfferVolumeRemovalOnDelete =
-    activeNodeMeta?.capabilities.includes(STACK_DELETE_PRUNE_VOLUMES_CAPABILITY) === true;
+  const deleteVolumePreservation = resolveDeleteVolumePreservation(activeNodeMeta?.capabilities);
 
   // One-shot boot milestone: the app shell has mounted. Developer mode gates the
   // hydration-timing overlay for the active node; it follows node switches.
@@ -301,7 +312,6 @@ export default function EditorLayout() {
       return can('stack:edit', 'stack', stackName, activeNode?.id);
     },
     canOfferVolumeRemoval,
-    canOfferVolumeRemovalOnDelete,
     onDeletedOpenStack: () => onDeletedOpenStackRef.current(),
     removeNotificationsForStack,
     isAdmin,
@@ -1073,7 +1083,7 @@ export default function EditorLayout() {
           composeReapply={composeReapply}
           canSaveAndReapply={canSaveAndReapply}
           canOfferVolumeRemoval={canOfferVolumeRemoval}
-          canOfferVolumeRemovalOnDelete={canOfferVolumeRemovalOnDelete}
+          deleteVolumePreservation={deleteVolumePreservation}
           onOpenFleetNodeUpdates={() => {
             if (isMobile) {
               navigateMobileAware('fleet');

@@ -180,8 +180,6 @@ interface UseStackActionsOptions {
   canEditStack: (stackNameOrFilename: string) => boolean;
   /** Fail-closed: true only when active node meta explicitly lists stack-down-remove-volumes. */
   canOfferVolumeRemoval?: boolean;
-  /** Fail-closed: true only when active node meta explicitly lists stack-delete-prune-volumes. */
-  canOfferVolumeRemovalOnDelete?: boolean;
   /**
    * Mobile (and any shell-owned) cleanup after deleting the stack that is
    * currently open in the editor. EditorLayout clears pending detail and
@@ -421,7 +419,6 @@ export function useStackActions(options: UseStackActionsOptions) {
     hasServiceScopedUpdate = false,
     canEditStack,
     canOfferVolumeRemoval = false,
-    canOfferVolumeRemovalOnDelete = false,
     onDeletedOpenStack,
     removeNotificationsForStack,
     isAdmin = false,
@@ -1952,11 +1949,6 @@ export function useStackActions(options: UseStackActionsOptions) {
   const deleteStack = async (pruneVolumes: boolean) => {
     const stackToDelete = overlayState.stackToDelete;
     if (!stackToDelete) return;
-    if (pruneVolumes && !canOfferVolumeRemovalOnDelete) {
-      toast.error('Volume removal is not supported on this node');
-      overlayState.closeDeleteDialog();
-      return;
-    }
     const deleteKey = resolveStackFileKey(stackListState.files, stackToDelete);
     const canonicalName = deleteKey.replace(/\.(yml|yaml)$/, '');
     if (stackListState.isStackBusy(deleteKey)) return;
@@ -1974,7 +1966,7 @@ export function useStackActions(options: UseStackActionsOptions) {
           overlayState.closeDeleteDialog();
           return;
         }
-        throw new Error(errText || 'Failed to delete stack');
+        throw parseStackActionError(errText, 'Failed to delete stack', response.status);
       }
       toast.success('Stack deleted successfully!');
       overlayState.closeDeleteDialog();

@@ -87,7 +87,7 @@ Every Sencho release ships with a static list of capabilities. The current list 
 | `compose-storage` | Stack Storage tab (volume explorer) |
 | `cross-node-rbac` | Role enforcement on requests forwarded to a remote node |
 | `stack-down-remove-volumes` | The "also remove volumes" option on Take Down |
-| `stack-delete-prune-volumes` | Honor the "also remove associated volumes" checkbox on Delete |
+| `stack-delete-prune-volumes` | Preserve volumes on Delete unless the operator opts in to remove them |
 | `guided-external-network-preflight` | Guided missing-external-network check before deploy |
 | `service-scoped-update` | Per-service update, rebuild, and restore on multi-service stacks |
 
@@ -105,6 +105,7 @@ A handful of capabilities gate a smaller piece of behavior rather than a whole p
 - Nodes that do not advertise `service-scoped-update` fall back to the legacy per-container layout on multi-service stacks: no declared-service headers, and no per-service update, rebuild, or restore.
 - Nodes that do not advertise `update-guard` run manual updates directly, with no pre-update rollback-readiness dialog.
 - `cross-node-rbac` is a security boundary, not a convenience: the control instance refuses to forward a non-admin request, or a confirmed stop-by-label, to a remote node that does not advertise it. This stops a mixed-version fleet from letting a lower-privileged action escalate on an un-upgraded node.
+- `stack-delete-prune-volumes` is also a data-safety boundary: a node that does not advertise it cannot guarantee volumes survive a Delete, so the confirmation dialog states that up front and forwards the delete with removal already acknowledged, and the control instance refuses to forward an *unacknowledged* delete to such a node at all rather than risk it silently destroying volumes the operator meant to keep.
 
 ## Handling nodes that do not advertise metadata
 
@@ -112,8 +113,8 @@ If a remote node does not respond to `/api/meta` (for example, an unreachable in
 
 - The node's row in the switcher and the connection-test panel show no version pill.
 - Every capability-gated feature on that node shows the lock card.
-- Core features (stacks, containers, resources, logs) continue to work normally.
-- No errors are surfaced in the UI; the control instance retries the metadata fetch after a short backoff.
+- Core features (stacks, containers, resources, logs) continue to work normally, with one exception: Delete requests preservation instead of guessing, so a genuinely un-upgraded remote returns an "upgrade this node" error rather than risk destroying volumes silently (see `stack-delete-prune-volumes` above).
+- No other errors are surfaced in the UI; the control instance retries the metadata fetch after a short backoff.
 
 If you expect a node to support a feature that is being gated, the fastest fix is to update that node to the latest Sencho release. See the [upgrade guide](/operations/upgrade) for instructions.
 

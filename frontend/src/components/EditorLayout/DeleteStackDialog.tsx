@@ -2,11 +2,21 @@ import { useState } from 'react';
 import { ConfirmModal } from '../ui/modal';
 import { Checkbox } from '../ui/checkbox';
 
+/**
+ * Whether the active node is confirmed (via its fetched capabilities) to preserve volumes
+ * on delete unless the operator opts in to removing them. 'unknown' covers both "not
+ * fetched yet" and "fetch failed": a node we simply have not confirmed must not be assumed
+ * incapable, so it requests preservation like a 'supported' node (a genuinely stale remote
+ * rejects that request outright instead of silently destroying data). Only 'unsupported'
+ * forces removal.
+ */
+export type VolumePreservationOnDelete = 'supported' | 'unsupported' | 'unknown';
+
 export interface DeleteStackDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     stackName: string | null;
-    showVolumeOption?: boolean;
+    volumePreservation?: VolumePreservationOnDelete;
     onConfirm: (pruneVolumes: boolean) => void | Promise<void>;
     /** True while the stack delete request owns the flow (from stackActionMap). */
     confirming?: boolean;
@@ -16,11 +26,20 @@ export function DeleteStackDialog({
     open,
     onOpenChange,
     stackName,
-    showVolumeOption = false,
+    volumePreservation = 'unknown',
     onConfirm,
     confirming = false,
 }: DeleteStackDialogProps) {
     const [pruneVolumes, setPruneVolumes] = useState(false);
+    const showVolumeOption = volumePreservation === 'supported';
+    const confirmedUnsupported = volumePreservation === 'unsupported';
+    // Single source of truth for what confirming will do: the operator's choice when the
+    // node offers one, forced removal only on a node confirmed unable to preserve volumes.
+    const willRemoveVolumes = showVolumeOption ? pruneVolumes : confirmedUnsupported;
+
+    let volumeHint = 'VOLUMES KEPT';
+    if (confirmedUnsupported) volumeHint = 'VOLUMES WILL BE REMOVED';
+    else if (willRemoveVolumes) volumeHint = 'VOLUMES PRUNED';
 
     const handleOpenChange = (next: boolean) => {
         if (!next) setPruneVolumes(false);
@@ -50,14 +69,13 @@ export function DeleteStackDialog({
                 )
             }
             description={`Confirm deletion of ${stackName ?? 'stack'}.`}
-            hint={showVolumeOption ? (pruneVolumes ? 'VOLUMES PRUNED' : 'VOLUMES KEPT') : undefined}
+            hint={volumeHint}
             confirmLabel="Delete"
             busyConfirmLabel="Deleting..."
             confirming={confirming}
             onConfirm={() => {
-                const shouldPrune = pruneVolumes && showVolumeOption;
                 setPruneVolumes(false);
-                onConfirm(shouldPrune);
+                onConfirm(willRemoveVolumes);
             }}
         >
             <p className="text-sm text-muted-foreground">This action cannot be undone.</p>
@@ -73,6 +91,11 @@ export function DeleteStackDialog({
                         Also remove associated volumes
                     </label>
                 </div>
+            )}
+            {confirmedUnsupported && (
+                <p className="text-sm text-destructive">
+                    This node can&apos;t preserve volumes on delete. Any volumes associated with this stack will be removed too.
+                </p>
             )}
         </ConfirmModal>
     );
