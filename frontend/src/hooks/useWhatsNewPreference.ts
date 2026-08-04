@@ -54,7 +54,7 @@ export function useWhatsNewPreference(): UseWhatsNewPreferenceResult {
   // This is deliberate: if we only stamped when latestWhatsNewEntryId was
   // non-null, an install that first loads while entries are empty would
   // never get a watermark written, so `stored === null` would still be true
-  // once a later release adds its first real entry — indistinguishable from
+  // once a later release adds its first real entry, indistinguishable from
   // a genuinely fresh install, silently swallowing the very first "unseen"
   // signal. Stamping '' up front means any later real id no longer equals
   // the stored watermark, so hasUnseen correctly flips to true for existing
