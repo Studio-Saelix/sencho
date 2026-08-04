@@ -304,3 +304,24 @@ describe('TopBar smart and compact modes', () => {
     expect(screen.queryByRole('menuitem', { name: /Add to quick links/i })).toBeNull();
   });
 });
+
+describe('TopBar whatsNew slot', () => {
+  it('renders the whatsNew slot before the search slot', () => {
+    renderTopBar({
+      whatsNew: <button aria-label="whats-new-marker">sparkle</button>,
+      search: <button aria-label="search-marker">search</button>,
+    });
+    const whatsNewEl = screen.getByRole('button', { name: 'whats-new-marker' });
+    const searchEl = screen.getByRole('button', { name: 'search-marker' });
+    // DOM order, not visual order: whatsNew's position relative to search in
+    // the source confirms it is placed before, not just present.
+    expect(
+      whatsNewEl.compareDocumentPosition(searchEl) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('renders nothing extra when whatsNew is omitted', () => {
+    renderTopBar();
+    expect(screen.queryByLabelText('whats-new-marker')).not.toBeInTheDocument();
+  });
+});
