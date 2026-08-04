@@ -913,6 +913,72 @@ describe('DockerController - managed image prune accounting', () => {
 
     expect(result.reclaimableBytes).toBe(2000);
   });
+
+  it('returns the same free image ID set from plan, estimate, and pruneManagedOnly including working-dir ownership', async () => {
+    CacheService.getInstance().invalidate('project-name-map');
+    const listImages = [
+      {
+        Id: 'img-label',
+        Containers: 0,
+        Size: 100,
+        RepoTags: ['svc:1'],
+        Labels: { 'com.docker.compose.project': 'any-stack' },
+      },
+      {
+        Id: 'img-workdir',
+        Containers: 0,
+        Size: 100,
+        RepoTags: ['svc2:1'],
+        Labels: { 'com.docker.compose.project.working_dir': '/app/compose/any-stack' },
+      },
+      {
+        Id: 'img-repo',
+        Containers: 0,
+        Size: 100,
+        RepoTags: ['running-app:1'],
+      },
+      {
+        Id: 'img-current',
+        Containers: 1,
+        Size: 100,
+        RepoTags: ['running-app:2'],
+      },
+      {
+        Id: 'img-foreign',
+        Containers: 0,
+        Size: 100,
+        RepoTags: ['running-app:0'],
+        Labels: { 'com.docker.compose.project': 'other-project' },
+      },
+    ];
+    mockDocker.listImages.mockResolvedValue(listImages);
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-run',
+        Image: 'running-app:2',
+        ImageID: 'img-current',
+        Labels: { 'com.docker.compose.project': 'any-stack' },
+      },
+    ]);
+    mockDocker.df
+      .mockResolvedValue({
+        Volumes: [],
+        Images: listImages.map((img) => ({ Id: img.Id, SharedSize: 0, Size: img.Size })),
+        LayersSize: 500,
+      });
+    mockDocker.getImage.mockReturnValue({ remove: vi.fn().mockResolvedValue(undefined) });
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'managed', ['any-stack'], 1);
+    const estimate = await dc.estimateManagedReclaim('images', ['any-stack']);
+    await dc.pruneManagedOnly('images', ['any-stack']);
+
+    const planIds = plan.items.map((i) => i.id).sort();
+    expect(planIds).toEqual(['img-label', 'img-repo', 'img-workdir']);
+    expect(estimate.reclaimableBytes).toBe(300);
+    const removeCalls = mockDocker.getImage.mock.calls.map((c: unknown[]) => c[0]).sort();
+    expect(removeCalls).toEqual(planIds);
+  });
 });
 
 // ── getOrphanContainers ────────────────────────────────────────────────

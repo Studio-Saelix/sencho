@@ -130,11 +130,13 @@ Reclaim disk space on every reachable node by deleting unused images, volumes, a
 
 The **Targets** checkboxes are independent and at least one must be ticked: **Images**, **Volumes**, **Networks**. The card defaults to Images alone, the cheapest and most common case.
 
+The toolbar estimate updates as you change targets and scope. **Prune fleet** stays disabled until you complete a successful **Dry run** for the current targets, scope, and fleet roster (the card footer reminds you with "Run Dry run to unlock Prune fleet" while the gate is closed).
+
 ### Managed only versus All unused
 
 Scope is a segmented control with two options:
 
-- **Managed only** (default). Sencho looks up the stacks it knows about on the node, then prunes only resources owned by those stacks. Active containers and resources placed by other tools are untouched.
+- **Managed only** (default). Sencho looks up the stacks it knows about on the node, then prunes only resources owned by those stacks. Active containers and resources placed by other tools are untouched. For images, that includes free previous tags that still share a repository with a stack container Sencho manages.
 - **All unused**. Sencho applies the target-specific Docker prune eligibility rules to each selected resource type. Any selected image, volume, or network not currently in use is deleted, including resources from workloads Sencho does not manage. The confirmation title flips to **Prune ALL unused resources across the fleet?**.
 
 ### Review the itemized dry run
@@ -147,7 +149,7 @@ The node total is the sum of the sizes shown in that node's candidate rows. Imag
 
 ### Fingerprint-bound execution
 
-**Prune fleet** remains disabled until the current targets, scope, and node roster have a valid reviewed plan for every reachable node. Execution sends one fingerprint per reviewed reachable node. Before deletion begins, the control instance rebuilds all plans, confirms that reviewed-unreachable nodes are still unreachable, and compares the complete configured-node roster.
+**Prune fleet** remains disabled until the current targets, scope, and node roster have a valid reviewed plan for every reachable node. Execution sends one fingerprint per reviewed reachable node. Image fingerprints bind the image Id plus the full reviewed tag set (and digest when present), so retagging a planned free image after Dry run invalidates that node fingerprint and rejects the whole fleet execute before any node deletes. Before deletion begins, the control instance rebuilds all plans, confirms that reviewed-unreachable nodes are still unreachable, and compares the complete configured-node roster.
 
 If a node was added, removed, connected, disconnected, or changed candidates after the dry run, no node starts pruning. Run **Dry run** again to review the new state. Once fleet-wide preflight passes, each node revalidates immediately before deletion. A race at that point can produce a partial result, which is reported rather than hidden.
 

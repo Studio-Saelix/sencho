@@ -50,11 +50,26 @@ export interface PrunePlan {
   targets: PruneTarget[];
   items: PrunePlanItem[];
   reclaimableBytes: number;
-  /** sha256 of sorted `target:id` pairs + scope + targets + nodeId. */
+  /**
+   * sha256 of nodeId, scope, targets, and a sorted per-item identity key.
+   * Non-image items use `target:id`. Images also bind digest and the full
+   * sorted RepoTags set, so retagging an already-planned free image invalidates
+   * the dry-run authorization (fleet preflight must reject the whole execute).
+   */
   fingerprint: string;
   createdAt: number;
   nodeId: number;
 }
+
+/** Fields required to fingerprint one plan item (full PrunePlanItem is accepted). */
+export type FingerprintPlanItem = {
+  target: PruneTarget;
+  id: string;
+  image?: {
+    references: string[];
+    digest?: string;
+  };
+};
 
 export type PruneItemOutcome =
   | { id: string; target: PruneTarget; status: 'removed'; sizeBytes?: number }
@@ -114,17 +129,51 @@ export function normalizePruneTargets(targets: PruneTarget[]): PruneTarget[] {
   return unique.sort((a, b) => (rank.get(a) ?? 99) - (rank.get(b) ?? 99));
 }
 
+/**
+ * Canonical identity line for one planned resource. Image lines include the
+ * full reviewed reference set so a tag add/remove on the same image Id is
+ * detectable as plan drift (not merely an Id match).
+ */
+export function fingerprintPlanItemKey(item: FingerprintPlanItem): string {
+  if (item.target === 'images') {
+    const refs = [...(item.image?.references ?? [])]
+      .filter((ref) => Boolean(ref) && ref !== '<none>:<none>')
+      .sort((a, b) => a.localeCompare(b));
+    const digest = item.image?.digest ?? '';
+    return `images:${item.id}\t${digest}\t${refs.join('\t')}`;
+  }
+  return `${item.target}:${item.id}`;
+}
+
 export function fingerprintPrunePlan(
   nodeId: number,
   scope: PruneScope,
   targets: PruneTarget[],
-  items: Pick<PrunePlanItem, 'target' | 'id'>[],
+  items: FingerprintPlanItem[],
 ): string {
   const lines = items
-    .map((item) => `${item.target}:${item.id}`)
+    .map((item) => fingerprintPlanItemKey(item))
     .sort((a, b) => a.localeCompare(b));
   const canonical = `${nodeId}|${scope}|${targets.join(',')}|${lines.join('\n')}`;
   return createHash('sha256').update(canonical).digest('hex');
+}
+
+/** Sorted live RepoTags comparable to a plan item's image.references. */
+export function normalizePruneImageReferences(refs: string[] | null | undefined): string[] {
+  if (!refs) return [];
+  return [...refs]
+    .filter((ref) => Boolean(ref) && ref !== '<none>:<none>')
+    .sort((a, b) => a.localeCompare(b));
+}
+
+export function pruneImageReferencesEqual(
+  planned: string[] | null | undefined,
+  live: string[] | null | undefined,
+): boolean {
+  const a = normalizePruneImageReferences(planned);
+  const b = normalizePruneImageReferences(live);
+  if (a.length !== b.length) return false;
+  return a.every((ref, index) => ref === b[index]);
 }
 
 export class PrunePlanStaleError extends Error {

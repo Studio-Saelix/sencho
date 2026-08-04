@@ -75,12 +75,12 @@ beforeEach(() => {
 describe('fingerprintPrunePlan', () => {
   it('is stable for the same sorted target:id pairs regardless of input order', () => {
     const a = fingerprintPrunePlan(1, 'managed', ['volumes', 'images'], [
-      { target: 'images', id: 'img-b' },
+      { target: 'images', id: 'img-b', image: { references: ['app:1'] } },
       { target: 'volumes', id: 'vol-a' },
     ]);
     const b = fingerprintPrunePlan(1, 'managed', ['volumes', 'images'], [
       { target: 'volumes', id: 'vol-a' },
-      { target: 'images', id: 'img-b' },
+      { target: 'images', id: 'img-b', image: { references: ['app:1'] } },
     ]);
     expect(a).toBe(b);
     expect(a).toMatch(/^[a-f0-9]{64}$/);
@@ -92,6 +92,31 @@ describe('fingerprintPrunePlan', () => {
     expect(fingerprintPrunePlan(1, 'all', ['volumes'], [{ target: 'volumes', id: 'v1' }])).not.toBe(base);
     expect(fingerprintPrunePlan(1, 'managed', ['images'], [{ target: 'volumes', id: 'v1' }])).not.toBe(base);
     expect(fingerprintPrunePlan(1, 'managed', ['volumes'], [{ target: 'volumes', id: 'v2' }])).not.toBe(base);
+  });
+
+  it('changes when an image gains or loses RepoTags without changing the image id', () => {
+    const sameId = 'sha256:abc';
+    const before = fingerprintPrunePlan(1, 'managed', ['images'], [
+      { target: 'images', id: sameId, image: { references: ['app:v0'] } },
+    ]);
+    const afterAddTag = fingerprintPrunePlan(1, 'managed', ['images'], [
+      { target: 'images', id: sameId, image: { references: ['app:v0', 'extra:v0'] } },
+    ]);
+    const afterReorder = fingerprintPrunePlan(1, 'managed', ['images'], [
+      { target: 'images', id: sameId, image: { references: ['extra:v0', 'app:v0'] } },
+    ]);
+    expect(afterAddTag).not.toBe(before);
+    expect(afterReorder).toBe(afterAddTag);
+  });
+
+  it('changes when the image digest differs for the same id and tags', () => {
+    const base = fingerprintPrunePlan(1, 'managed', ['images'], [
+      { target: 'images', id: 'img1', image: { references: ['app:1'], digest: 'd1' } },
+    ]);
+    const other = fingerprintPrunePlan(1, 'managed', ['images'], [
+      { target: 'images', id: 'img1', image: { references: ['app:1'], digest: 'd2' } },
+    ]);
+    expect(other).not.toBe(base);
   });
 });
 
@@ -355,7 +380,7 @@ describe('DockerController.buildPrunePlan', () => {
     ]);
   });
 
-  it('excludes unattributed unused images from managed scope', async () => {
+  it('includes labeled free images under managed and excludes foreign repos without attribution', async () => {
     mockDocker.listImages.mockResolvedValue([
       { Id: 'img-external', RepoTags: ['saelix/sencho:pr-1610'], Size: 100, Containers: 0 },
       {
@@ -371,6 +396,185 @@ describe('DockerController.buildPrunePlan', () => {
     const plan = await dc.buildPrunePlan(['images'], 'managed', ['my-stack'], 1);
 
     expect(plan.items.map((i) => i.id)).toEqual(['img-labeled']);
+  });
+
+  it('includes previous free tags of a repo still used by a managed container', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-run',
+        Names: ['/web'],
+        State: 'running',
+        Image: 'myapp:1.1',
+        ImageID: 'img-current',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-current', RepoTags: ['myapp:1.1'], Size: 200, Containers: 1 },
+      { Id: 'img-old', RepoTags: ['myapp:1.0'], Size: 180, Containers: 0 },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'managed', ['my-stack'], 1);
+
+    expect(plan.items).toEqual([
+      expect.objectContaining({
+        id: 'img-old',
+        managed: true,
+        reason: 'Unused image whose repository is used by a Sencho stack',
+      }),
+    ]);
+    // Repository sharing is not ownership: confirm surface must not name a stack.
+    expect(plan.items[0]?.stackName).toBeUndefined();
+  });
+
+  it('attributes stackName for label-owned free images but not for repo-matched free tags', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-run',
+        Names: ['/web'],
+        State: 'running',
+        Image: 'myapp:1.1',
+        ImageID: 'img-current',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-current', RepoTags: ['myapp:1.1'], Size: 200, Containers: 1 },
+      { Id: 'img-old', RepoTags: ['myapp:1.0'], Size: 180, Containers: 0 },
+      {
+        Id: 'img-labeled',
+        RepoTags: ['other:1'],
+        Size: 50,
+        Containers: 0,
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'managed', ['my-stack'], 1);
+    const byId = Object.fromEntries(plan.items.map((item) => [item.id, item]));
+
+    expect(byId['img-old']).toEqual(
+      expect.objectContaining({
+        reason: 'Unused image whose repository is used by a Sencho stack',
+      }),
+    );
+    expect(byId['img-old']?.stackName).toBeUndefined();
+    expect(byId['img-labeled']).toEqual(
+      expect.objectContaining({
+        managed: true,
+        stackName: 'my-stack',
+      }),
+    );
+  });
+
+  it('excludes a foreign Compose project image even when its repo matches a managed stack', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-run',
+        Names: ['/web'],
+        State: 'running',
+        Image: 'nginx:1.27',
+        ImageID: 'img-current',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-current', RepoTags: ['nginx:1.27'], Size: 200, Containers: 1 },
+      {
+        Id: 'img-foreign',
+        RepoTags: ['nginx:1.24'],
+        Size: 180,
+        Containers: 0,
+        Labels: { 'com.docker.compose.project': 'other-project' },
+      },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const managedPlan = await dc.buildPrunePlan(['images'], 'managed', ['my-stack'], 1);
+    const allPlan = await dc.buildPrunePlan(['images'], 'all', ['my-stack'], 1);
+
+    expect(managedPlan.items.map((i) => i.id)).toEqual([]);
+    expect(allPlan.items.map((i) => i.id)).toContain('img-foreign');
+  });
+
+  it('excludes untagged dangling images from managed scope and includes them under all', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-run',
+        Names: ['/web'],
+        State: 'running',
+        Image: 'myapp:1.1',
+        ImageID: 'img-current',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-current', RepoTags: ['myapp:1.1'], Size: 200, Containers: 1 },
+      { Id: 'img-dangling', RepoTags: null, Size: 90, Containers: 0 },
+      { Id: 'img-none', RepoTags: ['<none>:<none>'], Size: 80, Containers: 0 },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const managedPlan = await dc.buildPrunePlan(['images'], 'managed', ['my-stack'], 1);
+    const allPlan = await dc.buildPrunePlan(['images'], 'all', ['my-stack'], 1);
+
+    expect(managedPlan.items.map((i) => i.id)).toEqual([]);
+    expect(allPlan.items.map((i) => i.id).sort()).toEqual(['img-dangling', 'img-none']);
+  });
+
+  it('includes a becomesFree image under managed with the free-after-containers reason', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-exited',
+        Names: ['/exited'],
+        State: 'exited',
+        ImageID: 'img-only',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-only', RepoTags: ['scratch:old'], Size: 50, Containers: 1 },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['containers', 'images'], 'managed', ['my-stack'], 1);
+
+    expect(plan.items.some((i) => i.target === 'containers' && i.id === 'c-exited')).toBe(true);
+    expect(plan.items.find((i) => i.target === 'images' && i.id === 'img-only')).toEqual(
+      expect.objectContaining({
+        reason: 'Image becomes unused after planned container removal',
+        managed: true,
+      }),
+    );
+  });
+
+  it('excludes a becomesFree image labeled for a foreign Compose project under managed', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-exited',
+        Names: ['/exited'],
+        State: 'exited',
+        ImageID: 'img-foreign',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      {
+        Id: 'img-foreign',
+        RepoTags: ['shared:1'],
+        Size: 50,
+        Containers: 1,
+        Labels: { 'com.docker.compose.project': 'other-project' },
+      },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['containers', 'images'], 'managed', ['my-stack'], 1);
+
+    expect(plan.items.some((i) => i.target === 'containers')).toBe(true);
+    expect(plan.items.some((i) => i.target === 'images' && i.id === 'img-foreign')).toBe(false);
   });
 
   it('does not mark an image free when only some referencing containers are planned', async () => {
@@ -399,6 +603,28 @@ describe('DockerController.buildPrunePlan', () => {
 
     expect(plan.items.some((i) => i.target === 'containers' && i.id === 'c-exited')).toBe(true);
     expect(plan.items.some((i) => i.target === 'images' && i.id === 'img-shared')).toBe(false);
+  });
+
+  it('attributes via listed image RepoTags when the managed container Image is a bare digest', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-run',
+        Names: ['/web'],
+        State: 'running',
+        Image: 'sha256:' + 'a'.repeat(64),
+        ImageID: 'img-current',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-current', RepoTags: ['ghcr.io/acme/api:v2'], Size: 200, Containers: 1 },
+      { Id: 'img-old', RepoTags: ['ghcr.io/acme/api:v1'], Size: 180, Containers: 0 },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'managed', ['my-stack'], 1);
+
+    expect(plan.items.map((i) => i.id)).toEqual(['img-old']);
   });
 
   it('uses SharedSize when estimating reclaimable image bytes', async () => {
@@ -624,5 +850,75 @@ describe('DockerController.executePrunePlan', () => {
     expect(result.outcomes).toEqual([
       expect.objectContaining({ id: 'img1', target: 'images', status: 'skipped', reason: expect.stringMatching(/held/i) }),
     ]);
+  });
+
+  it('marks the plan stale when a free image gains a new RepoTag between plan and rebuild', async () => {
+    const img = {
+      Id: 'img-retag',
+      RepoTags: ['qa1769/app:v0'],
+      Size: 100,
+      Containers: 0,
+    };
+    mockDocker.listImages.mockResolvedValue([img]);
+    mockDocker.listContainers.mockResolvedValue([]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1);
+    expect(plan.items).toHaveLength(1);
+
+    mockDocker.listImages.mockResolvedValue([{
+      ...img,
+      RepoTags: ['qa1769/app:v0', 'qa1769-external/keep:v0'],
+    }]);
+    await expect(dc.assertPlanFresh(plan, [])).resolves.toBeNull();
+    await expect(dc.executePrunePlan(plan, [])).rejects.toBeInstanceOf(PrunePlanStaleError);
+  });
+
+  it('refuses image remove and does not call Docker delete when tags differ under a forced-fresh plan', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-multi', RepoTags: ['qa1769/app:v0'], Size: 50, Containers: 0 },
+    ]);
+    const imageRemove = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getImage.mockReturnValue({ remove: imageRemove });
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-multi', RepoTags: ['qa1769/app:v0', 'qa1769-external/keep:v0'], Size: 50, Containers: 0 },
+    ]);
+    vi.spyOn(dc, 'assertPlanFresh').mockResolvedValue(plan);
+    const result = await dc.executePrunePlan(plan, []);
+    expect(imageRemove).not.toHaveBeenCalled();
+    expect(result.outcomes[0]).toEqual(expect.objectContaining({
+      id: 'img-multi',
+      status: 'failed',
+      error: expect.stringMatching(/references changed/i),
+    }));
+  });
+
+  it('surfaces multi-repository refuse without a silent partial untag report', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      {
+        Id: 'img-multi',
+        RepoTags: ['qa1769/app:v0', 'qa1769-external/keep:v0'],
+        Size: 50,
+        Containers: 0,
+      },
+    ]);
+    const imageRemove = vi.fn().mockRejectedValue(
+      Object.assign(new Error('conflict: unable to delete (must be forced) - image is referenced in multiple repositories'), { statusCode: 409 }),
+    );
+    mockDocker.getImage.mockReturnValue({ remove: imageRemove });
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1);
+    vi.spyOn(dc, 'assertPlanFresh').mockResolvedValue(plan);
+    const result = await dc.executePrunePlan(plan, []);
+    expect(imageRemove).toHaveBeenCalled();
+    expect(result.outcomes[0]).toEqual(expect.objectContaining({
+      status: 'failed',
+      error: expect.stringMatching(/multiple repositories/i),
+    }));
+    expect(String(result.outcomes[0] && 'error' in result.outcomes[0] ? result.outcomes[0].error : '')).toMatch(/qa1769\/app:v0/);
   });
 });

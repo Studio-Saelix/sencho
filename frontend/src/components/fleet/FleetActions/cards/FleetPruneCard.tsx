@@ -315,7 +315,11 @@ export function FleetPruneCard({ nodes }: Props) {
           variant: 'destructive',
           disabled: running || !reviewValid,
         }}
-        footerContext={`Reversible · no · reviewed across ${nodes.length} node${nodes.length === 1 ? '' : 's'}`}
+        footerContext={
+          targets.size > 0 && !reviewValid
+            ? `Reversible · no · reviewed across ${nodes.length} node${nodes.length === 1 ? '' : 's'} · Run Dry run to unlock Prune fleet`
+            : `Reversible · no · reviewed across ${nodes.length} node${nodes.length === 1 ? '' : 's'}`
+        }
       >
         <SheetSection title={`Targets · ${targets.size} / ${ALL_TARGETS.length}`} meta={targets.size === 0 ? 'pick at least one' : undefined}>
           <div className="flex flex-wrap gap-3">
