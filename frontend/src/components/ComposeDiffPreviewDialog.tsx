@@ -1,8 +1,8 @@
 import { Suspense } from 'react';
 import { DiffEditor } from '@/lib/monacoLoader';
-import { Loader2 } from 'lucide-react';
 import { Modal, ModalHeader, ModalFooter } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
+import { BusyButton } from '@/components/ui/busy-button';
 import type { ComposeDiffActionLabel } from '@/components/resolveComposeDiffActionLabel';
 
 export interface ComposeDiffPreviewDialogProps {
@@ -75,16 +75,13 @@ export function ComposeDiffPreviewDialog({
           </Button>
         }
         primary={
-          <Button
+          <BusyButton
             size="sm"
+            pending={confirming}
             onClick={() => onConfirm()}
-            disabled={confirming}
           >
-            {confirming && (
-              <Loader2 className="w-4 h-4 mr-1.5 animate-spin" strokeWidth={1.5} />
-            )}
             {actionLabel}
-          </Button>
+          </BusyButton>
         }
       />
     </Modal>

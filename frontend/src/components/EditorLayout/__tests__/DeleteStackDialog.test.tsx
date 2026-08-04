@@ -28,4 +28,20 @@ describe('DeleteStackDialog', () => {
 
         expect(screen.getByTitle(LONG_STACK_NAME)).toHaveTextContent(LONG_STACK_NAME);
     });
+
+    it('disables Delete, Cancel, and volume checkbox while confirming', () => {
+        render(
+            <DeleteStackDialog
+                open
+                onOpenChange={vi.fn()}
+                stackName="web"
+                onConfirm={vi.fn()}
+                confirming
+            />,
+        );
+
+        expect(screen.getByRole('button', { name: /Delete/i })).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+        expect(screen.getByRole('checkbox')).toBeDisabled();
+    });
 });

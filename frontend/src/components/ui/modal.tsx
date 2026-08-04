@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { cn } from '@/lib/utils';
 import { buttonVariants } from '@/components/ui/button';
+import { BusyButton } from '@/components/ui/busy-button';
 import {
   Dialog,
   DialogContent,
@@ -206,6 +207,12 @@ interface ConfirmModalProps {
   description?: string;
   hint?: React.ReactNode;
   confirmLabel: React.ReactNode;
+  /**
+   * Progressive confirm copy shown only after delayed visual busy
+   * (see BusyButton / useVisualBusy). Prefer static confirmLabel + this over
+   * swapping confirmLabel when confirming flips true.
+   */
+  busyConfirmLabel?: React.ReactNode;
   cancelLabel?: React.ReactNode;
   confirming?: boolean;
   /** When true, the confirm action stays disabled (e.g. plan still loading). */
@@ -225,6 +232,7 @@ export function ConfirmModal({
   description,
   hint,
   confirmLabel,
+  busyConfirmLabel,
   cancelLabel = 'Cancel',
   confirming = false,
   confirmDisabled = false,
@@ -234,14 +242,17 @@ export function ConfirmModal({
 }: ConfirmModalProps) {
   const Header = variant === 'destructive' ? ConfirmDestructiveHeader : ConfirmHeader;
   const cancelClass = buttonVariants({ variant: 'outline', size: 'sm' });
-  const actionClass = buttonVariants({
-    variant: variant === 'destructive' ? 'destructive' : 'default',
-    size: 'sm',
-  });
+  const actionVariant = variant === 'destructive' ? 'destructive' : 'default';
   const actionDisabled = confirming || confirmDisabled;
 
+  const handleOpenChange = (next: boolean) => {
+    // Block Esc / overlay dismiss while the confirm action owns the request.
+    if (!next && confirming) return;
+    onOpenChange(next);
+  };
+
   return (
-    <AlertDialog open={open} onOpenChange={onOpenChange}>
+    <AlertDialog open={open} onOpenChange={handleOpenChange}>
       <AlertDialogContent className={cn('flex max-h-[85dvh] flex-col p-0 gap-0 overflow-hidden border-card-border/60', SIZE_CLASS[size])}>
         <Header kicker={kicker} title={title} description={description} />
         {children !== undefined && <ModalBody fill>{children}</ModalBody>}
@@ -257,21 +268,28 @@ export function ConfirmModal({
             </AlertDialogCancel>
           }
           primary={
-            <AlertDialogAction
-              className={actionClass}
-              disabled={actionDisabled}
-              onClick={(e) => {
-                const result = onConfirm();
-                // Async confirms keep the dialog open so the caller can render
-                // `confirming` state and close via onOpenChange when work completes.
-                // Sync confirms let Radix auto-close.
-                if (result instanceof Promise) {
-                  e.preventDefault();
-                  void result;
-                }
-              }}
-            >
-              {confirmLabel}
+            // BusyButton never uses asChild; Radix owns asChild on the Action
+            // shell so the multi-child busy chrome stays on the real button.
+            <AlertDialogAction asChild disabled={actionDisabled}>
+              <BusyButton
+                variant={actionVariant}
+                size="sm"
+                pending={confirming}
+                busyLabel={busyConfirmLabel}
+                disabled={actionDisabled}
+                onClick={(e) => {
+                  const result = onConfirm();
+                  // Async confirms keep the dialog open so the caller can render
+                  // `confirming` state and close via onOpenChange when work completes.
+                  // Sync confirms let Radix auto-close.
+                  if (result instanceof Promise) {
+                    e.preventDefault();
+                    void result;
+                  }
+                }}
+              >
+                {confirmLabel}
+              </BusyButton>
             </AlertDialogAction>
           }
         />

@@ -7,9 +7,17 @@ export interface DeleteStackDialogProps {
     onOpenChange: (open: boolean) => void;
     stackName: string | null;
     onConfirm: (pruneVolumes: boolean) => void | Promise<void>;
+    /** True while the stack delete request owns the flow (from stackActionMap). */
+    confirming?: boolean;
 }
 
-export function DeleteStackDialog({ open, onOpenChange, stackName, onConfirm }: DeleteStackDialogProps) {
+export function DeleteStackDialog({
+    open,
+    onOpenChange,
+    stackName,
+    onConfirm,
+    confirming = false,
+}: DeleteStackDialogProps) {
     const [pruneVolumes, setPruneVolumes] = useState(false);
 
     const handleOpenChange = (next: boolean) => {
@@ -42,6 +50,8 @@ export function DeleteStackDialog({ open, onOpenChange, stackName, onConfirm }: 
             description={`Confirm deletion of ${stackName ?? 'stack'}.`}
             hint={pruneVolumes ? 'VOLUMES PRUNED' : 'VOLUMES KEPT'}
             confirmLabel="Delete"
+            busyConfirmLabel="Deleting..."
+            confirming={confirming}
             onConfirm={() => onConfirm(pruneVolumes)}
         >
             <p className="text-sm text-muted-foreground">This action cannot be undone.</p>
@@ -49,6 +59,7 @@ export function DeleteStackDialog({ open, onOpenChange, stackName, onConfirm }: 
                 <Checkbox
                     id="prune-volumes"
                     checked={pruneVolumes}
+                    disabled={confirming}
                     onCheckedChange={(v) => setPruneVolumes(v === true)}
                 />
                 <label htmlFor="prune-volumes" className="text-sm text-muted-foreground cursor-pointer select-none">

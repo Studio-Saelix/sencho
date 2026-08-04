@@ -19,10 +19,16 @@ import type { OverlayState } from './hooks/useOverlayState';
 import type { StackActionsHook } from './hooks/useStackActions';
 import type { PermissionAction } from '@/context/AuthContext';
 import type { useComposeReapplyAction } from '../FleetView/hooks/useComposeReapplyAction';
+import type { StackAction } from './EditorView';
+import { resolveStackFileKey } from './hooks/resolveStackFileKey';
 
 interface ShellOverlaysProps {
   overlayState: OverlayState;
   stackActions: StackActionsHook;
+  /** Filename-keyed busy map from stack list state (not the stackActions hook). */
+  stackActionMap: Record<string, StackAction>;
+  /** Stack filenames for resolveStackFileKey (overlay holds bare names). */
+  stackFiles: string[];
   isDarkMode: boolean;
   isAdmin: boolean;
   can: (action: PermissionAction, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean;
@@ -41,6 +47,8 @@ interface ShellOverlaysProps {
 export function ShellOverlays({
   overlayState,
   stackActions,
+  stackActionMap,
+  stackFiles,
   isDarkMode,
   isAdmin,
   can,
@@ -72,6 +80,13 @@ export function ShellOverlays({
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
   } = overlayState;
 
+  const isDeleteConfirming =
+    stackToDelete != null &&
+    stackActionMap[resolveStackFileKey(stackFiles, stackToDelete)] === 'delete';
+  const isTakeDownConfirming =
+    stackToTakeDown != null &&
+    stackActionMap[resolveStackFileKey(stackFiles, stackToTakeDown)] === 'down';
+
   return (
     <>
       <DeleteStackDialog
@@ -79,6 +94,7 @@ export function ShellOverlays({
         onOpenChange={(open) => { if (!open) closeDeleteDialog(); }}
         stackName={stackToDelete}
         onConfirm={stackActions.deleteStack}
+        confirming={isDeleteConfirming}
       />
 
       <TakeDownStackDialog
@@ -87,6 +103,7 @@ export function ShellOverlays({
         stackName={stackToTakeDown}
         showVolumeOption={canOfferVolumeRemoval}
         onConfirm={stackActions.takeDownStack}
+        confirming={isTakeDownConfirming}
       />
 
       <SelfStackProtectedDialog

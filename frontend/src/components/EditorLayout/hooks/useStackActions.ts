@@ -30,6 +30,7 @@ import type {
   MissingExternalNetworksPayload,
 } from '../../stack/MissingExternalNetworksDialog';
 import type { PreDeployScanImage } from '@/types/security';
+import { resolveStackFileKey } from './resolveStackFileKey';
 
 interface RunResult {
   ok: boolean;
@@ -1948,10 +1949,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   const deleteStack = async (pruneVolumes: boolean) => {
     const stackToDelete = overlayState.stackToDelete;
     if (!stackToDelete) return;
-    const deleteKey =
-      stackListState.files.find(
-        f => f === stackToDelete || f.replace(/\.(yml|yaml)$/, '') === stackToDelete,
-      ) ?? stackToDelete;
+    const deleteKey = resolveStackFileKey(stackListState.files, stackToDelete);
     const canonicalName = deleteKey.replace(/\.(yml|yaml)$/, '');
     if (stackListState.isStackBusy(deleteKey)) return;
     stackListState.setStackAction(deleteKey, 'delete');
@@ -2010,10 +2008,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       overlayState.closeTakeDownDialog();
       return;
     }
-    const stackFile =
-      stackListState.files.find(
-        f => f === stackToTakeDown || f.replace(/\.(yml|yaml)$/, '') === stackToTakeDown,
-      ) ?? stackToTakeDown;
+    const stackFile = resolveStackFileKey(stackListState.files, stackToTakeDown);
     if (stackListState.isStackBusy(stackFile)) return;
     if (openSelfStackProtectedIfNeeded(stackFile)) return;
 
