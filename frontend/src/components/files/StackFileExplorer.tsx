@@ -657,7 +657,7 @@ export function StackFileExplorer({
         entry={ctxDeleteEntry}
         rootId={selectedRootId}
         onDeleted={() => {
-          if (ctxDeletePath === selectedPath) handleDeleted();
+          if (openFileAffectedBy([ctxDeletePath])) handleDeleted();
           else refresh();
           setCtxDeletePath('');
           setCtxDeleteEntry(null);
