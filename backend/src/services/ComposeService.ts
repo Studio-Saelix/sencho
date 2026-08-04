@@ -1132,10 +1132,13 @@ export class ComposeService {
     }, sendOutput);
   }
 
-  public async downStack(stackName: string): Promise<void> {
+  public async downStack(stackName: string, options?: { removeVolumes?: boolean }): Promise<void> {
     const stackPath = path.join(this.baseDir, stackName);
     try {
-      await this.execute('docker', await this.authoredComposeArgs(stackName, ['down', '--volumes', '--remove-orphans']), stackPath, undefined, false);
+      const args = options?.removeVolumes
+        ? ['down', '--volumes', '--remove-orphans']
+        : ['down', '--remove-orphans'];
+      await this.execute('docker', await this.authoredComposeArgs(stackName, args), stackPath, undefined, false);
     } catch (error) {
       console.warn(`[Teardown] Docker down failed or nothing to clean up for ${sanitizeForLog(stackName)}`);
     }

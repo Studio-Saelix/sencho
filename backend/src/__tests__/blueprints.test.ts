@@ -513,18 +513,19 @@ describe('BlueprintService local withdraw clears stack-scoped role assignments',
         );
         const { ComposeService } = await import('../services/ComposeService');
         const { FileSystemService } = await import('../services/FileSystemService');
-        vi.spyOn(ComposeService.prototype, 'downStack').mockResolvedValue(undefined);
+        const downStackSpy = vi.spyOn(ComposeService.prototype, 'downStack').mockResolvedValue(undefined);
         const deleteStackSpy = vi.spyOn(FileSystemService.prototype, 'deleteStack').mockResolvedValue(undefined);
 
-        return { bp, node, nodeId, userId, deleteStackSpy, db };
+        return { bp, node, nodeId, userId, downStackSpy, deleteStackSpy, db };
     }
 
     it('clears the target assignment after successful filesystem deletion and preserves unrelated grants', async () => {
-        const { bp, node, userId, deleteStackSpy, db } = await arrangeLocalWithdraw();
+        const { bp, node, userId, downStackSpy, deleteStackSpy, db } = await arrangeLocalWithdraw();
 
         const outcome = await BlueprintService.getInstance().withdrawFromNode(bp, node);
 
         expect(outcome.status).toBe('withdrawn');
+        expect(downStackSpy).toHaveBeenCalledWith(bp.name, { removeVolumes: false });
         expect(deleteStackSpy).toHaveBeenCalledWith(bp.name);
         expect(db.getDeployment(bp.id, node.id)).toBeUndefined();
         expect(hasAssignment(userId, 'stack', bp.name)).toBe(false);

@@ -302,7 +302,9 @@ export class DeployedStackDeletionService {
 
     if (!skipPhysical) {
       try {
-        await ComposeService.getInstance(nodeId).downStack(stackName);
+        await ComposeService.getInstance(nodeId).downStack(stackName, {
+          removeVolumes: intent.prune_volumes_requested === 1,
+        });
       } catch (downErr) {
         console.warn(
           '[DeployedStackDeletion] Compose down failed or no-op for %s:',

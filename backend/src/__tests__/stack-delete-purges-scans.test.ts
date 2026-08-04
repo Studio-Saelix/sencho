@@ -4,7 +4,7 @@
  * longer skews the Security Overview. Image scans are intentionally left to the
  * janitor reconciler (images are shared and may still exist on the host).
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi, type Mock } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 
@@ -14,6 +14,8 @@ let DatabaseService: typeof import('../services/DatabaseService').DatabaseServic
 let ComposeService: typeof import('../services/ComposeService').ComposeService;
 let FileSystemService: typeof import('../services/FileSystemService').FileSystemService;
 let MeshService: typeof import('../services/MeshService').MeshService;
+let DeployedStackDeletionService: typeof import('../services/DeployedStackDeletionService').DeployedStackDeletionService;
+let DockerController: typeof import('../services/DockerController').default;
 let adminCookie: string;
 
 beforeAll(async () => {
@@ -22,6 +24,8 @@ beforeAll(async () => {
   ({ ComposeService } = await import('../services/ComposeService'));
   ({ FileSystemService } = await import('../services/FileSystemService'));
   ({ MeshService } = await import('../services/MeshService'));
+  ({ DeployedStackDeletionService } = await import('../services/DeployedStackDeletionService'));
+  ({ default: DockerController } = await import('../services/DockerController'));
   ({ app } = await import('../index'));
   adminCookie = await loginAsTestAdmin(app);
 });
@@ -88,5 +92,70 @@ describe('DELETE /api/stacks/:stackName purges scan data', () => {
 
     expect(res.status).toBe(200);
     expect(db.getDistinctScanImageRefs(nodeId)).toEqual(['nginx:1']);
+  });
+});
+
+// ── Wiring: pruneVolumes flag reaches downStack ────────────────────────
+
+describe('DELETE /api/stacks/:stackName wires pruneVolumes to downStack', () => {
+  let downStackSpy: Mock;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.spyOn(FileSystemService.prototype, 'deleteStack').mockResolvedValue(undefined);
+    vi.spyOn(MeshService.getInstance(), 'optOutStack').mockResolvedValue(undefined);
+    downStackSpy = vi.spyOn(ComposeService.prototype, 'downStack').mockResolvedValue(undefined);
+  });
+
+  it('passes removeVolumes: true when pruneVolumes=true', async () => {
+    const res = await request(app).delete('/api/stacks/web?pruneVolumes=true').set('Cookie', adminCookie);
+
+    expect(res.status).toBe(200);
+    const lastArgs = downStackSpy.mock.calls.at(-1);
+    expect(lastArgs?.[1]).toEqual({ removeVolumes: true });
+  });
+
+  it('passes a falsy removeVolumes when pruneVolumes is absent', async () => {
+    const res = await request(app).delete('/api/stacks/web').set('Cookie', adminCookie);
+
+    expect(res.status).toBe(200);
+    const lastArgs = downStackSpy.mock.calls.at(-1);
+    expect(lastArgs?.[1]?.removeVolumes).toBeFalsy();
+  });
+});
+
+// ── Continuation guard: persisted flag beats input flag ─────────────────
+
+describe('DeployedStackDeletionService continuation', () => {
+  it('uses intent.prune_volumes_requested (not input.pruneVolumes) on resumed deletion', async () => {
+    vi.restoreAllMocks();
+    const downStackSpy = vi.spyOn(ComposeService.prototype, 'downStack').mockResolvedValue(undefined);
+    vi.spyOn(FileSystemService.prototype, 'deleteStack').mockResolvedValue(undefined);
+    vi.spyOn(MeshService.getInstance(), 'optOutStack').mockResolvedValue(undefined);
+    vi.spyOn(DockerController.prototype, 'pruneManagedOnly').mockResolvedValue({ success: true, reclaimedBytes: 0 });
+
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getNodes()[0].id;
+
+    const intentId = 'test-continuation-guard';
+    db.getDb().prepare(`
+      INSERT OR REPLACE INTO stack_update_cleanup_pending
+        (id, node_id, stack_name, status, target_kind, rollback_tags_json, override_paths_json, prune_volumes_requested, required_blueprint_id, created_at, updated_at)
+      VALUES (?, ?, ?, 'prepared', 'local_socket', '[]', '[]', 0, NULL, ?, ?)
+    `).run(intentId, nodeId, 'web', Date.now(), Date.now());
+
+    const svc = DeployedStackDeletionService.getInstance();
+    await svc.deleteDeployedStack({
+      nodeId,
+      stackName: 'web',
+      pruneVolumes: true,
+      actor: 'test',
+      continuationIntentId: intentId,
+    });
+
+    db.getDb().prepare('DELETE FROM stack_update_cleanup_pending WHERE id = ?').run(intentId);
+
+    const lastArgs = downStackSpy.mock.calls.at(-1);
+    expect(lastArgs?.[1]?.removeVolumes).toBeFalsy();
   });
 });

@@ -164,7 +164,7 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
         let dockerDownCompleted = true;
         let fileDeleteCompleted = true;
         try {
-          await ComposeService.getInstance(req.nodeId).downStack(stackName);
+          await ComposeService.getInstance(req.nodeId).downStack(stackName, { removeVolumes: true });
         } catch (downErr) {
           dockerDownCompleted = false;
           console.error("[Templates] Rollback Stage 1 (Docker down) failed:", downErr);

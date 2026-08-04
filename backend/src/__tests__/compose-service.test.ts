@@ -1328,7 +1328,7 @@ describe('ComposeService - withRegistryAuth', () => {
   });
 });
 
-// ── downStack ──────────────────────────────────────────────────────────
+// ── runDown ────────────────────────────────────────────────────────────
 
 describe('ComposeService - runDown', () => {
   it('runs plain docker compose down by default', async () => {
@@ -1374,7 +1374,33 @@ describe('ComposeService - runDown', () => {
 // ── downStack ──────────────────────────────────────────────────────────
 
 describe('ComposeService - downStack', () => {
-  it('runs docker compose down with volumes and remove-orphans', async () => {
+  it('runs docker compose down with volumes and remove-orphans when removeVolumes is true', async () => {
+    setupAutoCloseSpawn();
+
+    const svc = ComposeService.getInstance(1);
+    await svc.downStack('my-stack', { removeVolumes: true });
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      ['compose', 'down', '--volumes', '--remove-orphans'],
+      expect.any(Object)
+    );
+  });
+
+  it('runs docker compose down without --volumes when removeVolumes is false', async () => {
+    setupAutoCloseSpawn();
+
+    const svc = ComposeService.getInstance(1);
+    await svc.downStack('my-stack', { removeVolumes: false });
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      ['compose', 'down', '--remove-orphans'],
+      expect.any(Object)
+    );
+  });
+
+  it('defaults to no --volumes when options are omitted (safe default)', async () => {
     setupAutoCloseSpawn();
 
     const svc = ComposeService.getInstance(1);
@@ -1382,7 +1408,7 @@ describe('ComposeService - downStack', () => {
 
     expect(mockSpawn).toHaveBeenCalledWith(
       'docker',
-      ['compose', 'down', '--volumes', '--remove-orphans'],
+      ['compose', 'down', '--remove-orphans'],
       expect.any(Object)
     );
   });
