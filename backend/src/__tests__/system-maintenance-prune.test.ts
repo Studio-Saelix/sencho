@@ -4,7 +4,7 @@
  *
  * Uses real timers because supertest dispatches lazily and vi.useFakeTimers
  * does not compose cleanly with that pattern. Each timeout test waits the
- * full 8s withTimeout budget, so three such tests add ~25s to the file.
+ * full 12s withTimeout budget, so three such tests add ~36s to the file.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import request from 'supertest';

@@ -28,13 +28,15 @@ import { buildStackNetworkFacts } from '../services/network/composeNetworkInspec
 import { evaluateNetworkDeleteGuard } from '../services/network/networkDeleteGuards';
 import { loadNetworkingSnapshot } from '../services/network/networkingAggregate';
 
-// The prune estimate and plan paths are bounded at 8 s to match the
-// MonitorService janitor timeout (JANITOR_TIMEOUT_MS), so Sencho's own
-// await never holds the event loop for more than ~16 s even when prune
-// and janitor collide. The `all`-scope estimate fast-path uses only
-// `docker system df` via getDiskUsage(); the managed scope and plan
-// paths do heavier enumeration under the same budget.
-const PRUNE_ESTIMATE_TIMEOUT_MS = 8_000;
+// The prune estimate and plan paths are bounded at 12 s. `docker system df`
+// cost scales with image-store size (measured ~7.4 s on a 34 GB store), so
+// the estimate budget must leave headroom above a single df call. 12 s sits
+// strictly below the hub's 15 s AbortSignal.timeout on the fleet estimate
+// fetch, keeping the remote 503 the actionable failure instead of a hub-side
+// abort. The MonitorService janitor keeps its own 8 s budget
+// (JANITOR_TIMEOUT_MS) so Sencho's destructive paths never stack more than
+// ~16 s of concurrent daemon pressure with the janitor.
+const PRUNE_ESTIMATE_TIMEOUT_MS = 12_000;
 
 function respondDfSlow(res: Response): Response {
   return res.status(503).json({
@@ -331,7 +333,7 @@ systemMaintenanceRouter.post('/prune/estimate', async (req: Request, res: Respon
       ? await FileSystemService.getInstance(req.nodeId).getStacks()
       : [];
 
-    // Both estimate paths run under the same 8 s budget (F-6). The all-scope
+    // Both estimate paths run under the same 12 s budget (F-6). The all-scope
     // fast path uses only `docker system df` via getDiskUsage(); the managed
     // path enumerates stacks but stays within the same bound.
     const estimate = pruneScope === 'managed' && target !== 'containers'

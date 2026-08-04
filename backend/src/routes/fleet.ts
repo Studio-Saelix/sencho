@@ -38,8 +38,8 @@ import { buildTargetImageRef, isRepinBlocked, type ImagePinKind } from '../helpe
 import { withTimeout, TimeoutError } from '../utils/withTimeout';
 
 // Mirror the system-maintenance route timeout so fleet's local-node prune
-// paths cap the slow `docker system df` call at the same 8s budget (F-6).
-const FLEET_DF_TIMEOUT_MS = 8_000;
+// paths cap the slow `docker system df` call at the same 12 s budget (F-6).
+const FLEET_DF_TIMEOUT_MS = 12_000;
 import { POLICY_SEVERITIES } from '../utils/severity';
 import { isNoOpBlockingPolicy } from '../utils/policy-risk';
 import { sanitizeForLog, redactSensitiveText } from '../utils/safeLog';
@@ -2372,7 +2372,7 @@ fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Re
           for (const target of targets) {
             // Bound so a slow local daemon does not hang the fleet
             // estimate (F-6). Both managed and all scopes bound each
-            // per-target call at the same 8 s.
+            // per-target call at the same 12 s.
             const estimate = scope === 'managed'
               ? dockerController.estimateManagedReclaim(target, knownStacks)
               : dockerController.estimateSystemReclaim(target, knownStacks);

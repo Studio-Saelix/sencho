@@ -1,6 +1,6 @@
 /**
  * F-6 regression: Fleet itemized plan enumeration and byte estimation both
- * bound the slow `docker system df` call (8s) and surface a recognizable
+ * bound the slow `docker system df` call (12s) and surface a recognizable
  * timeout message to the operator.
  *
  * Covers:
@@ -29,7 +29,7 @@ beforeAll(async () => {
   ({ default: DockerController } = await import('../services/DockerController'));
   ({ FileSystemService } = await import('../services/FileSystemService'));
   ({ activeBulkActions } = await import('../routes/labels'));
-  // 10-minute expiry survives the file even with three ~8s timeout tests.
+  // 10-minute expiry survives the file even with three ~12s timeout tests.
   const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '10m' });
   authHeader = `Bearer ${token}`;
 });
@@ -56,7 +56,7 @@ function stubLocalEstimate(
   vi.spyOn(FileSystemService.prototype, 'getStacks').mockResolvedValue([]);
 }
 
-describe('Fleet prune routes bound docker df at 8s on local nodes (F-6)', () => {
+describe('Fleet prune routes bound docker df at 12s on local nodes (F-6)', () => {
   it('POST /api/fleet/labels/fleet-prune dry-run surfaces a busy-daemon error on local timeout', async () => {
     stubLocalEstimate(
       () => Promise.resolve({ reclaimableBytes: 0 }),
