@@ -72,6 +72,23 @@ it('keeps destructive prune disabled until an itemized dry run is reviewed', asy
   render(<FleetPruneCard nodes={nodes} />);
   await waitFor(() => expect(screen.getByText('~ 4 KB reclaimable')).toBeInTheDocument());
   expect(screen.getByRole('button', { name: 'Prune fleet' })).toBeDisabled();
+  expect(screen.getByText(/Run Dry run to unlock Prune fleet/)).toBeInTheDocument();
+});
+
+it('drops the unlock footer once dry run review is valid', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/prune/estimate') return Promise.resolve(estimateResponse());
+    if (url === '/fleet/labels/fleet-prune') return Promise.resolve(jsonResponse(200, { results: [planResult] }));
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+
+  render(<FleetPruneCard nodes={nodes} />);
+  await waitFor(() => expect(screen.getByText(/Run Dry run to unlock Prune fleet/)).toBeInTheDocument());
+  await user.click(screen.getByRole('button', { name: 'Dry run' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Prune fleet' })).toBeEnabled());
+  expect(screen.queryByText(/Run Dry run to unlock Prune fleet/)).not.toBeInTheDocument();
+  expect(screen.getByText(/Reversible · no · reviewed across 1 node/)).toBeInTheDocument();
 });
 
 it('renders item metadata and enables prune after a valid dry run', async () => {

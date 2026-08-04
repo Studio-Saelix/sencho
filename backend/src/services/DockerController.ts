@@ -39,6 +39,12 @@ export type {
   PruneTarget,
 } from './prunePlan';
 export { PrunePlanStaleError } from './prunePlan';
+import {
+  buildManagedImageRepoSet,
+  classifyManagedImageCandidate,
+  managedImagePlanReason,
+  type ManagedContainerForAttribution,
+} from '../helpers/managedImageAttribution';
 
 /** Parsed row from `docker compose ps --format json`. */
 interface ComposePsContainer {
@@ -772,24 +778,56 @@ class DockerController {
       const allContainers = await this.docker.listContainers({ all: true });
       const resolvedBase = path.resolve(COMPOSE_DIR);
       const absDirToStack = DockerController.buildAbsDirMap(knownStackNames);
+      const resolveStack = (labels: Record<string, string> | undefined) => {
+        const viaPath = DockerController.resolveContainerStack(
+          labels, projectToStack, knownSet, absDirToStack, resolvedBase,
+        );
+        if (viaPath) return viaPath;
+        // Match resolveProjectLabel: stack directory names in knownSet resolve
+        // even when the project-name map cache was built for a different list.
+        return DockerController.resolveProjectLabel(
+          labels?.['com.docker.compose.project'], knownSet, projectToStack,
+        );
+      };
       const unmanagedImageIds = new Set<string>();
       const managedImageIds = new Set<string>();
-      for (const c of allContainers as any[]) {
-        const stack = DockerController.resolveContainerStack(
-          c.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
-        );
+      const managedContainers: ManagedContainerForAttribution[] = [];
+      for (const c of allContainers as Array<{
+        Image?: string;
+        ImageID?: string;
+        Labels?: Record<string, string>;
+      }>) {
+        const stack = resolveStack(c.Labels);
         if (!c.ImageID) continue;
-        if (stack) managedImageIds.add(c.ImageID);
-        else unmanagedImageIds.add(c.ImageID);
+        if (stack) {
+          managedImageIds.add(c.ImageID);
+          managedContainers.push({ Image: c.Image, ImageID: c.ImageID, stack });
+        } else {
+          unmanagedImageIds.add(c.ImageID);
+        }
       }
-      const rawImages = await this.docker.listImages({ all: false });
-      const prunable = (rawImages as any[]).filter((img: any) => {
+      const rawImages = await this.docker.listImages({ all: false }) as Array<{
+        Id: string;
+        RepoTags?: string[] | null;
+        Labels?: Record<string, string>;
+        Size?: number;
+        Containers?: number;
+      }>;
+      const { repoKeys, repoToStack } = buildManagedImageRepoSet(managedContainers, rawImages);
+      const prunable = rawImages.filter((img) => {
         if (img.Containers !== 0 || selfIdentity.isOwnImage(img.Id)) return false;
-        if (unmanagedImageIds.has(img.Id)) return false;
-        const labeled = DockerController.resolveProjectLabel(
-          img.Labels?.['com.docker.compose.project'], knownSet, projectToStack,
-        );
-        return !!labeled || managedImageIds.has(img.Id);
+        if (isImageHeld?.(img.Id)) return false;
+        return classifyManagedImageCandidate({
+          imageId: img.Id,
+          labels: img.Labels,
+          repoTags: img.RepoTags,
+          becomesFree: false,
+          managedImageIds,
+          unmanagedImageIds,
+          repoKeys,
+          repoToStack,
+          resolveStack,
+        }).eligible;
       });
       // df-before / df-after delta is the only honest measurement of bytes
       // actually freed. Per-image (Size - SharedSize) undercounts layers
@@ -797,7 +835,6 @@ class DockerController {
       // once, but the per-image formula subtracts it from every referrer).
       const beforeDf = await this.safeDfSnapshot();
       await Promise.all(prunable.map(async (img) => {
-        if (isImageHeld?.(img.Id)) return;
         try {
           await this.docker.getImage(img.Id).remove({ force: true });
         } catch (e) {
@@ -868,25 +905,55 @@ class DockerController {
       const allContainers = await this.docker.listContainers({ all: true });
       const resolvedBase = path.resolve(COMPOSE_DIR);
       const absDirToStack = DockerController.buildAbsDirMap(knownStackNames);
+      const resolveStack = (labels: Record<string, string> | undefined) => {
+        const viaPath = DockerController.resolveContainerStack(
+          labels, projectToStack, knownSet, absDirToStack, resolvedBase,
+        );
+        if (viaPath) return viaPath;
+        // Match resolveProjectLabel: stack directory names in knownSet resolve
+        // even when the project-name map cache was built for a different list.
+        return DockerController.resolveProjectLabel(
+          labels?.['com.docker.compose.project'], knownSet, projectToStack,
+        );
+      };
       const unmanagedImageIds = new Set<string>();
       const managedImageIds = new Set<string>();
-      for (const c of allContainers as any[]) {
-        const stack = DockerController.resolveContainerStack(
-          c.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
-        );
+      const managedContainers: ManagedContainerForAttribution[] = [];
+      for (const c of allContainers as Array<{
+        Image?: string;
+        ImageID?: string;
+        Labels?: Record<string, string>;
+      }>) {
+        const stack = resolveStack(c.Labels);
         if (!c.ImageID) continue;
-        if (stack) managedImageIds.add(c.ImageID);
-        else unmanagedImageIds.add(c.ImageID);
+        if (stack) {
+          managedImageIds.add(c.ImageID);
+          managedContainers.push({ Image: c.Image, ImageID: c.ImageID, stack });
+        } else {
+          unmanagedImageIds.add(c.ImageID);
+        }
       }
-      const rawImages = await this.docker.listImages({ all: false });
-      const prunable = (rawImages as any[]).filter((img: any) => {
+      const rawImages = await this.docker.listImages({ all: false }) as Array<{
+        Id: string;
+        RepoTags?: string[] | null;
+        Labels?: Record<string, string>;
+        Size?: number;
+        Containers?: number;
+      }>;
+      const { repoKeys, repoToStack } = buildManagedImageRepoSet(managedContainers, rawImages);
+      const prunable = rawImages.filter((img) => {
         if (img.Containers !== 0 || selfIdentity.isOwnImage(img.Id)) return false;
-        if (unmanagedImageIds.has(img.Id)) return false;
-        // Unused images with no container attribution are not Sencho-managed.
-        const labeled = DockerController.resolveProjectLabel(
-          img.Labels?.['com.docker.compose.project'], knownSet, projectToStack,
-        );
-        return !!labeled || managedImageIds.has(img.Id);
+        return classifyManagedImageCandidate({
+          imageId: img.Id,
+          labels: img.Labels,
+          repoTags: img.RepoTags,
+          becomesFree: false,
+          managedImageIds,
+          unmanagedImageIds,
+          repoKeys,
+          repoToStack,
+          resolveStack,
+        }).eligible;
       });
       const sharedSizes = DockerController.mapSharedSizesFromDf(await this.safeDfSnapshot());
       for (const img of prunable) {
@@ -1065,19 +1132,31 @@ class DockerController {
       const managedImageIds = new Set<string>();
       const imageToStack = new Map<string, string>();
       const imageToContainerIds = new Map<string, string[]>();
+      const managedContainers: ManagedContainerForAttribution[] = [];
+      const resolveStack = (labels: Record<string, string> | undefined) => {
+        const viaPath = DockerController.resolveContainerStack(
+          labels, projectToStack, knownSet, absDirToStack, resolvedBase,
+        );
+        if (viaPath) return viaPath;
+        // Match resolveProjectLabel: stack directory names in knownSet resolve
+        // even when the project-name map cache was built for a different list.
+        return DockerController.resolveProjectLabel(
+          labels?.['com.docker.compose.project'], knownSet, projectToStack,
+        );
+      };
       for (const c of allContainers) {
         if (!c.ImageID) continue;
         const refs = imageToContainerIds.get(c.ImageID) ?? [];
         refs.push(c.Id);
         imageToContainerIds.set(c.ImageID, refs);
-        const stack = DockerController.resolveContainerStack(
-          c.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
-        );
+        const stack = resolveStack(c.Labels);
         if (stack) {
           managedImageIds.add(c.ImageID);
+          managedContainers.push({ Image: c.Image, ImageID: c.ImageID, stack });
           if (!imageToStack.has(c.ImageID)) imageToStack.set(c.ImageID, stack);
+        } else {
+          unmanagedImageIds.add(c.ImageID);
         }
-        else unmanagedImageIds.add(c.ImageID);
       }
       const plannedContainerIds = new Set(
         items.filter((i) => i.target === 'containers').map((i) => i.id),
@@ -1092,6 +1171,7 @@ class DockerController {
         Containers?: number;
         Created?: number;
       }>;
+      const { repoKeys, repoToStack } = buildManagedImageRepoSet(managedContainers, rawImages);
       // An image becomes free only when every container that references it is
       // also in this plan (not merely when any planned container uses it).
       const freeingImages = ordered.includes('containers');
@@ -1103,15 +1183,34 @@ class DockerController {
           && refs.length > 0
           && refs.every((id) => plannedContainerIds.has(id));
         if (refs.length > 0 && !becomesFree) continue;
-        const labeled = DockerController.resolveContainerStack(
-          img.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
-        );
-        const stack = labeled ?? imageToStack.get(img.Id) ?? null;
+        let planReason = becomesFree
+          ? 'Image becomes unused after planned container removal'
+          : 'Image is not used by any container';
+        let stackName: string | undefined = imageToStack.get(img.Id);
+        let managed = Boolean(stackName || managedImageIds.has(img.Id));
         if (scope === 'managed') {
-          if (unmanagedImageIds.has(img.Id)) continue;
-          // Unattributed unused images (no managed container, no compose label)
-          // are not Sencho-managed; keep them out of managed prune.
-          if (!becomesFree && !stack && !managedImageIds.has(img.Id)) continue;
+          const classification = classifyManagedImageCandidate({
+            imageId: img.Id,
+            labels: img.Labels,
+            repoTags: img.RepoTags,
+            becomesFree,
+            managedImageIds,
+            unmanagedImageIds,
+            repoKeys,
+            repoToStack,
+            resolveStack,
+          });
+          if (!classification.eligible) continue;
+          managed = true;
+          planReason = managedImagePlanReason(classification.reason);
+          stackName = classification.stackName ?? stackName;
+        } else {
+          // All-scope: foreign compose projects stay eligible; keep stack when known.
+          const labeled = resolveStack(img.Labels);
+          if (labeled) {
+            stackName = labeled;
+            managed = true;
+          }
         }
         const references = (img.RepoTags ?? []).filter((ref) => ref && ref !== '<none>:<none>');
         const name = references[0] ?? '<none>:<none>';
@@ -1121,11 +1220,9 @@ class DockerController {
           id: img.Id,
           name,
           sizeBytes: unique > 0 ? unique : undefined,
-          managed: Boolean(stack || managedImageIds.has(img.Id)),
-          reason: becomesFree
-            ? 'Image becomes unused after planned container removal'
-            : 'Image is not used by any container',
-          stackName: stack ?? undefined,
+          managed,
+          reason: planReason,
+          stackName,
           image: {
             references,
             digest: img.RepoDigests?.find((digest) => Boolean(digest)),

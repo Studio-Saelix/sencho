@@ -355,7 +355,7 @@ describe('DockerController.buildPrunePlan', () => {
     ]);
   });
 
-  it('excludes unattributed unused images from managed scope', async () => {
+  it('includes labeled free images under managed and excludes foreign repos without attribution', async () => {
     mockDocker.listImages.mockResolvedValue([
       { Id: 'img-external', RepoTags: ['saelix/sencho:pr-1610'], Size: 100, Containers: 0 },
       {
@@ -371,6 +371,143 @@ describe('DockerController.buildPrunePlan', () => {
     const plan = await dc.buildPrunePlan(['images'], 'managed', ['my-stack'], 1);
 
     expect(plan.items.map((i) => i.id)).toEqual(['img-labeled']);
+  });
+
+  it('includes previous free tags of a repo still used by a managed container', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-run',
+        Names: ['/web'],
+        State: 'running',
+        Image: 'myapp:1.1',
+        ImageID: 'img-current',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-current', RepoTags: ['myapp:1.1'], Size: 200, Containers: 1 },
+      { Id: 'img-old', RepoTags: ['myapp:1.0'], Size: 180, Containers: 0 },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'managed', ['my-stack'], 1);
+
+    expect(plan.items).toEqual([
+      expect.objectContaining({
+        id: 'img-old',
+        managed: true,
+        reason: 'Unused image whose repository is used by a Sencho stack',
+        stackName: 'my-stack',
+      }),
+    ]);
+  });
+
+  it('excludes a foreign Compose project image even when its repo matches a managed stack', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-run',
+        Names: ['/web'],
+        State: 'running',
+        Image: 'nginx:1.27',
+        ImageID: 'img-current',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-current', RepoTags: ['nginx:1.27'], Size: 200, Containers: 1 },
+      {
+        Id: 'img-foreign',
+        RepoTags: ['nginx:1.24'],
+        Size: 180,
+        Containers: 0,
+        Labels: { 'com.docker.compose.project': 'other-project' },
+      },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const managedPlan = await dc.buildPrunePlan(['images'], 'managed', ['my-stack'], 1);
+    const allPlan = await dc.buildPrunePlan(['images'], 'all', ['my-stack'], 1);
+
+    expect(managedPlan.items.map((i) => i.id)).toEqual([]);
+    expect(allPlan.items.map((i) => i.id)).toContain('img-foreign');
+  });
+
+  it('excludes untagged dangling images from managed scope and includes them under all', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-run',
+        Names: ['/web'],
+        State: 'running',
+        Image: 'myapp:1.1',
+        ImageID: 'img-current',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-current', RepoTags: ['myapp:1.1'], Size: 200, Containers: 1 },
+      { Id: 'img-dangling', RepoTags: null, Size: 90, Containers: 0 },
+      { Id: 'img-none', RepoTags: ['<none>:<none>'], Size: 80, Containers: 0 },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const managedPlan = await dc.buildPrunePlan(['images'], 'managed', ['my-stack'], 1);
+    const allPlan = await dc.buildPrunePlan(['images'], 'all', ['my-stack'], 1);
+
+    expect(managedPlan.items.map((i) => i.id)).toEqual([]);
+    expect(allPlan.items.map((i) => i.id).sort()).toEqual(['img-dangling', 'img-none']);
+  });
+
+  it('includes a becomesFree image under managed with the free-after-containers reason', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-exited',
+        Names: ['/exited'],
+        State: 'exited',
+        ImageID: 'img-only',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-only', RepoTags: ['scratch:old'], Size: 50, Containers: 1 },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['containers', 'images'], 'managed', ['my-stack'], 1);
+
+    expect(plan.items.some((i) => i.target === 'containers' && i.id === 'c-exited')).toBe(true);
+    expect(plan.items.find((i) => i.target === 'images' && i.id === 'img-only')).toEqual(
+      expect.objectContaining({
+        reason: 'Image becomes unused after planned container removal',
+        managed: true,
+      }),
+    );
+  });
+
+  it('excludes a becomesFree image labeled for a foreign Compose project under managed', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-exited',
+        Names: ['/exited'],
+        State: 'exited',
+        ImageID: 'img-foreign',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      {
+        Id: 'img-foreign',
+        RepoTags: ['shared:1'],
+        Size: 50,
+        Containers: 1,
+        Labels: { 'com.docker.compose.project': 'other-project' },
+      },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['containers', 'images'], 'managed', ['my-stack'], 1);
+
+    expect(plan.items.some((i) => i.target === 'containers')).toBe(true);
+    expect(plan.items.some((i) => i.target === 'images' && i.id === 'img-foreign')).toBe(false);
   });
 
   it('does not mark an image free when only some referencing containers are planned', async () => {
@@ -399,6 +536,28 @@ describe('DockerController.buildPrunePlan', () => {
 
     expect(plan.items.some((i) => i.target === 'containers' && i.id === 'c-exited')).toBe(true);
     expect(plan.items.some((i) => i.target === 'images' && i.id === 'img-shared')).toBe(false);
+  });
+
+  it('attributes via listed image RepoTags when the managed container Image is a bare digest', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-run',
+        Names: ['/web'],
+        State: 'running',
+        Image: 'sha256:' + 'a'.repeat(64),
+        ImageID: 'img-current',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-current', RepoTags: ['ghcr.io/acme/api:v2'], Size: 200, Containers: 1 },
+      { Id: 'img-old', RepoTags: ['ghcr.io/acme/api:v1'], Size: 180, Containers: 0 },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'managed', ['my-stack'], 1);
+
+    expect(plan.items.map((i) => i.id)).toEqual(['img-old']);
   });
 
   it('uses SharedSize when estimating reclaimable image bytes', async () => {

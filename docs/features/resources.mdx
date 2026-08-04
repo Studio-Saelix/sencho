@@ -29,9 +29,11 @@ The left card under the hero breaks down your Docker disk usage into three tiles
 
 | Tile | Meaning |
 |------|---------|
-| **Sencho managed** (green) | Images and volumes used by stacks in your `COMPOSE_DIR` |
+| **Sencho managed** (green) | Images and volumes **currently used** by stacks in your `COMPOSE_DIR` |
 | **External** (amber) | Images and volumes used by Docker projects outside Sencho |
-| **Reclaimable** (neutral) | Unused images, stopped containers, and dangling volumes safe to delete |
+| **Reclaimable** (neutral) | Unused images, stopped containers, and dangling volumes Docker can free |
+
+The managed tile does not count free (unused) images. Those rows appear under reclaimable space and in the Images tab as unused until you prune them.
 
 Each tile shows its size and its share of the total footprint as a percentage. The layout itself is fixed (Sencho managed on the left, External and Reclaimable stacked on the right); tile size does not scale with the percentage, so read the numbers rather than the proportions. Click any tile to filter the resource tabs below to that category.
 
@@ -41,10 +43,12 @@ The right card under the hero exposes four prune actions. Each tile has a single
 
 | Action | What it removes |
 |--------|----------------|
-| **Prune Unused Images** | Images with no running containers in Sencho stacks |
+| **Prune Unused Images** | Free images owned by or still matching repositories used by your Sencho stacks |
 | **Prune Unused Volumes** | Volumes not attached to any Sencho container |
 | **Prune Dead Networks** | Networks not connected to any Sencho container |
 | **Purge Unmanaged Containers** | Containers Sencho doesn't recognize (started outside it) |
+
+Managed image prune is broader than the green **Sencho managed** tile: after a stack update leaves an older tag unused, that free image can appear in the managed prune plan when a running stack container still uses the same image repository. Images labeled for Compose projects Sencho does not manage stay out of managed prune (use **All Docker** for a full host reclaim). Untagged dangling layers have no repository to match and usually require **All Docker** / all-scope prune.
 
 The first three tiles also show a **More options** menu with a single destructive entry, **All Docker (includes external)**, that broadens the prune to every Docker resource on the host. Use it carefully, since it can affect other Compose projects sharing the same daemon. The **Purge Unmanaged Containers** tile has no menu and always targets unmanaged containers only.
 
