@@ -2,11 +2,12 @@ import { describe, it, expect } from 'vitest';
 import rawEntries from './entries.json';
 import { isWhatsNewEntry, WHATS_NEW_CAP } from './types';
 
+// These are authoring guards on the committed data, not tests of behaviour:
+// they fail the build when a hand-written entry is malformed, duplicated, or
+// pushes the file past the cap. The loader's own behaviour is covered in
+// loader.test.ts. While entries.json is still empty they pass trivially, which
+// is expected; they start biting as soon as the first entry lands.
 describe('whats-new entries.json', () => {
-  it('is an array', () => {
-    expect(Array.isArray(rawEntries)).toBe(true);
-  });
-
   it('contains only valid entries', () => {
     for (const entry of rawEntries) {
       expect(isWhatsNewEntry(entry)).toBe(true);
