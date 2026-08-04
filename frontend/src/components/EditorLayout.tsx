@@ -4,6 +4,8 @@ import { Plus, Loader2, ChevronLeft, AlertCircle, RefreshCw } from 'lucide-react
 import { UserProfileDropdown } from './UserProfileDropdown';
 import { NotificationPanel } from './NotificationPanel';
 import { TopBar } from './TopBar';
+import { WhatsNewTrigger } from './WhatsNewTrigger';
+import { WhatsNewModal } from './WhatsNewModal';
 import { ViewRouter } from './EditorLayout/ViewRouter';
 import { CreateStackDialog, type CreateMode } from './EditorLayout/CreateStackDialog';
 import { AdoptExistingDialog } from './EditorLayout/AdoptExistingDialog';
@@ -198,6 +200,7 @@ export default function EditorLayout() {
   // Which mode the create dialog opens on (always empty after import tab removal).
   const [createDialogInitialMode, setCreateDialogInitialMode] = useState<CreateMode>('empty');
   const [adoptDialogOpen, setAdoptDialogOpen] = useState(false);
+  const [whatsNewOpen, setWhatsNewOpen] = useState(false);
   const adoptOpenedFromSetupRef = useRef(false);
 
   const openCreateDialog = useCallback((mode: CreateMode = 'empty') => {
@@ -884,6 +887,17 @@ export default function EditorLayout() {
     />
   );
 
+  const whatsNewModalEl = (
+    <WhatsNewModal
+      open={whatsNewOpen}
+      onOpenChange={setWhatsNewOpen}
+      onViewChangelog={() => {
+        setWhatsNewOpen(false);
+        handleNotificationNavigateChangelog();
+      }}
+    />
+  );
+
   return (
     <GlobalCommandPaletteProvider>
     {(() => {
@@ -980,6 +994,7 @@ export default function EditorLayout() {
           onNavigate={navHandler}
           mobileNavOpen={mobileNavOpen}
           onMobileNavOpenChange={setMobileNavOpen}
+          whatsNew={<WhatsNewTrigger onClick={() => setWhatsNewOpen(true)} />}
           search={<GlobalCommandPaletteTrigger />}
           themeSwitch={themeSwitchEl}
           notifications={notificationsEl}
@@ -1275,6 +1290,7 @@ export default function EditorLayout() {
               onSettings={openSettingsMobileAware}
             />
             {adoptDialogEl}
+            {whatsNewModalEl}
             {shellOverlaysEl}
             {hydrationOverlay}
           </div>
@@ -1293,6 +1309,7 @@ export default function EditorLayout() {
             {workspaceEl}
           </div>
           {adoptDialogEl}
+          {whatsNewModalEl}
           {shellOverlaysEl}
           {hydrationOverlay}
         </div>
