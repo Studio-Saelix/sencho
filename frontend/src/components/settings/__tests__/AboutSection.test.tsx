@@ -42,6 +42,11 @@ vi.mock('@/hooks/useWhatsNewPreference', () => ({
     useWhatsNewPreference: () => ({ enabled: true, setEnabled: mockSetEnabled, hasUnseen: false, markSeen: vi.fn() }),
 }));
 
+// The shipped entries.json is empty, so populate it here; the empty state has its own file.
+vi.mock('@/whats-new/entries', () => ({
+    whatsNewEntries: [{ id: 'entry-a', title: 'A feature', blurb: 'Does a thing.' }],
+}));
+
 describe('AboutSection', () => {
     it('renders Plan status and Source, License, and Licensing docs links with exact URLs', () => {
         render(<AboutSection />);
@@ -73,9 +78,16 @@ describe('AboutSection', () => {
 });
 
 describe('AboutSection Preferences', () => {
+    it('shows the Preferences section once an entry exists', () => {
+        render(<AboutSection />);
+        expect(screen.getByText('Preferences')).toBeTruthy();
+        expect(screen.getByText("Show What's New")).toBeTruthy();
+    });
+
     it('toggling "Show What\'s New" calls setEnabled', async () => {
         render(<AboutSection />);
-        await userEvent.click(screen.getByRole('switch'));
+        // Name-scoped so a second toggle landing in About cannot break this.
+        await userEvent.click(screen.getByRole('switch', { name: /Show What's New/i }));
         expect(mockSetEnabled).toHaveBeenCalledWith(false);
     });
 });
