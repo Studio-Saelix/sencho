@@ -397,9 +397,51 @@ describe('DockerController.buildPrunePlan', () => {
         id: 'img-old',
         managed: true,
         reason: 'Unused image whose repository is used by a Sencho stack',
-        stackName: 'my-stack',
       }),
     ]);
+    // Repository sharing is not ownership: confirm surface must not name a stack.
+    expect(plan.items[0]?.stackName).toBeUndefined();
+  });
+
+  it('attributes stackName for label-owned free images but not for repo-matched free tags', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-run',
+        Names: ['/web'],
+        State: 'running',
+        Image: 'myapp:1.1',
+        ImageID: 'img-current',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-current', RepoTags: ['myapp:1.1'], Size: 200, Containers: 1 },
+      { Id: 'img-old', RepoTags: ['myapp:1.0'], Size: 180, Containers: 0 },
+      {
+        Id: 'img-labeled',
+        RepoTags: ['other:1'],
+        Size: 50,
+        Containers: 0,
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'managed', ['my-stack'], 1);
+    const byId = Object.fromEntries(plan.items.map((item) => [item.id, item]));
+
+    expect(byId['img-old']).toEqual(
+      expect.objectContaining({
+        reason: 'Unused image whose repository is used by a Sencho stack',
+      }),
+    );
+    expect(byId['img-old']?.stackName).toBeUndefined();
+    expect(byId['img-labeled']).toEqual(
+      expect.objectContaining({
+        managed: true,
+        stackName: 'my-stack',
+      }),
+    );
   });
 
   it('excludes a foreign Compose project image even when its repo matches a managed stack', async () => {

@@ -813,7 +813,7 @@ class DockerController {
         Size?: number;
         Containers?: number;
       }>;
-      const { repoKeys, repoToStack } = buildManagedImageRepoSet(managedContainers, rawImages);
+      const { repoKeys } = buildManagedImageRepoSet(managedContainers, rawImages);
       const prunable = rawImages.filter((img) => {
         if (img.Containers !== 0 || selfIdentity.isOwnImage(img.Id)) return false;
         if (isImageHeld?.(img.Id)) return false;
@@ -825,7 +825,6 @@ class DockerController {
           managedImageIds,
           unmanagedImageIds,
           repoKeys,
-          repoToStack,
           resolveStack,
         }).eligible;
       });
@@ -940,7 +939,7 @@ class DockerController {
         Size?: number;
         Containers?: number;
       }>;
-      const { repoKeys, repoToStack } = buildManagedImageRepoSet(managedContainers, rawImages);
+      const { repoKeys } = buildManagedImageRepoSet(managedContainers, rawImages);
       const prunable = rawImages.filter((img) => {
         if (img.Containers !== 0 || selfIdentity.isOwnImage(img.Id)) return false;
         return classifyManagedImageCandidate({
@@ -951,7 +950,6 @@ class DockerController {
           managedImageIds,
           unmanagedImageIds,
           repoKeys,
-          repoToStack,
           resolveStack,
         }).eligible;
       });
@@ -1171,7 +1169,7 @@ class DockerController {
         Containers?: number;
         Created?: number;
       }>;
-      const { repoKeys, repoToStack } = buildManagedImageRepoSet(managedContainers, rawImages);
+      const { repoKeys } = buildManagedImageRepoSet(managedContainers, rawImages);
       // An image becomes free only when every container that references it is
       // also in this plan (not merely when any planned container uses it).
       const freeingImages = ordered.includes('containers');
@@ -1197,13 +1195,18 @@ class DockerController {
             managedImageIds,
             unmanagedImageIds,
             repoKeys,
-            repoToStack,
             resolveStack,
           });
           if (!classification.eligible) continue;
           managed = true;
           planReason = managedImagePlanReason(classification.reason);
-          stackName = classification.stackName ?? stackName;
+          // Repo-match deliberately omits stackName (repository sharing is not ownership).
+          // Label reasons supply classification.stackName; otherwise keep imageToStack when present.
+          if (classification.reason === 'repo-match') {
+            stackName = undefined;
+          } else {
+            stackName = classification.stackName ?? stackName;
+          }
         } else {
           // All-scope: foreign compose projects stay eligible; keep stack when known.
           const labeled = resolveStack(img.Labels);

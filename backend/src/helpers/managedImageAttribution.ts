@@ -124,7 +124,6 @@ export function classifyManagedImageCandidate(input: {
   managedImageIds: Set<string>;
   unmanagedImageIds: Set<string>;
   repoKeys: Set<string>;
-  repoToStack: Map<string, string>;
   resolveStack: (labels: Record<string, string> | undefined) => string | null;
 }): ManagedImageClassification {
   const {
@@ -135,7 +134,6 @@ export function classifyManagedImageCandidate(input: {
     managedImageIds,
     unmanagedImageIds,
     repoKeys,
-    repoToStack,
     resolveStack,
   } = input;
 
@@ -161,11 +159,10 @@ export function classifyManagedImageCandidate(input: {
 
   for (const key of imageRepoKeys(repoTags)) {
     if (repoKeys.has(key)) {
-      return {
-        eligible: true,
-        reason: 'repo-match',
-        stackName: repoToStack.get(key),
-      };
+      // No stackName: repository sharing is not ownership. Naming a stack here
+      // would surface as "· stack X" on the destructive confirm list for a free
+      // image that never belonged to that stack (coincidental Hub library overlap).
+      return { eligible: true, reason: 'repo-match' };
     }
   }
 

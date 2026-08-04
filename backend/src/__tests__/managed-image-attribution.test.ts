@@ -17,6 +17,10 @@ describe('imageRepositoryKey', () => {
     expect(imageRepositoryKey('<none>:<none>')).toBeNull();
     expect(imageRepositoryKey('')).toBeNull();
   });
+
+  it('keeps host:port registry in the repository key', () => {
+    expect(imageRepositoryKey('myhost:5000/foo:1')).toBe('myhost:5000/foo');
+  });
 });
 
 describe('buildManagedImageRepoSet', () => {
@@ -28,11 +32,17 @@ describe('buildManagedImageRepoSet', () => {
         { Id: 'img-old', RepoTags: ['myapp:1'] },
       ],
     );
-    expect(repoKeys.has('registry-1.docker.io/library/myapp') || repoKeys.has('registry-1.docker.io/library/myapp'.replace('library/', ''))
-      || [...repoKeys].some((k) => k.endsWith('/myapp') || k.endsWith('myapp'))).toBe(true);
-    // parseImageRef puts library/ for bare names
-    expect([...repoKeys].some((k) => k.includes('myapp'))).toBe(true);
-    expect(repoToStack.get([...repoKeys].find((k) => k.includes('myapp'))!)).toBe('my-stack');
+    expect(repoKeys).toEqual(new Set(['registry-1.docker.io/library/myapp']));
+    expect(repoToStack.get('registry-1.docker.io/library/myapp')).toBe('my-stack');
+  });
+
+  it('normalizes private registry host:port refs as repository keys', () => {
+    const { repoKeys, repoToStack } = buildManagedImageRepoSet(
+      [{ Image: 'myhost:5000/foo:1', ImageID: 'img-private', stack: 'private-stack' }],
+      [{ Id: 'img-private', RepoTags: ['myhost:5000/foo:1'] }],
+    );
+    expect(repoKeys).toEqual(new Set(['myhost:5000/foo']));
+    expect(repoToStack.get('myhost:5000/foo')).toBe('private-stack');
   });
 });
 
@@ -41,7 +51,6 @@ describe('classifyManagedImageCandidate', () => {
     managedImageIds: new Set<string>(),
     unmanagedImageIds: new Set<string>(),
     repoKeys: new Set<string>(),
-    repoToStack: new Map<string, string>(),
     resolveStack: () => null as string | null,
   };
 
@@ -67,5 +76,19 @@ describe('classifyManagedImageCandidate', () => {
       becomesFree: true,
     });
     expect(result).toEqual({ eligible: true, reason: 'becomes-free' });
+  });
+
+  it('does not attach stackName on repo-match (repository sharing is not ownership)', () => {
+    const result = classifyManagedImageCandidate({
+      imageId: 'img-free',
+      labels: undefined,
+      repoTags: ['nginx:1.14'],
+      becomesFree: false,
+      managedImageIds: new Set(),
+      unmanagedImageIds: new Set(),
+      repoKeys: new Set(['registry-1.docker.io/library/nginx']),
+      resolveStack: () => null,
+    });
+    expect(result).toEqual({ eligible: true, reason: 'repo-match' });
   });
 });
