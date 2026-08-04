@@ -14,6 +14,9 @@ interface WhatsNewModalProps {
 // font-sans/normal-case/tracking-normal reset ModalFooter's inherited kicker styling (font-mono uppercase tracking-[0.22em]) so the footer link reads as a link, not a label.
 const linkClassName = 'inline-flex items-center gap-1 text-xs text-brand hover:underline font-sans normal-case tracking-normal';
 
+// whatsNewEntries is authored oldest-first; the modal shows newest first.
+const entries = [...whatsNewEntries].reverse();
+
 export function WhatsNewModal({ open, onOpenChange, onViewChangelog }: WhatsNewModalProps) {
   const { markSeen, setEnabled } = useWhatsNewPreference();
   // Screenshots are authored by hand alongside the entry, so a typo'd or
@@ -24,8 +27,6 @@ export function WhatsNewModal({ open, onOpenChange, onViewChangelog }: WhatsNewM
   useEffect(() => {
     if (open) markSeen();
   }, [open, markSeen]);
-
-  const entries = [...whatsNewEntries].reverse();
 
   return (
     // xl (max-w-xl w-[95vw]), not the md default (max-w-md): cards carry

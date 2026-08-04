@@ -22,20 +22,12 @@ function readLastSeenId(): string | null {
   }
 }
 
-function writeEnabled(enabled: boolean) {
+function writeSetting(key: string, value: string) {
   try {
-    localStorage.setItem(ENABLED_KEY, enabled ? '1' : '0');
+    localStorage.setItem(key, value);
   } catch {
-    // Quota exhaustion is non-fatal for this preference.
-  }
-  window.dispatchEvent(new Event(CHANGE_EVENT));
-}
-
-function writeLastSeenId(id: string) {
-  try {
-    localStorage.setItem(LAST_SEEN_KEY, id);
-  } catch {
-    // Quota exhaustion is non-fatal for this preference.
+    // Quota exhaustion is non-fatal for this preference; in-memory state still
+    // reflects the user's choice for this session.
   }
   window.dispatchEvent(new Event(CHANGE_EVENT));
 }
@@ -65,7 +57,7 @@ export function useWhatsNewPreference(): UseWhatsNewPreferenceResult {
     const stored = readLastSeenId();
     if (stored !== null) return stored;
     const seed = latestWhatsNewEntryId ?? '';
-    writeLastSeenId(seed);
+    writeSetting(LAST_SEEN_KEY, seed);
     return seed;
   });
 
@@ -83,13 +75,13 @@ export function useWhatsNewPreference(): UseWhatsNewPreferenceResult {
   }, []);
 
   const setEnabled = useCallback((next: boolean) => {
-    writeEnabled(next);
+    writeSetting(ENABLED_KEY, next ? '1' : '0');
     setEnabledState(next);
   }, []);
 
   const markSeen = useCallback(() => {
     if (latestWhatsNewEntryId === null) return;
-    writeLastSeenId(latestWhatsNewEntryId);
+    writeSetting(LAST_SEEN_KEY, latestWhatsNewEntryId);
     setLastSeenIdState(latestWhatsNewEntryId);
   }, []);
 
