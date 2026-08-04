@@ -50,7 +50,7 @@ export function DeleteStackDialog({
                 )
             }
             description={`Confirm deletion of ${stackName ?? 'stack'}.`}
-            hint={pruneVolumes ? 'VOLUMES PRUNED' : 'VOLUMES KEPT'}
+            hint={showVolumeOption ? (pruneVolumes ? 'VOLUMES PRUNED' : 'VOLUMES KEPT') : undefined}
             confirmLabel="Delete"
             busyConfirmLabel="Deleting..."
             confirming={confirming}
