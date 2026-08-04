@@ -1,5 +1,7 @@
 import { useLicense } from '@/context/LicenseContext';
 import { TierBadge } from '@/components/TierBadge';
+import { TogglePill } from '@/components/ui/toggle-pill';
+import { useWhatsNewPreference } from '@/hooks/useWhatsNewPreference';
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import {
@@ -14,6 +16,7 @@ const linkClassName =
 
 export function AboutSection() {
     const { license } = useLicense();
+    const { enabled: whatsNewEnabled, setEnabled: setWhatsNewEnabled } = useWhatsNewPreference();
 
     return (
         <div className="flex flex-col gap-10">
@@ -39,6 +42,19 @@ export function AboutSection() {
                         </code>
                     </SettingsField>
                 ) : null}
+            </SettingsSection>
+
+            <SettingsSection title="Preferences">
+                <SettingsField
+                    label="Show What's New"
+                    helper="Breathe the sparkle icon in the nav bar when a feature you have not seen yet ships."
+                >
+                    <TogglePill
+                        id="whats-new-enabled"
+                        checked={whatsNewEnabled}
+                        onChange={setWhatsNewEnabled}
+                    />
+                </SettingsField>
             </SettingsSection>
 
             <SettingsSection title="Links">
