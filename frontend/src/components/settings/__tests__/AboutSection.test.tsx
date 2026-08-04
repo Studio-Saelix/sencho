@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { AboutSection } from '../AboutSection';
 import { ABOUT_LINK_URLS } from '../aboutLinks';
 
@@ -36,6 +37,11 @@ vi.mock('@/components/TierBadge', () => ({
     TierBadge: () => <span>Community</span>,
 }));
 
+const mockSetEnabled = vi.fn();
+vi.mock('@/hooks/useWhatsNewPreference', () => ({
+    useWhatsNewPreference: () => ({ enabled: true, setEnabled: mockSetEnabled, hasUnseen: false, markSeen: vi.fn() }),
+}));
+
 describe('AboutSection', () => {
     it('renders Plan status and Source, License, and Licensing docs links with exact URLs', () => {
         render(<AboutSection />);
@@ -63,5 +69,13 @@ describe('AboutSection', () => {
         expect(screen.getByText('Source code')).toBeTruthy();
         expect(screen.getByText('AGPLv3 License')).toBeTruthy();
         expect(screen.getByText('Licensing documentation')).toBeTruthy();
+    });
+});
+
+describe('AboutSection Preferences', () => {
+    it('toggling "Show What\'s New" calls setEnabled', async () => {
+        render(<AboutSection />);
+        await userEvent.click(screen.getByRole('switch'));
+        expect(mockSetEnabled).toHaveBeenCalledWith(false);
     });
 });

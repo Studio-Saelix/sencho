@@ -39,6 +39,7 @@ interface TopBarProps {
   mobileNavOpen: boolean;
   onMobileNavOpenChange: (open: boolean) => void;
   search?: ReactNode;
+  whatsNew?: ReactNode;
   themeSwitch?: ReactNode;
   notifications: ReactNode;
   userMenu: ReactNode;
@@ -482,6 +483,7 @@ export function TopBar({
   mobileNavOpen,
   onMobileNavOpenChange,
   search,
+  whatsNew,
   themeSwitch,
   notifications,
   userMenu,
@@ -565,6 +567,7 @@ export function TopBar({
           !centered && !stripLabels && navMode !== 'compact' && 'flex-1 min-w-0',
         )}
       >
+        {whatsNew}
         {search}
         {themeSwitch}
         {notifications}

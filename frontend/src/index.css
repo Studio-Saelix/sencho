@@ -480,6 +480,9 @@ html[data-effects="reduced"] [data-sn-glass="mobile-tabbar"] {
 html[data-effects="reduced"] .animate-pulse {
   animation: none;
 }
+html[data-effects="reduced"] .animate-whats-new-breathe {
+  animation: none;
+}
 
 /* Decorative masthead rails: tied to reduced material effects (Calm, Readability,
    or manual Reduced effects), not to data-motion. Motion remains independently
@@ -767,6 +770,10 @@ body {
   0%, 100% { opacity: 0.15; }
   50%      { opacity: 0.55; }
 }
+@keyframes whats-new-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.85; }
+  50%      { transform: scale(1.08); opacity: 1; }
+}
 
 /* ─────────────────────────────────────────────────────────────
    ANIMATION UTILITIES
@@ -794,6 +801,9 @@ body {
 }
 .masthead-rail-glow {
   animation: masthead-rail-glow 4s ease-in-out infinite alternate;
+}
+.animate-whats-new-breathe {
+  animation: whats-new-breathe 2.6s ease-in-out infinite;
 }
 
 /* Stagger delay helpers */
