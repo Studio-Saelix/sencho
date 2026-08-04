@@ -47,7 +47,7 @@ export function AboutSection() {
             <SettingsSection title="Preferences">
                 <SettingsField
                     label="Show What's New"
-                    helper="Breathe the sparkle icon in the nav bar when a feature you have not seen yet ships."
+                    helper="Highlight the sparkle icon in the top bar when a new feature ships."
                 >
                     <TogglePill
                         id="whats-new-enabled"
