@@ -324,7 +324,12 @@ systemMaintenanceRouter.post('/prune/estimate', async (req: Request, res: Respon
     }
     const pruneScope = scope === 'managed' ? 'managed' : 'all';
     const dockerController = DockerController.getInstance(req.nodeId);
-    const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
+    // Skip the filesystem walk for all scope: estimateSystemReclaim uses
+    // only docker system df and ignores knownStackNames. Mirroring the
+    // fleet route's conditional at fleet.ts:2367.
+    const knownStacks = pruneScope === 'managed'
+      ? await FileSystemService.getInstance(req.nodeId).getStacks()
+      : [];
 
     // Both estimate paths run under the same 8 s budget (F-6). The all-scope
     // fast path uses only `docker system df` via getDiskUsage(); the managed
