@@ -8,7 +8,7 @@
  * without instantiating Monaco.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { FileEntry } from '@/lib/stackFilesApi';
 import { downloadBlob } from '@/lib/download';
@@ -452,5 +452,117 @@ describe('StackFileExplorer new file affordance', () => {
   it('hides the New file button on a non-editable root', () => {
     render(<StackFileExplorer stackName="my-stack" canEdit={false} isDarkMode={false} />);
     expect(screen.queryByRole('button', { name: 'New file' })).not.toBeInTheDocument();
+  });
+});
+
+describe('StackFileExplorer resizable tree pane', () => {
+  const TREE_WIDTH_KEY = 'sencho.fileExplorer.treeWidth';
+
+  function treePane(): HTMLElement {
+    return screen.getByTestId('file-explorer-tree-pane');
+  }
+
+  function paneWidth(): number {
+    return Number.parseInt(treePane().style.width, 10);
+  }
+
+  function separator(): HTMLElement {
+    return screen.getByRole('separator', { name: 'Resize file tree' });
+  }
+
+  function dragSeparator(fromX: number, toX: number): void {
+    const sep = separator();
+    fireEvent.pointerDown(sep, { pointerId: 1, clientX: fromX });
+    fireEvent.pointerMove(sep, { pointerId: 1, clientX: toX });
+    fireEvent.pointerUp(sep, { pointerId: 1, clientX: toX });
+  }
+
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('defaults to 224px with shrink-0 when nothing is stored', () => {
+    setup();
+    const pane = treePane();
+    expect(pane.style.width).toBe('224px');
+    expect(pane.className).toMatch(/\bshrink-0\b/);
+    expect(pane.className).not.toMatch(/\bw-56\b/);
+  });
+
+  it('restores a stored in-range width', () => {
+    localStorage.setItem(TREE_WIDTH_KEY, '360');
+    setup();
+    expect(paneWidth()).toBe(360);
+  });
+
+  it('accepts stored exact min and max bounds', () => {
+    localStorage.setItem(TREE_WIDTH_KEY, '160');
+    const { unmount } = setup();
+    expect(paneWidth()).toBe(160);
+    unmount();
+
+    localStorage.setItem(TREE_WIDTH_KEY, '560');
+    setup();
+    expect(paneWidth()).toBe(560);
+  });
+
+  it('falls back to 224 for out-of-range or corrupt storage', () => {
+    for (const raw of ['99', '9999', 'nope', '{bad']) {
+      localStorage.setItem(TREE_WIDTH_KEY, raw);
+      const { unmount } = setup();
+      expect(paneWidth()).toBe(224);
+      unmount();
+    }
+  });
+
+  it('widens by the drag delta and persists on pointer up', () => {
+    setup();
+    dragSeparator(400, 420);
+    expect(paneWidth()).toBe(244);
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('244');
+  });
+
+  it('clamps a far-left drag to 160 and persists that bound', () => {
+    setup();
+    dragSeparator(400, 0);
+    expect(paneWidth()).toBe(160);
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('160');
+  });
+
+  it('clamps a far-right drag to 560 and persists that bound', () => {
+    setup();
+    dragSeparator(400, 2000);
+    expect(paneWidth()).toBe(560);
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('560');
+  });
+
+  it('tears down the gesture and persists on pointercancel', () => {
+    setup();
+    const sep = separator();
+    fireEvent.pointerDown(sep, { pointerId: 1, clientX: 400 });
+    fireEvent.pointerMove(sep, { pointerId: 1, clientX: 420 });
+    expect(paneWidth()).toBe(244);
+    fireEvent.pointerCancel(sep, { pointerId: 1, clientX: 420 });
+    expect(paneWidth()).toBe(244);
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('244');
+    expect(document.body.style.cursor).toBe('');
+    expect(document.body.style.userSelect).toBe('');
+  });
+
+  it('nudges 8px on ArrowRight and stops at the max bound', async () => {
+    const user = userEvent.setup();
+    const { unmount } = setup();
+    separator().focus();
+    await user.keyboard('{ArrowRight}');
+    expect(paneWidth()).toBe(232);
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('232');
+    unmount();
+
+    localStorage.setItem(TREE_WIDTH_KEY, '556');
+    setup();
+    separator().focus();
+    await user.keyboard('{ArrowRight}{ArrowRight}');
+    expect(paneWidth()).toBe(560);
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('560');
   });
 });

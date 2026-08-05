@@ -54,7 +54,7 @@ Named-volume editing is best-effort and bound by file ownership. The helper cont
 
 ## Layout
 
-The Files tab splits into two panes. The left pane holds the Browsing selector, the upload affordance, the **New file** and **New folder** buttons, and the directory tree for the selected root. The right pane is the action bar plus the file viewer.
+The Files tab splits into two panes. The left pane holds the Browsing selector, the upload affordance, the **New file** and **New folder** buttons, and the directory tree for the selected root. The right pane is the action bar plus the file viewer. Drag the divider between the panes to widen or narrow the tree; the width is remembered in this browser.
 
 A full-screen toggle sits next to **Close editor** whenever the Files tab is active. It collapses the identity, health, and log column on the left of the stack workspace so the tree and viewer use the full width, which helps when you are working with wide config files or a deep directory tree. Click it again (or switch to a different tab) to return to the normal two-column layout.
 
@@ -70,7 +70,7 @@ Click a folder to expand or collapse it. Click a file to open it in the viewer o
 
 The tree is fully keyboard navigable. Tab into it and use the arrow keys to move between rows: **Up** and **Down** move row to row, **Right** expands a folder (then steps into it), **Left** collapses it (or steps out to the parent), **Home** and **End** jump to the first and last visible row, and **Enter** or **Space** opens a file or toggles a folder.
 
-Each row is fully clickable across the pane, so right-clicking anywhere on a row (not just on its name) opens that entry's context menu. Long names are never truncated: the tree scrolls horizontally so you can read the full name.
+Each row is fully clickable across the pane, so right-clicking anywhere on a row (not just on its name) opens that entry's context menu. Long names are never truncated. Widen the tree with the divider when you can; names that still overflow the pane scroll horizontally.
 
 **Display cap.** Each directory render is capped at 1000 entries. A folder with more than 1000 children shows the first 1000 alphabetically with a footer noting how many entries the directory holds in total. The tree also has a filter input at the top of the list so you can narrow a large directory to the entries you care about without dropping to a shell.
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, type PointerEvent, type KeyboardEvent } from 'react';
 import { Trash2, FilePlus, FolderPlus, FolderInput, Download, Loader2, AlertTriangle, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ConfirmModal } from '@/components/ui/modal';
@@ -23,6 +23,33 @@ interface StackFileExplorerProps {
   isDarkMode: boolean;
   onNavigateToCompose?: () => void;
   onNavigateToEnv?: () => void;
+}
+
+const DEFAULT_TREE_WIDTH = 224;
+const MIN_TREE_WIDTH = 160;
+const MAX_TREE_WIDTH = 560;
+const TREE_WIDTH_KEY = 'sencho.fileExplorer.treeWidth';
+
+function clampTreeWidth(n: number): number {
+  return Math.min(MAX_TREE_WIDTH, Math.max(MIN_TREE_WIDTH, n));
+}
+
+function readStoredTreeWidth(): number {
+  try {
+    const n = Number.parseInt(localStorage.getItem(TREE_WIDTH_KEY) ?? '', 10);
+    if (Number.isFinite(n) && n >= MIN_TREE_WIDTH && n <= MAX_TREE_WIDTH) return n;
+  } catch {
+    /* localStorage may be unavailable */
+  }
+  return DEFAULT_TREE_WIDTH;
+}
+
+function persistTreeWidth(n: number): void {
+  try {
+    localStorage.setItem(TREE_WIDTH_KEY, String(n));
+  } catch {
+    /* localStorage may be unavailable */
+  }
 }
 
 /** The synthetic stack-source root used before roots load or if discovery fails. */
@@ -71,6 +98,50 @@ export function StackFileExplorer({
   const [currentDir, setCurrentDir] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [treeWidth, setTreeWidth] = useState(readStoredTreeWidth);
+  const treeWidthRef = useRef(treeWidth);
+  treeWidthRef.current = treeWidth;
+  const dragRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+
+  function onTreeResizePointerDown(event: PointerEvent<HTMLDivElement>): void {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: treeWidthRef.current,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
+  function onTreeResizePointerMove(event: PointerEvent<HTMLDivElement>): void {
+    const drag = dragRef.current;
+    if (drag === null || drag.pointerId !== event.pointerId) return;
+    setTreeWidth(clampTreeWidth(drag.startWidth + (event.clientX - drag.startX)));
+  }
+
+  function onTreeResizePointerEnd(event: PointerEvent<HTMLDivElement>): void {
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      /* capture may already be released */
+    }
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    persistTreeWidth(treeWidthRef.current);
+  }
+
+  function onTreeResizeKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const next = clampTreeWidth(treeWidthRef.current + (event.key === 'ArrowRight' ? 8 : -8));
+    setTreeWidth(next);
+    persistTreeWidth(next);
+  }
 
   // ── file roots (Volumes + Stack source) ──
   const [roots, setRoots] = useState<FileRoot[]>([STACK_SOURCE_FALLBACK]);
@@ -433,7 +504,11 @@ export function StackFileExplorer({
   return (
     <div className="flex h-full min-h-0">
       {/* Left pane: root switcher + tree + upload + new folder */}
-      <div className="flex flex-col w-56 shrink-0 border-r border-glass-border min-h-0">
+      <div
+        data-testid="file-explorer-tree-pane"
+        className="flex flex-col shrink-0 min-h-0"
+        style={{ width: treeWidth }}
+      >
         <div className="flex flex-col gap-1 px-2 py-1.5 border-b border-glass-border shrink-0">
           <span className="text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Browsing</span>
           <Select value={selectedRootId} onValueChange={handleRootChange}>
@@ -588,6 +663,24 @@ export function StackFileExplorer({
             onSelectionChange={setSelectedPaths}
           />
         </div>
+      </div>
+
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize file tree"
+        aria-valuenow={treeWidth}
+        aria-valuemin={MIN_TREE_WIDTH}
+        aria-valuemax={MAX_TREE_WIDTH}
+        tabIndex={0}
+        className="relative w-px shrink-0 cursor-col-resize bg-glass-border outline-none hover:bg-brand focus-visible:bg-brand"
+        onPointerDown={onTreeResizePointerDown}
+        onPointerMove={onTreeResizePointerMove}
+        onPointerUp={onTreeResizePointerEnd}
+        onPointerCancel={onTreeResizePointerEnd}
+        onKeyDown={onTreeResizeKeyDown}
+      >
+        <span className="absolute inset-y-0 -left-1.5 -right-1.5" aria-hidden />
       </div>
 
       {/* Right pane: action bar + viewer */}
