@@ -102,7 +102,7 @@ it('marks partial estimates with a PART pill and blast suffix', async () => {
   expect(screen.queryByText('OK')).not.toBeInTheDocument();
 });
 
-it('shows 0 reclaimable · partial when only failed targets leave a zero sum', async () => {
+it('shows 0 reclaimable · partial when successful targets report zero bytes', async () => {
   mockedFetch.mockImplementation((url: string) => {
     if (url === '/fleet/prune/estimate') {
       return Promise.resolve(jsonResponse(200, {
