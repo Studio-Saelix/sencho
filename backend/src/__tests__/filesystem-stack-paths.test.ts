@@ -848,6 +848,20 @@ describe('FileSystemService stack methods', () => {
         expect(stat.mode & 0o777).toBe(0o600);
       }
     });
+
+    it('chmodStackPath succeeds on .blueprint.json', async () => {
+      const markerPath = path.join(stackDir, '.blueprint.json');
+      await fs.writeFile(markerPath, '{"blueprintId":1,"revision":1}\n');
+      await fs.chmod(markerPath, 0o644);
+
+      const service = FileSystemService.getInstance();
+      await service.chmodStackPath(STACK, '.blueprint.json', 0o600);
+
+      if (!isWindows) {
+        const stat = await fs.stat(markerPath);
+        expect(stat.mode & 0o777).toBe(0o600);
+      }
+    });
   });
 });
 

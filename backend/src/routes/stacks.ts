@@ -145,7 +145,7 @@ function releaseStackOpLock(req: Request, stackName: string): void {
   StackOpLockService.getInstance().release(req.nodeId, stackName);
 }
 
-/** Root compose + blueprint marker on the stack-source root must not change while a lifecycle op holds the stack lock. */
+/** Root compose + blueprint marker on the stack-source root must not change (content or mode) while a lifecycle op holds the stack lock. */
 const STACK_OP_LOCKED_ROOT_TRUST_FILES = new Set([
   'compose.yaml',
   'compose.yml',
@@ -162,8 +162,9 @@ function rejectIfStackOpBlocksRootTrustFileWrite(
   root: StackFileRoot,
 ): boolean {
   if (root.kind !== 'stack-source') return false;
-  if (relPath.includes('/')) return false;
-  const base = relPath.toLowerCase();
+  const normalized = relPath.endsWith('/') ? relPath.slice(0, -1) : relPath;
+  if (normalized.includes('/')) return false;
+  const base = normalized.toLowerCase();
   if (!STACK_OP_LOCKED_ROOT_TRUST_FILES.has(base)) return false;
   const existing = StackOpLockService.getInstance().get(req.nodeId, stackName);
   if (!existing) return false;
@@ -3662,6 +3663,7 @@ stacksRouter.put('/:stackName/files/permissions', async (req: Request, res: Resp
   }
   const root = await resolveRootForOp(req, res, stackName, 'write');
   if (!root) return;
+  if (rejectIfStackOpBlocksRootTrustFileWrite(req, res, stackName, relPath, root)) return;
   const startedAt = Date.now();
   logFileDiag('chmod start', { stackName, relPath, nodeId: req.nodeId, mode, rootKind: root.kind });
   try {

@@ -1128,6 +1128,14 @@ describe('PUT /api/stacks/:stackName/files/content', () => {
       expect(composeRes.status).toBe(409);
       expect(composeRes.body.code).toBe('stack_op_in_progress');
 
+      const trailingRes = await request(app)
+        .put(`/api/stacks/${STACK}/files/content`)
+        .query({ path: 'compose.yaml/' })
+        .set('Cookie', adminCookie)
+        .send({ content: 'services:\n  app:\n    image: nginx\n' });
+      expect(trailingRes.status).toBe(409);
+      expect(trailingRes.body.code).toBe('stack_op_in_progress');
+
       const markerRes = await request(app)
         .put(`/api/stacks/${STACK}/files/content`)
         .query({ path: '.blueprint.json' })
@@ -1739,6 +1747,63 @@ describe('PUT /api/stacks/:stackName/files/permissions', () => {
       .send({ mode: 0o600 });
     expect(res.status).toBe(204);
   });
+
+  it('blocks root trust file chmod while a stack op lock is held', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, '.blueprint.json'), '{"blueprintId":1,"revision":1}\n');
+    await fs.mkdir(path.join(stacksDir, STACK, 'config'), { recursive: true });
+    await fs.writeFile(path.join(stacksDir, STACK, 'config', 'app.conf'), 'ok\n');
+    await fs.writeFile(path.join(stacksDir, STACK, 'config', 'compose.yaml'), 'services: {}\n');
+    const { StackOpLockService } = await import('../services/StackOpLockService');
+    StackOpLockService.getInstance().tryAcquire(1, STACK, 'deploy', 'admin');
+    try {
+      const composeRes = await request(app)
+        .put(`/api/stacks/${STACK}/files/permissions`)
+        .query({ path: 'compose.yaml' })
+        .set('Cookie', adminCookie)
+        .send({ mode: 0o600 });
+      expect(composeRes.status).toBe(409);
+      expect(composeRes.body.code).toBe('stack_op_in_progress');
+
+      const trailingRes = await request(app)
+        .put(`/api/stacks/${STACK}/files/permissions`)
+        .query({ path: 'compose.yaml/' })
+        .set('Cookie', adminCookie)
+        .send({ mode: 0o600 });
+      expect(trailingRes.status).toBe(409);
+      expect(trailingRes.body.code).toBe('stack_op_in_progress');
+
+      const markerRes = await request(app)
+        .put(`/api/stacks/${STACK}/files/permissions`)
+        .query({ path: '.blueprint.json' })
+        .set('Cookie', adminCookie)
+        .send({ mode: 0o600 });
+      expect(markerRes.status).toBe(409);
+      expect(markerRes.body.code).toBe('stack_op_in_progress');
+
+      const envRes = await request(app)
+        .put(`/api/stacks/${STACK}/files/permissions`)
+        .query({ path: '.env' })
+        .set('Cookie', adminCookie)
+        .send({ mode: 0o600 });
+      expect(envRes.status).toBe(204);
+
+      const nestedRes = await request(app)
+        .put(`/api/stacks/${STACK}/files/permissions`)
+        .query({ path: 'config/app.conf' })
+        .set('Cookie', adminCookie)
+        .send({ mode: 0o600 });
+      expect(nestedRes.status).toBe(204);
+
+      const nestedComposeRes = await request(app)
+        .put(`/api/stacks/${STACK}/files/permissions`)
+        .query({ path: 'config/compose.yaml' })
+        .set('Cookie', adminCookie)
+        .send({ mode: 0o600 });
+      expect(nestedComposeRes.status).toBe(204);
+    } finally {
+      StackOpLockService.getInstance().release(1, STACK);
+    }
+  });
 });
 
 // ── DELETE /:stackName/files ──────────────────────────────────────────────────
@@ -2016,6 +2081,21 @@ describe('protected stack files', () => {
     expect(res.status).toBe(204);
     if (!isWindows) {
       expect((await fs.stat(path.join(stacksDir, STACK, 'compose.yaml'))).mode & 0o777).toBe(mode);
+    }
+  });
+
+  it('PUT /files/permissions succeeds on .blueprint.json', async () => {
+    const markerPath = path.join(stacksDir, STACK, '.blueprint.json');
+    await fs.writeFile(markerPath, '{"blueprintId":1,"revision":1}\n');
+    const mode = 0o600;
+    const res = await request(app)
+      .put(`/api/stacks/${STACK}/files/permissions`)
+      .query({ path: '.blueprint.json' })
+      .set('Cookie', adminCookie)
+      .send({ mode });
+    expect(res.status).toBe(204);
+    if (!isWindows) {
+      expect((await fs.stat(markerPath)).mode & 0o777).toBe(mode);
     }
   });
 
