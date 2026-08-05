@@ -25,6 +25,13 @@ type PolicyBlock = {
 };
 type Container = { id: string; name: string };
 
+type InspectImageSelection = {
+  Id: string;
+  RepoTags: string[];
+  usedByStacks: string[];
+  nodeId: number;
+};
+
 type StackMonitorState = {
   stackName: string;
   tab: 'alerts' | 'auto-heal';
@@ -102,6 +109,10 @@ export function useOverlayState() {
     setLogViewerOpen(false);
     setLogContainer(null);
   }, []);
+
+  const [inspectImage, setInspectImage] = useState<InspectImageSelection | null>(null);
+  const openInspectImage = useCallback((image: InspectImageSelection) => setInspectImage(image), []);
+  const closeInspectImage = useCallback(() => setInspectImage(null), []);
 
   // Listen for topology click-to-logs events and open the log viewer.
   // openLogViewer is stable (useCallback with empty deps), so this effect
@@ -189,6 +200,7 @@ export function useOverlayState() {
     pendingLeaveAction, setPendingLeaveAction,
     bashModalOpen, selectedContainer, openBashModal, closeBashModal,
     logViewerOpen, logContainer, openLogViewer, closeLogViewer,
+    inspectImage, openInspectImage, closeInspectImage,
     stackMonitor, openAlertSheet, openAutoHeal, closeStackMonitor,
     policyBlock, setPolicyBlock, policyBypassing, setPolicyBypassing,
     updateReadiness, setUpdateReadiness,

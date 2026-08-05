@@ -700,6 +700,7 @@ export default function EditorLayout() {
       changeEnvFile={stackActions.changeEnvFile}
       openLogViewer={stackActions.openLogViewer}
       openBashModal={stackActions.openBashModal}
+      onInspectImage={selectedFile && activeNode?.id != null ? stackActions.openInspectImage : undefined}
       onOpenMonitor={stackName ? () => overlayState.openAlertSheet(stackName) : undefined}
       onOpenServiceMonitor={stackName
         ? (serviceName) => overlayState.openAlertSheet(stackName, { serviceName })

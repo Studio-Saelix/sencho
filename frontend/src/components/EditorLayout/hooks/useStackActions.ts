@@ -2290,6 +2290,19 @@ export function useStackActions(options: UseStackActionsOptions) {
     [overlayState.openLogViewer],
   );
   const closeLogViewer = overlayState.closeLogViewer;
+  const openInspectImage = useCallback(
+    (imageId: string, imageRef: string) => {
+      const file = stackListState.selectedFile;
+      if (!file || activeNode?.id == null) return;
+      overlayState.openInspectImage({
+        Id: imageId,
+        RepoTags: imageRef ? [imageRef] : [],
+        usedByStacks: [file.replace(/\.(ya?ml)$/, '')],
+        nodeId: activeNode.id,
+      });
+    },
+    [stackListState.selectedFile, activeNode?.id, overlayState.openInspectImage],
+  );
 
   return {
     pendingStackLoadRef,
@@ -2341,6 +2354,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     closeBashModal,
     openLogViewer,
     closeLogViewer,
+    openInspectImage,
     isSelfStackFile,
     openSelfStackProtectedIfNeeded,
   };

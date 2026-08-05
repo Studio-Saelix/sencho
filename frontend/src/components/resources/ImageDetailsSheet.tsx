@@ -46,16 +46,16 @@ interface ImageDetails {
   history: ImageHistoryEntry[];
 }
 
-/** Classified image row passed from Resources (node-bound). */
+/** Node-bound image selection (Resources row or stack-container inspect). */
 export interface ClassifiedImageSelection {
   Id: string;
   RepoTags: string[];
-  Size: number;
-  Containers: number;
+  Size?: number;
+  Containers?: number;
   usedByStacks: string[];
-  managedBy: string | null;
-  managedStatus: 'managed' | 'unmanaged' | 'unused';
-  isSencho: boolean;
+  managedBy?: string | null;
+  managedStatus?: 'managed' | 'unmanaged' | 'unused';
+  isSencho?: boolean;
   nodeId: string | number;
 }
 
@@ -63,6 +63,8 @@ interface ImageDetailsSheetProps {
   image: ClassifiedImageSelection | null;
   onClose: () => void;
   onOpenStack?: (stack: string) => void;
+  /** Optional breadcrumb. Defaults to Resources / Images / {image name}. */
+  crumb?: string[];
 }
 
 function formatRelativeAge(timestampSec: number): string {
@@ -76,7 +78,7 @@ function formatRelativeAge(timestampSec: number): string {
   return `${Math.floor(diff / (86400 * 365))}y ago`;
 }
 
-export function ImageDetailsSheet({ image, onClose, onOpenStack }: ImageDetailsSheetProps) {
+export function ImageDetailsSheet({ image, onClose, onOpenStack, crumb }: ImageDetailsSheetProps) {
   const imageId = image?.Id ?? null;
   const { isAdmin } = useAuth();
   const [data, setData] = useState<ImageDetails | null>(null);
@@ -120,9 +122,14 @@ export function ImageDetailsSheet({ image, onClose, onOpenStack }: ImageDetailsS
   const name = image?.RepoTags?.[0]
     || inspect?.RepoTags?.[0]
     || (inspect ? formatShortDigest(inspect.Id) : (imageId ? formatShortDigest(imageId) : 'Image details'));
-  const meta = inspect
-    ? `${formatBytes(inspect.Size)} · ${inspect.Architecture ?? '?'}/${inspect.Os ?? '?'} · ${totalLayers} layers`
-    : (loading ? 'Loading…' : (image ? formatBytes(image.Size) : ''));
+  let meta = '';
+  if (inspect) {
+    meta = `${formatBytes(inspect.Size)} · ${inspect.Architecture ?? '?'}/${inspect.Os ?? '?'} · ${totalLayers} layers`;
+  } else if (loading) {
+    meta = 'Loading…';
+  } else if (image?.Size != null) {
+    meta = formatBytes(image.Size);
+  }
 
   const footerContext = inspect?.Created
     ? `Created ${formatRelativeAge(new Date(inspect.Created).getTime() / 1000)}`
@@ -132,7 +139,7 @@ export function ImageDetailsSheet({ image, onClose, onOpenStack }: ImageDetailsS
     <SystemSheet
       open={!!image}
       onOpenChange={(open) => !open && onClose()}
-      crumb={['Resources', 'Images', name]}
+      crumb={crumb ?? ['Resources', 'Images', name]}
       name={name}
       meta={meta}
       footerContext={footerContext}

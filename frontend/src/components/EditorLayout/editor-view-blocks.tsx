@@ -24,6 +24,7 @@ import {
     AlertCircle,
     RefreshCw,
     HeartPulse,
+    Eye,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../ui/button';
@@ -327,6 +328,7 @@ export interface ContainersHealthProps {
     activeNode: Node | null;
     openLogViewer: (containerId: string, containerName: string) => void;
     openBashModal: (containerId: string, containerName: string) => void;
+    onInspectImage?: (imageId: string, imageRef: string) => void;
     /** Opens Monitor (Alerts tab); preselects the Compose service in add forms when listed. */
     onOpenServiceMonitor?: (serviceName: string) => void;
     serviceAction: (action: 'start' | 'stop' | 'restart', serviceName: string) => Promise<void>;
@@ -363,6 +365,7 @@ export function ContainersHealth({
     activeNode,
     openLogViewer,
     openBashModal,
+    onInspectImage,
     onOpenServiceMonitor,
     serviceAction,
     effectiveServices = [],
@@ -668,6 +671,28 @@ export function ContainersHealth({
                                             <TooltipContent>View logs</TooltipContent>
                                           </Tooltip>
                                         </TooltipProvider>
+                                        {onInspectImage && (
+                                          <TooltipProvider>
+                                            <Tooltip>
+                                              <TooltipTrigger asChild>
+                                                <Button
+                                                  size="icon"
+                                                  variant="ghost"
+                                                  className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
+                                                  onClick={() => {
+                                                    if (!container.ImageID) return;
+                                                    onInspectImage(container.ImageID, container.Image ?? '');
+                                                  }}
+                                                  disabled={!container.ImageID}
+                                                  aria-label="Inspect image"
+                                                >
+                                                  <Eye className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                                </Button>
+                                              </TooltipTrigger>
+                                              <TooltipContent>Inspect image</TooltipContent>
+                                            </Tooltip>
+                                          </TooltipProvider>
+                                        )}
                                         {onOpenServiceMonitor && composeService && (
                                           <TooltipProvider>
                                             <Tooltip>

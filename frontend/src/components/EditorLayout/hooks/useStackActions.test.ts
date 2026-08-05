@@ -24,6 +24,8 @@ import { toast } from '@/components/ui/toast-store';
 type EditorState = ReturnType<typeof useEditorViewState>;
 type StackListState = ReturnType<typeof useStackListState>;
 type NavState = ReturnType<typeof useViewNavigationState>;
+type ActiveNode = Parameters<typeof useStackActions>[0]['activeNode'];
+const DEFAULT_ACTIVE_NODE = { id: 1, name: 'Local', type: 'local' } as ActiveNode;
 
 function makeEditorState(over: Partial<EditorState> = {}): EditorState {
   const base = {
@@ -154,7 +156,7 @@ function setup(over: {
       stackListState,
       navState,
       overlayState,
-      activeNode: over.activeNode ?? ({ id: 1, name: 'Local', type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode']),
+      activeNode: over.activeNode === undefined ? DEFAULT_ACTIVE_NODE : over.activeNode,
       setActiveNode,
       nodes: [],
       runWithLog,
@@ -1929,3 +1931,72 @@ describe('useStackActions.deleteStack', () => {
     expect(removeNotificationsForStack).not.toHaveBeenCalled();
   });
 });
+
+describe('useStackActions.openInspectImage', () => {
+  it('builds a slim selection from the selected stack and active node', () => {
+    const openInspectImage = vi.fn();
+    const { result } = setup({
+      overlay: { openInspectImage },
+      stackList: { selectedFile: 'web.yml' },
+      activeNode: { id: 3, name: 'Local', type: 'local' } as ActiveNode,
+    });
+
+    act(() => {
+      result.current.openInspectImage('sha256:abc', 'nginx:latest');
+    });
+
+    expect(openInspectImage).toHaveBeenCalledWith({
+      Id: 'sha256:abc',
+      RepoTags: ['nginx:latest'],
+      usedByStacks: ['web'],
+      nodeId: 3,
+    });
+  });
+
+  it('strips yaml suffix from selectedFile for usedByStacks', () => {
+    const openInspectImage = vi.fn();
+    const { result } = setup({
+      overlay: { openInspectImage },
+      stackList: { selectedFile: 'api.yaml' },
+    });
+
+    act(() => {
+      result.current.openInspectImage('sha256:def', 'redis:7');
+    });
+
+    expect(openInspectImage).toHaveBeenCalledWith(expect.objectContaining({
+      usedByStacks: ['api'],
+      RepoTags: ['redis:7'],
+    }));
+  });
+
+  it('no-ops when no stack is selected', () => {
+    const openInspectImage = vi.fn();
+    const { result } = setup({
+      overlay: { openInspectImage },
+      stackList: { selectedFile: null },
+    });
+
+    act(() => {
+      result.current.openInspectImage('sha256:abc', 'nginx:latest');
+    });
+
+    expect(openInspectImage).not.toHaveBeenCalled();
+  });
+
+  it('no-ops when there is no active node', () => {
+    const openInspectImage = vi.fn();
+    const { result } = setup({
+      overlay: { openInspectImage },
+      stackList: { selectedFile: 'web.yml' },
+      activeNode: null,
+    });
+
+    act(() => {
+      result.current.openInspectImage('sha256:abc', 'nginx:latest');
+    });
+
+    expect(openInspectImage).not.toHaveBeenCalled();
+  });
+});
+
