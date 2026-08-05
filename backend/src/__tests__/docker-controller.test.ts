@@ -382,6 +382,48 @@ describe('DockerController - getDiskUsage', () => {
     expect(usage.reclaimableContainers).toBe(1_500);
     expect(usage.reclaimableContainerCount).toBe(2);
   });
+
+  it('estimateSystemReclaim returns same bytes as getDiskUsage for every target type', async () => {
+    mockDocker.df.mockResolvedValue({
+      LayersSize: 1_000_000_000,
+      Images: [
+        { Id: 'a', Containers: 0, Size: 500_000_000, SharedSize: 0 },
+        { Id: 'b', Containers: 1, Size: 300_000_000, SharedSize: 0 },
+      ],
+      Containers: [
+        { State: 'exited', SizeRw: 200 },
+      ],
+      Volumes: [
+        { UsageData: { RefCount: 0, Size: 400 } },
+      ],
+    });
+
+    const dc = DockerController.getInstance(1);
+    const usage = await dc.getDiskUsage();
+
+    // Each estimateSystemReclaim(target) must equal the corresponding
+    // getDiskUsage() field. knownStackNames is unused in the fast path
+    // but retained for call-site symmetry.
+    const expectations: Array<[target: 'images' | 'containers' | 'volumes' | 'networks', expected: number]> = [
+      ['images', usage.reclaimableImages],
+      ['containers', usage.reclaimableContainers],
+      ['volumes', usage.reclaimableVolumes],
+      ['networks', 0],
+    ];
+    for (const [target, expected] of expectations) {
+      const estimate = await dc.estimateSystemReclaim(target, []);
+      expect(estimate.reclaimableBytes).toBe(expected);
+    }
+
+    // The fast path uses only docker.df(), never the classified-resources
+    // API calls that estimateSystemReclaim previously incurred via
+    // getDiskUsageClassified (listImages, listVolumes, etc.).
+    expect(mockDocker.df).toHaveBeenCalledTimes(5); // 1 getDiskUsage + 4 estimateSystemReclaim
+    expect(mockDocker.listImages).not.toHaveBeenCalled();
+    expect(mockDocker.listVolumes).not.toHaveBeenCalled();
+    expect(mockDocker.listNetworks).not.toHaveBeenCalled();
+    expect(mockDocker.listContainers).not.toHaveBeenCalled();
+  });
 });
 
 // ── pruneSystem ────────────────────────────────────────────────────────

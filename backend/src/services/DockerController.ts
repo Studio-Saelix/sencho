@@ -964,15 +964,17 @@ class DockerController {
   }
 
   /**
-   * Non-destructive estimate for the `all` (system) prune scope. Reuses the
-   * same disk-usage source as the resources page so the readout matches what
-   * the operator already sees there.
+   * Non-destructive estimate for the `all` (system) prune scope. Uses only
+   * `docker system df` so the readout matches the daemon's own reclaimable
+   * totals for each resource type. `knownStackNames` is retained for
+   * call-site symmetry with {@link estimateManagedReclaim} and is unused
+   * by this method.
    */
   public async estimateSystemReclaim(
     target: 'containers' | 'images' | 'networks' | 'volumes',
-    knownStackNames: string[],
+    _knownStackNames: string[],
   ): Promise<{ reclaimableBytes: number }> {
-    const df = await this.getDiskUsageClassified(knownStackNames);
+    const df = await this.getDiskUsage();
     if (target === 'images') return { reclaimableBytes: df.reclaimableImages };
     if (target === 'containers') return { reclaimableBytes: df.reclaimableContainers };
     if (target === 'volumes') return { reclaimableBytes: df.reclaimableVolumes };

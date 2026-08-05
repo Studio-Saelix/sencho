@@ -1,6 +1,6 @@
 /**
  * F-6 regression: Fleet itemized plan enumeration and byte estimation both
- * bound the slow `docker system df` call (8s) and surface a recognizable
+ * bound the slow `docker system df` call (12s) and surface a recognizable
  * timeout message to the operator.
  *
  * Covers:
@@ -9,7 +9,7 @@
  *
  * Uses real timers because supertest dispatches lazily and the in-route
  * `withTimeout` setTimeout cannot be advanced via vi.useFakeTimers from
- * outside the request lifecycle.
+ * outside the request lifecycle. Three timeout tests add ~25s to the file.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
@@ -29,7 +29,7 @@ beforeAll(async () => {
   ({ default: DockerController } = await import('../services/DockerController'));
   ({ FileSystemService } = await import('../services/FileSystemService'));
   ({ activeBulkActions } = await import('../routes/labels'));
-  // 10-minute expiry survives the file even with two ~8s timeout tests.
+  // 10-minute expiry survives the file even with three ~12s timeout tests.
   const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '10m' });
   authHeader = `Bearer ${token}`;
 });
@@ -56,7 +56,7 @@ function stubLocalEstimate(
   vi.spyOn(FileSystemService.prototype, 'getStacks').mockResolvedValue([]);
 }
 
-describe('Fleet prune routes bound docker df at 8s on local nodes (F-6)', () => {
+describe('Fleet prune routes bound docker df at 12s on local nodes (F-6)', () => {
   it('POST /api/fleet/labels/fleet-prune dry-run surfaces a busy-daemon error on local timeout', async () => {
     stubLocalEstimate(
       () => Promise.resolve({ reclaimableBytes: 0 }),
@@ -86,6 +86,27 @@ describe('Fleet prune routes bound docker df at 8s on local nodes (F-6)', () => 
       .post('/api/fleet/prune/estimate')
       .set('Authorization', authHeader)
       .send({ targets: ['volumes'], scope: 'all' });
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.perNode)).toBe(true);
+    const local = res.body.perNode[0];
+    expect(local.reachable).toBe(false);
+    expect(local.error).toMatch(/Docker daemon is busy/);
+  }, 20_000);
+
+  it('POST /api/fleet/prune/estimate marks the local node unreachable on managed timeout', async () => {
+    vi.spyOn(FileSystemService.prototype, 'getStacks').mockResolvedValue([]);
+    // estimateManagedReclaim never settles so the managed path hits
+    // FLEET_DF_TIMEOUT_MS and surfaces the busy-daemon error.
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      estimateManagedReclaim: vi.fn().mockImplementation(() => new Promise(() => { /* never resolves */ })),
+      estimateSystemReclaim: vi.fn().mockResolvedValue({ reclaimableBytes: 0 }),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const res = await request(app)
+      .post('/api/fleet/prune/estimate')
+      .set('Authorization', authHeader)
+      .send({ targets: ['images'], scope: 'managed' });
 
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.perNode)).toBe(true);
