@@ -54,6 +54,7 @@ backend/src/generated/version.ts
 .claude/
 .worktrees/
 plans/
+references/
 CLAUDE.md
 
 # Design system (local-only authoritative reference)
