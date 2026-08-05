@@ -61,6 +61,7 @@ export function MobileStackDetail(props: EditorViewProps) {
         changeEnvFile,
         openLogViewer,
         openBashModal,
+        onInspectImage,
         onOpenMonitor,
         onOpenServiceMonitor,
         serviceAction,
@@ -233,6 +234,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 activeNode={activeNode}
                                 openLogViewer={openLogViewer}
                                 openBashModal={openBashModal}
+                                onInspectImage={onInspectImage}
                                 onOpenServiceMonitor={onOpenServiceMonitor}
                                 serviceAction={serviceAction}
                                 effectiveServices={effectiveServices}

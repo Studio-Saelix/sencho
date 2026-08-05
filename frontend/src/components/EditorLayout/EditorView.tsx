@@ -180,6 +180,7 @@ export interface EditorViewProps {
     // Container / service actions
     openLogViewer: (containerId: string, containerName: string) => void;
     openBashModal: (containerId: string, containerName: string) => void;
+    onInspectImage?: (imageId: string, imageRef: string) => void;
     onOpenMonitor?: () => void;
     onOpenServiceMonitor?: (serviceName: string) => void;
     serviceAction: (
@@ -287,6 +288,7 @@ export function EditorView(props: EditorViewProps) {
         changeEnvFile,
         openLogViewer,
         openBashModal,
+        onInspectImage,
         onOpenMonitor,
         onOpenServiceMonitor,
         serviceAction,
@@ -496,6 +498,7 @@ export function EditorView(props: EditorViewProps) {
                                     activeNode={activeNode}
                                     openLogViewer={openLogViewer}
                                     openBashModal={openBashModal}
+                                    onInspectImage={onInspectImage}
                                     onOpenServiceMonitor={onOpenServiceMonitor}
                                     serviceAction={serviceAction}
                                     effectiveServices={effectiveServices}
@@ -523,6 +526,7 @@ export function EditorView(props: EditorViewProps) {
                                 activeNode={activeNode}
                                 openLogViewer={openLogViewer}
                                 openBashModal={openBashModal}
+                                onInspectImage={onInspectImage}
                                 onOpenServiceMonitor={onOpenServiceMonitor}
                                 serviceAction={serviceAction}
                                 effectiveServices={effectiveServices}

@@ -91,13 +91,13 @@ Lists all Docker images on the host with their ID, repository tag, size, and sta
 
 #### Inspect image
 
-Click the eye icon on any image row to open a detail sheet with these sections:
+Click the eye icon on any image row to open a detail sheet with these sections. The same sheet is also available from each container card on the stack detail view (**Inspect image**, between View logs and Monitor). From that entry point, Used by lists the current stack only.
 
 <Frame>
   <img src="/images/resources/resources-image-inspect.png" alt="Image inspect sheet showing the Used by, Overview, Config, and Layers sections for a running image" />
 </Frame>
 
-- **Used by** lists every Sencho stack that references the image (chips open that stack). Sourced from the Resources inventory, so it stays visible while inspect loads or if inspect fails.
+- **Used by** (from Resources) lists every Sencho stack that references the image; chips open that stack. Sourced from the Resources inventory, so it stays visible while inspect loads or if inspect fails. From a stack container card, Used by shows the current stack only, as a non-clickable badge.
 - **Overview** lists the ID (with a copy button), size, creation date, architecture and OS, author, and all repository tags.
 - **Config** shows the default `Cmd`, `Entrypoint`, `WorkingDir`, `User`, exposed ports, environment variables, and labels. Env vars and labels are collapsible.
 - **Layers** lists the layer history in build order. Each row shows the layer index, size, age, and the build command (`CreatedBy`). Empty layers (metadata-only, zero bytes) are dimmed.

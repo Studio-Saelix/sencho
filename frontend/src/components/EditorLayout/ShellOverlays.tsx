@@ -12,6 +12,7 @@ import { UnsavedChangesDialog } from './UnsavedChangesDialog';
 import { StackAlertSheet } from '../StackAlertSheet';
 import { GitSourcePanel } from '../stack/GitSourcePanel';
 import { LogViewer } from '../LogViewer';
+import { ImageDetailsSheet } from '../resources/ImageDetailsSheet';
 import { VulnerabilityScanSheet } from '../VulnerabilityScanSheet';
 import { ComposeDiffPreviewDialog } from '@/components/ComposeDiffPreviewDialog';
 import { resolveComposeDiffActionLabel } from '@/components/resolveComposeDiffActionLabel';
@@ -71,6 +72,7 @@ export function ShellOverlays({
     pendingUnsavedLoad, pendingLeaveAction,
     bashModalOpen, selectedContainer,
     logViewerOpen, logContainer,
+    inspectImage, closeInspectImage,
     stackMonitor, closeStackMonitor,
     policyBlock, setPolicyBlock, policyBypassing,
     updateReadiness, setUpdateReadiness,
@@ -88,6 +90,12 @@ export function ShellOverlays({
   const isTakeDownConfirming =
     stackToTakeDown != null &&
     stackActionMap[resolveStackFileKey(stackFiles, stackToTakeDown)] === 'down';
+  const sheetImage = inspectImage && inspectImage.nodeId === activeNodeId
+    ? inspectImage
+    : null;
+  const inspectCrumb = sheetImage
+    ? [sheetImage.usedByStacks[0] || 'Stack', sheetImage.RepoTags[0] || 'Image']
+    : undefined;
 
   return (
     <>
@@ -167,6 +175,12 @@ export function ShellOverlays({
           containerName={logContainer.name}
         />
       )}
+
+      <ImageDetailsSheet
+        image={sheetImage}
+        onClose={closeInspectImage}
+        crumb={inspectCrumb}
+      />
 
       {/* Stack monitor (alerts + auto-heal as tabs) */}
       <StackAlertSheet

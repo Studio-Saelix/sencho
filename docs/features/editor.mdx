@@ -60,7 +60,7 @@ Below the action bar, the **CONTAINERS** section lists every container the stack
 | **Uptime / state** | `up 2h 15m` for running containers, the raw state for everything else. |
 | **Healthcheck label** | `healthy`, `unhealthy`, or `starting`, only when a healthcheck is defined. |
 | **Port mapping** | The first detected web-UI port, formatted `host → container/proto`. The mapping itself is a link that opens the service in a new tab, with a **Copy URL** button beside it. The address uses the active node's host and switches to `https` for port 443. |
-| **Action buttons** | **Image source links**, **View logs**, **Open bash shell** (admin only), **Service actions**. Per-container image references and registry links live here, not in the header. |
+| **Action buttons** | **Image source links**, **View logs**, **Inspect image**, **Open bash shell** (admin only), **Service actions**. Per-container image references and registry links live here, not in the header. **Inspect image** opens the same image detail sheet as Resources; Used by shows the current stack only from this entry point. |
 | **Live stats** | CPU, memory, and net I/O with rolling sparklines. Only rendered while the container is running. Stats refresh on the same 1500 ms cadence as the dashboard. |
 
 ### Service actions

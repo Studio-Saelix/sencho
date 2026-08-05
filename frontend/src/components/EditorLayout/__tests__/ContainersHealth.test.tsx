@@ -672,6 +672,85 @@ describe('containers load states', () => {
   });
 });
 
+describe('ContainersHealth inspect image icon', () => {
+  function inspectable(overrides: Partial<ContainerInfo> = {}): ContainerInfo {
+    return {
+      ...container([{ PrivatePort: 80, PublicPort: 8080 }]),
+      ImageID: 'sha256:abc123',
+      Image: 'nginx:latest',
+      Service: 'web',
+      ...overrides,
+    };
+  }
+
+  function renderInspect(containers: ContainerInfo[], props: Partial<ContainersHealthProps> = {}) {
+    return render(
+      <ContainersHealth
+        safeContainers={containers}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        onInspectImage={vi.fn()}
+        {...props}
+      />,
+    );
+  }
+
+  it('places Inspect image between View logs and Monitor', () => {
+    renderInspect([inspectable()], { onOpenServiceMonitor: vi.fn() });
+    const logs = screen.getByRole('button', { name: 'View logs' });
+    const inspect = screen.getByRole('button', { name: 'Inspect image' });
+    const monitor = screen.getByRole('button', { name: 'Monitor web' });
+    expect(
+      logs.compareDocumentPosition(inspect) & globalThis.Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      inspect.compareDocumentPosition(monitor) & globalThis.Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('calls onInspectImage with ImageID and Image', async () => {
+    const onInspectImage = vi.fn();
+    const user = userEvent.setup();
+    renderInspect([inspectable()], { onInspectImage });
+    await user.click(screen.getByRole('button', { name: 'Inspect image' }));
+    expect(onInspectImage).toHaveBeenCalledWith('sha256:abc123', 'nginx:latest');
+  });
+
+  it('hides Inspect image when onInspectImage is omitted', () => {
+    renderInspect([inspectable()], { onInspectImage: undefined });
+    expect(screen.queryByRole('button', { name: 'Inspect image' })).toBeNull();
+  });
+
+  it('disables Inspect image when ImageID is missing', () => {
+    renderInspect([inspectable({ ImageID: undefined })]);
+    expect(screen.getByRole('button', { name: 'Inspect image' })).toBeDisabled();
+  });
+
+  it('keeps Inspect image enabled for a stopped container', async () => {
+    const onInspectImage = vi.fn();
+    const user = userEvent.setup();
+    renderInspect([inspectable({ State: 'exited', Status: 'Exited (0)' })], { onInspectImage });
+    const button = screen.getByRole('button', { name: 'Inspect image' });
+    expect(button).toBeEnabled();
+    await user.click(button);
+    expect(onInspectImage).toHaveBeenCalledWith('sha256:abc123', 'nginx:latest');
+  });
+
+  it('keeps Inspect image visible in compact mode', () => {
+    renderInspect([
+      inspectable({ Id: 'a', Names: ['/web'] }),
+      inspectable({ Id: 'b', Names: ['/db'], Service: 'db', ImageID: 'sha256:def' }),
+    ]);
+    fireEvent.click(screen.getByRole('button', { name: 'Compact view' }));
+    expect(screen.getAllByRole('button', { name: 'Inspect image' })).toHaveLength(2);
+  });
+});
+
 describe('ContainersHealth Docker health status labels', () => {
   const OLD_PHRASES = ['healthcheck passing', 'healthcheck failing', 'healthcheck starting'] as const;
   const HEALTH_TOKENS = ['healthy', 'unhealthy', 'starting'] as const;

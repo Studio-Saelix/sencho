@@ -3,6 +3,13 @@ import { describe, it, expect } from 'vitest';
 import { useOverlayState } from './useOverlayState';
 
 describe('useOverlayState', () => {
+  const inspectSelection = {
+    Id: 'sha256:abc123',
+    RepoTags: ['nginx:latest'],
+    usedByStacks: ['web'],
+    nodeId: 1,
+  };
+
   it('initialises with all overlays closed and null/empty data', () => {
     const { result } = renderHook(() => useOverlayState());
     expect(result.current.createDialogOpen).toBe(false);
@@ -15,6 +22,7 @@ describe('useOverlayState', () => {
     expect(result.current.selectedContainer).toBeNull();
     expect(result.current.logViewerOpen).toBe(false);
     expect(result.current.logContainer).toBeNull();
+    expect(result.current.inspectImage).toBeNull();
     expect(result.current.stackMonitor).toBeNull();
     expect(result.current.policyBlock).toBeNull();
     expect(result.current.policyBypassing).toBe(false);
@@ -66,6 +74,19 @@ describe('useOverlayState', () => {
     act(() => result.current.closeLogViewer());
     expect(result.current.logViewerOpen).toBe(false);
     expect(result.current.logContainer).toBeNull();
+  });
+
+  it('openInspectImage sets the selection', () => {
+    const { result } = renderHook(() => useOverlayState());
+    act(() => result.current.openInspectImage(inspectSelection));
+    expect(result.current.inspectImage).toEqual(inspectSelection);
+  });
+
+  it('closeInspectImage clears the selection', () => {
+    const { result } = renderHook(() => useOverlayState());
+    act(() => result.current.openInspectImage(inspectSelection));
+    act(() => result.current.closeInspectImage());
+    expect(result.current.inspectImage).toBeNull();
   });
 
   it('openAlertSheet opens stack monitor on the alerts tab', () => {
