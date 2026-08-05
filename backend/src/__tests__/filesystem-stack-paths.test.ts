@@ -819,6 +819,50 @@ describe('FileSystemService stack methods', () => {
       expect(await fs.readFile(externalFile, 'utf-8')).toBe('external');
     });
   });
+
+  describe('chmod on protected stack files', () => {
+    it('chmodStackPath succeeds on .env', async () => {
+      const envPath = path.join(stackDir, '.env');
+      await fs.writeFile(envPath, 'KEY=val\n');
+      await fs.chmod(envPath, 0o644);
+
+      const service = FileSystemService.getInstance();
+      await service.chmodStackPath(STACK, '.env', 0o600);
+
+      if (!isWindows) {
+        const stat = await fs.stat(envPath);
+        expect(stat.mode & 0o777).toBe(0o600);
+      }
+    });
+
+    it('chmodStackPath succeeds on compose.yaml', async () => {
+      const composePath = path.join(stackDir, 'compose.yaml');
+      await fs.writeFile(composePath, 'services: {}\n');
+      await fs.chmod(composePath, 0o644);
+
+      const service = FileSystemService.getInstance();
+      await service.chmodStackPath(STACK, 'compose.yaml', 0o600);
+
+      if (!isWindows) {
+        const stat = await fs.stat(composePath);
+        expect(stat.mode & 0o777).toBe(0o600);
+      }
+    });
+
+    it('chmodStackPath succeeds on .blueprint.json', async () => {
+      const markerPath = path.join(stackDir, '.blueprint.json');
+      await fs.writeFile(markerPath, '{"blueprintId":1,"revision":1}\n');
+      await fs.chmod(markerPath, 0o644);
+
+      const service = FileSystemService.getInstance();
+      await service.chmodStackPath(STACK, '.blueprint.json', 0o600);
+
+      if (!isWindows) {
+        const stat = await fs.stat(markerPath);
+        expect(stat.mode & 0o777).toBe(0o600);
+      }
+    });
+  });
 });
 
 // Root-scoped (bind-mount) behaviour: the file methods accept an arbitrary

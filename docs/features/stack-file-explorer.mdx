@@ -78,16 +78,19 @@ Each row is fully clickable across the pane, so right-clicking anywhere on a row
 
 Protection applies to the **Stack source** root. On a volume root a file named `compose.yaml` or `.env` is an ordinary config file: it opens directly in the viewer and has no delete restriction, because it is the application's own file rather than the stack's compose definition.
 
-On the stack source root, the amber dot in the tree marks the five canonical stack files: `compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`, and `.env`.
+On the stack source root, the amber dot in the tree marks the five canonical stack files (`compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`, and `.env`) plus `.blueprint.json`.
 
 <Frame>
   <img src="/images/stack-file-explorer/protected-tree-marker.png" alt="Stack source tree with an amber dot marker next to compose.yaml" />
 </Frame>
 
-Two behaviours follow from the marker:
+Three behaviours follow from the marker:
 
 - **Dedicated tab redirect.** Clicking `compose.yaml`, `compose.yml`, or `.env` jumps you to the matching **compose.yaml** or **.env** tab so the save-and-deploy controls stay in front of you. `docker-compose.yaml` and `docker-compose.yml` are still flagged as protected, but they open in the regular file viewer because they are not the canonical Sencho file.
 - **Delete is blocked at the stack root.** The five canonical files at the stack root cannot be deleted through the explorer: the delete is rejected. Remove the whole stack via Stack Actions instead. A same-named file nested in a subdirectory is an ordinary file and can be deleted after the type-to-confirm step.
+- **Content edits and permission changes are allowed.** You can save those files and change their Unix mode bits from the explorer.
+
+The stack source root also keeps `.blueprint.json` (the marker a blueprint apply writes) under delete, rename, and copy-onto protection. Content edits and permission changes on that marker are allowed; a later apply recreates it.
 
 An override file such as `compose.override.yaml` or `docker-compose.override.yml` is not one of the five canonical names, so it carries no amber dot and no delete restriction: Sencho treats it as an ordinary file even at the stack root.
 
@@ -115,7 +118,7 @@ Click **Save** to write the file to disk. If you have unsaved edits and click a 
 
 Saves use optimistic concurrency: the editor remembers when the file was last loaded, and a save that targets a stale version returns a "file changed elsewhere" notice with the current server-side content. Your typed buffer is preserved so you can review the new version and reapply your edits before saving again.
 
-Writes to the stack source root and to bind-mount volumes are atomic at the filesystem level: Sencho stages the new content into a sibling temporary file, fsyncs, and promotes it via rename, so a crash or power loss never leaves a half-written target on disk. Named-volume writes go through the helper container instead and are not atomic; see [Named-volume editing details](#named-volume-editing-details) above.
+Writes to the stack source root and to bind-mount volumes are atomic at the filesystem level: Sencho stages the new content into a sibling temporary file, fsyncs, and promotes it via rename, so a crash or power loss never leaves a half-written target on disk. That rewrite also resets the file's mode bits and owner to the Sencho process defaults (typically `644` owned by the container user). If you had tightened permissions (for example `600` on `.env`), set them again after the save. Named-volume writes go through the helper container instead and are not atomic; see [Named-volume editing details](#named-volume-editing-details) above. Existing named-volume edits keep the file's owner and mode.
 
 <Warning>
   Editing a file does not restart any containers. If your stack reads the file at runtime (for example, a config file mounted as a volume), restart the relevant service after saving so the container picks up the new content.
@@ -213,6 +216,12 @@ When your account has stack edit permission, the toggles are interactive and the
   Permissions are applied with `chmod`. Permission changes on symlinks are not supported; edit the target file's permissions directly.
 </Note>
 
+Permission changes work on protected stack-source names too, including `.env`, the four compose filenames, and `.blueprint.json`.
+
+While another stack operation is running, permission changes on the compose filenames and `.blueprint.json` at the stack source root are refused the same way a content save is. `.env` is not part of that lock. Retry after the operation finishes.
+
+Saving, uploading a replacement, applying a blueprint, or restoring a backup returns the file's mode bits to the filesystem default (typically `644` inside the Sencho container). Re-apply permissions after those writes if you had tightened them.
+
 ## Deleting
 
 There are three delete entry points. All three require stack edit permission, and all three open the same confirmation modal.
@@ -271,7 +280,13 @@ The Permissions dialog opens for everyone; only users with stack edit permission
     Every service that mounts the volume declares it read-only (for example `./config:/config:ro`). The explorer browses it but disables the edit, upload, delete, and rename controls. Change the mount to read/write in the compose file and redeploy if you need to edit its contents from Sencho.
   </Accordion>
   <Accordion title="Cannot delete compose.yaml or .env">
-    The five canonical stack files (`compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`, `.env`) are protected because removing them mid-life breaks the stack. To delete a stack entirely, use **Delete stack** in the stack toolbar's overflow menu rather than removing these files individually.
+    The five canonical stack files (`compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`, `.env`) are protected because removing them mid-life breaks the stack. `.blueprint.json` is protected the same way. To delete a stack entirely, use **Delete stack** in the stack toolbar's overflow menu rather than removing these files individually.
+  </Accordion>
+  <Accordion title="Permissions save is refused while the stack is busy">
+    Another stack operation is running. Permission changes on compose filenames and `.blueprint.json` at the stack source are refused until that operation finishes. `.env` and ordinary files are not part of that lock. Retry after it completes.
+  </Accordion>
+  <Accordion title="Mode bits went back to 644 after a save">
+    A content save, upload replacement, blueprint apply, or backup restore returns mode bits to the filesystem default (typically `644` inside the Sencho container). Open **Permissions** again and re-apply the bits you want.
   </Accordion>
   <Accordion title="Save returns 'file changed elsewhere'">
     Another writer (a teammate, a deploy hook, or an out-of-band edit on the host) saved the file after you loaded it. Use the diff to compare your edits against the current version, then save again. Your typed buffer is kept so you do not have to retype your changes.

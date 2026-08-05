@@ -2068,7 +2068,6 @@ export class FileSystemService {
     if (!Number.isInteger(mode) || mode < 0 || mode > 0o777) {
       throw Object.assign(new Error('Invalid permission bits'), { code: 'INVALID_PATH' });
     }
-    if ((scope?.protectedEnabled ?? true) && isProtectedRelPath(relPath)) throw protectedFileError(relPath);
     const leafPath = await this.resolveScopedLeafPath(stackName, relPath, scope);
 
     // chmod on a symlink is rejected. Following the link would silently
