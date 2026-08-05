@@ -565,7 +565,7 @@ export function StackFileExplorer({
         )}
         <div className="flex-1 min-h-0 overflow-hidden">
           <FileTree
-            key={`${stackName}:${selectedRootId}:${refreshKey}`}
+            key={`${stackName}:${selectedRootId}`}
             sourceKey={`${stackName}:${selectedRootId}`}
             loadDir={(p) => listStackDirectory(stackName, p, selectedRootId)}
             refreshKey={refreshKey}

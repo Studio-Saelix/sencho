@@ -1,9 +1,10 @@
 /**
  * Coverage for FileTree.
  *
- * Locks the expand/collapse behavior: root directory loaded on mount,
- * subdirectory fetched on first expand, collapsed on second click, and
- * re-expanded from cache (no second fetch) on third click.
+ * Locks expand/collapse: root loaded on mount, subdirectory fetched on first
+ * expand, collapsed on second click, re-expanded from cache on third click
+ * when no refresh ran. Also locks soft refresh (`refreshKey`): expand state
+ * survives, collapsed caches drop, failed trees (and descendants) prune.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
@@ -637,5 +638,257 @@ describe('FileTree layout', () => {
     fireEvent.contextMenu(rowFor('src'));
     expect(await screen.findByText('New File')).toBeInTheDocument();
     expect(screen.getByText('Rename')).toBeInTheDocument();
+  });
+});
+
+// ── soft refresh: expand + listings survive refreshKey without remount ───────
+
+describe('FileTree soft refresh', () => {
+  const DEEP_ENTRIES: FileEntry[] = [makeFile('nested.ts')];
+  const SRC_WITH_DEEP: FileEntry[] = [makeDir('deep'), makeFile('index.ts')];
+
+  it('keeps expanded dirs open and re-lists them when refreshKey changes', async () => {
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return ROOT_ENTRIES;
+      if (relPath === 'src') return SRC_ENTRIES;
+      throw new Error(`unexpected path ${relPath}`);
+    });
+
+    const user = userEvent.setup();
+    const { rerender } = render(<FileTree {...defaultProps()} refreshKey={0} />);
+    await screen.findByText('src');
+    await user.click(screen.getByText('src'));
+    await screen.findByText('index.ts');
+
+    mockLoadDir.mockClear();
+    rerender(<FileTree {...defaultProps()} refreshKey={1} />);
+
+    await waitFor(() => {
+      expect(mockLoadDir).toHaveBeenCalledWith('');
+      expect(mockLoadDir).toHaveBeenCalledWith('src');
+    });
+    expect(await screen.findByText('index.ts')).toBeInTheDocument();
+    expect(screen.getByText('app.ts')).toBeInTheDocument();
+  });
+
+  it('updates an open folder listing in place on soft refresh', async () => {
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return ROOT_ENTRIES;
+      if (relPath === 'src') return SRC_ENTRIES;
+      throw new Error(`unexpected path ${relPath}`);
+    });
+
+    const user = userEvent.setup();
+    const { rerender } = render(<FileTree {...defaultProps()} refreshKey={0} />);
+    await screen.findByText('src');
+    await user.click(screen.getByText('src'));
+    await screen.findByText('index.ts');
+
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return ROOT_ENTRIES;
+      if (relPath === 'src') return [makeFile('index.ts'), makeFile('new.ts')];
+      throw new Error(`unexpected path ${relPath}`);
+    });
+    rerender(<FileTree {...defaultProps()} refreshKey={1} />);
+
+    expect(await screen.findByText('new.ts')).toBeInTheDocument();
+    expect(screen.getByText('index.ts')).toBeInTheDocument();
+    expect(screen.queryByText('app.ts')).not.toBeInTheDocument();
+  });
+
+  it('prunes descendant expand state when only the parent re-list fails', async () => {
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return ROOT_ENTRIES;
+      if (relPath === 'src') return SRC_WITH_DEEP;
+      if (relPath === 'src/deep') return DEEP_ENTRIES;
+      throw new Error(`unexpected path ${relPath}`);
+    });
+
+    const user = userEvent.setup();
+    const { rerender } = render(<FileTree {...defaultProps()} refreshKey={0} />);
+    await screen.findByText('src');
+    await user.click(screen.getByText('src'));
+    await screen.findByText('deep');
+    await user.click(screen.getByText('deep'));
+    await screen.findByText('nested.ts');
+
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return ROOT_ENTRIES;
+      if (relPath === 'src') throw new Error('Not found');
+      if (relPath === 'src/deep') return DEEP_ENTRIES;
+      throw new Error(`unexpected path ${relPath}`);
+    });
+    rerender(<FileTree {...defaultProps()} refreshKey={1} />);
+
+    await waitFor(() => expect(screen.queryByText('nested.ts')).not.toBeInTheDocument());
+    expect(screen.getByText('src')).toBeInTheDocument();
+    expect(screen.queryByText('deep')).not.toBeInTheDocument();
+
+    mockLoadDir.mockClear();
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return ROOT_ENTRIES;
+      if (relPath === 'src') return SRC_WITH_DEEP;
+      if (relPath === 'src/deep') return [makeFile('fresh.ts')];
+      throw new Error(`unexpected path ${relPath}`);
+    });
+    await user.click(screen.getByText('src'));
+    await screen.findByText('deep');
+    // Prune must drop descendant expand state: deep is visible but collapsed.
+    expect(screen.queryByText('nested.ts')).not.toBeInTheDocument();
+    expect(screen.queryByText('fresh.ts')).not.toBeInTheDocument();
+    await user.click(screen.getByText('deep'));
+    // Re-expand must refetch, not reuse the pre-prune listing.
+    expect(await screen.findByText('fresh.ts')).toBeInTheDocument();
+  });
+
+  it('keeps nested expand state and updates deep listings on successful refresh', async () => {
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return ROOT_ENTRIES;
+      if (relPath === 'src') return SRC_WITH_DEEP;
+      if (relPath === 'src/deep') return DEEP_ENTRIES;
+      throw new Error(`unexpected path ${relPath}`);
+    });
+
+    const user = userEvent.setup();
+    const { rerender } = render(<FileTree {...defaultProps()} refreshKey={0} />);
+    await screen.findByText('src');
+    await user.click(screen.getByText('src'));
+    await screen.findByText('deep');
+    await user.click(screen.getByText('deep'));
+    await screen.findByText('nested.ts');
+
+    mockLoadDir.mockClear();
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return ROOT_ENTRIES;
+      if (relPath === 'src') return SRC_WITH_DEEP;
+      if (relPath === 'src/deep') return [makeFile('nested.ts'), makeFile('extra.ts')];
+      throw new Error(`unexpected path ${relPath}`);
+    });
+    rerender(<FileTree {...defaultProps()} refreshKey={1} />);
+
+    await waitFor(() => {
+      expect(mockLoadDir).toHaveBeenCalledWith('');
+      expect(mockLoadDir).toHaveBeenCalledWith('src');
+      expect(mockLoadDir).toHaveBeenCalledWith('src/deep');
+    });
+    expect(await screen.findByText('extra.ts')).toBeInTheDocument();
+    expect(screen.getByText('nested.ts')).toBeInTheDocument();
+  });
+
+  it('drops a collapsed sibling cache while another folder stays open', async () => {
+    const rootWithLib: FileEntry[] = [makeDir('src'), makeDir('lib'), makeFile('README.md')];
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return rootWithLib;
+      if (relPath === 'src') return SRC_ENTRIES;
+      if (relPath === 'lib') return [makeFile('util.ts')];
+      throw new Error(`unexpected path ${relPath}`);
+    });
+
+    const user = userEvent.setup();
+    const { rerender } = render(<FileTree {...defaultProps()} refreshKey={0} />);
+    await screen.findByText('src');
+    await user.click(screen.getByText('src'));
+    await screen.findByText('index.ts');
+    await user.click(screen.getByText('lib'));
+    await screen.findByText('util.ts');
+    await user.click(screen.getByText('src'));
+    await waitFor(() => expect(screen.queryByText('index.ts')).not.toBeInTheDocument());
+
+    mockLoadDir.mockClear();
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return rootWithLib;
+      if (relPath === 'src') return [makeFile('index.ts'), makeFile('added.ts')];
+      if (relPath === 'lib') return [makeFile('util.ts'), makeFile('extra.ts')];
+      throw new Error(`unexpected path ${relPath}`);
+    });
+    rerender(<FileTree {...defaultProps()} refreshKey={1} />);
+
+    await waitFor(() => {
+      expect(mockLoadDir).toHaveBeenCalledWith('');
+      expect(mockLoadDir).toHaveBeenCalledWith('lib');
+    });
+    expect(mockLoadDir).not.toHaveBeenCalledWith('src');
+    expect(await screen.findByText('extra.ts')).toBeInTheDocument();
+
+    await user.click(screen.getByText('src'));
+    expect(await screen.findByText('added.ts')).toBeInTheDocument();
+    expect(mockLoadDir).toHaveBeenCalledWith('src');
+  });
+
+  it('keeps a sibling expanded when another open folder fails to re-list', async () => {
+    const rootWithLib: FileEntry[] = [makeDir('src'), makeDir('lib'), makeFile('README.md')];
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return rootWithLib;
+      if (relPath === 'src') return SRC_ENTRIES;
+      if (relPath === 'lib') return [makeFile('util.ts')];
+      throw new Error(`unexpected path ${relPath}`);
+    });
+
+    const user = userEvent.setup();
+    const { rerender } = render(<FileTree {...defaultProps()} refreshKey={0} />);
+    await screen.findByText('src');
+    await user.click(screen.getByText('src'));
+    await screen.findByText('index.ts');
+    await user.click(screen.getByText('lib'));
+    await screen.findByText('util.ts');
+
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return rootWithLib;
+      if (relPath === 'src') throw new Error('Not found');
+      if (relPath === 'lib') return [makeFile('util.ts'), makeFile('kept.ts')];
+      throw new Error(`unexpected path ${relPath}`);
+    });
+    rerender(<FileTree {...defaultProps()} refreshKey={1} />);
+
+    expect(await screen.findByText('kept.ts')).toBeInTheDocument();
+    expect(screen.getByText('util.ts')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText('index.ts')).not.toBeInTheDocument());
+    expect(screen.getByText('src')).toBeInTheDocument();
+  });
+
+  it('invalidates collapsed dir cache so re-expand refetches after refresh', async () => {
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return ROOT_ENTRIES;
+      if (relPath === 'src') return SRC_ENTRIES;
+      throw new Error(`unexpected path ${relPath}`);
+    });
+
+    const user = userEvent.setup();
+    const { rerender } = render(<FileTree {...defaultProps()} refreshKey={0} />);
+    await screen.findByText('src');
+    await user.click(screen.getByText('src'));
+    await screen.findByText('index.ts');
+    await user.click(screen.getByText('src'));
+    await waitFor(() => expect(screen.queryByText('index.ts')).not.toBeInTheDocument());
+
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return ROOT_ENTRIES;
+      if (relPath === 'src') return [makeFile('index.ts'), makeFile('added.ts')];
+      throw new Error(`unexpected path ${relPath}`);
+    });
+    mockLoadDir.mockClear();
+    rerender(<FileTree {...defaultProps()} refreshKey={1} />);
+    await waitFor(() => expect(mockLoadDir).toHaveBeenCalledWith(''));
+    expect(mockLoadDir).not.toHaveBeenCalledWith('src');
+
+    await user.click(screen.getByText('src'));
+    expect(await screen.findByText('added.ts')).toBeInTheDocument();
+    expect(mockLoadDir).toHaveBeenCalledWith('src');
+  });
+
+  it('clears a root-load error when a later soft refresh succeeds', async () => {
+    mockLoadDir.mockRejectedValue(new Error('Network error'));
+    const { rerender } = render(<FileTree {...defaultProps()} refreshKey={0} />);
+    expect(await screen.findByText('Network error')).toBeInTheDocument();
+
+    mockLoadDir.mockImplementation(async (relPath: string) => {
+      if (relPath === '') return ROOT_ENTRIES;
+      throw new Error(`unexpected path ${relPath}`);
+    });
+    rerender(<FileTree {...defaultProps()} refreshKey={1} />);
+
+    expect(await screen.findByText('src')).toBeInTheDocument();
+    expect(screen.getByText('README.md')).toBeInTheDocument();
+    expect(screen.queryByText('Network error')).not.toBeInTheDocument();
   });
 });

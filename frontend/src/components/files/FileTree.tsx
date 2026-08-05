@@ -16,8 +16,10 @@ import { cn } from '@/lib/utils';
 interface FileTreeProps {
   /** Loads directory contents at `relPath` (use '' for the tree root). */
   loadDir: (relPath: string) => Promise<FileEntry[]>;
-  /** Stable identity for the source. Changing it remounts the tree. */
+  /** Stable identity for the source. Parents remount via React `key` when this
+   *  changes so expand state does not leak across sources. */
   sourceKey: string;
+  /** Soft refresh: relist root and expanded dirs in place; keep expand state. */
   refreshKey?: number;
   selectedPath: string;
   onSelectFile: (relPath: string, entry: FileEntry) => void;
@@ -125,37 +127,80 @@ export function FileTree({
   }
   const sourceKeyRef = useRef(sourceKey);
   const loadDirRef = useRef(loadDir);
+  // Read at merge time so a concurrent expand/collapse is not overwritten by the snapshot.
+  const expandedDirsRef = useRef(expandedDirs);
+  expandedDirsRef.current = expandedDirs;
 
   // Always keep the latest loader in a ref so callers can pass a fresh
-  // function each render without re-triggering the root fetch effect below.
+  // function each render without re-triggering the refresh effect below.
   loadDirRef.current = loadDir;
 
   useEffect(() => {
     sourceKeyRef.current = sourceKey;
     let cancelled = false;
+    const expandedSnapshot = [...expandedDirs];
 
-    loadDirRef.current('')
-      .then((entries) => {
-        if (!cancelled) {
-          setRootEntries(entries);
-          setRootLoading(false);
+    void (async () => {
+      try {
+        const entries = await loadDirRef.current('');
+        if (cancelled) return;
+        setRootEntries(entries);
+        setError(null);
+        setRootLoading(false);
+      } catch (err: unknown) {
+        if (cancelled) return;
+        const msg = err instanceof Error ? err.message : 'Failed to load files.';
+        setError(msg);
+        setRootLoading(false);
+        toast.error('Failed to load files.');
+        return;
+      }
+
+      const results = await Promise.all(expandedSnapshot.map(async (path) => {
+        try {
+          const entries = await loadDirRef.current(path);
+          return { path, ok: true as const, entries };
+        } catch {
+          // Folder is gone or unlistable after a mutation. Prune below; do not
+          // toast (the user often just deleted or moved this folder).
+          return { path, ok: false as const };
         }
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          const msg = err instanceof Error ? err.message : 'Failed to load files.';
-          setError(msg);
-          setRootLoading(false);
-          toast.error('Failed to load files.');
+      }));
+      if (cancelled) return;
+
+      const failed = results.filter((r) => !r.ok).map((r) => r.path);
+      function inFailedTree(path: string): boolean {
+        return failed.some((p) => path === p || path.startsWith(`${p}/`));
+      }
+
+      if (failed.length > 0) {
+        setExpandedDirs((current) => {
+          const next = new Set([...current].filter((key) => !inFailedTree(key)));
+          return next.size === current.size ? current : next;
+        });
+      }
+
+      setDirContents((prev) => {
+        const fetched = new Map<string, FileEntry[]>();
+        for (const r of results) {
+          if (r.ok) fetched.set(r.path, r.entries);
         }
+        const next = new Map<string, FileEntry[]>();
+        for (const path of expandedDirsRef.current) {
+          if (inFailedTree(path)) continue;
+          const entries = fetched.get(path) ?? prev.get(path);
+          if (entries) next.set(path, entries);
+        }
+        return next;
       });
+    })();
 
     return () => {
       cancelled = true;
     };
-    // loadDir is intentionally read through loadDirRef to avoid refetch on
-    // identity-only changes from the parent (StackFileExplorer rebuilds the
-    // arrow on every render).
+    // Do not depend on expandedDirs (snapshot at start; expand/collapse must
+    // not refetch). loadDir is read via loadDirRef so identity-only parent
+    // changes do not refetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceKey, refreshKey]);
 
