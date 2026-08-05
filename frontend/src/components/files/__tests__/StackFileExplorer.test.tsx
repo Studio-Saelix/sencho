@@ -635,15 +635,15 @@ describe('StackFileExplorer resizable tree pane', () => {
     expect(treePane().style.width).toBe('244px');
     expect(document.body.style.cursor).toBe('col-resize');
     expect(document.body.style.userSelect).toBe('none');
-    fireEvent.pointerCancel(sep, { pointerId: 1, clientX: 500 });
-    expect(treePane().style.width).toBe('324px');
-    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('324');
+    fireEvent.pointerCancel(sep, { pointerId: 1, clientX: 0 });
+    expect(treePane().style.width).toBe('244px');
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('244');
     expect(document.body.style.cursor).toBe('');
     expect(document.body.style.userSelect).toBe('');
     fireEvent.pointerMove(sep, { pointerId: 1, clientX: 600 });
     fireEvent.pointerUp(sep, { pointerId: 1, clientX: 600 });
-    expect(treePane().style.width).toBe('324px');
-    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('324');
+    expect(treePane().style.width).toBe('244px');
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('244');
   });
 
   it('finishes the gesture on lostpointercapture using the last live width', () => {

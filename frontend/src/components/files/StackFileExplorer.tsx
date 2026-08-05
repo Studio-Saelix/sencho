@@ -132,9 +132,9 @@ export function StackFileExplorer({
   function finishTreeResize(event: PointerEvent<HTMLDivElement>): void {
     const drag = dragRef.current;
     if (drag === null || drag.pointerId !== event.pointerId) return;
-    const next = event.type === 'lostpointercapture'
-      ? drag.lastWidth
-      : clampToLayout(drag.startWidth + (event.clientX - drag.startX));
+    const next = event.type === 'pointerup'
+      ? clampToLayout(drag.startWidth + (event.clientX - drag.startX))
+      : drag.lastWidth;
     dragRef.current = null;
     try {
       event.currentTarget.releasePointerCapture(event.pointerId);
