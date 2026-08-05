@@ -558,6 +558,45 @@ describe('POST /api/fleet/prune/estimate', () => {
       db.deleteNode(remoteId);
     }
   });
+
+  it('keeps successful remote bytes when one per-target estimate fails', async () => {
+    const remoteId = db.addNode({
+      name: 'remote-partial',
+      type: 'remote',
+      api_url: 'http://remote-partial.example:1852',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+    try {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { target?: string };
+        if (body.target === 'images') {
+          return new Response(JSON.stringify({ reclaimableBytes: 42 }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ error: 'Docker daemon is busy', code: 'docker_df_slow' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      const res = await request(app)
+        .post('/api/fleet/prune/estimate')
+        .set('Authorization', authHeader)
+        .send({ targets: ['images', 'volumes'], scope: 'managed' });
+      expect(res.status).toBe(200);
+      const remote = res.body.perNode.find((n: { nodeId: number }) => n.nodeId === remoteId);
+      expect(remote.reachable).toBe(true);
+      expect(remote.partial).toBe(true);
+      expect(remote.reclaimableBytes).toBe(42);
+      expect(remote.error).toMatch(/Docker daemon is busy|503/);
+      expect(res.body.totalBytes).toBeGreaterThanOrEqual(42);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
 });
 
 describe('POST /api/fleet/labels/fleet-stop remote leg', () => {

@@ -9,7 +9,8 @@
  *
  * Uses real timers because supertest dispatches lazily and the in-route
  * `withTimeout` setTimeout cannot be advanced via vi.useFakeTimers from
- * outside the request lifecycle. Three timeout tests add ~25s to the file.
+ * outside the request lifecycle. Five timeout tests add ~49s to the file
+ * (three single-target ~12s each, plus two multi-target partial ~12s each).
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
@@ -29,7 +30,7 @@ beforeAll(async () => {
   ({ default: DockerController } = await import('../services/DockerController'));
   ({ FileSystemService } = await import('../services/FileSystemService'));
   ({ activeBulkActions } = await import('../routes/labels'));
-  // 10-minute expiry survives the file even with three ~12s timeout tests.
+  // 10-minute expiry survives the file even with five ~12s timeout tests.
   const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '10m' });
   authHeader = `Bearer ${token}`;
 });
@@ -114,6 +115,66 @@ describe('Fleet prune routes bound docker df at 12s on local nodes (F-6)', () =>
     expect(local.reachable).toBe(false);
     expect(local.error).toMatch(/Docker daemon is busy/);
   }, 20_000);
+
+  it('POST /api/fleet/prune/estimate keeps successful all-scope bytes when a later target times out', async () => {
+    const estimateSystemReclaim = vi.fn().mockImplementation(async (target: string) => {
+      if (target === 'images') return { reclaimableBytes: 500 };
+      if (target === 'volumes') return new Promise(() => { /* never resolves */ });
+      return { reclaimableBytes: 100 };
+    });
+    vi.spyOn(FileSystemService.prototype, 'getStacks').mockResolvedValue([]);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      estimateSystemReclaim,
+      estimateManagedReclaim: vi.fn().mockResolvedValue({ reclaimableBytes: 0 }),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const t0 = Date.now();
+    const res = await request(app)
+      .post('/api/fleet/prune/estimate')
+      .set('Authorization', authHeader)
+      .send({ targets: ['images', 'volumes', 'networks'], scope: 'all' });
+    const elapsed = Date.now() - t0;
+
+    expect(res.status).toBe(200);
+    const local = res.body.perNode[0];
+    expect(local.reachable).toBe(true);
+    expect(local.partial).toBe(true);
+    expect(local.reclaimableBytes).toBe(600);
+    expect(local.error).toMatch(/Docker daemon is busy/);
+    expect(estimateSystemReclaim).toHaveBeenCalledTimes(3);
+    expect(elapsed).toBeGreaterThanOrEqual(11_500);
+    expect(elapsed).toBeLessThan(24_000);
+  }, 30_000);
+
+  it('POST /api/fleet/prune/estimate keeps successful managed-scope bytes when a later target times out', async () => {
+    const estimateManagedReclaim = vi.fn().mockImplementation(async (target: string) => {
+      if (target === 'images') return { reclaimableBytes: 500 };
+      if (target === 'volumes') return new Promise(() => { /* never resolves */ });
+      return { reclaimableBytes: 100 };
+    });
+    vi.spyOn(FileSystemService.prototype, 'getStacks').mockResolvedValue([]);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      estimateManagedReclaim,
+      estimateSystemReclaim: vi.fn().mockResolvedValue({ reclaimableBytes: 0 }),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const t0 = Date.now();
+    const res = await request(app)
+      .post('/api/fleet/prune/estimate')
+      .set('Authorization', authHeader)
+      .send({ targets: ['images', 'volumes', 'networks'], scope: 'managed' });
+    const elapsed = Date.now() - t0;
+
+    expect(res.status).toBe(200);
+    const local = res.body.perNode[0];
+    expect(local.reachable).toBe(true);
+    expect(local.partial).toBe(true);
+    expect(local.reclaimableBytes).toBe(600);
+    expect(local.error).toMatch(/Docker daemon is busy/);
+    expect(estimateManagedReclaim).toHaveBeenCalledTimes(3);
+    expect(elapsed).toBeGreaterThanOrEqual(11_500);
+    expect(elapsed).toBeLessThan(24_000);
+  }, 30_000);
 
   it('fleet-prune dry-run succeeds normally when estimateSystemReclaim resolves quickly', async () => {
     stubLocalEstimate(
