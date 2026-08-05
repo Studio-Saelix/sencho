@@ -189,7 +189,13 @@ describe('R1-B: PilotTunnelBridge.acceptReverseLocal route events', () => {
         await bridge.start();
 
         // Real local server so the dial succeeds and 'connect' fires.
+        // Track accepted sockets and swallow teardown noise: closing the
+        // bridge while a peer still holds the connection can emit a late
+        // ECONNRESET with no listener, which Vitest treats as a suite failure.
+        const accepted: net.Socket[] = [];
         const upstream = net.createServer((socket) => {
+            accepted.push(socket);
+            socket.on('error', () => { /* expected post-handshake teardown */ });
             socket.write('hello-upstream');
         });
         await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', () => resolve()));
@@ -237,7 +243,10 @@ describe('R1-B: PilotTunnelBridge.acceptReverseLocal route events', () => {
             targetPort: upstreamPort,
         });
 
-        upstream.close();
+        for (const socket of accepted) {
+            try { socket.destroy(); } catch { /* ignore */ }
+        }
+        await new Promise<void>((resolve) => upstream.close(() => resolve()));
         bridge.close();
     });
 
