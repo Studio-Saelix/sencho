@@ -84,10 +84,11 @@ On the stack source root, the amber dot in the tree marks the five canonical sta
   <img src="/images/stack-file-explorer/protected-tree-marker.png" alt="Stack source tree with an amber dot marker next to compose.yaml" />
 </Frame>
 
-Two behaviours follow from the marker:
+Three behaviours follow from the marker:
 
 - **Dedicated tab redirect.** Clicking `compose.yaml`, `compose.yml`, or `.env` jumps you to the matching **compose.yaml** or **.env** tab so the save-and-deploy controls stay in front of you. `docker-compose.yaml` and `docker-compose.yml` are still flagged as protected, but they open in the regular file viewer because they are not the canonical Sencho file.
 - **Delete is blocked at the stack root.** The five canonical files at the stack root cannot be deleted through the explorer: the delete is rejected. Remove the whole stack via Stack Actions instead. A same-named file nested in a subdirectory is an ordinary file and can be deleted after the type-to-confirm step.
+- **Content edits and permission changes are allowed.** You can save those files and change their Unix mode bits from the explorer.
 
 An override file such as `compose.override.yaml` or `docker-compose.override.yml` is not one of the five canonical names, so it carries no amber dot and no delete restriction: Sencho treats it as an ordinary file even at the stack root.
 

@@ -1992,14 +1992,31 @@ describe('protected stack files', () => {
     await fs.unlink(path.join(stacksDir, STACK, 'pretend.yaml'));
   });
 
-  it('PUT /files/permissions refuses .env with 409 PROTECTED_FILE', async () => {
+  it('PUT /files/permissions succeeds on .env', async () => {
+    const mode = 0o600;
     const res = await request(app)
       .put(`/api/stacks/${STACK}/files/permissions`)
       .query({ path: '.env' })
       .set('Cookie', adminCookie)
-      .send({ mode: 0o644 });
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe('PROTECTED_FILE');
+      .send({ mode });
+    expect(res.status).toBe(204);
+    // Windows Node only distinguishes writable vs read-only; exact Unix bits are Linux/macOS.
+    if (!isWindows) {
+      expect((await fs.stat(path.join(stacksDir, STACK, '.env'))).mode & 0o777).toBe(mode);
+    }
+  });
+
+  it('PUT /files/permissions succeeds on compose.yaml', async () => {
+    const mode = 0o600;
+    const res = await request(app)
+      .put(`/api/stacks/${STACK}/files/permissions`)
+      .query({ path: 'compose.yaml' })
+      .set('Cookie', adminCookie)
+      .send({ mode });
+    expect(res.status).toBe(204);
+    if (!isWindows) {
+      expect((await fs.stat(path.join(stacksDir, STACK, 'compose.yaml'))).mode & 0o777).toBe(mode);
+    }
   });
 
   it('DELETE /files still succeeds on a non-protected file', async () => {
