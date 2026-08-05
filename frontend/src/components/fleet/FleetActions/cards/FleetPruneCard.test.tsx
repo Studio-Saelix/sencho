@@ -100,6 +100,7 @@ it('marks partial estimates with a PART pill and blast suffix', async () => {
   await waitFor(() => expect(screen.getByText('~ 500 Bytes reclaimable · partial')).toBeInTheDocument());
   expect(screen.getByText('PART')).toBeInTheDocument();
   expect(screen.queryByText('OK')).not.toBeInTheDocument();
+  expect(screen.getByTitle('Docker daemon is busy. Please try again in a moment.')).toBeInTheDocument();
 });
 
 it('shows 0 reclaimable · partial when successful targets report zero bytes', async () => {

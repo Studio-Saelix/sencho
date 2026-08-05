@@ -597,6 +597,59 @@ describe('POST /api/fleet/prune/estimate', () => {
       db.deleteNode(remoteId);
     }
   });
+
+  it('keeps successful local bytes when a later target rejects without timing out', async () => {
+    estimateManagedReclaim.mockImplementation(async (target: string) => {
+      if (target === 'images') return { reclaimableBytes: 4096 };
+      throw new Error('enumeration failed');
+    });
+    const res = await request(app)
+      .post('/api/fleet/prune/estimate')
+      .set('Authorization', authHeader)
+      .send({ targets: ['images', 'volumes'], scope: 'managed' });
+    expect(res.status).toBe(200);
+    expect(res.body.perNode[0].reachable).toBe(true);
+    expect(res.body.perNode[0].partial).toBe(true);
+    expect(res.body.perNode[0].reclaimableBytes).toBe(4096);
+    expect(res.body.perNode[0].error).toMatch(/enumeration failed/);
+    expect(res.body.totalBytes).toBe(4096);
+  });
+
+  it('marks the local node unreachable when DockerController init fails without 500ing the fleet', async () => {
+    const remoteId = db.addNode({
+      name: 'remote-survives-init',
+      type: 'remote',
+      api_url: 'http://remote-survives.example:1852',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+    try {
+      const DockerController = (await import('../services/DockerController')).default;
+      vi.mocked(DockerController.getInstance).mockImplementationOnce(() => {
+        throw new Error('Node with id 1 not found');
+      });
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+        JSON.stringify({ reclaimableBytes: 99 }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+      const res = await request(app)
+        .post('/api/fleet/prune/estimate')
+        .set('Authorization', authHeader)
+        .send({ targets: ['images'], scope: 'managed' });
+      expect(res.status).toBe(200);
+      const local = res.body.perNode.find((n: { nodeId: number; nodeName: string }) => n.nodeName !== 'remote-survives-init');
+      expect(local.reachable).toBe(false);
+      expect(local.reclaimableBytes).toBe(0);
+      expect(local.error).toMatch(/not found|Failed to estimate locally/);
+      const remote = res.body.perNode.find((n: { nodeId: number }) => n.nodeId === remoteId);
+      expect(remote.reachable).toBe(true);
+      expect(remote.reclaimableBytes).toBe(99);
+      expect(res.body.totalBytes).toBe(99);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
 });
 
 describe('POST /api/fleet/labels/fleet-stop remote leg', () => {

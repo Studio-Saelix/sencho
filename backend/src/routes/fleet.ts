@@ -2364,8 +2364,12 @@ fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Re
     const perNode: FleetNodeEstimate[] = await Promise.all(nodes.map(async (node): Promise<FleetNodeEstimate> => {
       if (node.type === 'local') {
         let knownStacks: string[];
+        let dockerController: ReturnType<typeof DockerController.getInstance>;
         try {
           knownStacks = scope === 'managed' ? await FileSystemService.getInstance(node.id).getStacks() : [];
+          // Init can throw if the node row disappears mid-request; keep that
+          // failure per-node so other fleet estimates still return.
+          dockerController = DockerController.getInstance(node.id);
         } catch (err) {
           return {
             nodeId: node.id,
@@ -2375,7 +2379,6 @@ fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Re
             error: getErrorMessage(err, 'Failed to estimate locally'),
           };
         }
-        const dockerController = DockerController.getInstance(node.id);
         const perTarget: FleetEstimateTargetResult[] = [];
         for (const target of targets) {
           // Bound so a slow local daemon does not hang the fleet

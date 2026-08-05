@@ -399,7 +399,11 @@ function EstimateSection({ estimate }: { estimate: EstimateState }) {
       <div className="rounded border border-card-border/60 bg-card/40 p-2 shadow-[inset_0_2px_4px_0_oklch(0_0_0_/_0.35)]">
         <ul className="space-y-1">
           {visible.map((node) => (
-            <li key={node.nodeId} className="flex items-center gap-2">
+            <li
+              key={node.nodeId}
+              className="flex items-center gap-2"
+              title={node.error}
+            >
               <span className={cn(
                 KICKER,
                 'inline-flex shrink-0 items-center rounded-sm border px-1 py-0.5',
