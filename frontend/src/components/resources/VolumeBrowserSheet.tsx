@@ -93,7 +93,7 @@ export function VolumeBrowserSheet({ volumeName, onClose }: VolumeBrowserSheetPr
           <div className="grid grid-cols-[260px_1fr] gap-3 px-6 py-5 flex-1 min-h-0 max-md:grid-cols-1 max-md:grid-rows-[40%_1fr] max-md:px-4">
             <div className="rounded-md border border-card-border bg-card overflow-hidden">
               <FileTree
-                key={`${volumeName}:${refreshKey}`}
+                key={volumeName}
                 sourceKey={volumeName}
                 loadDir={loadDir}
                 refreshKey={refreshKey}
