@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef, type PointerEvent, type KeyboardEvent } from 'react';
+import { useState, useEffect, useCallback, useId, useMemo, useRef, type PointerEvent, type KeyboardEvent } from 'react';
 import { Trash2, FilePlus, FolderPlus, FolderInput, Download, Loader2, AlertTriangle, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ConfirmModal } from '@/components/ui/modal';
@@ -28,10 +28,14 @@ interface StackFileExplorerProps {
 const DEFAULT_TREE_WIDTH = 224;
 const MIN_TREE_WIDTH = 160;
 const MAX_TREE_WIDTH = 560;
+const MIN_VIEWER_WIDTH = 240;
 const TREE_WIDTH_KEY = 'sencho.fileExplorer.treeWidth';
 
-function clampTreeWidth(n: number): number {
-  return Math.min(MAX_TREE_WIDTH, Math.max(MIN_TREE_WIDTH, n));
+function clampTreeWidth(n: number, containerWidth = 0): number {
+  const max = containerWidth > 0
+    ? Math.min(MAX_TREE_WIDTH, Math.max(MIN_TREE_WIDTH, containerWidth - MIN_VIEWER_WIDTH))
+    : MAX_TREE_WIDTH;
+  return Math.min(max, Math.max(MIN_TREE_WIDTH, n));
 }
 
 function readStoredTreeWidth(): number {
@@ -50,6 +54,11 @@ function persistTreeWidth(n: number): void {
   } catch {
     /* localStorage may be unavailable */
   }
+}
+
+function clearBodyResizeStyles(): void {
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
 }
 
 /** The synthetic stack-source root used before roots load or if discovery fails. */
@@ -99,9 +108,42 @@ export function StackFileExplorer({
   const [refreshKey, setRefreshKey] = useState(0);
   const [isDownloading, setIsDownloading] = useState(false);
   const [treeWidth, setTreeWidth] = useState(readStoredTreeWidth);
-  const treeWidthRef = useRef(treeWidth);
-  treeWidthRef.current = treeWidth;
-  const dragRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const explorerRef = useRef<HTMLDivElement>(null);
+  const treePaneId = useId();
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startWidth: number;
+    lastWidth: number;
+  } | null>(null);
+  const layoutWidth = clampTreeWidth(treeWidth, containerWidth);
+  const layoutMax = clampTreeWidth(MAX_TREE_WIDTH, containerWidth);
+
+  function clampToLayout(n: number): number {
+    return clampTreeWidth(n, containerWidth);
+  }
+
+  function commitTreeWidth(next: number): void {
+    setTreeWidth(next);
+    persistTreeWidth(next);
+  }
+
+  function finishTreeResize(event: PointerEvent<HTMLDivElement>): void {
+    const drag = dragRef.current;
+    if (drag === null || drag.pointerId !== event.pointerId) return;
+    const next = event.type === 'lostpointercapture'
+      ? drag.lastWidth
+      : clampToLayout(drag.startWidth + (event.clientX - drag.startX));
+    dragRef.current = null;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      /* capture may already be released */
+    }
+    clearBodyResizeStyles();
+    commitTreeWidth(next);
+  }
 
   function onTreeResizePointerDown(event: PointerEvent<HTMLDivElement>): void {
     if (event.button !== 0) return;
@@ -109,7 +151,8 @@ export function StackFileExplorer({
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
-      startWidth: treeWidthRef.current,
+      startWidth: layoutWidth,
+      lastWidth: layoutWidth,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
     document.body.style.cursor = 'col-resize';
@@ -119,28 +162,25 @@ export function StackFileExplorer({
   function onTreeResizePointerMove(event: PointerEvent<HTMLDivElement>): void {
     const drag = dragRef.current;
     if (drag === null || drag.pointerId !== event.pointerId) return;
-    setTreeWidth(clampTreeWidth(drag.startWidth + (event.clientX - drag.startX)));
-  }
-
-  function onTreeResizePointerEnd(event: PointerEvent<HTMLDivElement>): void {
-    if (dragRef.current?.pointerId !== event.pointerId) return;
-    dragRef.current = null;
-    try {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    } catch {
-      /* capture may already be released */
-    }
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
-    persistTreeWidth(treeWidthRef.current);
+    const next = clampToLayout(drag.startWidth + (event.clientX - drag.startX));
+    drag.lastWidth = next;
+    setTreeWidth(next);
   }
 
   function onTreeResizeKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
+    if (event.key === 'Home') {
+      event.preventDefault();
+      commitTreeWidth(MIN_TREE_WIDTH);
+      return;
+    }
+    if (event.key === 'End') {
+      event.preventDefault();
+      commitTreeWidth(layoutMax);
+      return;
+    }
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
     event.preventDefault();
-    const next = clampTreeWidth(treeWidthRef.current + (event.key === 'ArrowRight' ? 8 : -8));
-    setTreeWidth(next);
-    persistTreeWidth(next);
+    commitTreeWidth(clampToLayout(layoutWidth + (event.key === 'ArrowRight' ? 8 : -8)));
   }
 
   // ── file roots (Volumes + Stack source) ──
@@ -204,6 +244,24 @@ export function StackFileExplorer({
   // ── unsaved-changes guard on file switch ──
   const [isViewerDirty, setIsViewerDirty] = useState(false);
   const [pendingSelection, setPendingSelection] = useState<{ relPath: string; entry: FileEntry } | null>(null);
+
+  useEffect(() => {
+    return () => {
+      clearBodyResizeStyles();
+    };
+  }, []);
+
+  useEffect(() => {
+    const el = explorerRef.current;
+    if (!el) return;
+    setContainerWidth(el.getBoundingClientRect().width);
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width;
+      if (width !== undefined) setContainerWidth(width);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     setSelectedPath(null);
@@ -502,12 +560,13 @@ export function StackFileExplorer({
   }, []);
 
   return (
-    <div className="flex h-full min-h-0">
+    <div ref={explorerRef} data-testid="file-explorer" className="flex h-full min-h-0">
       {/* Left pane: root switcher + tree + upload + new folder */}
       <div
+        id={treePaneId}
         data-testid="file-explorer-tree-pane"
-        className="flex flex-col shrink-0 min-h-0"
-        style={{ width: treeWidth }}
+        className="flex min-h-0 min-w-0 shrink-0 flex-col overflow-hidden"
+        style={{ width: layoutWidth }}
       >
         <div className="flex flex-col gap-1 px-2 py-1.5 border-b border-glass-border shrink-0">
           <span className="text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Browsing</span>
@@ -669,18 +728,21 @@ export function StackFileExplorer({
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize file tree"
-        aria-valuenow={treeWidth}
+        aria-controls={treePaneId}
+        aria-valuenow={layoutWidth}
         aria-valuemin={MIN_TREE_WIDTH}
-        aria-valuemax={MAX_TREE_WIDTH}
+        aria-valuemax={layoutMax}
+        aria-valuetext={`${layoutWidth} pixels`}
         tabIndex={0}
-        className="relative w-px shrink-0 cursor-col-resize bg-glass-border outline-none hover:bg-brand focus-visible:bg-brand"
+        className="relative z-10 w-px shrink-0 cursor-col-resize touch-none bg-glass-border outline-none hover:bg-brand focus-visible:bg-brand focus-visible:ring-1 focus-visible:ring-brand/50"
         onPointerDown={onTreeResizePointerDown}
         onPointerMove={onTreeResizePointerMove}
-        onPointerUp={onTreeResizePointerEnd}
-        onPointerCancel={onTreeResizePointerEnd}
+        onPointerUp={finishTreeResize}
+        onPointerCancel={finishTreeResize}
+        onLostPointerCapture={finishTreeResize}
         onKeyDown={onTreeResizeKeyDown}
       >
-        <span className="absolute inset-y-0 -left-1.5 -right-1.5" aria-hidden />
+        <span className="absolute inset-y-0 left-0 -right-1.5 z-10" aria-hidden />
       </div>
 
       {/* Right pane: action bar + viewer */}

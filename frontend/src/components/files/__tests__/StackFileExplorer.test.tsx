@@ -7,7 +7,7 @@
  * exposes a "Mark dirty" button so the test can drive the dirty signal
  * without instantiating Monaco.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { FileEntry } from '@/lib/stackFilesApi';
@@ -457,13 +457,12 @@ describe('StackFileExplorer new file affordance', () => {
 
 describe('StackFileExplorer resizable tree pane', () => {
   const TREE_WIDTH_KEY = 'sencho.fileExplorer.treeWidth';
+  const OriginalResizeObserver = globalThis.ResizeObserver;
+  const observed: { el: Element; cb: ResizeObserverCallback }[] = [];
+  let explorerWidth = 0;
 
   function treePane(): HTMLElement {
     return screen.getByTestId('file-explorer-tree-pane');
-  }
-
-  function paneWidth(): number {
-    return Number.parseInt(treePane().style.width, 10);
   }
 
   function separator(): HTMLElement {
@@ -477,8 +476,70 @@ describe('StackFileExplorer resizable tree pane', () => {
     fireEvent.pointerUp(sep, { pointerId: 1, clientX: toX });
   }
 
+  function explorerRect(width: number): DOMRect {
+    return {
+      width,
+      height: 400,
+      top: 0,
+      left: 0,
+      bottom: 400,
+      right: width,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect;
+  }
+
+  function notifyExplorerResize(): void {
+    for (const { el, cb } of [...observed]) {
+      cb(
+        [{
+          target: el,
+          contentRect: el.getBoundingClientRect(),
+          borderBoxSize: [],
+          contentBoxSize: [],
+          devicePixelContentBoxSize: [],
+        } as unknown as ResizeObserverEntry],
+        {} as ResizeObserver,
+      );
+    }
+  }
+
   beforeEach(() => {
     localStorage.clear();
+    explorerWidth = 0;
+    observed.length = 0;
+    const origRect = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.testid === 'file-explorer') return explorerRect(explorerWidth);
+      return origRect.call(this);
+    });
+    globalThis.ResizeObserver = class MockExplorerResizeObserver {
+      cb: ResizeObserverCallback;
+      constructor(cb: ResizeObserverCallback) {
+        this.cb = cb;
+      }
+      observe(el: Element) {
+        observed.push({ el, cb: this.cb });
+        this.cb(
+          [{
+            target: el,
+            contentRect: el.getBoundingClientRect(),
+            borderBoxSize: [],
+            contentBoxSize: [],
+            devicePixelContentBoxSize: [],
+          } as unknown as ResizeObserverEntry],
+          this as unknown as ResizeObserver,
+        );
+      }
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+  });
+
+  afterEach(() => {
+    globalThis.ResizeObserver = OriginalResizeObserver;
+    vi.restoreAllMocks();
   });
 
   it('defaults to 224px with shrink-0 when nothing is stored', () => {
@@ -486,53 +547,83 @@ describe('StackFileExplorer resizable tree pane', () => {
     const pane = treePane();
     expect(pane.style.width).toBe('224px');
     expect(pane.className).toMatch(/\bshrink-0\b/);
+    expect(pane.className).toMatch(/\bmin-w-0\b/);
+    expect(pane.className).toMatch(/\boverflow-hidden\b/);
     expect(pane.className).not.toMatch(/\bw-56\b/);
   });
 
   it('restores a stored in-range width', () => {
     localStorage.setItem(TREE_WIDTH_KEY, '360');
     setup();
-    expect(paneWidth()).toBe(360);
+    expect(treePane().style.width).toBe('360px');
   });
 
   it('accepts stored exact min and max bounds', () => {
     localStorage.setItem(TREE_WIDTH_KEY, '160');
     const { unmount } = setup();
-    expect(paneWidth()).toBe(160);
+    expect(treePane().style.width).toBe('160px');
     unmount();
 
     localStorage.setItem(TREE_WIDTH_KEY, '560');
     setup();
-    expect(paneWidth()).toBe(560);
+    expect(treePane().style.width).toBe('560px');
   });
 
   it('falls back to 224 for out-of-range or corrupt storage', () => {
     for (const raw of ['99', '9999', 'nope', '{bad']) {
       localStorage.setItem(TREE_WIDTH_KEY, raw);
       const { unmount } = setup();
-      expect(paneWidth()).toBe(224);
+      expect(treePane().style.width).toBe('224px');
       unmount();
     }
   });
 
-  it('widens by the drag delta and persists on pointer up', () => {
+  it('widens by the drag delta and persists the pointer-up position', () => {
     setup();
-    dragSeparator(400, 420);
-    expect(paneWidth()).toBe(244);
-    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('244');
+    const sep = separator();
+    fireEvent.pointerDown(sep, { pointerId: 1, clientX: 400 });
+    fireEvent.pointerMove(sep, { pointerId: 1, clientX: 420 });
+    expect(treePane().style.width).toBe('244px');
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBeNull();
+    fireEvent.pointerUp(sep, { pointerId: 1, clientX: 460 });
+    expect(treePane().style.width).toBe('284px');
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('284');
+    expect(document.body.style.cursor).toBe('');
+    expect(document.body.style.userSelect).toBe('');
   });
 
   it('clamps a far-left drag to 160 and persists that bound', () => {
     setup();
     dragSeparator(400, 0);
-    expect(paneWidth()).toBe(160);
+    expect(treePane().style.width).toBe('160px');
     expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('160');
   });
 
   it('clamps a far-right drag to 560 and persists that bound', () => {
     setup();
     dragSeparator(400, 2000);
-    expect(paneWidth()).toBe(560);
+    expect(treePane().style.width).toBe('560px');
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('560');
+  });
+
+  it('caps the tree so a narrow explorer still leaves room for the viewer', async () => {
+    explorerWidth = 500;
+    setup();
+    await waitFor(() => expect(separator()).toHaveAttribute('aria-valuemax', '260'));
+    dragSeparator(400, 2000);
+    expect(treePane().style.width).toBe('260px');
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('260');
+  });
+
+  it('shrinks the live pane on a narrow layout without rewriting storage', async () => {
+    localStorage.setItem(TREE_WIDTH_KEY, '560');
+    explorerWidth = 500;
+    setup();
+    await waitFor(() => expect(treePane().style.width).toBe('260px'));
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('560');
+    explorerWidth = 900;
+    notifyExplorerResize();
+    await waitFor(() => expect(treePane().style.width).toBe('560px'));
     expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('560');
   });
 
@@ -541,10 +632,50 @@ describe('StackFileExplorer resizable tree pane', () => {
     const sep = separator();
     fireEvent.pointerDown(sep, { pointerId: 1, clientX: 400 });
     fireEvent.pointerMove(sep, { pointerId: 1, clientX: 420 });
-    expect(paneWidth()).toBe(244);
-    fireEvent.pointerCancel(sep, { pointerId: 1, clientX: 420 });
-    expect(paneWidth()).toBe(244);
+    expect(treePane().style.width).toBe('244px');
+    expect(document.body.style.cursor).toBe('col-resize');
+    expect(document.body.style.userSelect).toBe('none');
+    fireEvent.pointerCancel(sep, { pointerId: 1, clientX: 500 });
+    expect(treePane().style.width).toBe('324px');
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('324');
+    expect(document.body.style.cursor).toBe('');
+    expect(document.body.style.userSelect).toBe('');
+    fireEvent.pointerMove(sep, { pointerId: 1, clientX: 600 });
+    fireEvent.pointerUp(sep, { pointerId: 1, clientX: 600 });
+    expect(treePane().style.width).toBe('324px');
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('324');
+  });
+
+  it('finishes the gesture on lostpointercapture using the last live width', () => {
+    setup();
+    const sep = separator();
+    fireEvent.pointerDown(sep, { pointerId: 1, clientX: 400 });
+    fireEvent.pointerMove(sep, { pointerId: 1, clientX: 420 });
+    fireEvent.lostPointerCapture(sep, { pointerId: 1, clientX: 0 });
+    expect(treePane().style.width).toBe('244px');
     expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('244');
+    expect(document.body.style.cursor).toBe('');
+    fireEvent.pointerMove(sep, { pointerId: 1, clientX: 500 });
+    expect(treePane().style.width).toBe('244px');
+  });
+
+  it('ignores a trailing lostpointercapture after pointerup', () => {
+    setup();
+    const sep = separator();
+    fireEvent.pointerDown(sep, { pointerId: 1, clientX: 400 });
+    fireEvent.pointerMove(sep, { pointerId: 1, clientX: 420 });
+    fireEvent.pointerUp(sep, { pointerId: 1, clientX: 420 });
+    fireEvent.lostPointerCapture(sep, { pointerId: 1, clientX: 0 });
+    expect(treePane().style.width).toBe('244px');
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('244');
+  });
+
+  it('clears body resize styles if the explorer unmounts mid-drag', () => {
+    const { unmount } = setup();
+    fireEvent.pointerDown(separator(), { pointerId: 1, clientX: 400 });
+    expect(document.body.style.cursor).toBe('col-resize');
+    expect(document.body.style.userSelect).toBe('none');
+    unmount();
     expect(document.body.style.cursor).toBe('');
     expect(document.body.style.userSelect).toBe('');
   });
@@ -554,7 +685,7 @@ describe('StackFileExplorer resizable tree pane', () => {
     const { unmount } = setup();
     separator().focus();
     await user.keyboard('{ArrowRight}');
-    expect(paneWidth()).toBe(232);
+    expect(treePane().style.width).toBe('232px');
     expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('232');
     unmount();
 
@@ -562,7 +693,47 @@ describe('StackFileExplorer resizable tree pane', () => {
     setup();
     separator().focus();
     await user.keyboard('{ArrowRight}{ArrowRight}');
-    expect(paneWidth()).toBe(560);
+    expect(treePane().style.width).toBe('560px');
     expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('560');
+  });
+
+  it('nudges 8px on ArrowLeft and stops at the min bound', async () => {
+    const user = userEvent.setup();
+    const { unmount } = setup();
+    separator().focus();
+    await user.keyboard('{ArrowLeft}');
+    expect(treePane().style.width).toBe('216px');
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('216');
+    unmount();
+
+    localStorage.setItem(TREE_WIDTH_KEY, '164');
+    setup();
+    separator().focus();
+    await user.keyboard('{ArrowLeft}{ArrowLeft}');
+    expect(treePane().style.width).toBe('160px');
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('160');
+  });
+
+  it('jumps to min and max on Home and End', async () => {
+    const user = userEvent.setup();
+    setup();
+    separator().focus();
+    await user.keyboard('{Home}');
+    expect(treePane().style.width).toBe('160px');
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('160');
+    await user.keyboard('{End}');
+    expect(treePane().style.width).toBe('560px');
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('560');
+  });
+
+  it('caps End at the live layout max', async () => {
+    const user = userEvent.setup();
+    explorerWidth = 500;
+    setup();
+    await waitFor(() => expect(separator()).toHaveAttribute('aria-valuemax', '260'));
+    separator().focus();
+    await user.keyboard('{End}');
+    expect(treePane().style.width).toBe('260px');
+    expect(localStorage.getItem(TREE_WIDTH_KEY)).toBe('260');
   });
 });
