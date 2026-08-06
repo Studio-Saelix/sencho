@@ -10,6 +10,7 @@ import {
   isPreviewUncertain,
   isReviewRequiredUpdatePreview,
   isTagOnlyAdvisory,
+  DIGEST_REBUILD_HINT,
 } from '@/lib/updatePreviewActionability';
 import { cn } from '@/lib/utils';
 import { type AnatomyMarkdownInput, type PortRow, type VolumeRow } from '@/lib/anatomyMarkdown';
@@ -440,6 +441,8 @@ export default function StackAnatomyPanel({
   const gitRebuildHint = hasBuildServices && activeGitSource
     ? 'After applying Git source changes, use Rebuild & Update to deploy the updated source.'
     : '';
+  const changelogLine = updatePreview?.changelog ? updatePreview.changelog.split(/[.\n]/)[0] : '';
+  const bannerTailSegments = [buildHint, gitRebuildHint, changelogLine].filter(Boolean);
   const applyLabel = hasBuildServices
     ? (applying ? 'rebuilding...' : 'Rebuild & Update')
     : (applying ? 'applying...' : 'apply');
@@ -658,13 +661,18 @@ export default function StackAnatomyPanel({
                   </ul>
                 )}
                 <div className="mt-1 font-mono text-xs text-foreground/80 leading-relaxed">
-                  {[
-                    bumpLabel,
-                    bannerLeadIn,
-                    buildHint,
-                    gitRebuildHint,
-                    updatePreview.changelog ? updatePreview.changelog.split(/[.\n]/)[0] : '',
-                  ].filter(Boolean).join(' · ')}
+                  {/* The tooltip belongs to the digest-rebuild lead-in only: when a
+                      review hold or tag advisory overrides bannerLeadIn, render the
+                      plain joined line so the hint never rides on other copy. */}
+                  {updateKind === 'digest' && hasUpdate && bannerLeadIn === 'same-tag digest rebuild' ? (
+                    <>
+                      {bumpLabel && <span>{bumpLabel} · </span>}
+                      <span title={DIGEST_REBUILD_HINT}>{bannerLeadIn}</span>
+                      {bannerTailSegments.length > 0 && <span> · {bannerTailSegments.join(' · ')}</span>}
+                    </>
+                  ) : (
+                    [bumpLabel, bannerLeadIn, ...bannerTailSegments].filter(Boolean).join(' · ')
+                  )}
                 </div>
                 {blocked && updatePreview.summary.blocked_reason && (
                   <div className="mt-1 font-mono text-[10px] text-destructive">{updatePreview.summary.blocked_reason}</div>

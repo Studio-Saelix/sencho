@@ -37,6 +37,11 @@ export const UPDATE_STILL_PRESENT_WARNING =
 export const UPDATE_VERIFICATION_INCOMPLETE_WARNING =
     'The update command completed, but Sencho could not fully verify whether an image update remains.';
 
+// Mirrored verbatim in GENERIC_POST_UPDATE_WARNINGS in
+// frontend/src/components/EditorLayout/hooks/useStackActions.ts; keep the copy in sync.
+export const UPDATE_DIGEST_UNCHANGED_WARNING =
+    'The update command completed, but the image digest was not updated. Your Docker daemon may cache older content through a registry mirror, or the container may still be pinned to the previous image. Check your daemon configuration or recreate the container with --force-recreate.';
+
 export interface ImageCheckResult {
     hasUpdate: boolean;
     /** Same-tag registry digest drift; Compose pull can apply without pin change. */
@@ -1092,6 +1097,15 @@ export class ImageUpdateService {
         const services = reductions.map((r) => r.status);
         const checkStatus = aggregateServiceCheckStatus(services);
         const hasUpdate = services.some((s) => s.hasUpdate);
+        // Every still-present update being a same-tag digest rebuild (no higher
+        // semver tag) signals the local content for that image did not move: the
+        // daemon may serve a cached/mirrored manifest, or the container may still
+        // run the previous image (or the last update targeted another service).
+        // Surface both causes instead of the generic copy.
+        const updatingEntries = [...imageUpdateMap.values()]
+            .filter((r) => r.hasUpdate && normalizeImageCheckStatus(r) !== 'not_checkable');
+        const allDigestOnly = hasUpdate && updatingEntries.length > 0
+            && updatingEntries.every((r) => r.digestUpdate === true && r.tagUpdate !== true);
         const lastError = stackStatusLastError(services);
         const now = Date.now();
 
@@ -1119,7 +1133,7 @@ export class ImageUpdateService {
         if (hasUpdate) {
             return {
                 outcome: 'still_present',
-                warning: UPDATE_STILL_PRESENT_WARNING,
+                warning: allDigestOnly ? UPDATE_DIGEST_UNCHANGED_WARNING : UPDATE_STILL_PRESENT_WARNING,
             };
         }
         return { outcome: 'cleared', warning: null };

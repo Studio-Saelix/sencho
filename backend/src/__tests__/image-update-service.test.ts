@@ -153,7 +153,11 @@ vi.mock('../services/registry-api', async (importOriginal) => {
 // For this test we re-implement the function signatures to test via the
 // public checkImage method (which calls parseImageRef internally).
 
-import { ImageUpdateService } from '../services/ImageUpdateService';
+import {
+  ImageUpdateService,
+  UPDATE_DIGEST_UNCHANGED_WARNING,
+  UPDATE_STILL_PRESENT_WARNING,
+} from '../services/ImageUpdateService';
 import YAML from 'yaml';
 
 // ── parseImageRef (tested indirectly via checkImage) ──────────────────
@@ -1805,6 +1809,90 @@ services:
         ],
         expect.any(Number),
       );
+    });
+
+    it('returns the digest-unchanged warning when every still-present update is a same-tag digest rebuild', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue({
+        hasUpdate: true,
+        digestUpdate: true,
+        tagUpdate: false,
+        checkStatus: 'ok',
+      });
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({ outcome: 'still_present', warning: UPDATE_DIGEST_UNCHANGED_WARNING });
+    });
+
+    it('returns the generic warning when one still-present update is a digest rebuild and another is a tag bump', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+        { Id: 'c2', Image: 'worker:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'worker' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockImplementation(async (_docker: unknown, ref: string) => (
+        ref === 'web:latest'
+          ? { hasUpdate: true, digestUpdate: true, tagUpdate: false, checkStatus: 'ok' }
+          : { hasUpdate: true, digestUpdate: false, tagUpdate: true, checkStatus: 'ok' }
+      ));
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({ outcome: 'still_present', warning: UPDATE_STILL_PRESENT_WARNING });
+    });
+
+    it('returns the generic warning when a single image has both a digest drift and a newer tag', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue({
+        hasUpdate: true,
+        digestUpdate: true,
+        tagUpdate: true,
+        checkStatus: 'ok',
+      });
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({ outcome: 'still_present', warning: UPDATE_STILL_PRESENT_WARNING });
+    });
+
+    it('returns the generic warning when the still-present update is a tag bump, not a digest-only rebuild', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue({
+        hasUpdate: true,
+        digestUpdate: false,
+        tagUpdate: true,
+        checkStatus: 'ok',
+      });
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({ outcome: 'still_present', warning: UPDATE_STILL_PRESENT_WARNING });
     });
 
     it('returns cleared when every checkable service is up to date', async () => {

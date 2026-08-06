@@ -173,6 +173,9 @@ A stack that mixes registry images and `build:` services still gets a card, scor
   <Accordion title='Apply now finished but the readiness card still shows a newer tag'>
     Compose still pins the older tag. Apply pulls and recreates that pinned tag only. To move to the next tag shown on the card, edit the Compose `image:` reference, then deploy.
   </Accordion>
+  <Accordion title='Apply now finished but the digest rebuild badge stays'>
+    The badge means new image content is published behind the same tag. If an update does not clear it, your Docker daemon may be pulling through a registry mirror that still serves the old content, or the container may still run the previous image. Check your daemon configuration for a `registry-mirrors` entry, or recreate the service with `docker compose up -d --force-recreate` on the affected stack.
+  </Accordion>
   <Accordion title='Banner says "X of Y nodes reachable"'>
     One or more nodes that are marked online in your fleet did not respond within the request timeout. Pending updates from those nodes are not shown until they come back. Check the node's status from the Fleet view and the network path between this Sencho instance and the unreachable node.
   </Accordion>

@@ -320,6 +320,8 @@ describe('verification preview helpers', () => {
 it('enables Apply for a safe, non-blocked update', () => {
   render(<MobileReadinessCard card={card()} onApply={vi.fn()} />);
   expect(apply()).toBeEnabled();
+  // The mobile digest-rebuild headline carries the same hint tooltip as desktop.
+  expect(screen.getByText('Rebuild available')).toHaveAttribute('title', expect.stringContaining('Same tag, newer content'));
 });
 
 it('disables Apply for tag-only advisory updates', () => {
@@ -652,6 +654,8 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
 
     render(<AutoUpdateReadinessView />);
     const serviceApply = await screen.findByRole('button', { name: /^Apply$/i });
+    // The digest-rebuild headline carries the hint tooltip for this update kind.
+    expect(screen.getByText('Rebuild available')).toHaveAttribute('title', expect.stringContaining('Same tag, newer content'));
     await act(async () => { fireEvent.click(serviceApply); });
 
     await waitFor(() => {

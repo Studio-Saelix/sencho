@@ -3,6 +3,11 @@
  * Tag-only availability is advisory: Compose pull does not rewrite pins.
  */
 
+/** Tooltip for digest-rebuild surfaces: what the badge means, and why an
+ *  update may not clear it (daemon-side causes behind a persistent badge). */
+export const DIGEST_REBUILD_HINT =
+  'Same tag, newer content. If Update does not clear this, your Docker daemon may be pulling through a mirror or the container may still be on the previous image. Check your daemon configuration.';
+
 export interface UpdatePreviewActionImage {
   service?: string;
   has_update?: boolean;

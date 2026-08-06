@@ -80,14 +80,17 @@ const NODE_UNREACHABLE_FAILURE: FailureClassification = {
 
 const UNREACHABLE_STATUSES: ReadonlySet<number> = new Set([502, 503, 504]);
 
-// Mirrors ImageUpdateService's UPDATE_STILL_PRESENT_WARNING / UPDATE_VERIFICATION_INCOMPLETE_WARNING:
-// that service's warning copy assumes an update was just applied, but
-// checkUpdatesForStack runs before any update, so these two generic messages
-// are replaced with accurate pre-update copy. A stack-specific reason (e.g. a
-// compose render failure) is still forwarded as-is.
+// Mirrors ImageUpdateService's post-update warning copy: UPDATE_STILL_PRESENT_WARNING,
+// UPDATE_VERIFICATION_INCOMPLETE_WARNING, and UPDATE_DIGEST_UNCHANGED_WARNING. Those
+// warnings assume an update was just applied, but checkUpdatesForStack runs before
+// any update, so they are replaced with accurate pre-update copy. The set is a
+// safety net for pairing changes: today only the verification-incomplete warning
+// actually arrives outside the still_present branch, which is intercepted earlier.
+// A stack-specific reason (e.g. a compose render failure) is still forwarded as-is.
 const GENERIC_POST_UPDATE_WARNINGS: ReadonlySet<string> = new Set([
   'The update command completed, but Sencho still detects an available image update.',
   'The update command completed, but Sencho could not fully verify whether an image update remains.',
+  'The update command completed, but the image digest was not updated. Your Docker daemon may cache older content through a registry mirror, or the container may still be pinned to the previous image. Check your daemon configuration or recreate the container with --force-recreate.',
 ]);
 
 const SELF_STACK_PROTECTED_CODE = 'self_stack_protected';

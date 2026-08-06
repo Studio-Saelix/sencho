@@ -18,6 +18,7 @@ import {
   isServiceApplyActionable,
   isTagOnlyAdvisory,
   isVerificationOnlyPreview,
+  DIGEST_REBUILD_HINT,
 } from '@/lib/updatePreviewActionability';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
@@ -247,7 +248,10 @@ function RiskBadge({
   }
   if (bump === 'unknown') {
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-full border border-card-border bg-muted/30 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">
+      <span
+        className="inline-flex items-center gap-1.5 rounded-full border border-card-border bg-muted/30 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle"
+        title={DIGEST_REBUILD_HINT}
+      >
         Digest rebuild
       </span>
     );
@@ -368,7 +372,7 @@ function StackReadinessCard({
             headline = (
               <div className="flex items-baseline gap-2 font-mono text-sm">
                 <span className="text-stat-subtitle">{p.summary.current_tag}</span>
-                <span className="text-brand text-[10px] leading-3 uppercase tracking-[0.18em]">
+                <span className="text-brand text-[10px] leading-3 uppercase tracking-[0.18em]" title={DIGEST_REBUILD_HINT}>
                   Rebuild available
                 </span>
               </div>
@@ -671,7 +675,7 @@ export function MobileReadinessCard({
           headline = (
             <div className="flex items-baseline gap-2 font-mono text-[13px]">
               <span className="text-stat-subtitle">{p.summary.current_tag}</span>
-              <span className="text-[10px] uppercase tracking-[0.12em] text-brand">Rebuild available</span>
+              <span className="text-[10px] uppercase tracking-[0.12em] text-brand" title={DIGEST_REBUILD_HINT}>Rebuild available</span>
             </div>
           );
         } else {

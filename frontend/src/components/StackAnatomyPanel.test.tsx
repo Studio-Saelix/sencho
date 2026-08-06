@@ -655,6 +655,7 @@ describe('StackAnatomyPanel digest verification failure', () => {
     expect(screen.getByText(/same-tag digest rebuild/i)).toBeInTheDocument();
     expect(screen.queryByText(/review required/i)).toBeNull();
     expect(screen.getByRole('button', { name: /^apply$/i })).toBeEnabled();
+    expect(screen.getByTitle(/same tag, newer content/i)).toBeInTheDocument();
   });
 
   it('holds a confirmed update for review even when the other image\'s own tag update masks its digest error into an overall ok check_status', async () => {
