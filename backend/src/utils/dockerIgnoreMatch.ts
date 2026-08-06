@@ -19,7 +19,7 @@
 
 export interface DockerIgnoreMatcher {
     /** True when `relPath` (context-root-relative, posix) is ignored. */
-    matches(relPath: string, isDir: boolean): boolean;
+    matches(relPath: string, isDir?: boolean): boolean;
 }
 
 function escapeRegExpSegment(input: string): string {
