@@ -4,6 +4,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.97.0](https://github.com/Studio-Saelix/sencho/compare/v0.96.0...v0.97.0) (2026-08-06)
+
+
+### Added
+
+* account for VM memory ballooning in host memory reporting ([#1750](https://github.com/Studio-Saelix/sencho/issues/1750)) ([c613010](https://github.com/Studio-Saelix/sencho/commit/c613010199fc67b21f940a379fbe3d801f0d36a4))
+* add inspect image action on stack container cards ([#1780](https://github.com/Studio-Saelix/sencho/issues/1780)) ([4e54a92](https://github.com/Studio-Saelix/sencho/commit/4e54a9272d783f8484a9fc864625afc10bc18762))
+* add node-scoped opt-out for image update detection ([#1715](https://github.com/Studio-Saelix/sencho/issues/1715)) ([fa503dd](https://github.com/Studio-Saelix/sencho/commit/fa503ddf2782871d476713b6183cb28c86b560e1))
+* add ntfy notification channel ([#1761](https://github.com/Studio-Saelix/sencho/issues/1761)) ([0ba09eb](https://github.com/Studio-Saelix/sencho/commit/0ba09ebdee30d50e19e5f6a6438866a55a2b7f2e))
+* add stack:read permission gate to Settings Labels section ([#1747](https://github.com/Studio-Saelix/sencho/issues/1747)) ([7c02f6e](https://github.com/Studio-Saelix/sencho/commit/7c02f6eeb520f8f77a4c6dbc72f1b6dfb0da331c))
+* add target-aware RBAC authorization to Scheduled Operations ([#1745](https://github.com/Studio-Saelix/sencho/issues/1745)) ([209c9c5](https://github.com/Studio-Saelix/sencho/commit/209c9c5d532df0de77307ff21f77037d9a09c7d1))
+* **auth:** add SSO-only authentication mode ([#1714](https://github.com/Studio-Saelix/sencho/issues/1714)) ([e175db8](https://github.com/Studio-Saelix/sencho/commit/e175db8e626f3b1d44464efa13d928da736bf6cb))
+* **compose-doctor:** show All Clear when findings are acknowledged ([#1721](https://github.com/Studio-Saelix/sencho/issues/1721)) ([543e4ef](https://github.com/Studio-Saelix/sencho/commit/543e4ef256ee09a2160f5ae025088ef77592d210))
+* expose Community audit log via system:audit navigation ([#1740](https://github.com/Studio-Saelix/sencho/issues/1740)) ([a1e2846](https://github.com/Studio-Saelix/sencho/commit/a1e2846d7d16f0015cd9a741ae8d09d064a74287))
+* **fleet-secrets:** graduate encrypted fleet-wide environment bundles to Community ([#1758](https://github.com/Studio-Saelix/sencho/issues/1758)) ([5f5cd5e](https://github.com/Studio-Saelix/sencho/commit/5f5cd5ea514e532ea579b302b719302c17dde772))
+* **fleet:** add Node details sheet to the node card kebab ([#1752](https://github.com/Studio-Saelix/sencho/issues/1752)) ([97be019](https://github.com/Studio-Saelix/sencho/commit/97be019696ef31a95765a21cd0a5d1caa9c1c4b6))
+* **fleet:** reapply Compose configuration without a version update ([#1716](https://github.com/Studio-Saelix/sencho/issues/1716)) ([b0b423b](https://github.com/Studio-Saelix/sencho/commit/b0b423b234a29fcf29ec45c725f2f92b3f4801d7))
+* **fleet:** show itemized prune plans ([#1734](https://github.com/Studio-Saelix/sencho/issues/1734)) ([44d6078](https://github.com/Studio-Saelix/sencho/commit/44d607824113a6bca9723978f7200492c9e28736))
+* live-refresh stack detail container and health state ([#1712](https://github.com/Studio-Saelix/sencho/issues/1712)) ([60092dd](https://github.com/Studio-Saelix/sencho/commit/60092dd46231b837534a0c404a14fcf1d68f3965))
+* make the Files explorer tree pane resizable ([#1774](https://github.com/Studio-Saelix/sencho/issues/1774)) ([85b8411](https://github.com/Studio-Saelix/sencho/commit/85b841175a2e2827dea87d8f27657615ce4d3465))
+* **rbac:** make Settings authorization permission-aware ([#1738](https://github.com/Studio-Saelix/sencho/issues/1738)) ([a3026f4](https://github.com/Studio-Saelix/sencho/commit/a3026f47a8291c6b4d0a554b7aa4bde17c3ef32b))
+* **rbac:** make stack-scoped grants node-specific ([#1727](https://github.com/Studio-Saelix/sencho/issues/1727)) ([9922d8e](https://github.com/Studio-Saelix/sencho/commit/9922d8e765a7fbd917cec1473153fa462a46d0cd))
+* **recovery:** make rollback-recovery image lifecycle visible and controllable ([#1753](https://github.com/Studio-Saelix/sencho/issues/1753)) ([41bf075](https://github.com/Studio-Saelix/sencho/commit/41bf075eb06c2991eaaab670cffc91698a8c042b))
+* **schedules:** auto-update stacks by Stack Label ([#1717](https://github.com/Studio-Saelix/sencho/issues/1717)) ([72cdbb0](https://github.com/Studio-Saelix/sencho/commit/72cdbb0eaa5c9632d262c075db9e30bd15dd4e1e))
+* surface ZFS ARC reclaimable as dashboard context line ([#1760](https://github.com/Studio-Saelix/sencho/issues/1760)) ([71be163](https://github.com/Studio-Saelix/sencho/commit/71be1634a5b6214d39ee9159eadf4151a85500c8))
+* validate scheduled task target existence at creation time ([#1757](https://github.com/Studio-Saelix/sencho/issues/1757)) ([5240957](https://github.com/Studio-Saelix/sencho/commit/5240957ff370e2fa2362772c7afdbfae369c9746))
+
+
+### Fixed
+
+* allow chmod on protected stack files ([#1772](https://github.com/Studio-Saelix/sencho/issues/1772)) ([a826cd3](https://github.com/Studio-Saelix/sencho/commit/a826cd398dceb5d3466e2ecbf7f9d1f4c488093c))
+* **auth:** align WebSocket token_version checks with HTTP ([#1744](https://github.com/Studio-Saelix/sencho/issues/1744)) ([a74905f](https://github.com/Studio-Saelix/sencho/commit/a74905ff1ed7a7309a899eddd612fab56246ea02))
+* **auth:** gate scoped JWTs on container-exec WebSocket ([#1741](https://github.com/Studio-Saelix/sencho/issues/1741)) ([ce4b91e](https://github.com/Studio-Saelix/sencho/commit/ce4b91e90f1ca7c6a45ac200ebf831260ee015ac))
+* **auth:** keep active sessions alive and add stay-signed-in ([#1711](https://github.com/Studio-Saelix/sencho/issues/1711)) ([681ecc7](https://github.com/Studio-Saelix/sencho/commit/681ecc7047818345220150ed8a18b3259d1d283f))
+* bump golang.org/x/text to v0.39.0 in Docker CLI and Compose builds ([#1728](https://github.com/Studio-Saelix/sencho/issues/1728)) ([d698eb4](https://github.com/Studio-Saelix/sencho/commit/d698eb46f96906a1962463d4861689a8bf51b74f))
+* **compose-doctor:** resolve effective healthcheck coverage ([#1713](https://github.com/Studio-Saelix/sencho/issues/1713)) ([78475d9](https://github.com/Studio-Saelix/sencho/commit/78475d96ef2f5e0571db8f953f274b189462b957))
+* condition --volumes in downStack() on the removeVolumes option ([#1764](https://github.com/Studio-Saelix/sencho/issues/1764)) ([92d974b](https://github.com/Studio-Saelix/sencho/commit/92d974b13eba47a74cd482a1b6fb4a6120a15ea7))
+* credit issue openers linked to a PR without closing text ([#1718](https://github.com/Studio-Saelix/sencho/issues/1718)) ([ea38113](https://github.com/Studio-Saelix/sencho/commit/ea381131940d35c506f16d8122df3725f91538a1))
+* **dashboard:** scope alert-rule count to stacks on the active node ([#1722](https://github.com/Studio-Saelix/sencho/issues/1722)) ([c90e960](https://github.com/Studio-Saelix/sencho/commit/c90e9606f1314ead738254664b5240a4e9a17d70))
+* **files:** preserve tree expand state after mutations ([#1773](https://github.com/Studio-Saelix/sencho/issues/1773)) ([9b48121](https://github.com/Studio-Saelix/sencho/commit/9b481212f651655221dbde2d3655f337808d52b1))
+* **fleet-secrets:** invalidate stale preview when target inputs change ([#1756](https://github.com/Studio-Saelix/sencho/issues/1756)) ([bfabdc2](https://github.com/Studio-Saelix/sencho/commit/bfabdc244447af6ad033a611584484c9b76277fa))
+* forward scoped node-admin permission for Settings writes through remote proxy ([#1748](https://github.com/Studio-Saelix/sencho/issues/1748)) ([ba017ee](https://github.com/Studio-Saelix/sencho/commit/ba017ee665bb2b7f7ef479b5d8a9f8cbb0681302))
+* **image-updates:** explain persistent digest rebuilds after update ([#1784](https://github.com/Studio-Saelix/sencho/issues/1784)) ([4fa5325](https://github.com/Studio-Saelix/sencho/commit/4fa532530e857d3d09e9c55b579b5b604126b2de))
+* keep fleet prune estimate bytes after a target timeout ([#1783](https://github.com/Studio-Saelix/sencho/issues/1783)) ([575848e](https://github.com/Studio-Saelix/sencho/commit/575848e017219ac2e9fc2b8d6be262f98ccbcb40))
+* **mesh:** close error-listener race in pilot tunnel reverse-dial connect ([#1754](https://github.com/Studio-Saelix/sencho/issues/1754)) ([48c89d2](https://github.com/Studio-Saelix/sencho/commit/48c89d217d2d7e1f360c2b9a1c73d8d60de5c303))
+* **networking:** ignore verified Mesh attachments in drift ([#1729](https://github.com/Studio-Saelix/sencho/issues/1729)) ([3c93406](https://github.com/Studio-Saelix/sencho/commit/3c934066f3d49d5850a42475821a2d47dbf52b2e))
+* **proxy:** forward scoped stack evidence for alerts, auto-heal, and node-wide image refresh ([#1749](https://github.com/Studio-Saelix/sencho/issues/1749)) ([2e2b095](https://github.com/Studio-Saelix/sencho/commit/2e2b095b0002ea09d5ce9e4c5209735ceb4d9a51))
+* **rbac:** enforce operational permission parity ([#1736](https://github.com/Studio-Saelix/sencho/issues/1736)) ([c704cb5](https://github.com/Studio-Saelix/sencho/commit/c704cb54d20a41329af5319b04b3c58f1b58d3f6))
+* **rbac:** handle permission metadata failures ([#1735](https://github.com/Studio-Saelix/sencho/issues/1735)) ([a65bf4d](https://github.com/Studio-Saelix/sencho/commit/a65bf4d46aab9e668ca11ed078b09efac4a9e3df))
+* **rbac:** permission-gate alerts, auto-heal, and image updates ([#1743](https://github.com/Studio-Saelix/sencho/issues/1743)) ([1580131](https://github.com/Studio-Saelix/sencho/commit/15801318d69525f7f2b6e047891c06ea83ea5740))
+* reduce prune estimate work and add managed-scope timeout ([#1768](https://github.com/Studio-Saelix/sencho/issues/1768)) ([e2fc3a5](https://github.com/Studio-Saelix/sencho/commit/e2fc3a58a0ac7d0bbf2e06aaf559d607902bd82e))
+* **resources:** attribute free images to managed prune by repository family ([#1769](https://github.com/Studio-Saelix/sencho/issues/1769)) ([a29d451](https://github.com/Studio-Saelix/sencho/commit/a29d4518759d4bd474d571dc0d456a4337cf972b))
+* surface NOT_EMPTY error code so DeleteFileConfirm can offer recursive delete ([#1765](https://github.com/Studio-Saelix/sencho/issues/1765)) ([4be3319](https://github.com/Studio-Saelix/sencho/commit/4be3319a07db98b1e5a5298ce9ae508191ccb8ed))
+* **ui:** flatten single-container Update onto the service row ([#1759](https://github.com/Studio-Saelix/sencho/issues/1759))q ([1c9060a](https://github.com/Studio-Saelix/sencho/commit/1c9060a855a8673915e638906f5e8f190f097378))
+* **ui:** restore equal gutters on container logs modal ([#1771](https://github.com/Studio-Saelix/sencho/issues/1771)) ([63a3594](https://github.com/Studio-Saelix/sencho/commit/63a3594671956fd36ca130f7c9179af8ada2ac7f))
+* **ui:** show delayed busy feedback on confirm actions ([#1763](https://github.com/Studio-Saelix/sencho/issues/1763)) ([5d89a10](https://github.com/Studio-Saelix/sencho/commit/5d89a1075476d454048a245922e992619a716eb2))
+
 ## [0.96.0](https://github.com/Studio-Saelix/sencho/compare/v0.95.0...v0.96.0) (2026-07-26)
 
 
