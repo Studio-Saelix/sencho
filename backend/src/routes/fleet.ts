@@ -36,6 +36,7 @@ import { parseIntParam } from '../utils/parseIntParam';
 import { parseRequestedTargetVersion, pickCompareTarget } from '../utils/targetVersion';
 import { buildTargetImageRef, isRepinBlocked, type ImagePinKind } from '../helpers/selfUpdateCompose';
 import { withTimeout, TimeoutError } from '../utils/withTimeout';
+import { foldNodeEstimate, type FleetEstimateTargetResult, type FleetNodeEstimate } from '../helpers/fleetEstimate';
 
 // Mirror the system-maintenance route timeout so fleet's local-node prune
 // paths cap the slow `docker system df` call at the same 12 s budget (F-6).
@@ -2331,7 +2332,8 @@ fleetRouter.get('/labels/suggestions', authMiddleware, async (req: Request, res:
 // Fleet-wide prune size estimate. Local node uses the controller estimate
 // helper; remote nodes hit `/api/system/prune/estimate` per target. Same
 // fan-out shape as `/labels/fleet-prune` minus the locks (estimation is read
-// only).
+// only). Per-target failures keep successful targets' bytes via foldNodeEstimate
+// rather than zeroing the whole node.
 fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
 
@@ -2356,38 +2358,47 @@ fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Re
   const targets: FleetPruneTarget[] = Array.from(dedup);
   const scope: 'managed' | 'all' = body.scope === 'all' ? 'all' : 'managed';
 
-  type NodeEstimate = {
-    nodeId: number; nodeName: string; reclaimableBytes: number; reachable: boolean; error?: string;
-  };
-
   try {
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
-    const perNode: NodeEstimate[] = await Promise.all(nodes.map(async (node): Promise<NodeEstimate> => {
+    const perNode: FleetNodeEstimate[] = await Promise.all(nodes.map(async (node): Promise<FleetNodeEstimate> => {
       if (node.type === 'local') {
+        let knownStacks: string[];
+        let dockerController: ReturnType<typeof DockerController.getInstance>;
         try {
-          const knownStacks = scope === 'managed' ? await FileSystemService.getInstance(node.id).getStacks() : [];
-          const dockerController = DockerController.getInstance(node.id);
-          let nodeBytes = 0;
-          for (const target of targets) {
-            // Bound so a slow local daemon does not hang the fleet
-            // estimate (F-6). Both managed and all scopes bound each
-            // per-target call at the same 12 s.
+          knownStacks = scope === 'managed' ? await FileSystemService.getInstance(node.id).getStacks() : [];
+          // Init can throw if the node row disappears mid-request; keep that
+          // failure per-node so other fleet estimates still return.
+          dockerController = DockerController.getInstance(node.id);
+        } catch (err) {
+          return {
+            nodeId: node.id,
+            nodeName: node.name,
+            reclaimableBytes: 0,
+            reachable: false,
+            error: getErrorMessage(err, 'Failed to estimate locally'),
+          };
+        }
+        const perTarget: FleetEstimateTargetResult[] = [];
+        for (const target of targets) {
+          // Bound so a slow local daemon does not hang the fleet
+          // estimate (F-6). Both managed and all scopes bound each
+          // per-target call at the same 12 s. Failures stay per-target so
+          // earlier successes are not discarded.
+          try {
             const estimate = scope === 'managed'
               ? dockerController.estimateManagedReclaim(target, knownStacks)
               : dockerController.estimateSystemReclaim(target, knownStacks);
             const result = await withTimeout(estimate, FLEET_DF_TIMEOUT_MS, 'docker disk usage');
-            nodeBytes += result.reclaimableBytes;
+            perTarget.push({ bytes: result.reclaimableBytes });
+          } catch (err) {
+            const error = err instanceof TimeoutError
+              ? 'Docker daemon is busy. Please try again in a moment.'
+              : getErrorMessage(err, 'Failed to estimate locally');
+            perTarget.push({ bytes: 0, error });
           }
-          return { nodeId: node.id, nodeName: node.name, reclaimableBytes: nodeBytes, reachable: true };
-        } catch (err) {
-          const error = err instanceof TimeoutError
-            ? 'Docker daemon is busy. Please try again in a moment.'
-            : getErrorMessage(err, 'Failed to estimate locally');
-          return {
-            nodeId: node.id, nodeName: node.name, reclaimableBytes: 0, reachable: false, error,
-          };
         }
+        return foldNodeEstimate({ nodeId: node.id, nodeName: node.name }, perTarget);
       }
 
       const proxyTarget = NodeRegistry.getInstance().getProxyTarget(node.id);
@@ -2404,7 +2415,7 @@ fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Re
       // so wall time matches the slowest single call rather than the sum.
       // (The destructive sibling stays serial because Docker prune is internally
       // serialized and one failure should short-circuit later targets there.)
-      const perTarget = await Promise.all(targets.map(async (target): Promise<{ bytes: number; error?: string }> => {
+      const perTarget = await Promise.all(targets.map(async (target): Promise<FleetEstimateTargetResult> => {
         try {
           const response = await fetch(`${baseUrl}/api/system/prune/estimate`, {
             method: 'POST',
@@ -2425,12 +2436,7 @@ fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Re
           return { bytes: 0, error: getErrorMessage(err, 'Failed to reach remote node') };
         }
       }));
-      const firstError = perTarget.find(t => t.error)?.error;
-      if (firstError) {
-        return { nodeId: node.id, nodeName: node.name, reclaimableBytes: 0, reachable: false, error: firstError };
-      }
-      const nodeBytes = perTarget.reduce((sum, t) => sum + t.bytes, 0);
-      return { nodeId: node.id, nodeName: node.name, reclaimableBytes: nodeBytes, reachable: true };
+      return foldNodeEstimate({ nodeId: node.id, nodeName: node.name }, perTarget);
     }));
 
     const totalBytes = perNode.reduce((acc, n) => acc + (n.reachable ? n.reclaimableBytes : 0), 0);

@@ -71,8 +71,59 @@ beforeEach(() => {
 it('keeps destructive prune disabled until an itemized dry run is reviewed', async () => {
   render(<FleetPruneCard nodes={nodes} />);
   await waitFor(() => expect(screen.getByText('~ 4 KB reclaimable')).toBeInTheDocument());
+  expect(screen.queryByText(/· partial/)).not.toBeInTheDocument();
+  expect(screen.getByText('OK')).toBeInTheDocument();
+  expect(screen.queryByText('PART')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Prune fleet' })).toBeDisabled();
   expect(screen.getByText(/Run Dry run to unlock Prune fleet/)).toBeInTheDocument();
+});
+
+it('marks partial estimates with a PART pill and blast suffix', async () => {
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/prune/estimate') {
+      return Promise.resolve(jsonResponse(200, {
+        totalBytes: 500,
+        perNode: [{
+          nodeId: 1,
+          nodeName: 'central',
+          reclaimableBytes: 500,
+          reachable: true,
+          partial: true,
+          error: 'Docker daemon is busy. Please try again in a moment.',
+        }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+
+  render(<FleetPruneCard nodes={nodes} />);
+  await waitFor(() => expect(screen.getByText('~ 500 Bytes reclaimable · partial')).toBeInTheDocument());
+  expect(screen.getByText('PART')).toBeInTheDocument();
+  expect(screen.queryByText('OK')).not.toBeInTheDocument();
+  expect(screen.getByTitle('Docker daemon is busy. Please try again in a moment.')).toBeInTheDocument();
+});
+
+it('shows 0 reclaimable · partial when successful targets report zero bytes', async () => {
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/prune/estimate') {
+      return Promise.resolve(jsonResponse(200, {
+        totalBytes: 0,
+        perNode: [{
+          nodeId: 1,
+          nodeName: 'central',
+          reclaimableBytes: 0,
+          reachable: true,
+          partial: true,
+          error: 'Docker daemon is busy. Please try again in a moment.',
+        }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+
+  render(<FleetPruneCard nodes={nodes} />);
+  await waitFor(() => expect(screen.getByText('0 reclaimable · partial')).toBeInTheDocument());
+  expect(screen.getByText('PART')).toBeInTheDocument();
 });
 
 it('drops the unlock footer once dry run review is valid', async () => {

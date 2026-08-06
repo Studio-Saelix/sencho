@@ -28,6 +28,7 @@ interface PruneEstimateNode {
   reclaimableBytes: number;
   reachable: boolean;
   error?: string;
+  partial?: boolean;
 }
 
 interface PruneEstimateResponse {
@@ -287,8 +288,10 @@ export function FleetPruneCard({ nodes }: Props) {
     if (estimate.kind === 'loading') return '~ estimating…';
     if (estimate.kind === 'unavailable') return '~ estimate unavailable';
     if (estimate.kind === 'ready') {
-      if (estimate.data.totalBytes === 0) return '0 reclaimable';
-      return `~ ${formatBytes(estimate.data.totalBytes)} reclaimable`;
+      const partial = estimate.data.perNode.some((node) => node.partial);
+      const suffix = partial ? ' · partial' : '';
+      if (estimate.data.totalBytes === 0) return `0 reclaimable${suffix}`;
+      return `~ ${formatBytes(estimate.data.totalBytes)} reclaimable${suffix}`;
     }
     return 'awaiting target';
   }, [targets.size, estimate]);
@@ -396,13 +399,21 @@ function EstimateSection({ estimate }: { estimate: EstimateState }) {
       <div className="rounded border border-card-border/60 bg-card/40 p-2 shadow-[inset_0_2px_4px_0_oklch(0_0_0_/_0.35)]">
         <ul className="space-y-1">
           {visible.map((node) => (
-            <li key={node.nodeId} className="flex items-center gap-2">
+            <li
+              key={node.nodeId}
+              className="flex items-center gap-2"
+              title={node.error}
+            >
               <span className={cn(
                 KICKER,
                 'inline-flex shrink-0 items-center rounded-sm border px-1 py-0.5',
-                node.reachable ? 'border-success/40 bg-success/10 text-success' : 'border-stat-subtitle/40 bg-card text-stat-subtitle',
+                node.reachable
+                  ? (node.partial
+                    ? 'border-warning/40 bg-warning/10 text-warning'
+                    : 'border-success/40 bg-success/10 text-success')
+                  : 'border-stat-subtitle/40 bg-card text-stat-subtitle',
               )}>
-                {node.reachable ? 'OK' : '--'}
+                {node.reachable ? (node.partial ? 'PART' : 'OK') : '--'}
               </span>
               <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-stat-value">{node.nodeName}</span>
               <span className={cn(KICKER, 'shrink-0 tabular-nums', node.reachable ? 'text-stat-subtitle' : 'text-stat-icon')}>
