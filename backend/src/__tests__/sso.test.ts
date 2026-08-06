@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi, type MockInstance } from 'vitest';
 import { setupTestDb, cleanupTestDb, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import supertest from 'supertest';
 import jwt from 'jsonwebtoken';
@@ -111,27 +111,38 @@ describe('SSO OIDC Callback', () => {
     expect(res.headers.location).toContain('User');
   });
 
-  it('forwards the RFC 9207 iss query parameter to SSOService.handleOIDCCallback', async () => {
+  // Drives a callback request with a valid state cookie, returning the stubbed
+  // handleOIDCCallback spy so the caller can assert on the params it received.
+  async function callbackWithStubbedService(provider: string, query: Record<string, string>): Promise<MockInstance> {
     const { SSOService } = await import('../services/SSOService');
     const { CryptoService } = await import('../services/CryptoService');
 
-    const statePayload = JSON.stringify({
+    const stateCookie = CryptoService.getInstance().encrypt(JSON.stringify({
       state: 'test-state',
       codeVerifier: 'test-verifier',
-      provider: 'oidc_custom',
-    });
-    const stateCookie = CryptoService.getInstance().encrypt(statePayload);
+      provider,
+    }));
 
-    const handleOIDCCallbackSpy = vi
+    const spy = vi
       .spyOn(SSOService.getInstance(), 'handleOIDCCallback')
       .mockResolvedValue({ success: false, error: 'stubbed for iss-forwarding assertion' });
 
     await supertest(app)
-      .get('/api/auth/sso/oidc/oidc_custom/callback')
-      .query({ code: 'test-code', state: 'test-state', iss: 'https://idp.example.com/realms/master' })
+      .get(`/api/auth/sso/oidc/${provider}/callback`)
+      .query(query)
       .set('Cookie', `sencho_sso_state=${stateCookie}`);
 
-    expect(handleOIDCCallbackSpy).toHaveBeenCalledWith(
+    return spy;
+  }
+
+  it('forwards the RFC 9207 iss query parameter to SSOService.handleOIDCCallback', async () => {
+    const spy = await callbackWithStubbedService('oidc_custom', {
+      code: 'test-code',
+      state: 'test-state',
+      iss: 'https://idp.example.com/realms/master',
+    });
+
+    expect(spy).toHaveBeenCalledWith(
       'oidc_custom',
       expect.any(String),
       expect.objectContaining({ code: 'test-code', state: 'test-state', iss: 'https://idp.example.com/realms/master' }),
@@ -139,38 +150,21 @@ describe('SSO OIDC Callback', () => {
       'test-verifier',
     );
 
-    handleOIDCCallbackSpy.mockRestore();
+    spy.mockRestore();
   });
 
   it('omits iss from the forwarded params when the provider does not send one', async () => {
-    const { SSOService } = await import('../services/SSOService');
-    const { CryptoService } = await import('../services/CryptoService');
+    const spy = await callbackWithStubbedService('oidc_google', { code: 'test-code', state: 'test-state' });
 
-    const statePayload = JSON.stringify({
-      state: 'test-state-2',
-      codeVerifier: 'test-verifier-2',
-      provider: 'oidc_google',
-    });
-    const stateCookie = CryptoService.getInstance().encrypt(statePayload);
-
-    const handleOIDCCallbackSpy = vi
-      .spyOn(SSOService.getInstance(), 'handleOIDCCallback')
-      .mockResolvedValue({ success: false, error: 'stubbed for iss-forwarding assertion' });
-
-    await supertest(app)
-      .get('/api/auth/sso/oidc/oidc_google/callback')
-      .query({ code: 'test-code-2', state: 'test-state-2' })
-      .set('Cookie', `sencho_sso_state=${stateCookie}`);
-
-    expect(handleOIDCCallbackSpy).toHaveBeenCalledWith(
+    expect(spy).toHaveBeenCalledWith(
       'oidc_google',
       expect.any(String),
-      expect.objectContaining({ code: 'test-code-2', state: 'test-state-2', iss: undefined }),
-      'test-state-2',
-      'test-verifier-2',
+      expect.objectContaining({ code: 'test-code', state: 'test-state', iss: undefined }),
+      'test-state',
+      'test-verifier',
     );
 
-    handleOIDCCallbackSpy.mockRestore();
+    spy.mockRestore();
   });
 });
 
