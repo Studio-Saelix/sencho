@@ -14,12 +14,12 @@ By the end, the workload runs only on the new node, the old node is marked unsch
 
 Both controls follow the same rule, and it's the part most likely to trip up a first-time user: **pinning and cordoning only declare intent.** Neither one deploys or withdraws a single container by itself. The reconciler stages what it *wants* to do next; you still open the blueprint and click **Confirm Apply** before anything on the fleet actually changes. That extra step is what makes this walkthrough three actions long instead of one.
 
-This tutorial does not cover creating a Blueprint from scratch, draining a node of everything it runs, or evicting a stateful deployment. See the [Blueprints](/features/blueprint-model) and [Fleet Federation](/features/fleet-federation) feature pages for those.
+This tutorial does not cover creating a Blueprint from scratch (see [Create and Approve a Blueprint](/tutorials/create-and-approve-a-blueprint)), draining a node of everything it runs, or evicting a stateful deployment. See the [Blueprints](/features/blueprint-model) and [Fleet Federation](/features/fleet-federation) feature pages for those last two.
 
 ## Prerequisites
 
 - **An admin account.** Cordoning a node and pinning a blueprint both check the same permission, scoped to the node you're acting on; clearing a pin checks that same permission without a node scope. Delegating that permission to a non-admin role for one specific node is an Admiral-tier capability, so on Community you complete every step here as the instance's admin.
-- **An existing Blueprint already deployed on at least one node.** Federation steers placement for Blueprints that exist; it does not create them. If you don't have one yet, create it under **Fleet → Deployments** first, see [Blueprints](/features/blueprint-model).
+- **An existing Blueprint already deployed on at least one node.** Federation steers placement for Blueprints that exist; it does not create them. If you don't have one yet, walk through [Create and Approve a Blueprint](/tutorials/create-and-approve-a-blueprint) first.
 - **At least two nodes in the fleet**, both online. Pinning only matters when there's somewhere else to pin to. Multi-node fleets and Federation are both Community-tier, no paid plan required.
 
 <Frame caption="Federation before any changes: no nodes cordoned, one blueprint listed, unpinned.">
@@ -112,5 +112,8 @@ If **Confirm Apply** is greyed out instead, a blocker is present, most often an 
   </Card>
   <Card title="Blueprints" icon="sitemap" href="/features/blueprint-model">
     The declarative deployment model Federation steers, including selectors, drift policy, and the rollout-preview mechanic.
+  </Card>
+  <Card title="Create and Approve a Blueprint" icon="drafting-compass" href="/tutorials/create-and-approve-a-blueprint">
+    Author and deploy a Blueprint from scratch, the prerequisite this tutorial assumes.
   </Card>
 </CardGroup>
