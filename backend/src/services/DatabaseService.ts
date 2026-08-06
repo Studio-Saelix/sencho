@@ -16,6 +16,7 @@ import {
 } from '../helpers/notificationSchedule';
 import { readSnapshotFileRow, type SnapshotFileReadResult, type SnapshotFileRow } from '../helpers/snapshotFileDecrypt';
 import { sanitizeForLog } from '../utils/safeLog';
+import type { GitSourceManifestState } from '../types/gitProjectManifest';
 
 export type { SnapshotFileReadResult } from '../helpers/snapshotFileDecrypt';
 
@@ -446,6 +447,9 @@ export interface StackGitSource {
     pending_fetched_at: number | null;
     last_debounce_at: number | null;
     applied_deploy_spec: GitSourceAppliedSpec | null;  // deploy-time materialized file set; null = single-file auto-discovery
+    manifest_version: number | null;                   // cache of the managed-project manifest's manifestVersion (file is the source of truth)
+    manifest_state: GitSourceManifestState | null;     // DB-only enum, wider than the file state; see types/gitProjectManifest.ts
+    manifest_generation: string | null;                // stack-relative path of the applied generation dir
     created_at: number;
     updated_at: number;
 }
@@ -1137,6 +1141,7 @@ export class DatabaseService {
         this.migrateFleetSyncStickyError();
         this.migrateStackDossierHashes();
         this.migrateGitSourceMultiFile();
+        this.migrateGitSourceManifest();
         this.migrateNodeUpdateSkips();
         this.migrateStackAlertServiceScope();
 
@@ -2504,6 +2509,14 @@ export class DatabaseService {
         this.tryAddColumn('stack_dossiers', 'source_hash', 'TEXT');
         this.tryAddColumn('stack_dossiers', 'rendered_hash', 'TEXT');
         this.tryAddColumn('stack_dossiers', 'last_drift_check_at', 'INTEGER');
+    }
+
+    private migrateGitSourceManifest(): void {
+        // Cache columns for the managed-project manifest (the manifest FILE in
+        // <DATA_DIR>/git-managed/<nodeId>/<stackName>/ is the source of truth).
+        this.tryAddColumn('stack_git_sources', 'manifest_version', 'INTEGER');
+        this.tryAddColumn('stack_git_sources', 'manifest_state', 'TEXT');
+        this.tryAddColumn('stack_git_sources', 'manifest_generation', 'TEXT');
     }
 
     private migrateGitSourceMultiFile(): void {
@@ -6154,6 +6167,9 @@ export class DatabaseService {
             compose_paths: this.normalizeComposePaths(row.compose_paths, composePath),
             context_dir: (row.context_dir as string | null) ?? null,
             applied_deploy_spec: this.parseAppliedDeploySpec(row.applied_deploy_spec),
+            manifest_version: row.manifest_version !== undefined && row.manifest_version !== null ? Number(row.manifest_version) : null,
+            manifest_state: (row.manifest_state as GitSourceManifestState | null) ?? null,
+            manifest_generation: (row.manifest_generation as string | null) ?? null,
             sync_env: Number(row.sync_env) === 1,
             env_path: (row.env_path as string | null) ?? null,
             auth_type: row.auth_type as GitSourceAuthType,
@@ -6182,7 +6198,7 @@ export class DatabaseService {
         return rows.map(r => this.parseGitSource(r)!);
     }
 
-    public upsertGitSource(source: Omit<StackGitSource, 'id' | 'created_at' | 'updated_at' | 'applied_deploy_spec'>): number {
+    public upsertGitSource(source: Omit<StackGitSource, 'id' | 'created_at' | 'updated_at' | 'applied_deploy_spec' | 'manifest_version' | 'manifest_state' | 'manifest_generation'>): number {
         const now = Date.now();
         const existing = this.getGitSource(source.stack_name);
         const composePathsJson = JSON.stringify(source.compose_paths ?? [source.compose_path]);
@@ -6234,6 +6250,18 @@ export class DatabaseService {
 
     public deleteGitSource(stackName: string): void {
         this.db.prepare('DELETE FROM stack_git_sources WHERE stack_name = ?').run(stackName);
+    }
+
+    /**
+     * Persist the managed-project manifest cache columns. The manifest FILE in
+     * the managed area is the source of truth; these columns are cheap
+     * projections for GET/dashboard reads and carry the two states the file
+     * cannot express ('migration_required', 'absent').
+     */
+    public setGitSourceManifestState(stackName: string, version: number | null, state: GitSourceManifestState | null, generation: string | null): void {
+        this.db.prepare(
+            `UPDATE stack_git_sources SET manifest_version = ?, manifest_state = ?, manifest_generation = ?, updated_at = ? WHERE stack_name = ?`
+        ).run(version, state, generation, Date.now(), stackName);
     }
 
     public setGitSourcePending(stackName: string, commitSha: string, composeContent: string, envContent: string | null): void {

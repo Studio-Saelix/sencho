@@ -538,3 +538,64 @@ describe('GET /api/git-sources', () => {
         expect(res.status).toBe(401);
     });
 });
+
+describe('stack_git_sources manifest cache columns', () => {
+    const MANIFEST_STATES = [
+        'none',
+        'migrated',
+        'active',
+        'partial',
+        'unsupported',
+        'migration_required',
+        'absent',
+    ] as const;
+
+    it('round-trips every GitSourceManifestState enum member', () => {
+        const db = DatabaseService.getInstance();
+        for (const state of MANIFEST_STATES) {
+            seedGitSource(`manifest-state-${state}`);
+            db.setGitSourceManifestState(`manifest-state-${state}`, 7, state, 'generations/applied-abc');
+            const row = db.getGitSource(`manifest-state-${state}`)!;
+            expect(row.manifest_version).toBe(7);
+            expect(row.manifest_state).toBe(state);
+            expect(row.manifest_generation).toBe('generations/applied-abc');
+            db.deleteGitSource(`manifest-state-${state}`);
+        }
+    });
+
+    it('reads nulls for rows written before the columns existed', () => {
+        const row = DatabaseService.getInstance().getGitSource('missing-manifest-row');
+        expect(row).toBeUndefined();
+    });
+
+    it('upsert does not clobber the manifest cache columns', () => {
+        const db = DatabaseService.getInstance();
+        seedGitSource('manifest-preserved');
+        db.setGitSourceManifestState('manifest-preserved', 3, 'active', 'generations/applied-x');
+        db.upsertGitSource({
+            stack_name: 'manifest-preserved',
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: null,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+        const row = db.getGitSource('manifest-preserved')!;
+        expect(row.manifest_version).toBe(3);
+        expect(row.manifest_state).toBe('active');
+        expect(row.manifest_generation).toBe('generations/applied-x');
+    });
+});
