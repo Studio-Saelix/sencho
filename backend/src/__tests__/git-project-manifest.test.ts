@@ -482,3 +482,75 @@ describe('promoteGeneration mid-write failure recovery', () => {
         expect(DatabaseService.getInstance().getGitSource(stackName)?.manifest_state).toBe('migration_required');
     });
 });
+
+describe('byte-exact materialization (audit C-1)', () => {
+    it('promotes binary files byte-identically and keeps the divergence guard silent', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'promote-binary';
+        writeStackFile(stackName, 'compose.yaml', 'services: {}\n');
+        // A real PNG header + arbitrary binary payload.
+        const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xd8, 0xc0, 0x80, 0x00, 0x01, 0x02, 0xfe, 0xfd]);
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    image: nginx\n    configs: [bin]\nconfigs:\n  bin:\n    file: blob.bin\n',
+            'blob.bin': pngBytes.toString('latin1'),
+        });
+        // makeClone writes via fs.writeFileSync(utf8 default); reconstruct the exact bytes on disk.
+        fs.writeFileSync(path.join(clone, 'blob.bin'), pngBytes);
+
+        const inventory = await import('../services/ComposeInputDiscoveryService').then((m) =>
+            m.ComposeInputDiscoveryService.getInstance().discoverFromClone({
+                cloneDir: clone,
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                bounds: BOUNDS,
+            }),
+        );
+        const inputs = inventory.inputs.filter((i) => i.ownership === 'managed' && i.materializedPath !== null);
+        const blobEntry = inputs.find((i) => i.materializedPath === 'blob.bin');
+        expect(blobEntry?.contentSha256).toBeTruthy();
+
+        const manifest = buildManifest(stackName, inputs);
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'bin-sha',
+            clone,
+            inputs.map((i) => ({ srcRel: i.sourcePath!, destRel: i.materializedPath! })),
+            inventory.contextCopyPlans,
+            BOUNDS,
+        );
+        await svc.promoteGeneration(stackName, { sha: 'bin-sha', candidateRelPath: candidateRel, manifest, priorManifest: null });
+
+        // The stack-dir file is byte-identical to the clone source.
+        const onDisk = fs.readFileSync(path.join(stackDir(stackName), 'blob.bin'));
+        expect(onDisk.equals(pngBytes)).toBe(true);
+        // The divergence guard hashes the same bytes the manifest recorded.
+        expect(await svc.hashStackFile(stackName, 'blob.bin')).toBe(blobEntry?.contentSha256);
+    });
+});
+
+describe('partial manifest state', () => {
+    it('builds a partial-state manifest when refusals exist and the summary surfaces them', () => {
+        const svc = GitProjectManifestService.getInstance();
+        const manifest = svc.buildManifest({
+            stackName: 'partial-state',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: 'partial-state',
+            invocation: ['-f', 'compose.yaml', '-p', 'partial-state'],
+            inputs: [managedEntry({ materializedPath: 'compose.yaml' })],
+            refusals: [{ sourcePath: 'x.yaml', kind: 'url-include', reason: 'x', actionable: false }],
+            buildContexts: [],
+            bounds: BOUNDS,
+            priorManifest: null,
+            state: 'partial',
+        });
+        expect(manifest.state).toBe('partial');
+        expect(svc.summaryFrom(manifest).state).toBe('partial');
+        // Tolerated (non-actionable) refusals reach the manifest; actionable
+        // ones abort the pull before a manifest is built.
+        expect(svc.summaryFrom(manifest).refused).toHaveLength(0);
+    });
+});

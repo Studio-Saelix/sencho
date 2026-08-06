@@ -1738,3 +1738,56 @@ describe('GitSourceService legacy pending apply (migration path)', () => {
         }
     });
 });
+
+describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => {
+    it('applies twice without a divergence refusal when the repo carries a root .env', async () => {
+        const sha = 'abcd1111abcd1111abcd1111abcd1111abcd1111';
+        const svc = GitSourceService.getInstance();
+        const db = DatabaseService.getInstance();
+        const runSpy = vi
+            .spyOn(svc as unknown as { runDockerCompose: (a: string[], c: string, t: number) => Promise<{ code: number; stdout: string; stderr: string }> }, 'runDockerCompose')
+            .mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const fsSvc = FileSystemService.getInstance();
+        await fsSvc.createStack('sync-env-double');
+        // Repo carries a root .env; sync_env is on and the sync env path is the same file.
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n',
+            env: 'SYNCED=1\n',
+            envPath: '.env',
+            extraFiles: { '.env': 'REPO=1\n' },
+            sha,
+        });
+        try {
+            await svc.upsert({
+                stackName: 'sync-env-double',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: true,
+                envPath: '.env',
+                authType: 'none',
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+            const pull1 = await svc.pull('sync-env-double');
+            const apply1 = await svc.apply('sync-env-double', pull1.commitSha, { deploy: false });
+            expect(apply1.applied).toBe(true);
+            // The manifest has exactly one .env entry.
+            const manifest = await svc.getManifest('sync-env-double');
+            const envEntries = manifest?.inputs.filter((i) => i.materializedPath === '.env') ?? [];
+            expect(envEntries).toHaveLength(1);
+            expect(envEntries[0].dependencyKind).toBe('sync-env');
+
+            // Second cycle must not raise the divergence refusal.
+            const pull2 = await svc.pull('sync-env-double');
+            const apply2 = await svc.apply('sync-env-double', pull2.commitSha, { deploy: false });
+            expect(apply2.applied).toBe(true);
+            void db;
+        } finally {
+            runSpy.mockRestore();
+            await cleanupStackDir('sync-env-double');
+        }
+    });
+});

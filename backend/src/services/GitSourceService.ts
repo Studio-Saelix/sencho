@@ -177,6 +177,18 @@ export class GitSourceError extends Error {
     }
 }
 
+/**
+ * Merge the synthesized sync-env entry into the discovery inventory with a
+ * one-entry-per-path invariant: the synced stack-root .env owns the path, so
+ * any discovery entry for it is dropped. The discovery guard already marks the
+ * repo's interpolation .env unmanaged when syncEnv is on; this dedupe enforces
+ * the invariant regardless of which branch produced the entries.
+ */
+function mergeSyncEnvEntry(inputs: ComposeInputEntry[], syncEntry: ComposeInputEntry | null): ComposeInputEntry[] {
+    if (!syncEntry) return inputs;
+    return [...inputs.filter((i) => i.materializedPath !== syncEntry.materializedPath), syncEntry];
+}
+
 /** A single compose file fetched from a repo, keyed by its repo-relative path. */
 export interface ComposeFile {
     path: string;
@@ -1121,6 +1133,10 @@ export class GitSourceService {
             cloneDir,
             composePaths: src.compose_paths,
             contextDir: src.context_dir,
+            // The synced stack-root .env owns that path when sync_env is on; the
+            // discovery guard makes the repo's interpolation .env unmanaged so it
+            // is never hash-guarded against the staged sync content.
+            syncEnv: src.sync_env,
             bounds,
         });
 
@@ -1640,7 +1656,7 @@ export class GitSourceService {
                 composeFiles: src.compose_paths,
                 projectName: stackName,
                 invocation,
-                inputs: syncEnvEntry ? [...pending.inventory.inputs, syncEnvEntry] : pending.inventory.inputs,
+                inputs: mergeSyncEnvEntry(pending.inventory.inputs, syncEnvEntry),
                 refusals: pending.inventory.refusals,
                 buildContexts: pending.inventory.buildContexts,
                 bounds: manifestSvc.boundsConfig(),
@@ -1825,7 +1841,7 @@ export class GitSourceService {
                         composeFiles: input.composePaths,
                         projectName: input.stackName,
                         invocation,
-                        inputs: syncEnvEntry ? [...inputs, syncEnvEntry] : inputs,
+                        inputs: mergeSyncEnvEntry(inputs, syncEnvEntry),
                         refusals: materialization.value.inventory.refusals,
                         buildContexts: materialization.value.inventory.buildContexts,
                         bounds: manifestSvc.boundsConfig(),

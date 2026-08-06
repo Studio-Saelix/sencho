@@ -293,3 +293,30 @@ describe('walkAndCopy', () => {
         ).rejects.toThrow(/case-insensitive/);
     });
 });
+
+describe('syncEnv ownership (audit C-2)', () => {
+    it('marks the repo-root .env unmanaged and unhashed when syncEnv owns the path', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    image: nginx\n',
+            '.env': 'REPO=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, syncEnv: true, bounds: BOUNDS });
+        const envEntries = result.inputs.filter((i) => i.materializedPath === '.env' || i.dependencyKind === 'interpolation-env');
+        expect(envEntries).toHaveLength(1);
+        expect(envEntries[0].ownership).toBe('unmanaged');
+        expect(envEntries[0].contentSha256).toBeNull();
+        expect(envEntries[0].deletionAuthority).toBe('none');
+    });
+
+    it('keeps the repo .env managed when syncEnv is off', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    image: nginx\n',
+            '.env': 'REPO=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, syncEnv: false, bounds: BOUNDS });
+        const envEntries = result.inputs.filter((i) => i.dependencyKind === 'interpolation-env');
+        expect(envEntries).toHaveLength(1);
+        expect(envEntries[0].ownership).toBe('managed');
+        expect(envEntries[0].contentSha256).toBeTruthy();
+    });
+});

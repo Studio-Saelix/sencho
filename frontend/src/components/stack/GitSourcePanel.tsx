@@ -511,8 +511,9 @@ export function GitSourcePanel({
       >
         <p className="text-sm text-stat-subtitle">
           Detaches the stack from its Git source. Sencho renders the effective compose model into a single
-          compose.yaml, keeps the materialized files, and removes Git tracking. Resolved environment values
-          are baked into the exported file. Reconfiguring the source later is always possible.
+          compose.yaml, keeps the materialized files, and removes Git tracking. Resolved values are baked into
+          the exported file: anything interpolated from .env or env_file files, including credentials, becomes
+          readable in compose.yaml. Reconfiguring the source later is always possible.
         </p>
       </ConfirmModal>
     </>

@@ -405,7 +405,10 @@ export class GitProjectManifestService {
     /**
      * Copy one candidate path into the stack dir through the guarded FS
      * service. Directory entries (build contexts) are copied recursively,
-     * preserving the nested layout.
+     * preserving the nested layout. Content is written BYTE-EXACT: build
+     * contexts, configs, and secrets can be binary, and the manifest hashes
+     * are computed over raw bytes, so a lossy string conversion would corrupt
+     * files and permanently trip the divergence guard on re-apply.
      */
     private async writeStackFileFromCandidate(stackName: string, candidateAbs: string, destRel: string, maxFileBytes: number): Promise<void> {
         const src = path.join(candidateAbs, destRel);
@@ -417,15 +420,15 @@ export class GitProjectManifestService {
             }
             return;
         }
-        const content = await fs.promises.readFile(src);
-        if (content.length > maxFileBytes) {
-            throw new Error(`Materialized file too large: ${destRel} (${content.length} bytes)`);
+        if (stat.size > maxFileBytes) {
+            throw new Error(`Materialized file too large: ${destRel} (${stat.size} bytes)`);
         }
+        const content = await fs.promises.readFile(src);
         const fsSvc = FileSystemService.getInstance();
         if (destRel === 'compose.yaml' || destRel === 'compose.yml' || destRel === 'docker-compose.yaml' || destRel === 'docker-compose.yml') {
-            await fsSvc.saveStackContent(stackName, content.toString('utf8'));
+            await fsSvc.saveStackContent(stackName, content);
         } else {
-            await fsSvc.writeStackFile(stackName, destRel, content.toString('utf8'));
+            await fsSvc.writeStackFile(stackName, destRel, content);
         }
     }
 
@@ -456,13 +459,19 @@ export class GitProjectManifestService {
             await fs.promises.mkdir(this.managedRoot(stackName), { recursive: true });
             await this.writeMarker(stackName, { sha, candidateRelPath, written: [] });
 
-            // 1. Write every managed, present input from the candidate.
+            // 1. Write every managed, present input from the candidate. The
+            //    marker is rewritten in BATCHES (every 25 files) with the full
+            //    written list: per-file rewrites are O(n^2) I/O on the large
+            //    projects this feature enables, and the recovery invariant only
+            //    needs the marker to exist with the last-known written set.
             const managed = manifest.inputs.filter((i) => i.ownership === 'managed' && i.state === 'present' && i.materializedPath !== null);
             const written: string[] = [];
             for (const entry of managed) {
                 await this.writeStackFileFromCandidate(stackName, candidateAbs, entry.materializedPath!, bounds.maxFileBytes);
                 written.push(entry.materializedPath!);
-                await this.writeMarker(stackName, { sha, candidateRelPath, written });
+                if (written.length % 25 === 0 || written.length === managed.length) {
+                    await this.writeMarker(stackName, { sha, candidateRelPath, written });
+                }
             }
 
             // 2. Stale cleanup: prior-manifest paths Sencho owns (deletionAuthority
@@ -568,7 +577,12 @@ export class GitProjectManifestService {
                 failures === 0 ? prior.generation.appliedDir : null,
             );
         } else {
+            // First-ever promotion failed with no prior generation to restore:
+            // the stack dir holds a partial file set. Flag it and KEEP the
+            // marker so the boot sweep reports the stack instead of silently
+            // leaving a mixed state.
             DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
+            failures = 1;
         }
         if (failures === 0) {
             await fs.promises.rm(await this.markerPath(stackName), { force: true });

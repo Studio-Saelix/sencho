@@ -363,11 +363,14 @@ export class FileSystemService {
     }
   }
 
-  async saveStackContent(stackName: string, content: string): Promise<void> {
+  async saveStackContent(stackName: string, content: string | Buffer): Promise<void> {
     const stackDir = this.resolveStackDir(stackName);
     const filePath = path.join(stackDir, 'compose.yaml');
     await this.assertRealWithinBase(filePath);
     try {
+      // Buffer input is written byte-exact (the encoding option is ignored for
+      // Buffers); string input keeps the utf-8 write. Byte-exactness matters to
+      // the Git materializer, whose content hashes are computed over raw bytes.
       await fsPromises.writeFile(filePath, content, 'utf-8');
     } catch (error) {
       console.error('Error writing file:', error);
@@ -1806,7 +1809,7 @@ export class FileSystemService {
   async writeStackFile(
     stackName: string,
     relPath: string,
-    content: string,
+    content: string | Buffer,
     opts?: { exclusive?: boolean },
   ): Promise<void> {
     const safePath = await this.resolveSafeStackPath(stackName, relPath);

@@ -1269,8 +1269,13 @@ export class ComposeService {
     return new Promise((resolve, reject) => {
       const MAX_OUTPUT = 5 * 1024 * 1024; // 5 MiB cap on each stream
       const TIMEOUT_MS = 30_000;
-      let stdout = '';
+      // Accumulate Buffer chunks and decode ONCE at the end: chunk-wise
+      // toString() can split a multi-byte UTF-8 sequence across a chunk
+      // boundary and mangle non-ASCII values.
+      const outChunks: Buffer[] = [];
+      let outBytes = 0;
       let stderr = '';
+      let capped = false;
       let settled = false;
       const timer = setTimeout(() => {
         settled = true;
@@ -1287,15 +1292,33 @@ export class ComposeService {
         settled = true;
         clearTimeout(timer);
         if (error) reject(error);
-        else resolve(stdout);
+        else resolve(Buffer.concat(outChunks).toString('utf8'));
       };
       child.stdout.on('data', (data: Buffer) => {
-        if (stdout.length < MAX_OUTPUT) stdout += data.toString();
+        if (capped) return;
+        outBytes += data.length;
+        if (outBytes > MAX_OUTPUT) {
+          // A truncated model frequently still parses as YAML; overwriting a
+          // working compose.yaml with it would be silent corruption. The cap is
+          // an error, not a truncation.
+          capped = true;
+          settled = true;
+          clearTimeout(timer);
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            // best effort
+          }
+          reject(new Error(`docker compose config output exceeded ${MAX_OUTPUT} bytes`));
+          return;
+        }
+        outChunks.push(data);
       });
       child.stderr.on('data', (data: Buffer) => {
         if (stderr.length < MAX_OUTPUT) stderr += data.toString();
       });
       child.on('close', (code) => {
+        if (capped) return;
         if (code === 0) finish(null);
         else finish(new Error(stderr.trim() || `docker compose config exited with code ${code}`));
       });
