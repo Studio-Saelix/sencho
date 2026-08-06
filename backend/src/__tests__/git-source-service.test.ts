@@ -13,6 +13,8 @@
  * - Per-stack mutex serialization ordering
  */
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
@@ -705,14 +707,16 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
             autoApplyOnWebhook: false,
             autoDeployOnApply: false,
         });
-        // upsert runs a dry-run fetch but not validateCompose, so the stub only
-        // affects the webhook pull below.
-        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: false, error: 'bad compose' });
+        // Complete-project pulls validate the staged candidate via the docker
+        // runner; stub it to fail so the webhook pull reports the error.
+        const runSpy = vi
+            .spyOn(svc as unknown as { runDockerCompose: (a: string[], c: string, t: number) => Promise<{ code: number; stdout: string; stderr: string }> }, 'runDockerCompose')
+            .mockResolvedValue({ code: 1, stdout: '', stderr: 'bad compose' });
 
         const result = await svc.handleWebhookPull('webhook-validate-fail');
         expect(result.status).toBe('error');
         expect(result.message).toMatch(/validation failed/i);
-        validateSpy.mockRestore();
+        runSpy.mockRestore();
     });
 });
 
@@ -1561,5 +1565,130 @@ describe('GitSourceService multi-file create + apply flow', () => {
 
         validateSpy.mockRestore();
         await cleanupStackDir('pending-config');
+    });
+});
+
+describe('GitSourceService pending blob decode branches', () => {
+    function svc(): unknown { return GitSourceService.getInstance(); }
+    type DecodeApi = {
+        crypto: { encrypt(s: string): string; decrypt(s: string): string };
+        encodePendingCompose(files: { path: string; content: string }[], ctx: string | null, cand: string | null, inv: unknown): string;
+        decodePendingCompose(s: string): { files: { path: string; content: string }[]; contextDir: string | null; candidateRelPath: string | null; inventory: unknown };
+    };
+
+    it('round-trips the v3 blob with candidate path and inventory', () => {
+        const s = svc() as unknown as DecodeApi;
+        const encoded = s.encodePendingCompose([{ path: 'compose.yaml', content: 'x' }], null, 'generations/candidate-abc', { inputs: [] });
+        const decoded = s.decodePendingCompose(encoded);
+        expect(decoded.candidateRelPath).toBe('generations/candidate-abc');
+        expect(decoded.files[0].content).toBe('x');
+        expect(decoded.inventory).toEqual({ inputs: [] });
+    });
+
+    it('decodes a v2 blob without a candidate', () => {
+        const s = svc() as unknown as DecodeApi;
+        const encoded = s.crypto.encrypt(JSON.stringify({ v: 2, files: [{ path: 'compose.yaml', content: 'y' }], contextDir: null }));
+        const decoded = s.decodePendingCompose(encoded);
+        expect(decoded.candidateRelPath).toBeNull();
+        expect(decoded.files[0].content).toBe('y');
+    });
+
+    it('falls back to legacy plaintext for unknown shapes', () => {
+        const s = svc() as unknown as DecodeApi;
+        const decoded = s.decodePendingCompose(s.crypto.encrypt('legacy content'));
+        expect(decoded.files).toEqual([{ path: 'compose.yaml', content: 'legacy content' }]);
+        expect(decoded.candidateRelPath).toBeNull();
+    });
+
+    it('treats a corrupt v3 blob as legacy with a logged warning', () => {
+        const s = svc() as unknown as DecodeApi;
+        const encoded = s.crypto.encrypt('{"v":3 not json');
+        const decoded = s.decodePendingCompose(encoded);
+        expect(decoded.files).toEqual([{ path: 'compose.yaml', content: '{"v":3 not json' }]);
+    });
+});
+
+describe('GitSourceService managed-area lifecycle', () => {
+    it('removes the managed area when createStackFromGit fails after staging', async () => {
+        const sha = 'f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1';
+        mockSuccessfulClone({ sha });
+        const svc = GitSourceService.getInstance();
+        const runSpy = vi
+            .spyOn(svc as unknown as { runDockerCompose: (a: string[], c: string, t: number) => Promise<{ code: number; stdout: string; stderr: string }> }, 'runDockerCompose')
+            .mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const createSpy = vi
+            .spyOn(FileSystemService.prototype, 'createStack')
+            .mockRejectedValue(new Error('simulated create failure'));
+        try {
+            await expect(
+                svc.createStackFromGit({
+                    stackName: 'rollback-area',
+                    repoUrl: 'https://github.com/example/repo.git',
+                    branch: 'main',
+                    composePaths: ['compose.yaml'],
+                    contextDir: null,
+                    syncEnv: false,
+                    envPath: null,
+                    authType: 'none',
+                    token: null,
+                    autoApplyOnWebhook: false,
+                    autoDeployOnApply: false,
+                }),
+            ).rejects.toThrow(/simulated create failure/);
+        } finally {
+            runSpy.mockRestore();
+            createSpy.mockRestore();
+        }
+        // The staged candidate lived in the managed area; the rollback must reap it.
+        const area = path.join(process.env.DATA_DIR!, 'git-managed', '1', 'rollback-area');
+        expect(fs.existsSync(area)).toBe(false);
+        expect(DatabaseService.getInstance().getGitSource('rollback-area')).toBeUndefined();
+    });
+
+    it('sweeps managed areas whose stack no longer exists', async () => {
+        mockSuccessfulClone();
+        DatabaseService.getInstance().upsertGitSource({
+            stack_name: 'ghost-stack',
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: null,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const manifestSvc = GitProjectManifestService.getInstance();
+        const manifest = manifestSvc.buildManifest({
+            stackName: 'ghost-stack',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: 'ghost-stack',
+            invocation: ['-f', 'compose.yaml', '-p', 'ghost-stack'],
+            inputs: [],
+            refusals: [],
+            buildContexts: [],
+            bounds: { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 },
+            priorManifest: null,
+            state: 'active',
+        });
+        await manifestSvc.writeManifest('ghost-stack', manifest);
+        await GitSourceService.getInstance().sweepOrphans();
+        expect(await manifestSvc.readManifest('ghost-stack', 'https://github.com/example/repo.git', 'main')).toBeNull();
     });
 });

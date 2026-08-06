@@ -353,7 +353,7 @@ export class GitProjectManifestService {
     }
 
     /** Hash of the stack-dir file at a materialized path, or null when absent. */
-    private async hashStackFile(stackName: string, relPath: string): Promise<string | null> {
+    async hashStackFile(stackName: string, relPath: string): Promise<string | null> {
         try {
             const abs = await this.stackFileAbs(stackName, relPath);
             return sha256Of(await fs.promises.readFile(abs));
@@ -766,9 +766,16 @@ export class GitProjectManifestService {
      * the detach transaction aborts before anything changes.
      */
     async exportForDetach(stackName: string, render: () => Promise<string>): Promise<string> {
-        const rendered = await render();
+        let rendered: string;
+        try {
+            rendered = await render();
+        } catch (e) {
+            // A render failure aborts the detach transaction; tag it so the
+            // route can answer 409 (row kept) rather than a generic 500.
+            throw Object.assign(new Error(`Detach render failed: ${e instanceof Error ? e.message : String(e)}`), { code: 'RENDER_FAILED' });
+        }
         if (!rendered || !rendered.trim()) {
-            throw new Error('Detach render produced empty output; nothing exported');
+            throw Object.assign(new Error('Detach render produced empty output; nothing exported'), { code: 'RENDER_FAILED' });
         }
         try {
             const parsed = YAML.parse(rendered);
@@ -776,7 +783,7 @@ export class GitProjectManifestService {
                 throw new Error('Detach render produced invalid YAML');
             }
         } catch (e) {
-            throw new Error(`Detach render failed to parse: ${e instanceof Error ? e.message : String(e)}`);
+            throw Object.assign(new Error(`Detach render failed to parse: ${e instanceof Error ? e.message : String(e)}`), { code: 'RENDER_FAILED' });
         }
         return rendered;
     }

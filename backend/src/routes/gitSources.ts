@@ -107,7 +107,10 @@ stackGitSourceRouter.get('/:stackName/git-source', async (req: Request, res: Res
   try {
     const source = GitSourceService.getInstance().get(stackName);
     if (source) {
-      res.json(source);
+      // The managed-project manifest summary rides the source branch; the
+      // unlinked {linked:false} shape below is unchanged.
+      const manifest = await GitSourceService.getInstance().getManifestSummary(stackName);
+      res.json({ ...source, manifest });
       return;
     }
     // No source row. A non-existent stack is a genuine 404, but an existing
@@ -241,21 +244,37 @@ stackGitSourceRouter.delete('/:stackName/git-source', async (req: Request, res: 
   }
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   try {
-    // The deploy spec lives on the Git-source row, so unlinking a multi-file (or
-    // project-directory) source would silently drop the spec and revert future
-    // deploys to root compose.yaml auto-discovery, ignoring the override files
-    // still on disk. Refuse rather than change deploy semantics out from under the
-    // user; deleting the stack removes it cleanly.
-    const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
-    if (spec && (spec.files.length > 1 || spec.contextDir)) {
-      res.status(409).json({
-        error: 'This stack deploys multiple compose files configured by its Git source. Unlinking would change it to deploy only compose.yaml. Delete the stack to remove it, or keep the Git source.',
-      });
+    // Detach with the export contract: the effective compose model is rendered
+    // into a single compose.yaml and the materialized files are kept, so a
+    // multi-file / project-directory stack stays deployable after unlinking.
+    // A render failure aborts with 409 and the row is left intact.
+    await GitSourceService.getInstance().detach(stackName);
+    console.log(`[GitSource] Detached git source for ${stackName}`);
+    res.json({ success: true });
+  } catch (error) {
+    const code = (error as { code?: string } | null)?.code;
+    if (code === 'RENDER_FAILED') {
+      res.status(409).json({ error: (error as Error).message });
       return;
     }
-    GitSourceService.getInstance().delete(stackName);
-    console.log(`[GitSource] Removed git source for ${stackName}`);
-    res.json({ success: true });
+    sendGitSourceError(res, error);
+  }
+});
+
+stackGitSourceRouter.get('/:stackName/git-source/manifest', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  try {
+    const manifest = await GitSourceService.getInstance().getManifest(stackName);
+    if (!manifest) {
+      res.status(404).json({ error: 'No managed-project manifest for this stack' });
+      return;
+    }
+    res.json({ manifest });
   } catch (error) {
     sendGitSourceError(res, error);
   }

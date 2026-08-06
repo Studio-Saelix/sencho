@@ -17,6 +17,10 @@ import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
 import { gitSourceLocalComposeFiles, PRIMARY_COMPOSE_FILENAME } from '../utils/gitComposeFiles';
+import { ComposeInputDiscoveryService, type ContextCopyPlan } from './ComposeInputDiscoveryService';
+import { GitProjectManifestService } from './GitProjectManifestService';
+import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import type { ComposeInputEntry, GitProjectManifest, GitSourceManifestState, InventoryResult, ManifestSummary, RefusalInfo } from '../types/gitProjectManifest';
 import type { GitHttpRequest, GitHttpResponse, HttpClient } from 'isomorphic-git/http/node';
 
 // isomorphic-git is the heaviest dependency in the backend (~5 MB) and only
@@ -186,6 +190,12 @@ export interface FetchParams {
     envPath?: string | null;
     token?: string | null;
     timeoutMs?: number;
+    /**
+     * Runs inside the clone lifecycle (before the temp dir is removed) so the
+     * caller can discover and stage the complete project from the checkout.
+     * Used by the pull/create paths for complete-project materialization.
+     */
+    onClone?: (cloneDir: string, commitSha: string, envContent: string | null) => Promise<unknown>;
 }
 
 export interface FetchResult {
@@ -198,6 +208,16 @@ export interface FetchResult {
      * UI should surface these so the user is not surprised later.
      */
     warnings: string[];
+    /** Set when an onClone hook ran (complete-project materialization). */
+    materialization?: MaterializationResult | null;
+}
+
+/** Result of discovery + candidate staging inside the clone lifecycle. */
+export interface MaterializationResult {
+    inventory: InventoryResult;
+    contextCopyPlans: ContextCopyPlan[];
+    candidateRelPath: string;
+    validation: { ok: boolean; error?: string };
 }
 
 export interface UpsertInput {
@@ -243,6 +263,12 @@ export interface PullResult {
     currentEnv: string | null;
     validation: { ok: boolean; error?: string };
     hasLocalChanges: boolean;
+    /** Tolerated (non-actionable) refusals from complete-project discovery. */
+    refusals: RefusalInfo[];
+    /** Projection of the current managed-project manifest, when one exists. */
+    manifestSummary: ManifestSummary | null;
+    /** True when a validated candidate is staged and ready to apply. */
+    candidateReady: boolean;
 }
 
 export interface PublicGitSource {
@@ -264,6 +290,8 @@ export interface PublicGitSource {
     pending_fetched_at: number | null;
     created_at: number;
     updated_at: number;
+    /** Managed-project manifest cache state (DB-only enum, see gitProjectManifest.ts). */
+    manifest_state: GitSourceManifestState | null;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -494,6 +522,11 @@ async function removeTempDir(dir: string): Promise<void> {
     }
 }
 
+/** Module-level boot hook for the managed-area sweep (see sweepOrphans). */
+export async function sweepGitManifestOrphans(): Promise<void> {
+    await GitSourceService.getInstance().sweepOrphans();
+}
+
 /**
  * Sweep any leftover sencho-git-* temp dirs older than 1 hour. Runs once at
  * service boot to clean up after a crashed process.
@@ -562,6 +595,7 @@ export class GitSourceService {
             pending_fetched_at: src.pending_fetched_at,
             created_at: src.created_at,
             updated_at: src.updated_at,
+            manifest_state: src.manifest_state ?? 'absent',
         };
     }
 
@@ -651,8 +685,42 @@ export class GitSourceService {
         return this.get(input.stackName)!;
     }
 
-    public delete(stackName: string): void {
-        DatabaseService.getInstance().deleteGitSource(stackName);
+    /**
+     * Detach a Git source under the export contract: render the effective
+     * compose model into a single compose.yaml, keep the materialized files,
+     * remove the managed area, then drop the row. Ordering guarantees every
+     * failure leaves the stack and the row intact; the render is deterministic
+     * per disk state, so a late failure leaves detach safely re-runnable.
+     */
+    public async detach(stackName: string): Promise<void> {
+        return this.withStackLock(stackName, async () => {
+            const src = DatabaseService.getInstance().getGitSource(stackName);
+            if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
+            const manifestSvc = GitProjectManifestService.getInstance();
+            const rendered = await manifestSvc.exportForDetach(stackName, () =>
+                ComposeService.getInstance().renderComposeYaml(stackName),
+            );
+            await FileSystemService.getInstance().saveStackContent(stackName, rendered);
+            await manifestSvc.deleteManagedArea(stackName);
+            DatabaseService.getInstance().deleteGitSource(stackName);
+        });
+    }
+
+    /** The managed-project manifest for a stack, when it exists and is trusted. */
+    public async getManifest(stackName: string): Promise<GitProjectManifest | null> {
+        const src = DatabaseService.getInstance().getGitSource(stackName);
+        if (!src) return null;
+        const manifest = await GitProjectManifestService.getInstance().readManifest(stackName, src.repo_url, src.branch);
+        return manifest !== null && !('corrupt' in manifest) ? manifest : null;
+    }
+
+    /** Summary projection of the managed-project manifest (null when absent or corrupt). */
+    public async getManifestSummary(stackName: string): Promise<ManifestSummary | null> {
+        const src = DatabaseService.getInstance().getGitSource(stackName);
+        if (!src) return null;
+        const manifestSvc = GitProjectManifestService.getInstance();
+        const manifest = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
+        return manifest !== null && !('corrupt' in manifest) ? manifestSvc.summaryFrom(manifest) : null;
     }
 
     // ─── Fetch ───────────────────────────────────────────────────────────────
@@ -798,12 +866,17 @@ export class GitSourceService {
                     }
                 }
 
+                let materialization: MaterializationResult | null = null;
+                if (params.onClone) {
+                    materialization = (await params.onClone(dir, commitSha, envContent)) as MaterializationResult | null;
+                }
+
                 if (diag) {
                     console.log(
-                        `[GitSource:diag] fetch ok host=${sanitizeForLog(repoHost(repoUrl))} branch=${sanitizeForLog(branch)} sha=${commitSha.slice(0, 7)} files=${composeFiles.length} env=${envContent !== null ? 'present' : 'absent'} warnings=${warnings.length} elapsedMs=${Date.now() - startedAt}`
+                        `[GitSource:diag] fetch ok host=${sanitizeForLog(repoHost(repoUrl))} branch=${sanitizeForLog(branch)} sha=${commitSha.slice(0, 7)} files=${composeFiles.length} env=${envContent !== null ? 'present' : 'absent'} warnings=${warnings.length} materialized=${materialization !== null} elapsedMs=${Date.now() - startedAt}`
                     );
                 }
-                return { composeFiles, envContent, commitSha, warnings };
+                return { composeFiles, envContent, commitSha, warnings, materialization };
             });
         } catch (err) {
             if (diag) {
@@ -1001,6 +1074,105 @@ export class GitSourceService {
         }
     }
 
+    /**
+     * Complete-project materialization inside the clone lifecycle: discover +
+     * classify every declared input, abort on actionable refusals, build the
+     * staged candidate (managed files + filtered build contexts), and validate
+     * the exact candidate with the exact deploy invocation (including -p).
+     * Runs only when the complete-project contract applies.
+     */
+    private async buildMaterialization(
+        stackName: string,
+        cloneDir: string,
+        commitSha: string,
+        src: { compose_paths: string[]; context_dir: string | null; sync_env: boolean },
+        envContent: string | null,
+    ): Promise<MaterializationResult> {
+        const manifestSvc = GitProjectManifestService.getInstance();
+        const bounds = manifestSvc.boundsConfig();
+
+        const inventory = await ComposeInputDiscoveryService.getInstance().discoverFromClone({
+            cloneDir,
+            composePaths: src.compose_paths,
+            contextDir: src.context_dir,
+            bounds,
+        });
+
+        const actionable = inventory.refusals.filter((r) => r.actionable);
+        if (actionable.length > 0) {
+            const detail = actionable.slice(0, 5).map((r) => r.reason).join('; ');
+            throw new GitSourceError('GIT_ERROR', `Cannot materialize the complete project: ${detail}${actionable.length > 5 ? ` (and ${actionable.length - 5} more)` : ''}`);
+        }
+
+        const managed = inventory.inputs.filter((i) => i.ownership === 'managed' && i.materializedPath !== null && i.state === 'present');
+        const candidateRel = await manifestSvc.buildCandidate(
+            stackName,
+            commitSha,
+            cloneDir,
+            managed.map((i) => ({ srcRel: i.sourcePath!, destRel: i.materializedPath! })),
+            inventory.contextCopyPlans,
+            bounds,
+        );
+
+        // Stage the synced env into the candidate so validation exercises the
+        // exact deploy layout (stack-root .env).
+        if (src.sync_env && envContent !== null) {
+            const candidateAbs = path.join(process.env.DATA_DIR || path.join(process.cwd(), 'data'), 'git-managed', String(NodeRegistry.getInstance().getDefaultNodeId()), stackName, candidateRel);
+            await fsPromises.mkdir(candidateAbs, { recursive: true });
+            await fsPromises.writeFile(path.join(candidateAbs, '.env'), envContent, 'utf8');
+        }
+
+        const validation = await this.validateCandidate(stackName, candidateRel, src.compose_paths, src.context_dir);
+        return { inventory, contextCopyPlans: inventory.contextCopyPlans, candidateRelPath: candidateRel, validation };
+    }
+
+    /**
+     * Validate the staged candidate with the exact deploy invocation: the same
+     * relative -f order, -p project name, --project-directory, and --env-file
+     * the deploy uses, run inside the candidate dir. Candidate validation gets a
+     * larger budget than the pull preview (30s) and names the timeout.
+     */
+    private async validateCandidate(stackName: string, candidateRelPath: string, composePaths: string[], contextDir: string | null): Promise<{ ok: boolean; error?: string }> {
+        const manifestSvc = GitProjectManifestService.getInstance();
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+        const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, candidateRelPath);
+        const localFiles = gitSourceLocalComposeFiles(composePaths);
+
+        const args = ['compose'];
+        for (const local of localFiles) {
+            const safeRel = local.replace(/\\/g, '/').split('/').map((s) => path.basename(s)).join('/');
+            const abs = path.resolve(candidateAbs, safeRel);
+            if (!isPathWithinBase(abs, candidateAbs)) {
+                return { ok: false, error: `Compose path escapes the candidate dir: ${local}` };
+            }
+            args.push('-f', safeRel);
+        }
+        args.push('-p', stackName);
+        if (contextDir) {
+            const baseResolved = path.resolve(candidateAbs);
+            const ctxAbs = path.resolve(baseResolved, contextDir);
+            if (!ctxAbs.startsWith(baseResolved + path.sep)) {
+                return { ok: false, error: 'Context directory escapes the candidate dir.' };
+            }
+            args.push('--project-directory', ctxAbs);
+        }
+        // Mirror the deploy-time env resolution: only pass --env-file when the
+        // candidate actually carries the env (sync-env stacks stage it there).
+        const candidateEnv = path.join(candidateAbs, '.env');
+        try {
+            await fsPromises.access(candidateEnv);
+            args.push('--env-file', candidateEnv);
+        } catch {
+            // no staged env; compose falls back to environment interpolation
+        }
+        args.push('config', '--quiet');
+        const result = await this.runDockerCompose(args, candidateAbs, 30_000);
+        if (result.code === 0) return { ok: true };
+        const timeoutHint = result.stderr.includes('Validation timed out') ? ' (docker compose config timed out after 30s)' : '';
+        return { ok: false, error: `${result.stderr.trim() || `docker compose exited with code ${result.code}`}${timeoutHint}` };
+    }
+
     private runDockerCompose(args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
         return new Promise((resolve) => {
             const child = spawn('docker', args, { cwd });
@@ -1062,32 +1234,46 @@ export class GitSourceService {
         return { files: gitSourceLocalComposeFiles(composePaths), contextDir: contextDir ?? null };
     }
 
-    /** Encrypt the ordered compose file set as the v2 pending blob (carries contextDir). */
-    private encodePendingCompose(files: ComposeFile[], contextDir: string | null): string {
-        return this.crypto.encrypt(JSON.stringify({ v: 2, files, contextDir }));
+    /** Encrypt the ordered compose file set as the v3 pending blob (carries contextDir + staged candidate + inventory). */
+    private encodePendingCompose(files: ComposeFile[], contextDir: string | null, candidateRelPath: string | null, inventory: InventoryResult | null): string {
+        return this.crypto.encrypt(JSON.stringify({ v: 3, files, contextDir, candidateRelPath, inventory }));
     }
 
     /**
      * Decrypt a stored pending compose blob into its ordered file set + contextDir.
-     * Detects the v2 marker; anything else is a legacy single-file plaintext string.
+     * Detects the v3 marker first, then v2, then legacy single-file plaintext.
+     * The `{"v":2` / `{"v":3` prefixes are mutually exclusive, so ordering is for
+     * readability only; a parse failure under a version marker is corrupt state
+     * (logged, never silently treated as legacy).
      */
-    private decodePendingCompose(stored: string): { files: ComposeFile[]; contextDir: string | null } {
+    private decodePendingCompose(stored: string): { files: ComposeFile[]; contextDir: string | null; candidateRelPath: string | null; inventory: InventoryResult | null } {
         const raw = this.crypto.decrypt(stored);
+        if (raw.startsWith('{"v":3')) {
+            try {
+                const parsed = JSON.parse(raw) as { v: number; files?: ComposeFile[]; contextDir?: string | null; candidateRelPath?: string | null; inventory?: InventoryResult | null };
+                if (Array.isArray(parsed.files) && parsed.files.length > 0) {
+                    return {
+                        files: parsed.files,
+                        contextDir: parsed.contextDir ?? null,
+                        candidateRelPath: typeof parsed.candidateRelPath === 'string' ? parsed.candidateRelPath : null,
+                        inventory: parsed.inventory ?? null,
+                    };
+                }
+            } catch (e) {
+                console.error('[GitSource] pending compose blob carried the v3 marker but failed to parse; treating as legacy:', (e as Error).message);
+            }
+        }
         if (raw.startsWith('{"v":2')) {
             try {
                 const parsed = JSON.parse(raw) as { v: number; files?: ComposeFile[]; contextDir?: string | null };
                 if (Array.isArray(parsed.files) && parsed.files.length > 0) {
-                    return { files: parsed.files, contextDir: parsed.contextDir ?? null };
+                    return { files: parsed.files, contextDir: parsed.contextDir ?? null, candidateRelPath: null, inventory: null };
                 }
             } catch (e) {
-                // The v2 marker proves this was written as multi-file, so a parse
-                // failure signals a corrupt pending blob, not a legacy row. Log it
-                // so the misleading downstream validation error is traceable; the
-                // re-validate in apply still blocks deploying the garbled content.
                 console.error('[GitSource] pending compose blob carried the v2 marker but failed to parse; treating as legacy:', (e as Error).message);
             }
         }
-        return { files: [{ path: PRIMARY_COMPOSE_FILENAME, content: raw }], contextDir: null };
+        return { files: [{ path: PRIMARY_COMPOSE_FILENAME, content: raw }], contextDir: null, candidateRelPath: null, inventory: null };
     }
 
     private async readDiskContent(stackName: string, syncEnv: boolean, relFiles: string[]): Promise<{ files: ComposeFile[]; env: string | null }> {
@@ -1205,15 +1391,24 @@ export class GitSourceService {
         }
 
         const token = src.encrypted_token ? this.crypto.decrypt(src.encrypted_token) : null;
+        const manifestSvc = GitProjectManifestService.getInstance();
+        // Object holder: property access is not narrowed by control-flow
+        // analysis, so the closure assignment below stays visible.
+        const materialization: { value: MaterializationResult | null } = { value: null };
         const fetched = await this.fetchFromGit({
             repoUrl: src.repo_url,
             branch: src.branch,
             composePaths: src.compose_paths,
             envPath: src.sync_env ? src.env_path : null,
             token,
+            onClone: async (cloneDir, commitSha, envContent) => {
+                materialization.value = await this.buildMaterialization(stackName, cloneDir, commitSha, src, envContent);
+            },
         });
 
-        const validation = await this.validateCompose(fetched.composeFiles, fetched.envContent, src.context_dir);
+        const validation = materialization.value
+            ? materialization.value.validation
+            : await this.validateCompose(fetched.composeFiles, fetched.envContent, src.context_dir);
         const appliedFiles = src.applied_deploy_spec?.files ?? [PRIMARY_COMPOSE_FILENAME];
         const disk = await this.readDiskContent(stackName, src.sync_env, appliedFiles);
         const currentHash = this.hashContent(disk.files, disk.env);
@@ -1222,17 +1417,26 @@ export class GitSourceService {
 
         // Store pending so a subsequent apply doesn't re-fetch. Compose files
         // routinely contain secrets inlined as env interpolations or passwords,
-        // so the v2 blob (ordered files + contextDir) is encrypted at rest.
+        // so the v3 blob (ordered files + contextDir + candidate + inventory)
+        // is encrypted at rest.
         db.setGitSourcePending(
             stackName,
             fetched.commitSha,
-            this.encodePendingCompose(fetched.composeFiles, src.context_dir),
+            this.encodePendingCompose(fetched.composeFiles, src.context_dir, materialization.value?.candidateRelPath ?? null, materialization.value?.inventory ?? null),
             fetched.envContent !== null ? this.crypto.encrypt(fetched.envContent) : null,
         );
 
-        console.log(`[GitSource] Pending update ready for ${stackName} at ${fetched.commitSha.slice(0, 7)} (validation=${validation.ok ? 'ok' : 'fail'}, localEdits=${hasLocalChanges})`);
+        // Prior manifest summary for the pull response (managed/unmanaged/refused
+        // counts + pinned revision); a corrupt manifest is surfaced as such.
+        let manifestSummary: ManifestSummary | null = null;
+        const prior = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
+        if (prior !== null && !('corrupt' in prior)) {
+            manifestSummary = manifestSvc.summaryFrom(prior);
+        }
+
+        console.log(`[GitSource] Pending update ready for ${stackName} at ${fetched.commitSha.slice(0, 7)} (validation=${validation.ok ? 'ok' : 'fail'}, localEdits=${hasLocalChanges}, candidate=${materialization.value?.candidateRelPath ?? "none"})`);
         if (diag) {
-            console.log(`[GitSource:diag] pull done stack=${stackName} sha=${fetched.commitSha.slice(0, 7)} validation=${validation.ok} localEdits=${hasLocalChanges}`);
+            console.log(`[GitSource:diag] pull done stack=${stackName} sha=${fetched.commitSha.slice(0, 7)} validation=${validation.ok} localEdits=${hasLocalChanges} candidate=${materialization.value !== null}`);
         }
 
         return {
@@ -1243,6 +1447,9 @@ export class GitSourceService {
             currentEnv: disk.env,
             validation,
             hasLocalChanges,
+            refusals: materialization.value?.inventory.refusals ?? [],
+            manifestSummary,
+            candidateReady: materialization.value !== null && materialization.value.validation.ok,
         };
     }
 
@@ -1287,23 +1494,126 @@ export class GitSourceService {
 
         // Materialize from the pending blob (its files + contextDir), never the
         // live config: a config edit between pull and apply must not change what
-        // gets written. The v2 blob is decoded here; legacy plaintext is treated
-        // as a single compose.yaml.
+        // gets written. The v3 blob is decoded here (legacy v2/plaintext blobs
+        // fall back to the historical file-set path below).
         const pending = this.decodePendingCompose(src.pending_compose_content);
         const envContent = src.pending_env_content !== null
             ? this.crypto.decrypt(src.pending_env_content)
             : null;
+        const manifestSvc = GitProjectManifestService.getInstance();
 
-        // Re-validate before writing.
-        const validation = await this.validateCompose(pending.files, envContent, pending.contextDir);
-        if (!validation.ok) {
-            if (diag) console.log(`[GitSource:diag] apply validation fail stack=${stackName}`);
-            throw new GitSourceError('GIT_ERROR', `Compose validation failed: ${validation.error}`);
+        let appliedSpec: GitSourceAppliedSpec | null;
+        if (pending.candidateRelPath !== null && pending.inventory !== null) {
+            // ── Complete-project path (v3 pending) ───────────────────────────
+            const prior = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
+            if (prior !== null && 'corrupt' in prior) {
+                throw new GitSourceError('GIT_ERROR', `The managed-project manifest for ${stackName} cannot be trusted (${prior.corrupt}). Pull again to rebuild it.`);
+            }
+
+            // The staged candidate must still exist and be complete; a deleted
+            // candidate (or a node restart that swept it) invalidates the pull.
+            const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+            const candidateAbs = path.join(dataDir, 'git-managed', String(NodeRegistry.getInstance().getDefaultNodeId()), stackName, pending.candidateRelPath);
+            try {
+                await fsPromises.access(candidateAbs);
+            } catch {
+                throw new GitSourceError('GIT_ERROR', 'Pending update was invalidated; pull again.');
+            }
+
+            // Re-validate the exact candidate before touching the live project.
+            const candValidation = await this.validateCandidate(stackName, pending.candidateRelPath, src.compose_paths, src.context_dir);
+            if (!candValidation.ok) {
+                if (diag) console.log(`[GitSource:diag] apply candidate validation fail stack=${stackName}`);
+                throw new GitSourceError('GIT_ERROR', `Candidate validation failed: ${candValidation.error}`);
+            }
+
+            // Local-modification refusal (convergence prelude): every managed,
+            // present input must still match the manifest hash, or the incoming
+            // commit would overwrite user edits. Abort before any write.
+            if (prior) {
+                const diverged: string[] = [];
+                for (const entry of prior.inputs) {
+                    if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
+                    if (entry.contentSha256 === null) continue;
+                    const diskHash = await manifestSvc.hashStackFile(stackName, entry.materializedPath);
+                    if (diskHash !== entry.contentSha256) diverged.push(entry.materializedPath);
+                }
+                if (diverged.length > 0) {
+                    throw new GitSourceError(
+                        'GIT_ERROR',
+                        `Local modifications detected on ${diverged.join(', ')}. Detach the Git source or restore these files; the incoming commit will not overwrite local changes.`,
+                    );
+                }
+            }
+
+            // Assemble the new manifest from the pull-time inventory.
+            const syncEnvEntry: ComposeInputEntry | null =
+                src.sync_env && envContent !== null
+                    ? {
+                          sourcePath: null,
+                          materializedPath: '.env',
+                          role: 'env',
+                          dependencyKind: 'sync-env',
+                          ownership: 'managed',
+                          provenance: 'fetch',
+                          sensitivity: 'high',
+                          contentSha256: crypto.createHash('sha256').update(envContent).digest('hex'),
+                          sizeBytes: Buffer.byteLength(envContent, 'utf8'),
+                          state: 'present',
+                          deletionAuthority: 'sencho',
+                          note: null,
+                      }
+                    : null;
+            const invocation: string[] = [];
+            try {
+                invocation.push(...(await authoredComposeFileArgs(stackName, NodeRegistry.getInstance().getDefaultNodeId())));
+                invocation.push(...(await authoredComposeEnvFileArgs(stackName, NodeRegistry.getInstance().getDefaultNodeId())));
+            } catch {
+                // best-effort; a fresh pull rebuilds the invocation
+            }
+            const manifest = manifestSvc.buildManifest({
+                stackName,
+                repoUrl: src.repo_url,
+                branch: src.branch,
+                commitSha,
+                projectRoot: src.context_dir,
+                composeFiles: src.compose_paths,
+                projectName: stackName,
+                invocation,
+                inputs: syncEnvEntry ? [...pending.inventory.inputs, syncEnvEntry] : pending.inventory.inputs,
+                refusals: pending.inventory.refusals,
+                buildContexts: pending.inventory.buildContexts,
+                bounds: manifestSvc.boundsConfig(),
+                priorManifest: prior ?? null,
+                state: pending.inventory.refusals.length > 0 ? 'partial' : 'active',
+            });
+            await manifestSvc.promoteGeneration(stackName, {
+                sha: commitSha,
+                candidateRelPath: pending.candidateRelPath,
+                manifest,
+                priorManifest: prior ?? null,
+            });
+            appliedSpec = this.deriveAppliedSpec(src.compose_paths, src.context_dir);
+        } else {
+            // ── Legacy path (v2/plaintext pending from before the upgrade) ──
+            const validation = await this.validateCompose(pending.files, envContent, pending.contextDir);
+            if (!validation.ok) {
+                if (diag) console.log(`[GitSource:diag] apply validation fail stack=${stackName}`);
+                throw new GitSourceError('GIT_ERROR', `Compose validation failed: ${validation.error}`);
+            }
+            appliedSpec = await this.materialize(
+                stackName, pending.files, pending.contextDir, src.sync_env, envContent, src.applied_deploy_spec,
+            );
+            // Migration: build the conservative manifest from spec + disk.
+            const migrated = await manifestSvc.buildMigratedManifest(stackName, {
+                repo_url: src.repo_url,
+                branch: src.branch,
+                sync_env: src.sync_env,
+                applied_deploy_spec: appliedSpec,
+            });
+            await manifestSvc.writeManifest(stackName, migrated);
+            db.setGitSourceManifestState(stackName, migrated.manifestVersion, migrated.state, migrated.generation.appliedDir);
         }
-
-        const appliedSpec = await this.materialize(
-            stackName, pending.files, pending.contextDir, src.sync_env, envContent, src.applied_deploy_spec,
-        );
 
         const hash = this.hashContent(pending.files, envContent);
         db.markGitSourceApplied(stackName, commitSha, hash);
@@ -1380,32 +1690,99 @@ export class GitSourceService {
             }
 
             // 1. Fetch from git BEFORE touching disk or DB. If the fetch
-            //    fails there is nothing to clean up.
+            //    fails there is nothing to clean up. The onClone hook stages
+            //    the complete-project candidate inside the clone lifecycle.
+            const manifestSvc = GitProjectManifestService.getInstance();
+            const materialization: { value: MaterializationResult | null } = { value: null };
             const fetched = await this.fetchFromGit({
                 repoUrl: input.repoUrl,
                 branch: input.branch,
                 composePaths: input.composePaths,
                 envPath: input.syncEnv ? input.envPath : null,
                 token: input.token,
+                onClone: async (cloneDir, commitSha, envContent) => {
+                    materialization.value = await this.buildMaterialization(input.stackName, cloneDir, commitSha, {
+                        compose_paths: input.composePaths,
+                        context_dir: input.contextDir,
+                        sync_env: input.syncEnv,
+                    }, envContent);
+                },
             });
 
             // 2. Validate against the same `docker compose config` check the
             //    apply path uses. Reject before creating anything on disk.
-            const validation = await this.validateCompose(fetched.composeFiles, fetched.envContent, input.contextDir);
+            const validation = materialization.value
+                ? materialization.value.validation
+                : await this.validateCompose(fetched.composeFiles, fetched.envContent, input.contextDir);
             if (!validation.ok) {
                 throw new GitSourceError('GIT_ERROR', `Compose validation failed: ${validation.error}`);
             }
 
-            // 3. Create directory + boilerplate, then materialize the fetched
-            //    files. createStack() throws if the directory already exists, so a
+            // 3. Create directory + boilerplate, then promote the staged
+            //    candidate (or fall back to the historical file-set write).
+            //    createStack() throws if the directory already exists, so a
             //    name collision is caught here.
             let stackCreated = false;
             try {
                 await fsSvc.createStack(input.stackName);
                 stackCreated = true;
-                const appliedSpec = await this.materialize(
-                    input.stackName, fetched.composeFiles, input.contextDir, input.syncEnv, fetched.envContent, null,
-                );
+                let appliedSpec: GitSourceAppliedSpec | null;
+                if (materialization.value) {
+                    const inputs = materialization.value.inventory.inputs.filter(
+                        (i) => i.ownership === 'managed' && i.state === 'present' && i.materializedPath !== null,
+                    );
+                    const syncEnvEntry: ComposeInputEntry | null =
+                        input.syncEnv && fetched.envContent !== null
+                            ? {
+                                  sourcePath: null,
+                                  materializedPath: '.env',
+                                  role: 'env',
+                                  dependencyKind: 'sync-env',
+                                  ownership: 'managed',
+                                  provenance: 'fetch',
+                                  sensitivity: 'high',
+                                  contentSha256: crypto.createHash('sha256').update(fetched.envContent).digest('hex'),
+                                  sizeBytes: Buffer.byteLength(fetched.envContent, 'utf8'),
+                                  state: 'present',
+                                  deletionAuthority: 'sencho',
+                                  note: null,
+                              }
+                            : null;
+                    const invocation: string[] = [];
+                    try {
+                        invocation.push(...(await authoredComposeFileArgs(input.stackName, NodeRegistry.getInstance().getDefaultNodeId())));
+                        invocation.push(...(await authoredComposeEnvFileArgs(input.stackName, NodeRegistry.getInstance().getDefaultNodeId())));
+                    } catch {
+                        // best-effort; a fresh pull rebuilds the invocation
+                    }
+                    const manifest = manifestSvc.buildManifest({
+                        stackName: input.stackName,
+                        repoUrl: input.repoUrl,
+                        branch: input.branch,
+                        commitSha: fetched.commitSha,
+                        projectRoot: input.contextDir,
+                        composeFiles: input.composePaths,
+                        projectName: input.stackName,
+                        invocation,
+                        inputs: syncEnvEntry ? [...inputs, syncEnvEntry] : inputs,
+                        refusals: materialization.value.inventory.refusals,
+                        buildContexts: materialization.value.inventory.buildContexts,
+                        bounds: manifestSvc.boundsConfig(),
+                        priorManifest: null,
+                        state: materialization.value.inventory.refusals.length > 0 ? 'partial' : 'active',
+                    });
+                    await manifestSvc.promoteGeneration(input.stackName, {
+                        sha: fetched.commitSha,
+                        candidateRelPath: materialization.value.candidateRelPath,
+                        manifest,
+                        priorManifest: null,
+                    });
+                    appliedSpec = this.deriveAppliedSpec(input.composePaths, input.contextDir);
+                } else {
+                    appliedSpec = await this.materialize(
+                        input.stackName, fetched.composeFiles, input.contextDir, input.syncEnv, fetched.envContent, null,
+                    );
+                }
                 const envWritten = input.syncEnv && fetched.envContent !== null;
 
                 // 4. Insert the git-source row, then mark it applied so future
@@ -1460,10 +1837,51 @@ export class GitSourceService {
                         console.error(`[GitSource] Rollback: failed to remove partial stack dir ${input.stackName}:`, cleanupErr);
                     }
                 }
+                // R6: the managed area must not outlive the failed create.
+                try {
+                    await GitProjectManifestService.getInstance().deleteManagedArea(input.stackName);
+                } catch (cleanupErr) {
+                    console.error(`[GitSource] Rollback: failed to remove managed area for ${input.stackName}:`, cleanupErr);
+                }
                 db.deleteGitSource(input.stackName);
                 throw e;
             }
         });
+    }
+
+    /**
+     * Boot sweep for every managed-project area, under the per-stack lock:
+     * crash-recovery restore, orphan candidates, and areas whose stack no
+     * longer exists (either the row or the directory is gone).
+     */
+    public async sweepOrphans(): Promise<void> {
+        const fsSvc = FileSystemService.getInstance();
+        const manifestSvc = GitProjectManifestService.getInstance();
+        const rows = DatabaseService.getInstance().getGitSources();
+        const stacks = new Set(await fsSvc.getStacks());
+        for (const row of rows) {
+            if (!stacks.has(row.stack_name)) {
+                await manifestSvc.deleteManagedArea(row.stack_name);
+                continue;
+            }
+            await this.withStackLock(row.stack_name, () =>
+                manifestSvc.sweepManagedArea(row.stack_name, { repoUrl: row.repo_url, branch: row.branch, stackExists: true }),
+            );
+        }
+        // Areas whose stack row is gone entirely (source deleted, stack kept)
+        // must not linger either.
+        const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+        const managedRoot = path.join(dataDir, 'git-managed', String(NodeRegistry.getInstance().getDefaultNodeId()));
+        const known = new Set(rows.map((r) => r.stack_name));
+        try {
+            const entries = await fsPromises.readdir(managedRoot, { withFileTypes: true });
+            for (const entry of entries) {
+                if (!entry.isDirectory() || known.has(entry.name)) continue;
+                await fsPromises.rm(path.join(managedRoot, entry.name), { recursive: true, force: true });
+            }
+        } catch {
+            // no managed root yet; nothing to sweep
+        }
     }
 
     // ─── Webhook-triggered pull ──────────────────────────────────────────────

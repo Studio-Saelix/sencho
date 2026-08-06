@@ -18,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
+import { ComposeService } from '../services/ComposeService';
 import { GitSourceService } from '../services/GitSourceService';
 
 function seedGitSource(stackName: string): void {
@@ -492,35 +493,114 @@ describe('POST /api/stacks/:stackName/git-source/webhook-pull status codes', () 
     });
 });
 
-describe('DELETE /api/stacks/:stackName/git-source — multi-file unlink guard', () => {
-    it('blocks unlinking a multi-file source with 409 and keeps the row', async () => {
+describe('DELETE /api/stacks/:stackName/git-source — detach/export contract', () => {
+    function mockRender(yaml: string | null): ReturnType<typeof vi.spyOn> {
+        // ComposeService.getInstance() returns a fresh instance per call, so
+        // the spy must live on the prototype to reach the route's instance.
+        return vi
+            .spyOn(ComposeService.prototype, 'renderComposeYaml')
+            .mockImplementation(() => (yaml === null ? Promise.reject(new Error('docker unavailable')) : Promise.resolve(yaml)));
+    }
+
+    it('exports a multi-file source: renders, writes compose.yaml, removes the row', async () => {
         seedGitSource('mf-unlink');
         DatabaseService.getInstance().setGitSourceAppliedSpec('mf-unlink', { files: ['compose.yaml', 'infra/prod.yml'], contextDir: null });
-        const res = await request(app)
-            .delete('/api/stacks/mf-unlink/git-source')
-            .set('Authorization', `Bearer ${adminToken()}`);
-        expect(res.status).toBe(409);
-        expect(res.body.error).toMatch(/multiple compose files/i);
-        expect(DatabaseService.getInstance().getGitSource('mf-unlink')).toBeTruthy();
+        const stackDir = path.join(process.env.COMPOSE_DIR!, 'mf-unlink');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+        const render = mockRender('services:\n  web:\n    image: nginx\n    environment:\n      A: b\n');
+        try {
+            const res = await request(app)
+                .delete('/api/stacks/mf-unlink/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            expect(DatabaseService.getInstance().getGitSource('mf-unlink')).toBeUndefined();
+            const exported = fs.readFileSync(path.join(stackDir, 'compose.yaml'), 'utf8');
+            expect(exported).toContain('A: b');
+            expect(render).toHaveBeenCalled();
+        } finally {
+            render.mockRestore();
+        }
     });
 
-    it('blocks unlinking a context-dir source with 409', async () => {
+    it('returns 409 and keeps the row when the export render fails', async () => {
         seedGitSource('ctx-unlink');
         DatabaseService.getInstance().setGitSourceAppliedSpec('ctx-unlink', { files: ['compose.yaml'], contextDir: 'app' });
-        const res = await request(app)
-            .delete('/api/stacks/ctx-unlink/git-source')
-            .set('Authorization', `Bearer ${adminToken()}`);
-        expect(res.status).toBe(409);
-        expect(DatabaseService.getInstance().getGitSource('ctx-unlink')).toBeTruthy();
+        const render = mockRender(null);
+        try {
+            const res = await request(app)
+                .delete('/api/stacks/ctx-unlink/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(409);
+            expect(DatabaseService.getInstance().getGitSource('ctx-unlink')).toBeTruthy();
+        } finally {
+            render.mockRestore();
+        }
     });
 
     it('allows unlinking a single-file source', async () => {
         seedGitSource('sf-unlink');
+        const stackDir = path.join(process.env.COMPOSE_DIR!, 'sf-unlink');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+        const render = mockRender('services:\n  web:\n    image: nginx\n');
+        try {
+            const res = await request(app)
+                .delete('/api/stacks/sf-unlink/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            expect(DatabaseService.getInstance().getGitSource('sf-unlink')).toBeUndefined();
+        } finally {
+            render.mockRestore();
+        }
+    });
+});
+
+describe('GET /api/stacks/:stackName/git-source/manifest', () => {
+    it('returns the manifest for a stack that has one', async () => {
+        seedGitSource('manifest-get');
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const svc = GitProjectManifestService.getInstance();
+        const manifest = svc.buildManifest({
+            stackName: 'manifest-get',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc123',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: 'manifest-get',
+            invocation: ['-f', 'compose.yaml', '-p', 'manifest-get'],
+            inputs: [],
+            refusals: [],
+            buildContexts: [],
+            bounds: { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 },
+            priorManifest: null,
+            state: 'active',
+        });
+        await svc.writeManifest('manifest-get', manifest);
         const res = await request(app)
-            .delete('/api/stacks/sf-unlink/git-source')
+            .get('/api/stacks/manifest-get/git-source/manifest')
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(res.status).toBe(200);
-        expect(DatabaseService.getInstance().getGitSource('sf-unlink')).toBeUndefined();
+        expect(res.body.manifest.schemaVersion).toBe(1);
+        expect(res.body.manifest.resolvedRevision.commitSha).toBe('abc123');
+    });
+
+    it('returns 404 when no manifest exists', async () => {
+        seedGitSource('manifest-missing');
+        const res = await request(app)
+            .get('/api/stacks/manifest-missing/git-source/manifest')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(404);
+    });
+
+    it('denies without the stack:read permission', async () => {
+        seedGitSource('manifest-denied');
+        const res = await request(app)
+            .get('/api/stacks/manifest-denied/git-source/manifest')
+            .set('Authorization', `Bearer ${jwt.sign({ username: 'viewer', role: 'viewer' }, TEST_JWT_SECRET, { expiresIn: '1m' })}`);
+        // viewer lacks stack:read for this stack
+        expect([401, 403]).toContain(res.status);
     });
 });
 

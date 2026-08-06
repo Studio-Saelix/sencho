@@ -257,7 +257,17 @@ export class UpdateGuardService {
       containers,
     }, now);
 
-    return { stack: stackName, computedAt: now, overall: aggregateRollbackOverall(items), items };
+    // Partial-revert disclosure for Git-managed stacks: rollback restores only
+    // compose files and .env; the rest of the materialized project is not
+    // reverted by the backup slot. State the scope rather than imply a
+    // complete revert.
+    let note: string | undefined;
+    const gitSource = db.getGitSource(stackName);
+    if (gitSource && (gitSource.manifest_state === 'active' || gitSource.manifest_state === 'partial' || gitSource.manifest_state === 'migrated')) {
+      note = 'This stack is Git-managed. Rollback restores compose files and .env; other materialized inputs are not reverted. Re-apply the previous revision from Git to restore them.';
+    }
+
+    return { stack: stackName, computedAt: now, overall: aggregateRollbackOverall(items), items, note };
   }
 
   /** Host disk use percent for the main filesystem, or null when unavailable. */
