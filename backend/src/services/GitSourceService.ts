@@ -391,7 +391,7 @@ function transportError(code: string, host: string): GitSourceError | null {
  */
 const LFS_POINTER_PREFIX = 'version https://git-lfs.github.com/spec/v';
 
-function isLfsPointer(content: string): boolean {
+export function isLfsPointer(content: string): boolean {
     // Pointer files are a few lines of ASCII, always starting with the
     // version header on the first line. Check just the leading bytes so
     // a very large plain file does not trigger a full scan.
