@@ -390,7 +390,7 @@ export class SSOService {
     public async handleOIDCCallback(
         provider: string,
         callbackUrl: string,
-        params: { code: string; state: string },
+        params: { code: string; state: string; iss?: string },
         expectedState: string,
         codeVerifier: string
     ): Promise<SSOAuthResult> {
@@ -405,6 +405,11 @@ export class SSOService {
             const currentUrl = new URL(callbackUrl);
             currentUrl.searchParams.set('code', params.code);
             currentUrl.searchParams.set('state', params.state);
+            // Providers that support RFC 9207 issuer identification (Keycloak 26+,
+            // and others) include `iss` in the callback. openid-client requires it
+            // once the provider's discovery metadata advertises support, so it must
+            // be forwarded here or the callback fails with "invalid response".
+            if (params.iss) currentUrl.searchParams.set('iss', params.iss);
 
             const tokens = await authorizationCodeGrant(oidcConfig, currentUrl, {
                 pkceCodeVerifier: codeVerifier,

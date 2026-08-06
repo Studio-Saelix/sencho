@@ -110,6 +110,68 @@ describe('SSO OIDC Callback', () => {
     expect(res.status).toBe(302);
     expect(res.headers.location).toContain('User');
   });
+
+  it('forwards the RFC 9207 iss query parameter to SSOService.handleOIDCCallback', async () => {
+    const { SSOService } = await import('../services/SSOService');
+    const { CryptoService } = await import('../services/CryptoService');
+
+    const statePayload = JSON.stringify({
+      state: 'test-state',
+      codeVerifier: 'test-verifier',
+      provider: 'oidc_custom',
+    });
+    const stateCookie = CryptoService.getInstance().encrypt(statePayload);
+
+    const handleOIDCCallbackSpy = vi
+      .spyOn(SSOService.getInstance(), 'handleOIDCCallback')
+      .mockResolvedValue({ success: false, error: 'stubbed for iss-forwarding assertion' });
+
+    await supertest(app)
+      .get('/api/auth/sso/oidc/oidc_custom/callback')
+      .query({ code: 'test-code', state: 'test-state', iss: 'https://idp.example.com/realms/master' })
+      .set('Cookie', `sencho_sso_state=${stateCookie}`);
+
+    expect(handleOIDCCallbackSpy).toHaveBeenCalledWith(
+      'oidc_custom',
+      expect.any(String),
+      expect.objectContaining({ code: 'test-code', state: 'test-state', iss: 'https://idp.example.com/realms/master' }),
+      'test-state',
+      'test-verifier',
+    );
+
+    handleOIDCCallbackSpy.mockRestore();
+  });
+
+  it('omits iss from the forwarded params when the provider does not send one', async () => {
+    const { SSOService } = await import('../services/SSOService');
+    const { CryptoService } = await import('../services/CryptoService');
+
+    const statePayload = JSON.stringify({
+      state: 'test-state-2',
+      codeVerifier: 'test-verifier-2',
+      provider: 'oidc_google',
+    });
+    const stateCookie = CryptoService.getInstance().encrypt(statePayload);
+
+    const handleOIDCCallbackSpy = vi
+      .spyOn(SSOService.getInstance(), 'handleOIDCCallback')
+      .mockResolvedValue({ success: false, error: 'stubbed for iss-forwarding assertion' });
+
+    await supertest(app)
+      .get('/api/auth/sso/oidc/oidc_google/callback')
+      .query({ code: 'test-code-2', state: 'test-state-2' })
+      .set('Cookie', `sencho_sso_state=${stateCookie}`);
+
+    expect(handleOIDCCallbackSpy).toHaveBeenCalledWith(
+      'oidc_google',
+      expect.any(String),
+      expect.objectContaining({ code: 'test-code-2', state: 'test-state-2', iss: undefined }),
+      'test-state-2',
+      'test-verifier-2',
+    );
+
+    handleOIDCCallbackSpy.mockRestore();
+  });
 });
 
 describe('SSO User Provisioning', () => {
