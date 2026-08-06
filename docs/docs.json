@@ -237,6 +237,7 @@
             "pages": [
               "tutorials/connect-a-private-registry",
               "tutorials/set-up-rbac",
+              "tutorials/set-up-sso",
               "tutorials/configure-environment-guardrails",
               "tutorials/set-up-a-webhook",
               "tutorials/resolve-stack-drift"
