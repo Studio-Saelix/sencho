@@ -203,6 +203,11 @@ jobs:
         uses: ./.github/actions/start-app
         with:
           skip-backend-build: 'true'
+        env:
+          # The git-sources E2E specs exercise the complete-project materializer
+          # against a local TLS fixture repo (e2e/fixtures); the backend must
+          # trust its dev-only CA to clone over https://.
+          NODE_EXTRA_CA_CERTS: e2e/fixtures/git-ca.pem
 
       - name: Run E2E tests
         # `--project=chromium` is explicit because playwright.config.ts also
