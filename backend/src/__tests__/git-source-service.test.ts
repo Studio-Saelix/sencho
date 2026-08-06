@@ -1578,11 +1578,11 @@ describe('GitSourceService pending blob decode branches', () => {
 
     it('round-trips the v3 blob with candidate path and inventory', () => {
         const s = svc() as unknown as DecodeApi;
-        const encoded = s.encodePendingCompose([{ path: 'compose.yaml', content: 'x' }], null, 'generations/candidate-abc', { inputs: [] });
+        const encoded = s.encodePendingCompose([{ path: 'compose.yaml', content: 'x' }], null, 'generations/candidate-abc', { inputs: [], refusals: [], buildContexts: [] });
         const decoded = s.decodePendingCompose(encoded);
         expect(decoded.candidateRelPath).toBe('generations/candidate-abc');
         expect(decoded.files[0].content).toBe('x');
-        expect(decoded.inventory).toEqual({ inputs: [] });
+        expect(decoded.inventory).toEqual({ inputs: [], refusals: [], buildContexts: [] });
     });
 
     it('decodes a v2 blob without a candidate', () => {
@@ -1600,11 +1600,10 @@ describe('GitSourceService pending blob decode branches', () => {
         expect(decoded.candidateRelPath).toBeNull();
     });
 
-    it('treats a corrupt v3 blob as legacy with a logged warning', () => {
+    it('rejects a corrupt v3 blob as corrupt state instead of falling back to legacy', () => {
         const s = svc() as unknown as DecodeApi;
         const encoded = s.crypto.encrypt('{"v":3 not json');
-        const decoded = s.decodePendingCompose(encoded);
-        expect(decoded.files).toEqual([{ path: 'compose.yaml', content: '{"v":3 not json' }]);
+        expect(() => s.decodePendingCompose(encoded)).toThrow(/corrupt/);
     });
 });
 
@@ -1641,8 +1640,8 @@ describe('GitSourceService managed-area lifecycle', () => {
             createSpy.mockRestore();
         }
         // The staged candidate lived in the managed area; the rollback must reap it.
-        const area = path.join(process.env.DATA_DIR!, 'git-managed', '1', 'rollback-area');
-        expect(fs.existsSync(area)).toBe(false);
+        const stagedCandidate = path.join(process.env.DATA_DIR!, 'git-managed', '1', 'rollback-area', 'generations', 'candidate-f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1');
+        expect(fs.existsSync(stagedCandidate)).toBe(false);
         expect(DatabaseService.getInstance().getGitSource('rollback-area')).toBeUndefined();
     });
 
@@ -1690,5 +1689,52 @@ describe('GitSourceService managed-area lifecycle', () => {
         await manifestSvc.writeManifest('ghost-stack', manifest);
         await GitSourceService.getInstance().sweepOrphans();
         expect(await manifestSvc.readManifest('ghost-stack', 'https://github.com/example/repo.git', 'main')).toBeNull();
+    });
+});
+
+describe('GitSourceService legacy pending apply (migration path)', () => {
+    it('applies a v2 pending blob via the historical path and builds a migrated manifest', async () => {
+        const sha = '9999aaa9999aaa9999aaa9999aaa9999aaa9999a';
+        const svc = GitSourceService.getInstance();
+        const db = DatabaseService.getInstance();
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const fsSvc = FileSystemService.getInstance();
+        await fsSvc.createStack('legacy-apply');
+        db.upsertGitSource({
+            stack_name: 'legacy-apply',
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: sha,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+        // Seed the v2 blob directly, as a pre-upgrade row would carry it.
+        const svcPriv = svc as unknown as { crypto: { encrypt(s: string): string } };
+        db.setGitSourcePending('legacy-apply', sha, svcPriv.crypto.encrypt(JSON.stringify({ v: 2, files: [{ path: 'compose.yaml', content: 'services:\n  web:\n    image: nginx\n' }], contextDir: null })), null);
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+
+        try {
+            const applied = await svc.apply('legacy-apply', sha, { deploy: false });
+            expect(applied.applied).toBe(true);
+            expect(await fsSvc.getStackContent('legacy-apply')).toContain('image: nginx');
+            const row = db.getGitSource('legacy-apply');
+            expect(row?.manifest_state).toBe('migrated');
+        } finally {
+            validateSpy.mockRestore();
+            await cleanupStackDir('legacy-apply');
+        }
     });
 });

@@ -418,7 +418,25 @@ export function GitSourcePanel({
                   )}
 
                   {source && (
-                    <GitManifestSummary stackName={stackName} summary={source.manifest} />
+                    <GitManifestSummary
+                      stackName={stackName}
+                      summary={
+                        source.manifest ??
+                        (source.manifest_state
+                          ? {
+                              state: source.manifest_state,
+                              manifestVersion: 0,
+                              resolvedCommitSha: null,
+                              managedCount: 0,
+                              unmanagedCount: 0,
+                              refusedCount: 0,
+                              refused: [],
+                              hasBuildContexts: false,
+                              generatedAt: null,
+                            }
+                          : null)
+                      }
+                    />
                   )}
                 </>
               )}

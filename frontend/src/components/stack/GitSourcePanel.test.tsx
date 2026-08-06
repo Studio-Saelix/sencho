@@ -183,10 +183,13 @@ describe('GitSourcePanel manifest summary', () => {
     await waitFor(() => expect(screen.getByText('explicit')).toBeTruthy());
   });
 
-  it('renders no manifest section when the source has no manifest', async () => {
+  it('renders the manifest section with the DB state when the source has no manifest file', async () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonRes(LINKED_SOURCE));
     render(panel());
     await waitFor(() => expect(screen.getByText('Last applied commit')).toBeTruthy());
-    expect(screen.queryByText('Managed project')).toBeNull();
+    // The section is driven by the DB manifest_state ('absent') when the file
+    // has not been materialized yet.
+    expect(screen.getByText('Managed project')).toBeTruthy();
+    expect(screen.getByText('Not materialized')).toBeTruthy();
   });
 });

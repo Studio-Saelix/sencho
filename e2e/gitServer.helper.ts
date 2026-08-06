@@ -78,20 +78,44 @@ export function serveRepos(repoDirs: Record<string, string>): Promise<{ url: str
         if (pathname === '/info/refs' && (req.method === 'GET' || req.method === 'POST')) {
           const ps = spawn('git', ['upload-pack', '--stateless-rpc', '--advertise-refs', bare]);
           let out = Buffer.alloc(0);
+          let err = '';
           ps.stdout.on('data', (d: Buffer) => {
             out = Buffer.concat([out, d]);
           });
-          ps.on('close', () => {
+          ps.stderr.on('data', (d: Buffer) => {
+            err += d.toString();
+          });
+          ps.on('error', (e) => {
+            console.error('[gitServer.helper] upload-pack spawn failed:', e.message);
+            res.statusCode = 500;
+            res.end('git upload-pack failed to start');
+          });
+          ps.on('close', (code) => {
+            if (code !== 0) {
+              console.error('[gitServer.helper] upload-pack exited', code, err);
+              res.statusCode = 500;
+              res.end(err || 'git upload-pack failed');
+              return;
+            }
             res.setHeader('content-type', 'application/x-git-upload-pack-advertisement');
             res.end(Buffer.concat([Buffer.from('001e# service=git-upload-pack\n0000'), out]));
           });
-          ps.stderr.on('data', (d: Buffer) => console.error('[gitServer.helper] upload-pack stderr:', d.toString()));
           return;
         }
         if (pathname === '/git-upload-pack' && req.method === 'POST') {
           const ps = spawn('git', ['upload-pack', '--stateless-rpc', bare]);
           res.setHeader('content-type', 'application/x-git-upload-pack-result');
           ps.stdout.pipe(res);
+          ps.on('error', (e) => {
+            console.error('[gitServer.helper] upload-pack spawn failed:', e.message);
+            if (!res.headersSent) {
+              res.statusCode = 500;
+              res.end('git upload-pack failed to start');
+            }
+          });
+          ps.stdin.on('error', () => {
+            // client aborted mid-stream; the response is already ending
+          });
           req.pipe(ps.stdin);
           ps.stderr.on('data', (d: Buffer) => console.error('[gitServer.helper] upload-pack stderr:', d.toString()));
           return;

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -394,5 +394,91 @@ describe('FileSystemService interaction', () => {
         await svc.promoteGeneration(stackName, { sha: 'invalidate', candidateRelPath: candidateRel, manifest, priorManifest: null });
         expect(readStackFile(stackName, 'compose.yaml')).toBe('v2\n');
         expect(await FileSystemService.getInstance().getStackContent(stackName)).toBe('v2\n');
+    });
+});
+
+describe('promoteGeneration mid-write failure recovery', () => {
+    it('restores the previous generation and manifest when a write fails mid-promotion', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'promote-midfail';
+        writeStackFile(stackName, 'compose.yaml', 'PRIOR\n');
+        writeStackFile(stackName, 'app.env', 'A=1\n');
+        const prior = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml' }),
+            managedEntry({ materializedPath: 'app.env', dependencyKind: 'env_file', role: 'env', sensitivity: 'high' }),
+        ]);
+        const priorRel = `generations/applied-prior`;
+        const priorAbs = path.join(tmpDir, 'git-managed', '1', stackName, priorRel);
+        fs.mkdirSync(priorAbs, { recursive: true });
+        fs.writeFileSync(path.join(priorAbs, 'compose.yaml'), 'PRIOR\n');
+        fs.writeFileSync(path.join(priorAbs, 'app.env'), 'A=1\n');
+        prior.generation.appliedDir = priorRel;
+        await svc.writeManifest(stackName, prior);
+
+        // Force the failure at PROMOTION time (a rejected stack write after
+        // the marker was written), not during candidate staging.
+        const clone = makeClone({ 'compose.yaml': 'NEW\n', 'app.env': 'B=2\n' });
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'midfail',
+            clone,
+            [{ srcRel: 'compose.yaml', destRel: 'compose.yaml' }, { srcRel: 'app.env', destRel: 'app.env' }],
+            [],
+            BOUNDS,
+        );
+        const next = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml', contentSha256: 'x' }),
+            managedEntry({ materializedPath: 'app.env', dependencyKind: 'env_file', role: 'env', sensitivity: 'high' }),
+        ], prior);
+        // Fail exactly the promotion's first write; the restore path's writes
+        // must succeed for the recovery assertions below.
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockRejectedValueOnce(new Error('simulated disk failure'));
+        try {
+            await expect(
+                svc.promoteGeneration(stackName, { sha: 'midfail', candidateRelPath: candidateRel, manifest: next, priorManifest: prior }),
+            ).rejects.toThrow(/simulated disk failure/);
+        } finally {
+            saveSpy.mockRestore();
+        }
+
+        // The prior generation and the prior manifest FILE are both restored,
+        // so a subsequent apply reads hashes that match the disk.
+        expect(readStackFile(stackName, 'compose.yaml')).toBe('PRIOR\n');
+        const restored = await svc.readManifest(stackName, REPO.repo_url, REPO.branch);
+        if (restored === null || 'corrupt' in restored) throw new Error('expected a manifest');
+        expect(restored.manifestVersion).toBe(prior.manifestVersion);
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
+    });
+
+    it('treats a corrupt promotion marker as recovery-required, not a clean slate', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'sweep-corrupt-marker';
+        writeStackFile(stackName, 'compose.yaml', 'ANY\n');
+        DatabaseService.getInstance().upsertGitSource({
+            stack_name: stackName,
+            repo_url: REPO.repo_url,
+            branch: REPO.branch,
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: null,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+        fs.mkdirSync(path.join(tmpDir, 'git-managed', '1', stackName), { recursive: true });
+        fs.writeFileSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER), '{"v":3 torn', 'utf8');
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
+        expect(DatabaseService.getInstance().getGitSource(stackName)?.manifest_state).toBe('migration_required');
     });
 });

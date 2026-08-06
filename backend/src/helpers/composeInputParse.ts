@@ -218,21 +218,47 @@ function walkService(serviceName: string, service: unknown, fromFile: string, re
     void serviceName;
 }
 
-/** Parse one compose file into declarations, recursing into include/extends. */
+/**
+ * Parse one compose file into declarations, recursing into include/extends.
+ * Cycle detection uses the RECURSION STACK (a file re-entered while still
+ * being walked is a real cycle); a file reached again after completion is a
+ * shared base (diamond / repeated include) and dedupes silently.
+ */
 function parseFile(
     repoPath: string,
     content: string,
     opts: ParseOptions,
     refs: ComposeRefs,
     visited: Set<string>,
+    stack: Set<string>,
     depth: number,
 ): void {
     const normalized = normalizeRepoPath(repoPath);
-    if (visited.has(normalized)) {
+    if (stack.has(normalized)) {
         refs.parseErrors.push(`Include/extends cycle detected at ${normalized}`);
         return;
     }
-    visited.add(normalized);
+    if (visited.has(normalized)) {
+        return; // shared base file, not a cycle
+    }
+    stack.add(normalized);
+    try {
+        parseFileInner(normalized, content, opts, refs, visited, stack, depth);
+    } finally {
+        stack.delete(normalized);
+        visited.add(normalized);
+    }
+}
+
+function parseFileInner(
+    normalized: string,
+    content: string,
+    opts: ParseOptions,
+    refs: ComposeRefs,
+    visited: Set<string>,
+    stack: Set<string>,
+    depth: number,
+): void {
     if (depth > MAX_INCLUDE_DEPTH) {
         refs.parseErrors.push(`Include/extends graph exceeds depth ${MAX_INCLUDE_DEPTH} at ${normalized}`);
         return;
@@ -266,7 +292,7 @@ function parseFile(
                 if (nested === null) {
                     refs.parseErrors.push(`Included compose file ${resolved} is unreadable`);
                 } else {
-                    parseFile(resolved, nested, opts, refs, visited, depth + 1);
+                    parseFile(resolved, nested, opts, refs, visited, stack, depth + 1);
                 }
             } else if (item && typeof item === 'object' && !Array.isArray(item)) {
                 const map = item as Record<string, unknown>;
@@ -278,7 +304,7 @@ function parseFile(
                     if (nested === null) {
                         refs.parseErrors.push(`Included compose file ${resolved} is unreadable`);
                     } else {
-                        parseFile(resolved, nested, opts, refs, visited, depth + 1);
+                        parseFile(resolved, nested, opts, refs, visited, stack, depth + 1);
                     }
                 }
                 const includeEnv = asString(map.env_file);
@@ -305,7 +331,7 @@ function parseFile(
                     if (nested === null) {
                         refs.parseErrors.push(`extends.file target ${resolved} is unreadable`);
                     } else {
-                        parseFile(resolved, nested, opts, refs, visited, depth + 1);
+                        parseFile(resolved, nested, opts, refs, visited, stack, depth + 1);
                     }
                 }
             }
@@ -339,8 +365,9 @@ export function parseDeclaredInputs(
 ): ParsedDeclaredInputs {
     const refs: ComposeRefs = { inputs: [], dynamic: [], parseErrors: [] };
     const visited = new Set<string>();
+    const stack = new Set<string>();
     for (const file of orderedContents) {
-        parseFile(file.path, file.content, opts, refs, visited, 0);
+        parseFile(file.path, file.content, opts, refs, visited, stack, 0);
     }
 
     // Interpolation env at the project root (compose loads it for variable

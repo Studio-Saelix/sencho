@@ -701,7 +701,14 @@ export class GitSourceService {
                 ComposeService.getInstance().renderComposeYaml(stackName),
             );
             await FileSystemService.getInstance().saveStackContent(stackName, rendered);
-            await manifestSvc.deleteManagedArea(stackName);
+            // The managed area holds previous applied generations with
+            // materialized configs/secrets; dropping the row while it survives
+            // would orphan it until the next boot sweep. Fail the detach
+            // instead (the render is deterministic, so a retry is safe).
+            const areaDeleted = await manifestSvc.deleteManagedArea(stackName);
+            if (!areaDeleted) {
+                throw new GitSourceError('GIT_ERROR', 'Could not remove the managed project data; detach aborted. Retry to complete it.');
+            }
             DatabaseService.getInstance().deleteGitSource(stackName);
         });
     }
@@ -714,13 +721,32 @@ export class GitSourceService {
         return manifest !== null && !('corrupt' in manifest) ? manifest : null;
     }
 
-    /** Summary projection of the managed-project manifest (null when absent or corrupt). */
+    /**
+     * Summary projection of the managed-project manifest. When the manifest
+     * FILE is absent or cannot be trusted, the summary is synthesized from the
+     * DB cache so the UI can render the actual state ('absent' /
+     * 'migration_required') instead of treating corruption as "nothing".
+     */
     public async getManifestSummary(stackName: string): Promise<ManifestSummary | null> {
         const src = DatabaseService.getInstance().getGitSource(stackName);
         if (!src) return null;
         const manifestSvc = GitProjectManifestService.getInstance();
         const manifest = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
-        return manifest !== null && !('corrupt' in manifest) ? manifestSvc.summaryFrom(manifest) : null;
+        if (manifest !== null && !('corrupt' in manifest)) {
+            return manifestSvc.summaryFrom(manifest);
+        }
+        const state = manifest !== null && 'corrupt' in manifest ? 'migration_required' : (src.manifest_state ?? 'absent');
+        return {
+            state,
+            manifestVersion: src.manifest_version ?? 0,
+            resolvedCommitSha: null,
+            managedCount: 0,
+            unmanagedCount: 0,
+            refusedCount: 0,
+            refused: [],
+            hasBuildContexts: false,
+            generatedAt: null,
+        };
     }
 
     // ─── Fetch ───────────────────────────────────────────────────────────────
@@ -1104,7 +1130,16 @@ export class GitSourceService {
             throw new GitSourceError('GIT_ERROR', `Cannot materialize the complete project: ${detail}${actionable.length > 5 ? ` (and ${actionable.length - 5} more)` : ''}`);
         }
 
-        const managed = inventory.inputs.filter((i) => i.ownership === 'managed' && i.materializedPath !== null && i.state === 'present');
+        // Build-context entries are directories; their content is copied via
+        // the context copy plans (dockerignore-filtered), never as files.
+        const managed = inventory.inputs.filter(
+            (i) =>
+                i.ownership === 'managed' &&
+                i.materializedPath !== null &&
+                i.state === 'present' &&
+                i.dependencyKind !== 'build-context' &&
+                i.dependencyKind !== 'build-additional-context',
+        );
         const candidateRel = await manifestSvc.buildCandidate(
             stackName,
             commitSha,
@@ -1141,7 +1176,10 @@ export class GitSourceService {
 
         const args = ['compose'];
         for (const local of localFiles) {
-            const safeRel = local.replace(/\\/g, '/').split('/').map((s) => path.basename(s)).join('/');
+            // The candidate mirrors the stack layout 1:1 (primary -> compose.yaml,
+            // additional files at their repo-relative path), so the -f path is
+            // used AS-IS; basename-collapsing would break nested additional files.
+            const safeRel = local.replace(/\\/g, '/');
             const abs = path.resolve(candidateAbs, safeRel);
             if (!isPathWithinBase(abs, candidateAbs)) {
                 return { ok: false, error: `Compose path escapes the candidate dir: ${local}` };
@@ -1251,7 +1289,16 @@ export class GitSourceService {
         if (raw.startsWith('{"v":3')) {
             try {
                 const parsed = JSON.parse(raw) as { v: number; files?: ComposeFile[]; contextDir?: string | null; candidateRelPath?: string | null; inventory?: InventoryResult | null };
-                if (Array.isArray(parsed.files) && parsed.files.length > 0) {
+                // Shape gate: the inventory drives the manifest build, so a
+                // structurally wrong inventory must be corrupt, never silently
+                // filtered into a half-populated manifest.
+                const inventoryValid =
+                    parsed.inventory === null ||
+                    (parsed.inventory !== undefined &&
+                        Array.isArray(parsed.inventory.inputs) &&
+                        Array.isArray(parsed.inventory.refusals) &&
+                        Array.isArray(parsed.inventory.buildContexts));
+                if (Array.isArray(parsed.files) && parsed.files.length > 0 && inventoryValid) {
                     return {
                         files: parsed.files,
                         contextDir: parsed.contextDir ?? null,
@@ -1260,8 +1307,12 @@ export class GitSourceService {
                     };
                 }
             } catch (e) {
-                console.error('[GitSource] pending compose blob carried the v3 marker but failed to parse; treating as legacy:', (e as Error).message);
+                console.error('[GitSource] pending compose blob carried the v3 marker but failed to parse:', (e as Error).message);
             }
+            // A v3-marker blob that fails to parse is corrupt state, not a
+            // legacy row: applying it as plaintext compose would deploy garbage
+            // or a misleading validation error.
+            throw new GitSourceError('GIT_ERROR', 'Pending update is corrupt; pull again to rebuild it.');
         }
         if (raw.startsWith('{"v":2')) {
             try {
@@ -1300,7 +1351,8 @@ export class GitSourceService {
         if (syncEnv) {
             try {
                 env = await fsSvc.getEnvContent(stackName);
-            } catch {
+            } catch (e) {
+                console.warn(`[GitSource] could not read .env for ${sanitizeForLog(stackName)} diff:`, (e as Error).message);
                 env = null;
             }
         }
@@ -1532,16 +1584,24 @@ export class GitSourceService {
             // commit would overwrite user edits. Abort before any write.
             if (prior) {
                 const diverged: string[] = [];
+                const unreadable: string[] = [];
                 for (const entry of prior.inputs) {
                     if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
                     if (entry.contentSha256 === null) continue;
                     const diskHash = await manifestSvc.hashStackFile(stackName, entry.materializedPath);
-                    if (diskHash !== entry.contentSha256) diverged.push(entry.materializedPath);
+                    if (diskHash === null) unreadable.push(entry.materializedPath);
+                    else if (diskHash !== entry.contentSha256) diverged.push(entry.materializedPath);
                 }
                 if (diverged.length > 0) {
                     throw new GitSourceError(
                         'GIT_ERROR',
                         `Local modifications detected on ${diverged.join(', ')}. Detach the Git source or restore these files; the incoming commit will not overwrite local changes.`,
+                    );
+                }
+                if (unreadable.length > 0) {
+                    throw new GitSourceError(
+                        'GIT_ERROR',
+                        `Could not read ${unreadable.join(', ')} to verify it is unchanged; restore it or detach the Git source before applying.`,
                     );
                 }
             }
@@ -1568,8 +1628,8 @@ export class GitSourceService {
             try {
                 invocation.push(...(await authoredComposeFileArgs(stackName, NodeRegistry.getInstance().getDefaultNodeId())));
                 invocation.push(...(await authoredComposeEnvFileArgs(stackName, NodeRegistry.getInstance().getDefaultNodeId())));
-            } catch {
-                // best-effort; a fresh pull rebuilds the invocation
+            } catch (e) {
+                console.warn(`[GitSource] invocation build failed for ${stackName}:`, (e as Error).message);
             }
             const manifest = manifestSvc.buildManifest({
                 stackName,
@@ -1723,6 +1783,7 @@ export class GitSourceService {
             //    createStack() throws if the directory already exists, so a
             //    name collision is caught here.
             let stackCreated = false;
+            let rowInserted = false;
             try {
                 await fsSvc.createStack(input.stackName);
                 stackCreated = true;
@@ -1816,6 +1877,7 @@ export class GitSourceService {
                 db.markGitSourceApplied(input.stackName, fetched.commitSha, hash);
                 db.setGitSourceAppliedSpec(input.stackName, appliedSpec);
 
+                rowInserted = true;
                 const source = this.get(input.stackName);
                 if (!source) {
                     throw new GitSourceError('GIT_ERROR', 'Failed to read back created git source.');
@@ -1837,13 +1899,27 @@ export class GitSourceService {
                         console.error(`[GitSource] Rollback: failed to remove partial stack dir ${input.stackName}:`, cleanupErr);
                     }
                 }
-                // R6: the managed area must not outlive the failed create.
-                try {
+                // R6: the managed area must not outlive a create THIS invocation
+                // staged. A pre-existing stack (TOCTOU race or a create failure
+                // for a non-existence reason) must never lose its previous
+                // applied generations to someone else's rollback: when the stack
+                // dir was NOT created by us, remove only the candidate we staged.
+                if (stackCreated) {
                     await GitProjectManifestService.getInstance().deleteManagedArea(input.stackName);
-                } catch (cleanupErr) {
-                    console.error(`[GitSource] Rollback: failed to remove managed area for ${input.stackName}:`, cleanupErr);
+                } else if (materialization.value) {
+                    const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+                    const stagedCandidate = path.join(
+                        dataDir,
+                        'git-managed',
+                        String(NodeRegistry.getInstance().getDefaultNodeId()),
+                        input.stackName,
+                        materialization.value.candidateRelPath,
+                    );
+                    await fsPromises.rm(stagedCandidate, { recursive: true, force: true });
                 }
-                db.deleteGitSource(input.stackName);
+                if (rowInserted) {
+                    db.deleteGitSource(input.stackName);
+                }
                 throw e;
             }
         });
@@ -1860,13 +1936,18 @@ export class GitSourceService {
         const rows = DatabaseService.getInstance().getGitSources();
         const stacks = new Set(await fsSvc.getStacks());
         for (const row of rows) {
-            if (!stacks.has(row.stack_name)) {
-                await manifestSvc.deleteManagedArea(row.stack_name);
-                continue;
+            // One failing stack must never abort recovery for the rest.
+            try {
+                if (!stacks.has(row.stack_name)) {
+                    await manifestSvc.deleteManagedArea(row.stack_name);
+                    continue;
+                }
+                await this.withStackLock(row.stack_name, () =>
+                    manifestSvc.sweepManagedArea(row.stack_name, { repoUrl: row.repo_url, branch: row.branch, stackExists: true }),
+                );
+            } catch (e) {
+                console.error(`[GitManifest] sweep failed for ${row.stack_name}:`, (e as Error).message);
             }
-            await this.withStackLock(row.stack_name, () =>
-                manifestSvc.sweepManagedArea(row.stack_name, { repoUrl: row.repo_url, branch: row.branch, stackExists: true }),
-            );
         }
         // Areas whose stack row is gone entirely (source deleted, stack kept)
         // must not linger either.

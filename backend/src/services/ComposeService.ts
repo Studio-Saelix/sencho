@@ -1237,20 +1237,6 @@ export class ComposeService {
   }
 
   /**
-   * Render the fully-resolved effective Compose model via `docker compose
-   * config --format json`. This is the AUTHORED model: it does NOT splice in
-   * the Sencho Mesh override, so it stays read-only (the override is
-   * write-generated) and reflects what the user actually edits. The override
-   * would also add the managed `sencho_mesh` external network and per-service
-   * mesh attachments, which would make preflight emit a false "external network
-   * not found" finding, so rendering the authored model is both safer and more
-   * accurate here.
-   * Captures stderr (where Compose reports unset variables) and never rejects
-   * on a non-zero exit, so the Compose Doctor can turn a failed render into a
-   * finding rather than an exception. Bounded by a timeout and an output cap.
-   * Rejects only when the docker binary cannot be spawned.
-   */
-  /**
    * Render the effective compose model as YAML (the default `docker compose
    * config` output) with the exact authored invocation and NO mesh override.
    * Used by the Git source detach/export contract: the rendered model becomes
@@ -1317,6 +1303,20 @@ export class ComposeService {
     });
   }
 
+  /**
+   * Render the fully-resolved effective Compose model via `docker compose
+   * config --format json`. This is the AUTHORED model: it does NOT splice in
+   * the Sencho Mesh override, so it stays read-only (the override is
+   * write-generated) and reflects what the user actually edits. The override
+   * would also add the managed `sencho_mesh` external network and per-service
+   * mesh attachments, which would make preflight emit a false "external network
+   * not found" finding, so rendering the authored model is both safer and more
+   * accurate here.
+   * Captures stderr (where Compose reports unset variables) and never rejects
+   * on a non-zero exit, so the Compose Doctor can turn a failed render into a
+   * finding rather than an exception. Bounded by a timeout and an output cap.
+   * Rejects only when the docker binary cannot be spawned.
+   */
   public async renderConfig(
     stackName: string,
   ): Promise<{ rendered: string | null; stderr: string; code: number | null; timedOut: boolean }> {

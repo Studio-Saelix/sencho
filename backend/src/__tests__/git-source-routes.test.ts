@@ -493,7 +493,7 @@ describe('POST /api/stacks/:stackName/git-source/webhook-pull status codes', () 
     });
 });
 
-describe('DELETE /api/stacks/:stackName/git-source — detach/export contract', () => {
+describe('DELETE /api/stacks/:stackName/git-source, detach/export contract', () => {
     function mockRender(yaml: string | null): ReturnType<typeof vi.spyOn> {
         // ComposeService.getInstance() returns a fresh instance per call, so
         // the spy must live on the prototype to reach the route's instance.

@@ -11,11 +11,13 @@
  * Refusal policy: actionable refusals (out-of-bounds, url-include, submodule,
  * LFS, unbounded context, missing files, unsafe links) are returned with
  * actionable: true so the caller aborts the pull; tolerated classes (host
- * binds, external resources, dynamic paths) become unmanaged entries with a
- * documented-limitation note. Never claim coverage for anything else.
+ * binds, external resources) become unmanaged entries with a documented-
+ * limitation note. Dynamic \${VAR} paths are reported in the pull response but
+ * are never claimed as covered. Never claim coverage for anything else.
  */
 import path from 'path';
 import fs from 'fs';
+import { createHash } from 'crypto';
 import { parseDeclaredInputs } from '../helpers/composeInputParse';
 import { isPathWithinBase } from '../utils/validation';
 import { isLfsPointer } from './GitSourceService';
@@ -26,7 +28,6 @@ import type {
     ComposeInputEntry,
     DeclaredInput,
     DynamicInput,
-    InputDependencyKind,
     InputRole,
     InputSensitivity,
     InventoryResult,
@@ -47,6 +48,10 @@ const COMPOSE_OVERRIDE_FILENAMES = [
 
 const LFS_POINTER_PREFIX_LEN = 48;
 
+// Include/extends recursion reads stay under this bound (the clone download
+// cap bounds the pack, not the decompressed tree).
+const MAX_REPO_READ_BYTES = 10 * 1024 * 1024;
+
 export interface DiscoverFromCloneParams {
     /** Root of the cloned tree (immutable resolved revision). */
     cloneDir: string;
@@ -54,6 +59,8 @@ export interface DiscoverFromCloneParams {
     composePaths: string[];
     /** Repo-relative project root (context_dir); null = repo root. */
     contextDir: string | null;
+    /** True when a synced stack-root .env is deployed (owns that path). */
+    syncEnv?: boolean;
     bounds: ManifestBounds;
 }
 
@@ -186,7 +193,6 @@ export class ComposeInputDiscoveryService {
         if (isLfsPointer(content.toString('utf8', 0, LFS_POINTER_PREFIX_LEN + 64))) {
             return { ok: false, refusal: this.refusal(relPath, 'lfs-pointer', `${relPath} is a Git LFS pointer; LFS content is not fetched`, true) };
         }
-        const { createHash } = await import('crypto');
         return { ok: true, sizeBytes: stat.size, contentSha256: createHash('sha256').update(content).digest('hex') };
     }
 
@@ -253,10 +259,14 @@ export class ComposeInputDiscoveryService {
             const dockerfileDecl = contextInputs.find(
                 (i) => i.kind === 'dockerfile' && i.fromFile === input.fromFile,
             );
-            const dockerignoreDir =
-                dockerfileDecl && typeof dockerfileDecl.sourcePath === 'string' && !dockerfileDecl.sourcePath.includes('/')
-                    ? abs
-                    : abs;
+            // docker reads .dockerignore from the DOCKERFILE's directory when
+            // the dockerfile is declared with a directory component, else from
+            // the context root.
+            let dockerignoreDir = abs;
+            if (dockerfileDecl && typeof dockerfileDecl.sourcePath === 'string' && dockerfileDecl.sourcePath.includes('/')) {
+                const safeDockerfileDir = dockerfileDecl.sourcePath.split('/').slice(0, -1).join('/');
+                dockerignoreDir = path.join(abs, safeDockerfileDir);
+            }
             const matcher = await loadDockerIgnore(dockerignoreDir);
             const dockerignoreRel = matcher !== null ? path.relative(cloneDir, path.join(dockerignoreDir, '.dockerignore')).replace(/\\/g, '/') : null;
 
@@ -275,6 +285,10 @@ export class ComposeInputDiscoveryService {
                     return;
                 }
                 for (const entry of entriesList) {
+                    // Never counted or copied: `.git` is excluded from the
+                    // materialized context by the copier, and counting it here
+                    // would trip the size caps on repo-root contexts.
+                    if (entry.name.toLowerCase() === '.git') continue;
                     const childRel = rel ? `${rel}/${entry.name}` : entry.name;
                     if (matcher?.matches(childRel, entry.isDirectory())) {
                         ignoredCount += 1;
@@ -425,8 +439,17 @@ export class ComposeInputDiscoveryService {
         const parsed = parseDeclaredInputs(ordered, {
             projectRoot,
             read: (repoPath) => {
+                // Containment + size bound at the read boundary: include/extends
+                // targets can carry `..` segments, and an attacker-controlled
+                // repo must never make the parser read outside the clone or pull
+                // an unbounded file into memory.
+                if (hasGitMetaSegment(repoPath)) return null;
+                const abs = path.resolve(cloneDir, repoPath);
+                if (!isPathWithinBase(abs, path.resolve(cloneDir))) return null;
                 try {
-                    return fs.readFileSync(path.join(cloneDir, repoPath), 'utf8');
+                    const st = fs.statSync(abs);
+                    if (!st.isFile() || st.size > MAX_REPO_READ_BYTES) return null;
+                    return fs.readFileSync(abs, 'utf8');
                 } catch {
                     return null;
                 }
@@ -441,16 +464,14 @@ export class ComposeInputDiscoveryService {
         let managedBytes = 0;
         const inputs: ComposeInputEntry[] = [];
 
-        // Explicit compose files (ordered).
+        // Explicit compose files (ordered). The content is already in memory,
+        // so the content hash is computed here: the apply-time divergence guard
+        // needs a sha for every managed present file, compose.yaml included, or
+        // a hand-edited compose file would be silently overwritten.
         composePaths.forEach((p, index) => {
             const local = index === 0 ? PRIMARY_COMPOSE_FILENAME : posixRel(p);
             const role: InputRole = index === 0 ? 'compose-primary' : 'compose-additional';
-            let size = 0;
-            try {
-                size = fs.statSync(path.join(cloneDir, p)).size;
-            } catch {
-                // classified below or already refused; size 0 is a placeholder
-            }
+            const content = ordered.find((o) => o.path === p)?.content ?? null;
             inputs.push({
                 sourcePath: p,
                 materializedPath: local,
@@ -459,17 +480,17 @@ export class ComposeInputDiscoveryService {
                 ownership: 'managed',
                 provenance: 'fetch',
                 sensitivity: 'medium',
-                contentSha256: null,
-                sizeBytes: size,
+                contentSha256: content !== null ? createHash('sha256').update(content).digest('hex') : null,
+                sizeBytes: content !== null ? Buffer.byteLength(content, 'utf8') : 0,
                 state: 'present',
                 deletionAuthority: 'sencho',
                 note: null,
             });
             managedCount += 1;
-            managedBytes += size;
+            managedBytes += content !== null ? Buffer.byteLength(content, 'utf8') : 0;
         });
         if (implicitOverridePath) {
-            const size = fs.statSync(path.join(cloneDir, implicitOverridePath)).size;
+            const content = ordered.find((o) => o.path === implicitOverridePath)?.content ?? '';
             inputs.push({
                 sourcePath: implicitOverridePath,
                 materializedPath: posixRel(implicitOverridePath),
@@ -478,14 +499,14 @@ export class ComposeInputDiscoveryService {
                 ownership: 'managed',
                 provenance: 'fetch',
                 sensitivity: 'medium',
-                contentSha256: null,
-                sizeBytes: size,
+                contentSha256: createHash('sha256').update(content).digest('hex'),
+                sizeBytes: Buffer.byteLength(content, 'utf8'),
                 state: 'present',
                 deletionAuthority: 'sencho',
                 note: 'Implicit compose override auto-discovered for single-file stacks',
             });
             managedCount += 1;
-            managedBytes += size;
+            managedBytes += Buffer.byteLength(content, 'utf8');
         }
 
         // Classify the parser's declarations.
@@ -531,6 +552,29 @@ export class ComposeInputDiscoveryService {
             const inSubmodule = submodules.find((s) => resolved === s || resolved.startsWith(`${s}/`)) ?? null;
             if (inSubmodule !== null) {
                 refusals.push(this.refusal(resolved, 'submodule', `${resolved} is inside Git submodule ${inSubmodule}; submodule contents are not fetched`, true));
+                continue;
+            }
+
+            // When the synced stack-root .env owns the same path (no project
+            // dir), the interpolation env must NOT be hash-guarded: the apply
+            // stages the sync content over it, so a managed entry would record
+            // the repo hash and the next apply would refuse .env as locally
+            // modified forever. Record it unmanaged in that case.
+            if (kind === 'interpolation-env' && params.syncEnv === true && resolved === '.env') {
+                inputs.push({
+                    sourcePath: resolved,
+                    materializedPath: null,
+                    role: 'env',
+                    dependencyKind: 'interpolation-env',
+                    ownership: 'unmanaged',
+                    provenance: 'fetch',
+                    sensitivity: 'high',
+                    contentSha256: null,
+                    sizeBytes: null,
+                    state: 'present',
+                    deletionAuthority: 'none',
+                    note: 'Owned by the synced stack-root .env; not hash-guarded by the repository copy',
+                });
                 continue;
             }
 
@@ -660,7 +704,6 @@ export class ComposeInputDiscoveryService {
 
         for (const plan of contexts) {
             const srcRoot = path.resolve(cloneDir, plan.srcRel);
-            const destRoot = path.resolve(destDir, plan.destRel);
             const stack: Array<{ src: string; destRel: string }> = [];
             const walk = async (dir: string, rel: string): Promise<void> => {
                 const entriesList = await fs.promises.readdir(dir, { withFileTypes: true });

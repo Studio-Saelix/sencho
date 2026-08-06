@@ -85,6 +85,18 @@ function sha256Of(buf: Buffer): string {
     return createHash('sha256').update(buf).digest('hex');
 }
 
+/** A manifest path field must be relative and free of `..` / absolute escapes. Empty string is allowed (unset generation dirs). */
+function isSafeRelPath(value: unknown): boolean {
+    if (value === null) return true;
+    if (typeof value !== 'string') return false;
+    if (value === '') return true;
+    const normalized = value.replace(/\\/g, '/');
+    if (path.posix.isAbsolute(normalized)) return false;
+    if (/^[A-Za-z]:/.test(normalized)) return false;
+    const segments = normalized.split('/');
+    return !segments.some((seg) => seg === '..' || seg === '.');
+}
+
 export class GitProjectManifestService {
     private constructor() {
         // Singleton; node scoping follows the executing node's default node id,
@@ -183,7 +195,7 @@ export class GitProjectManifestService {
             if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return 'invalid input entry';
             const e = entry as Record<string, unknown>;
             if (e.sourcePath !== null && typeof e.sourcePath !== 'string') return 'invalid input sourcePath';
-            if (e.materializedPath !== null && typeof e.materializedPath !== 'string') return 'invalid input materializedPath';
+            if (!isSafeRelPath(e.materializedPath)) return `invalid input materializedPath ${String(e.materializedPath)}`;
             if (!isOneOf(e.dependencyKind, DEPENDENCY_KINDS)) return `invalid input kind ${String(e.dependencyKind)}`;
             if (!isOneOf(e.role, INPUT_ROLES)) return `invalid input role ${String(e.role)}`;
             if (!isOneOf(e.ownership, OWNERSHIPS)) return `invalid input ownership ${String(e.ownership)}`;
@@ -194,7 +206,12 @@ export class GitProjectManifestService {
             if (e.contentSha256 !== null && typeof e.contentSha256 !== 'string') return 'invalid input contentSha256';
         }
         if (!Array.isArray(m.refusals) || !Array.isArray(m.buildContexts)) return 'invalid refusals/buildContexts';
-        if (!m.generation || typeof m.generation !== 'object') return 'invalid generation';
+        const generation = m.generation as Record<string, unknown> | undefined;
+        if (!generation || typeof generation !== 'object') return 'invalid generation';
+        if (!isSafeRelPath(generation.candidateDir) || !isSafeRelPath(generation.appliedDir) || !isSafeRelPath(generation.previousDir)) {
+            return 'invalid generation paths';
+        }
+        if (!isSafeRelPath((m.project as Record<string, unknown> | undefined)?.root)) return 'invalid project.root';
         if (!m.counts || typeof m.counts !== 'object') return 'invalid counts';
         if (!m.bounds || typeof m.bounds !== 'object') return 'invalid bounds';
         return null;
@@ -335,21 +352,36 @@ export class GitProjectManifestService {
         return path.join(this.managedRoot(stackName), PROMOTION_MARKER);
     }
 
-    private async readMarker(stackName: string): Promise<PromotionMarker | null> {
+    /**
+     * Read the promotion marker. Distinguishes ABSENT (no crash happened) from
+     * CORRUPT (a crash mid-marker-write): a corrupt marker must never be
+     * treated as a clean slate, or recovery would skip a half-written stack.
+     */
+    private async readMarker(stackName: string): Promise<PromotionMarker | { corrupt: string } | null> {
+        let raw: string;
         try {
-            const raw = await fs.promises.readFile(await this.markerPath(stackName), 'utf8');
+            raw = await fs.promises.readFile(await this.markerPath(stackName), 'utf8');
+        } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+            return { corrupt: `Cannot read promotion marker: ${(e as Error).message}` };
+        }
+        try {
             const parsed = JSON.parse(raw) as PromotionMarker;
             if (typeof parsed.sha !== 'string' || typeof parsed.candidateRelPath !== 'string' || !Array.isArray(parsed.written)) {
-                return null;
+                return { corrupt: 'Promotion marker has an unexpected shape' };
             }
             return parsed;
-        } catch {
-            return null;
+        } catch (e) {
+            return { corrupt: `Promotion marker is not valid JSON: ${(e as Error).message}` };
         }
     }
 
+    /** Atomic marker write (tmp + rename) so a crash never leaves a half-written marker. */
     private async writeMarker(stackName: string, marker: PromotionMarker): Promise<void> {
-        await fs.promises.writeFile(await this.markerPath(stackName), JSON.stringify(marker), 'utf8');
+        const target = await this.markerPath(stackName);
+        const tmp = `${target}.tmp`;
+        await fs.promises.writeFile(tmp, JSON.stringify(marker), 'utf8');
+        await fs.promises.rename(tmp, target);
     }
 
     /** Hash of the stack-dir file at a materialized path, or null when absent. */
@@ -370,9 +402,22 @@ export class GitProjectManifestService {
         return path.resolve(composeDir, stackName, relPath);
     }
 
-    /** Copy one candidate file into the stack dir through the guarded FS service. */
+    /**
+     * Copy one candidate path into the stack dir through the guarded FS
+     * service. Directory entries (build contexts) are copied recursively,
+     * preserving the nested layout.
+     */
     private async writeStackFileFromCandidate(stackName: string, candidateAbs: string, destRel: string, maxFileBytes: number): Promise<void> {
-        const content = await fs.promises.readFile(path.join(candidateAbs, destRel));
+        const src = path.join(candidateAbs, destRel);
+        const stat = await fs.promises.stat(src);
+        if (stat.isDirectory()) {
+            const entries = await fs.promises.readdir(src, { withFileTypes: true });
+            for (const entry of entries) {
+                await this.writeStackFileFromCandidate(stackName, candidateAbs, `${destRel}/${entry.name}`, maxFileBytes);
+            }
+            return;
+        }
+        const content = await fs.promises.readFile(src);
         if (content.length > maxFileBytes) {
             throw new Error(`Materialized file too large: ${destRel} (${content.length} bytes)`);
         }
@@ -420,8 +465,12 @@ export class GitProjectManifestService {
                 await this.writeMarker(stackName, { sha, candidateRelPath, written });
             }
 
-            // 2. Stale cleanup: prior-manifest paths Sencho owns, absent from the
-            //    new set, double-checked against the prior generation's inventory.
+            // 2. Stale cleanup: prior-manifest paths Sencho owns (deletionAuthority
+            //    sencho), absent from the new set. Only sencho-authority paths are
+            //    ever unlinked; user/none authority stays untouched. A failed
+            //    unlink FAILS the promotion (the transaction restores the prior
+            //    generation) rather than recording a tombstone for a file that
+            //    still exists and can silently change the deployed model.
             const newPaths = new Set(managed.map((i) => i.materializedPath!));
             const removed: ComposeInputEntry[] = [];
             if (priorManifest) {
@@ -429,23 +478,25 @@ export class GitProjectManifestService {
                     if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
                     if (entry.deletionAuthority !== 'sencho') continue; // never touch user/none authority
                     if (newPaths.has(entry.materializedPath)) continue;
-                    // Double-check: the path must appear in the previous
-                    // generation's inventory before unlinking.
-                    const inPrior = priorManifest.inputs.some(
-                        (p) => p.materializedPath === entry.materializedPath && p.ownership === 'managed',
-                    );
-                    if (!inPrior) continue;
                     const fsSvc = FileSystemService.getInstance();
-                    try {
-                        await fsSvc.deleteStackPath(stackName, entry.materializedPath, false);
-                    } catch (e) {
-                        console.warn(`[GitManifest] stale cleanup could not delete ${entry.materializedPath}:`, (e as Error).message);
-                    }
+                    // Directories (build contexts) need a recursive unlink; a
+                    // non-recursive attempt would throw and fail the promotion
+                    // even though the directory is legitimately removable.
+                    const isDir = await fsSvc
+                        .pathKind(stackName, entry.materializedPath)
+                        .then((kind) => kind === 'directory')
+                        .catch(() => false);
+                    await fsSvc.deleteStackPath(stackName, entry.materializedPath, isDir);
                     removed.push({ ...entry, state: 'tombstoned', contentSha256: null, sizeBytes: null });
                 }
             }
 
-            // 3. Finalize generation bookkeeping, then write the manifest.
+            // 3. Move candidate -> applied FIRST, then write the manifest.
+            //    Ordering invariant: the sweep treats the on-disk manifest as
+            //    the previous generation, so a crash before the manifest write
+            //    must leave the OLD manifest on disk (restore works); a crash
+            //    after the write restores the idempotently rewritten new
+            //    generation, which is harmless.
             const appliedRel = `${GENERATIONS_DIR}/applied-${sha}`;
             const appliedAbs = path.join(this.managedRoot(stackName), appliedRel);
             manifest.generation = {
@@ -454,19 +505,21 @@ export class GitProjectManifestService {
                 previousDir: priorManifest?.generation.appliedDir ?? null,
             };
             manifest.inputs = [...manifest.inputs, ...removed];
-            manifest.counts.managed = manifest.inputs.filter((i) => i.ownership === 'managed' && i.state === 'present').length;
-            await this.writeManifest(stackName, manifest);
-
-            // 4. Move candidate -> applied, prune beyond retention.
+            manifest.counts = {
+                managed: manifest.inputs.filter((i) => i.ownership === 'managed' && i.state === 'present').length,
+                unmanaged: manifest.inputs.filter((i) => i.ownership === 'unmanaged').length,
+                refused: manifest.refusals.length,
+            };
             await fs.promises.rm(appliedAbs, { recursive: true, force: true });
             await fs.promises.rename(candidateAbs, appliedAbs);
-            await this.pruneGenerations(stackName, appliedRel);
+            await this.pruneGenerations(stackName, appliedRel, manifest.generation.previousDir);
 
-            // 5. DB cache + mount-root invalidation.
+            // 4. Write the manifest, then the DB cache + mount-root invalidation.
+            await this.writeManifest(stackName, manifest);
             DatabaseService.getInstance().setGitSourceManifestState(stackName, manifest.manifestVersion, manifest.state, appliedRel);
             StackFileRootsService.invalidate(NodeRegistry.getInstance().getDefaultNodeId(), stackName);
 
-            // 6. Clear the marker (last step; its presence means "recover").
+            // 5. Clear the marker (last step; its presence means "recover").
             await fs.promises.rm(markerPath, { force: true });
         } catch (error) {
             // Mid-write failure: restore the previous applied generation and
@@ -481,11 +534,16 @@ export class GitProjectManifestService {
     }
 
     /**
-     * Restore the previous applied generation's managed files into the stack
-     * dir and clear the promotion marker. Used after a mid-write crash.
+     * Restore the previous applied generation's managed files AND the manifest
+     * FILE into the stack dir, then clear the promotion marker. Used after a
+     * mid-write crash or failed promotion. If any restore step fails, the
+     * marker is KEPT and the DB state is set to migration_required so the boot
+     * sweep retries and the UI flags the stack instead of declaring a false
+     * recovery.
      */
     async restorePreviousGeneration(stackName: string, opts: { sha: string; candidateRelPath: string; manifest: GitProjectManifest; priorManifest: GitProjectManifest | null }): Promise<void> {
         const prior = opts.priorManifest;
+        let failures = 0;
         if (prior) {
             const priorDir = path.join(this.managedRoot(stackName), prior.generation.appliedDir);
             for (const entry of prior.inputs) {
@@ -493,18 +551,32 @@ export class GitProjectManifestService {
                 try {
                     await this.writeStackFileFromCandidate(stackName, priorDir, entry.materializedPath, this.boundsConfig().maxFileBytes);
                 } catch (e) {
-                    console.warn(`[GitManifest] restore could not write ${entry.materializedPath}:`, (e as Error).message);
+                    failures += 1;
+                    console.error(`[GitManifest] restore could not write ${entry.materializedPath}:`, (e as Error).message);
                 }
             }
-            DatabaseService.getInstance().setGitSourceManifestState(stackName, prior.manifestVersion, prior.state, prior.generation.appliedDir);
+            if (failures === 0) {
+                // C1: the manifest FILE must agree with the restored disk state,
+                // or the next apply would read the new manifest against the old
+                // files and refuse every input as locally modified forever.
+                await this.writeManifest(stackName, prior);
+            }
+            DatabaseService.getInstance().setGitSourceManifestState(
+                stackName,
+                failures === 0 ? prior.manifestVersion : null,
+                failures === 0 ? prior.state : 'migration_required',
+                failures === 0 ? prior.generation.appliedDir : null,
+            );
         } else {
             DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
         }
-        await fs.promises.rm(await this.markerPath(stackName), { force: true });
+        if (failures === 0) {
+            await fs.promises.rm(await this.markerPath(stackName), { force: true });
+        }
         StackFileRootsService.invalidate(NodeRegistry.getInstance().getDefaultNodeId(), stackName);
     }
 
-    private async pruneGenerations(stackName: string, keepAppliedRel: string): Promise<void> {
+    private async pruneGenerations(stackName: string, keepAppliedRel: string, previousDir: string | null): Promise<void> {
         const dir = this.generationsDir(stackName);
         let entries;
         try {
@@ -512,16 +584,15 @@ export class GitProjectManifestService {
         } catch {
             return;
         }
-        const appliedDirs = entries
-            .filter((e) => e.isDirectory() && e.name.startsWith('applied-'))
-            .map((e) => e.name)
-            .sort();
         const keepBase = path.basename(keepAppliedRel);
-        const remove = appliedDirs.filter((name) => name !== keepBase);
-        // Keep at most MAX_GENERATIONS - 1 previous applied generations.
-        const excess = remove.slice(0, Math.max(0, remove.length - (MAX_GENERATIONS - 1)));
-        for (const name of excess) {
-            await fs.promises.rm(path.join(dir, name), { recursive: true, force: true });
+        // Retention is previousDir-explicit, never lexicographic: sha hex order
+        // says nothing about recency, and the manifest's previousDir is what a
+        // crash restore reads from.
+        const keep = new Set([keepBase, previousDir ? path.basename(previousDir) : null].filter((v): v is string => v !== null));
+        for (const entry of entries) {
+            if (!entry.isDirectory() || !entry.name.startsWith('applied-')) continue;
+            if (keep.has(entry.name)) continue;
+            await fs.promises.rm(path.join(dir, entry.name), { recursive: true, force: true });
         }
     }
 
@@ -544,6 +615,14 @@ export class GitProjectManifestService {
         }
         const marker = await this.readMarker(stackName);
         if (marker) {
+            if ('corrupt' in marker) {
+                // A corrupt marker (crash mid-marker-write) is NOT a clean slate:
+                // the stack dir may be half-written. Flag recovery-required.
+                await fs.promises.rm(await this.markerPath(stackName), { force: true });
+                DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
+                console.warn(`[GitManifest] promotion marker for ${stackName} is corrupt (${marker.corrupt}); flagged migration_required`);
+                return;
+            }
             const candidateAbs = path.join(this.managedRoot(stackName), marker.candidateRelPath);
             let candidateOk = false;
             try {
@@ -567,9 +646,17 @@ export class GitProjectManifestService {
                 return;
             }
             // Verify the recorded mid-write state still matches the candidate.
+            // A missing candidate file is a mismatch (decline + flag), never a
+            // throw that would abort the sweep for the remaining stacks.
             let mismatch: string | null = null;
             for (const rel of marker.written) {
-                const expected = sha256Of(await fs.promises.readFile(path.join(candidateAbs, rel)));
+                let expected: string | null = null;
+                try {
+                    expected = sha256Of(await fs.promises.readFile(path.join(candidateAbs, rel)));
+                } catch {
+                    mismatch = `${rel} (candidate file missing)`;
+                    break;
+                }
                 const actual = await this.hashStackFile(stackName, rel);
                 if (actual !== expected) {
                     mismatch = `${rel} (${actual ?? 'missing'} != ${expected})`;
@@ -618,13 +705,20 @@ export class GitProjectManifestService {
         }
     }
 
-    /** Delete the whole managed area; failures are logged, never fatal. */
-    async deleteManagedArea(stackName: string): Promise<void> {
+    /**
+     * Delete the whole managed area. Failures are logged and reported as
+     * false so callers can decide whether the operation should proceed
+     * (stack deletion tolerates a lingering area; detach must not drop the
+     * row while secret-bearing generations survive).
+     */
+    async deleteManagedArea(stackName: string): Promise<boolean> {
         const root = this.managedRoot(stackName);
         try {
             await fs.promises.rm(root, { recursive: true, force: true });
+            return true;
         } catch (e) {
             console.warn(`[GitManifest] could not delete managed area for ${stackName}:`, (e as Error).message);
+            return false;
         }
     }
 
@@ -637,7 +731,11 @@ export class GitProjectManifestService {
      * were never enumerated, so their files get authority 'none'. Never infer
      * deletion authority from incomplete historical metadata.
      */
-    async buildMigratedManifest(stackName: string, source: { repo_url: string; branch: string; sync_env: boolean; applied_deploy_spec: { files: string[]; contextDir: string | null } | null }): Promise<GitProjectManifest> {
+    async buildMigratedManifest(
+        stackName: string,
+        source: { repo_url: string; branch: string; sync_env: boolean; applied_deploy_spec: { files: string[]; contextDir: string | null } | null },
+        priorVersion = 0,
+    ): Promise<GitProjectManifest> {
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const bounds = this.boundsConfig();
         const now = Date.now();
@@ -678,9 +776,11 @@ export class GitProjectManifestService {
         };
 
         if (spec && spec.files.length > 0) {
-            spec.files.forEach((file, index) => {
-                void addEntry(file, index === 0 ? 'compose-primary' : 'compose-additional', 'explicit', 'sencho', null);
-            });
+            for (const [index, file] of spec.files.entries()) {
+                // Must be awaited: addEntry reads the disk before pushing, and
+                // the manifest + counts below are built from the final array.
+                await addEntry(file, index === 0 ? 'compose-primary' : 'compose-additional', 'explicit', 'sencho', null);
+            }
             if (spec.contextDir) {
                 inputs.push({
                     sourcePath: spec.contextDir,
@@ -714,7 +814,7 @@ export class GitProjectManifestService {
 
         const manifest: GitProjectManifest = {
             schemaVersion: 1,
-            manifestVersion: 1,
+            manifestVersion: priorVersion + 1,
             state: 'migrated',
             generatedAt: now,
             identity: this.expectedIdentity(stackName, source.repo_url, source.branch),
