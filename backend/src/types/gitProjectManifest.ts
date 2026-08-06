@@ -99,6 +99,13 @@ export interface BuildContextPlan {
   /** True when the context is not copied (refused). */
   excludedFromCopy: boolean;
   note: string | null;
+  /**
+   * File-level inventory of the materialized context (context-relative paths
+   * with content hashes). Gives the context file-granular ownership: local
+   * edits and files removed upstream are detected per file, so a removed file
+   * can be cleared on promotion and a locally edited one refuses apply.
+   */
+  files: Array<{ path: string; sha256: string }>;
 }
 
 export interface ManifestBounds {

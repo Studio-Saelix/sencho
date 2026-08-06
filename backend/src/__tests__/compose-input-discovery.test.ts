@@ -320,3 +320,60 @@ describe('syncEnv ownership (audit C-2)', () => {
         expect(envEntries[0].contentSha256).toBeTruthy();
     });
 });
+
+describe('explicit dockerfile resolution (audit round 2 C-3)', () => {
+    it('rebases the dockerfile against its build context', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    build:\n      context: web\n      dockerfile: Dockerfile.dev\n',
+            'web/Dockerfile.dev': 'FROM nginx\n',
+            'web/app.js': 'console.log(1)\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        expect(result.buildContexts).toHaveLength(1);
+        expect(result.buildContexts[0].repoPath).toBe('web');
+        expect(result.buildContexts[0].dockerfile).toBe('web/Dockerfile.dev');
+        // The dockerfile's files are part of the context inventory.
+        expect(result.buildContexts[0].files.some((f) => f.path === 'Dockerfile.dev')).toBe(true);
+    });
+
+    it('allows a ../ dockerfile inside the repository and materializes it separately', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    build:\n      context: web\n      dockerfile: ../shared/Dockerfile\n',
+            'web/app.js': 'x\n',
+            'shared/Dockerfile': 'FROM nginx\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const dockerfileEntry = result.inputs.find((i) => i.dependencyKind === 'dockerfile' && i.materializedPath === 'shared/Dockerfile');
+        expect(dockerfileEntry).toBeTruthy();
+        expect(dockerfileEntry?.ownership).toBe('managed');
+        expect(dockerfileEntry?.contentSha256).toBeTruthy();
+    });
+
+    it('refuses a dockerfile that escapes the repository', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    build:\n      context: web\n      dockerfile: ../../outside/Dockerfile\n',
+            'web/app.js': 'x\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals.some((r) => r.kind === 'out-of-bounds' && String(r.sourcePath).includes('Dockerfile'))).toBe(true);
+    });
+});
+
+describe('repo-root build context overlap (audit round 2)', () => {
+    it('copies a repo-root context without duplicating managed files', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    build: .\n',
+            'src/main.go': 'package main\n',
+        });
+        const inv = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        const managed = inv.inputs.filter((i) => i.ownership === 'managed' && i.materializedPath !== null && i.dependencyKind !== 'build-context');
+        const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-rootctx-'));
+        tmpRoots.push(dest);
+        const result = await discovery().walkAndCopy(clone, dest, managed.map((i) => ({ srcRel: i.sourcePath!, destRel: i.materializedPath! })), inv.contextCopyPlans, BOUNDS);
+        // compose.yaml + src/main.go: no duplicate-path failure, no double copy.
+        expect(result.copiedFiles).toBe(2);
+        expect(fs.readFileSync(path.join(dest, 'src/main.go'), 'utf8')).toBe('package main\n');
+    });
+});

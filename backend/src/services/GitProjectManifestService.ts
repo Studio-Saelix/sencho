@@ -29,7 +29,6 @@ import type {
     ComposeInputEntry,
     DeletionAuthority,
     GitProjectManifest,
-    GitSourceManifestState,
     InputDependencyKind,
     InputOwnership,
     InputRole,
@@ -49,8 +48,8 @@ export const PROMOTION_MARKER = 'promotion.json';
 export const CANDIDATE_COMPLETE_MARKER = '.candidate-complete';
 export const GENERATIONS_DIR = 'generations';
 
-// Retention: current applied generation + one previous.
-const MAX_GENERATIONS = 2;
+// Retention: current applied generation + one previous (prune keeps the
+// manifest's previousDir explicitly, not by count).
 const ORPHAN_CANDIDATE_AGE_MS = 24 * 60 * 60 * 1000;
 
 interface PromotionMarker {
@@ -394,6 +393,57 @@ export class GitProjectManifestService {
         }
     }
 
+    /**
+     * Verify a build-context subtree on disk against the manifest's file-level
+     * inventory. Returns the context-relative paths that diverge: files whose
+     * hash differs, files missing from the stack, and files present in the
+     * stack that the manifest does not own (locally added). This gives contexts
+     * the same local-modification protection as plain managed files.
+     */
+    async verifyContextOnDisk(stackName: string, context: BuildContextPlan): Promise<string[]> {
+        const abs = await this.stackFileAbs(stackName, context.repoPath);
+        const diverged: string[] = [];
+        const owned = new Set(context.files.map((f) => f.path));
+        const walk = async (dir: string, rel: string): Promise<void> => {
+            let entriesList: fs.Dirent[];
+            try {
+                entriesList = await fs.promises.readdir(dir, { withFileTypes: true });
+            } catch {
+                return; // missing context dir reported by the owned-file loop below
+            }
+            for (const entry of entriesList) {
+                const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+                if (entry.isDirectory()) {
+                    await walk(path.join(dir, entry.name), childRel);
+                    continue;
+                }
+                if (entry.isSymbolicLink()) {
+                    diverged.push(`${childRel} (symbolic link)`);
+                    continue;
+                }
+                if (!owned.has(childRel)) {
+                    diverged.push(`${childRel} (not in the managed context)`);
+                    continue;
+                }
+                const expected = context.files.find((f) => f.path === childRel)?.sha256;
+                const actual = await this.hashStackFile(stackName, `${context.repoPath}/${childRel}`);
+                if (expected === undefined || actual !== expected) {
+                    diverged.push(childRel);
+                }
+            }
+        };
+        await walk(abs, '');
+        for (const ownedFile of context.files) {
+            if (!owned.has(ownedFile.path)) continue;
+            const present = await fs.promises
+                .access(path.join(abs, ownedFile.path))
+                .then(() => true)
+                .catch(() => false);
+            if (!present) diverged.push(`${ownedFile.path} (missing)`);
+        }
+        return diverged;
+    }
+
     private async stackFileAbs(stackName: string, relPath: string): Promise<string> {
         // Same resolution chain as FileSystemService: node.compose_dir ->
         // COMPOSE_DIR -> /app/compose. The stack name was validated upstream
@@ -482,12 +532,20 @@ export class GitProjectManifestService {
             //    still exists and can silently change the deployed model.
             const newPaths = new Set(managed.map((i) => i.materializedPath!));
             const removed: ComposeInputEntry[] = [];
+            const fsSvc = FileSystemService.getInstance();
+            // Context files are reconciled FILE-LEVEL: a file removed from the
+            // repository inside a retained context must disappear from the
+            // stack context too, or the deployed/build context would keep
+            // deleted (possibly secret-bearing) content.
+            const newContextFiles = new Map<string, Set<string>>();
+            for (const ctx of manifest.buildContexts) {
+                newContextFiles.set(ctx.repoPath, new Set(ctx.files.map((f) => f.path)));
+            }
             if (priorManifest) {
                 for (const entry of priorManifest.inputs) {
                     if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
                     if (entry.deletionAuthority !== 'sencho') continue; // never touch user/none authority
                     if (newPaths.has(entry.materializedPath)) continue;
-                    const fsSvc = FileSystemService.getInstance();
                     // Directories (build contexts) need a recursive unlink; a
                     // non-recursive attempt would throw and fail the promotion
                     // even though the directory is legitimately removable.
@@ -497,6 +555,16 @@ export class GitProjectManifestService {
                         .catch(() => false);
                     await fsSvc.deleteStackPath(stackName, entry.materializedPath, isDir);
                     removed.push({ ...entry, state: 'tombstoned', contentSha256: null, sizeBytes: null });
+                }
+                // Context-file reconciliation for contexts retained in both sets.
+                for (const priorCtx of priorManifest.buildContexts) {
+                    const newFiles = newContextFiles.get(priorCtx.repoPath);
+                    if (!newFiles) continue; // context removed entirely; handled above
+                    for (const priorFile of priorCtx.files) {
+                        if (newFiles.has(priorFile.path)) continue;
+                        const rel = `${priorCtx.repoPath}/${priorFile.path}`;
+                        await fsSvc.deleteStackPath(stackName, rel, false);
+                    }
                 }
             }
 
@@ -553,8 +621,21 @@ export class GitProjectManifestService {
     async restorePreviousGeneration(stackName: string, opts: { sha: string; candidateRelPath: string; manifest: GitProjectManifest; priorManifest: GitProjectManifest | null }): Promise<void> {
         const prior = opts.priorManifest;
         let failures = 0;
+        const fsSvc = FileSystemService.getInstance();
+        const removeStackPath = async (relPath: string): Promise<void> => {
+            const isDir = await fsSvc
+                .pathKind(stackName, relPath)
+                .then((kind) => kind === 'directory')
+                .catch(() => false);
+            if (isDir || (await fsSvc.pathKind(stackName, relPath).catch(() => null)) !== null) {
+                await fsSvc.deleteStackPath(stackName, relPath, isDir);
+            }
+        };
         if (prior) {
             const priorDir = path.join(this.managedRoot(stackName), prior.generation.appliedDir);
+            const priorPaths = new Set(
+                prior.inputs.filter((i) => i.ownership === 'managed' && i.materializedPath !== null).map((i) => i.materializedPath as string),
+            );
             for (const entry of prior.inputs) {
                 if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
                 try {
@@ -564,8 +645,23 @@ export class GitProjectManifestService {
                     console.error(`[GitManifest] restore could not write ${entry.materializedPath}:`, (e as Error).message);
                 }
             }
+            // Exact-generation restore: paths the failed promotion introduced
+            // (present in the NEW manifest, absent from the prior one) must be
+            // removed, or the stack would keep a mixed old/new file set.
+            if (failures === 0 && opts.manifest) {
+                for (const entry of opts.manifest.inputs) {
+                    if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
+                    if (priorPaths.has(entry.materializedPath)) continue;
+                    try {
+                        await removeStackPath(entry.materializedPath);
+                    } catch (e) {
+                        failures += 1;
+                        console.error(`[GitManifest] restore could not remove ${entry.materializedPath}:`, (e as Error).message);
+                    }
+                }
+            }
             if (failures === 0) {
-                // C1: the manifest FILE must agree with the restored disk state,
+                // The manifest FILE must agree with the restored disk state,
                 // or the next apply would read the new manifest against the old
                 // files and refuse every input as locally modified forever.
                 await this.writeManifest(stackName, prior);
@@ -578,9 +674,20 @@ export class GitProjectManifestService {
             );
         } else {
             // First-ever promotion failed with no prior generation to restore:
-            // the stack dir holds a partial file set. Flag it and KEEP the
-            // marker so the boot sweep reports the stack instead of silently
-            // leaving a mixed state.
+            // remove everything the failed promotion wrote so the stack dir is
+            // not left with a partial file set, flag migration_required, and
+            // KEEP the marker so the boot sweep reports the stack.
+            if (opts.manifest && failures === 0) {
+                for (const entry of opts.manifest.inputs) {
+                    if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
+                    try {
+                        await removeStackPath(entry.materializedPath);
+                    } catch (e) {
+                        failures += 1;
+                        console.error(`[GitManifest] restore could not remove ${entry.materializedPath}:`, (e as Error).message);
+                    }
+                }
+            }
             DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
             failures = 1;
         }

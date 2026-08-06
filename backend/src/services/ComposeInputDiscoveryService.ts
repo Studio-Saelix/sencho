@@ -220,6 +220,7 @@ export class ComposeInputDiscoveryService {
     private async planBuildContexts(
         cloneDir: string,
         contextInputs: DeclaredInput[],
+        dockerfileInputs: DeclaredInput[],
         submodules: string[],
         bounds: ManifestBounds,
         refusals: RefusalInfo[],
@@ -254,28 +255,78 @@ export class ComposeInputDiscoveryService {
                 continue;
             }
 
-            // docker reads .dockerignore from the dockerfile's directory when the
-            // dockerfile is declared, else from the context root.
-            const dockerfileDecl = contextInputs.find(
+            // An explicit dockerfile resolves RELATIVE TO THE BUILD CONTEXT
+            // (docker compose build spec); the parser emits it with
+            // compose-file-dir provenance, so it is rebased here against the
+            // context root and validated for containment.
+            const dockerfileDecl = dockerfileInputs.find(
                 (i) => i.kind === 'dockerfile' && i.fromFile === input.fromFile,
             );
+            let dockerfileRel: string | null = null;
+            let dockerfileOutsideContext = false;
+            if (dockerfileDecl && typeof dockerfileDecl.sourcePath === 'string') {
+                const rebased = path.posix.normalize(path.posix.join(resolved, dockerfileDecl.sourcePath));
+                if (rebased === '..' || rebased.startsWith('../') || path.posix.isAbsolute(rebased)) {
+                    refusals.push(this.refusal(dockerfileDecl.sourcePath, 'out-of-bounds', `Dockerfile ${dockerfileDecl.sourcePath} resolves outside the repository`, true));
+                    continue;
+                }
+                dockerfileRel = rebased;
+                // Compose resolves the dockerfile relative to the context. A
+                // `../` form that stays inside the repository is allowed: the
+                // dockerfile lands outside the context subtree, so it is
+                // materialized as its own managed input below.
+                const inContext = dockerfileRel === resolved || dockerfileRel.startsWith(`${resolved}/`);
+                dockerfileOutsideContext = !inContext;
+            }
             // docker reads .dockerignore from the DOCKERFILE's directory when
-            // the dockerfile is declared with a directory component, else from
-            // the context root.
+            // the dockerfile is declared with a directory component inside the
+            // context, else from the context root.
             let dockerignoreDir = abs;
-            if (dockerfileDecl && typeof dockerfileDecl.sourcePath === 'string' && dockerfileDecl.sourcePath.includes('/')) {
-                const safeDockerfileDir = dockerfileDecl.sourcePath.split('/').slice(0, -1).join('/');
-                dockerignoreDir = path.join(abs, safeDockerfileDir);
+            if (dockerfileRel !== null && !dockerfileOutsideContext && dockerfileRel.includes('/')) {
+                const safeDockerfileDir = dockerfileRel.split('/').slice(0, -1).join('/');
+                dockerignoreDir = path.join(abs, safeDockerfileDir.replace(`${resolved}/`, ''));
             }
             const matcher = await loadDockerIgnore(dockerignoreDir);
             const dockerignoreRel = matcher !== null ? path.relative(cloneDir, path.join(dockerignoreDir, '.dockerignore')).replace(/\\/g, '/') : null;
+            if (dockerfileOutsideContext) {
+                // Materialize the out-of-context dockerfile as its own managed
+                // input (it is outside the context subtree the walk copies).
+                const dfAbs = path.join(cloneDir, dockerfileRel!);
+                try {
+                    const dfStat = await fs.promises.stat(dfAbs);
+                    if (!dfStat.isFile() || dfStat.size > bounds.maxFileBytes) {
+                        refusals.push(this.refusal(dockerfileRel, 'missing-file', `Dockerfile ${dockerfileRel} is missing or oversized in the repository`, true));
+                        continue;
+                    }
+                    const dfContent = await fs.promises.readFile(dfAbs);
+                    entries.push({
+                        sourcePath: dockerfileRel,
+                        materializedPath: dockerfileRel,
+                        role: 'dockerfile',
+                        dependencyKind: 'dockerfile',
+                        ownership: 'managed',
+                        provenance: 'fetch',
+                        sensitivity: 'medium',
+                        contentSha256: createHash('sha256').update(dfContent).digest('hex'),
+                        sizeBytes: dfStat.size,
+                        state: 'present',
+                        deletionAuthority: 'sencho',
+                        note: 'Dockerfile outside the build context; materialized at its repo-relative path',
+                    });
+                } catch {
+                    refusals.push(this.refusal(dockerfileRel, 'missing-file', `Dockerfile ${dockerfileRel} is not present in the repository`, true));
+                    continue;
+                }
+            }
 
             // Walk the context subtree: filtered bytes, ignored count, LFS and
-            // special-file detection among files that would be copied.
+            // special-file detection, and the per-file hash inventory that
+            // gives the context file-granular ownership.
             let contextBytes = 0;
             let ignoredCount = 0;
             let lfsInContext = false;
             let specialInContext: string | null = null;
+            const contextFiles: Array<{ path: string; sha256: string }> = [];
             const walk = async (dir: string, rel: string): Promise<void> => {
                 let entriesList: fs.Dirent[];
                 try {
@@ -313,6 +364,8 @@ export class ComposeInputDiscoveryService {
                         return;
                     }
                     contextBytes += st.size;
+                    const content = await fs.promises.readFile(path.join(dir, entry.name));
+                    contextFiles.push({ path: childRel, sha256: createHash('sha256').update(content).digest('hex') });
                     if (!lfsInContext) {
                         const handle = await fs.promises.open(path.join(dir, entry.name), 'r');
                         try {
@@ -355,12 +408,13 @@ export class ComposeInputDiscoveryService {
 
             const plan: BuildContextPlan = {
                 repoPath: resolved,
-                dockerfile: dockerfileDecl?.sourcePath ?? null,
+                dockerfile: dockerfileRel,
                 contextBytes,
                 ignoredCount,
                 dockerignoreApplied: matcher !== null,
                 excludedFromCopy: excluded,
                 note,
+                files: contextFiles,
             };
             plans.push({
                 context: plan,
@@ -539,8 +593,9 @@ export class ComposeInputDiscoveryService {
                 continue;
             }
 
-            // Build contexts are planned separately below.
-            if (kind === 'build-context' || kind === 'build-additional-context') continue;
+            // Build contexts and their dockerfiles are planned separately
+            // below (the dockerfile is rebased against its context there).
+            if (kind === 'build-context' || kind === 'build-additional-context' || kind === 'dockerfile') continue;
 
             const resolved = this.resolveDeclared(cloneDir, input);
             if (resolved === null) {
@@ -636,7 +691,8 @@ export class ComposeInputDiscoveryService {
 
         // Build contexts.
         const contextInputs = parsed.inputs.filter((i) => i.kind === 'build-context' || i.kind === 'build-additional-context');
-        const { plans, entries: contextEntries } = await this.planBuildContexts(cloneDir, contextInputs, submodules, bounds, refusals);
+        const dockerfileInputs = parsed.inputs.filter((i) => i.kind === 'dockerfile');
+        const { plans, entries: contextEntries } = await this.planBuildContexts(cloneDir, contextInputs, dockerfileInputs, submodules, bounds, refusals);
         inputs.push(...contextEntries);
 
         // Sync env entry (stack-root .env) is recorded by the caller (it knows
@@ -709,7 +765,7 @@ export class ComposeInputDiscoveryService {
                 const entriesList = await fs.promises.readdir(dir, { withFileTypes: true });
                 for (const entry of entriesList) {
                     const childRel = rel ? `${rel}/${entry.name}` : entry.name;
-                    if (entry.name === '.git' || (entry.name.toLowerCase() === '.git')) continue;
+                    if (entry.name.toLowerCase() === '.git') continue;
                     if (plan.matcher?.matches(childRel, entry.isDirectory())) {
                         if (!entry.isDirectory()) plan.context.ignoredCount += 1;
                         continue;
@@ -724,7 +780,12 @@ export class ComposeInputDiscoveryService {
                     if (entry.isCharacterDevice() || entry.isBlockDevice() || entry.isSocket() || entry.isFIFO()) {
                         throw new Error(`Special file inside build context: ${childRel}`);
                     }
-                    stack.push({ src: path.join(dir, entry.name), destRel: plan.destRel ? `${plan.destRel}/${childRel}` : childRel });
+                    const destRel = plan.destRel && plan.destRel !== '.' ? `${plan.destRel}/${childRel}` : childRel;
+                    // A repo-root context overlaps the managed file set: paths
+                    // already copied as managed inputs must not be copied again
+                    // (writeOne would reject the duplicate).
+                    if (seen.has(caseKey(destRel))) continue;
+                    stack.push({ src: path.join(dir, entry.name), destRel });
                 }
             };
             await walk(srcRoot, '');

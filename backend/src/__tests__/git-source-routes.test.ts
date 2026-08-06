@@ -538,6 +538,60 @@ describe('DELETE /api/stacks/:stackName/git-source, detach/export contract', () 
         }
     });
 
+    it('removes auto-discovered override files so the flattened model is final', async () => {
+        seedGitSource('ov-unlink');
+        const stackDir = path.join(process.env.COMPOSE_DIR!, 'ov-unlink');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+        fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'), 'services:\n  web:\n    environment:\n      A: b\n');
+        // The managed override file is recorded in the manifest so detach can
+        // find it; write a manifest entry for it directly.
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const svc = GitProjectManifestService.getInstance();
+        const manifest = svc.buildManifest({
+            stackName: 'ov-unlink',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: 'ov-unlink',
+            invocation: ['-f', 'compose.yaml', '-p', 'ov-unlink'],
+            inputs: [
+                {
+                    sourcePath: 'compose.yaml', materializedPath: 'compose.yaml', role: 'compose-primary', dependencyKind: 'explicit',
+                    ownership: 'managed', provenance: 'fetch', sensitivity: 'medium', contentSha256: null, sizeBytes: 10,
+                    state: 'present', deletionAuthority: 'sencho', note: null,
+                },
+                {
+                    sourcePath: 'compose.override.yaml', materializedPath: 'compose.override.yaml', role: 'compose-override', dependencyKind: 'implicit-override',
+                    ownership: 'managed', provenance: 'fetch', sensitivity: 'medium', contentSha256: null, sizeBytes: 10,
+                    state: 'present', deletionAuthority: 'sencho', note: null,
+                },
+            ],
+            refusals: [],
+            buildContexts: [],
+            bounds: { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 },
+            priorManifest: null,
+            state: 'active',
+        });
+        await svc.writeManifest('ov-unlink', manifest);
+        const render = mockRender('services:\n  web:\n    image: nginx\n    environment:\n      A: b\n');
+        try {
+            const res = await request(app)
+                .delete('/api/stacks/ov-unlink/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            // The flattened model is final: the override file is gone, so plain
+            // docker compose cannot re-merge it.
+            expect(fs.existsSync(path.join(stackDir, 'compose.override.yaml'))).toBe(false);
+            expect(DatabaseService.getInstance().getGitSource('ov-unlink')).toBeUndefined();
+            expect(render).toHaveBeenCalled();
+        } finally {
+            render.mockRestore();
+        }
+    });
+
     it('allows unlinking a single-file source', async () => {
         seedGitSource('sf-unlink');
         const stackDir = path.join(process.env.COMPOSE_DIR!, 'sf-unlink');

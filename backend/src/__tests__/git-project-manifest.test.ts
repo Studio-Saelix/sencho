@@ -59,7 +59,7 @@ function managedEntry(partial: Partial<ComposeInputEntry> & { materializedPath: 
     };
 }
 
-function buildManifest(stackName: string, inputs: ComposeInputEntry[], prior: GitProjectManifest | null = null): GitProjectManifest {
+function buildManifest(stackName: string, inputs: ComposeInputEntry[], prior: GitProjectManifest | null = null, contexts: import('../types/gitProjectManifest').BuildContextPlan[] = []): GitProjectManifest {
     return GitProjectManifestService.getInstance().buildManifest({
         stackName,
         repoUrl: 'https://github.com/example/repo.git',
@@ -71,7 +71,7 @@ function buildManifest(stackName: string, inputs: ComposeInputEntry[], prior: Gi
         invocation: ['-f', 'compose.yaml', '-p', stackName],
         inputs,
         refusals: [],
-        buildContexts: [],
+        buildContexts: contexts,
         bounds: BOUNDS,
         priorManifest: prior,
         state: prior ? 'active' : 'active',
@@ -151,6 +151,27 @@ describe('promoteGeneration', () => {
     it('promotes a candidate transactionally and persists the manifest', async () => {
         const svc = GitProjectManifestService.getInstance();
         const stackName = 'promote-ok';
+        DatabaseService.getInstance().upsertGitSource({
+            stack_name: stackName,
+            repo_url: REPO.repo_url,
+            branch: REPO.branch,
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: null,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
         writeStackFile(stackName, 'compose.yaml', 'services:\n  web:\n    image: nginx:old\n');
         const clone = makeClone({
             'compose.yaml': 'services:\n  web:\n    image: nginx:new\n    configs: [app]\nconfigs:\n  app:\n    file: config/app.conf\n',
@@ -186,13 +207,13 @@ describe('promoteGeneration', () => {
         expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
         // DB cache agrees with the file.
         const row = DatabaseService.getInstance().getGitSource(stackName);
+        expect(row?.manifest_state).toBe(read.state);
     });
 
     it('refuses to promote a candidate without the completion marker', async () => {
         const svc = GitProjectManifestService.getInstance();
         const stackName = 'promote-incomplete';
         writeStackFile(stackName, 'compose.yaml', 'old\n');
-        const clone = makeClone({ 'compose.yaml': 'new\n' });
         const candidateRel = `generations/candidate-deadbeef`;
         const candidateAbs = path.join(tmpDir, 'git-managed', '1', stackName, candidateRel);
         fs.mkdirSync(candidateAbs, { recursive: true });
@@ -283,6 +304,27 @@ describe('sweepManagedArea (crash recovery)', () => {
     it('declines to restore over a hand-repaired stack dir and flags migration_required', async () => {
         const svc = GitProjectManifestService.getInstance();
         const stackName = 'sweep-decline';
+        DatabaseService.getInstance().upsertGitSource({
+            stack_name: stackName,
+            repo_url: REPO.repo_url,
+            branch: REPO.branch,
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: null,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
         writeStackFile(stackName, 'compose.yaml', 'PRIOR\n');
         const prior = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]);
         const priorRel = `generations/applied-prior`;
@@ -306,7 +348,7 @@ describe('sweepManagedArea (crash recovery)', () => {
         expect(readStackFile(stackName, 'compose.yaml')).toBe('OPERATOR FIXED ME\n');
         expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
         const row = DatabaseService.getInstance().getGitSource(stackName);
-
+        expect(row?.manifest_state).toBe('migration_required');
     });
 
     it('drops the managed area when the stack no longer exists', async () => {
@@ -552,5 +594,96 @@ describe('partial manifest state', () => {
         // Tolerated (non-actionable) refusals reach the manifest; actionable
         // ones abort the pull before a manifest is built.
         expect(svc.summaryFrom(manifest).refused).toHaveLength(0);
+    });
+});
+
+describe('exact-generation restore (audit round 2 C-1)', () => {
+    it('removes files the failed promotion introduced', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'restore-exact';
+        writeStackFile(stackName, 'compose.yaml', 'PRIOR\n');
+        const prior = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]);
+        const priorRel = `generations/applied-prior`;
+        const priorAbs = path.join(tmpDir, 'git-managed', '1', stackName, priorRel);
+        fs.mkdirSync(priorAbs, { recursive: true });
+        fs.writeFileSync(path.join(priorAbs, 'compose.yaml'), 'PRIOR\n');
+        prior.generation.appliedDir = priorRel;
+        await svc.writeManifest(stackName, prior);
+
+        // The incoming revision introduces new.txt and updates compose.yaml.
+        const clone = makeClone({ 'compose.yaml': 'NEW\n', 'new.txt': 'fresh\n' });
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'exact',
+            clone,
+            [{ srcRel: 'compose.yaml', destRel: 'compose.yaml' }, { srcRel: 'new.txt', destRel: 'new.txt' }],
+            [],
+            BOUNDS,
+        );
+        const next = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml', contentSha256: 'x' }),
+            managedEntry({ materializedPath: 'new.txt', contentSha256: 'y' }),
+        ], prior);
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockRejectedValueOnce(new Error('simulated disk failure'));
+        try {
+            await expect(
+                svc.promoteGeneration(stackName, { sha: 'exact', candidateRelPath: candidateRel, manifest: next, priorManifest: prior }),
+            ).rejects.toThrow(/simulated disk failure/);
+        } finally {
+            saveSpy.mockRestore();
+        }
+
+        // The prior generation is exact: compose.yaml restored, new.txt removed.
+        expect(readStackFile(stackName, 'compose.yaml')).toBe('PRIOR\n');
+        expect(fs.existsSync(path.join(stackDir(stackName), 'new.txt'))).toBe(false);
+        const restored = await svc.readManifest(stackName, REPO.repo_url, REPO.branch);
+        if (restored === null || 'corrupt' in restored) throw new Error('expected a manifest');
+        expect(restored.manifestVersion).toBe(prior.manifestVersion);
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
+    });
+});
+
+describe('build-context file-level ownership (audit round 2 C-2)', () => {
+    it('removes context files deleted upstream and detects local edits', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const { ComposeInputDiscoveryService } = await import('../services/ComposeInputDiscoveryService');
+        const discovery = ComposeInputDiscoveryService.getInstance();
+        const stackName = 'context-reconcile';
+        writeStackFile(stackName, 'compose.yaml', 'services: {}\n');
+
+        // Revision 1: context web with keep.txt + drop.txt.
+        const clone1 = makeClone({
+            'compose.yaml': 'services:\n  web:\n    build:\n      context: web\n',
+            'web/keep.txt': 'keep\n',
+            'web/drop.txt': 'drop\n',
+        });
+        const inv1 = await discovery.discoverFromClone({ cloneDir: clone1, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        const managed1 = inv1.inputs.filter((i) => i.ownership === 'managed' && i.materializedPath !== null);
+        const manifest1 = buildManifest(stackName, managed1, null, inv1.buildContexts);
+        const fileList1 = managed1.filter((i) => i.dependencyKind !== 'build-context');
+        const cand1 = await svc.buildCandidate(stackName, 'rev1', clone1, fileList1.map((i) => ({ srcRel: i.sourcePath!, destRel: i.materializedPath! })), inv1.contextCopyPlans, BOUNDS);
+        await svc.promoteGeneration(stackName, { sha: 'rev1', candidateRelPath: cand1, manifest: manifest1, priorManifest: null });
+        expect(fs.existsSync(path.join(stackDir(stackName), 'web', 'drop.txt'))).toBe(true);
+
+        // Revision 2: drop.txt removed upstream.
+        const clone2 = makeClone({
+            'compose.yaml': 'services:\n  web:\n    build:\n      context: web\n',
+            'web/keep.txt': 'keep\n',
+        });
+        const inv2 = await discovery.discoverFromClone({ cloneDir: clone2, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        const managed2 = inv2.inputs.filter((i) => i.ownership === 'managed' && i.materializedPath !== null);
+        const manifest2 = buildManifest(stackName, managed2, manifest1, inv2.buildContexts);
+        const fileList2 = managed2.filter((i) => i.dependencyKind !== 'build-context');
+        const cand2 = await svc.buildCandidate(stackName, 'rev2', clone2, fileList2.map((i) => ({ srcRel: i.sourcePath!, destRel: i.materializedPath! })), inv2.contextCopyPlans, BOUNDS);
+        await svc.promoteGeneration(stackName, { sha: 'rev2', candidateRelPath: cand2, manifest: manifest2, priorManifest: manifest1 });
+        expect(fs.existsSync(path.join(stackDir(stackName), 'web', 'drop.txt'))).toBe(false);
+        expect(fs.existsSync(path.join(stackDir(stackName), 'web', 'keep.txt'))).toBe(true);
+
+        // A local edit inside the context is divergence on the next apply path.
+        const diverged = await svc.verifyContextOnDisk(stackName, manifest2.buildContexts[0]);
+        expect(diverged).toEqual([]);
+        fs.writeFileSync(path.join(stackDir(stackName), 'web', 'keep.txt'), 'locally edited\n');
+        const divergedAfter = await svc.verifyContextOnDisk(stackName, manifest2.buildContexts[0]);
+        expect(divergedAfter.some((p) => p.includes('keep.txt'))).toBe(true);
     });
 });

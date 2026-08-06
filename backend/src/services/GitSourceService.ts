@@ -713,6 +713,24 @@ export class GitSourceService {
                 ComposeService.getInstance().renderComposeYaml(stackName),
             );
             await FileSystemService.getInstance().saveStackContent(stackName, rendered);
+            // The flattened model already bakes every override; any remaining
+            // compose.override.* file would be AUTO-DISCOVERED and merged again
+            // by plain docker compose, changing the effective model post-detach.
+            // Remove managed files whose basename compose would auto-merge.
+            const manifest = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
+            if (manifest !== null && !('corrupt' in manifest)) {
+                const overrideNames = new Set(['compose.override.yaml', 'compose.override.yml', 'docker-compose.override.yaml', 'docker-compose.override.yml']);
+                for (const entry of manifest.inputs) {
+                    if (entry.ownership !== 'managed' || entry.materializedPath === null) continue;
+                    const base = entry.materializedPath.split('/').pop() ?? '';
+                    if (!overrideNames.has(base)) continue;
+                    try {
+                        await FileSystemService.getInstance().deleteStackPath(stackName, entry.materializedPath, false);
+                    } catch (e) {
+                        throw new GitSourceError('GIT_ERROR', `Could not remove auto-discovered override ${entry.materializedPath}; detach aborted. Retry to complete it.`);
+                    }
+                }
+            }
             // The managed area holds previous applied generations with
             // materialized configs/secrets; dropping the row while it survives
             // would orphan it until the next boot sweep. Fail the detach
@@ -1184,7 +1202,6 @@ export class GitSourceService {
      * larger budget than the pull preview (30s) and names the timeout.
      */
     private async validateCandidate(stackName: string, candidateRelPath: string, composePaths: string[], contextDir: string | null): Promise<{ ok: boolean; error?: string }> {
-        const manifestSvc = GitProjectManifestService.getInstance();
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
         const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, candidateRelPath);
@@ -1607,6 +1624,15 @@ export class GitSourceService {
                     const diskHash = await manifestSvc.hashStackFile(stackName, entry.materializedPath);
                     if (diskHash === null) unreadable.push(entry.materializedPath);
                     else if (diskHash !== entry.contentSha256) diverged.push(entry.materializedPath);
+                }
+                // Build contexts are file-granular: local edits, added files,
+                // and missing files inside a retained context are divergence.
+                for (const context of prior.buildContexts) {
+                    if (context.files.length === 0) continue;
+                    const contextDiverged = await manifestSvc.verifyContextOnDisk(stackName, context);
+                    for (const rel of contextDiverged) {
+                        diverged.push(`${context.repoPath}/${rel}`);
+                    }
                 }
                 if (diverged.length > 0) {
                     throw new GitSourceError(
