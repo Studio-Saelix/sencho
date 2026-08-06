@@ -288,7 +288,9 @@ export class StackUpdateOrchestrator {
           );
         }
       }
-      const recheck = await ImageUpdateService.getInstance().recheckStack(nodeId, stackName);
+      const recheck = await ImageUpdateService.getInstance().recheckStack(nodeId, stackName, {
+        updatedService: serviceName,
+      });
       await DriftLedgerService.getInstance().reconcileServiceForStack(nodeId, stackName, serviceName);
       await this.refreshMeshIfEnabled(nodeId, stackName);
 
@@ -434,7 +436,9 @@ export class StackUpdateOrchestrator {
         consumed = true;
       }
 
-      const recheck = await ImageUpdateService.getInstance().recheckStack(nodeId, stackName);
+      const recheck = await ImageUpdateService.getInstance().recheckStack(nodeId, stackName, {
+        updatedService: serviceName,
+      });
       await this.refreshMeshIfEnabled(nodeId, stackName);
 
       const warnings = [observed.gateWarning, recheck.warning].filter((w): w is string => !!w);

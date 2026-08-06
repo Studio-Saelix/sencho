@@ -5,7 +5,7 @@
  * the update did not take effect.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -655,6 +655,10 @@ describe('StackAnatomyPanel digest verification failure', () => {
     expect(screen.getByText(/same-tag digest rebuild/i)).toBeInTheDocument();
     expect(screen.queryByText(/review required/i)).toBeNull();
     expect(screen.getByRole('button', { name: /^apply$/i })).toBeEnabled();
+    const hint = screen.getByTestId('digest-rebuild-hint');
+    expect(hint).toHaveTextContent(/same-tag digest rebuild/i);
+    await act(async () => { fireEvent.click(hint); });
+    expect(await screen.findByTestId('digest-rebuild-hint-content')).toHaveTextContent(/same tag, newer content/i);
   });
 
   it('holds a confirmed update for review even when the other image\'s own tag update masks its digest error into an overall ok check_status', async () => {

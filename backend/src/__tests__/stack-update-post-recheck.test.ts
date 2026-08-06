@@ -6,6 +6,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import { UPDATE_DIGEST_UNCHANGED_WARNING } from '../services/ImageUpdateService';
 
 const {
   mockExecute,
@@ -164,6 +165,24 @@ describe('POST /api/stacks/:name/update post-compose verification', () => {
     expect(res.body.recheckWarning).toBe(
       'The update command completed, but Sencho still detects an available image update.',
     );
+  });
+
+  it('surfaces the digest-unchanged warning when the image digest did not move after update', async () => {
+    mockRecheckStack.mockImplementation(async () => {
+      callOrder.push('recheckStack');
+      return {
+        outcome: 'still_present',
+        warning: UPDATE_DIGEST_UNCHANGED_WARNING,
+      };
+    });
+
+    const res = await request(app)
+      .post('/api/stacks/web/update')
+      .set('Cookie', authCookie)
+      .send({ skip_scan: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.recheckWarning).toBe(UPDATE_DIGEST_UNCHANGED_WARNING);
   });
 
   it('keeps HTTP 200 and success notification when recheck throws after Compose', async () => {

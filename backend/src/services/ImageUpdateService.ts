@@ -37,6 +37,27 @@ export const UPDATE_STILL_PRESENT_WARNING =
 export const UPDATE_VERIFICATION_INCOMPLETE_WARNING =
     'The update command completed, but Sencho could not fully verify whether an image update remains.';
 
+// Mirrored verbatim in GENERIC_POST_UPDATE_WARNINGS in
+// frontend/src/components/EditorLayout/hooks/useStackActions.ts; keep the copy in sync.
+export const UPDATE_DIGEST_UNCHANGED_WARNING =
+    'The update command completed, but the image digest was not updated. Your Docker daemon may cache older content through a registry mirror, or the container may still be pinned to the previous image. Check your daemon configuration or recreate the container with --force-recreate.';
+
+/** Warning when a service-scoped update cleared the target but siblings still need updates. */
+export function otherServicesStillPresentWarning(updatedService: string, otherServices: string[]): string {
+    return `The update for "${updatedService}" completed, but Sencho still detects an available image update on ${formatServiceList(otherServices)}.`;
+}
+
+function formatServiceList(names: string[]): string {
+    if (names.length <= 1) return names[0] ?? '';
+    if (names.length === 2) return `${names[0]} and ${names[1]}`;
+    return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
+}
+
+export interface RecheckStackOptions {
+    /** When set after a service-scoped update, attribution prefers siblings over daemon blame. */
+    updatedService?: string;
+}
+
 export interface ImageCheckResult {
     hasUpdate: boolean;
     /** Same-tag registry digest drift; Compose pull can apply without pin change. */
@@ -1026,7 +1047,11 @@ export class ImageUpdateService {
      * after a manual full-stack update. On a render failure the prior row is
      * left untouched and a verification_failed result is returned.
      */
-    public async recheckStack(nodeId: number, stackName: string): Promise<StackRecheckResult> {
+    public async recheckStack(
+        nodeId: number,
+        stackName: string,
+        options?: RecheckStackOptions,
+    ): Promise<StackRecheckResult> {
         // While detection is off, skip registry probes and do not write
         // stack_update_status (avoids stale findings after re-enable).
         if (!ImageUpdateService.isChecksEnabled()) {
@@ -1092,6 +1117,16 @@ export class ImageUpdateService {
         const services = reductions.map((r) => r.status);
         const checkStatus = aggregateServiceCheckStatus(services);
         const hasUpdate = services.some((s) => s.hasUpdate);
+        // Every still-present update being a same-tag digest rebuild (no higher
+        // semver tag) signals the local content for that image did not move: the
+        // daemon may serve a cached/mirrored manifest, or the container may still
+        // run the previous image. After a service-scoped update, prefer naming
+        // sibling services that still need work over blaming the daemon for the
+        // service that was just updated.
+        const updatingEntries = [...imageUpdateMap.values()]
+            .filter((r) => r.hasUpdate && normalizeImageCheckStatus(r) !== 'not_checkable');
+        const allDigestOnly = hasUpdate && updatingEntries.length > 0
+            && updatingEntries.every((r) => r.digestUpdate === true && r.tagUpdate !== true);
         const lastError = stackStatusLastError(services);
         const now = Date.now();
 
@@ -1117,9 +1152,20 @@ export class ImageUpdateService {
             };
         }
         if (hasUpdate) {
+            const updatedService = options?.updatedService;
+            if (updatedService) {
+                const staleNames = services.filter((s) => s.hasUpdate).map((s) => s.service);
+                const siblings = staleNames.filter((name) => name !== updatedService).sort();
+                if (!staleNames.includes(updatedService) && siblings.length > 0) {
+                    return {
+                        outcome: 'still_present',
+                        warning: otherServicesStillPresentWarning(updatedService, siblings),
+                    };
+                }
+            }
             return {
                 outcome: 'still_present',
-                warning: UPDATE_STILL_PRESENT_WARNING,
+                warning: allDigestOnly ? UPDATE_DIGEST_UNCHANGED_WARNING : UPDATE_STILL_PRESENT_WARNING,
             };
         }
         return { outcome: 'cleared', warning: null };

@@ -998,6 +998,15 @@ describe('useStackActions recovery records', () => {
     expect(stackListState.recordActionFailure).not.toHaveBeenCalled();
   });
 
+  it('toasts recheckWarning from a successful update response body', async () => {
+    const warning = 'Digest still detected after update.';
+    routeApi(200, JSON.stringify({ status: 'Update completed', healthGateId: 'gate-1', recheckWarning: warning }));
+    const { result } = setup();
+    await act(async () => { await result.current.updateStack(); });
+    expect(toast.info).toHaveBeenCalledWith('Stack updated. Verifying health...');
+    expect(toast.info).toHaveBeenCalledWith(warning);
+  });
+
   it('does not record a failure for a stack-op-in-progress 409', async () => {
     const inProgress = JSON.stringify({
       code: 'stack_op_in_progress',

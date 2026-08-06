@@ -19,6 +19,7 @@ import {
   isTagOnlyAdvisory,
   isVerificationOnlyPreview,
 } from '@/lib/updatePreviewActionability';
+import { DigestRebuildHint } from '@/components/DigestRebuildHint';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
@@ -247,9 +248,9 @@ function RiskBadge({
   }
   if (bump === 'unknown') {
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-full border border-card-border bg-muted/30 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">
+      <DigestRebuildHint className="inline-flex items-center gap-1.5 rounded-full border border-card-border bg-muted/30 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">
         Digest rebuild
-      </span>
+      </DigestRebuildHint>
     );
   }
   return (
@@ -368,9 +369,9 @@ function StackReadinessCard({
             headline = (
               <div className="flex items-baseline gap-2 font-mono text-sm">
                 <span className="text-stat-subtitle">{p.summary.current_tag}</span>
-                <span className="text-brand text-[10px] leading-3 uppercase tracking-[0.18em]">
+                <DigestRebuildHint className="text-brand text-[10px] leading-3 uppercase tracking-[0.18em]">
                   Rebuild available
-                </span>
+                </DigestRebuildHint>
               </div>
             );
           } else {
@@ -671,7 +672,9 @@ export function MobileReadinessCard({
           headline = (
             <div className="flex items-baseline gap-2 font-mono text-[13px]">
               <span className="text-stat-subtitle">{p.summary.current_tag}</span>
-              <span className="text-[10px] uppercase tracking-[0.12em] text-brand">Rebuild available</span>
+              <DigestRebuildHint className="text-[10px] uppercase tracking-[0.12em] text-brand">
+                Rebuild available
+              </DigestRebuildHint>
             </div>
           );
         } else {

@@ -49,17 +49,32 @@ type MissingExternalNetworksEnvelope = MissingExternalNetworksPayload & {
   declaredExternalCount: number;
 };
 
-/** healthGateId from a success body, or null when absent or unreadable. */
-const parseHealthGateId = async (response: Response): Promise<string | null> => {
+type UpdateSuccessBody = {
+  healthGateId: string | null;
+  recheckWarning?: string;
+};
+
+/** healthGateId (and optional recheckWarning) from a success body. */
+const parseUpdateSuccessBody = async (response: Response): Promise<UpdateSuccessBody> => {
   try {
     const body: unknown = await response.json();
-    if (isRecord(body) && typeof body.healthGateId === 'string') return body.healthGateId;
+    if (!isRecord(body)) return { healthGateId: null };
+    return {
+      healthGateId: typeof body.healthGateId === 'string' ? body.healthGateId : null,
+      recheckWarning: typeof body.recheckWarning === 'string' ? body.recheckWarning : undefined,
+    };
   } catch (e) {
     // A success body should always parse; the warn surfaces a future
     // double-read bug instead of silently disabling the gate UI.
     console.warn('[HealthGate] could not read the success body:', e);
+    return { healthGateId: null };
   }
-  return null;
+};
+
+/** healthGateId from a success body, or null when absent or unreadable. */
+const parseHealthGateId = async (response: Response): Promise<string | null> => {
+  const { healthGateId } = await parseUpdateSuccessBody(response);
+  return healthGateId;
 };
 
 // Sentinel stored in overlayState.pendingUnsavedLoad to mark that the pending
@@ -80,14 +95,17 @@ const NODE_UNREACHABLE_FAILURE: FailureClassification = {
 
 const UNREACHABLE_STATUSES: ReadonlySet<number> = new Set([502, 503, 504]);
 
-// Mirrors ImageUpdateService's UPDATE_STILL_PRESENT_WARNING / UPDATE_VERIFICATION_INCOMPLETE_WARNING:
-// that service's warning copy assumes an update was just applied, but
-// checkUpdatesForStack runs before any update, so these two generic messages
-// are replaced with accurate pre-update copy. A stack-specific reason (e.g. a
-// compose render failure) is still forwarded as-is.
+// Mirrors ImageUpdateService's post-update warning copy: UPDATE_STILL_PRESENT_WARNING,
+// UPDATE_VERIFICATION_INCOMPLETE_WARNING, and UPDATE_DIGEST_UNCHANGED_WARNING. Those
+// warnings assume an update was just applied, but checkUpdatesForStack runs before
+// any update, so they are replaced with accurate pre-update copy. The set is a
+// safety net for pairing changes: today only the verification-incomplete warning
+// actually arrives outside the still_present branch, which is intercepted earlier.
+// A stack-specific reason (e.g. a compose render failure) is still forwarded as-is.
 const GENERIC_POST_UPDATE_WARNINGS: ReadonlySet<string> = new Set([
   'The update command completed, but Sencho still detects an available image update.',
   'The update command completed, but Sencho could not fully verify whether an image update remains.',
+  'The update command completed, but the image digest was not updated. Your Docker daemon may cache older content through a registry mirror, or the container may still be pinned to the previous image. Check your daemon configuration or recreate the container with --force-recreate.',
 ]);
 
 const SELF_STACK_PROTECTED_CODE = 'self_stack_protected';
@@ -1725,15 +1743,22 @@ export function useStackActions(options: UseStackActionsOptions) {
             };
           }
           overlayState.setPolicyBlock(null);
-          const healthGateId = await parseHealthGateId(response);
-          // With a health gate observing, the operation finishing is not the
-          // final verdict yet; soften the toast so success is not claimed twice.
-          if (healthGateId && action === 'update') {
-            toast.info('Stack updated. Verifying health...');
+          const { healthGateId, recheckWarning } = await parseUpdateSuccessBody(response);
+          if (action === 'update') {
+            // With a health gate observing, the operation finishing is not the
+            // final verdict yet; soften the toast so success is not claimed twice.
+            if (healthGateId) {
+              toast.info('Stack updated. Verifying health...');
+            } else {
+              toast.success(successMessage);
+            }
+            // Same surface as service-scoped Apply / Fleet Apply Now: the backend
+            // may explain why a digest rebuild is still detected after Compose.
+            if (recheckWarning) toast.info(recheckWarning);
+            stackListState.fetchImageUpdates();
           } else {
             toast.success(successMessage);
           }
-          if (action === 'update') stackListState.fetchImageUpdates();
           await refreshSelectedContainers(stackName, stackFile);
           stackListState.recordActionSuccess(stackFile);
           return { ok: true as const, healthGateId };
