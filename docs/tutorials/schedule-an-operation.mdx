@@ -93,7 +93,7 @@ Check from two places, since either alone could be misleading (a table that has 
 **The Execution history.** Click the **Execution history** button (clock icon) on the row. The sheet opens with the breadcrumb `Schedules › Nightly website restart › Runs`, a `1 run` count, and the run's row: **Source** `Manual` (it was triggered by Run now, not by the cron), **Status** `Success`, a short **Duration**, and the details `Restarted 2 container(s) in stack "my-website"`: both services, exactly as configured.
 
 <Frame>
-  <img src="/images/tutorials/schedule-an-operation/run-history.png" alt="The Execution history sheet for Nightly website restart, showing 1 run with Source Manual, Status Success, Duration 0.7s, and Details 'Restarted 2 container(s) in stack \"my-website\"'. The footer shows the next scheduled run." />
+  <img src="/images/tutorials/schedule-an-operation/run-history.png" alt="The Execution history sheet for Nightly website restart, showing 1 run with Source Manual, Status Success, Duration 0.7s, and Details 'Restarted 2 container(s) in stack my-website'. The footer shows the next scheduled run." />
 </Frame>
 
 The footer confirms the schedule is alive: the next run time is shown there too, matching the row's **Next Run** in the table. You can now rely on the nightly restart without being at the console at 3:00 AM.
