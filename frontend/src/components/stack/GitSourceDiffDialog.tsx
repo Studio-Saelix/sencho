@@ -16,6 +16,8 @@ export interface PullResult {
   currentEnv: string | null;
   validation: { ok: boolean; error?: string };
   hasLocalChanges: boolean;
+  /** Tolerated refusals from complete-project discovery (documented limitations). */
+  refusals?: Array<{ sourcePath: string | null; kind: string; reason: string; actionable: boolean }>;
 }
 
 interface GitSourceDiffDialogProps {
@@ -94,6 +96,17 @@ export function GitSourceDiffDialog({
               <div>
                 <p className="font-medium">Local edits detected on disk</p>
                 <p className="mt-0.5">Applying will overwrite changes that differ from the last applied commit.</p>
+              </div>
+            </div>
+          )}
+          {pull.refusals && pull.refusals.length > 0 && (
+            <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" strokeWidth={1.5} />
+              <div>
+                <p className="font-medium">Some project inputs are not materialized</p>
+                {pull.refusals.slice(0, 5).map((r, i) => (
+                  <p key={i} className="mt-0.5">{r.reason}</p>
+                ))}
               </div>
             </div>
           )}

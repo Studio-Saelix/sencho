@@ -10,6 +10,7 @@ import { useNodes } from '@/context/NodeContext';
 import { toast } from '@/components/ui/toast-store';
 import { GitSourceDiffDialog, type PullResult } from './GitSourceDiffDialog';
 import { GitSourceFields, type ApplyMode } from './GitSourceFields';
+import { GitManifestSummary, type ManifestSummary } from './GitManifestSummary';
 import type { GitBrowseResult } from './GitComposeFilePicker';
 
 export interface GitSource {
@@ -31,6 +32,8 @@ export interface GitSource {
   pending_fetched_at: number | null;
   created_at: number;
   updated_at: number;
+  manifest_state: ManifestSummary['state'] | null;
+  manifest: ManifestSummary | null;
 }
 
 interface GitSourcePanelProps {
@@ -413,6 +416,10 @@ export function GitSourcePanel({
                       </div>
                     </div>
                   )}
+
+                  {source && (
+                    <GitManifestSummary stackName={stackName} summary={source.manifest} />
+                  )}
                 </>
               )}
             </div>
@@ -479,13 +486,15 @@ export function GitSourcePanel({
         onOpenChange={setRemoveConfirmOpen}
         variant="destructive"
         kicker={`${stackName.toUpperCase()} · GIT · DISCONNECT`}
-        title="Remove Git source"
-        confirmLabel={deleting ? 'Removing...' : 'Remove'}
+        title="Detach and export"
+        confirmLabel={deleting ? 'Detaching...' : 'Detach'}
         confirming={deleting}
         onConfirm={remove}
       >
         <p className="text-sm text-stat-subtitle">
-          Disconnects the stack from its Git source. The stack files on disk are left in place and you can reconfigure the source later at any time.
+          Detaches the stack from its Git source. Sencho renders the effective compose model into a single
+          compose.yaml, keeps the materialized files, and removes Git tracking. Resolved environment values
+          are baked into the exported file. Reconfiguring the source later is always possible.
         </p>
       </ConfirmModal>
     </>

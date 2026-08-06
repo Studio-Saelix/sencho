@@ -70,6 +70,8 @@ const LINKED_SOURCE = {
   pending_fetched_at: null,
   created_at: 0,
   updated_at: 0,
+  manifest_state: 'absent' as const,
+  manifest: null,
 };
 
 function panel() {
@@ -135,5 +137,56 @@ describe('GitSourcePanel deploy-mode apply node binding', () => {
       expect(applyCall?.[1]).toEqual(expect.objectContaining({ nodeId: 4 }));
     });
     expect(dfCtl.params).toEqual(expect.objectContaining({ action: 'deploy', nodeId: 4 }));
+  });
+});
+
+describe('GitSourcePanel manifest summary', () => {
+  it('renders the managed-project section when the source carries a manifest', async () => {
+    const summary = {
+      state: 'active',
+      manifestVersion: 2,
+      resolvedCommitSha: 'abc1234567890abc1234567890abc1234567890a',
+      managedCount: 3,
+      unmanagedCount: 1,
+      refusedCount: 0,
+      refused: [],
+      hasBuildContexts: true,
+      generatedAt: 1,
+    };
+    vi.mocked(apiFetch).mockImplementation(async (url: string) =>
+      url.includes('/git-source/manifest')
+        ? jsonRes({
+            manifest: {
+              schemaVersion: 1,
+              manifestVersion: 2,
+              state: 'active',
+              resolvedRevision: { commitSha: 'abc123', fetchedAt: 1 },
+              project: { root: null, composeFiles: ['compose.yaml'], projectName: 'web' },
+              inputs: [
+                { sourcePath: 'compose.yaml', materializedPath: 'compose.yaml', role: 'compose-primary', dependencyKind: 'explicit', ownership: 'managed', sensitivity: 'medium', state: 'present', deletionAuthority: 'sencho', note: null },
+              ],
+              refusals: [],
+              counts: { managed: 3, unmanaged: 1, refused: 0 },
+            },
+          })
+        : jsonRes({ ...LINKED_SOURCE, manifest_state: 'active', manifest: summary }),
+    );
+    render(panel());
+    const toggle = await screen.findByText('Managed project');
+    expect(screen.getByText('abc1234')).toBeTruthy();
+    expect(screen.getByText('Active')).toBeTruthy();
+    // Counts render in the expanded section; the inventory is lazy-fetched.
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.getByText('3')).toBeTruthy());
+    expect(screen.getByText('1')).toBeTruthy();
+    expect(screen.getByText('unmanaged')).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('explicit')).toBeTruthy());
+  });
+
+  it('renders no manifest section when the source has no manifest', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(LINKED_SOURCE));
+    render(panel());
+    await waitFor(() => expect(screen.getByText('Last applied commit')).toBeTruthy());
+    expect(screen.queryByText('Managed project')).toBeNull();
   });
 });
