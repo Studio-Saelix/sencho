@@ -317,11 +317,14 @@ describe('verification preview helpers', () => {
   });
 });
 
-it('enables Apply for a safe, non-blocked update', () => {
+it('enables Apply for a safe, non-blocked update', async () => {
   render(<MobileReadinessCard card={card()} onApply={vi.fn()} />);
   expect(apply()).toBeEnabled();
-  // The mobile digest-rebuild headline carries the same hint tooltip as desktop.
-  expect(screen.getByText('Rebuild available')).toHaveAttribute('title', expect.stringContaining('Same tag, newer content'));
+  // Digest-rebuild headline opens an accessible popover (not hover-only title).
+  const hint = screen.getByTestId('digest-rebuild-hint');
+  expect(hint).toHaveTextContent('Rebuild available');
+  await act(async () => { fireEvent.click(hint); });
+  expect(await screen.findByTestId('digest-rebuild-hint-content')).toHaveTextContent(/same tag, newer content/i);
 });
 
 it('disables Apply for tag-only advisory updates', () => {
@@ -654,8 +657,11 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
 
     render(<AutoUpdateReadinessView />);
     const serviceApply = await screen.findByRole('button', { name: /^Apply$/i });
-    // The digest-rebuild headline carries the hint tooltip for this update kind.
-    expect(screen.getByText('Rebuild available')).toHaveAttribute('title', expect.stringContaining('Same tag, newer content'));
+    // Digest-rebuild headline opens an accessible popover (not hover-only title).
+    const hint = screen.getByTestId('digest-rebuild-hint');
+    expect(hint).toHaveTextContent('Rebuild available');
+    await act(async () => { fireEvent.click(hint); });
+    expect(await screen.findByTestId('digest-rebuild-hint-content')).toHaveTextContent(/same tag, newer content/i);
     await act(async () => { fireEvent.click(serviceApply); });
 
     await waitFor(() => {

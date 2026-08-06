@@ -49,17 +49,32 @@ type MissingExternalNetworksEnvelope = MissingExternalNetworksPayload & {
   declaredExternalCount: number;
 };
 
-/** healthGateId from a success body, or null when absent or unreadable. */
-const parseHealthGateId = async (response: Response): Promise<string | null> => {
+type UpdateSuccessBody = {
+  healthGateId: string | null;
+  recheckWarning?: string;
+};
+
+/** healthGateId (and optional recheckWarning) from a success body. */
+const parseUpdateSuccessBody = async (response: Response): Promise<UpdateSuccessBody> => {
   try {
     const body: unknown = await response.json();
-    if (isRecord(body) && typeof body.healthGateId === 'string') return body.healthGateId;
+    if (!isRecord(body)) return { healthGateId: null };
+    return {
+      healthGateId: typeof body.healthGateId === 'string' ? body.healthGateId : null,
+      recheckWarning: typeof body.recheckWarning === 'string' ? body.recheckWarning : undefined,
+    };
   } catch (e) {
     // A success body should always parse; the warn surfaces a future
     // double-read bug instead of silently disabling the gate UI.
     console.warn('[HealthGate] could not read the success body:', e);
+    return { healthGateId: null };
   }
-  return null;
+};
+
+/** healthGateId from a success body, or null when absent or unreadable. */
+const parseHealthGateId = async (response: Response): Promise<string | null> => {
+  const { healthGateId } = await parseUpdateSuccessBody(response);
+  return healthGateId;
 };
 
 // Sentinel stored in overlayState.pendingUnsavedLoad to mark that the pending
@@ -1728,15 +1743,22 @@ export function useStackActions(options: UseStackActionsOptions) {
             };
           }
           overlayState.setPolicyBlock(null);
-          const healthGateId = await parseHealthGateId(response);
-          // With a health gate observing, the operation finishing is not the
-          // final verdict yet; soften the toast so success is not claimed twice.
-          if (healthGateId && action === 'update') {
-            toast.info('Stack updated. Verifying health...');
+          const { healthGateId, recheckWarning } = await parseUpdateSuccessBody(response);
+          if (action === 'update') {
+            // With a health gate observing, the operation finishing is not the
+            // final verdict yet; soften the toast so success is not claimed twice.
+            if (healthGateId) {
+              toast.info('Stack updated. Verifying health...');
+            } else {
+              toast.success(successMessage);
+            }
+            // Same surface as service-scoped Apply / Fleet Apply Now: the backend
+            // may explain why a digest rebuild is still detected after Compose.
+            if (recheckWarning) toast.info(recheckWarning);
+            stackListState.fetchImageUpdates();
           } else {
             toast.success(successMessage);
           }
-          if (action === 'update') stackListState.fetchImageUpdates();
           await refreshSelectedContainers(stackName, stackFile);
           stackListState.recordActionSuccess(stackFile);
           return { ok: true as const, healthGateId };

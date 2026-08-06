@@ -10,8 +10,8 @@ import {
   isPreviewUncertain,
   isReviewRequiredUpdatePreview,
   isTagOnlyAdvisory,
-  DIGEST_REBUILD_HINT,
 } from '@/lib/updatePreviewActionability';
+import { DigestRebuildHint } from '@/components/DigestRebuildHint';
 import { cn } from '@/lib/utils';
 import { type AnatomyMarkdownInput, type PortRow, type VolumeRow } from '@/lib/anatomyMarkdown';
 import { usePreflightDismiss } from '@/hooks/usePreflightDismiss';
@@ -661,13 +661,13 @@ export default function StackAnatomyPanel({
                   </ul>
                 )}
                 <div className="mt-1 font-mono text-xs text-foreground/80 leading-relaxed">
-                  {/* The tooltip belongs to the digest-rebuild lead-in only: when a
+                  {/* The hint popover belongs to the digest-rebuild lead-in only: when a
                       review hold or tag advisory overrides bannerLeadIn, render the
                       plain joined line so the hint never rides on other copy. */}
                   {updateKind === 'digest' && hasUpdate && bannerLeadIn === 'same-tag digest rebuild' ? (
                     <>
                       {bumpLabel && <span>{bumpLabel} · </span>}
-                      <span title={DIGEST_REBUILD_HINT}>{bannerLeadIn}</span>
+                      <DigestRebuildHint>{bannerLeadIn}</DigestRebuildHint>
                       {bannerTailSegments.length > 0 && <span> · {bannerTailSegments.join(' · ')}</span>}
                     </>
                   ) : (

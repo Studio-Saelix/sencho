@@ -157,6 +157,7 @@ import {
   ImageUpdateService,
   UPDATE_DIGEST_UNCHANGED_WARNING,
   UPDATE_STILL_PRESENT_WARNING,
+  otherServicesStillPresentWarning,
 } from '../services/ImageUpdateService';
 import YAML from 'yaml';
 
@@ -1828,6 +1829,52 @@ services:
       });
 
       const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({ outcome: 'still_present', warning: UPDATE_DIGEST_UNCHANGED_WARNING });
+    });
+
+    it('names sibling services when a service-scoped recheck cleared the target but siblings remain', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+        { Id: 'c2', Image: 'worker:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'worker' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockImplementation(async (_docker: unknown, ref: string) => (
+        ref === 'worker:latest'
+          ? { hasUpdate: true, digestUpdate: true, tagUpdate: false, checkStatus: 'ok' }
+          : { hasUpdate: false, checkStatus: 'ok' }
+      ));
+
+      const result = await service.recheckStack(1, 'stackA', { updatedService: 'web' });
+
+      expect(result).toEqual({
+        outcome: 'still_present',
+        warning: otherServicesStillPresentWarning('web', ['worker']),
+      });
+      expect(result.warning).not.toBe(UPDATE_DIGEST_UNCHANGED_WARNING);
+    });
+
+    it('keeps the digest-unchanged warning when the updated service itself is still digest-stale', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+        { Id: 'c2', Image: 'worker:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'worker' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockImplementation(async (_docker: unknown, ref: string) => (
+        ref === 'web:latest'
+          ? { hasUpdate: true, digestUpdate: true, tagUpdate: false, checkStatus: 'ok' }
+          : { hasUpdate: false, checkStatus: 'ok' }
+      ));
+
+      const result = await service.recheckStack(1, 'stackA', { updatedService: 'web' });
 
       expect(result).toEqual({ outcome: 'still_present', warning: UPDATE_DIGEST_UNCHANGED_WARNING });
     });
