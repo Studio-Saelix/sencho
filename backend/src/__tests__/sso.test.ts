@@ -174,6 +174,30 @@ describe('SSO OIDC Callback', () => {
   });
 });
 
+describe('SSOService.buildTokenExchangeUrl', () => {
+  it('sets the iss query parameter when provided', async () => {
+    const { SSOService } = await import('../services/SSOService');
+    const url = SSOService.getInstance().buildTokenExchangeUrl(
+      'http://sencho.example.com/api/auth/sso/oidc/oidc_custom/callback',
+      { code: 'test-code', state: 'test-state', iss: 'https://idp.example.com/realms/master' },
+    );
+    expect(url.searchParams.get('code')).toBe('test-code');
+    expect(url.searchParams.get('state')).toBe('test-state');
+    expect(url.searchParams.get('iss')).toBe('https://idp.example.com/realms/master');
+  });
+
+  it('omits the iss query parameter when not provided', async () => {
+    const { SSOService } = await import('../services/SSOService');
+    const url = SSOService.getInstance().buildTokenExchangeUrl(
+      'http://sencho.example.com/api/auth/sso/oidc/oidc_google/callback',
+      { code: 'test-code', state: 'test-state' },
+    );
+    expect(url.searchParams.get('code')).toBe('test-code');
+    expect(url.searchParams.get('state')).toBe('test-state');
+    expect(url.searchParams.has('iss')).toBe(false);
+  });
+});
+
 describe('SSO User Provisioning', () => {
   afterAll(() => {
     vi.restoreAllMocks();

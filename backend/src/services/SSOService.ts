@@ -387,6 +387,19 @@ export class SSOService {
         return { url: url.href, state, codeVerifier };
     }
 
+    /** Builds the URL passed to authorizationCodeGrant() for response validation.
+     *  Providers that support RFC 9207 issuer identification (confirmed on
+     *  Keycloak 26; likely others) include `iss` in the callback. openid-client
+     *  requires it once the provider's discovery metadata advertises support, so
+     *  it must be forwarded here or the callback fails with "invalid response". */
+    public buildTokenExchangeUrl(callbackUrl: string, params: { code: string; state: string; iss?: string }): URL {
+        const url = new URL(callbackUrl);
+        url.searchParams.set('code', params.code);
+        url.searchParams.set('state', params.state);
+        if (params.iss) url.searchParams.set('iss', params.iss);
+        return url;
+    }
+
     public async handleOIDCCallback(
         provider: string,
         callbackUrl: string,
@@ -402,14 +415,7 @@ export class SSOService {
         try {
             const oidcConfig = await this.getOIDCConfig(provider, config);
 
-            const currentUrl = new URL(callbackUrl);
-            currentUrl.searchParams.set('code', params.code);
-            currentUrl.searchParams.set('state', params.state);
-            // Providers that support RFC 9207 issuer identification (Keycloak 26+,
-            // and others) include `iss` in the callback. openid-client requires it
-            // once the provider's discovery metadata advertises support, so it must
-            // be forwarded here or the callback fails with "invalid response".
-            if (params.iss) currentUrl.searchParams.set('iss', params.iss);
+            const currentUrl = this.buildTokenExchangeUrl(callbackUrl, params);
 
             const tokens = await authorizationCodeGrant(oidcConfig, currentUrl, {
                 pkceCodeVerifier: codeVerifier,
@@ -478,7 +484,11 @@ export class SSOService {
             };
         } catch (err) {
             const message = err instanceof Error ? err.message : 'OIDC authentication failed';
-            console.error('[SSO] OIDC callback error:', message);
+            // openid-client collapses specific validation failures (e.g. a missing or
+            // mismatched "iss" parameter) into this generic message; the cause carries
+            // the actual reason and is essential for diagnosing callback failures.
+            const cause = err instanceof Error && err.cause instanceof Error ? ` (${err.cause.message})` : '';
+            console.error('[SSO] OIDC callback error:', message + cause);
             return { success: false, error: 'Authentication failed. Please try again.' };
         }
     }
