@@ -711,21 +711,27 @@ export class GitSourceService {
             const manifestSvc = GitProjectManifestService.getInstance();
 
             // Phase 1: render the effective model. A render failure aborts
-            // before anything on disk changes (the stack is untouched).
+            // before anything on disk changes.
             const rendered = await manifestSvc.exportForDetach(stackName, () =>
                 ComposeService.getInstance().renderComposeYaml(stackName),
             );
 
-            // Phase 2: write the flattened compose.yaml. If this fails,
-            // nothing downstream (overrides, managed area, row) was touched
-            // yet, so the stack is unchanged and a retry is safe.
+            // Phase 2: snapshot the current compose.yaml so a mid-detach
+            // failure can restore it.
+            let priorCompose: string | null = null;
+            try {
+                priorCompose = await FileSystemService.getInstance().getStackContent(stackName);
+            } catch {
+                // Stack has no compose.yaml yet (fresh, never deployed); the
+                // render is the first write, no snapshot to keep.
+            }
+
+            // Phase 3: write the flattened compose.yaml, then delete
+            // overrides. If override deletion fails, restore the prior
+            // compose.yaml so the stack is byte-identical to pre-detach state
+            // (retry renders the same model and is safe).
             await FileSystemService.getInstance().saveStackContent(stackName, rendered);
 
-            // Phase 3: remove auto-discovered override files. The flattened
-            // model already bakes every override; any remaining
-            // compose.override.* file would be auto-discovered and merged
-            // again by plain docker compose. A retry after failure here
-            // re-renders the same model and re-deletes.
             const manifest = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
             if (manifest !== null && !('corrupt' in manifest)) {
                 const overrideNames = new Set(['compose.override.yaml', 'compose.override.yml', 'docker-compose.override.yaml', 'docker-compose.override.yml']);
@@ -733,16 +739,26 @@ export class GitSourceService {
                     if (entry.ownership !== 'managed' || entry.materializedPath === null) continue;
                     const base = entry.materializedPath.split('/').pop() ?? '';
                     if (!overrideNames.has(base)) continue;
-                    await FileSystemService.getInstance().deleteStackPath(stackName, entry.materializedPath, false);
+                    try {
+                        await FileSystemService.getInstance().deleteStackPath(stackName, entry.materializedPath, false);
+                    } catch (e) {
+                        // Rollback: restore the prior compose.yaml so the
+                        // stack is exactly what it was before detach started.
+                        if (priorCompose !== null) {
+                            await FileSystemService.getInstance().saveStackContent(stackName, priorCompose).catch(() => {});
+                        }
+                        throw new GitSourceError('GIT_ERROR', `Could not remove auto-discovered override ${entry.materializedPath}; detach rolled back. Retry to complete it.`);
+                    }
                 }
             }
 
-            // Phase 4: delete the managed area, then drop the row. A managed-
-            // area failure aborts (the row keeps the linkage so a retry can
-            // re-read the manifest and re-delete the overrides from phase 3).
+            // Phase 4: delete the managed area, then drop the row.
             const areaDeleted = await manifestSvc.deleteManagedArea(stackName);
             if (!areaDeleted) {
-                throw new GitSourceError('GIT_ERROR', 'Could not remove the managed project data; detach aborted. Retry to complete it.');
+                if (priorCompose !== null) {
+                    await FileSystemService.getInstance().saveStackContent(stackName, priorCompose).catch(() => {});
+                }
+                throw new GitSourceError('GIT_ERROR', 'Could not remove the managed project data; detach rolled back. Retry to complete it.');
             }
             DatabaseService.getInstance().deleteGitSource(stackName);
         });
@@ -1632,9 +1648,14 @@ export class GitSourceService {
                 }
                 // Build contexts are file-granular: local edits, added files,
                 // and missing files inside a retained context are divergence.
+                const managedInputPaths = new Set(
+                    prior.inputs
+                        .filter((i) => i.ownership === 'managed' && i.materializedPath !== null)
+                        .map((i) => i.materializedPath!),
+                );
                 for (const context of prior.buildContexts) {
                     if (context.files.length === 0) continue;
-                    const contextDiverged = await manifestSvc.verifyContextOnDisk(stackName, context);
+                    const contextDiverged = await manifestSvc.verifyContextOnDisk(stackName, context, managedInputPaths);
                     for (const rel of contextDiverged) {
                         diverged.push(`${context.repoPath}/${rel}`);
                     }

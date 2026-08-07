@@ -298,12 +298,9 @@ export class ComposeInputDiscoveryService {
             let matcher = await loadDockerIgnore(abs);
             let dockerignoreRel = matcher !== null ? path.relative(cloneDir, path.join(abs, '.dockerignore')).replace(/\\/g, '/') : null;
             if (dockerfileRel !== null && !dockerfileOutsideContext) {
-                // The dockerfile is CONTEXT-relative (e.g., `sub/Dockerfile` for
-                // context `web` means `web/sub/Dockerfile`); its repo-relative
-                // directory for the ignore file is just the dockerfile's dir.
-                const dfDir = dockerfileRel.includes('/') ? dockerfileRel.slice(0, dockerfileRel.lastIndexOf('/')) : '';
                 const dfBase = dockerfileRel.split('/').pop() ?? '';
-                const specificAbs = path.join(cloneDir, dockerfileRel.slice(0, dockerfileRel.lastIndexOf('/')));
+                const dfRelDir = dockerfileRel.includes('/') ? dockerfileRel.slice(0, dockerfileRel.lastIndexOf('/')) : '';
+                const specificAbs = path.join(cloneDir, dfRelDir);
                 const specificFile = path.join(specificAbs, `${dfBase}.dockerignore`);
                 const specificExists = await fs.promises.access(specificFile).then(() => true).catch(() => false);
                 if (specificExists) {
@@ -731,6 +728,21 @@ export class ComposeInputDiscoveryService {
         // Sync env entry (stack-root .env) is recorded by the caller (it knows
         // sync_env + env_path); interpolation-env classification is covered above.
 
+        // Root contexts share the stack root with managed inputs (compose.yaml,
+        // .env, configs). Remove context files that already have a managed-input
+        // owner so the manifest collision check and candidate copy never dupe.
+        const managedPaths = new Set(inputs.filter((i) => i.materializedPath !== null).map((i) => caseKey(i.materializedPath!)));
+        const reconciledBuildContexts = plans.map((p) => ({
+            ...p,
+            context: {
+                ...p.context,
+                files: p.context.files.filter((f) => {
+                    const key = caseKey(p.context.repoPath ? `${p.context.repoPath}/${f.path}` : f.path);
+                    return !managedPaths.has(key);
+                }),
+            },
+        }));
+
         // Deduplicate managed inputs by stack-relative path: two services
         // referencing the same file (shared env_file, config, or Dockerfile)
         // produce one entry so the candidate writer never rejects a duplicate.
@@ -748,12 +760,12 @@ export class ComposeInputDiscoveryService {
         return {
             inputs: dedupedInputs,
             refusals,
-            buildContexts: plans.map((p) => p.context),
-            contextCopyPlans: plans,
+            buildContexts: reconciledBuildContexts.map((p) => p.context),
+            contextCopyPlans: reconciledBuildContexts,
             dynamic,
             counts: {
-                managed: inputs.filter((i) => i.ownership === 'managed').length,
-                unmanaged: inputs.filter((i) => i.ownership === 'unmanaged').length,
+                managed: dedupedInputs.filter((i) => i.ownership === 'managed').length,
+                unmanaged: dedupedInputs.filter((i) => i.ownership === 'unmanaged').length,
                 refused: refusals.length,
             },
         };

@@ -103,6 +103,15 @@ function isSafeRelPath(value: unknown): boolean {
     return !segments.some((seg) => seg === '..' || seg === '.');
 }
 
+/**
+ * A file-level path in a marker or manifest must be non-empty because an
+ * empty path resolves to the stack root and would delete/overwrite it.
+ */
+function isNonEmptyRelPath(value: unknown): boolean {
+    if (typeof value !== 'string' || value.length === 0) return false;
+    return isSafeRelPath(value);
+}
+
 export class GitProjectManifestService {
     private constructor() {
         // Singleton; node scoping follows the executing node's default node id,
@@ -425,10 +434,10 @@ export class GitProjectManifestService {
             const parsed = JSON.parse(raw) as PromotionMarker;
             if (typeof parsed.sha !== 'string' || parsed.sha.length === 0) return { corrupt: 'Promotion marker has an invalid sha' };
             if (!isSafeRelPath(parsed.candidateRelPath) || parsed.candidateRelPath === '') return { corrupt: 'Promotion marker has an invalid candidate path' };
-            if (!Array.isArray(parsed.written) || !parsed.written.every((w) => typeof w === 'string' && isSafeRelPath(w))) {
+            if (!Array.isArray(parsed.written) || !parsed.written.every((w) => typeof w === 'string' && isNonEmptyRelPath(w))) {
                 return { corrupt: 'Promotion marker has an invalid written set' };
             }
-            if (!Array.isArray(parsed.introduced) || !parsed.introduced.every((w) => typeof w === 'string' && isSafeRelPath(w))) {
+            if (!Array.isArray(parsed.introduced) || !parsed.introduced.every((w) => typeof w === 'string' && isNonEmptyRelPath(w))) {
                 return { corrupt: 'Promotion marker has an invalid introduced set' };
             }
             return parsed;
@@ -462,7 +471,7 @@ export class GitProjectManifestService {
      * stack that the manifest does not own (locally added). This gives contexts
      * the same local-modification protection as plain managed files.
      */
-    async verifyContextOnDisk(stackName: string, context: BuildContextPlan): Promise<string[]> {
+    async verifyContextOnDisk(stackName: string, context: BuildContextPlan, managedInputPaths?: Set<string>): Promise<string[]> {
         const abs = await this.stackFileAbs(stackName, context.repoPath);
         const diverged: string[] = [];
         const owned = new Set(context.files.map((f) => f.path));
@@ -483,10 +492,14 @@ export class GitProjectManifestService {
                     diverged.push(`${childRel} (symbolic link)`);
                     continue;
                 }
-                // Root contexts span the whole stack dir: files managed by
-                // non-context entries (compose.yaml, .env, configs) are not
-                // owned by the context and must not be reported as diverged.
+                // Files not in the context inventory: if they have a
+                // managed-input owner, they are owned by another manifest
+                // entry. All other files are local additions to the context
+                // that affect the build — refuse apply just as for plain
+                // managed files.
                 if (!owned.has(childRel)) {
+                    if (managedInputPaths && managedInputPaths.has(childRel)) continue;
+                    diverged.push(`${childRel} (locally added, not in the managed context)`);
                     continue;
                 }
                 const expected = context.files.find((f) => f.path === childRel)?.sha256;
@@ -658,6 +671,10 @@ export class GitProjectManifestService {
             };
             await fs.promises.rm(appliedAbs, { recursive: true, force: true });
             await fs.promises.rename(candidateAbs, appliedAbs);
+            // The marker must point at the APPLIED generation after the rename:
+            // a crash before the manifest write now finds the applied dir and can
+            // restore from it instead of hitting a missing candidate → migration.
+            await this.writeMarker(stackName, { sha, candidateRelPath: appliedRel, written: written.map((w) => w), introduced });
             await this.pruneGenerations(stackName, appliedRel, manifest.generation.previousDir);
 
             // 4. Write the manifest, then the DB cache + mount-root invalidation.
@@ -839,7 +856,6 @@ export class GitProjectManifestService {
     async sweepManagedArea(
         stackName: string,
         opts: { repoUrl: string; branch: string; stackExists: boolean },
-        incoming: { inputs: ComposeInputEntry[]; buildContexts: BuildContextPlan[] } | null = null,
     ): Promise<void> {
         const { repoUrl, branch, stackExists } = opts;
         if (!stackExists) {
@@ -865,11 +881,26 @@ export class GitProjectManifestService {
                 candidateOk = false;
             }
             if (!candidateOk) {
-                // Candidate vanished; nothing to verify or restore against.
-                await fs.promises.rm(await this.markerPath(stackName), { force: true });
-                DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
-                console.warn(`[GitManifest] promotion marker found for ${stackName} but the candidate is missing; flagged migration_required`);
-                return;
+                // The marker may point at an applied generation (post-rename
+                // crash): check whether the directory is non-empty before
+                // giving up.
+                let isAppliedGen = false;
+                try {
+                    const entries = await fs.promises.readdir(candidateAbs);
+                    isAppliedGen = entries.length > 0 && !entries.every((e) => e === CANDIDATE_COMPLETE_MARKER);
+                } catch {
+                    isAppliedGen = false;
+                }
+                if (!isAppliedGen) {
+                    // Candidate vanished; nothing to verify or restore against.
+                    await fs.promises.rm(await this.markerPath(stackName), { force: true });
+                    DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
+                    console.warn(`[GitManifest] promotion marker found for ${stackName} but the candidate is missing; flagged migration_required`);
+                    return;
+                }
+                // Applied generation is present (post-rename crash); proceed
+                // with restore as if the candidate were complete.
+                candidateOk = true;
             }
             const prior = await this.readManifest(stackName, repoUrl, branch);
             if (prior === null || 'corrupt' in prior) {
