@@ -283,8 +283,11 @@ export class ComposeInputDiscoveryService {
                 // Compose resolves the dockerfile relative to the context. A
                 // `../` form that stays inside the repository is allowed: the
                 // dockerfile lands outside the context subtree, so it is
-                // materialized as its own managed input below.
-                const inContext = dockerfileRel === resolved || dockerfileRel.startsWith(`${resolved}/`);
+                // materialized as its own managed input below. Root contexts
+                // (`''` or `'.'`) contain every repo-relative path.
+                const inContext = resolved === '' || resolved === '.'
+                    ? !dockerfileRel.startsWith('../')
+                    : dockerfileRel === resolved || dockerfileRel.startsWith(`${resolved}/`);
                 dockerfileOutsideContext = !inContext;
             }
             // Docker's ignore selection: the context-root .dockerignore applies
@@ -832,40 +835,19 @@ export class ComposeInputDiscoveryService {
 
         for (const plan of contexts) {
             const srcRoot = path.resolve(cloneDir, plan.srcRel);
-            const stack: Array<{ src: string; destRel: string }> = [];
-            const walk = async (dir: string, rel: string): Promise<void> => {
-                const entriesList = await fs.promises.readdir(dir, { withFileTypes: true });
-                for (const entry of entriesList) {
-                    const childRel = rel ? `${rel}/${entry.name}` : entry.name;
-                    if (entry.name.toLowerCase() === '.git') continue;
-                    if (plan.matcher?.matches(childRel, entry.isDirectory())) {
-                        if (!entry.isDirectory()) plan.context.ignoredCount += 1;
-                        continue;
-                    }
-                    if (entry.isSymbolicLink()) {
-                        throw new Error(`Symbolic link inside build context: ${childRel}`);
-                    }
-                    if (entry.isDirectory()) {
-                        await walk(path.join(dir, entry.name), childRel);
-                        continue;
-                    }
-                    if (entry.isCharacterDevice() || entry.isBlockDevice() || entry.isSocket() || entry.isFIFO()) {
-                        throw new Error(`Special file inside build context: ${childRel}`);
-                    }
-                    const destRel = plan.destRel && plan.destRel !== '.' ? `${plan.destRel}/${childRel}` : childRel;
-                    // Sencho's candidate control marker must never reach the
-                    // live stack dir.
-                    if (childRel === '.candidate-complete') continue;
-                    // A repo-root context overlaps the managed file set: paths
-                    // already copied as managed inputs must not be copied again
-                    // (writeOne would reject the duplicate).
-                    if (seen.has(caseKey(destRel))) continue;
-                    stack.push({ src: path.join(dir, entry.name), destRel });
-                }
-            };
-            await walk(srcRoot, '');
-            for (const item of stack) {
-                await writeOne(item.src, item.destRel);
+            // Context files are copied from the INVENTORY (plan.context.files),
+            // not from a re-walk of the directory with the first plan's matcher.
+            // This means merged plans (multiple services sharing a context with
+            // different Dockerfiles) copy the exact union their manifests record.
+            for (const f of plan.context.files) {
+                const src = path.resolve(srcRoot, f.path);
+                const destRel = plan.destRel && plan.destRel !== '.' ? `${plan.destRel}/${f.path}` : f.path;
+                // Sencho metadata must never reach the live stack.
+                if (f.path === '.candidate-complete') continue;
+                // A repo-root context overlaps the managed file set: paths
+                // already copied as managed inputs must not be copied again.
+                if (seen.has(caseKey(destRel))) continue;
+                await writeOne(src, destRel);
             }
         }
 

@@ -598,19 +598,28 @@ export class GitProjectManifestService {
             //    needs the marker to exist with the last-known written set.
             const managed = manifest.inputs.filter((i) => i.ownership === 'managed' && i.state === 'present' && i.materializedPath !== null);
             const written: string[] = [];
+            // Track directories to skip in the written list: directory paths
+            // cannot be hashed by recovery, and the context-file loop below
+            // records every individual file.
+            const dirPaths = new Set<string>();
             for (const entry of managed) {
                 await this.writeStackFileFromCandidate(stackName, candidateAbs, entry.materializedPath!, bounds.maxFileBytes);
-                written.push(entry.materializedPath!);
+                // Non-root context directories are expanded by the context-file
+                // loop below; only individual file paths go to the marker.
+                const candidateSrc = path.join(candidateAbs, entry.materializedPath!);
+                if (await fs.promises.stat(candidateSrc).then((s) => s.isDirectory()).catch(() => false)) {
+                    dirPaths.add(entry.materializedPath!);
+                } else {
+                    written.push(entry.materializedPath!);
+                }
                 if (written.length % 25 === 0) {
                     await this.writeMarker(stackName, { sha, candidateRelPath, written, introduced });
                 }
             }
 
-            // 1b. Root-context files (build: .) have no input entry, so they
-            //     are not covered by the managed-input loop above. Promote
-            //     every owned context file from the candidate individually.
-            //     For non-root contexts the directory copy in step 1 already
-            //     handled them; the per-file write here is harmless.
+            // 1b. Context files: every file in every build context (root and
+            //     non-root) is promoted individually so the marker's written
+            //     list records exact file paths for recovery verification.
             for (const ctx of manifest.buildContexts) {
                 for (const f of ctx.files) {
                     const destRel = ctx.repoPath ? `${ctx.repoPath}/${f.path}` : f.path;
@@ -686,12 +695,13 @@ export class GitProjectManifestService {
                 refused: manifest.refusals.length,
             };
             await fs.promises.rm(appliedAbs, { recursive: true, force: true });
-            // Point the marker at the applied dir BEFORE the rename so every
-            // crash window finds a dir the sweep recognizes (applied-gen when
-            // rename succeeds, candidate when it hasn't happened yet). Both are
-            // handled with isAppliedGen fallback.
-            await this.writeMarker(stackName, { sha, candidateRelPath: appliedRel, written: written.map((w) => w), introduced });
+            // Rename FIRST so the marker can trust the applied dir exists.
+            // A crash after rename but before marker update: the sweep reads
+            // the old marker path (candidate-<sha>, gone) and falls through to
+            // isAppliedGen which sees the applied dir is present. A crash
+            // before rename: the original candidate is still there.
             await fs.promises.rename(candidateAbs, appliedAbs);
+            await this.writeMarker(stackName, { sha, candidateRelPath: appliedRel, written: written.map((w) => w), introduced });
             await this.pruneGenerations(stackName, appliedRel, manifest.generation.previousDir);
 
             // 4. Write the manifest, then the DB cache + mount-root invalidation.

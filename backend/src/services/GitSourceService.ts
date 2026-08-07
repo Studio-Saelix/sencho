@@ -726,7 +726,14 @@ export class GitSourceService {
             }
             const overrideSnapshots: Array<{ path: string; content: string }> = [];
             const manifest = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
-            if (manifest !== null && !('corrupt' in manifest)) {
+            // A corrupt manifest means the stack's ownership status is unknown:
+            // detach cannot know which files are auto-discovered overrides and
+            // must not proceed. A missing manifest means the stack was never
+            // materialized, so there are no managed overrides to clean up.
+            if (manifest !== null && 'corrupt' in manifest) {
+                throw new GitSourceError('GIT_ERROR', 'Managed-project manifest cannot be trusted; detach aborted. Pull to rebuild before detaching.');
+            }
+            if (manifest !== null) {
                 const overrideNames = new Set(['compose.override.yaml', 'compose.override.yml', 'docker-compose.override.yaml', 'docker-compose.override.yml']);
                 for (const entry of manifest.inputs) {
                     if (entry.ownership !== 'managed' || entry.materializedPath === null) continue;
@@ -735,8 +742,11 @@ export class GitSourceService {
                     try {
                         const content = await FileSystemService.getInstance().readStackFile(stackName, entry.materializedPath);
                         overrideSnapshots.push({ path: entry.materializedPath, content: content.content ?? '' });
-                    } catch {
-                        // File not present on disk; nothing to snapshot or restore.
+                    } catch (e) {
+                        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+                            throw new GitSourceError('GIT_ERROR', `Cannot read override ${entry.materializedPath} for snapshot; detach aborted.`);
+                        }
+                        // ENOENT: file not present on disk; nothing to snapshot.
                     }
                 }
             }
@@ -746,13 +756,23 @@ export class GitSourceService {
             // deleted override so the stack is byte-identical to pre-detach.
             await FileSystemService.getInstance().saveStackContent(stackName, rendered);
 
-            const rollback = async (): Promise<void> => {
+            const rollback = async (): Promise<string[]> => {
+                const errors: string[] = [];
                 if (priorCompose !== null) {
-                    await FileSystemService.getInstance().saveStackContent(stackName, priorCompose).catch(() => {});
+                    try {
+                        await FileSystemService.getInstance().saveStackContent(stackName, priorCompose);
+                    } catch (e) {
+                        errors.push(`compose restore: ${(e as Error).message}`);
+                    }
                 }
                 for (const snap of overrideSnapshots) {
-                    await FileSystemService.getInstance().writeStackFile(stackName, snap.path, snap.content).catch(() => {});
+                    try {
+                        await FileSystemService.getInstance().writeStackFile(stackName, snap.path, snap.content);
+                    } catch (e) {
+                        errors.push(`override ${snap.path}: ${(e as Error).message}`);
+                    }
                 }
+                return errors;
             };
 
             if (manifest !== null && !('corrupt' in manifest)) {
@@ -764,17 +784,21 @@ export class GitSourceService {
                     try {
                         await FileSystemService.getInstance().deleteStackPath(stackName, entry.materializedPath, false);
                     } catch (e) {
-                        await rollback();
-                        throw new GitSourceError('GIT_ERROR', `Could not remove auto-discovered override ${entry.materializedPath}; detach rolled back. Retry to complete it.`);
+                        const rbErrors = await rollback();
+                        const suffix = rbErrors.length > 0 ? ` (rollback errors: ${rbErrors.join('; ')})` : '';
+                        throw new GitSourceError('GIT_ERROR', `Could not remove auto-discovered override ${entry.materializedPath}; detach rolled back.${suffix} Retry to complete it.`);
                     }
                 }
             }
 
-            // Phase 4: delete the managed area, then drop the row.
+            // Phase 4: delete the managed area, then drop the row. All three
+            // steps (compose write, override cleanup, managed area removal)
+            // succeeded; the row deletion commits the detach.
             const areaDeleted = await manifestSvc.deleteManagedArea(stackName);
             if (!areaDeleted) {
-                await rollback();
-                throw new GitSourceError('GIT_ERROR', 'Could not remove the managed project data; detach rolled back. Retry to complete it.');
+                const rbErrors = await rollback();
+                const suffix = rbErrors.length > 0 ? ` (rollback errors: ${rbErrors.join('; ')})` : '';
+                throw new GitSourceError('GIT_ERROR', `Could not remove the managed project data; detach rolled back.${suffix} Retry to complete it.`);
             }
             DatabaseService.getInstance().deleteGitSource(stackName);
         });
