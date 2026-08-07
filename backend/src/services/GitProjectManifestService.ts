@@ -493,12 +493,12 @@ export class GitProjectManifestService {
                     continue;
                 }
                 // Files not in the context inventory: if they have a
-                // managed-input owner, they are owned by another manifest
-                // entry. All other files are local additions to the context
-                // that affect the build — refuse apply just as for plain
-                // managed files.
+                // managed-input owner (stack-relative path), they are owned
+                // by another manifest entry. The managed set uses stack-
+                // relative paths; the walk uses context-relative paths.
                 if (!owned.has(childRel)) {
-                    if (managedInputPaths && managedInputPaths.has(childRel)) continue;
+                    const stackRel = context.repoPath ? `${context.repoPath}/${childRel}` : childRel;
+                    if (managedInputPaths && managedInputPaths.has(stackRel)) continue;
                     diverged.push(`${childRel} (locally added, not in the managed context)`);
                     continue;
                 }
@@ -601,9 +601,25 @@ export class GitProjectManifestService {
             for (const entry of managed) {
                 await this.writeStackFileFromCandidate(stackName, candidateAbs, entry.materializedPath!, bounds.maxFileBytes);
                 written.push(entry.materializedPath!);
-                if (written.length % 25 === 0 || written.length === managed.length) {
+                if (written.length % 25 === 0) {
                     await this.writeMarker(stackName, { sha, candidateRelPath, written, introduced });
                 }
+            }
+
+            // 1b. Root-context files (build: .) have no input entry, so they
+            //     are not covered by the managed-input loop above. Promote
+            //     every owned context file from the candidate individually.
+            //     For non-root contexts the directory copy in step 1 already
+            //     handled them; the per-file write here is harmless.
+            for (const ctx of manifest.buildContexts) {
+                for (const f of ctx.files) {
+                    const destRel = ctx.repoPath ? `${ctx.repoPath}/${f.path}` : f.path;
+                    await this.writeStackFileFromCandidate(stackName, candidateAbs, destRel, bounds.maxFileBytes);
+                    written.push(destRel);
+                }
+            }
+            if (written.length % 25 === 0 || written.length === managed.length + manifest.buildContexts.reduce((s, ctx) => s + ctx.files.length, 0)) {
+                await this.writeMarker(stackName, { sha, candidateRelPath, written, introduced });
             }
 
             // 2. Stale cleanup: prior-manifest paths Sencho owns (deletionAuthority
@@ -644,7 +660,7 @@ export class GitProjectManifestService {
                     if (!newFiles) continue; // context removed entirely; handled above
                     for (const priorFile of priorCtx.files) {
                         if (newFiles.has(priorFile.path)) continue;
-                        const rel = `${priorCtx.repoPath}/${priorFile.path}`;
+                        const rel = priorCtx.repoPath ? `${priorCtx.repoPath}/${priorFile.path}` : priorFile.path;
                         await fsSvc.deleteStackPath(stackName, rel, false);
                     }
                 }
@@ -670,11 +686,12 @@ export class GitProjectManifestService {
                 refused: manifest.refusals.length,
             };
             await fs.promises.rm(appliedAbs, { recursive: true, force: true });
-            await fs.promises.rename(candidateAbs, appliedAbs);
-            // The marker must point at the APPLIED generation after the rename:
-            // a crash before the manifest write now finds the applied dir and can
-            // restore from it instead of hitting a missing candidate → migration.
+            // Point the marker at the applied dir BEFORE the rename so every
+            // crash window finds a dir the sweep recognizes (applied-gen when
+            // rename succeeds, candidate when it hasn't happened yet). Both are
+            // handled with isAppliedGen fallback.
             await this.writeMarker(stackName, { sha, candidateRelPath: appliedRel, written: written.map((w) => w), introduced });
+            await fs.promises.rename(candidateAbs, appliedAbs);
             await this.pruneGenerations(stackName, appliedRel, manifest.generation.previousDir);
 
             // 4. Write the manifest, then the DB cache + mount-root invalidation.

@@ -228,7 +228,6 @@ export class ComposeInputDiscoveryService {
     ): Promise<{ plans: ContextCopyPlan[]; entries: ComposeInputEntry[] }> {
         const plans: ContextCopyPlan[] = [];
         const entries: ComposeInputEntry[] = [];
-        const seen = new Set<string>();
 
         for (const input of contextInputs) {
             const resolved = this.resolveDeclared(cloneDir, input);
@@ -241,9 +240,6 @@ export class ComposeInputDiscoveryService {
             // path rules, promotes the candidate root, and never collides
             // with '.'-rejection in manifest validation.
             const rootPath = resolved === '.' ? '' : resolved;
-            const seenKey = caseKey(rootPath);
-            if (seen.has(seenKey)) continue;
-            seen.add(seenKey);
 
             const abs = path.resolve(cloneDir, resolved);
             let stat: fs.Stats;
@@ -468,7 +464,24 @@ export class ComposeInputDiscoveryService {
                 });
             }
         }
-        return { plans, entries };
+        // Merge context plans sharing the same root: multiple services in
+        // one compose file referencing the same context with different
+        // Dockerfiles produce one plan with the union of all file inventories
+        // so no service loses required files.
+        const mergedPlans: ContextCopyPlan[] = [];
+        for (const plan of plans) {
+            const existing = mergedPlans.find((mp) => caseKey(mp.context.repoPath) === caseKey(plan.context.repoPath));
+            if (existing) {
+                for (const f of plan.context.files) {
+                    if (!existing.context.files.some((ef) => caseKey(ef.path) === caseKey(f.path))) {
+                        existing.context.files.push(f);
+                    }
+                }
+            } else {
+                mergedPlans.push(plan);
+            }
+        }
+        return { plans: mergedPlans, entries };
     }
 
     /**
