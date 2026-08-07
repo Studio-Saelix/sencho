@@ -178,6 +178,13 @@ export interface DeclaredInput {
   role: InputRole;
   /** Compose source context for diagnostics. */
   fromFile: string | null;
+  /**
+   * Service name that declared this input (build declarations, env_file,
+   * configs references). Pairs a build context with its own dockerfile,
+   * build secrets, and additional contexts when a file declares several
+   * services. Null for top-level declarations.
+   */
+  service: string | null;
 }
 
 /** Path with ${VAR} interpolation that Compose resolves at deploy time. */

@@ -72,12 +72,13 @@ function emitInput(
     role: InputRole,
     fromFile: string,
     baseDir: DeclaredInput['baseDir'],
+    service: string | null = null,
 ): void {
     if (sourcePath !== null && isDynamicPath(sourcePath)) {
         refs.dynamic.push({ sourcePath, kind, note: 'Path contains a variable; resolved by Compose at deploy time, not enumerated.' });
         return;
     }
-    refs.inputs.push({ sourcePath, baseDir, kind, role, fromFile });
+    refs.inputs.push({ sourcePath, baseDir, kind, role, fromFile, service });
 }
 
 function asString(value: unknown): string | undefined {
@@ -142,30 +143,30 @@ function collectBindMounts(volumes: unknown, fromFile: string, refs: ComposeRefs
 }
 
 /** Collect build declarations (context, dockerfile, secrets, additional contexts). */
-function collectBuild(build: unknown, fromFile: string, refs: ComposeRefs): void {
+function collectBuild(build: unknown, fromFile: string, refs: ComposeRefs, service: string | null): void {
     if (typeof build === 'string') {
-        emitInput(refs, build, 'build-context', 'build-context', fromFile, 'compose-file-dir');
+        emitInput(refs, build, 'build-context', 'build-context', fromFile, 'compose-file-dir', service);
         return;
     }
     if (!build || typeof build !== 'object' || Array.isArray(build)) return;
     const record = build as Record<string, unknown>;
     if (typeof record.context === 'string') {
-        emitInput(refs, record.context, 'build-context', 'build-context', fromFile, 'compose-file-dir');
+        emitInput(refs, record.context, 'build-context', 'build-context', fromFile, 'compose-file-dir', service);
     }
     if (typeof record.dockerfile === 'string') {
         // Dockerfile is relative to the context; the classifier rebases it.
-        emitInput(refs, record.dockerfile, 'dockerfile', 'dockerfile', fromFile, 'compose-file-dir');
+        emitInput(refs, record.dockerfile, 'dockerfile', 'dockerfile', fromFile, 'compose-file-dir', service);
     }
     if (record.secrets && Array.isArray(record.secrets)) {
         for (const entry of record.secrets as unknown[]) {
             if (typeof entry === 'string') {
                 // Named build secret (top-level secrets or BuildKit named secret).
-                emitInput(refs, null, 'build-secret', 'build-secret', fromFile, 'host');
+                emitInput(refs, null, 'build-secret', 'build-secret', fromFile, 'host', service);
             } else if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
                 const def = entry as Record<string, unknown>;
                 const file = asString(def.source) ?? asString(def.file);
                 if (file !== undefined) {
-                    emitInput(refs, file, 'build-secret', 'build-secret', fromFile, 'compose-file-dir');
+                    emitInput(refs, file, 'build-secret', 'build-secret', fromFile, 'compose-file-dir', service);
                 }
             }
         }
@@ -174,7 +175,7 @@ function collectBuild(build: unknown, fromFile: string, refs: ComposeRefs): void
         for (const [, ctxPath] of Object.entries(record.additional_contexts as Record<string, unknown>)) {
             const p = asString(ctxPath);
             if (p !== undefined) {
-                emitInput(refs, p, 'build-additional-context', 'build-additional-context', fromFile, 'compose-file-dir');
+                emitInput(refs, p, 'build-additional-context', 'build-additional-context', fromFile, 'compose-file-dir', service);
             }
         }
     }
@@ -210,7 +211,7 @@ function walkService(serviceName: string, service: unknown, fromFile: string, re
         emitInput(refs, record.label_file, 'label_file', 'label-file', fromFile, 'compose-file-dir');
     }
 
-    if (record.build !== undefined) collectBuild(record.build, fromFile, refs);
+    if (record.build !== undefined) collectBuild(record.build, fromFile, refs, serviceName);
     collectBindMounts(record.volumes, fromFile, refs);
 
     // Per-service configs/secrets references are keys into the top-level

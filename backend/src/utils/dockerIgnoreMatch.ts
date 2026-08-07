@@ -168,15 +168,16 @@ export function compileDockerIgnore(lines: string[]): DockerIgnoreMatcher {
 }
 
 /**
- * Load `.dockerignore` from a directory (docker reads it from the dockerfile's
- * directory when the context and dockerfile differ; callers resolve that).
- * Returns null when no file exists or it cannot be read (nothing ignored).
+ * Load a Docker ignore file from a directory. Defaults to `.dockerignore`;
+ * pass an explicit filename for the Dockerfile-specific
+ * `<DockerfileName>.dockerignore` precedence form. Returns null when no file
+ * exists or it cannot be read (nothing ignored).
  */
-export async function loadDockerIgnore(rootDir: string): Promise<DockerIgnoreMatcher | null> {
+export async function loadDockerIgnore(rootDir: string, filename = '.dockerignore'): Promise<DockerIgnoreMatcher | null> {
     const fs = await import('fs');
     const path = await import('path');
     try {
-        const raw = await fs.promises.readFile(path.join(rootDir, '.dockerignore'), 'utf8');
+        const raw = await fs.promises.readFile(path.join(rootDir, filename), 'utf8');
         return compileDockerIgnore(raw.split(/\r?\n/));
     } catch {
         return null;

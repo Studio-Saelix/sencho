@@ -709,14 +709,16 @@ export class GitSourceService {
             const src = DatabaseService.getInstance().getGitSource(stackName);
             if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
             const manifestSvc = GitProjectManifestService.getInstance();
+
+            // Phase 1: render the export model and remove auto-discovered
+            // override files BEFORE overwriting compose.yaml. If anything
+            // fails here, the stack is untouched and detach is safely
+            // re-runnable (the render is deterministic per disk state, and
+            // overriding removal is manifest-driven).
             const rendered = await manifestSvc.exportForDetach(stackName, () =>
                 ComposeService.getInstance().renderComposeYaml(stackName),
             );
-            await FileSystemService.getInstance().saveStackContent(stackName, rendered);
-            // The flattened model already bakes every override; any remaining
-            // compose.override.* file would be AUTO-DISCOVERED and merged again
-            // by plain docker compose, changing the effective model post-detach.
-            // Remove managed files whose basename compose would auto-merge.
+
             const manifest = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
             if (manifest !== null && !('corrupt' in manifest)) {
                 const overrideNames = new Set(['compose.override.yaml', 'compose.override.yml', 'docker-compose.override.yaml', 'docker-compose.override.yml']);
@@ -724,17 +726,15 @@ export class GitSourceService {
                     if (entry.ownership !== 'managed' || entry.materializedPath === null) continue;
                     const base = entry.materializedPath.split('/').pop() ?? '';
                     if (!overrideNames.has(base)) continue;
-                    try {
-                        await FileSystemService.getInstance().deleteStackPath(stackName, entry.materializedPath, false);
-                    } catch (e) {
-                        throw new GitSourceError('GIT_ERROR', `Could not remove auto-discovered override ${entry.materializedPath}; detach aborted. Retry to complete it.`);
-                    }
+                    await FileSystemService.getInstance().deleteStackPath(stackName, entry.materializedPath, false);
                 }
             }
-            // The managed area holds previous applied generations with
-            // materialized configs/secrets; dropping the row while it survives
-            // would orphan it until the next boot sweep. Fail the detach
-            // instead (the render is deterministic, so a retry is safe).
+
+            // Phase 2: write the flattened compose.yaml, then delete the
+            // managed area, then drop the row. A failure here leaves the
+            // overrides already removed (a retry rebuilds the same flattened
+            // model from the remaining disk state, so it is byte-stable).
+            await FileSystemService.getInstance().saveStackContent(stackName, rendered);
             const areaDeleted = await manifestSvc.deleteManagedArea(stackName);
             if (!areaDeleted) {
                 throw new GitSourceError('GIT_ERROR', 'Could not remove the managed project data; detach aborted. Retry to complete it.');

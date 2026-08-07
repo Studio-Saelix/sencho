@@ -205,6 +205,28 @@ export class GitProjectManifestService {
             if (e.contentSha256 !== null && typeof e.contentSha256 !== 'string') return 'invalid input contentSha256';
         }
         if (!Array.isArray(m.refusals) || !Array.isArray(m.buildContexts)) return 'invalid refusals/buildContexts';
+        for (const ctx of m.buildContexts as unknown[]) {
+            if (!ctx || typeof ctx !== 'object' || Array.isArray(ctx)) return 'invalid build context entry';
+            const c = ctx as Record<string, unknown>;
+            if (!isSafeRelPath(c.repoPath)) return `invalid build context root ${String(c.repoPath)}`;
+            if (!isSafeRelPath(c.dockerfile)) return `invalid build context dockerfile ${String(c.dockerfile)}`;
+            if (typeof c.contextBytes !== 'number' || typeof c.ignoredCount !== 'number') return 'invalid build context counters';
+            if (typeof c.dockerignoreApplied !== 'boolean' || typeof c.excludedFromCopy !== 'boolean') return 'invalid build context flags';
+            const files = c.files;
+            if (files !== undefined) {
+                if (!Array.isArray(files)) return 'invalid build context files';
+                const seenPaths = new Set<string>();
+                for (const f of files as unknown[]) {
+                    if (!f || typeof f !== 'object' || Array.isArray(f)) return 'invalid build context file entry';
+                    const fe = f as Record<string, unknown>;
+                    if (!isSafeRelPath(fe.path)) return `invalid build context file path ${String(fe.path)}`;
+                    if (typeof fe.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(fe.sha256)) return 'invalid build context file hash';
+                    const key = String(fe.path).toLowerCase();
+                    if (seenPaths.has(key)) return `duplicate build context file ${String(fe.path)}`;
+                    seenPaths.add(key);
+                }
+            }
+        }
         const generation = m.generation as Record<string, unknown> | undefined;
         if (!generation || typeof generation !== 'object') return 'invalid generation';
         if (!isSafeRelPath(generation.candidateDir) || !isSafeRelPath(generation.appliedDir) || !isSafeRelPath(generation.previousDir)) {
@@ -241,7 +263,15 @@ export class GitProjectManifestService {
         }
         const reason = this.validateManifest(parsed, stackName, this.expectedIdentity(stackName, repoUrl, branch));
         if (reason !== null) return { corrupt: `Manifest failed validation: ${reason}` };
-        return parsed as GitProjectManifest;
+        // Normalize pre-correction manifests: context entries written before
+        // the per-file inventory existed have no `files` array; degrade them
+        // to directory granularity instead of rejecting or throwing later.
+        const manifest = parsed as GitProjectManifest;
+        manifest.buildContexts = manifest.buildContexts.map((ctx) => ({
+            ...ctx,
+            files: Array.isArray(ctx.files) ? ctx.files : [],
+        }));
+        return manifest;
     }
 
     /** Atomic manifest write (tmp + rename). */
@@ -366,8 +396,10 @@ export class GitProjectManifestService {
         }
         try {
             const parsed = JSON.parse(raw) as PromotionMarker;
-            if (typeof parsed.sha !== 'string' || typeof parsed.candidateRelPath !== 'string' || !Array.isArray(parsed.written)) {
-                return { corrupt: 'Promotion marker has an unexpected shape' };
+            if (typeof parsed.sha !== 'string' || parsed.sha.length === 0) return { corrupt: 'Promotion marker has an invalid sha' };
+            if (!isSafeRelPath(parsed.candidateRelPath) || parsed.candidateRelPath === '') return { corrupt: 'Promotion marker has an invalid candidate path' };
+            if (!Array.isArray(parsed.written) || !parsed.written.every((w) => typeof w === 'string' && isSafeRelPath(w))) {
+                return { corrupt: 'Promotion marker has an invalid written set' };
             }
             return parsed;
         } catch (e) {
@@ -602,7 +634,7 @@ export class GitProjectManifestService {
             // Mid-write failure: restore the previous applied generation and
             // rethrow so the caller reports the failure honestly.
             try {
-                await this.restorePreviousGeneration(stackName, opts);
+                await this.restorePreviousGeneration(stackName, { ...opts, incoming: { inputs: opts.manifest.inputs, buildContexts: opts.manifest.buildContexts } });
             } catch (restoreError) {
                 console.error('[GitManifest] promotion failed and recovery restore also failed:', (restoreError as Error).message);
             }
@@ -611,14 +643,47 @@ export class GitProjectManifestService {
     }
 
     /**
+     * Exact introduced-set computation: every path the incoming generation
+     * owns that the prior generation did not. Includes context files so a
+     * failed promotion cannot leave a mixed file set inside a retained
+     * context. Stack-relative paths.
+     */
+    private introducedPaths(
+        prior: GitProjectManifest | null,
+        incoming: { inputs: ComposeInputEntry[]; buildContexts: BuildContextPlan[] },
+    ): string[] {
+        const priorTop = new Set(
+            (prior?.inputs ?? []).filter((i) => i.ownership === 'managed' && i.materializedPath !== null).map((i) => i.materializedPath as string),
+        );
+        const priorContextFiles = new Map<string, Set<string>>();
+        for (const ctx of prior?.buildContexts ?? []) {
+            priorContextFiles.set(ctx.repoPath, new Set(ctx.files.map((f) => f.path)));
+        }
+        const introduced: string[] = [];
+        for (const entry of incoming.inputs) {
+            if (entry.ownership !== 'managed' || entry.materializedPath === null) continue;
+            if (!priorTop.has(entry.materializedPath)) introduced.push(entry.materializedPath);
+        }
+        for (const ctx of incoming.buildContexts) {
+            const priorFiles = priorContextFiles.get(ctx.repoPath) ?? new Set<string>();
+            for (const f of ctx.files) {
+                if (priorFiles.has(f.path)) continue;
+                introduced.push(ctx.repoPath ? `${ctx.repoPath}/${f.path}` : f.path);
+            }
+        }
+        return introduced;
+    }
+
+    /**
      * Restore the previous applied generation's managed files AND the manifest
      * FILE into the stack dir, then clear the promotion marker. Used after a
-     * mid-write crash or failed promotion. If any restore step fails, the
-     * marker is KEPT and the DB state is set to migration_required so the boot
-     * sweep retries and the UI flags the stack instead of declaring a false
-     * recovery.
+     * mid-write crash or failed promotion. Files the incoming generation
+     * introduced (top-level or inside retained contexts) are removed so the
+     * prior generation is exact. If any restore step fails, the marker is KEPT
+     * and the DB state is set to migration_required so the boot sweep retries
+     * and the UI flags the stack instead of declaring a false recovery.
      */
-    async restorePreviousGeneration(stackName: string, opts: { sha: string; candidateRelPath: string; manifest: GitProjectManifest; priorManifest: GitProjectManifest | null }): Promise<void> {
+    async restorePreviousGeneration(stackName: string, opts: { sha: string; candidateRelPath: string; manifest: GitProjectManifest; priorManifest: GitProjectManifest | null; incoming?: { inputs: ComposeInputEntry[]; buildContexts: BuildContextPlan[] } | null }): Promise<void> {
         const prior = opts.priorManifest;
         let failures = 0;
         const fsSvc = FileSystemService.getInstance();
@@ -633,9 +698,6 @@ export class GitProjectManifestService {
         };
         if (prior) {
             const priorDir = path.join(this.managedRoot(stackName), prior.generation.appliedDir);
-            const priorPaths = new Set(
-                prior.inputs.filter((i) => i.ownership === 'managed' && i.materializedPath !== null).map((i) => i.materializedPath as string),
-            );
             for (const entry of prior.inputs) {
                 if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
                 try {
@@ -646,17 +708,16 @@ export class GitProjectManifestService {
                 }
             }
             // Exact-generation restore: paths the failed promotion introduced
-            // (present in the NEW manifest, absent from the prior one) must be
-            // removed, or the stack would keep a mixed old/new file set.
-            if (failures === 0 && opts.manifest) {
-                for (const entry of opts.manifest.inputs) {
-                    if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
-                    if (priorPaths.has(entry.materializedPath)) continue;
+            // (present in the incoming inventory, absent from the prior one)
+            // must be removed, or the stack would keep a mixed old/new file
+            // set. Context files are included.
+            if (failures === 0 && opts.incoming) {
+                for (const rel of this.introducedPaths(prior, opts.incoming)) {
                     try {
-                        await removeStackPath(entry.materializedPath);
+                        await removeStackPath(rel);
                     } catch (e) {
                         failures += 1;
-                        console.error(`[GitManifest] restore could not remove ${entry.materializedPath}:`, (e as Error).message);
+                        console.error(`[GitManifest] restore could not remove ${rel}:`, (e as Error).message);
                     }
                 }
             }
@@ -677,14 +738,13 @@ export class GitProjectManifestService {
             // remove everything the failed promotion wrote so the stack dir is
             // not left with a partial file set, flag migration_required, and
             // KEEP the marker so the boot sweep reports the stack.
-            if (opts.manifest && failures === 0) {
-                for (const entry of opts.manifest.inputs) {
-                    if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
+            if (opts.incoming && failures === 0) {
+                for (const rel of this.introducedPaths(null, opts.incoming)) {
                     try {
-                        await removeStackPath(entry.materializedPath);
+                        await removeStackPath(rel);
                     } catch (e) {
                         failures += 1;
-                        console.error(`[GitManifest] restore could not remove ${entry.materializedPath}:`, (e as Error).message);
+                        console.error(`[GitManifest] restore could not remove ${rel}:`, (e as Error).message);
                     }
                 }
             }
@@ -728,7 +788,11 @@ export class GitProjectManifestService {
      * and report. Candidates without the completion marker are deleted; the
      * whole managed area is dropped when the stack no longer exists.
      */
-    async sweepManagedArea(stackName: string, opts: { repoUrl: string; branch: string; stackExists: boolean }): Promise<void> {
+    async sweepManagedArea(
+        stackName: string,
+        opts: { repoUrl: string; branch: string; stackExists: boolean },
+        incoming: { inputs: ComposeInputEntry[]; buildContexts: BuildContextPlan[] } | null = null,
+    ): Promise<void> {
         const { repoUrl, branch, stackExists } = opts;
         if (!stackExists) {
             await this.deleteManagedArea(stackName);
@@ -796,6 +860,7 @@ export class GitProjectManifestService {
                 candidateRelPath: marker.candidateRelPath,
                 manifest: prior,
                 priorManifest: prior,
+                incoming,
             });
             console.warn(`[GitManifest] restored previous applied generation for ${stackName} after a crash`);
         }
