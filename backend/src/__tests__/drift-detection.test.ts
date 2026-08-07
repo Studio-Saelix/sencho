@@ -49,6 +49,7 @@ function effSvc(over: Partial<EffService> = {}): EffService {
   return {
     name: 'web', image: 'nginx:1.27', ports: [], binds: [], namedVolumes: [], storageMounts: [],
     privileged: false, restart: 'unless-stopped', envKeys: [],
+    enabledProxyApiFlags: [],
     networks: [], extraHosts: [], labelKeys: [],
     ...over,
     hasHealthcheck,

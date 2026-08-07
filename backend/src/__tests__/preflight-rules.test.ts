@@ -16,6 +16,7 @@ function svc(over: Partial<EffService> = {}): EffService {
   return {
     name: 'web', image: 'nginx:1.27', ports: [], binds: [], namedVolumes: [], storageMounts: [],
     privileged: false, restart: 'unless-stopped', envKeys: [],
+    enabledProxyApiFlags: [],
     networks: [], extraHosts: [], labelKeys: [],
     ...over,
     hasHealthcheck,
@@ -190,10 +191,212 @@ describe('bind-path-missing / bind-path-permission', () => {
 });
 
 describe('security rules', () => {
-  it('flags a docker socket mount', () => {
-    const m = model([svc({ binds: [{ source: '/var/run/docker.sock', target: '/var/run/docker.sock' }] })]);
-    expect(ids(runRules(ctx({ model: m })), 'docker-socket-mount')[0].severity).toBe('high');
+  const sockBind = { source: '/var/run/docker.sock', target: '/var/run/docker.sock' };
+  const sockRo = { type: 'bind' as const, source: '/var/run/docker.sock', target: '/var/run/docker.sock', readOnly: true };
+  const sockRw = { type: 'bind' as const, source: '/var/run/docker.sock', target: '/var/run/docker.sock', readOnly: false };
+  const internalNet = { app_internal: { name: 'proj_app_internal', external: false, internal: true } };
+  const publicNet = { lan: { name: 'proj_lan', external: false, internal: false } };
+
+  it('flags a direct docker socket mount as high', () => {
+    const m = model([svc({ binds: [sockBind], storageMounts: [sockRw] })]);
+    const f = ids(runRules(ctx({ model: m })), 'docker-socket-mount');
+    expect(f).toHaveLength(1);
+    expect(f[0].severity).toBe('high');
+    expect(f[0].remediation).toMatch(/scoped socket proxy/i);
+    expect(ids(runRules(ctx({ model: m })), 'docker-socket-proxy')).toHaveLength(0);
   });
+
+  it('classifies known proxy images as info, not high', () => {
+    const m = model([svc({
+      name: 'proxy',
+      image: 'lscr.io/linuxserver/socket-proxy:latest',
+      binds: [sockBind],
+      storageMounts: [sockRo],
+      networks: [{ key: 'app_internal', aliases: [] }],
+    })], { networks: internalNet });
+    expect(ids(runRules(ctx({ model: m })), 'docker-socket-mount')).toHaveLength(0);
+    const f = ids(runRules(ctx({ model: m })), 'docker-socket-proxy');
+    expect(f).toHaveLength(1);
+    expect(f[0].severity).toBe('info');
+  });
+
+  it('classifies tecnativa image and name-hint proxies', () => {
+    const byImage = model([svc({
+      name: 'api', image: 'tecnativa/docker-socket-proxy:latest', binds: [sockBind], storageMounts: [sockRw],
+    })]);
+    expect(ids(runRules(ctx({ model: byImage })), 'docker-socket-proxy')).toHaveLength(1);
+    const byName = model([svc({
+      name: 'docker-socket-proxy', image: 'custom/proxy:1', binds: [sockBind], storageMounts: [sockRw],
+    })]);
+    expect(ids(runRules(ctx({ model: byName })), 'docker-socket-proxy')).toHaveLength(1);
+  });
+
+  it('classifies unknown RO socket plus two API keys as proxy; RW stays high', () => {
+    const keys = ['CONTAINERS', 'IMAGES'];
+    const ro = model([svc({
+      name: 'mystery', image: 'custom:1', binds: [sockBind], storageMounts: [sockRo], envKeys: keys,
+    })]);
+    expect(ids(runRules(ctx({ model: ro })), 'docker-socket-proxy')).toHaveLength(1);
+    expect(ids(runRules(ctx({ model: ro })), 'docker-socket-mount')).toHaveLength(0);
+    const rw = model([svc({
+      name: 'mystery', image: 'custom:1', binds: [sockBind], storageMounts: [sockRw], envKeys: keys,
+    })]);
+    expect(ids(runRules(ctx({ model: rw })), 'docker-socket-mount')[0].severity).toBe('high');
+    expect(ids(runRules(ctx({ model: rw })), 'docker-socket-proxy')).toHaveLength(0);
+  });
+
+  it('does not downgrade on a single API key or Portainer', () => {
+    const oneKey = model([svc({
+      binds: [sockBind], storageMounts: [sockRo], envKeys: ['CONTAINERS'],
+    })]);
+    expect(ids(runRules(ctx({ model: oneKey })), 'docker-socket-mount')).toHaveLength(1);
+    const portainer = model([svc({
+      name: 'portainer', image: 'portainer/portainer-ce:latest', binds: [sockBind], storageMounts: [sockRw],
+    })]);
+    expect(ids(runRules(ctx({ model: portainer })), 'docker-socket-mount')).toHaveLength(1);
+  });
+
+  it('matches docker.sock on source-only or target-only binds', () => {
+    const sourceOnly = model([svc({
+      binds: [{ source: '/var/run/docker.sock', target: '/run/docker.sock' }],
+      storageMounts: [{ type: 'bind', source: '/var/run/docker.sock', target: '/run/docker.sock', readOnly: false }],
+    })]);
+    expect(ids(runRules(ctx({ model: sourceOnly })), 'docker-socket-mount')).toHaveLength(1);
+    const targetOnly = model([svc({
+      binds: [{ source: '/host/custom', target: '/var/run/docker.sock' }],
+      storageMounts: [{ type: 'bind', source: '/host/custom', target: '/var/run/docker.sock', readOnly: false }],
+    })]);
+    expect(ids(runRules(ctx({ model: targetOnly })), 'docker-socket-mount')).toHaveLength(1);
+  });
+
+  it('warns when a proxy publishes any host port', () => {
+    const m = model([svc({
+      name: 'proxy',
+      image: 'tecnativa/docker-socket-proxy:latest',
+      binds: [sockBind],
+      storageMounts: [sockRo],
+      ports: [{ startPort: 2375, endPort: 2375, hostIp: '', protocol: 'tcp' }],
+      networks: [{ key: 'app_internal', aliases: [] }],
+    })], { networks: internalNet });
+    expect(ids(runRules(ctx({ model: m })), 'docker-socket-proxy-published')[0].severity).toBe('high');
+    const remapped = model([svc({
+      name: 'proxy',
+      image: 'tecnativa/docker-socket-proxy:latest',
+      binds: [sockBind],
+      storageMounts: [sockRo],
+      ports: [{ startPort: 12375, endPort: 12375, hostIp: '127.0.0.1', protocol: 'tcp' }],
+    })]);
+    expect(ids(runRules(ctx({ model: remapped })), 'docker-socket-proxy-published')).toHaveLength(1);
+    const none = model([svc({
+      name: 'proxy', image: 'tecnativa/docker-socket-proxy:latest', binds: [sockBind], storageMounts: [sockRo],
+    })]);
+    expect(ids(runRules(ctx({ model: none })), 'docker-socket-proxy-published')).toHaveLength(0);
+  });
+
+  it('warns on enabled POST/DELETE flags only', () => {
+    const mutating = model([svc({
+      name: 'proxy',
+      image: 'tecnativa/docker-socket-proxy:latest',
+      binds: [sockBind],
+      storageMounts: [sockRo],
+      enabledProxyApiFlags: ['POST', 'DELETE', 'CONTAINERS'],
+    })]);
+    const f = ids(runRules(ctx({ model: mutating })), 'docker-socket-proxy-mutating');
+    expect(f).toHaveLength(1);
+    expect(f[0].severity).toBe('warning');
+    expect(f[0].message).toMatch(/POST and DELETE/);
+    const safe = model([svc({
+      name: 'proxy',
+      image: 'tecnativa/docker-socket-proxy:latest',
+      binds: [sockBind],
+      storageMounts: [sockRo],
+      enabledProxyApiFlags: ['CONTAINERS'],
+      envKeys: ['POST', 'DELETE', 'CONTAINERS'],
+    })]);
+    expect(ids(runRules(ctx({ model: safe })), 'docker-socket-proxy-mutating')).toHaveLength(0);
+  });
+
+  it('warns when a proxy attaches to any non-internal network, including mixed', () => {
+    const internalOnly = model([svc({
+      name: 'proxy',
+      image: 'tecnativa/docker-socket-proxy:latest',
+      binds: [sockBind],
+      storageMounts: [sockRo],
+      networks: [{ key: 'app_internal', aliases: [] }],
+    })], { networks: internalNet });
+    expect(ids(runRules(ctx({ model: internalOnly })), 'docker-socket-proxy-exposure')).toHaveLength(0);
+
+    const mixed = model([svc({
+      name: 'proxy',
+      image: 'tecnativa/docker-socket-proxy:latest',
+      binds: [sockBind],
+      storageMounts: [sockRo],
+      networks: [{ key: 'app_internal', aliases: [] }, { key: 'lan', aliases: [] }],
+    })], { networks: { ...internalNet, ...publicNet } });
+    expect(ids(runRules(ctx({ model: mixed })), 'docker-socket-proxy-exposure')).toHaveLength(1);
+
+    const missingMeta = model([svc({
+      name: 'proxy',
+      image: 'tecnativa/docker-socket-proxy:latest',
+      binds: [sockBind],
+      storageMounts: [sockRo],
+      networks: [{ key: 'undeclared', aliases: [] }],
+    })]);
+    expect(ids(runRules(ctx({ model: missingMeta })), 'docker-socket-proxy-exposure')).toHaveLength(0);
+  });
+
+  it('emits a client note when DOCKER_HOST shares a network with a proxy', () => {
+    const m = model([
+      svc({
+        name: 'proxy',
+        image: 'tecnativa/docker-socket-proxy:latest',
+        binds: [sockBind],
+        storageMounts: [sockRo],
+        networks: [{ key: 'app_internal', aliases: [] }],
+      }),
+      svc({
+        name: 'app',
+        image: 'myapp:1',
+        envKeys: ['DOCKER_HOST'],
+        networks: [{ key: 'app_internal', aliases: [] }],
+      }),
+    ], { networks: internalNet });
+    const note = ids(runRules(ctx({ model: m })), 'docker-socket-proxy-client');
+    expect(note).toHaveLength(1);
+    expect(note[0].message).toMatch(/appears to use/i);
+  });
+
+  it('skips the client note without DOCKER_HOST, shared network, or when the app mounts the socket', () => {
+    const proxy = svc({
+      name: 'proxy',
+      image: 'tecnativa/docker-socket-proxy:latest',
+      binds: [sockBind],
+      storageMounts: [sockRo],
+      networks: [{ key: 'app_internal', aliases: [] }],
+    });
+    const noKey = model([
+      proxy,
+      svc({ name: 'app', networks: [{ key: 'app_internal', aliases: [] }] }),
+    ], { networks: internalNet });
+    expect(ids(runRules(ctx({ model: noKey })), 'docker-socket-proxy-client')).toHaveLength(0);
+    const noShare = model([
+      proxy,
+      svc({ name: 'app', envKeys: ['DOCKER_HOST'], networks: [{ key: 'other', aliases: [] }] }),
+    ], { networks: internalNet });
+    expect(ids(runRules(ctx({ model: noShare })), 'docker-socket-proxy-client')).toHaveLength(0);
+    const alsoMounts = model([
+      proxy,
+      svc({
+        name: 'app',
+        envKeys: ['DOCKER_HOST'],
+        binds: [sockBind],
+        storageMounts: [sockRw],
+        networks: [{ key: 'app_internal', aliases: [] }],
+      }),
+    ], { networks: internalNet });
+    expect(ids(runRules(ctx({ model: alsoMounts })), 'docker-socket-proxy-client')).toHaveLength(0);
+  });
+
   it('flags privileged and host networking', () => {
     expect(ids(runRules(ctx({ model: model([svc({ privileged: true })]) })), 'privileged')).toHaveLength(1);
     expect(ids(runRules(ctx({ model: model([svc({ networkMode: 'host' })]) })), 'network-mode-host')).toHaveLength(1);
@@ -543,7 +746,10 @@ describe('rule registry completeness', () => {
   // which forces a deliberate pass over the docs and the frontend severity map.
   const EXPECTED_RULE_IDS = [
     'render-failed', 'env-unset', 'env-literal-dollar', 'env-file-missing', 'port-conflict-node', 'port-conflict-internal', 'port-exposed-all-interfaces',
-    'bind-path-missing', 'bind-path-permission', 'docker-socket-mount', 'privileged', 'network-mode-host',
+    'bind-path-missing', 'bind-path-permission', 'docker-socket-mount',
+    'docker-socket-proxy', 'docker-socket-proxy-published', 'docker-socket-proxy-mutating',
+    'docker-socket-proxy-exposure', 'docker-socket-proxy-client',
+    'privileged', 'network-mode-host',
     'uid-gid-risk', 'image-latest', 'no-restart-policy', 'no-healthcheck',
     'healthcheck-disabled', 'healthcheck-inherited', 'healthcheck-unverifiable', 'healthcheck-inconsistent',
     'deploy-swarm-only',

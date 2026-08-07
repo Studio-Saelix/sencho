@@ -146,6 +146,41 @@ describe('parseEffectiveModel', () => {
     expect(JSON.stringify(m)).not.toContain(SECRET);
   });
 
+  it('records enabled socket-proxy API flags when the value is exactly 1', () => {
+    const mapForm = parseEffectiveModel({
+      services: {
+        proxy: {
+          environment: {
+            CONTAINERS: '1',
+            POST: '1',
+            DELETE: '0',
+            IMAGES: '1',
+            DB_PASSWORD: SECRET,
+          },
+        },
+      },
+    }, 'p');
+    expect(mapForm.services[0].enabledProxyApiFlags.sort()).toEqual(['CONTAINERS', 'IMAGES', 'POST']);
+    expect(mapForm.services[0].envKeys).toContain('DB_PASSWORD');
+    expect(JSON.stringify(mapForm)).not.toContain(SECRET);
+
+    const arrayForm = parseEffectiveModel({
+      services: {
+        proxy: {
+          environment: ['POST=1', 'DELETE=0', 'EVENTS=1', `TOKEN=${SECRET}`],
+        },
+      },
+    }, 'p');
+    expect(arrayForm.services[0].enabledProxyApiFlags.sort()).toEqual(['EVENTS', 'POST']);
+    expect(JSON.stringify(arrayForm)).not.toContain(SECRET);
+
+    const absent = parseEffectiveModel({
+      services: { proxy: { environment: { CONTAINERS: '1' } } },
+    }, 'p');
+    expect(absent.services[0].enabledProxyApiFlags).toEqual(['CONTAINERS']);
+    expect(absent.services[0].enabledProxyApiFlags).not.toContain('POST');
+  });
+
   it('parses the short-string port form and drops container-only EXPOSE', () => {
     const m = parseEffectiveModel({ services: { s: { ports: ['127.0.0.1:8080:80/udp', '8443:443', '90'] } } }, 'p');
     expect(m.services[0].ports).toEqual([
