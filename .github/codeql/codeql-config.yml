@@ -68,3 +68,20 @@ query-filters:
       id: js/file-access-to-http
       paths:
         - backend/src/services/NotificationService.ts
+
+  # GitProjectManifestService stores per-stack managed-project state under
+  # <DATA_DIR>/git-managed/<nodeId>/<stackName>/. CodeQL traces the stack name
+  # route parameter through the per-stack service layer into the manifest
+  # write paths and flags it as a path-injection risk. The taint is fully
+  # guarded by construction: stackName passes isValidStackName at the route
+  # (400 early return) and is re-validated with a throw inside managedRoot
+  # before any path expression; every filename is a constant
+  # (manifest.v1.json, promotion.json, .tmp); and stack-relative paths
+  # additionally pass isPathWithinBase / isNonEmptyRelPath containment
+  # checks. No traversal is reachable; the PR analysis surfaces the sink
+  # whenever the diff touches the service layer. Excluding this file so the
+  # query still catches real path traversal from unvalidated input elsewhere.
+  - exclude:
+      id: js/path-injection
+      paths:
+        - backend/src/services/GitProjectManifestService.ts

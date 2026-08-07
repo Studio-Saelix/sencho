@@ -156,17 +156,14 @@ describe('GitSourcePanel manifest summary', () => {
     vi.mocked(apiFetch).mockImplementation(async (url: string) =>
       url.includes('/git-source/manifest')
         ? jsonRes({
+            // The manifest endpoint serves the redacted PUBLIC projection
+            // (path, not sourcePath/materializedPath; no hashes or internals).
             manifest: {
-              schemaVersion: 1,
               manifestVersion: 2,
               state: 'active',
-              resolvedRevision: { commitSha: 'abc123', fetchedAt: 1 },
-              project: { root: null, composeFiles: ['compose.yaml'], projectName: 'web' },
               inputs: [
-                { sourcePath: 'compose.yaml', materializedPath: 'compose.yaml', role: 'compose-primary', dependencyKind: 'explicit', ownership: 'managed', sensitivity: 'medium', state: 'present', deletionAuthority: 'sencho', note: null },
+                { path: 'compose.yaml', role: 'compose-primary', dependencyKind: 'explicit', ownership: 'managed', sensitivity: 'medium', state: 'present', note: null },
               ],
-              refusals: [],
-              counts: { managed: 3, unmanaged: 1, refused: 0 },
             },
           })
         : jsonRes({ ...LINKED_SOURCE, manifest_state: 'active', manifest: summary }),
