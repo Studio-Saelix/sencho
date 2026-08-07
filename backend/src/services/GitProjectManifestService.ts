@@ -24,6 +24,7 @@ import { StackFileRootsService } from './StackFileRootsService';
 import { DatabaseService } from './DatabaseService';
 import { ComposeInputDiscoveryService, type ContextCopyPlan, type CopyEntry } from './ComposeInputDiscoveryService';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import { sanitizeForLog } from '../utils/safeLog';
 import type {
     BuildContextPlan,
     ComposeInputEntry,
@@ -896,7 +897,7 @@ export class GitProjectManifestService {
                 // the stack dir may be half-written. Flag recovery-required.
                 await fs.promises.rm(await this.markerPath(stackName), { force: true });
                 DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
-                console.warn(`[GitManifest] promotion marker for ${stackName} is corrupt (${marker.corrupt}); flagged migration_required`);
+                console.warn(`[GitManifest] promotion marker for ${sanitizeForLog(stackName)} is corrupt (${marker.corrupt}); flagged migration_required`);
                 return;
             }
             const candidateAbs = path.join(this.managedRoot(stackName), marker.candidateRelPath);
@@ -922,7 +923,7 @@ export class GitProjectManifestService {
                     // Candidate vanished; nothing to verify or restore against.
                     await fs.promises.rm(await this.markerPath(stackName), { force: true });
                     DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
-                    console.warn(`[GitManifest] promotion marker found for ${stackName} but the candidate is missing; flagged migration_required`);
+                    console.warn(`[GitManifest] promotion marker found for ${sanitizeForLog(stackName)} but the candidate is missing; flagged migration_required`);
                     return;
                 }
                 // Applied generation is present (post-rename crash); proceed
@@ -933,7 +934,7 @@ export class GitProjectManifestService {
             if (prior === null || 'corrupt' in prior) {
                 await fs.promises.rm(await this.markerPath(stackName), { force: true });
                 DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
-                console.warn(`[GitManifest] promotion marker found for ${stackName} but no trustworthy prior manifest; flagged migration_required`);
+                console.warn(`[GitManifest] promotion marker found for ${sanitizeForLog(stackName)} but no trustworthy prior manifest; flagged migration_required`);
                 return;
             }
             // Verify the recorded mid-write state still matches the candidate.
@@ -958,7 +959,7 @@ export class GitProjectManifestService {
                 // Hand-repaired after the crash: do NOT overwrite user work.
                 await fs.promises.rm(await this.markerPath(stackName), { force: true });
                 DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
-                console.warn(`[GitManifest] promotion marker for ${stackName} does not match the stack dir (${mismatch}); restore declined, flagged migration_required`);
+                console.warn(`[GitManifest] promotion marker for ${sanitizeForLog(stackName)} does not match the stack dir (${mismatch}); restore declined, flagged migration_required`);
                 return;
             }
             await this.restorePreviousGeneration(stackName, {
@@ -968,7 +969,7 @@ export class GitProjectManifestService {
                 priorManifest: prior,
                 incoming: marker.introduced.length > 0 ? { introducedPaths: marker.introduced } : null,
             });
-            console.warn(`[GitManifest] restored previous applied generation for ${stackName} after a crash`);
+            console.warn(`[GitManifest] restored previous applied generation for ${sanitizeForLog(stackName)} after a crash`);
         }
 
         // Orphan candidates: incomplete or stale.
@@ -1009,7 +1010,7 @@ export class GitProjectManifestService {
             await fs.promises.rm(root, { recursive: true, force: true });
             return true;
         } catch (e) {
-            console.warn(`[GitManifest] could not delete managed area for ${stackName}:`, (e as Error).message);
+            console.warn(`[GitManifest] could not delete managed area for ${sanitizeForLog(stackName)}:`, (e as Error).message);
             return false;
         }
     }
