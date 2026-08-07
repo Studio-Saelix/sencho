@@ -295,18 +295,22 @@ export class ComposeInputDiscoveryService {
             // by default; a Dockerfile-specific ignore file named
             // `<DockerfileName>.dockerignore` next to the dockerfile takes
             // precedence when present.
-            const matcher = await loadDockerIgnore(abs);
+            let matcher = await loadDockerIgnore(abs);
             let dockerignoreRel = matcher !== null ? path.relative(cloneDir, path.join(abs, '.dockerignore')).replace(/\\/g, '/') : null;
             if (dockerfileRel !== null && !dockerfileOutsideContext) {
+                // The dockerfile is CONTEXT-relative (e.g., `sub/Dockerfile` for
+                // context `web` means `web/sub/Dockerfile`); its repo-relative
+                // directory for the ignore file is just the dockerfile's dir.
                 const dfDir = dockerfileRel.includes('/') ? dockerfileRel.slice(0, dockerfileRel.lastIndexOf('/')) : '';
                 const dfBase = dockerfileRel.split('/').pop() ?? '';
-                const specificDir = path.join(abs, dfDir);
-                const specific = path.join(specificDir, `${dfBase}.dockerignore`);
-                const specificExists = await fs.promises.access(specific).then(() => true).catch(() => false);
+                const specificAbs = path.join(cloneDir, dockerfileRel.slice(0, dockerfileRel.lastIndexOf('/')));
+                const specificFile = path.join(specificAbs, `${dfBase}.dockerignore`);
+                const specificExists = await fs.promises.access(specificFile).then(() => true).catch(() => false);
                 if (specificExists) {
-                    const specificMatcher = await loadDockerIgnore(specificDir, `${dfBase}.dockerignore`);
+                    const specificMatcher = await loadDockerIgnore(specificAbs, `${dfBase}.dockerignore`);
                     if (specificMatcher !== null) {
-                        dockerignoreRel = path.relative(cloneDir, specific).replace(/\\/g, '/');
+                        matcher = specificMatcher;
+                        dockerignoreRel = path.relative(cloneDir, specificFile).replace(/\\/g, '/');
                     }
                 }
             }
@@ -445,20 +449,27 @@ export class ComposeInputDiscoveryService {
                 matcher,
                 dockerignoreRel,
             });
-            entries.push({
-                sourcePath: rootPath,
-                materializedPath: rootPath,
-                role: 'build-context',
-                dependencyKind: 'build-context',
-                ownership: 'managed',
-                provenance: 'fetch',
-                sensitivity: 'low',
-                contentSha256: null,
-                sizeBytes: contextBytes,
-                state: 'present',
-                deletionAuthority: 'sencho',
-                note,
-            });
+            // Contexts are tracked in buildContexts with per-file inventories;
+            // a materializedPath entry in the input list is only emitted for
+            // non-root contexts (a directory on disk). The root context (empty
+            // path) must never become a stack-relative path for promotion or
+            // stale cleanup to write/delete.
+            if (rootPath !== '') {
+                entries.push({
+                    sourcePath: rootPath,
+                    materializedPath: rootPath,
+                    role: 'build-context',
+                    dependencyKind: 'build-context',
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    sensitivity: 'low',
+                    contentSha256: null,
+                    sizeBytes: contextBytes,
+                    state: 'present',
+                    deletionAuthority: 'sencho',
+                    note,
+                });
+            }
         }
         return { plans, entries };
     }
@@ -720,8 +731,22 @@ export class ComposeInputDiscoveryService {
         // Sync env entry (stack-root .env) is recorded by the caller (it knows
         // sync_env + env_path); interpolation-env classification is covered above.
 
+        // Deduplicate managed inputs by stack-relative path: two services
+        // referencing the same file (shared env_file, config, or Dockerfile)
+        // produce one entry so the candidate writer never rejects a duplicate.
+        const dedupedInputs: ComposeInputEntry[] = [];
+        const seenPaths = new Set<string>();
+        for (const entry of inputs) {
+            if (entry.materializedPath !== null) {
+                const key = caseKey(entry.materializedPath);
+                if (seenPaths.has(key)) continue;
+                seenPaths.add(key);
+            }
+            dedupedInputs.push(entry);
+        }
+
         return {
-            inputs,
+            inputs: dedupedInputs,
             refusals,
             buildContexts: plans.map((p) => p.context),
             contextCopyPlans: plans,

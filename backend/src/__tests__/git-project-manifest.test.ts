@@ -292,7 +292,7 @@ describe('sweepManagedArea (crash recovery)', () => {
         fs.writeFileSync(path.join(candidateAbs, CANDIDATE_COMPLETE_MARKER), 'crash');
         fs.writeFileSync(path.join(candidateAbs, 'compose.yaml'), 'NEW\n');
         writeStackFile(stackName, 'compose.yaml', 'NEW\n');
-        const marker = { sha: 'crash', candidateRelPath: candidateRel, written: ['compose.yaml'] };
+        const marker = { sha: 'crash', candidateRelPath: candidateRel, written: ['compose.yaml'], introduced: [] };
         fs.writeFileSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER), JSON.stringify(marker), 'utf8');
 
         await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
@@ -340,7 +340,7 @@ describe('sweepManagedArea (crash recovery)', () => {
         fs.writeFileSync(path.join(candidateAbs, CANDIDATE_COMPLETE_MARKER), 'crash2');
         fs.writeFileSync(path.join(candidateAbs, 'compose.yaml'), 'NEW\n');
         writeStackFile(stackName, 'compose.yaml', 'OPERATOR FIXED ME\n'); // hand-repaired
-        const marker = { sha: 'crash2', candidateRelPath: candidateRel, written: ['compose.yaml'] };
+        const marker = { sha: 'crash2', candidateRelPath: candidateRel, written: ['compose.yaml'], introduced: [] };
         fs.writeFileSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER), JSON.stringify(marker), 'utf8');
 
         await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });

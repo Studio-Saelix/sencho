@@ -57,6 +57,13 @@ interface PromotionMarker {
     candidateRelPath: string;
     /** Stack-relative paths already written before the crash. */
     written: string[];
+    /**
+     * Stack-relative paths the incoming generation introduces (absent from
+     * the prior generation). Persisted so boot recovery can remove them for
+     * an exact prior-generation restore even when the incoming manifest is
+     * no longer available.
+     */
+    introduced: string[];
 }
 
 const MANIFEST_STATES: readonly ManifestState[] = ['none', 'migrated', 'active', 'partial', 'unsupported'];
@@ -235,6 +242,26 @@ export class GitProjectManifestService {
         if (!isSafeRelPath((m.project as Record<string, unknown> | undefined)?.root)) return 'invalid project.root';
         if (!m.counts || typeof m.counts !== 'object') return 'invalid counts';
         if (!m.bounds || typeof m.bounds !== 'object') return 'invalid bounds';
+        // Cross-check: no managed input path collides with any context file path.
+        const inputSeen = new Set<string>();
+        for (const e of m.inputs as Record<string, unknown>[]) {
+            if (e.materializedPath === null || e.materializedPath === undefined) continue;
+            const key = String(e.materializedPath).toLowerCase();
+            if (inputSeen.has(key)) return `duplicate input path ${String(e.materializedPath)}`;
+            inputSeen.add(key);
+        }
+        for (const c of m.buildContexts as Record<string, unknown>[]) {
+            if (!c || typeof c !== 'object') continue;
+            const files = (c as Record<string, unknown>).files;
+            if (!Array.isArray(files)) continue;
+            for (const f of files as Record<string, unknown>[]) {
+                const ctxPath = String((c as Record<string, unknown>).repoPath ?? '');
+                const filePath = String(f.path ?? '');
+                const key = (ctxPath ? `${ctxPath}/${filePath}` : filePath).toLowerCase();
+                if (inputSeen.has(key)) return `context file path ${key} collides with an input path`;
+                inputSeen.add(key);
+            }
+        }
         return null;
     }
 
@@ -401,6 +428,9 @@ export class GitProjectManifestService {
             if (!Array.isArray(parsed.written) || !parsed.written.every((w) => typeof w === 'string' && isSafeRelPath(w))) {
                 return { corrupt: 'Promotion marker has an invalid written set' };
             }
+            if (!Array.isArray(parsed.introduced) || !parsed.introduced.every((w) => typeof w === 'string' && isSafeRelPath(w))) {
+                return { corrupt: 'Promotion marker has an invalid introduced set' };
+            }
             return parsed;
         } catch (e) {
             return { corrupt: `Promotion marker is not valid JSON: ${(e as Error).message}` };
@@ -453,12 +483,14 @@ export class GitProjectManifestService {
                     diverged.push(`${childRel} (symbolic link)`);
                     continue;
                 }
+                // Root contexts span the whole stack dir: files managed by
+                // non-context entries (compose.yaml, .env, configs) are not
+                // owned by the context and must not be reported as diverged.
                 if (!owned.has(childRel)) {
-                    diverged.push(`${childRel} (not in the managed context)`);
                     continue;
                 }
                 const expected = context.files.find((f) => f.path === childRel)?.sha256;
-                const actual = await this.hashStackFile(stackName, `${context.repoPath}/${childRel}`);
+                const actual = await this.hashStackFile(stackName, context.repoPath ? `${context.repoPath}/${childRel}` : childRel);
                 if (expected === undefined || actual !== expected) {
                     diverged.push(childRel);
                 }
@@ -539,7 +571,12 @@ export class GitProjectManifestService {
             }
 
             await fs.promises.mkdir(this.managedRoot(stackName), { recursive: true });
-            await this.writeMarker(stackName, { sha, candidateRelPath, written: [] });
+            // The introduced set (paths the incoming generation OWNS that the
+            // prior does not) is persisted in every marker write so boot recovery
+            // can restore exactly the prior generation even when the incoming
+            // manifest is no longer available.
+            const introduced = this.introducedPaths(priorManifest, { inputs: manifest.inputs, buildContexts: manifest.buildContexts });
+            await this.writeMarker(stackName, { sha, candidateRelPath, written: [], introduced });
 
             // 1. Write every managed, present input from the candidate. The
             //    marker is rewritten in BATCHES (every 25 files) with the full
@@ -552,7 +589,7 @@ export class GitProjectManifestService {
                 await this.writeStackFileFromCandidate(stackName, candidateAbs, entry.materializedPath!, bounds.maxFileBytes);
                 written.push(entry.materializedPath!);
                 if (written.length % 25 === 0 || written.length === managed.length) {
-                    await this.writeMarker(stackName, { sha, candidateRelPath, written });
+                    await this.writeMarker(stackName, { sha, candidateRelPath, written, introduced });
                 }
             }
 
@@ -652,8 +689,12 @@ export class GitProjectManifestService {
         prior: GitProjectManifest | null,
         incoming: { inputs: ComposeInputEntry[]; buildContexts: BuildContextPlan[] },
     ): string[] {
+        // Only PRESENT prior entries count: tombstoned files were already
+        // removed and their paths can safely be reused by the incoming set.
         const priorTop = new Set(
-            (prior?.inputs ?? []).filter((i) => i.ownership === 'managed' && i.materializedPath !== null).map((i) => i.materializedPath as string),
+            (prior?.inputs ?? [])
+                .filter((i) => i.ownership === 'managed' && i.state === 'present' && i.materializedPath !== null)
+                .map((i) => i.materializedPath as string),
         );
         const priorContextFiles = new Map<string, Set<string>>();
         for (const ctx of prior?.buildContexts ?? []) {
@@ -683,7 +724,10 @@ export class GitProjectManifestService {
      * and the DB state is set to migration_required so the boot sweep retries
      * and the UI flags the stack instead of declaring a false recovery.
      */
-    async restorePreviousGeneration(stackName: string, opts: { sha: string; candidateRelPath: string; manifest: GitProjectManifest; priorManifest: GitProjectManifest | null; incoming?: { inputs: ComposeInputEntry[]; buildContexts: BuildContextPlan[] } | null }): Promise<void> {
+    async restorePreviousGeneration(
+        stackName: string,
+        opts: { sha: string; candidateRelPath: string; manifest: GitProjectManifest; priorManifest: GitProjectManifest | null; incoming?: { inputs?: ComposeInputEntry[]; buildContexts?: BuildContextPlan[]; introducedPaths?: string[] } | null },
+    ): Promise<void> {
         const prior = opts.priorManifest;
         let failures = 0;
         const fsSvc = FileSystemService.getInstance();
@@ -712,7 +756,9 @@ export class GitProjectManifestService {
             // must be removed, or the stack would keep a mixed old/new file
             // set. Context files are included.
             if (failures === 0 && opts.incoming) {
-                for (const rel of this.introducedPaths(prior, opts.incoming)) {
+                const removeList =
+                    opts.incoming.introducedPaths ?? this.introducedPaths(prior, opts.incoming as { inputs: ComposeInputEntry[]; buildContexts: BuildContextPlan[] });
+                for (const rel of removeList) {
                     try {
                         await removeStackPath(rel);
                     } catch (e) {
@@ -739,7 +785,9 @@ export class GitProjectManifestService {
             // not left with a partial file set, flag migration_required, and
             // KEEP the marker so the boot sweep reports the stack.
             if (opts.incoming && failures === 0) {
-                for (const rel of this.introducedPaths(null, opts.incoming)) {
+                const removeList =
+                    opts.incoming.introducedPaths ?? this.introducedPaths(null, opts.incoming as { inputs: ComposeInputEntry[]; buildContexts: BuildContextPlan[] });
+                for (const rel of removeList) {
                     try {
                         await removeStackPath(rel);
                     } catch (e) {
@@ -860,7 +908,7 @@ export class GitProjectManifestService {
                 candidateRelPath: marker.candidateRelPath,
                 manifest: prior,
                 priorManifest: prior,
-                incoming,
+                incoming: marker.introduced.length > 0 ? { introducedPaths: marker.introduced } : null,
             });
             console.warn(`[GitManifest] restored previous applied generation for ${stackName} after a crash`);
         }

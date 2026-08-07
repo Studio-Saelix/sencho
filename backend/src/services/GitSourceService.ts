@@ -710,15 +710,22 @@ export class GitSourceService {
             if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
             const manifestSvc = GitProjectManifestService.getInstance();
 
-            // Phase 1: render the export model and remove auto-discovered
-            // override files BEFORE overwriting compose.yaml. If anything
-            // fails here, the stack is untouched and detach is safely
-            // re-runnable (the render is deterministic per disk state, and
-            // overriding removal is manifest-driven).
+            // Phase 1: render the effective model. A render failure aborts
+            // before anything on disk changes (the stack is untouched).
             const rendered = await manifestSvc.exportForDetach(stackName, () =>
                 ComposeService.getInstance().renderComposeYaml(stackName),
             );
 
+            // Phase 2: write the flattened compose.yaml. If this fails,
+            // nothing downstream (overrides, managed area, row) was touched
+            // yet, so the stack is unchanged and a retry is safe.
+            await FileSystemService.getInstance().saveStackContent(stackName, rendered);
+
+            // Phase 3: remove auto-discovered override files. The flattened
+            // model already bakes every override; any remaining
+            // compose.override.* file would be auto-discovered and merged
+            // again by plain docker compose. A retry after failure here
+            // re-renders the same model and re-deletes.
             const manifest = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
             if (manifest !== null && !('corrupt' in manifest)) {
                 const overrideNames = new Set(['compose.override.yaml', 'compose.override.yml', 'docker-compose.override.yaml', 'docker-compose.override.yml']);
@@ -730,11 +737,9 @@ export class GitSourceService {
                 }
             }
 
-            // Phase 2: write the flattened compose.yaml, then delete the
-            // managed area, then drop the row. A failure here leaves the
-            // overrides already removed (a retry rebuilds the same flattened
-            // model from the remaining disk state, so it is byte-stable).
-            await FileSystemService.getInstance().saveStackContent(stackName, rendered);
+            // Phase 4: delete the managed area, then drop the row. A managed-
+            // area failure aborts (the row keeps the linkage so a retry can
+            // re-read the manifest and re-delete the overrides from phase 3).
             const areaDeleted = await manifestSvc.deleteManagedArea(stackName);
             if (!areaDeleted) {
                 throw new GitSourceError('GIT_ERROR', 'Could not remove the managed project data; detach aborted. Retry to complete it.');
