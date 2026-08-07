@@ -1,26 +1,99 @@
 ---
-title: Connect a Git Source
-sidebarTitle: Connect a Git source
-description: Step-by-step instructions for connecting a Git repository as a compose source.
+title: Deploy Compose Changes by Pulling From Git Instead of Editing by Hand
+sidebarTitle: Deploy compose changes from Git
+description: Link a running stack to a Git repository, pull a real commit, review the diff, and deploy it, instead of hand-editing the compose file in the browser.
 ---
 
-<Note>
-  This tutorial is a placeholder pending full content. See the [Git Sources feature page](/features/git-sources) for the current reference documentation.
-</Note>
+Say `marketing-site` is a small nginx stack you created directly in Sencho, and your team has decided the compose file should live in a Git repository instead, so changes go through a commit and a pull request before they reach the stack. This walks through connecting that already-running stack to a repository, pulling a real commit a teammate pushed, reviewing the diff Sencho builds against what is on disk, and applying it, which both writes the new file and redeploys the container.
 
-## What you'll do
+This tutorial covers linking an existing stack to a Git source and running one manual pull-review-apply cycle. It doesn't cover creating a brand-new stack directly from a repository, the three webhook-driven apply modes, or multi-file compose sources; see the [Git Sources](/features/git-sources) feature page for all of that.
 
 ## Prerequisites
 
+- The `admin` or `node-admin` role. Linking a source and running a pull or apply needs the `stack:edit` permission, which `deployer`, `viewer`, and `auditor` do not hold.
+- A running stack to link. If you don't have one, select **Create Stack**, name it `marketing-site`, and replace its compose file with:
+
+  ```yaml
+  services:
+    web:
+      image: nginx:1.27-alpine
+      restart: always
+      ports:
+        - "8098:80"
+  ```
+
+  Select **Save & Deploy**. This tutorial's steps and screenshots use this exact stack, so if you use a different name or port, adjust accordingly.
+- A public Git repository over HTTPS that you control, with a compose file committed at its root. The screenshots below use a small throwaway demo repository; any repository with the same shape works.
+- Available on every tier, including Community; no Admiral requirement.
+
 <Steps>
-  <Step title="">
+  <Step title="Open the Git Source panel">
+    Open the `marketing-site` stack and select **Git Source** in the editor toolbar. The panel opens empty, since nothing is linked yet.
+
+    <Frame>
+      <img src="/images/tutorials/connect-a-git-source/git-source-panel-empty.png" alt="Empty Git source panel for the marketing-site stack, showing blank Repository URL and Branch fields defaulted to main, a compose.yaml entry marked primary in Compose files, Public (no auth) selected under Authentication, and Review only selected under Apply behavior." />
+    </Frame>
+  </Step>
+  <Step title="Point it at your repository">
+    Paste your repository's HTTPS URL into **Repository URL** (for example `https://github.com/your-org/your-repo.git`). Leave **Branch** on its default, `main`, unless your repository uses a different one.
+
+    Select **Browse** to confirm Sencho can actually reach the repository and see its files, rather than trusting the URL is correct. The browser lists every file in the repository; `compose.yaml` is already ticked as the primary compose file, since that name matches the picker's default.
+
+    <Frame>
+      <img src="/images/tutorials/connect-a-git-source/browse-picker.png" alt="Git source panel with a Repository URL filled in and the Browse file picker open below the Compose files list, showing a checked compose.yaml and an unchecked README.md fetched live from the repository." />
+    </Frame>
+
+    Leave **Authentication** on **Public (no auth)** for a public repository, and **Apply behavior** on **Review only**, the safest default: a pull only stages a diff for you to review, it never writes or deploys on its own. Select **Save**. Sencho runs a reachability check against the repository before persisting anything; if that check fails, nothing is saved and the panel reports why.
+  </Step>
+  <Step title="Pull the latest commit">
+    Now make a change the way your team actually would: edit the compose file in your repository (not in Sencho) and push a commit. For this tutorial, bump the pinned tag from `nginx:1.27-alpine` to `nginx:1.28-alpine` and push it to the branch you configured.
+
+    Back in the Git Source panel, select **Pull now**. Sencho fetches the branch's current commit and opens a side-by-side diff against what's on disk.
+
+    <Frame>
+      <img src="/images/tutorials/connect-a-git-source/pull-preview-diff.png" alt="GIT · PULL PREVIEW dialog for marketing-site, showing a Monaco side-by-side diff with the on-disk compose.yaml on the left and the incoming commit on the right, the only difference highlighted on the image line: nginx:1.27-alpine changing to nginx:1.28-alpine." />
+    </Frame>
+
+    The diff shows only the line that actually changed. If the incoming compose file failed `docker compose config` validation, an error banner would appear here and the **Apply** button would stay disabled; since this pull is clean, Apply is enabled.
+  </Step>
+  <Step title="Apply and deploy in one step">
+    Tick **Deploy after apply** at the bottom of the dialog, then select **Apply**. This both writes the incoming file to disk and runs `docker compose up -d` against it, so the running container picks up the new tag immediately instead of just staging the file for a later manual deploy.
+
+    Sencho shows the deploy's progress the same way any other deploy does, ending in a health check on the recreated container.
   </Step>
 </Steps>
+
+## Verify it worked
+
+Check from two places, since neither alone proves the pull was actually applied and deployed.
+
+**The Git Source panel.** Reopen it. The **Last applied commit** stat strip at the bottom now shows the short SHA of the commit you just pulled, with an updated timestamp.
+
+<Frame>
+  <img src="/images/tutorials/connect-a-git-source/last-applied-commit.png" alt="Git source panel for marketing-site with Apply behavior still on Review only, and a Last applied commit stat strip at the bottom showing a short commit SHA and a just-now timestamp." />
+</Frame>
+
+**The stack itself.** Reopen `marketing-site`. The container recreated on the new image: a fresh uptime, and its logs now start with `nginx/1.28.3` instead of `1.27.5`. The compose editor tab reflects the same change; if it still shows the old tag, reload the page, since the editor buffer doesn't refresh itself after a Git-driven write.
+
+<Frame>
+  <img src="/images/tutorials/connect-a-git-source/stack-redeployed.png" alt="marketing-site stack page after redeploy, showing marketing-site-web-1 up about a minute, logs starting from nginx/1.28.3, and the compose editor showing image nginx:1.28-alpine." />
+</Frame>
+
+## If something goes wrong
+
+**Saving the source fails with "Repository not found or not accessible," even though the URL is right.** Branch names are case-sensitive, and a typo there (`Main` instead of `main`, for example) surfaces as this same repository-level error rather than a distinct branch error, since Sencho can't always tell a missing branch apart from a missing repository during the reachability check. Double-check the branch name against what your Git host actually shows before assuming the URL itself is wrong.
+
+<Frame>
+  <img src="/images/tutorials/connect-a-git-source/branch-error.png" alt="Git source panel with Branch set to the incorrect value Main, and a red error toast in the corner reading Repository not found or not accessible." />
+</Frame>
 
 ## Related
 
 <CardGroup cols={2}>
   <Card title="Git Sources" icon="code-branch" href="/features/git-sources">
-    Sync compose files from a Git repository.
+    Multi-file sources, the three webhook apply modes, private-repo authentication, and the full troubleshooting table.
+  </Card>
+  <Card title="Deploy a Stack Automatically From Your CI Pipeline" icon="satellite-dish" href="/tutorials/set-up-a-webhook">
+    Trigger a Git source pull and deploy from CI instead of pulling by hand from the panel.
   </Card>
 </CardGroup>
