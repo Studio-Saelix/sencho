@@ -12,7 +12,10 @@
  * - include map-form `env_file` resolves relative to the project directory.
  * - service `env_file`, top-level `configs`/`secrets` `file:`, `label_file`
  *   and `build.context` are recorded with a base dir; the classifier resolves
- *   them (declaring-file dir first, project dir fallback).
+ *   them against the effective project directory (the first compose file's
+ *   directory, or the context dir when one is configured), except in files
+ *   reached via include/extends, which keep their own directory. An omitted
+ *   build context defaults to the project directory.
  * - relative bind-mount host sources resolve relative to the project dir.
  *
  * Never throws: parse errors are collected into `parseErrors` and surface as
@@ -152,24 +155,28 @@ function collectBuild(build: unknown, fromFile: string, refs: ComposeRefs, servi
     const record = build as Record<string, unknown>;
     if (typeof record.context === 'string') {
         emitInput(refs, record.context, 'build-context', 'build-context', fromFile, 'compose-file-dir', service);
+    } else {
+        // An omitted context defaults to the declaring file's project
+        // directory (compose spec). The classifier resolves '.' against the
+        // project directory: the context dir, the base file's directory for
+        // merged (-f) files, or the declaring file's own directory for
+        // include/extends-reached files.
+        emitInput(refs, '.', 'build-context', 'build-context', fromFile, 'compose-file-dir', service);
     }
     if (typeof record.dockerfile === 'string') {
         // Dockerfile is relative to the context; the classifier rebases it.
         emitInput(refs, record.dockerfile, 'dockerfile', 'dockerfile', fromFile, 'compose-file-dir', service);
     }
     if (record.secrets && Array.isArray(record.secrets)) {
-        for (const entry of record.secrets as unknown[]) {
-            if (typeof entry === 'string') {
-                // Named build secret (top-level secrets or BuildKit named secret).
-                emitInput(refs, null, 'build-secret', 'build-secret', fromFile, 'host', service);
-            } else if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
-                const def = entry as Record<string, unknown>;
-                const file = asString(def.source) ?? asString(def.file);
-                if (file !== undefined) {
-                    emitInput(refs, file, 'build-secret', 'build-secret', fromFile, 'compose-file-dir', service);
-                }
-            }
-        }
+        // Long syntax carries only source/target/uid/gid/mode; `source` names
+        // a TOP-LEVEL SECRET (compose errors if it is not defined in the
+        // top-level secrets section), never a file path. The referenced
+        // secret's file, when file-backed, is emitted by the top-level
+        // secrets walk; the reference itself is recorded as unmanaged, the
+        // same as the string form.
+        record.secrets.forEach(() => {
+            emitInput(refs, null, 'build-secret', 'build-secret', fromFile, 'host', service);
+        });
     }
     if (record.additional_contexts && typeof record.additional_contexts === 'object' && !Array.isArray(record.additional_contexts)) {
         for (const [, ctxPath] of Object.entries(record.additional_contexts as Record<string, unknown>)) {
@@ -311,8 +318,10 @@ function parseFileInner(
                 const includeEnv = asString(map.env_file);
                 if (includeEnv !== undefined) {
                     // Relative to the project directory per the compose spec.
+                    // The path is ALREADY resolved here, so it is emitted as a
+                    // repo-root input; the classifier must not re-resolve it.
                     const base = opts.projectRoot ?? declaringDir ?? null;
-                    emitInput(refs, base ? resolveRelative(base, includeEnv) : includeEnv, 'include-env', 'env', normalized, 'project-root');
+                    emitInput(refs, base ? resolveRelative(base, includeEnv) : includeEnv, 'include-env', 'env', normalized, 'repo-root');
                 }
             }
         }

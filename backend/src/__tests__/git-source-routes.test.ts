@@ -592,6 +592,58 @@ describe('DELETE /api/stacks/:stackName/git-source, detach/export contract', () 
         }
     });
 
+    it('keeps an explicitly selected file named compose.override.yaml during detach (audit round 8 B-7)', async () => {
+        seedGitSource('explicit-override-name');
+        const stackDir = path.join(process.env.COMPOSE_DIR!, 'explicit-override-name');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+        fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'), 'services:\n  web:\n    environment:\n      A: b\n');
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const svc = GitProjectManifestService.getInstance();
+        const manifest = svc.buildManifest({
+            stackName: 'explicit-override-name',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc',
+            projectRoot: null,
+            composeFiles: ['compose.yaml', 'compose.override.yaml'],
+            projectName: 'explicit-override-name',
+            invocation: ['-f', 'compose.yaml', '-f', 'compose.override.yaml', '-p', 'explicit-override-name'],
+            inputs: [
+                {
+                    sourcePath: 'compose.yaml', materializedPath: 'compose.yaml', role: 'compose-primary', dependencyKind: 'explicit',
+                    ownership: 'managed', provenance: 'fetch', sensitivity: 'medium', contentSha256: null, sizeBytes: 10,
+                    state: 'present', deletionAuthority: 'sencho', note: null,
+                },
+                {
+                    // Same basename, but an EXPLICIT -f input, not an
+                    // auto-discovered override.
+                    sourcePath: 'compose.override.yaml', materializedPath: 'compose.override.yaml', role: 'compose-additional', dependencyKind: 'explicit',
+                    ownership: 'managed', provenance: 'fetch', sensitivity: 'medium', contentSha256: null, sizeBytes: 10,
+                    state: 'present', deletionAuthority: 'sencho', note: null,
+                },
+            ],
+            refusals: [],
+            buildContexts: [],
+            bounds: { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 },
+            priorManifest: null,
+            state: 'active',
+        });
+        await svc.writeManifest('explicit-override-name', manifest);
+        const render = mockRender('services:\n  web:\n    image: nginx\n    environment:\n      A: b\n');
+        try {
+            const res = await request(app)
+                .delete('/api/stacks/explicit-override-name/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            // The explicit file is part of the rendered model; detach keeps it.
+            expect(fs.existsSync(path.join(stackDir, 'compose.override.yaml'))).toBe(true);
+            expect(DatabaseService.getInstance().getGitSource('explicit-override-name')).toBeUndefined();
+        } finally {
+            render.mockRestore();
+        }
+    });
+
     it('allows unlinking a single-file source', async () => {
         seedGitSource('sf-unlink');
         const stackDir = path.join(process.env.COMPOSE_DIR!, 'sf-unlink');
@@ -721,8 +773,117 @@ describe('GET /api/stacks/:stackName/git-source/manifest', () => {
             .get('/api/stacks/manifest-get/git-source/manifest')
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(res.status).toBe(200);
-        expect(res.body.manifest.schemaVersion).toBe(1);
-        expect(res.body.manifest.resolvedRevision.commitSha).toBe('abc123');
+        expect(res.body.manifest.manifestVersion).toBe(1);
+        expect(res.body.manifest.resolvedCommitSha).toBe('abc123');
+    });
+
+    it('redacts sensitive input paths and omits internal metadata (audit round 8 B-6)', async () => {
+        seedGitSource('manifest-redact');
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const svc = GitProjectManifestService.getInstance();
+        const manifest = svc.buildManifest({
+            stackName: 'manifest-redact',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc123',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: 'manifest-redact',
+            invocation: ['-f', 'compose.yaml', '-p', 'manifest-redact'],
+            inputs: [
+                {
+                    sourcePath: 'compose.yaml',
+                    materializedPath: 'compose.yaml',
+                    role: 'compose-primary',
+                    dependencyKind: 'explicit',
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    sensitivity: 'medium',
+                    contentSha256: 'a'.repeat(64),
+                    sizeBytes: 120,
+                    state: 'present',
+                    deletionAuthority: 'sencho',
+                    note: null,
+                },
+                {
+                    sourcePath: 'secrets/db.env',
+                    materializedPath: 'secrets/db.env',
+                    role: 'env',
+                    dependencyKind: 'env_file',
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    sensitivity: 'high',
+                    contentSha256: 'b'.repeat(64),
+                    sizeBytes: 40,
+                    state: 'present',
+                    deletionAuthority: 'sencho',
+                    note: null,
+                },
+                {
+                    sourcePath: 'configs/app.conf',
+                    materializedPath: 'configs/app.conf',
+                    role: 'config',
+                    dependencyKind: 'config',
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    sensitivity: 'high',
+                    contentSha256: 'c'.repeat(64),
+                    sizeBytes: 200,
+                    state: 'present',
+                    deletionAuthority: 'sencho',
+                    note: null,
+                },
+                {
+                    sourcePath: 'keys/jwt.pem',
+                    materializedPath: 'keys/jwt.pem',
+                    role: 'secret',
+                    dependencyKind: 'secret',
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    sensitivity: 'high',
+                    contentSha256: 'd'.repeat(64),
+                    sizeBytes: 50,
+                    state: 'present',
+                    deletionAuthority: 'sencho',
+                    note: 'File-backed secret materialized from keys/jwt.pem',
+                },
+            ],
+            refusals: [],
+            buildContexts: [],
+            bounds: { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 },
+            priorManifest: null,
+            state: 'active',
+        });
+        await svc.writeManifest('manifest-redact', manifest);
+
+        const res = await request(app)
+            .get('/api/stacks/manifest-redact/git-source/manifest')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+
+        // The medium-sensitivity compose input keeps its path...
+        const compose = res.body.manifest.inputs.find((i: { dependencyKind: string }) => i.dependencyKind === 'explicit');
+        expect(compose.path).toBe('compose.yaml');
+        // ...and high-sensitivity env/config inputs have their paths redacted.
+        const env = res.body.manifest.inputs.find((i: { dependencyKind: string }) => i.dependencyKind === 'env_file');
+        expect(env.path).toBeNull();
+        const cfg = res.body.manifest.inputs.find((i: { dependencyKind: string }) => i.dependencyKind === 'config');
+        expect(cfg.path).toBeNull();
+
+        // Internal metadata never crosses the API.
+        const serialized = JSON.stringify(res.body);
+        expect(serialized).not.toContain('contentSha256');
+        expect(serialized).not.toContain('sizeBytes');
+        expect(serialized).not.toContain('sourcePath');
+        expect(serialized).not.toContain('materializedPath');
+        expect(serialized).not.toContain('deletionAuthority');
+        expect(serialized).not.toContain('provenance');
+        expect(serialized).not.toContain('secrets/db.env');
+        expect(serialized).not.toContain('configs/app.conf');
+        // A path-bearing note on a high-sensitivity entry must not leak either.
+        expect(serialized).not.toContain('keys/jwt.pem');
+        // The redacted projection still counts the entries.
+        expect(res.body.manifest.inputs).toHaveLength(4);
     });
 
     it('returns 404 when no manifest exists', async () => {

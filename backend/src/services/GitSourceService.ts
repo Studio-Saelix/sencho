@@ -281,6 +281,8 @@ export interface PullResult {
     manifestSummary: ManifestSummary | null;
     /** True when a validated candidate is staged and ready to apply. */
     candidateReady: boolean;
+    /** Clone-time warnings (submodules present, for example). */
+    warnings: string[];
 }
 
 export interface PublicGitSource {
@@ -644,6 +646,24 @@ export class GitSourceService {
             throw new GitSourceError('GIT_ERROR', 'Auto-deploy requires auto-apply-on-webhook to be enabled.');
         }
 
+        // Repository identity changes on a managed stack deadlock: the manifest
+        // file is stamped with the old repo/branch, and every subsequent apply
+        // refuses it as untrusted forever (a pull stages a new pending blob but
+        // never replaces the manifest file). Require a detach (the export
+        // contract flattens the effective model into compose.yaml) before
+        // re-pointing the source.
+        const identityChanged = !!existing && (existing.repo_url !== input.repoUrl || existing.branch !== input.branch);
+        if (identityChanged) {
+            const manifestSvc = GitProjectManifestService.getInstance();
+            const manifest = await manifestSvc.readManifest(input.stackName, existing.repo_url, existing.branch);
+            if (manifest !== null) {
+                throw new GitSourceError(
+                    'GIT_ERROR',
+                    'Changing the repository or branch of a stack with a managed project is not supported. Detach the Git source first (the effective compose model is exported to compose.yaml), then re-link the source to the new repository or branch.',
+                );
+            }
+        }
+
         // Dry-run reachability check before persisting. Fetches every configured
         // file so a bad path in the ordered list is caught at save time.
         const token = encryptedToken ? this.crypto.decrypt(encryptedToken) : null;
@@ -744,10 +764,11 @@ export class GitSourceService {
                 }
             }
             const overrideSnapshots: Array<{ path: string; content: Buffer }> = [];
-            const overrideNames = new Set(['compose.override.yaml', 'compose.override.yml', 'docker-compose.override.yaml', 'docker-compose.override.yml']);
+            // Only AUTO-DISCOVERED implicit overrides are removed: an explicit
+            // compose file, config, secret, or include that happens to share the
+            // basename is part of the rendered model and must survive detach.
             const managedOverridePaths = manifest?.inputs
-                .flatMap((entry) => entry.ownership === 'managed' && entry.materializedPath !== null ? [entry.materializedPath] : [])
-                .filter((materializedPath) => overrideNames.has(materializedPath.split('/').pop() ?? '')) ?? [];
+                .flatMap((entry) => entry.ownership === 'managed' && entry.dependencyKind === 'implicit-override' && entry.materializedPath !== null ? [entry.materializedPath] : []) ?? [];
             for (const overridePath of managedOverridePaths) {
                 try {
                     const content = await FileSystemService.getInstance().readStackFile(stackName, overridePath, snapshotFileLimit, { forceText: true });
@@ -1644,6 +1665,7 @@ export class GitSourceService {
             refusals: materialization.value?.inventory.refusals ?? [],
             manifestSummary,
             candidateReady: materialization.value !== null && materialization.value.validation.ok,
+            warnings: fetched.warnings,
         };
     }
 
@@ -1701,7 +1723,17 @@ export class GitSourceService {
             // ── Complete-project path (v3 pending) ───────────────────────────
             const prior = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
             if (prior !== null && 'corrupt' in prior) {
-                throw new GitSourceError('GIT_ERROR', `The managed-project manifest for ${stackName} cannot be trusted (${prior.corrupt}). Pull again to rebuild it.`);
+                // Any identity-stamp corruption (missing identity, node/stack/
+                // repo/branch mismatch) is unrecoverable by pulling (a pull
+                // never replaces the manifest file); the actionable escape is
+                // detach + re-link.
+                const identityMismatch = prior.corrupt.includes('identity');
+                throw new GitSourceError(
+                    'GIT_ERROR',
+                    identityMismatch
+                        ? `The managed-project manifest for ${stackName} is stamped for a different repository or branch. Detach the Git source, then re-link it to the current repository and branch.`
+                        : `The managed-project manifest for ${stackName} cannot be trusted (${prior.corrupt}). Detach the Git source and re-link it to rebuild the managed project.`,
+                );
             }
 
             // The staged candidate must still exist and be complete; a deleted
@@ -1940,6 +1972,11 @@ export class GitSourceService {
             //    name collision is caught here.
             let stackCreated = false;
             let rowInserted = false;
+            // Promotion persists the manifest cache columns BEFORE the row
+            // exists (zero rows updated); the cache is written again after the
+            // insert below so list and immediate projections report the real
+            // state instead of 'absent'.
+            let completeProjectManifest: GitProjectManifest | null = null;
             try {
                 await fsSvc.createStack(input.stackName);
                 stackCreated = true;
@@ -1994,6 +2031,7 @@ export class GitSourceService {
                         manifest,
                         priorManifest: null,
                     });
+                    completeProjectManifest = manifest;
                     appliedSpec = this.deriveAppliedSpec(input.composePaths, input.contextDir);
                 } else {
                     appliedSpec = await this.materialize(
@@ -2032,6 +2070,16 @@ export class GitSourceService {
                 });
                 db.markGitSourceApplied(input.stackName, fetched.commitSha, hash);
                 db.setGitSourceAppliedSpec(input.stackName, appliedSpec);
+                if (completeProjectManifest) {
+                    // The promotion's cache write predated the row; persist the
+                    // cache now so list and response projections are truthful.
+                    db.setGitSourceManifestState(
+                        input.stackName,
+                        completeProjectManifest.manifestVersion,
+                        completeProjectManifest.state,
+                        completeProjectManifest.generation.appliedDir,
+                    );
+                }
 
                 rowInserted = true;
                 const source = this.get(input.stackName);

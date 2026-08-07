@@ -46,8 +46,11 @@ describe('discoverFromClone', () => {
     it('classifies include, env_file and config inputs as managed', async () => {
         const clone = makeClone({
             'compose.yaml': 'include:\n  - common/redis.yaml\nservices:\n  web:\n    image: nginx\n    env_file: web.env\n    configs: [cfg]\nconfigs:\n  cfg:\n    file: nginx/nginx.conf\n',
-            'common/redis.yaml': 'services:\n  redis:\n    image: redis\n',
+            // Included files resolve their own relative paths against their
+            // own directory (each included file is its own project).
+            'common/redis.yaml': 'services:\n  redis:\n    image: redis\n    env_file: redis.env\n',
             'web.env': 'FOO=bar\n',
+            'common/redis.env': 'REDIS=1\n',
             'nginx/nginx.conf': 'server {}\n',
             '.env': 'PROJECT=1\n',
         });
@@ -57,11 +60,14 @@ describe('discoverFromClone', () => {
         expect(byKind('explicit').map((i) => i.sourcePath)).toEqual(['compose.yaml']);
         expect(byKind('explicit')[0].materializedPath).toBe('compose.yaml');
         expect(byKind('include')[0].sourcePath).toBe('common/redis.yaml');
-        expect(byKind('env_file')[0].sourcePath).toBe('web.env');
+        const envFiles = byKind('env_file');
+        expect(envFiles.some((i) => i.sourcePath === 'web.env')).toBe(true);
+        // The included file's env_file resolves against its own directory.
+        expect(envFiles.some((i) => i.sourcePath === 'common/redis.env')).toBe(true);
         expect(byKind('config')[0].sourcePath).toBe('nginx/nginx.conf');
         expect(result.inputs.every((i) => i.ownership === 'managed')).toBe(true);
         // content hashes are computed for file-backed inputs.
-        expect(byKind('env_file')[0].contentSha256).toBeTruthy();
+        expect(envFiles[0].contentSha256).toBeTruthy();
     });
 
     it('refuses out-of-bound ../ include targets', async () => {
@@ -403,6 +409,260 @@ describe('explicit dockerfile resolution (audit round 2 C-3)', () => {
         });
         const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
         expect(result.refusals.some((r) => r.kind === 'out-of-bounds' && String(r.sourcePath).includes('Dockerfile'))).toBe(true);
+    });
+});
+
+describe('dynamic and submodule-backed inputs (audit round 8 B-2)', () => {
+    it('persists dynamic ${VAR} paths as explicit unmanaged entries', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    image: nginx\n    env_file: ${ENV_FILE:-default.env}\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const dyn = result.inputs.filter((i) => i.dependencyKind === 'env_file' && i.sourcePath?.includes('${ENV_FILE'));
+        expect(dyn).toHaveLength(1);
+        expect(dyn[0].ownership).toBe('unmanaged');
+        expect(dyn[0].materializedPath).toBeNull();
+        expect(dyn[0].deletionAuthority).toBe('none');
+        expect(dyn[0].note).toContain('resolved by Compose at deploy time');
+        // The dynamic path is never searched for as a file in the clone.
+        expect(result.refusals.some((r) => r.kind === 'missing-file')).toBe(false);
+    });
+
+    it('refuses a build context rooted inside a submodule', async () => {
+        const clone = makeClone({
+            '.gitmodules': '[submodule "vendor"]\n\tpath = vendor/lib\n',
+            'compose.yaml': 'services:\n  web:\n    build: vendor/lib\n',
+            'vendor/lib/Dockerfile': 'FROM nginx\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals.some((r) => r.kind === 'submodule' && String(r.sourcePath).includes('vendor/lib'))).toBe(true);
+    });
+
+    it('refuses a repo-root context containing a submodule directory', async () => {
+        const clone = makeClone({
+            '.gitmodules': '[submodule "vendor"]\n\tpath = vendor/lib\n',
+            'compose.yaml': 'services:\n  web:\n    build: .\n',
+            'Dockerfile': 'FROM nginx\n',
+            'vendor/lib/Dockerfile': 'FROM nginx\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals.some((r) => r.kind === 'submodule' && String(r.reason).includes('vendor/lib'))).toBe(true);
+    });
+
+    it('allows a submodule directory excluded by the context dockerignore', async () => {
+        const clone = makeClone({
+            '.gitmodules': '[submodule "vendor"]\n\tpath = vendor/lib\n',
+            'compose.yaml': 'services:\n  web:\n    build: .\n',
+            'Dockerfile': 'FROM nginx\n',
+            '.dockerignore': 'vendor\n',
+            'vendor/lib/Dockerfile': 'FROM nginx\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+    });
+});
+
+describe('effective invocation path resolution (audit round 8 B-3)', () => {
+    it('resolves merged-file relative paths against the base file directory, never the declaring file', async () => {
+        const clone = makeClone({
+            'deploy/base.yaml': 'services:\n  web:\n    image: nginx\n    configs: [cfg]\nconfigs:\n  cfg:\n    file: nginx.conf\n',
+            // The second -f file lives in a DIFFERENT directory: its relative
+            // paths still resolve against the base file's directory (deploy/),
+            // not its own.
+            'configs/prod.yaml': 'services:\n  web:\n    env_file: prod.env\n',
+            'deploy/nginx.conf': 'server {}\n',
+            'deploy/prod.env': 'A=1\n',
+            // Same-named files at the repo root must NOT be picked up.
+            'nginx.conf': 'WRONG server {}\n',
+            'prod.env': 'WRONG=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['deploy/base.yaml', 'configs/prod.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const prodEnv = result.inputs.find((i) => i.dependencyKind === 'env_file');
+        expect(prodEnv?.sourcePath).toBe('deploy/prod.env');
+        // Materialized at the stack root (the runtime project dir).
+        expect(prodEnv?.materializedPath).toBe('prod.env');
+        const cfg = result.inputs.find((i) => i.dependencyKind === 'config');
+        expect(cfg?.sourcePath).toBe('deploy/nginx.conf');
+        expect(cfg?.materializedPath).toBe('nginx.conf');
+    });
+
+    it('refuses a base-dir-relative file that is missing instead of falling back to a same-named root file', async () => {
+        const clone = makeClone({
+            'deploy/base.yaml': 'services:\n  web:\n    image: nginx\n    env_file: app.env\n',
+            // No deploy/app.env: the old declaring-dir-first + repo-root
+            // fallback would silently materialize the root decoy.
+            'app.env': 'WRONG=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['deploy/base.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals.some((r) => r.kind === 'missing-file' && r.sourcePath === 'deploy/app.env')).toBe(true);
+        expect(result.inputs.some((i) => i.sourcePath === 'app.env' && i.ownership === 'managed')).toBe(false);
+    });
+
+    it('keeps included files on their own project directory even when a context dir is configured', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'include:\n  - common/redis.yaml\nservices: {}\n',
+            'common/redis.yaml': 'services:\n  redis:\n    image: redis\n    env_file: redis.env\n',
+            'common/redis.env': 'REDIS=1\n',
+            // The context dir must NOT redirect the included file's paths.
+            'deploy/common/redis.env': 'WRONG=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: 'deploy', bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const env = result.inputs.find((i) => i.dependencyKind === 'env_file');
+        expect(env?.sourcePath).toBe('common/redis.env');
+        expect(env?.materializedPath).toBe('common/redis.env');
+    });
+
+    it('materializes base-file-relative paths at the stack root, stripping the base directory prefix', async () => {
+        const clone = makeClone({
+            'deploy/base.yaml': 'services:\n  web:\n    image: nginx\n    env_file: prod.env\n',
+            'deploy/prod.env': 'A=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['deploy/base.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const env = result.inputs.find((i) => i.dependencyKind === 'env_file');
+        // The primary file lands at the stack root, so the runtime project dir
+        // is the stack root: prod.env must live at the stack root, not under
+        // deploy/.
+        expect(env?.sourcePath).toBe('deploy/prod.env');
+        expect(env?.materializedPath).toBe('prod.env');
+    });
+
+    it('resolves project-relative paths against the configured project directory', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    image: nginx\n    env_file: app.env\n',
+            'deploy/app.env': 'A=1\n',
+            'app.env': 'WRONG=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: 'deploy', bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const env = result.inputs.find((i) => i.dependencyKind === 'env_file');
+        expect(env?.sourcePath).toBe('deploy/app.env');
+        expect(env?.materializedPath).toBe('deploy/app.env');
+    });
+
+    it('does not auto-discover an override when the project directory makes the invocation explicit', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    image: nginx\n',
+            'compose.override.yaml': 'services:\n  web:\n    environment:\n      A: b\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: 'deploy', bounds: BOUNDS });
+        // A context dir forces explicit -f at runtime, which suppresses
+        // auto-discovery; the override must not enter the inventory.
+        expect(result.inputs.some((i) => i.dependencyKind === 'implicit-override')).toBe(false);
+    });
+
+    it('rebases a subdir build context to the stack root for the materialized layout', async () => {
+        const clone = makeClone({
+            'deploy/base.yaml': 'services:\n  web:\n    build:\n      context: web\n      dockerfile: Dockerfile\n',
+            'deploy/web/Dockerfile': 'FROM nginx\n',
+            'deploy/web/app.js': 'console.log(1)\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['deploy/base.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        expect(result.buildContexts).toHaveLength(1);
+        const ctx = result.buildContexts[0];
+        expect(ctx.repoPath).toBe('web');
+        expect(ctx.dockerfile).toBe('deploy/web/Dockerfile');
+        const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-b3-ctx-'));
+        tmpRoots.push(dest);
+        const managed = result.inputs.filter((i) => i.ownership === 'managed' && i.materializedPath !== null && i.dependencyKind !== 'build-context')
+            .map((i) => ({ srcRel: i.sourcePath!, destRel: i.materializedPath! }));
+        await discovery().walkAndCopy(clone, dest, managed, result.contextCopyPlans, BOUNDS);
+        expect(fs.existsSync(path.join(dest, 'web/Dockerfile'))).toBe(true);
+        expect(fs.existsSync(path.join(dest, 'web/app.js'))).toBe(true);
+    });
+});
+
+describe('default build context and build-secret grammar (audit round 8 B-1)', () => {
+    it('materializes an omitted build context at the repo root', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    build:\n      dockerfile: Dockerfile\n',
+            'Dockerfile': 'FROM nginx\n',
+            'src/app.js': 'console.log(1)\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        expect(result.buildContexts).toHaveLength(1);
+        const ctx = result.buildContexts[0];
+        expect(ctx.repoPath).toBe('');
+        expect(ctx.dockerfile).toBe('Dockerfile');
+        expect(ctx.files.some((f) => f.path === 'Dockerfile')).toBe(true);
+        expect(ctx.files.some((f) => f.path === 'src/app.js')).toBe(true);
+    });
+
+    it('resolves an omitted build context against the configured project directory', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    build:\n      dockerfile: Dockerfile\n',
+            'deploy/Dockerfile': 'FROM nginx\n',
+            'deploy/app.js': 'console.log(1)\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: 'deploy', bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        expect(result.buildContexts).toHaveLength(1);
+        const ctx = result.buildContexts[0];
+        expect(ctx.repoPath).toBe('deploy');
+        expect(ctx.dockerfile).toBe('deploy/Dockerfile');
+        expect(ctx.files.some((f) => f.path === 'app.js')).toBe(true);
+    });
+
+    it('resolves an omitted build context in an included file against the included file\'s directory', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'include:\n  - services/app/compose.yaml\nservices: {}\n',
+            'services/app/compose.yaml': 'services:\n  app:\n    build:\n      dockerfile: Dockerfile\n',
+            'services/app/Dockerfile': 'FROM nginx\n',
+            'services/app/app.js': 'console.log(1)\n',
+            'root-decoy.txt': 'must not be in the context\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        expect(result.buildContexts).toHaveLength(1);
+        const ctx = result.buildContexts[0];
+        expect(ctx.repoPath).toBe('services/app');
+        expect(ctx.dockerfile).toBe('services/app/Dockerfile');
+        expect(ctx.files.some((f) => f.path === 'app.js')).toBe(true);
+        expect(ctx.files.some((f) => f.path === 'root-decoy.txt')).toBe(false);
+    });
+
+    it('does not double-prefix an include map-form env_file from a subdirectory base file', async () => {
+        const clone = makeClone({
+            'deploy/base.yaml': 'include:\n  - path: web.yaml\n    env_file: e.env\nservices: {}\n',
+            'deploy/web.yaml': 'services:\n  web:\n    image: nginx\n',
+            'deploy/e.env': 'A=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['deploy/base.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const includeEnv = result.inputs.find((i) => i.dependencyKind === 'include-env');
+        expect(includeEnv?.sourcePath).toBe('deploy/e.env');
+        expect(includeEnv?.materializedPath).toBe('deploy/e.env');
+    });
+
+    it('does not search for a file named after a build-secret source', async () => {
+        const clone = makeClone({
+            'compose.yaml': `secrets:
+  build-key:
+    file: keys/build.env
+services:
+  web:
+    build:
+      context: web
+      secrets:
+        - id: build-key
+          source: build-key
+`,
+            'web/Dockerfile': 'FROM nginx\n',
+            'keys/build.env': 'TOKEN=x\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const secretEntry = result.inputs.find((i) => i.dependencyKind === 'secret' && i.sourcePath === 'keys/build.env');
+        expect(secretEntry).toBeTruthy();
+        expect(secretEntry?.ownership).toBe('managed');
+        const buildSecret = result.inputs.find((i) => i.dependencyKind === 'build-secret');
+        expect(buildSecret?.sourcePath).toBeNull();
+        expect(buildSecret?.ownership).toBe('unmanaged');
     });
 });
 

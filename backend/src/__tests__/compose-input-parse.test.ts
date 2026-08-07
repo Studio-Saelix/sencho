@@ -44,14 +44,15 @@ describe('parseDeclaredInputs', () => {
     it('walks include list form and recurses into included files', () => {
         const { result } = parse({
             'compose.yaml': 'include:\n  - common/redis.yaml\nservices:\n  web:\n    image: nginx\n',
-            'common/redis.yaml': 'services:\n  redis:\n    image: redis\n    env_file: common/redis.env\n',
+            // Included files resolve their relative paths against their own
+            // directory (each included file is its own project).
+            'common/redis.yaml': 'services:\n  redis:\n    image: redis\n    env_file: redis.env\n',
         });
         const includes = byKind(result, 'include');
         expect(includes.map((i) => i.sourcePath)).toEqual(['common/redis.yaml']);
         const envFiles = byKind(result, 'env_file');
-        expect(envFiles.map((e) => e.sourcePath)).toContain('common/redis.env');
-        // Included file's env_file resolves relative to its own directory.
-        expect(envFiles.find((e) => e.sourcePath === 'common/redis.env')?.baseDir).toBe('compose-file-dir');
+        expect(envFiles.map((e) => e.sourcePath)).toContain('redis.env');
+        expect(envFiles.find((e) => e.sourcePath === 'redis.env')?.baseDir).toBe('compose-file-dir');
     });
 
     it('walks include map form with include-specific env_file', () => {
@@ -63,7 +64,8 @@ describe('parseDeclaredInputs', () => {
         const includeEnv = byKind(result, 'include-env');
         expect(includeEnv).toHaveLength(1);
         expect(includeEnv[0].sourcePath).toBe('apps/api.env');
-        expect(includeEnv[0].baseDir).toBe('project-root');
+        // Already resolved by the parser; the classifier must not re-resolve it.
+        expect(includeEnv[0].baseDir).toBe('repo-root');
     });
 
     it('detects include cycles', () => {
@@ -152,7 +154,10 @@ services:
 
     it('walks build context, dockerfile, secrets and additional contexts', () => {
         const { result } = parse({
-            'compose.yaml': `services:
+            'compose.yaml': `secrets:
+  ssh-key:
+    file: web/ssh-key
+services:
   web:
     build:
       context: web
@@ -160,7 +165,7 @@ services:
       secrets:
         - npm-token
         - id: ssh-key
-          file: web/ssh-key
+          source: ssh-key
       additional_contexts:
         certs: web/certs
 `,
@@ -168,9 +173,45 @@ services:
         const contexts = byKind(result, 'build-context');
         expect(contexts.map((c) => c.sourcePath)).toEqual(['web']);
         expect(byKind(result, 'dockerfile')[0].sourcePath).toBe('Dockerfile.dev');
+        // String-form and long-syntax (source = top-level secret name) build
+        // secrets are both recorded as unmanaged references; the top-level
+        // secrets walk emits the actual file.
         const buildSecrets = byKind(result, 'build-secret');
-        expect(buildSecrets.map((s) => s.sourcePath)).toEqual([null, 'web/ssh-key']);
+        expect(buildSecrets.map((s) => s.sourcePath)).toEqual([null, null]);
+        expect(byKind(result, 'secret').map((s) => s.sourcePath)).toContain('web/ssh-key');
         expect(byKind(result, 'build-additional-context')[0].sourcePath).toBe('web/certs');
+    });
+
+    it('defaults an omitted build context to the project directory', () => {
+        const { result } = parse({
+            'compose.yaml': 'services:\n  web:\n    build:\n      dockerfile: Dockerfile\n',
+        });
+        const contexts = byKind(result, 'build-context');
+        expect(contexts.map((c) => c.sourcePath)).toEqual(['.']);
+        // The classifier resolves '.' against the per-file project directory
+        // (context dir, base file dir, or the declaring file's own dir).
+        expect(contexts[0].baseDir).toBe('compose-file-dir');
+    });
+
+    it('never treats a build-secret source as a file path', () => {
+        const { result } = parse({
+            'compose.yaml': `secrets:
+  build-key:
+    external: true
+services:
+  web:
+    build:
+      context: web
+      secrets:
+        - id: build-key
+          source: build-key
+`,
+        });
+        // The secret name must not be searched as a file in the repository.
+        const buildSecrets = byKind(result, 'build-secret');
+        expect(buildSecrets.map((s) => s.sourcePath)).toEqual([null]);
+        // The referenced (external) top-level secret is recorded unmanaged.
+        expect(byKind(result, 'secret').some((s) => s.sourcePath === null)).toBe(true);
     });
 
     it('walks string-form build context', () => {

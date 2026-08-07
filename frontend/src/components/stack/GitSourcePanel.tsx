@@ -251,6 +251,9 @@ export function GitSourcePanel({
       });
       if (res.ok) {
         const data: PullResult = await res.json();
+        if (data.warnings && data.warnings.length > 0) {
+          toast.warning(data.warnings.join(' '));
+        }
         setPull(data);
         setDiffOpen(true);
         onSourceChanged?.();

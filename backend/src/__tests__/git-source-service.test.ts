@@ -355,6 +355,138 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
 
         expect(DatabaseService.getInstance().getGitSource('unreachable')).toBeUndefined();
     });
+
+    describe('repository identity changes on managed stacks (audit round 8 B-5)', () => {
+        async function seedManifest(stackName: string, repoUrl = 'https://github.com/example/repo.git', branch = 'main') {
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const manifest = GitProjectManifestService.getInstance().buildManifest({
+                stackName,
+                repoUrl,
+                branch,
+                commitSha: 'abc123',
+                projectRoot: null,
+                composeFiles: ['compose.yaml'],
+                projectName: stackName,
+                invocation: ['-f', 'compose.yaml', '-p', stackName],
+                inputs: [{
+                    sourcePath: 'compose.yaml',
+                    materializedPath: 'compose.yaml',
+                    role: 'compose-primary',
+                    dependencyKind: 'explicit',
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    sensitivity: 'medium',
+                    contentSha256: null,
+                    sizeBytes: null,
+                    state: 'present',
+                    deletionAuthority: 'sencho',
+                    note: null,
+                }],
+                refusals: [],
+                buildContexts: [],
+                bounds: {
+                    maxFiles: 10_000,
+                    maxBytes: 512 * 1024 * 1024,
+                    maxContextBytes: 256 * 1024 * 1024,
+                    maxPathDepth: 64,
+                    maxFileBytes: 10 * 1024 * 1024,
+                },
+                priorManifest: null,
+                state: 'active',
+            });
+            await GitProjectManifestService.getInstance().writeManifest(stackName, manifest);
+        }
+
+        const baseInput = {
+            stackName: 'id-change',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none' as const,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        };
+
+        async function seedSource(stackName: string) {
+            mockSuccessfulClone();
+            const svc = GitSourceService.getInstance();
+            await svc.upsert({ ...baseInput, stackName });
+        }
+
+        it('rejects a repository change when a managed-project manifest exists', async () => {
+            await seedSource('id-change-repo');
+            await seedManifest('id-change-repo');
+            const svc = GitSourceService.getInstance();
+            mockGitClone.mockClear();
+
+            await expect(svc.upsert({
+                ...baseInput,
+                stackName: 'id-change-repo',
+                repoUrl: 'https://github.com/example/other.git',
+            })).rejects.toMatchObject({
+                code: 'GIT_ERROR',
+                message: expect.stringMatching(/Detach the Git source first/),
+            });
+
+            // Nothing persisted, no dry-run fetch attempted.
+            expect(DatabaseService.getInstance().getGitSource('id-change-repo')?.repo_url).toBe('https://github.com/example/repo.git');
+            expect(mockGitClone).not.toHaveBeenCalled();
+        });
+
+        it('rejects a branch change when a managed-project manifest exists', async () => {
+            await seedSource('id-change-branch');
+            await seedManifest('id-change-branch');
+            const svc = GitSourceService.getInstance();
+
+            await expect(svc.upsert({
+                ...baseInput,
+                stackName: 'id-change-branch',
+                branch: 'develop',
+            })).rejects.toMatchObject({ code: 'GIT_ERROR', message: expect.stringMatching(/Detach the Git source first/) });
+            expect(DatabaseService.getInstance().getGitSource('id-change-branch')?.branch).toBe('main');
+        });
+
+        it('allows a repository change when no manifest exists (legacy stack)', async () => {
+            await seedSource('id-change-legacy');
+            const svc = GitSourceService.getInstance();
+
+            await svc.upsert({ ...baseInput, stackName: 'id-change-legacy', repoUrl: 'https://github.com/example/other.git' });
+            expect(DatabaseService.getInstance().getGitSource('id-change-legacy')?.repo_url).toBe('https://github.com/example/other.git');
+        });
+
+        it('allows non-identity config changes on a managed stack', async () => {
+            await seedSource('id-change-paths');
+            await seedManifest('id-change-paths');
+            const svc = GitSourceService.getInstance();
+            // The dry-run reachability fetch must find every configured file.
+            mockSuccessfulClone({ extraFiles: { 'override.yaml': 'services: {}\n' } });
+
+            await svc.upsert({ ...baseInput, stackName: 'id-change-paths', composePaths: ['compose.yaml', 'override.yaml'] });
+            const row = DatabaseService.getInstance().getGitSource('id-change-paths');
+            expect(row?.compose_paths).toEqual(['compose.yaml', 'override.yaml']);
+        });
+
+        it('apply refuses a stale-identity manifest with a detach-first instruction', async () => {
+            const sha = 'abc1234567890abc1234567890abc1234567890a';
+            await seedSource('id-change-apply');
+            // Manifest stamped for a different repository than the source row.
+            await seedManifest('id-change-apply', 'https://github.com/example/other.git', 'main');
+            const svc = GitSourceService.getInstance();
+
+            mockSuccessfulClone({ sha });
+            await svc.pull('id-change-apply');
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            try {
+                await expect(svc.apply('id-change-apply', sha))
+                    .rejects.toMatchObject({ code: 'GIT_ERROR', message: expect.stringMatching(/Detach the Git source/) });
+            } finally {
+                validateSpy.mockRestore();
+            }
+        });
+    });
 });
 
 describe('GitSourceService error mapping', () => {
@@ -934,6 +1066,18 @@ describe('GitSourceService.createStackFromGit', () => {
         expect(result.envWritten).toBe(false);
         expect(result.source.last_applied_commit_sha).toBe(sha);
         expect(result.source.pending_commit_sha).toBeNull();
+
+        // The manifest cache is persisted after the row insert (audit S-2):
+        // the immediate response and the DB row report the real state, not
+        // the default 'absent'.
+        expect(result.source.manifest_state).toBe('active');
+        const row = DatabaseService.getInstance().getGitSource('create-happy');
+        expect(row?.manifest_state).toBe('active');
+        expect(row?.manifest_version).toBe(1);
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const manifest = await GitProjectManifestService.getInstance().readManifest('create-happy', 'https://github.com/example/repo.git', 'main');
+        if (manifest === null || 'corrupt' in manifest) throw new Error('expected a manifest');
+        expect(manifest.resolvedRevision.commitSha).toBe(sha);
 
         const { FileSystemService } = await import('../services/FileSystemService');
         const onDisk = await FileSystemService.getInstance().getStackContent('create-happy');

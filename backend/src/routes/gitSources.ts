@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { GitSourceService } from '../services/GitSourceService';
+import { GitProjectManifestService } from '../services/GitProjectManifestService';
 import { FileSystemService } from '../services/FileSystemService';
 import { DatabaseService } from '../services/DatabaseService';
 import { CryptoService } from '../services/CryptoService';
@@ -274,7 +275,9 @@ stackGitSourceRouter.get('/:stackName/git-source/manifest', async (req: Request,
       res.status(404).json({ error: 'No managed-project manifest for this stack' });
       return;
     }
-    res.json({ manifest });
+    // The public projection: no content hashes, size metadata, provenance, or
+    // deletion authority, and high-sensitivity input paths are redacted.
+    res.json({ manifest: GitProjectManifestService.getInstance().toPublicManifest(manifest) });
   } catch (error) {
     sendGitSourceError(res, error);
   }

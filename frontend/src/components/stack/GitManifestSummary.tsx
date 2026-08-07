@@ -17,27 +17,22 @@ export interface ManifestSummary {
   generatedAt: number | null;
 }
 
+/** Public manifest projection served by the manifest endpoint (no hashes, sensitive paths redacted). */
 interface ManifestInput {
-  sourcePath: string | null;
-  materializedPath: string | null;
+  /** Display label; null for high-sensitivity inputs whose path is redacted. */
+  path: string | null;
   role: string;
   dependencyKind: string;
   ownership: 'managed' | 'unmanaged';
   sensitivity: 'high' | 'medium' | 'low';
   state: 'present' | 'tombstoned';
-  deletionAuthority: 'sencho' | 'user' | 'none';
   note: string | null;
 }
 
 interface GitManifest {
-  schemaVersion: number;
   manifestVersion: number;
   state: string;
-  resolvedRevision: { commitSha: string; fetchedAt: number };
-  project: { root: string | null; composeFiles: string[]; projectName: string };
   inputs: ManifestInput[];
-  refusals: Array<{ sourcePath: string | null; kind: string; reason: string; actionable: boolean }>;
-  counts: { managed: number; unmanaged: number; refused: number };
 }
 
 const LIST_CAP = 200;
@@ -73,9 +68,14 @@ export function GitManifestSummary({ stackName, summary }: GitManifestSummaryPro
   const [manifest, setManifest] = useState<GitManifest | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // One fetch attempt per mount: a failed request must not re-trigger the
+  // effect (loading flipping false would otherwise loop forever). The attempt
+  // flag flips only in the fetch's finally, so the effect never refires on the
+  // loading state; retrying is an explicit user action.
+  const [attempted, setAttempted] = useState(false);
 
   useEffect(() => {
-    if (!expanded || manifest !== null || loading) return;
+    if (!expanded || manifest !== null || attempted) return;
     setLoading(true);
     setError(null);
     apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/manifest`)
@@ -88,8 +88,11 @@ export function GitManifestSummary({ stackName, summary }: GitManifestSummaryPro
         }
       })
       .catch(() => setError('Could not load the managed-project manifest.'))
-      .finally(() => setLoading(false));
-  }, [expanded, manifest, loading, stackName]);
+      .finally(() => {
+        setLoading(false);
+        setAttempted(true);
+      });
+  }, [expanded, manifest, attempted, stackName]);
 
   if (!summary) return null;
 
@@ -164,7 +167,21 @@ export function GitManifestSummary({ stackName, summary }: GitManifestSummaryPro
           )}
 
           {loading && <p className="text-stat-subtitle">Loading inventory...</p>}
-          {error && <p className="text-destructive/90">{error}</p>}
+          {error && !loading && (
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-destructive/90">{error}</p>
+              <button
+                type="button"
+                className="text-[11px] font-medium text-primary underline-offset-2 hover:underline"
+                onClick={() => {
+                  setAttempted(false);
+                  setError(null);
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          )}
 
           {manifest && (
             <>
@@ -172,7 +189,7 @@ export function GitManifestSummary({ stackName, summary }: GitManifestSummaryPro
                 {shownInputs.map((input, i) => (
                   <div key={i} className="flex items-center justify-between gap-2">
                     <span className="font-mono truncate" title={input.note ?? undefined}>
-                      {input.materializedPath ?? input.sourcePath ?? input.dependencyKind}
+                      {input.path ?? input.dependencyKind}
                     </span>
                     <span className="flex items-center gap-1.5 shrink-0">
                       <Badge variant="outline" className="px-1.5 py-0 text-[10px] font-normal">

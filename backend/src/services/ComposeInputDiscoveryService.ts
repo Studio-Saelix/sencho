@@ -12,8 +12,9 @@
  * LFS, unbounded context, missing files, unsafe links) are returned with
  * actionable: true so the caller aborts the pull; tolerated classes (host
  * binds, external resources) become unmanaged entries with a documented-
- * limitation note. Dynamic \${VAR} paths are reported in the pull response but
- * are never claimed as covered. Never claim coverage for anything else.
+ * limitation note. Dynamic \${VAR} paths are recorded as explicit unmanaged
+ * entries (they resolve at deploy time from the environment) and are never
+ * claimed as covered. Never claim coverage for anything else.
  */
 import path from 'path';
 import fs from 'fs';
@@ -28,6 +29,7 @@ import type {
     ComposeInputEntry,
     DeclaredInput,
     DynamicInput,
+    InputDependencyKind,
     InputRole,
     InputSensitivity,
     InventoryResult,
@@ -97,11 +99,57 @@ function isUrl(p: string): boolean {
     return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p);
 }
 
+/** Map a dynamic declaration's dependency kind to its manifest role. */
+function roleForDynamicKind(kind: DynamicInput['kind']): InputRole {
+    switch (kind) {
+        case 'env_file':
+        case 'include-env':
+        case 'interpolation-env':
+            return 'env';
+        case 'config':
+            return 'config';
+        case 'secret':
+            return 'secret';
+        case 'build-context':
+            return 'build-context';
+        case 'build-additional-context':
+            return 'build-additional-context';
+        case 'dockerfile':
+            return 'dockerfile';
+        case 'build-secret':
+            return 'build-secret';
+        case 'label_file':
+            return 'label-file';
+        case 'bind-mount':
+            return 'bind-mount';
+        case 'include':
+        case 'extends':
+            return 'compose-additional';
+        default:
+            return 'other';
+    }
+}
+
 function hasGitMetaSegment(relPath: string): boolean {
     return posixRel(relPath)
         .split('/')
         .filter(Boolean)
         .some((seg) => seg.toLowerCase() === '.git');
+}
+
+/** The submodule whose directory contains the path, or undefined. */
+function submoduleOwner(relPath: string, submodules: string[]): string | undefined {
+    return submodules.find((s) => relPath === s || relPath.startsWith(`${s}/`));
+}
+
+function fileDir(p: string | null): string | null {
+    return p && p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : null;
+}
+
+/** Kinds whose declared paths must be treated as sensitive. */
+function isSensitiveKind(kind: InputDependencyKind): boolean {
+    return kind === 'config' || kind === 'secret' || kind === 'env_file' || kind === 'include-env'
+        || kind === 'interpolation-env' || kind === 'label_file' || kind === 'build-secret';
 }
 
 function resolveInRepo(relPath: string, base: string | null): string | null {
@@ -196,41 +244,63 @@ export class ComposeInputDiscoveryService {
         return { ok: true, sizeBytes: stat.size, contentSha256: createHash('sha256').update(content).digest('hex') };
     }
 
-    /** Resolve a declared input's repo-relative path per its base-dir rule. */
-    private resolveDeclared(cloneDir: string, input: DeclaredInput): string | null {
-        // repo-root inputs from the parser are already resolved (include/extends
-        // and project-root-prefixed env forms); compose-file-dir inputs resolve
-        // against the declaring file's dir, falling back to the repo root.
+    /**
+     * Resolve a declared input's repo-relative source path AND its materialized
+     * path, deriving both from the effective invocation:
+     *
+     * - Project-relative declarations (env_file, configs/secrets file, build
+     *   contexts, bind mounts) resolve against the project directory: the
+     *   configured context dir, or for explicitly listed (-f) files the BASE
+     *   FILE's directory (the first compose file), per the compose merge rules.
+     *   Files reached via include/extends keep their own directory as their
+     *   project directory.
+     * - The materialized path uses the RUNTIME base (stack root or context
+     *   dir): the primary compose file lands at the stack root, so a base file
+     *   in a repo subdirectory has its relative paths live at the stack root,
+     *   not under its repo directory. Include/extends files materialize at
+     *   their repo paths, so their materialized path equals the source path.
+     */
+    private resolveDeclared(
+        input: DeclaredInput,
+        orderedPaths: string[],
+        contextDir: string | null,
+    ): { source: string; materialized: string } | null {
         if (input.baseDir === 'repo-root') {
-            return input.sourcePath && !isUrl(input.sourcePath) && !hasGitMetaSegment(input.sourcePath)
+            const p = input.sourcePath && !isUrl(input.sourcePath) && !hasGitMetaSegment(input.sourcePath)
                 ? input.sourcePath
                 : null;
+            return p === null ? null : { source: p, materialized: p };
         }
-        const declaringDir =
-            input.baseDir === 'compose-file-dir' && input.fromFile && input.fromFile.includes('/')
-                ? input.fromFile.slice(0, input.fromFile.lastIndexOf('/'))
-                : null;
-        const first = resolveInRepo(input.sourcePath ?? '', declaringDir);
-        if (first === null) return null;
-        if (fs.existsSync(path.join(cloneDir, first))) return first;
-        return resolveInRepo(input.sourcePath ?? '', null);
+        const fromFile = input.fromFile;
+        const isOrdered = fromFile !== null && orderedPaths.some((p) => caseKey(p) === caseKey(fromFile));
+        // The context dir applies to the top-level invocation only; compose
+        // loads each included file with ITS OWN directory as its project
+        // directory even when --project-directory is set.
+        const sourceBase = isOrdered ? (contextDir ?? fileDir(orderedPaths[0] ?? null)) : fileDir(fromFile);
+        const rel = input.sourcePath ?? '';
+        const source = resolveInRepo(rel, sourceBase);
+        if (source === null) return null;
+        // The materialized path diverges only when a base file in a repo
+        // subdirectory (no context dir) moves to the stack root at runtime.
+        const materialized = isOrdered && contextDir === null ? resolveInRepo(rel, null) : source;
+        if (materialized === null) return null;
+        return { source, materialized };
     }
 
     /** Plan build contexts with dockerignore semantics and byte accounting. */
     private async planBuildContexts(
-        cloneDir: string,
+        params: DiscoverFromCloneParams,
+        submodules: string[],
         contextInputs: DeclaredInput[],
         dockerfileInputs: DeclaredInput[],
-        submodules: string[],
-        bounds: ManifestBounds,
         refusals: RefusalInfo[],
-        syncEnv: boolean,
     ): Promise<{ plans: ContextCopyPlan[]; entries: ComposeInputEntry[] }> {
+        const { cloneDir, composePaths, contextDir, bounds, syncEnv } = params;
         const plans: ContextCopyPlan[] = [];
         const entries: ComposeInputEntry[] = [];
 
         for (const input of contextInputs) {
-            const resolved = this.resolveDeclared(cloneDir, input);
+            const resolved = this.resolveDeclared(input, composePaths, contextDir);
             if (resolved === null) {
                 refusals.push(this.refusal(input.sourcePath, 'out-of-bounds', `Build context ${input.sourcePath ?? '(unnamed)'} is not inside the repository`, true));
                 continue;
@@ -239,22 +309,23 @@ export class ComposeInputDiscoveryService {
             // relative path: materializedPath '' is valid per the manifest
             // path rules, promotes the candidate root, and never collides
             // with '.'-rejection in manifest validation.
-            const rootPath = resolved === '.' ? '' : resolved;
+            const sourceRoot = resolved.source === '.' || resolved.source === '' ? '' : resolved.source;
+            const materializedRoot = resolved.materialized === '.' || resolved.materialized === '' ? '' : resolved.materialized;
 
-            const abs = path.resolve(cloneDir, resolved);
+            const abs = path.resolve(cloneDir, sourceRoot);
             let stat: fs.Stats;
             try {
                 stat = await fs.promises.lstat(abs);
             } catch {
-                refusals.push(this.refusal(resolved, 'missing-file', `Build context ${resolved} does not exist in the repository`, true));
+                refusals.push(this.refusal(sourceRoot, 'missing-file', `Build context ${sourceRoot} does not exist in the repository`, true));
                 continue;
             }
             if (stat.isSymbolicLink()) {
-                refusals.push(this.refusal(resolved, 'unsafe-symlink', `Build context ${resolved} is a symbolic link`, true));
+                refusals.push(this.refusal(sourceRoot, 'unsafe-symlink', `Build context ${sourceRoot} is a symbolic link`, true));
                 continue;
             }
             if (!stat.isDirectory()) {
-                refusals.push(this.refusal(resolved, 'not-a-directory', `Build context ${resolved} is not a directory`, true));
+                refusals.push(this.refusal(sourceRoot, 'not-a-directory', `Build context ${sourceRoot} is not a directory`, true));
                 continue;
             }
 
@@ -274,7 +345,7 @@ export class ComposeInputDiscoveryService {
             // inherit the service's dockerfile.
             const isPrimaryContext = input.kind === 'build-context';
             if (isPrimaryContext && dockerfileDecl && typeof dockerfileDecl.sourcePath === 'string') {
-                const rebased = path.posix.normalize(path.posix.join(resolved, dockerfileDecl.sourcePath));
+                const rebased = path.posix.normalize(path.posix.join(sourceRoot, dockerfileDecl.sourcePath));
                 if (rebased === '..' || rebased.startsWith('../') || path.posix.isAbsolute(rebased)) {
                     refusals.push(this.refusal(dockerfileDecl.sourcePath, 'out-of-bounds', `Dockerfile ${dockerfileDecl.sourcePath} resolves outside the repository`, true));
                     continue;
@@ -285,9 +356,9 @@ export class ComposeInputDiscoveryService {
                 // dockerfile lands outside the context subtree, so it is
                 // materialized as its own managed input below. Root contexts
                 // (`''` or `'.'`) contain every repo-relative path.
-                const inContext = resolved === '' || resolved === '.'
+                const inContext = sourceRoot === ''
                     ? !dockerfileRel.startsWith('../')
-                    : dockerfileRel === resolved || dockerfileRel.startsWith(`${resolved}/`);
+                    : dockerfileRel === sourceRoot || dockerfileRel.startsWith(`${sourceRoot}/`);
                 dockerfileOutsideContext = !inContext;
             }
             // Docker's ignore selection: the context-root .dockerignore applies
@@ -310,11 +381,50 @@ export class ComposeInputDiscoveryService {
                     }
                 }
             }
+            // Submodule containment (mirrors the ordinary-input check below):
+            // a context rooted inside a submodule, or a submodule directory
+            // inside the context, omits content the author's build would
+            // include (submodule contents are never fetched). Refuse rather
+            // than materialize a context that silently lacks it. A submodule
+            // excluded by the context's dockerignore is excluded by the
+            // author's build too, so it is not a refusal.
+            const owner = submoduleOwner(sourceRoot, submodules);
+            if (owner !== undefined) {
+                refusals.push(this.refusal(sourceRoot, 'submodule', `Build context ${sourceRoot} is inside Git submodule ${owner}; submodule contents are not fetched`, true));
+                continue;
+            }
+            const submoduleInContext = submodules.find((s) => {
+                if (s === sourceRoot) return false;
+                const rel = sourceRoot ? (s.startsWith(`${sourceRoot}/`) ? s.slice(sourceRoot.length + 1) : null) : s;
+                if (rel === null) return false;
+                // The walk prunes a directory subtree when any ancestor (or
+                // the directory itself) matches; mirror that for the submodule
+                // path so an ignored submodule is not a refusal.
+                let prefix = '';
+                for (const seg of rel.split('/')) {
+                    prefix = prefix ? `${prefix}/${seg}` : seg;
+                    if (matcher?.matches(prefix, true) ?? false) return false;
+                }
+                return true;
+            });
+            if (submoduleInContext !== undefined) {
+                refusals.push(this.refusal(sourceRoot, 'submodule', `Build context ${sourceRoot} contains Git submodule ${submoduleInContext}; submodule contents are not fetched`, true));
+                continue;
+            }
+
             if (dockerfileOutsideContext) {
                 // Materialize the out-of-context dockerfile as its own managed
                 // input (it is outside the context subtree the walk copies),
                 // classified with the same lstat/symlink/containment/size/LFS
-                // guards as every other repository input.
+                // guards as every other repository input. Its materialized
+                // path follows the same runtime base as the context itself
+                // (compose resolves the dockerfile relative to the context at
+                // its materialized location).
+                const dfMaterialized = path.posix.normalize(path.posix.join(materializedRoot, dockerfileDecl!.sourcePath!));
+                if (dfMaterialized === '..' || dfMaterialized.startsWith('../') || path.posix.isAbsolute(dfMaterialized)) {
+                    refusals.push(this.refusal(dockerfileRel, 'out-of-bounds', `Dockerfile ${dockerfileRel} cannot be reproduced in the stack layout`, true));
+                    continue;
+                }
                 const dfClassified = await this.classifyPath(cloneDir, dockerfileRel!, bounds);
                 if (!dfClassified.ok) {
                     refusals.push(dfClassified.refusal);
@@ -322,7 +432,7 @@ export class ComposeInputDiscoveryService {
                 }
                 entries.push({
                     sourcePath: dockerfileRel,
-                    materializedPath: dockerfileRel,
+                    materializedPath: dfMaterialized,
                     role: 'dockerfile',
                     dependencyKind: 'dockerfile',
                     ownership: 'managed',
@@ -332,7 +442,7 @@ export class ComposeInputDiscoveryService {
                     sizeBytes: dfClassified.sizeBytes,
                     state: 'present',
                     deletionAuthority: 'sencho',
-                    note: 'Dockerfile outside the build context; materialized at its repo-relative path',
+                    note: 'Dockerfile outside the build context; materialized at its stack-relative path',
                 });
             }
 
@@ -358,7 +468,7 @@ export class ComposeInputDiscoveryService {
                     // would trip the size caps on repo-root contexts.
                     if (entry.name.toLowerCase() === '.git') continue;
                     const childRel = rel ? `${rel}/${entry.name}` : entry.name;
-                    if (rootPath === '' && childRel === '.env' && syncEnv) {
+                    if (materializedRoot === '' && childRel === '.env' && syncEnv) {
                         // The synced stack-root .env owns this path; the repo
                         // copy must not be hash-guarded against it.
                         continue;
@@ -402,15 +512,15 @@ export class ComposeInputDiscoveryService {
             };
             await walk(abs, '');
 
-            const isRepoRoot = resolved === '' || resolved === '.';
+            const isRepoRoot = sourceRoot === '';
             const excluded = false;
             let note: string | null = null;
             if (specialInContext !== null) {
-                refusals.push(this.refusal(resolved, 'unsafe-context', specialInContext, true));
+                refusals.push(this.refusal(sourceRoot, 'unsafe-context', specialInContext, true));
                 continue;
             }
             if (lfsInContext) {
-                refusals.push(this.refusal(resolved, 'lfs-in-context', `Build context ${resolved} contains Git LFS pointers`, true));
+                refusals.push(this.refusal(sourceRoot, 'lfs-in-context', `Build context ${sourceRoot} contains Git LFS pointers`, true));
                 continue;
             }
             if (isRepoRoot) {
@@ -418,7 +528,7 @@ export class ComposeInputDiscoveryService {
             }
 
             const plan: BuildContextPlan = {
-                repoPath: rootPath,
+                repoPath: materializedRoot,
                 dockerfile: dockerfileRel,
                 contextBytes,
                 ignoredCount,
@@ -429,8 +539,8 @@ export class ComposeInputDiscoveryService {
             };
             plans.push({
                 context: plan,
-                srcRel: rootPath,
-                destRel: rootPath, // contexts keep their repo-relative path in the materialized layout
+                srcRel: sourceRoot,
+                destRel: materializedRoot,
                 matcher,
                 dockerignoreRel,
             });
@@ -439,10 +549,10 @@ export class ComposeInputDiscoveryService {
             // non-root contexts (a directory on disk). The root context (empty
             // path) must never become a stack-relative path for promotion or
             // stale cleanup to write/delete.
-            if (rootPath !== '') {
+            if (materializedRoot !== '') {
                 entries.push({
-                    sourcePath: rootPath,
-                    materializedPath: rootPath,
+                    sourcePath: sourceRoot,
+                    materializedPath: materializedRoot,
                     role: 'build-context',
                     dependencyKind: 'build-context',
                     ownership: 'managed',
@@ -510,10 +620,13 @@ export class ComposeInputDiscoveryService {
             return { inputs: [], refusals, buildContexts: [], contextCopyPlans: [], dynamic, counts: { managed: 0, unmanaged: 0, refused: refusals.length } };
         }
 
-        // Implicit override: only when the invocation passes a single explicit
-        // -f (docker compose suppresses auto-discovery for explicit multi-file lists).
+        // Implicit override: only when the runtime invocation stays plain
+        // `docker compose` auto-discovery. A single explicit -f with no project
+        // directory keeps auto-discovery (deriveAppliedSpec returns null), but
+        // a configured project directory forces explicit -f arguments, which
+        // suppress auto-discovery (compose merge docs: explicit -f disables it).
         let implicitOverridePath: string | null = null;
-        if (composePaths.length === 1) {
+        if (composePaths.length === 1 && !contextDir) {
             const overrideBase = projectRoot ?? '';
             for (const candidate of COMPOSE_OVERRIDE_FILENAMES) {
                 const rel = overrideBase ? `${overrideBase}/${candidate}` : candidate;
@@ -611,7 +724,7 @@ export class ComposeInputDiscoveryService {
                     dependencyKind: kind,
                     ownership: 'unmanaged',
                     provenance: 'fetch',
-                    sensitivity: kind === 'config' || kind === 'secret' || kind === 'env_file' || kind === 'include-env' || kind === 'interpolation-env' || kind === 'label_file' || kind === 'build-secret' ? 'high' : 'low',
+                    sensitivity: isSensitiveKind(kind) ? 'high' : 'low',
                     contentSha256: null,
                     sizeBytes: null,
                     state: 'present',
@@ -633,16 +746,16 @@ export class ComposeInputDiscoveryService {
             // below (the dockerfile is rebased against its context there).
             if (kind === 'build-context' || kind === 'build-additional-context' || kind === 'dockerfile') continue;
 
-            const resolved = this.resolveDeclared(cloneDir, input);
+            const resolved = this.resolveDeclared(input, composePaths, contextDir);
             if (resolved === null) {
                 refusals.push(this.refusal(input.sourcePath, 'out-of-bounds', `${input.sourcePath} is outside the repository or project root`, true));
                 continue;
             }
 
             // Submodule containment check.
-            const inSubmodule = submodules.find((s) => resolved === s || resolved.startsWith(`${s}/`)) ?? null;
+            const inSubmodule = submoduleOwner(resolved.source, submodules) ?? null;
             if (inSubmodule !== null) {
-                refusals.push(this.refusal(resolved, 'submodule', `${resolved} is inside Git submodule ${inSubmodule}; submodule contents are not fetched`, true));
+                refusals.push(this.refusal(resolved.source, 'submodule', `${resolved.source} is inside Git submodule ${inSubmodule}; submodule contents are not fetched`, true));
                 continue;
             }
 
@@ -651,9 +764,9 @@ export class ComposeInputDiscoveryService {
             // stages the sync content over it, so a managed entry would record
             // the repo hash and the next apply would refuse .env as locally
             // modified forever. Record it unmanaged in that case.
-            if (kind === 'interpolation-env' && params.syncEnv === true && resolved === '.env') {
+            if (kind === 'interpolation-env' && params.syncEnv === true && resolved.source === '.env') {
                 inputs.push({
-                    sourcePath: resolved,
+                    sourcePath: resolved.source,
                     materializedPath: null,
                     role: 'env',
                     dependencyKind: 'interpolation-env',
@@ -672,9 +785,9 @@ export class ComposeInputDiscoveryService {
             // A missing interpolation .env is not a refusal: compose tolerates an
             // absent project env (variables resolve from the environment), and the
             // synced stack-root .env covers the common case. Record it unmanaged.
-            if (kind === 'interpolation-env' && !fs.existsSync(path.join(cloneDir, resolved))) {
+            if (kind === 'interpolation-env' && !fs.existsSync(path.join(cloneDir, resolved.source))) {
                 inputs.push({
-                    sourcePath: resolved,
+                    sourcePath: resolved.source,
                     materializedPath: null,
                     role: 'env',
                     dependencyKind: 'interpolation-env',
@@ -690,28 +803,25 @@ export class ComposeInputDiscoveryService {
                 continue;
             }
 
-            const classified = await this.classifyPath(cloneDir, resolved, bounds);
+            const classified = await this.classifyPath(cloneDir, resolved.source, bounds);
             if (!classified.ok) {
                 refusals.push(classified.refusal);
                 continue;
             }
             if (managedCount + 1 > bounds.maxFiles) {
-                refusals.push(this.refusal(resolved, 'too-many-files', `Materialization would exceed ${bounds.maxFiles} files`, true));
+                refusals.push(this.refusal(resolved.source, 'too-many-files', `Materialization would exceed ${bounds.maxFiles} files`, true));
                 continue;
             }
             if (managedBytes + classified.sizeBytes > bounds.maxBytes) {
-                refusals.push(this.refusal(resolved, 'too-many-bytes', `Materialization would exceed ${bounds.maxBytes} bytes (${managedBytes} so far)`, true));
+                refusals.push(this.refusal(resolved.source, 'too-many-bytes', `Materialization would exceed ${bounds.maxBytes} bytes (${managedBytes} so far)`, true));
                 continue;
             }
             managedCount += 1;
             managedBytes += classified.sizeBytes;
-            const sensitivity: InputSensitivity =
-                kind === 'config' || kind === 'secret' || kind === 'env_file' || kind === 'include-env' || kind === 'interpolation-env' || kind === 'label_file' || kind === 'build-secret'
-                    ? 'high'
-                    : 'medium';
+            const sensitivity: InputSensitivity = isSensitiveKind(kind) ? 'high' : 'medium';
             inputs.push({
-                sourcePath: resolved,
-                materializedPath: resolved,
+                sourcePath: resolved.source,
+                materializedPath: resolved.materialized,
                 role: input.role,
                 dependencyKind: kind,
                 ownership: 'managed',
@@ -725,10 +835,31 @@ export class ComposeInputDiscoveryService {
             });
         }
 
+        // Dynamic ${VAR} paths resolve at deploy time from the environment and
+        // can never be enumerated against the clone. Persist each as an
+        // explicit unmanaged entry so the manifest inventory never silently
+        // drops a declared input (create and pull both consume this inventory).
+        for (const dyn of dynamic) {
+            inputs.push({
+                sourcePath: dyn.sourcePath,
+                materializedPath: null,
+                role: roleForDynamicKind(dyn.kind),
+                dependencyKind: dyn.kind,
+                ownership: 'unmanaged',
+                provenance: 'fetch',
+                sensitivity: isSensitiveKind(dyn.kind) ? 'high' : 'medium',
+                contentSha256: null,
+                sizeBytes: null,
+                state: 'present',
+                deletionAuthority: 'none',
+                note: dyn.note,
+            });
+        }
+
         // Build contexts.
         const contextInputs = parsed.inputs.filter((i) => i.kind === 'build-context' || i.kind === 'build-additional-context');
         const dockerfileInputs = parsed.inputs.filter((i) => i.kind === 'dockerfile');
-        const { plans, entries: contextEntries } = await this.planBuildContexts(cloneDir, contextInputs, dockerfileInputs, submodules, bounds, refusals, params.syncEnv === true);
+        const { plans, entries: contextEntries } = await this.planBuildContexts(params, submodules, contextInputs, dockerfileInputs, refusals);
         inputs.push(...contextEntries);
 
         // Sync env entry (stack-root .env) is recorded by the caller (it knows

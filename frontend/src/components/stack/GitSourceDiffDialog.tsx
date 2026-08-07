@@ -18,6 +18,8 @@ export interface PullResult {
   hasLocalChanges: boolean;
   /** Tolerated refusals from complete-project discovery (documented limitations). */
   refusals?: Array<{ sourcePath: string | null; kind: string; reason: string; actionable: boolean }>;
+  /** Clone-time warnings (submodules present, for example). */
+  warnings?: string[];
 }
 
 interface GitSourceDiffDialogProps {

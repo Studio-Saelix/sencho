@@ -41,6 +41,7 @@ import type {
     ManifestProvenance,
     ManifestState,
     ManifestSummary,
+    PublicManifest,
     RefusalInfo,
 } from '../types/gitProjectManifest';
 
@@ -409,6 +410,33 @@ export class GitProjectManifestService {
         await fs.promises.rename(tmp, target);
     }
 
+    /**
+     * Public projection for the manifest read endpoint: hashes, size metadata,
+     * provenance, and deletion authority are internal-only, and for
+     * high-sensitivity inputs the display path AND the note are redacted
+     * (null) so secret file names never cross the API.
+     */
+    toPublicManifest(manifest: GitProjectManifest): PublicManifest {
+        return {
+            manifestVersion: manifest.manifestVersion,
+            state: manifest.state,
+            resolvedCommitSha: manifest.resolvedRevision.commitSha,
+            projectRoot: manifest.project.root,
+            composeFiles: manifest.project.composeFiles,
+            projectName: manifest.project.projectName,
+            inputs: manifest.inputs.map((entry) => ({
+                path: entry.sensitivity === 'high' ? null : (entry.materializedPath ?? entry.sourcePath),
+                role: entry.role,
+                dependencyKind: entry.dependencyKind,
+                ownership: entry.ownership,
+                sensitivity: entry.sensitivity,
+                state: entry.state,
+                note: entry.sensitivity === 'high' ? null : entry.note,
+            })),
+            counts: manifest.counts,
+        };
+    }
+
     summaryFrom(manifest: GitProjectManifest): ManifestSummary {
         const actionable = manifest.refusals.filter((r) => r.actionable);
         return {
@@ -756,6 +784,31 @@ export class GitProjectManifestService {
             // The candidate must be complete; a partial build is never promoted.
             if (!(await this.pathExists(path.join(candidateAbs, CANDIDATE_COMPLETE_MARKER)))) {
                 throw new Error('Candidate is incomplete; pull again before applying');
+            }
+
+            // Introduced-path collision guard: a path the incoming generation
+            // owns that the prior generation did not, and that ALREADY EXISTS
+            // in the live stack, is a local file Sencho never owned.
+            // Overwriting it would destroy user data, so refuse BEFORE the
+            // first live mutation. The synced stack-root .env is excluded:
+            // enabling sync_env is the explicit adoption of that path (its
+            // content is staged by design). Fresh creation (priorManifest
+            // null) is exempt: the stack dir was just created and every file
+            // is adoption boilerplate.
+            if (priorManifest) {
+                const fsSvc = FileSystemService.getInstance();
+                const syncEnvOwnsEnv = manifest.inputs.some((i) => i.dependencyKind === 'sync-env' && i.materializedPath === '.env');
+                const colliding: string[] = [];
+                for (const rel of introduced) {
+                    if (rel === '.env' && syncEnvOwnsEnv) continue;
+                    const kind = await fsSvc.pathKind(stackName, rel);
+                    if (kind !== null) colliding.push(rel);
+                }
+                if (colliding.length > 0) {
+                    throw new Error(
+                        `Refusing to overwrite ${colliding.length > 1 ? 'files' : 'a file'} that Sencho does not manage: ${colliding.join(', ')}. Remove or rename ${colliding.length > 1 ? 'them' : 'it'} in the stack directory, or detach the Git source first.`,
+                    );
+                }
             }
 
             await fs.promises.mkdir(this.managedRoot(stackName), { recursive: true });

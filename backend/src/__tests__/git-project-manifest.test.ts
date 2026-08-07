@@ -417,6 +417,142 @@ describe('promoteGeneration', () => {
         expect(readStackFile(stackName, 'Config.yml')).toBe('PRIOR\n');
         expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
     });
+
+    it('refuses to overwrite an unowned local file at an introduced path', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'promote-introduced-collision';
+        writeStackFile(stackName, 'compose.yaml', 'v1\n');
+        // A local file Sencho never owned.
+        writeStackFile(stackName, 'local-secret.txt', 'user data\n');
+        const prior = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]);
+        const priorRel = 'generations/applied-prior';
+        const priorAbs = path.join(tmpDir, 'git-managed', '1', stackName, priorRel);
+        fs.mkdirSync(priorAbs, { recursive: true });
+        fs.writeFileSync(path.join(priorAbs, 'compose.yaml'), 'v1\n');
+        prior.generation.appliedDir = priorRel;
+        await svc.writeManifest(stackName, prior);
+
+        const incoming = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml' }),
+            managedEntry({ materializedPath: 'local-secret.txt', dependencyKind: 'config', role: 'config' }),
+        ], prior);
+        const clone = makeClone({ 'compose.yaml': 'v2\n', 'local-secret.txt': 'repo version\n' });
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'sha-collide',
+            clone,
+            [{ srcRel: 'compose.yaml', destRel: 'compose.yaml' }, { srcRel: 'local-secret.txt', destRel: 'local-secret.txt' }],
+            [],
+            BOUNDS,
+        );
+
+        await expect(svc.promoteGeneration(stackName, {
+            sha: 'sha-collide',
+            candidateRelPath: candidateRel,
+            manifest: incoming,
+            priorManifest: prior,
+        })).rejects.toThrow(/does not manage/);
+
+        // Nothing changed on disk and no promotion marker was written.
+        expect(readStackFile(stackName, 'local-secret.txt')).toBe('user data\n');
+        expect(readStackFile(stackName, 'compose.yaml')).toBe('v1\n');
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
+    });
+
+    it('refuses to overwrite an unowned file introduced inside a root-context file set', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'promote-rootctx-collision';
+        writeStackFile(stackName, 'compose.yaml', 'v1\n');
+        writeStackFile(stackName, 'src/main.go', 'user code\n');
+        const prior = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]);
+        const priorRel = 'generations/applied-prior';
+        const priorAbs = path.join(tmpDir, 'git-managed', '1', stackName, priorRel);
+        fs.mkdirSync(priorAbs, { recursive: true });
+        fs.writeFileSync(path.join(priorAbs, 'compose.yaml'), 'v1\n');
+        prior.generation.appliedDir = priorRel;
+        await svc.writeManifest(stackName, prior);
+
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    build: .\n',
+            'src/main.go': 'repo code\n',
+        });
+        const inventory = await import('../services/ComposeInputDiscoveryService').then((m) =>
+            m.ComposeInputDiscoveryService.getInstance().discoverFromClone({
+                cloneDir: clone,
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                bounds: BOUNDS,
+            }),
+        );
+        const incoming = buildManifest(stackName, inventory.inputs.filter((i) => i.ownership === 'managed'), prior, inventory.buildContexts);
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'sha-rootctx',
+            clone,
+            inventory.inputs.filter((i) => i.ownership === 'managed' && i.materializedPath !== null)
+                .map((i) => ({ srcRel: i.sourcePath!, destRel: i.materializedPath! })),
+            inventory.contextCopyPlans,
+            BOUNDS,
+        );
+
+        await expect(svc.promoteGeneration(stackName, {
+            sha: 'sha-rootctx',
+            candidateRelPath: candidateRel,
+            manifest: incoming,
+            priorManifest: prior,
+        })).rejects.toThrow(/does not manage/);
+        expect(readStackFile(stackName, 'src/main.go')).toBe('user code\n');
+    });
+
+    it('allows the synced stack-root .env to adopt an existing file when sync_env is enabled', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'promote-sync-env-adoption';
+        writeStackFile(stackName, 'compose.yaml', 'v1\n');
+        writeStackFile(stackName, '.env', 'EXISTING=1\n');
+        const prior = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]);
+        const priorRel = 'generations/applied-prior';
+        const priorAbs = path.join(tmpDir, 'git-managed', '1', stackName, priorRel);
+        fs.mkdirSync(priorAbs, { recursive: true });
+        fs.writeFileSync(path.join(priorAbs, 'compose.yaml'), 'v1\n');
+        prior.generation.appliedDir = priorRel;
+        await svc.writeManifest(stackName, prior);
+
+        const syncEnvEntry: ComposeInputEntry = {
+            sourcePath: null,
+            materializedPath: '.env',
+            role: 'env',
+            dependencyKind: 'sync-env',
+            ownership: 'managed',
+            provenance: 'fetch',
+            sensitivity: 'high',
+            contentSha256: 'a'.repeat(64),
+            sizeBytes: 4,
+            state: 'present',
+            deletionAuthority: 'sencho',
+            note: null,
+        };
+        const incoming = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml' }),
+            syncEnvEntry,
+        ], prior);
+        const clone = makeClone({ 'compose.yaml': 'v2\n', '.env': 'NEW=1\n' });
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'sha-syncenv',
+            clone,
+            [{ srcRel: 'compose.yaml', destRel: 'compose.yaml' }, { srcRel: '.env', destRel: '.env' }],
+            [],
+            BOUNDS,
+        );
+
+        await svc.promoteGeneration(stackName, {
+            sha: 'sha-syncenv',
+            candidateRelPath: candidateRel,
+            manifest: incoming,
+            priorManifest: prior,
+        });
+        expect(readStackFile(stackName, '.env')).toBe('NEW=1\n');
+    });
 });
 
 describe('sweepManagedArea (crash recovery)', () => {

@@ -153,6 +153,35 @@ export interface GitProjectManifest {
   bounds: ManifestBounds;
 }
 
+/**
+ * Public projection of one manifest input, served by the manifest read
+ * endpoint. Hashes, size metadata, and provenance are internal-only; the
+ * display path is redacted (null) for high-sensitivity inputs so secret file
+ * names never cross the API.
+ */
+export interface PublicManifestInput {
+  /** Display label; null when redacted (high-sensitivity input) or when the input has no path. */
+  path: string | null;
+  role: InputRole;
+  dependencyKind: InputDependencyKind;
+  ownership: InputOwnership;
+  sensitivity: InputSensitivity;
+  state: InputState;
+  note: string | null;
+}
+
+/** Public projection of the internal manifest (no hashes, no sensitive paths). */
+export interface PublicManifest {
+  manifestVersion: number;
+  state: ManifestState;
+  resolvedCommitSha: string | null;
+  projectRoot: string | null;
+  composeFiles: string[];
+  projectName: string;
+  inputs: PublicManifestInput[];
+  counts: { managed: number; unmanaged: number; refused: number };
+}
+
 /** Projection served by GET /git-source and the manifest read endpoint. */
 export interface ManifestSummary {
   state: GitSourceManifestState;
