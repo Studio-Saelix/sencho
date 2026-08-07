@@ -17,7 +17,7 @@ import { StackOpLockService } from '../services/StackOpLockService';
 import SelfUpdateService, { type PinInfo } from '../services/SelfUpdateService';
 import { getSenchoVersion, isValidVersion } from '../services/CapabilityRegistry';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireAdmin, requireNodeProxy, requireUserSession } from '../middleware/tierGates';
+import { requireAdmin, requireNodeProxy, requireUserSession } from '../middleware/tierGates';
 import { checkPermission, requirePermission } from '../middleware/permissions';
 import { respondSelfUpdatePreflight } from './license';
 import { ImageOperationService } from '../services/ImageOperationService';
@@ -588,7 +588,6 @@ fleetRouter.post('/role/reanchor', authMiddleware, (req: Request, res: Response)
 
 fleetRouter.get('/sync-status', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   res.json(DatabaseService.getInstance().getFleetSyncStatuses());
 });
 
