@@ -52,9 +52,12 @@ backend/src/generated/version.ts
 
 # Local-only working files
 .claude/
+.codex/
+.agents/
 .worktrees/
 plans/
 CLAUDE.md
+AGENTS.md
 
 # Design system (local-only authoritative reference)
 .design-bundle/
