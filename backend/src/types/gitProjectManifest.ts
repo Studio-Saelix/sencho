@@ -85,10 +85,16 @@ export interface RefusalInfo {
   kind: string;
   reason: string;
   actionable: boolean;
+  /**
+   * Sensitivity of the declared input the refusal is about; public
+   * projections redact high-sensitivity refusals. Absent on refusals from
+   * older manifests (treated as not sensitive).
+   */
+  sensitivity?: InputSensitivity;
 }
 
 export interface BuildContextPlan {
-  /** Context root, repo-relative. */
+  /** Context root in the materialized (stack-relative) layout. */
   repoPath: string;
   /** Repo-relative dockerfile path within the context, if declared. */
   dockerfile: string | null;
@@ -202,6 +208,16 @@ export interface ManifestSummary {
 export interface DeclaredInput {
   /** Repo-relative or host path; null for non-path forms. */
   sourcePath: string | null;
+  /**
+   * Stack-relative path the input occupies at runtime; null for host paths,
+   * non-path forms, and the dockerfile declaration (which is resolved
+   * relative to its build context in planBuildContexts). Diverges from
+   * sourcePath when the runtime layout relocates a file: the primary compose
+   * file lands at the stack root, so its include/extends graph AND every
+   * project-relative declaration in the primary or in merged (-f) files
+   * shifts by the primary's repository directory prefix.
+   */
+  materializedPath: string | null;
   baseDir: 'repo-root' | 'project-root' | 'compose-file-dir' | 'host';
   kind: InputDependencyKind;
   role: InputRole;

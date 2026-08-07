@@ -1370,6 +1370,53 @@ describe('GitSourceService.apply', () => {
         }
     });
 
+    it('refuses the first complete-project apply when an unowned local file collides (audit round 9 B-1)', async () => {
+        const sha = '9999aaaa9999aaaa9999aaaa9999aaaa9999aaaa';
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n    configs: [app]\nconfigs:\n  app:\n    file: configs/app.json\n',
+            extraFiles: { 'configs/app.json': '{"repo": true}\n' },
+            sha,
+        });
+        const svc = GitSourceService.getInstance();
+        const stackName = 'pre-manifest-collision';
+        await svc.upsert({
+            stackName,
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        // Legacy state: only compose.yaml was ever applied (no manifest).
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, { files: ['compose.yaml'], contextDir: null });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const fsSvc = FileSystemService.getInstance();
+        await fsSvc.createStack(stackName);
+        await fsSvc.saveStackContent(stackName, 'services:\n  web:\n    image: nginx:old\n');
+        // A local file Sencho never owned, colliding with the incoming revision.
+        await fsSvc.writeStackFile(stackName, 'configs/app.json', 'local user data\n');
+
+        await svc.pull(stackName);
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        try {
+            await expect(svc.apply(stackName, sha)).rejects.toMatchObject({
+                code: 'GIT_ERROR',
+                message: expect.stringMatching(/does not manage/),
+            });
+            // The local file is preserved byte-for-byte.
+            const onDisk = await fsSvc.readStackFile(stackName, 'configs/app.json');
+            expect(onDisk.content).toBe('local user data\n');
+            expect(DatabaseService.getInstance().getGitSource(stackName)?.pending_commit_sha).toBe(sha);
+        } finally {
+            validateSpy.mockRestore();
+        }
+        await cleanupStackDir(stackName);
+    });
+
     it('returns deployError and skips compose deploy when policy blocks apply deploy', async () => {
         const sha = 'dddd444dddd444dddd444dddd444dddd444dddd4';
         const svc = await seedPending('apply-policy-block', 'services:\n  x:\n    image: nginx:bad\n', sha);

@@ -130,6 +130,27 @@ function writePromotionMarker(stackName: string, marker: {
     );
 }
 
+describe('toPublicRefusals (audit round 9 S-1)', () => {
+    it('redacts high-sensitivity refusals and leaves others untouched', () => {
+        const svc = GitProjectManifestService.getInstance();
+        const projected = svc.toPublicRefusals([
+            { sourcePath: 'secrets/db.env', kind: 'missing-file', reason: 'File not found in repository: secrets/db.env', actionable: true, sensitivity: 'high' },
+            { sourcePath: 'configs/app.conf', kind: 'missing-file', reason: 'File not found in repository: configs/app.conf', actionable: true, sensitivity: 'high' },
+            { sourcePath: 'compose.yaml', kind: 'missing-file', reason: 'File not found in repository: compose.yaml', actionable: true, sensitivity: 'medium' },
+            { sourcePath: 'web', kind: 'unsafe-context', reason: 'Build context web contains a symlink', actionable: true },
+        ]);
+        expect(projected[0].sourcePath).toBeNull();
+        expect(projected[0].reason).toBe('File not found in repository: [redacted]');
+        expect(projected[0].reason).not.toContain('secrets/db.env');
+        expect(projected[1].sourcePath).toBeNull();
+        expect(projected[1].reason).not.toContain('configs/app.conf');
+        // Medium and unspecified sensitivity pass through unchanged.
+        expect(projected[2]).toEqual({ sourcePath: 'compose.yaml', kind: 'missing-file', reason: 'File not found in repository: compose.yaml', actionable: true, sensitivity: 'medium' });
+        expect(projected[3].sourcePath).toBe('web');
+        expect(projected[3].reason).toBe('Build context web contains a symlink');
+    });
+});
+
 describe('readManifest / writeManifest', () => {
     it('round-trips and bumps the manifest version', async () => {
         const svc = GitProjectManifestService.getInstance();
@@ -280,7 +301,7 @@ describe('promoteGeneration', () => {
             inventory.contextCopyPlans,
             BOUNDS,
         );
-        await svc.promoteGeneration(stackName, { sha: 'abc123', candidateRelPath: candidateRel, manifest, priorManifest: null });
+        await svc.promoteGeneration(stackName, { sha: 'abc123', candidateRelPath: candidateRel, manifest, priorManifest: null, adoptExistingMaterializedPaths: 'all' });
 
         expect(readStackFile(stackName, 'compose.yaml')).toContain('nginx:new');
         expect(readStackFile(stackName, 'config/app.conf')).toContain('new config');
@@ -502,6 +523,86 @@ describe('promoteGeneration', () => {
             priorManifest: prior,
         })).rejects.toThrow(/does not manage/);
         expect(readStackFile(stackName, 'src/main.go')).toBe('user code\n');
+    });
+
+    it('refuses an unowned collision on a pre-manifest stack even with no prior manifest (audit round 9 B-1)', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'promote-premanifest-collision';
+        // An existing pre-manifest stack: the legacy compose file plus a local
+        // file Sencho never owned.
+        writeStackFile(stackName, 'compose.yaml', 'legacy v1\n');
+        writeStackFile(stackName, 'configs/app.json', 'local user data\n');
+
+        const incoming = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml' }),
+            managedEntry({ materializedPath: 'configs/app.json', dependencyKind: 'config', role: 'config' }),
+        ]);
+        const clone = makeClone({ 'compose.yaml': 'v2\n', 'configs/app.json': 'repo version\n' });
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'sha-pre',
+            clone,
+            [{ srcRel: 'compose.yaml', destRel: 'compose.yaml' }, { srcRel: 'configs/app.json', destRel: 'configs/app.json' }],
+            [],
+            BOUNDS,
+        );
+
+        // The allowlist covers only the legacy-owned compose file; the local
+        // config file must be refused and preserved byte-for-byte.
+        await expect(svc.promoteGeneration(stackName, {
+            sha: 'sha-pre',
+            candidateRelPath: candidateRel,
+            manifest: incoming,
+            priorManifest: null,
+            adoptExistingMaterializedPaths: ['compose.yaml'],
+        })).rejects.toThrow(/does not manage/);
+        expect(readStackFile(stackName, 'configs/app.json')).toBe('local user data\n');
+        expect(readStackFile(stackName, 'compose.yaml')).toBe('legacy v1\n');
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
+    });
+
+    it('adopts exactly the allowlisted legacy paths on a pre-manifest stack (audit round 9 B-1)', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'promote-premanifest-adopt';
+        writeStackFile(stackName, 'compose.yaml', 'legacy v1\n');
+        writeStackFile(stackName, '.env', 'SYNC=1\n');
+
+        const incoming = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml' }),
+            {
+                sourcePath: null,
+                materializedPath: '.env',
+                role: 'env',
+                dependencyKind: 'sync-env',
+                ownership: 'managed',
+                provenance: 'fetch',
+                sensitivity: 'high',
+                contentSha256: 'a'.repeat(64),
+                sizeBytes: 4,
+                state: 'present',
+                deletionAuthority: 'sencho',
+                note: null,
+            },
+        ]);
+        const clone = makeClone({ 'compose.yaml': 'v2\n', '.env': 'SYNC=2\n' });
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'sha-adopt',
+            clone,
+            [{ srcRel: 'compose.yaml', destRel: 'compose.yaml' }, { srcRel: '.env', destRel: '.env' }],
+            [],
+            BOUNDS,
+        );
+
+        await svc.promoteGeneration(stackName, {
+            sha: 'sha-adopt',
+            candidateRelPath: candidateRel,
+            manifest: incoming,
+            priorManifest: null,
+            adoptExistingMaterializedPaths: ['compose.yaml', '.env'],
+        });
+        expect(readStackFile(stackName, 'compose.yaml')).toBe('v2\n');
+        expect(readStackFile(stackName, '.env')).toBe('SYNC=2\n');
     });
 
     it('allows the synced stack-root .env to adopt an existing file when sync_env is enabled', async () => {
@@ -960,7 +1061,7 @@ describe('FileSystemService interaction', () => {
             BOUNDS,
         );
         const manifest = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]);
-        await svc.promoteGeneration(stackName, { sha: 'invalidate', candidateRelPath: candidateRel, manifest, priorManifest: null });
+        await svc.promoteGeneration(stackName, { sha: 'invalidate', candidateRelPath: candidateRel, manifest, priorManifest: null, adoptExistingMaterializedPaths: 'all' });
         expect(readStackFile(stackName, 'compose.yaml')).toBe('v2\n');
         expect(await FileSystemService.getInstance().getStackContent(stackName)).toBe('v2\n');
     });
@@ -1087,7 +1188,7 @@ describe('promoteGeneration mid-write failure recovery', () => {
         const writeSpy = vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockRejectedValueOnce(new Error('simulated second write failure'));
         try {
             await expect(
-                svc.promoteGeneration(stackName, { sha: 'first-fail', candidateRelPath: candidateRel, manifest, priorManifest: null }),
+                svc.promoteGeneration(stackName, { sha: 'first-fail', candidateRelPath: candidateRel, manifest, priorManifest: null, adoptExistingMaterializedPaths: 'all' }),
             ).rejects.toThrow(/simulated second write failure/);
         } finally {
             writeSpy.mockRestore();
@@ -1256,7 +1357,7 @@ describe('byte-exact materialization (audit C-1)', () => {
             inventory.contextCopyPlans,
             BOUNDS,
         );
-        await svc.promoteGeneration(stackName, { sha: 'bin-sha', candidateRelPath: candidateRel, manifest, priorManifest: null });
+        await svc.promoteGeneration(stackName, { sha: 'bin-sha', candidateRelPath: candidateRel, manifest, priorManifest: null, adoptExistingMaterializedPaths: 'all' });
 
         // The stack-dir file is byte-identical to the clone source.
         const onDisk = fs.readFileSync(path.join(stackDir(stackName), 'blob.bin'));
@@ -1358,7 +1459,7 @@ describe('build-context file-level ownership (audit round 2 C-2)', () => {
         const manifest1 = buildManifest(stackName, managed1, null, inv1.buildContexts);
         const fileList1 = managed1.filter((i) => i.dependencyKind !== 'build-context');
         const cand1 = await svc.buildCandidate(stackName, 'rev1', clone1, fileList1.map((i) => ({ srcRel: i.sourcePath!, destRel: i.materializedPath! })), inv1.contextCopyPlans, BOUNDS);
-        await svc.promoteGeneration(stackName, { sha: 'rev1', candidateRelPath: cand1, manifest: manifest1, priorManifest: null });
+        await svc.promoteGeneration(stackName, { sha: 'rev1', candidateRelPath: cand1, manifest: manifest1, priorManifest: null, adoptExistingMaterializedPaths: 'all' });
         expect(fs.existsSync(path.join(stackDir(stackName), 'web', 'drop.txt'))).toBe(true);
 
         // Revision 2: drop.txt removed upstream.

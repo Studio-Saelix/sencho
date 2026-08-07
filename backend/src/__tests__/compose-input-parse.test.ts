@@ -51,8 +51,8 @@ describe('parseDeclaredInputs', () => {
         const includes = byKind(result, 'include');
         expect(includes.map((i) => i.sourcePath)).toEqual(['common/redis.yaml']);
         const envFiles = byKind(result, 'env_file');
-        expect(envFiles.map((e) => e.sourcePath)).toContain('redis.env');
-        expect(envFiles.find((e) => e.sourcePath === 'redis.env')?.baseDir).toBe('compose-file-dir');
+        expect(envFiles.map((e) => e.sourcePath)).toContain('common/redis.env');
+        expect(envFiles.find((e) => e.sourcePath === 'common/redis.env')?.baseDir).toBe('compose-file-dir');
     });
 
     it('walks include map form with include-specific env_file', () => {
@@ -86,7 +86,9 @@ describe('parseDeclaredInputs', () => {
     it('walks extends.file recursion and reports cycles', () => {
         const { result } = parse({
             'compose.yaml': 'services:\n  web:\n    extends:\n      file: base/web.yaml\n      service: web-base\n',
-            'base/web.yaml': 'services:\n  web-base:\n    image: nginx\n    label_file: base/labels.txt\n',
+            // Included files resolve their own relative paths against their
+            // own directory (each included file is its own project).
+            'base/web.yaml': 'services:\n  web-base:\n    image: nginx\n    label_file: labels.txt\n',
         });
         const extendsRefs = byKind(result, 'extends');
         expect(extendsRefs.map((e) => e.sourcePath)).toEqual(['base/web.yaml']);
@@ -241,8 +243,11 @@ services:
 `,
         });
         const binds = byKind(result, 'bind-mount');
-        expect(binds.map((b) => b.sourcePath)).toEqual(['./data', '../shared', null, null, './config']);
-        expect(binds.map((b) => b.baseDir)).toEqual(['project-root', 'project-root', 'host', 'host', 'project-root']);
+        // Relative binds resolve against the project base; absolute and
+        // ../-escaping binds are host paths (never adopted from the repo).
+        expect(binds.map((b) => b.sourcePath)).toEqual(['data', '../shared', null, null, 'config']);
+        expect(binds.map((b) => b.baseDir)).toEqual(['project-root', 'host', 'host', 'host', 'project-root']);
+        expect(binds.map((b) => b.materializedPath)).toEqual(['data', null, null, null, 'config']);
     });
 
     it('routes dynamic paths into the dynamic list, not inputs', () => {
@@ -285,5 +290,109 @@ services:
             'compose.yaml': 'services: [unclosed\n',
         });
         expect(result.parseErrors.some((e) => e.includes('Cannot parse'))).toBe(true);
+    });
+
+    it('walks label_file in string and list forms', () => {
+        const { result } = parse({
+            'compose.yaml': `services:
+  a:
+    image: a
+    label_file: a.labels
+  b:
+    image: b
+    label_file:
+      - b1.labels
+      - b2.labels
+`,
+        });
+        const labelFiles = byKind(result, 'label_file');
+        expect(labelFiles.map((l) => l.sourcePath).sort()).toEqual(['a.labels', 'b1.labels', 'b2.labels'].sort());
+    });
+
+    it('walks additional_contexts in mapping and NAME=VALUE list forms', () => {
+        const { result } = parse({
+            'compose.yaml': `services:
+  a:
+    build:
+      context: web
+      additional_contexts:
+        certs: web/certs
+  b:
+    build:
+      context: web
+      additional_contexts:
+        - resources=web/resources
+        - app=docker-image://my-app:latest
+        - base=service:base
+`,
+        });
+        const contexts = byKind(result, 'build-additional-context');
+        // Path values resolve project-relative; builder-supplied values are
+        // recorded unmanaged (host) and never searched for in the repo.
+        const pathValues = contexts.filter((c) => c.baseDir !== 'host');
+        expect(pathValues.map((c) => c.sourcePath).sort()).toEqual(['web/certs', 'web/resources'].sort());
+        const builderValues = contexts.filter((c) => c.baseDir === 'host');
+        expect(builderValues.map((c) => c.sourcePath).sort()).toEqual(['docker-image://my-app:latest', 'service:base'].sort());
+    });
+
+    it('walks include map path and env_file in list forms', () => {
+        const { result } = parse({
+            'compose.yaml': `include:
+  - path:
+      - a.yaml
+      - b.yaml
+    env_file:
+      - a.env
+      - b.env
+services: {}
+`,
+            'a.yaml': 'services: {}\n',
+            'b.yaml': 'services: {}\n',
+        });
+        const includes = byKind(result, 'include');
+        expect(includes.map((i) => i.sourcePath).sort()).toEqual(['a.yaml', 'b.yaml'].sort());
+        const includeEnv = byKind(result, 'include-env');
+        expect(includeEnv.map((e) => e.sourcePath).sort()).toEqual(['a.env', 'b.env'].sort());
+    });
+
+    it('applies include project_directory to the included subtree', () => {
+        const { result } = parse({
+            'compose.yaml': 'include:\n  - path: app/compose.yaml\n    project_directory: app\nservices: {}\n',
+            'app/compose.yaml': 'services:\n  web:\n    image: nginx\n    env_file: x.env\n',
+        });
+        // The included file's project-relative paths resolve against the
+        // included project_directory ('app'), not its own directory.
+        const envFiles = byKind(result, 'env_file');
+        expect(envFiles.map((e) => e.sourcePath)).toEqual(['app/x.env']);
+    });
+
+    it('classifies absolute and home-relative paths as host paths', () => {
+        const { result } = parse({
+            'compose.yaml': `include:
+  - /etc/compose/extra.yaml
+services:
+  web:
+    image: nginx
+    env_file: /etc/secrets/web.env
+    configs: [cfg]
+    label_file: ~/labels.txt
+configs:
+  cfg:
+    file: C:\\\\config\\\\app.conf
+`,
+        });
+        const includes = byKind(result, 'include');
+        expect(includes[0].sourcePath).toBe('/etc/compose/extra.yaml');
+        expect(includes[0].baseDir).toBe('host');
+        const envFile = byKind(result, 'env_file')[0];
+        expect(envFile.baseDir).toBe('host');
+        expect(envFile.materializedPath).toBeNull();
+        const cfg = byKind(result, 'config')[0];
+        // Plain YAML scalars do not process escapes, so the parsed value
+        // carries the double backslashes as written.
+        expect(cfg.sourcePath).toBe('C:\\\\config\\\\app.conf');
+        expect(cfg.baseDir).toBe('host');
+        const labelFile = byKind(result, 'label_file')[0];
+        expect(labelFile.baseDir).toBe('host');
     });
 });

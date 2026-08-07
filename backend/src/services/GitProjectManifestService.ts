@@ -286,6 +286,7 @@ export class GitProjectManifestService {
             if (typeof r.kind !== 'string' || r.kind.length === 0 || typeof r.reason !== 'string' || typeof r.actionable !== 'boolean') {
                 return 'invalid refusal fields';
             }
+            if (r.sensitivity !== undefined && !isOneOf(r.sensitivity, SENSITIVITIES)) return 'invalid refusal sensitivity';
         }
         for (const ctx of m.buildContexts as unknown[]) {
             if (!ctx || typeof ctx !== 'object' || Array.isArray(ctx)) return 'invalid build context entry';
@@ -437,8 +438,23 @@ export class GitProjectManifestService {
         };
     }
 
+    /**
+     * Public projection of refusals for every API surface (summary, pull, and
+     * abort messages): high-sensitivity refusals lose their source path and
+     * the path text is scrubbed (case-insensitively) from the reason so
+     * secret file names never cross the API.
+     */
+    toPublicRefusals(refusals: RefusalInfo[]): RefusalInfo[] {
+        return refusals.map((r) => {
+            if (r.sensitivity !== 'high' || r.sourcePath === null) return r;
+            const pattern = r.sourcePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const scrubbedReason = r.reason.replace(new RegExp(pattern, 'gi'), '[redacted]');
+            return { ...r, sourcePath: null, reason: scrubbedReason };
+        });
+    }
+
     summaryFrom(manifest: GitProjectManifest): ManifestSummary {
-        const actionable = manifest.refusals.filter((r) => r.actionable);
+        const actionable = this.toPublicRefusals(manifest.refusals.filter((r) => r.actionable));
         return {
             state: manifest.state,
             manifestVersion: manifest.manifestVersion,
@@ -742,12 +758,26 @@ export class GitProjectManifestService {
      * Promote the validated candidate into the live stack dir. Crash-safe:
      * the promotion marker records the intermediate state; any mid-write
      * failure restores the previous applied generation and rethrows.
+     *
+     * The introduced-path collision guard protects every path the incoming
+     * generation owns that the prior generation did not. What may overwrite
+     * an existing file at such a path depends on the caller:
+     * - a managed stack (priorManifest present): nothing except the synced
+     *   stack-root .env, the file is unowned and the apply refuses;
+     * - fresh stack creation: 'all' (the directory was just created and
+     *   every file is adoption boilerplate);
+     * - an existing pre-manifest stack (legacy Git source): the caller's
+     *   allowlist of known legacy-owned paths (compose files + synced .env),
+     *   matched exactly as STACK-RELATIVE materialized paths;
+     * - omitted: fail closed, nothing may be adopted.
      */
     async promoteGeneration(stackName: string, opts: {
         sha: string;
         candidateRelPath: string;
         manifest: GitProjectManifest;
         priorManifest: GitProjectManifest | null;
+        /** Paths the incoming generation may overwrite even though they already exist and were never managed. 'all' = fresh creation. Omitted = nothing may be adopted. */
+        adoptExistingMaterializedPaths?: string[] | 'all';
     }): Promise<void> {
         const { sha, candidateRelPath, manifest, priorManifest } = opts;
         const candidateAbs = path.join(this.managedRoot(stackName), candidateRelPath);
@@ -790,17 +820,25 @@ export class GitProjectManifestService {
             // owns that the prior generation did not, and that ALREADY EXISTS
             // in the live stack, is a local file Sencho never owned.
             // Overwriting it would destroy user data, so refuse BEFORE the
-            // first live mutation. The synced stack-root .env is excluded:
-            // enabling sync_env is the explicit adoption of that path (its
-            // content is staged by design). Fresh creation (priorManifest
-            // null) is exempt: the stack dir was just created and every file
-            // is adoption boilerplate.
-            if (priorManifest) {
+            // first live mutation. Exceptions are explicit and caller-driven:
+            // the synced stack-root .env (enabling sync_env is the explicit
+            // adoption of that path, its content is staged by design), 'all'
+            // for fresh creation (the directory was just created and every
+            // file is adoption boilerplate), and the caller's legacy-ownership
+            // allowlist for an existing pre-manifest stack. Omitted (managed
+            // stack, or an apply with no allowlist) fails closed. Allowlist
+            // entries are STACK-RELATIVE materialized paths matched exactly:
+            // a case-variant path is a different file on case-sensitive
+            // filesystems and must not be adopted.
+            {
                 const fsSvc = FileSystemService.getInstance();
                 const syncEnvOwnsEnv = manifest.inputs.some((i) => i.dependencyKind === 'sync-env' && i.materializedPath === '.env');
+                const adoptAll = opts.adoptExistingMaterializedPaths === 'all';
+                const allowlist = new Set(Array.isArray(opts.adoptExistingMaterializedPaths) ? opts.adoptExistingMaterializedPaths : []);
                 const colliding: string[] = [];
                 for (const rel of introduced) {
                     if (rel === '.env' && syncEnvOwnsEnv) continue;
+                    if (adoptAll || allowlist.has(rel)) continue;
                     const kind = await fsSvc.pathKind(stackName, rel);
                     if (kind !== null) colliding.push(rel);
                 }

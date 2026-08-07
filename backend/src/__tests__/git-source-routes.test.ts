@@ -289,6 +289,49 @@ describe('GET /api/stacks/:stackName/git-source', () => {
         expect(res.body.repo_url).toBe('https://github.com/example/repo.git');
         expect(res.body.linked).toBeUndefined();
     });
+
+    it('redacts high-sensitivity refusal paths from the summary projection (audit round 9 S-1)', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, 'linked-redacted'), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, 'linked-redacted', 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+        seedGitSource('linked-redacted');
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const svc = GitProjectManifestService.getInstance();
+        const manifest = svc.buildManifest({
+            stackName: 'linked-redacted',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc123',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: 'linked-redacted',
+            invocation: ['-f', 'compose.yaml', '-p', 'linked-redacted'],
+            inputs: [],
+            refusals: [
+                { sourcePath: 'secrets/db.env', kind: 'missing-file', reason: 'File not found in repository: secrets/db.env', actionable: true, sensitivity: 'high' },
+                { sourcePath: 'compose.yaml', kind: 'missing-file', reason: 'File not found in repository: compose.yaml', actionable: true, sensitivity: 'medium' },
+            ],
+            buildContexts: [],
+            bounds: { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 },
+            priorManifest: null,
+            state: 'partial',
+        });
+        await svc.writeManifest('linked-redacted', manifest);
+
+        const res = await request(app)
+            .get('/api/stacks/linked-redacted/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        const serialized = JSON.stringify(res.body);
+        expect(serialized).not.toContain('secrets/db.env');
+        const high = res.body.manifest.refused.find(
+            (r: { kind: string; sourcePath: string | null; reason: string }) => r.kind === 'missing-file' && r.sourcePath === null,
+        ) as { reason: string } | undefined;
+        expect(high).toBeTruthy();
+        expect(high?.reason).toContain('[redacted]');
+        // Non-sensitive refusals keep their actionable path.
+        expect(res.body.manifest.refused.some((r: { sourcePath: string }) => r.sourcePath === 'compose.yaml')).toBe(true);
+    });
 });
 
 describe('PUT /api/stacks/:stackName/git-source: multi-file selection', () => {

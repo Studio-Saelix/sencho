@@ -6,17 +6,33 @@
  * injected via the `read` callback so this module stays side-effect free and
  * testable.
  *
+ * Every declaration is resolved in TWO coordinate systems:
+ * - source: the repository path of the file (what the clone contains), and
+ * - materialized: the stack-relative path the file occupies at runtime.
+ * They diverge only when the runtime layout relocates a file: the primary
+ * compose file always lands at the stack root, so its entire include/extends
+ * graph (and every project-relative path declared in it) shifts by the
+ * primary's repository directory prefix. Merged (-f) files keep their
+ * repository paths; include/extends-reached files keep their own directory
+ * unless a relocation applies.
+ *
  * Resolution rules (compose spec):
  * - `include:` and `extends.file` paths resolve relative to the declaring
- *   file's directory.
- * - include map-form `env_file` resolves relative to the project directory.
+ *   file's directory, in both coordinate systems.
+ * - include map-form `env_file` resolves relative to the invoking file, per
+ *   the compose-go include env resolution.
+ * - include map-form `project_directory` re-bases the included subtree's
+ *   project-relative paths.
  * - service `env_file`, top-level `configs`/`secrets` `file:`, `label_file`
- *   and `build.context` are recorded with a base dir; the classifier resolves
- *   them against the effective project directory (the first compose file's
- *   directory, or the context dir when one is configured), except in files
- *   reached via include/extends, which keep their own directory. An omitted
- *   build context defaults to the project directory.
- * - relative bind-mount host sources resolve relative to the project dir.
+ *   and `build.context` resolve against the effective project directory: the
+ *   context dir, or the base file's directory for merged (-f) files; files
+ *   reached via include/extends keep their own directory (or the included
+ *   `project_directory`). An omitted build context defaults to that project
+ *   directory.
+ * - Absolute (POSIX, Windows drive/UNC) and home-relative (`~`) paths are
+ *   HOST paths: emitted with baseDir 'host' so the classifier records them as
+ *   unmanaged (data inputs) or refuses them (include/extends), never adopting
+ *   a same-named repository file.
  *
  * Never throws: parse errors are collected into `parseErrors` and surface as
  * refusals at classification time.
@@ -52,42 +68,109 @@ interface ComposeRefs {
     parseErrors: string[];
 }
 
+/**
+ * Walk context for one compose file: its repository path, its runtime
+ * (materialized) path ('' = stack root), and the project bases used to
+ * resolve project-relative declarations in both coordinate systems.
+ */
+interface FileContext {
+    repoPath: string;
+    runtimePath: string;
+    projectBase: string | null;
+    runtimeProjectBase: string | null;
+}
+
 function isDynamicPath(p: string): boolean {
     return p.includes('$');
 }
 
-function normalizeRepoPath(p: string): string {
-    return path.posix.normalize(p).replace(/\\/g, '/').replace(/^\/+/, '');
+/** Absolute (POSIX, Windows drive/UNC, drive-relative, root-relative) or home-relative host path. */
+export function isHostAbsolutePath(p: string): boolean {
+    return p.startsWith('/') || p.startsWith('~') || /^[A-Za-z]:/.test(p) || p.startsWith('\\');
 }
 
-function resolveRelative(declaringDir: string | null, target: string): string {
-    // URL includes (http/https/git) are recorded verbatim; the classifier
-    // refuses them as url-include.
-    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(target)) return target.trim();
-    if (path.posix.isAbsolute(target)) return normalizeRepoPath(target);
-    return normalizeRepoPath(declaringDir ? `${declaringDir}/${target}` : target);
+export function isUrl(p: string): boolean {
+    return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p);
+}
+
+function dirOf(p: string): string | null {
+    return p && p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : null;
+}
+
+/** Normalize a resolved path; null when it escapes its base (.. / absolute). */
+function normalizeWithinBase(candidate: string): string | null {
+    // Backslashes are normalized BEFORE collapse so `sub\..\x` (Windows-style
+    // separators) collapses and escapes are detected, never emitted raw.
+    const normalized = path.posix.normalize(candidate.replace(/\\/g, '/')).replace(/^\.\//, '');
+    if (normalized === '..' || normalized.startsWith('../') || path.posix.isAbsolute(normalized)) return null;
+    return normalized;
+}
+
+/** Resolve a path against a base; null when the result escapes the base. */
+function resolveWithinBase(base: string | null, target: string): string | null {
+    return normalizeWithinBase(base ? `${base}/${target}` : target);
 }
 
 function emitInput(
     refs: ComposeRefs,
+    rawPath: string | null,
     sourcePath: string | null,
+    materializedPath: string | null,
     kind: InputDependencyKind,
     role: InputRole,
     fromFile: string,
     baseDir: DeclaredInput['baseDir'],
     service: string | null = null,
 ): void {
-    if (sourcePath !== null && isDynamicPath(sourcePath)) {
-        refs.dynamic.push({ sourcePath, kind, note: 'Path contains a variable; resolved by Compose at deploy time, not enumerated.' });
+    if (rawPath !== null && isDynamicPath(rawPath)) {
+        refs.dynamic.push({ sourcePath: rawPath, kind, note: 'Path contains a variable; resolved by Compose at deploy time, not enumerated.' });
         return;
     }
-    refs.inputs.push({ sourcePath, baseDir, kind, role, fromFile, service });
+    refs.inputs.push({ sourcePath, materializedPath, baseDir, kind, role, fromFile, service });
+}
+
+/**
+ * Emit a project-relative declaration resolved in both coordinate systems.
+ * Host/absolute paths and paths that escape either base are emitted as host
+ * inputs (the classifier records them unmanaged or refuses include/extends).
+ */
+function emitProjectRelative(
+    refs: ComposeRefs,
+    raw: string,
+    kind: InputDependencyKind,
+    role: InputRole,
+    fromFile: string,
+    ctx: FileContext,
+    baseDir: DeclaredInput['baseDir'],
+    service: string | null = null,
+): void {
+    if (isHostAbsolutePath(raw)) {
+        emitInput(refs, raw, raw, null, kind, role, fromFile, 'host', service);
+        return;
+    }
+    const source = resolveWithinBase(ctx.projectBase, raw);
+    const materialized = resolveWithinBase(ctx.runtimeProjectBase, raw);
+    if (source === null || materialized === null) {
+        emitInput(refs, raw, raw, null, kind, role, fromFile, 'host', service);
+        return;
+    }
+    emitInput(refs, raw, source, materialized, kind, role, fromFile, baseDir, service);
 }
 
 function asString(value: unknown): string | undefined {
     if (typeof value === 'string') return value;
     if (typeof value === 'number') return String(value);
     return undefined;
+}
+
+/** Normalize a string-or-list-of-strings value into its string items. */
+function asStringList(value: unknown): string[] {
+    if (typeof value === 'string') return [value];
+    if (typeof value === 'number') return [String(value)];
+    if (Array.isArray(value)) {
+        return value.map(asString).filter((p): p is string => p !== undefined);
+    }
+    return [];
 }
 
 /** Normalize an env_file entry (string, list item, or map {path, required}) to its path. */
@@ -110,7 +193,6 @@ function resourceFilePath(value: unknown): string | null {
         if (f !== undefined) return asString(f) ?? null;
         return null; // plain {} or name-only reference
     }
-    if (value === null) return null;
     return null;
 }
 
@@ -124,48 +206,52 @@ function shortFormBindSource(volume: string): string | null {
 }
 
 /** Collect bind-mount host sources from a service volumes list. */
-function collectBindMounts(volumes: unknown, fromFile: string, refs: ComposeRefs): void {
+function collectBindMounts(volumes: unknown, fromFile: string, refs: ComposeRefs, ctx: FileContext): void {
+    const emitBindSource = (src: string): void => {
+        if (isHostAbsolutePath(src)) {
+            emitInput(refs, src, null, null, 'bind-mount', 'bind-mount', fromFile, 'host');
+        } else {
+            emitProjectRelative(refs, src, 'bind-mount', 'bind-mount', fromFile, ctx, 'project-root');
+        }
+    };
     if (!Array.isArray(volumes)) return;
     for (const entry of volumes) {
         if (typeof entry === 'string') {
             const src = shortFormBindSource(entry);
-            if (src === null) continue;
-            const hostAbs = src.startsWith('/') || src.startsWith('~') || /^[A-Za-z]:[\\/]/.test(src);
-            emitInput(refs, hostAbs ? null : src, 'bind-mount', 'bind-mount', fromFile, hostAbs ? 'host' : 'project-root');
+            if (src !== null) emitBindSource(src);
             continue;
         }
         if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
             const record = entry as Record<string, unknown>;
             if (record.type === 'bind' && typeof record.source === 'string') {
-                const src = record.source;
-                const hostAbs = src.startsWith('/') || src.startsWith('~') || /^[A-Za-z]:[\\/]/.test(src);
-                emitInput(refs, hostAbs ? null : src, 'bind-mount', 'bind-mount', fromFile, hostAbs ? 'host' : 'project-root');
+                emitBindSource(record.source);
             }
         }
     }
 }
 
 /** Collect build declarations (context, dockerfile, secrets, additional contexts). */
-function collectBuild(build: unknown, fromFile: string, refs: ComposeRefs, service: string | null): void {
+function collectBuild(build: unknown, fromFile: string, refs: ComposeRefs, ctx: FileContext, service: string | null): void {
     if (typeof build === 'string') {
-        emitInput(refs, build, 'build-context', 'build-context', fromFile, 'compose-file-dir', service);
+        emitProjectRelative(refs, build, 'build-context', 'build-context', fromFile, ctx, 'compose-file-dir', service);
         return;
     }
     if (!build || typeof build !== 'object' || Array.isArray(build)) return;
     const record = build as Record<string, unknown>;
     if (typeof record.context === 'string') {
-        emitInput(refs, record.context, 'build-context', 'build-context', fromFile, 'compose-file-dir', service);
+        emitProjectRelative(refs, record.context, 'build-context', 'build-context', fromFile, ctx, 'compose-file-dir', service);
     } else {
         // An omitted context defaults to the declaring file's project
-        // directory (compose spec). The classifier resolves '.' against the
-        // project directory: the context dir, the base file's directory for
-        // merged (-f) files, or the declaring file's own directory for
-        // include/extends-reached files.
-        emitInput(refs, '.', 'build-context', 'build-context', fromFile, 'compose-file-dir', service);
+        // directory (compose spec); resolved by emitProjectRelative.
+        emitProjectRelative(refs, '.', 'build-context', 'build-context', fromFile, ctx, 'compose-file-dir', service);
     }
     if (typeof record.dockerfile === 'string') {
-        // Dockerfile is relative to the context; the classifier rebases it.
-        emitInput(refs, record.dockerfile, 'dockerfile', 'dockerfile', fromFile, 'compose-file-dir', service);
+        if (isHostAbsolutePath(record.dockerfile)) {
+            emitInput(refs, record.dockerfile, record.dockerfile, null, 'dockerfile', 'dockerfile', fromFile, 'host', service);
+        } else {
+            // Dockerfile is relative to the context; the classifier rebases it.
+            emitInput(refs, record.dockerfile, record.dockerfile, null, 'dockerfile', 'dockerfile', fromFile, 'compose-file-dir', service);
+        }
     }
     if (record.secrets && Array.isArray(record.secrets)) {
         // Long syntax carries only source/target/uid/gid/mode; `source` names
@@ -175,55 +261,95 @@ function collectBuild(build: unknown, fromFile: string, refs: ComposeRefs, servi
         // secrets walk; the reference itself is recorded as unmanaged, the
         // same as the string form.
         record.secrets.forEach(() => {
-            emitInput(refs, null, 'build-secret', 'build-secret', fromFile, 'host', service);
+            emitInput(refs, null, null, null, 'build-secret', 'build-secret', fromFile, 'host', service);
         });
     }
+    // additional_contexts: mapping (name -> value) or list of NAME=VALUE
+    // strings (compose build spec). Path values are project-relative inputs;
+    // type:// and service: values are supplied by the image builder at build
+    // time and recorded unmanaged.
+    let additional: Array<[string, unknown]> = [];
     if (record.additional_contexts && typeof record.additional_contexts === 'object' && !Array.isArray(record.additional_contexts)) {
-        for (const [, ctxPath] of Object.entries(record.additional_contexts as Record<string, unknown>)) {
-            const p = asString(ctxPath);
-            if (p !== undefined) {
-                emitInput(refs, p, 'build-additional-context', 'build-additional-context', fromFile, 'compose-file-dir', service);
+        additional = Object.entries(record.additional_contexts as Record<string, unknown>);
+    } else if (Array.isArray(record.additional_contexts)) {
+        for (const item of record.additional_contexts) {
+            const text = asString(item);
+            if (text !== undefined) {
+                const eq = text.indexOf('=');
+                if (eq > 0) additional.push([text.slice(0, eq), text.slice(eq + 1)]);
             }
+        }
+    }
+    for (const [, value] of additional) {
+        const p = asString(value);
+        if (p === undefined) continue;
+        if (isUrl(p) || p.startsWith('service:')) {
+            emitInput(refs, p, p, null, 'build-additional-context', 'build-additional-context', fromFile, 'host', service);
+        } else {
+            emitProjectRelative(refs, p, 'build-additional-context', 'build-additional-context', fromFile, ctx, 'compose-file-dir', service);
         }
     }
 }
 
 /** Walk one service definition for file-backed inputs. */
-function walkService(serviceName: string, service: unknown, fromFile: string, refs: ComposeRefs): void {
+function walkService(serviceName: string, service: unknown, fromFile: string, refs: ComposeRefs, ctx: FileContext): void {
     if (!service || typeof service !== 'object' || Array.isArray(service)) return;
     const record = service as Record<string, unknown>;
 
-    // extends.file (map form); the string form extends a sibling service in the same file.
-    if (record.extends && typeof record.extends === 'object' && !Array.isArray(record.extends)) {
-        const ext = record.extends as Record<string, unknown>;
-        if (typeof ext.file === 'string') {
-            emitInput(refs, ext.file, 'extends', 'compose-additional', fromFile, 'compose-file-dir');
-        }
-    }
+    // extends.file (map form) is emitted and recursed by parseFileInner, which
+    // needs the resolved target for the recursion; the string form extends a
+    // sibling service in the same file.
 
     const envFile = record.env_file;
     if (envFile !== undefined) {
-        if (Array.isArray(envFile)) {
-            for (const entry of envFile) {
-                const p = envFilePath(entry);
-                if (p !== undefined) emitInput(refs, p, 'env_file', 'env', fromFile, 'compose-file-dir');
-            }
-        } else {
-            const p = envFilePath(envFile);
-            if (p !== undefined) emitInput(refs, p, 'env_file', 'env', fromFile, 'compose-file-dir');
+        const entries = Array.isArray(envFile) ? envFile : [envFile];
+        for (const entry of entries) {
+            const p = envFilePath(entry);
+            if (p !== undefined) emitProjectRelative(refs, p, 'env_file', 'env', fromFile, ctx, 'compose-file-dir');
         }
     }
 
-    if (typeof record.label_file === 'string') {
-        emitInput(refs, record.label_file, 'label_file', 'label-file', fromFile, 'compose-file-dir');
+    for (const labelFile of asStringList(record.label_file)) {
+        emitProjectRelative(refs, labelFile, 'label_file', 'label-file', fromFile, ctx, 'compose-file-dir');
     }
 
-    if (record.build !== undefined) collectBuild(record.build, fromFile, refs, serviceName);
-    collectBindMounts(record.volumes, fromFile, refs);
+    if (record.build !== undefined) collectBuild(record.build, fromFile, refs, ctx, serviceName);
+    collectBindMounts(record.volumes, fromFile, refs, ctx);
 
     // Per-service configs/secrets references are keys into the top-level
     // maps, which the top-level walk emits; nothing to record here.
-    void serviceName;
+}
+
+/**
+ * Emit a file-relative declaration (include/extends/include-env), returning
+ * the resolved source/materialized pair; the caller recurses via
+ * readAndRecurse when the target is a repository file.
+ */
+function emitFileRelative(
+    refs: ComposeRefs,
+    raw: string,
+    kind: InputDependencyKind,
+    role: InputRole,
+    fromFile: string,
+    ctx: FileContext,
+    baseDir: DeclaredInput['baseDir'] = 'repo-root',
+): { source: string | null; materialized: string | null } {
+    if (isHostAbsolutePath(raw)) {
+        emitInput(refs, raw, raw, null, kind, role, fromFile, 'host');
+        return { source: null, materialized: null };
+    }
+    if (isUrl(raw)) {
+        emitInput(refs, raw, raw.trim(), null, kind, role, fromFile, baseDir);
+        return { source: null, materialized: null };
+    }
+    const source = resolveWithinBase(dirOf(ctx.repoPath), raw);
+    const materialized = resolveWithinBase(dirOf(ctx.runtimePath), raw);
+    if (source === null || materialized === null) {
+        emitInput(refs, raw, raw, null, kind, role, fromFile, 'host');
+        return { source: null, materialized: null };
+    }
+    emitInput(refs, raw, source, materialized, kind, role, fromFile, baseDir);
+    return { source, materialized };
 }
 
 /**
@@ -233,7 +359,7 @@ function walkService(serviceName: string, service: unknown, fromFile: string, re
  * shared base (diamond / repeated include) and dedupes silently.
  */
 function parseFile(
-    repoPath: string,
+    ctx: FileContext,
     content: string,
     opts: ParseOptions,
     refs: ComposeRefs,
@@ -241,7 +367,7 @@ function parseFile(
     stack: Set<string>,
     depth: number,
 ): void {
-    const normalized = normalizeRepoPath(repoPath);
+    const normalized = normalizeRepoPath(ctx.repoPath);
     if (stack.has(normalized)) {
         refs.parseErrors.push(`Include/extends cycle detected at ${normalized}`);
         return;
@@ -251,15 +377,19 @@ function parseFile(
     }
     stack.add(normalized);
     try {
-        parseFileInner(normalized, content, opts, refs, visited, stack, depth);
+        parseFileInner(ctx, content, opts, refs, visited, stack, depth);
     } finally {
         stack.delete(normalized);
         visited.add(normalized);
     }
 }
 
+function normalizeRepoPath(p: string): string {
+    return path.posix.normalize(p.replace(/\\/g, '/')).replace(/^\/+/, '');
+}
+
 function parseFileInner(
-    normalized: string,
+    ctx: FileContext,
     content: string,
     opts: ParseOptions,
     refs: ComposeRefs,
@@ -267,6 +397,7 @@ function parseFileInner(
     stack: Set<string>,
     depth: number,
 ): void {
+    const normalized = normalizeRepoPath(ctx.repoPath);
     if (depth > MAX_INCLUDE_DEPTH) {
         refs.parseErrors.push(`Include/extends graph exceeds depth ${MAX_INCLUDE_DEPTH} at ${normalized}`);
         return;
@@ -286,42 +417,46 @@ function parseFileInner(
     if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return;
 
     const root = doc as Record<string, unknown>;
-    const declaringDir = normalized.includes('/') ? normalized.slice(0, normalized.lastIndexOf('/')) : null;
 
-    // Top-level include: list of paths or map {path, env_file}.
+    // Top-level include: list of paths or maps {path, env_file, project_directory}.
     const include = root.include;
     if (include !== undefined) {
         const items = Array.isArray(include) ? include : [include];
         for (const item of items) {
             if (typeof item === 'string') {
-                const resolved = resolveRelative(declaringDir, item);
-                emitInput(refs, resolved, 'include', 'compose-additional', normalized, 'repo-root');
-                const nested = opts.read(resolved);
-                if (nested === null) {
-                    refs.parseErrors.push(`Included compose file ${resolved} is unreadable`);
-                } else {
-                    parseFile(resolved, nested, opts, refs, visited, stack, depth + 1);
-                }
+                const resolved = emitFileRelative(refs, item, 'include', 'compose-additional', normalized, ctx);
+                readAndRecurse(resolved, ctx, opts, refs, visited, stack, depth, 'Included compose file');
             } else if (item && typeof item === 'object' && !Array.isArray(item)) {
                 const map = item as Record<string, unknown>;
-                const p = asString(map.path);
-                if (p !== undefined) {
-                    const resolved = resolveRelative(declaringDir, p);
-                    emitInput(refs, resolved, 'include', 'compose-additional', normalized, 'repo-root');
-                    const nested = opts.read(resolved);
-                    if (nested === null) {
-                        refs.parseErrors.push(`Included compose file ${resolved} is unreadable`);
+                // path accepts a string or a list of strings (merged in order).
+                const paths = asStringList(map.path);
+                if (paths.length === 0) {
+                    refs.parseErrors.push(`Include entry in ${normalized} has no resolvable path`);
+                    continue;
+                }
+                // project_directory re-bases the included subtree's
+                // project-relative paths; when omitted it defaults to the
+                // included file's own directory (readAndRecurse's fallback),
+                // matching the string-form include behavior.
+                const projectDir = asString(map.project_directory);
+                let childOverride: { projectBase: string | null; runtimeProjectBase: string | null } | undefined;
+                if (projectDir !== undefined) {
+                    const childProjectBase = resolveWithinBase(dirOf(ctx.repoPath), projectDir);
+                    const childRuntimeProjectBase = resolveWithinBase(dirOf(ctx.runtimePath), projectDir);
+                    if (childProjectBase === null || childRuntimeProjectBase === null) {
+                        refs.parseErrors.push(`Include project_directory ${projectDir} in ${normalized} escapes its base`);
                     } else {
-                        parseFile(resolved, nested, opts, refs, visited, stack, depth + 1);
+                        childOverride = { projectBase: childProjectBase, runtimeProjectBase: childRuntimeProjectBase };
                     }
                 }
-                const includeEnv = asString(map.env_file);
-                if (includeEnv !== undefined) {
-                    // Relative to the project directory per the compose spec.
-                    // The path is ALREADY resolved here, so it is emitted as a
-                    // repo-root input; the classifier must not re-resolve it.
-                    const base = opts.projectRoot ?? declaringDir ?? null;
-                    emitInput(refs, base ? resolveRelative(base, includeEnv) : includeEnv, 'include-env', 'env', normalized, 'repo-root');
+                for (const p of paths) {
+                    const resolved = emitFileRelative(refs, p, 'include', 'compose-additional', normalized, ctx);
+                    readAndRecurse(resolved, ctx, opts, refs, visited, stack, depth, 'Included compose file', childOverride);
+                }
+                // env_file accepts a string or a list of strings; resolves
+                // relative to the invoking file (compose-go include env).
+                for (const env of asStringList(map.env_file)) {
+                    emitFileRelative(refs, env, 'include-env', 'env', normalized, ctx);
                 }
             }
         }
@@ -330,18 +465,15 @@ function parseFileInner(
     // Per-file service walk (keeps declaring-file provenance for relative refs).
     if (root.services && typeof root.services === 'object' && !Array.isArray(root.services)) {
         for (const [serviceName, service] of Object.entries(root.services as Record<string, unknown>)) {
-            walkService(serviceName, service, normalized, refs);
+            walkService(serviceName, service, normalized, refs, ctx);
             // extends.file recursion after recording the declaration.
             if (service && typeof service === 'object' && !Array.isArray(service)) {
                 const ext = (service as Record<string, unknown>).extends;
-                if (ext && typeof ext === 'object' && !Array.isArray(ext) && typeof (ext as Record<string, unknown>).file === 'string') {
-                    const fileTarget = (ext as Record<string, unknown>).file as string;
-                    const resolved = resolveRelative(declaringDir, fileTarget);
-                    const nested = opts.read(resolved);
-                    if (nested === null) {
-                        refs.parseErrors.push(`extends.file target ${resolved} is unreadable`);
-                    } else {
-                        parseFile(resolved, nested, opts, refs, visited, stack, depth + 1);
+                if (ext && typeof ext === 'object' && !Array.isArray(ext)) {
+                    const fileTarget = asString((ext as Record<string, unknown>).file);
+                    if (fileTarget !== undefined) {
+                        const resolved = emitFileRelative(refs, fileTarget, 'extends', 'compose-additional', normalized, ctx);
+                        readAndRecurse(resolved, ctx, opts, refs, visited, stack, depth, 'extends.file target');
                     }
                 }
             }
@@ -355,18 +487,52 @@ function parseFileInner(
     ] as const) {
         const resources = root[key];
         if (!resources || typeof resources !== 'object' || Array.isArray(resources)) continue;
-        for (const [name, def] of Object.entries(resources as Record<string, unknown>)) {
+        for (const def of Object.values(resources as Record<string, unknown>)) {
             const file = resourceFilePath(def);
             if (file !== null) {
-                emitInput(refs, file, kind, role, normalized, 'compose-file-dir');
+                emitProjectRelative(refs, file, kind, role, normalized, ctx, 'compose-file-dir');
             } else if (def !== null && def !== undefined) {
                 // external / env / name-only forms are docker-supplied or
                 // unresolvable; record an unmanaged placeholder.
-                emitInput(refs, null, kind, role, normalized, 'host');
+                emitInput(refs, null, null, null, kind, role, normalized, 'host');
             }
-            void name;
         }
     }
+}
+
+/** Read a resolved include/extends target and recurse when it is a repository file. */
+function readAndRecurse(
+    resolved: { source: string | null; materialized: string | null },
+    ctx: FileContext,
+    opts: ParseOptions,
+    refs: ComposeRefs,
+    visited: Set<string>,
+    stack: Set<string>,
+    depth: number,
+    errorLabel: string,
+    childOverride?: { projectBase: string | null; runtimeProjectBase: string | null },
+): void {
+    // Host/URL/escape paths emit with both sides null; the classifier decides.
+    if (resolved.source === null || resolved.materialized === null) return;
+    const nested = opts.read(resolved.source);
+    if (nested === null) {
+        refs.parseErrors.push(`${errorLabel} ${resolved.source} is unreadable`);
+        return;
+    }
+    parseFile(
+        {
+            repoPath: resolved.source,
+            runtimePath: resolved.materialized,
+            projectBase: childOverride?.projectBase ?? dirOf(resolved.source),
+            runtimeProjectBase: childOverride?.runtimeProjectBase ?? dirOf(resolved.materialized),
+        },
+        nested,
+        opts,
+        refs,
+        visited,
+        stack,
+        depth + 1,
+    );
 }
 
 export function parseDeclaredInputs(
@@ -376,14 +542,34 @@ export function parseDeclaredInputs(
     const refs: ComposeRefs = { inputs: [], dynamic: [], parseErrors: [] };
     const visited = new Set<string>();
     const stack = new Set<string>();
-    for (const file of orderedContents) {
-        parseFile(file.path, file.content, opts, refs, visited, stack, 0);
+    // Merged (-f) files share the TOP project's bases: the context dir, or
+    // the base (first) file's directory. The primary file lands at the stack
+    // root at runtime, so its runtime path is '' while additional files keep
+    // their repository paths.
+    const orderedProjectBase = opts.projectRoot ?? dirOf(orderedContents[0]?.path ?? '');
+    const orderedRuntimeProjectBase = opts.projectRoot ?? null;
+    for (const [index, file] of orderedContents.entries()) {
+        parseFile(
+            {
+                repoPath: file.path,
+                runtimePath: index === 0 ? '' : file.path,
+                projectBase: orderedProjectBase,
+                runtimeProjectBase: orderedRuntimeProjectBase,
+            },
+            file.content,
+            opts,
+            refs,
+            visited,
+            stack,
+            0,
+        );
     }
 
     // Interpolation env at the project root (compose loads it for variable
     // substitution). Always declared; classification decides managed vs absent.
     const interpRoot = opts.projectRoot ?? '';
-    emitInput(refs, interpRoot ? `${interpRoot}/.env` : '.env', 'interpolation-env', 'env', '<project>', 'project-root');
+    const interpPath = interpRoot ? `${interpRoot}/.env` : '.env';
+    emitInput(refs, interpPath, interpPath, interpPath, 'interpolation-env', 'env', '<project>', 'project-root');
 
     return { inputs: refs.inputs, dynamic: refs.dynamic, parseErrors: refs.parseErrors };
 }

@@ -1290,8 +1290,11 @@ export class GitSourceService {
 
         const actionable = inventory.refusals.filter((r) => r.actionable);
         if (actionable.length > 0) {
-            const detail = actionable.slice(0, 5).map((r) => r.reason).join('; ');
-            throw new GitSourceError('GIT_ERROR', `Cannot materialize the complete project: ${detail}${actionable.length > 5 ? ` (and ${actionable.length - 5} more)` : ''}`);
+            // The abort message is a public surface: high-sensitivity refusal
+            // paths are redacted before they reach the API.
+            const publicRefusals = manifestSvc.toPublicRefusals(actionable);
+            const detail = publicRefusals.slice(0, 5).map((r) => r.reason).join('; ');
+            throw new GitSourceError('GIT_ERROR', `Cannot materialize the complete project: ${detail}${publicRefusals.length > 5 ? ` (and ${publicRefusals.length - 5} more)` : ''}`);
         }
 
         // Build-context entries are directories; their content is copied via
@@ -1662,7 +1665,8 @@ export class GitSourceService {
             currentEnv: disk.env,
             validation,
             hasLocalChanges,
-            refusals: materialization.value?.inventory.refusals ?? [],
+            // High-sensitivity refusals are redacted on every public surface.
+            refusals: manifestSvc.toPublicRefusals(materialization.value?.inventory.refusals ?? []),
             manifestSummary,
             candidateReady: materialization.value !== null && materialization.value.validation.ok,
             warnings: fetched.warnings,
@@ -1835,12 +1839,42 @@ export class GitSourceService {
                 priorManifest: prior ?? null,
                 state: pending.inventory.refusals.length > 0 ? 'partial' : 'active',
             });
-            await manifestSvc.promoteGeneration(stackName, {
-                sha: commitSha,
-                candidateRelPath: pending.candidateRelPath,
-                manifest,
-                priorManifest: prior ?? null,
-            });
+            // An existing pre-manifest stack (legacy Git source) adopts ONLY
+            // the paths the legacy format owned: the applied compose files and
+            // the synced .env. Every other existing file at an introduced path
+            // is a local file the incoming generation must not overwrite.
+            const legacyOwnedPaths = prior
+                ? undefined
+                : [
+                      ...(src.applied_deploy_spec?.files ?? [PRIMARY_COMPOSE_FILENAME]),
+                      ...(src.sync_env ? ['.env'] : []),
+                  ];
+            try {
+                await manifestSvc.promoteGeneration(stackName, {
+                    sha: commitSha,
+                    candidateRelPath: pending.candidateRelPath,
+                    manifest,
+                    priorManifest: prior ?? null,
+                    adoptExistingMaterializedPaths: legacyOwnedPaths,
+                });
+            } catch (e) {
+                // Pre-mutation refusals (collision guard, case-only changes)
+                // and promotion failures surface as clean GitSourceErrors.
+                // The original error is logged with its stack for diagnosis,
+                // and the message is scrubbed of credentials and of the
+                // incoming manifest's high-sensitivity paths.
+                if (e instanceof GitSourceError) throw e;
+                const raw = e instanceof Error ? e.message : String(e);
+                console.error(`[GitSource] promotion failed for ${sanitizeForLog(stackName)}:`, e instanceof Error ? e.stack ?? e.message : raw);
+                const sensitivePaths = manifest.inputs
+                    .filter((i) => i.sensitivity === 'high' && i.materializedPath !== null)
+                    .map((i) => i.materializedPath!);
+                let redacted = raw;
+                for (const rel of sensitivePaths) {
+                    redacted = redacted.split(rel).join('[redacted]');
+                }
+                throw new GitSourceError('GIT_ERROR', scrubCredentials(redacted));
+            }
             appliedSpec = this.deriveAppliedSpec(src.compose_paths, src.context_dir);
         } else {
             // ── Legacy path (v2/plaintext pending from before the upgrade) ──
@@ -2030,6 +2064,9 @@ export class GitSourceService {
                         candidateRelPath: materialization.value.candidateRelPath,
                         manifest,
                         priorManifest: null,
+                        // The stack directory was just created by this flow;
+                        // every existing file is adoption boilerplate.
+                        adoptExistingMaterializedPaths: 'all',
                     });
                     completeProjectManifest = manifest;
                     appliedSpec = this.deriveAppliedSpec(input.composePaths, input.contextDir);
