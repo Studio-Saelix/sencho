@@ -478,10 +478,25 @@ export class ComposeInputDiscoveryService {
                 for (const f of plan.context.files) {
                     if (!existing.context.files.some((ef) => caseKey(ef.path) === caseKey(f.path))) {
                         existing.context.files.push(f);
+                        existing.context.contextBytes += plan.context.contextBytes;
                     }
                 }
             } else {
                 mergedPlans.push(plan);
+            }
+        }
+        // Recheck bounds after merge: the union may exceed the configured cap
+        // even though each individual plan stayed under it.
+        for (const plan of mergedPlans) {
+            if (plan.context.contextBytes > bounds.maxContextBytes) {
+                refusals.push(
+                    this.refusal(
+                        plan.context.repoPath || '.',
+                        'context-unbounded',
+                        `Merged build context ${plan.context.repoPath || '.'} is ${plan.context.contextBytes} bytes after union; the maximum is ${bounds.maxContextBytes}`,
+                        true,
+                    ),
+                );
             }
         }
         return { plans: mergedPlans, entries };
