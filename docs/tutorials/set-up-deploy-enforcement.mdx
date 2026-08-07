@@ -1,26 +1,100 @@
 ---
-title: Set Up Deploy Enforcement
-sidebarTitle: Set up deploy enforcement
-description: Step-by-step instructions for configuring deploy gates and enforcement thresholds.
+title: Stop a Vulnerable Deploy Before It Starts
+sidebarTitle: Block a vulnerable deploy
+description: Add a scan policy that rejects a deploy carrying Critical vulnerabilities, read the block dialog, and override it as an admin when the risk is acceptable.
 ---
 
-<Note>
-  This tutorial is a placeholder pending full content. See the [Deploy Enforcement feature page](/features/deploy-enforcement) for the current reference documentation.
-</Note>
+Say a stack's base image quietly falls behind between one deploy and the next and picks up a Critical CVE. Nothing about a normal `docker compose up` stops that image from going live. This walks through adding a scan policy that gates deploys against a small `prod-web` stack running `nginx:1.14`, an image old enough to reliably carry dozens of Critical and High findings: Trivy scans every image the stack references before any container starts, and Sencho rejects the deploy instead of starting one with a known-bad image. You'll then decide, as an admin, whether to accept the risk for this one deploy and confirm that decision lands in the audit log.
 
-## What you'll do
+This tutorial covers one block-on-deploy policy scoped to a single stack pattern, its block dialog, and the admin bypass. It doesn't cover installing the Trivy scanner itself, CVE suppressions, or replicating a policy across a fleet through Fleet Federation; see the [Deploy Enforcement](/features/deploy-enforcement) feature page for the complete picture.
 
 ## Prerequisites
 
+- The `admin` role. Creating and editing a policy needs the `stack:edit` permission, which both the `admin` and `node-admin` roles hold, but only `admin` can click **Deploy anyway** on a blocked deploy: `node-admin` can configure policies but not bypass a block.
+- The Trivy scanner installed and running on the node you're deploying to (**Security** → **Scanner setup**). Deploy Enforcement fails open, letting the deploy through with a warning alert instead of a block, when Trivy isn't installed.
+- Available on every tier; no Admiral requirement.
+- This tutorial uses a small stack called `prod-web`:
+
+  ```yaml
+  services:
+    web:
+      image: nginx:1.14
+      restart: unless-stopped
+      ports:
+        - "8091:80"
+  ```
+
+  `nginx:1.14` is used here specifically because it's old enough to reliably carry Critical and High findings, which is what makes the block in this tutorial real instead of staged. Create this stack (or use one you already have with a similarly outdated image), but don't start it yet: the point of this tutorial is watching the policy catch the first deploy attempt.
+
 <Steps>
-  <Step title="">
+  <Step title="Add a block policy scoped to your stack">
+    Open **Security** → **Policies** and select **Add policy**. Set **Name** to `Production block on critical` and **Stack pattern (optional)** to `prod-*`, so the policy only ever evaluates stacks whose name starts with `prod-`. Leave **Known-exploited (KEV)** and **Fixable Critical/High** on (both default on), turn on **Severity threshold** (it defaults to **Critical**), and turn on **Block on deploy**. Leave **Enabled** on.
+
+    <Frame>
+      <img src="/images/tutorials/set-up-deploy-enforcement/new-policy-form-filled.png" alt="New policy form filled in: Name Production block on critical, Stack pattern prod-*, Severity threshold ON at Critical, Known-exploited (KEV) ON, Fixable Critical/High ON, Block on deploy ON, Enabled ON." />
+    </Frame>
+
+    At least one block condition has to stay on; a policy with **Block on deploy** enabled but every condition off is rejected as a no-op.
+  </Step>
+  <Step title="Confirm the policy is live">
+    Select **Create**. The policy now appears as a card reading **max: CRITICAL**, **KEV**, **Fixable**, and a destructive **block** badge, with **Scope: prod-\*** underneath.
+
+    <Frame>
+      <img src="/images/tutorials/set-up-deploy-enforcement/policy-created-prod-block.png" alt="Policies tab showing the new Production block on critical policy card with max: CRITICAL, KEV, Fixable, and block badges, and Scope: prod-*." />
+    </Frame>
+  </Step>
+  <Step title="Deploy the stack and watch the gate fire">
+    Open the `prod-web` stack and select **Start**. Sencho enumerates the stack's images, runs a pre-flight Trivy scan against `nginx:1.14`, and evaluates the result against the policy before any container starts. This is the first scan of this image digest, so budget up to a couple of minutes rather than the sub-second result a cached rescan gets.
+
+    Instead of a running container, a **Deploy blocked by security policy** dialog appears, naming the policy and every condition it blocks on. The violation row shows `nginx:1.14` with its finding counts and a **Severity**, **KEV**, and **Fixable** badge, each matching a condition the image tripped.
+
+    <Frame>
+      <img src="/images/tutorials/set-up-deploy-enforcement/deploy-blocked-dialog.png" alt="Deploy blocked by security policy dialog for prod-web, naming policy Production block on critical, with a violation row for nginx:1.14 showing 31 CRITICAL, 82 HIGH, 1 KEV, 77 FIXABLE, Severity/KEV/Fixable badges, a CRITICAL chip, and Close and Deploy anyway buttons." />
+    </Frame>
+
+    This is a hard gate, not an advisory: the stack has no running containers and stays that way until the image clears the policy or an admin overrides it.
+  </Step>
+  <Step title="Bypass the block as admin">
+    Select **Deploy anyway**. The button is only active because you're signed in as `admin`; a non-admin session sees a disabled **Admin required to bypass** button in its place and cannot proceed. Sencho retries the deploy with the block ignored, pulls the image, starts the container, and runs its usual health-gate observation window.
+
+    <Frame>
+      <img src="/images/tutorials/set-up-deploy-enforcement/stack-running-after-bypass.png" alt="prod-web stack page showing RUNNING status with prod-web-web-1 up and port 8091 mapped to 80/tcp." />
+    </Frame>
   </Step>
 </Steps>
+
+## Verify it worked
+
+Check from two independent surfaces so you're not trusting a single UI element.
+
+**The stack itself.** `prod-web` shows **RUNNING**, with `prod-web-web-1` up and its port mapping live, as in the screenshot above.
+
+**The audit log.** Open **More** → **Audit**. Reading newest first, you'll see the successful bypass deploy, a `policy.bypass` entry naming the policy, the violation count, and the offending image (`policy.bypass stack="prod-web" policy="Production block on critical" violations=1 images=[nginx:1.14]`), and below that the original blocked attempt with a `409` status in red. All three carry the account that triggered them, so the override is attributable, not anonymous.
+
+<Frame>
+  <img src="/images/tutorials/set-up-deploy-enforcement/audit-log-bypass-entry.png" alt="Audit log showing three prod-web entries in order: a 200 deploy, a policy.bypass entry naming policy Production block on critical with violations=1 images=[nginx:1.14], and a 409 blocked deploy." />
+</Frame>
+
+## If something goes wrong
+
+**The gate lets a deploy through even though a policy should have caught it.** The most common first-time cause is a stack pattern that doesn't actually match the stack name. Edit the policy and set **Stack pattern** to something that doesn't match, like `staging-*`, while your stack is still named `prod-web`:
+
+<Frame>
+  <img src="/images/tutorials/set-up-deploy-enforcement/policy-pattern-mismatch.png" alt="Policies tab showing the Production block on critical policy with Scope: staging-*, which does not match the prod-web stack." />
+</Frame>
+
+Deploy or update `prod-web` again and it succeeds with no block at all: the policy never evaluates a stack whose name doesn't match its pattern, so a typo here fails silently rather than loudly. Fix the pattern back to `prod-*` (or clear it entirely to apply the policy to every stack on the node) and redeploy to confirm the gate fires again. See [Deploy Enforcement · Troubleshooting](/features/deploy-enforcement#troubleshooting) for the other ways a policy can fail to fire, including a missing Trivy install and a scan that found nothing matching your conditions.
 
 ## Related
 
 <CardGroup cols={2}>
   <Card title="Deploy Enforcement" icon="shield-check" href="/features/deploy-enforcement">
-    Gate deployments on vulnerability and drift policy.
+    The full mechanics: precedence between policies, every code path the gate covers, and fleet policy replication.
+  </Card>
+  <Card title="Vulnerability Scanning" icon="shield-halved" href="/features/vulnerability-scanning">
+    Install and configure the Trivy scanner this tutorial's policy depends on.
+  </Card>
+  <Card title="CVE Suppressions" icon="eye-slash" href="/features/cve-suppressions">
+    Accept a specific finding with an expiry so it stops counting toward a block, without disabling the whole policy.
   </Card>
 </CardGroup>
