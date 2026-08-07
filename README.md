@@ -96,7 +96,7 @@ Sencho is free, open-source software under AGPLv3. Everything below is included 
 ### Security
 - [SSO](https://docs.sencho.io/features/sso): custom OIDC and presets for Google, GitHub, and Okta
 - [Two-factor authentication](https://docs.sencho.io/features/two-factor-authentication) with TOTP and backup codes
-- [RBAC](https://docs.sencho.io/features/rbac) with admin (full control) and viewer (read-only) roles
+- [RBAC](https://docs.sencho.io/features/rbac) with five built-in roles and stack or node scoped assignments
 - [Security overview](https://docs.sencho.io/features/security) with a chart-led scan summary, sortable images, and searchable scan history
 - [Vulnerability scanning](https://docs.sencho.io/features/vulnerability-scanning) via Trivy, with on-demand node-wide scans, VEX-based suppression, SARIF export, and SBOM upload
 - [Compose network inspector](https://docs.sencho.io/features/compose-networking) with an exposure-intent guard for unintended published ports
@@ -194,7 +194,7 @@ Sencho does not emit telemetry, analytics, or crash reports, and makes no outbou
 
 ## Admiral
 
-**Admiral** is Studio Saelix's paid business assurance plan on top of everything in Community: Hardened Build, Recovery Vault (managed off-site snapshots), priority support, and governance depth (advanced RBAC roles, LDAP / Active Directory, full audit log export and anomaly detection). Fleet Sync policy replication and AWS ECR registry credentials currently require Admiral as well; those access rules are temporary availability, not the reason Admiral exists. See [sencho.io/pricing](https://sencho.io/pricing) for current plan details.
+**Admiral** is Studio Saelix's paid business assurance plan on top of everything in Community: Hardened Build, Recovery Vault (managed off-site snapshots), priority support, and governance depth (LDAP / Active Directory, full audit log export and anomaly detection, and related organizational controls). Built-in RBAC (five roles and scoped assignments) is included on Community. AWS ECR registry credentials currently require Admiral as well; that access rule is temporary availability, not the reason Admiral exists. See [sencho.io/pricing](https://sencho.io/pricing) for current plan details.
 
 ---
 

@@ -136,28 +136,36 @@ describe('POST /api/users', () => {
     expect(res.body.code).toBe('SCOPE_DENIED');
   });
 
-  it('creates an advanced-role user on the paid tier (201)', async () => {
+  it('creates a deployer user (201)', async () => {
     const res = await request(app)
       .post('/api/users')
       .set('Authorization', `Bearer ${adminToken()}`)
-      .send({ username: 'paid-deployer', password: 'password123', role: 'deployer' });
+      .send({ username: 'role-deployer', password: 'password123', role: 'deployer' });
     expect(res.status).toBe(201);
     expect(res.body.role).toBe('deployer');
     DatabaseService.getInstance().deleteUser(res.body.id);
   });
 
-  it('blocks an advanced-role user on the Community tier (403 PAID_REQUIRED)', async () => {
+  it('creates deployer, node-admin, and auditor users on the Community tier (201)', async () => {
     const { LicenseService } = await import('../services/LicenseService');
     const svc = LicenseService.getInstance();
     vi.spyOn(svc, 'getTier').mockReturnValue('community');
+    const createdIds: number[] = [];
     try {
-      const res = await request(app)
-        .post('/api/users')
-        .set('Authorization', `Bearer ${adminToken()}`)
-        .send({ username: 'community-deployer', password: 'password123', role: 'deployer' });
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe('PAID_REQUIRED');
+      for (const role of ['deployer', 'node-admin', 'auditor'] as const) {
+        const res = await request(app)
+          .post('/api/users')
+          .set('Authorization', `Bearer ${adminToken()}`)
+          .send({ username: `community-${role}`, password: 'password123', role });
+        expect(res.status).toBe(201);
+        expect(res.body.role).toBe(role);
+        expect(res.body.code).not.toBe('PAID_REQUIRED');
+        createdIds.push(res.body.id);
+      }
     } finally {
+      for (const id of createdIds) {
+        DatabaseService.getInstance().deleteUser(id);
+      }
       vi.spyOn(svc, 'getTier').mockReturnValue('paid');
     }
   });
@@ -506,17 +514,31 @@ describe('Scoped Role Assignments', () => {
     expect(res.body.success).toBe(true);
   });
 
-  it('POST /api/users/:id/roles is blocked on the Community tier (PAID_REQUIRED)', async () => {
+  it('POST /api/users/:id/roles succeeds on the Community tier (201)', async () => {
     const { LicenseService } = await import('../services/LicenseService');
     const svc = LicenseService.getInstance();
+    const nodeId = defaultNodeId();
     vi.spyOn(svc, 'getTier').mockReturnValue('community');
     try {
       const res = await request(app)
         .post(`/api/users/${targetUserId}/roles`)
         .set('Authorization', `Bearer ${adminToken()}`)
-        .send({ role: 'deployer', resource_type: 'stack', resource_id: 'community-stack', node_id: defaultNodeId() });
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe('PAID_REQUIRED');
+        .send({ role: 'deployer', resource_type: 'stack', resource_id: 'community-stack', node_id: nodeId });
+      expect(res.status).toBe(201);
+      expect(res.body.role).toBe('deployer');
+      expect(res.body.resource_id).toBe('community-stack');
+      expect(res.body.code).not.toBe('PAID_REQUIRED');
+
+      const listed = await request(app)
+        .get(`/api/users/${targetUserId}/roles`)
+        .set('Authorization', `Bearer ${adminToken()}`);
+      expect(listed.status).toBe(200);
+      expect(listed.body.some((a: { id: number }) => a.id === res.body.id)).toBe(true);
+
+      const deleted = await request(app)
+        .delete(`/api/users/${targetUserId}/roles/${res.body.id}`)
+        .set('Authorization', `Bearer ${adminToken()}`);
+      expect(deleted.status).toBe(200);
     } finally {
       vi.spyOn(svc, 'getTier').mockReturnValue('paid');
     }
@@ -563,30 +585,30 @@ describe('GET /api/permissions/me', () => {
     db.deleteUser(id);
   });
 
-  it('omits scoped permissions on the Community tier even when assignments exist', async () => {
+  it('includes scoped permissions on the Community tier when assignments exist', async () => {
     const { LicenseService } = await import('../services/LicenseService');
     const db = DatabaseService.getInstance();
     const svc = LicenseService.getInstance();
     const hash = await bcrypt.hash('password123', 1);
+    const nodeId = defaultNodeId();
     const id = db.addUser({ username: 'permcheck-community', password_hash: hash, role: 'viewer' });
     db.addRoleAssignment({
       user_id: id,
       role: 'deployer',
       resource_type: 'stack',
       resource_id: 'my-stack',
-      node_id: defaultNodeId(),
+      node_id: nodeId,
     });
     const user = db.getUserById(id)!;
     const token = authToken('permcheck-community', 'viewer', user.token_version);
 
-    // Scoped grants only take effect on paid; a downgraded instance must not
-    // advertise per-resource permissions the API will then 403.
     vi.spyOn(svc, 'getTier').mockReturnValue('community');
     const res = await request(app)
       .get('/api/permissions/me')
       .set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(200);
-    expect(res.body.scopedPermissions).toEqual({});
+    expect(res.body.scopedPermissions[`stack:${nodeId}:my-stack`]).toBeDefined();
+    expect(res.body.scopedPermissions[`stack:${nodeId}:my-stack`]).toContain('stack:deploy');
 
     // Cleanup
     vi.spyOn(svc, 'getTier').mockReturnValue('paid');

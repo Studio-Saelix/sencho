@@ -12,7 +12,6 @@ vi.mock('@/components/ui/toast-store', () => ({
     toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
 }));
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ isAdmin: true, user: { username: 'admin' } }) }));
-vi.mock('@/context/LicenseContext', () => ({ useLicense: () => ({ isPaid: true }) }));
 vi.mock('../MastheadStatsContext', () => ({ useMastheadStats: () => {} }));
 vi.mock('@/components/CapabilityGate', () => ({ CapabilityGate: ({ children }: { children: React.ReactNode }) => children }));
 

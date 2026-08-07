@@ -2,7 +2,6 @@ import { CronExpressionParser } from 'cron-parser';
 import { DatabaseService } from './DatabaseService';
 import type { ScheduledTask } from './DatabaseService';
 import { LicenseService } from './LicenseService';
-import type { LicenseTier } from './license-types';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
@@ -333,10 +332,8 @@ export class SchedulerService {
                     task.node_id,
                     task.selector_type,
                 );
-                const tier: LicenseTier = LicenseService.getInstance().getTier();
                 if (!checkPermissionForSubject(
                     { username: creator.username, role: creator.role, userId: creator.id },
-                    tier,
                     scope.action,
                     scope.resourceType,
                     scope.resourceId,
