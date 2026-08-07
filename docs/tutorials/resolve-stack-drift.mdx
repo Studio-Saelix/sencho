@@ -1,26 +1,116 @@
 ---
-title: Resolve Stack Drift
-sidebarTitle: Resolve stack drift
-description: Step-by-step instructions for choosing a drift policy mode and resolving a detected drift.
+title: Catch and Fix a Container That's Drifted From Its Compose File
+sidebarTitle: Catch and fix drift
+description: Read a real Drift finding after a manual out-of-band container change, then redeploy through Sencho to bring the running state back in line with the compose file.
 ---
 
-<Note>
-  This tutorial is a placeholder pending full content. See the [Stack Drift feature page](/features/stack-drift) for the current reference documentation.
-</Note>
+Say an on-call engineer hotfixes a container directly on the host during an incident: change the image tag, run `docker compose up -d`, done, the site's back up. Nobody thinks to also make the same edit through Sencho, so the compose file it deploys from tomorrow never learns about tonight's fix. This walks through catching exactly that: read a real Drift finding after an out-of-band container change, confirm what's different, and redeploy through Sencho to bring the running state back in line with the compose file.
 
-## What you'll do
+This tutorial covers the runtime drift detection described on the Drift feature page: the status badge, the findings list, the drift ledger, and resolving a finding by redeploying. It does not cover Blueprint's separate policy-based drift mode (observe/suggest/enforce), which reconciles drift on Blueprint-deployed stacks automatically instead of leaving it for you to redeploy; see [Blueprint Model](/features/blueprint-model). It also does not cover network-attachment drift findings, which reuse this same mechanism but compare against the Networking tab instead of an image; see [Compose Networking](/features/compose-networking).
 
 ## Prerequisites
 
+- Any role that can view a stack, including the read-only **viewer** and **auditor** roles, can open the Drift tab and click **re-check**. Actually resolving drift means redeploying, which needs the `stack:deploy` permission for this stack (the same permission Start, Stop, Restart, and Update already require).
+- The stack must have been deployed through Sencho at least once. Drift's "since last deploy" signal has nothing to compare against until then, and shows **No deploy baseline** instead of a useful state.
+- No plan requirement and nothing to turn on. Drift detection runs automatically as soon as a stack has a compose file and Docker is reachable on the node.
+- Shell or SSH access to the host, if you want to reproduce this tutorial's own out-of-band change yourself. Any real manual Docker operation that changes a running container without going back through Sencho works just as well.
+
+This tutorial uses a small single-service stack called `landing-page`:
+
+```yaml
+services:
+  app:
+    image: nginx:1.27-alpine
+    restart: always
+    ports:
+      - "8096:80"
+```
+
+Deploy this stack (or adapt an existing one) before continuing.
+
 <Steps>
-  <Step title="">
+  <Step title="Open the Drift tab and confirm the baseline">
+    Click the stack in the sidebar to open it, then switch to the **Drift** tab in the right-hand panel (scroll the tab row if it doesn't fit). Right after a deploy through Sencho, the status reads **in sync** ("Runtime matches the compose file.") and the card below it reads **matches last deploy** ("The compose source is unchanged since the last deploy."). This is the state the rest of this tutorial gets you back to.
+
+    <Frame>
+      <img src="/images/tutorials/resolve-stack-drift/drift-baseline-in-sync.png" alt="The Drift tab showing In sync status (Runtime matches the compose file) and Matches last deploy below it, with no findings or drift history." />
+    </Frame>
+  </Step>
+
+  <Step title="Make an out-of-band change on the host">
+    Simulate the incident hotfix: on the host, point the compose file at a different image tag, bring it up directly with Compose, then revert the file without redeploying through Sencho.
+
+    ```bash
+    cd /path/to/landing-page
+    sed -i 's/nginx:1.27-alpine/nginx:1.29-alpine/' compose.yaml
+    docker compose up -d
+    sed -i 's/nginx:1.29-alpine/nginx:1.27-alpine/' compose.yaml
+    ```
+
+    The running container is now on `nginx:1.29-alpine`, but the compose file on disk is back to declaring `nginx:1.27-alpine`, exactly as if someone had made a quick fix and never told Sencho about it.
+  </Step>
+
+  <Step title="Read the drift finding">
+    Reopen the Drift tab. Just opening it re-runs the comparison, so the status flips to **drifted · 1 finding** ("Runtime differs from the compose file."), while **matches last deploy** stays exactly as it was: the file itself never changed, only what's running under it. Under **Findings**, the `app` service shows an **image** finding with the expected and actual images side by side.
+
+    <Frame>
+      <img src="/images/tutorials/resolve-stack-drift/drift-detected-image-finding.png" alt="The Drift tab showing Drifted status with 1 finding, Matches last deploy still green below it, and a Findings section with an app image finding: compose nginx:1.27-alpine to running nginx:1.29-alpine." />
+    </Frame>
+
+    This is the moment the two signals' independence actually matters: a stack can be drifted at runtime while its file is unchanged, or the reverse. Here it's drifted with an unchanged file, because the fix happened directly against Docker, not through a compose edit.
+  </Step>
+
+  <Step title="Log the finding with re-check">
+    Click **re-check**. A **Drift history** section appears with the same finding marked **OPEN** and a detected timestamp, and the header now reads "checked just now." The status badge above it, though, still says **drifted**.
+
+    <Frame>
+      <img src="/images/tutorials/resolve-stack-drift/drift-recheck-still-drifted.png" alt="The Drift tab still showing Drifted status after clicking re-check, with a new Drift history section showing an app image finding marked OPEN, detected just now." />
+    </Frame>
+
+    Re-check is a read plus a ledger write: it records the finding into the stack's history and logs a **Drift detected** entry to the Activity tab, but it never touches the running container. Nothing about the actual deployment has changed yet.
+  </Step>
+
+  <Step title="Resolve it: redeploy through Sencho">
+    Click **Update**. The **Update Readiness** dialog opens with a **Drift** warning already listed: "1 open drift finding: the running state has diverged from the compose file, so the rollback target may not match what is running." Here that's expected, since you already know why; on a stack you didn't just break yourself, that warning is exactly the kind of thing worth reading before you proceed. Click **Update now**.
+
+    <Frame>
+      <img src="/images/tutorials/resolve-stack-drift/update-readiness-drift-warning.png" alt="The Ready to update dialog for landing-page, showing Ready with warnings and a Drift warning: 1 open drift finding, the running state has diverged from the compose file, so the rollback target may not match what is running." />
+    </Frame>
+
+    Sencho re-pulls and recreates the `app` container from the compose file, which puts it back on `nginx:1.27-alpine`.
   </Step>
 </Steps>
+
+## Verify it worked
+
+Check from two independent surfaces.
+
+Back on the **Drift** tab, the status returns to **in sync**, and the drift history entry that was **OPEN** a moment ago now reads **RESOLVED**, with both a detected and a resolved timestamp:
+
+<Frame>
+  <img src="/images/tutorials/resolve-stack-drift/drift-resolved-in-sync.png" alt="The Drift tab back to In sync status, with the drift history entry now marked RESOLVED, showing both a detected and a resolved timestamp." />
+</Frame>
+
+On the **Activity** tab, which lists most-recent-first, the update entries sit above a new **Drift resolved** entry, which sits above the original **Drift detected** entry from earlier in this tutorial: read bottom to top, that's detected, then updated, then resolved, in the order the events actually happened.
+
+<Frame>
+  <img src="/images/tutorials/resolve-stack-drift/activity-drift-resolved.png" alt="The Activity tab showing, in order: landing-page updated, landing-page update started, Drift resolved on landing-page: 1 finding cleared, and Drift detected on landing-page: 1 new finding." />
+</Frame>
+
+## If something goes wrong
+
+**Clicking re-check doesn't fix anything, and the status still says drifted.** That's not a bug, it's the read-only design: re-check only reconciles the ledger (recording what it currently sees, as in the screenshot above) so the finding shows up in history and on the Activity timeline. It never changes what Docker is running. If you want the drifted container gone, redeploy the stack instead (**Update**, or **Save & Deploy** from the compose editor) as in the last step above; that's the only action that actually reconciles the runtime with the compose file.
 
 ## Related
 
 <CardGroup cols={2}>
   <Card title="Stack Drift" icon="magnifying-glass-chart" href="/features/stack-drift">
-    Detect and resolve configuration drift against the last deploy.
+    Full mechanics: every finding type, image comparison rules, port ranges, the drift ledger, and troubleshooting.
+  </Card>
+  <Card title="Stack Activity" icon="clock-rotate-left" href="/features/stack-activity">
+    Drift detected and resolved events sit in the same timeline as deploys and restarts.
+  </Card>
+  <Card title="Blueprint Model" icon="drafting-compass" href="/features/blueprint-model">
+    Blueprints manage drift differently, with a separate observe/suggest/enforce policy mode.
   </Card>
 </CardGroup>
