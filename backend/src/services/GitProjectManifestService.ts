@@ -9,10 +9,10 @@
  * stackName, repo url, branch) are validated before any field is honored. A
  * mismatch is corruption, never partial trust.
  *
- * Promotion is transactional: a promotion.json marker records the mid-write
- * state; the boot sweep restores the previous applied generation under the
- * per-stack lock unless the stack dir was hand-repaired after the crash (then
- * it declines and flags migration_required).
+ * Promotion is transactional: a promotion.json marker records the full file
+ * journal and commit phase. The boot sweep either finalizes a committed
+ * manifest or restores the previous applied generation under the per-stack
+ * lock. If live files match neither snapshot, it declines and flags recovery.
  */
 import path from 'path';
 import fs from 'fs';
@@ -25,6 +25,7 @@ import { DatabaseService } from './DatabaseService';
 import { ComposeInputDiscoveryService, type ContextCopyPlan, type CopyEntry } from './ComposeInputDiscoveryService';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import { sanitizeForLog } from '../utils/safeLog';
+import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import type {
     BuildContextPlan,
     ComposeInputEntry,
@@ -48,24 +49,51 @@ export const MANIFEST_FILENAME = 'manifest.v1.json';
 export const PROMOTION_MARKER = 'promotion.json';
 export const CANDIDATE_COMPLETE_MARKER = '.candidate-complete';
 export const GENERATIONS_DIR = 'generations';
+const DETACH_RECOVERY_MARKER = 'detach-recovery.v1.json';
 
 // Retention: current applied generation + one previous (prune keeps the
 // manifest's previousDir explicitly, not by count).
 const ORPHAN_CANDIDATE_AGE_MS = 24 * 60 * 60 * 1000;
 
+type PromotionPhase = 'applying' | 'committing';
+
 interface PromotionMarker {
+    schemaVersion: 2;
+    phase: PromotionPhase;
     sha: string;
+    manifestVersion: number;
     candidateRelPath: string;
-    /** Stack-relative paths already written before the crash. */
-    written: string[];
+    appliedRelPath: string;
     /**
-     * Stack-relative paths the incoming generation introduces (absent from
-     * the prior generation). Persisted so boot recovery can remove them for
-     * an exact prior-generation restore even when the incoming manifest is
-     * no longer available.
+     * Complete stack-relative file operation journal, persisted before the
+     * first live write. Recovery validates every path against either the prior
+     * or incoming snapshot, including writes after the last marker flush.
      */
+    affected: string[];
+    /** Incoming files absent from the prior generation. */
     introduced: string[];
 }
+
+const PROMOTION_PHASES: readonly PromotionPhase[] = ['applying', 'committing'];
+
+type DetachRecoveryFile =
+    | { path: string; existed: true; contentBase64: string }
+    | { path: string; existed: false; contentBase64: null };
+
+type DetachRecoveryInput =
+    | { path: string; existed: true; content: Buffer }
+    | { path: string; existed: false; content: null };
+
+interface DetachRecoveryMarker {
+    schemaVersion: 1;
+    identity: { stackName: string; repoUrl: string; branch: string };
+    managedAreaExisted: boolean;
+    files: DetachRecoveryFile[];
+}
+
+type RecoveryIncoming =
+    | { inputs: ComposeInputEntry[]; buildContexts: BuildContextPlan[] }
+    | { introducedPaths: string[] };
 
 const MANIFEST_STATES: readonly ManifestState[] = ['none', 'migrated', 'active', 'partial', 'unsupported'];
 const DEPENDENCY_KINDS: readonly InputDependencyKind[] = [
@@ -108,9 +136,21 @@ function isSafeRelPath(value: unknown): boolean {
  * A file-level path in a marker or manifest must be non-empty because an
  * empty path resolves to the stack root and would delete/overwrite it.
  */
-function isNonEmptyRelPath(value: unknown): boolean {
+function isNonEmptyRelPath(value: unknown): value is string {
     if (typeof value !== 'string' || value.length === 0) return false;
     return isSafeRelPath(value);
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function isSha256(value: unknown): value is string {
+    return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 }
 
 export class GitProjectManifestService {
@@ -131,12 +171,23 @@ export class GitProjectManifestService {
     }
 
     private managedRoot(stackName: string): string {
+        if (!isValidStackName(stackName)) throw new Error('Invalid stack name for managed project data');
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
         return path.join(this.dataRoot(), MANAGED_ROOT_NAME, String(nodeId), stackName);
     }
 
     private generationsDir(stackName: string): string {
         return path.join(this.managedRoot(stackName), GENERATIONS_DIR);
+    }
+
+    private async pathExists(absPath: string): Promise<boolean> {
+        try {
+            await fs.promises.access(absPath);
+            return true;
+        } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
+            throw e;
+        }
     }
 
     // ─── Bounds ───────────────────────────────────────────────────────────────
@@ -182,9 +233,9 @@ export class GitProjectManifestService {
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return 'not an object';
         const m = raw as Record<string, unknown>;
         if (m.schemaVersion !== 1) return `unsupported schemaVersion ${String(m.schemaVersion)}`;
-        if (typeof m.manifestVersion !== 'number' || m.manifestVersion < 1) return 'invalid manifestVersion';
+        if (!isPositiveInteger(m.manifestVersion)) return 'invalid manifestVersion';
         if (!isOneOf(m.state, MANIFEST_STATES)) return `invalid state ${String(m.state)}`;
-        if (typeof m.generatedAt !== 'number') return 'invalid generatedAt';
+        if (!isNonNegativeInteger(m.generatedAt)) return 'invalid generatedAt';
 
         const identity = m.identity as Record<string, unknown> | undefined;
         if (!identity || typeof identity !== 'object') return 'missing identity';
@@ -197,21 +248,24 @@ export class GitProjectManifestService {
         const repo = m.repo as Record<string, unknown> | undefined;
         if (!repo || repo.url !== expected.repoUrl || repo.branch !== expected.branch) return 'repo mismatch';
         const revision = m.resolvedRevision as Record<string, unknown> | undefined;
-        if (!revision || typeof revision.commitSha !== 'string' || typeof revision.fetchedAt !== 'number') {
+        if (!revision
+            || typeof revision.commitSha !== 'string'
+            || (revision.commitSha.length === 0 && m.state !== 'migrated')
+            || !isNonNegativeInteger(revision.fetchedAt)) {
             return 'invalid resolvedRevision';
         }
         const project = m.project as Record<string, unknown> | undefined;
         if (!project || typeof project !== 'object') return 'invalid project';
-        if (!Array.isArray(project.composeFiles) || !project.composeFiles.every((f) => typeof f === 'string')) return 'invalid project.composeFiles';
+        if (!Array.isArray(project.composeFiles) || !project.composeFiles.every((f) => isNonEmptyRelPath(f))) return 'invalid project.composeFiles';
         if (!Array.isArray(project.invocation) || !project.invocation.every((a) => typeof a === 'string')) return 'invalid project.invocation';
-        if (typeof project.projectName !== 'string') return 'invalid project.projectName';
+        if (typeof project.projectName !== 'string' || project.projectName.length === 0) return 'invalid project.projectName';
 
         if (!Array.isArray(m.inputs)) return 'invalid inputs';
         for (const entry of m.inputs as unknown[]) {
             if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return 'invalid input entry';
             const e = entry as Record<string, unknown>;
             if (e.sourcePath !== null && typeof e.sourcePath !== 'string') return 'invalid input sourcePath';
-            if (!isSafeRelPath(e.materializedPath)) return `invalid input materializedPath ${String(e.materializedPath)}`;
+            if (e.materializedPath !== null && !isNonEmptyRelPath(e.materializedPath)) return `invalid input materializedPath ${String(e.materializedPath)}`;
             if (!isOneOf(e.dependencyKind, DEPENDENCY_KINDS)) return `invalid input kind ${String(e.dependencyKind)}`;
             if (!isOneOf(e.role, INPUT_ROLES)) return `invalid input role ${String(e.role)}`;
             if (!isOneOf(e.ownership, OWNERSHIPS)) return `invalid input ownership ${String(e.ownership)}`;
@@ -219,29 +273,46 @@ export class GitProjectManifestService {
             if (!isOneOf(e.sensitivity, SENSITIVITIES)) return `invalid input sensitivity ${String(e.sensitivity)}`;
             if (!isOneOf(e.state, INPUT_STATES)) return `invalid input state ${String(e.state)}`;
             if (!isOneOf(e.deletionAuthority, DELETION_AUTHORITIES)) return `invalid deletionAuthority ${String(e.deletionAuthority)}`;
-            if (e.contentSha256 !== null && typeof e.contentSha256 !== 'string') return 'invalid input contentSha256';
+            if (e.contentSha256 !== null && !isSha256(e.contentSha256)) return 'invalid input contentSha256';
+            if (e.sizeBytes !== null && !isNonNegativeInteger(e.sizeBytes)) return 'invalid input sizeBytes';
+            if (e.note !== null && typeof e.note !== 'string') return 'invalid input note';
         }
         if (!Array.isArray(m.refusals) || !Array.isArray(m.buildContexts)) return 'invalid refusals/buildContexts';
+        for (const refusal of m.refusals as unknown[]) {
+            if (!refusal || typeof refusal !== 'object' || Array.isArray(refusal)) return 'invalid refusal entry';
+            const r = refusal as Record<string, unknown>;
+            if (r.sourcePath !== null && typeof r.sourcePath !== 'string') return 'invalid refusal sourcePath';
+            if (typeof r.kind !== 'string' || r.kind.length === 0 || typeof r.reason !== 'string' || typeof r.actionable !== 'boolean') {
+                return 'invalid refusal fields';
+            }
+        }
         for (const ctx of m.buildContexts as unknown[]) {
             if (!ctx || typeof ctx !== 'object' || Array.isArray(ctx)) return 'invalid build context entry';
             const c = ctx as Record<string, unknown>;
             if (!isSafeRelPath(c.repoPath)) return `invalid build context root ${String(c.repoPath)}`;
-            if (!isSafeRelPath(c.dockerfile)) return `invalid build context dockerfile ${String(c.dockerfile)}`;
-            if (typeof c.contextBytes !== 'number' || typeof c.ignoredCount !== 'number') return 'invalid build context counters';
+            if (c.dockerfile !== null && !isNonEmptyRelPath(c.dockerfile)) return `invalid build context dockerfile ${String(c.dockerfile)}`;
+            if (!isNonNegativeInteger(c.contextBytes) || !isNonNegativeInteger(c.ignoredCount)) return 'invalid build context counters';
             if (typeof c.dockerignoreApplied !== 'boolean' || typeof c.excludedFromCopy !== 'boolean') return 'invalid build context flags';
+            if (c.note !== null && typeof c.note !== 'string') return 'invalid build context note';
             const files = c.files;
             if (files !== undefined) {
                 if (!Array.isArray(files)) return 'invalid build context files';
                 const seenPaths = new Set<string>();
+                let inventoryBytes = 0;
+                let inventoryHasSizes = true;
                 for (const f of files as unknown[]) {
                     if (!f || typeof f !== 'object' || Array.isArray(f)) return 'invalid build context file entry';
                     const fe = f as Record<string, unknown>;
-                    if (!isSafeRelPath(fe.path)) return `invalid build context file path ${String(fe.path)}`;
-                    if (typeof fe.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(fe.sha256)) return 'invalid build context file hash';
+                    if (!isNonEmptyRelPath(fe.path)) return `invalid build context file path ${String(fe.path)}`;
+                    if (!isSha256(fe.sha256)) return 'invalid build context file hash';
+                    if (fe.sizeBytes !== undefined && !isNonNegativeInteger(fe.sizeBytes)) return 'invalid build context file size';
+                    if (typeof fe.sizeBytes === 'number') inventoryBytes += fe.sizeBytes;
+                    else inventoryHasSizes = false;
                     const key = String(fe.path).toLowerCase();
                     if (seenPaths.has(key)) return `duplicate build context file ${String(fe.path)}`;
                     seenPaths.add(key);
                 }
+                if (inventoryHasSizes && inventoryBytes !== c.contextBytes) return 'build context byte count does not match its file inventory';
             }
         }
         const generation = m.generation as Record<string, unknown> | undefined;
@@ -251,7 +322,22 @@ export class GitProjectManifestService {
         }
         if (!isSafeRelPath((m.project as Record<string, unknown> | undefined)?.root)) return 'invalid project.root';
         if (!m.counts || typeof m.counts !== 'object') return 'invalid counts';
+        const counts = m.counts as Record<string, unknown>;
+        if (!isNonNegativeInteger(counts.managed) || !isNonNegativeInteger(counts.unmanaged) || !isNonNegativeInteger(counts.refused)) {
+            return 'invalid counts';
+        }
+        const inputEntries = m.inputs as Record<string, unknown>[];
+        const expectedManaged = inputEntries.filter((entry) => entry.ownership === 'managed' && entry.state === 'present').length;
+        const expectedUnmanaged = inputEntries.filter((entry) => entry.ownership === 'unmanaged').length;
+        if (counts.managed !== expectedManaged || counts.unmanaged !== expectedUnmanaged || counts.refused !== (m.refusals as unknown[]).length) {
+            return 'manifest counts do not match its inventory';
+        }
         if (!m.bounds || typeof m.bounds !== 'object') return 'invalid bounds';
+        const bounds = m.bounds as Record<string, unknown>;
+        if (!isPositiveInteger(bounds.maxFiles) || !isPositiveInteger(bounds.maxBytes) || !isPositiveInteger(bounds.maxContextBytes)
+            || !isPositiveInteger(bounds.maxPathDepth) || !isPositiveInteger(bounds.maxFileBytes)) {
+            return 'invalid bounds';
+        }
         // Cross-check: no managed input path collides with any context file path.
         const inputSeen = new Set<string>();
         for (const e of m.inputs as Record<string, unknown>[]) {
@@ -306,7 +392,9 @@ export class GitProjectManifestService {
         const manifest = parsed as GitProjectManifest;
         manifest.buildContexts = manifest.buildContexts.map((ctx) => ({
             ...ctx,
-            files: Array.isArray(ctx.files) ? ctx.files : [],
+            files: Array.isArray(ctx.files) && ctx.files.every((file) => isNonNegativeInteger(file.sizeBytes))
+                ? ctx.files
+                : [],
         }));
         return manifest;
     }
@@ -432,16 +520,47 @@ export class GitProjectManifestService {
             return { corrupt: `Cannot read promotion marker: ${(e as Error).message}` };
         }
         try {
-            const parsed = JSON.parse(raw) as PromotionMarker;
-            if (typeof parsed.sha !== 'string' || parsed.sha.length === 0) return { corrupt: 'Promotion marker has an invalid sha' };
-            if (!isSafeRelPath(parsed.candidateRelPath) || parsed.candidateRelPath === '') return { corrupt: 'Promotion marker has an invalid candidate path' };
-            if (!Array.isArray(parsed.written) || !parsed.written.every((w) => typeof w === 'string' && isNonEmptyRelPath(w))) {
-                return { corrupt: 'Promotion marker has an invalid written set' };
+            const parsed: unknown = JSON.parse(raw);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { corrupt: 'Promotion marker is not an object' };
+            const marker = parsed as Record<string, unknown>;
+            if (marker.schemaVersion !== 2) return { corrupt: 'Promotion marker has an unsupported schema version' };
+            if (!isOneOf(marker.phase, PROMOTION_PHASES)) return { corrupt: 'Promotion marker has an invalid phase' };
+            if (typeof marker.sha !== 'string' || marker.sha.length === 0) return { corrupt: 'Promotion marker has an invalid sha' };
+            if (!isPositiveInteger(marker.manifestVersion)) return { corrupt: 'Promotion marker has an invalid manifest version' };
+            if (!isNonEmptyRelPath(marker.candidateRelPath)) return { corrupt: 'Promotion marker has an invalid candidate path' };
+            if (!isNonEmptyRelPath(marker.appliedRelPath)) return { corrupt: 'Promotion marker has an invalid applied path' };
+            if (!Array.isArray(marker.affected) || !marker.affected.every((w) => isNonEmptyRelPath(w))) {
+                return { corrupt: 'Promotion marker has an invalid affected set' };
             }
-            if (!Array.isArray(parsed.introduced) || !parsed.introduced.every((w) => typeof w === 'string' && isNonEmptyRelPath(w))) {
+            if (!Array.isArray(marker.introduced) || !marker.introduced.every((w) => isNonEmptyRelPath(w))) {
                 return { corrupt: 'Promotion marker has an invalid introduced set' };
             }
-            return parsed;
+            const affected = marker.affected.filter((value): value is string => typeof value === 'string');
+            const introduced = marker.introduced.filter((value): value is string => typeof value === 'string');
+            const markerPathLimit = this.boundsConfig().maxFiles * 2;
+            if (affected.length > markerPathLimit || introduced.length > markerPathLimit) {
+                return { corrupt: 'Promotion marker exceeds the path journal bound' };
+            }
+            if (new Set(affected.map((w) => w.toLowerCase())).size !== affected.length) {
+                return { corrupt: 'Promotion marker has duplicate affected paths' };
+            }
+            if (new Set(introduced.map((w) => w.toLowerCase())).size !== introduced.length) {
+                return { corrupt: 'Promotion marker has duplicate introduced paths' };
+            }
+            const affectedKeys = new Set(affected.map((w) => w.toLowerCase()));
+            if (!introduced.every((w) => affectedKeys.has(w.toLowerCase()))) {
+                return { corrupt: 'Promotion marker introduced paths are not in the affected set' };
+            }
+            return {
+                schemaVersion: 2,
+                phase: marker.phase,
+                sha: marker.sha,
+                manifestVersion: marker.manifestVersion,
+                candidateRelPath: marker.candidateRelPath,
+                appliedRelPath: marker.appliedRelPath,
+                affected,
+                introduced,
+            };
         } catch (e) {
             return { corrupt: `Promotion marker is not valid JSON: ${(e as Error).message}` };
         }
@@ -457,11 +576,12 @@ export class GitProjectManifestService {
 
     /** Hash of the stack-dir file at a materialized path, or null when absent. */
     async hashStackFile(stackName: string, relPath: string): Promise<string | null> {
+        const abs = await this.stackFileAbs(stackName, relPath);
         try {
-            const abs = await this.stackFileAbs(stackName, relPath);
             return sha256Of(await fs.promises.readFile(abs));
-        } catch {
-            return null;
+        } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+            throw e;
         }
     }
 
@@ -527,26 +647,56 @@ export class GitProjectManifestService {
         // COMPOSE_DIR -> /app/compose. The stack name was validated upstream
         // (isValidStackName); writes still go through the guarded FS service.
         const composeDir = NodeRegistry.getInstance().getComposeDir(NodeRegistry.getInstance().getDefaultNodeId());
-        return path.resolve(composeDir, stackName, relPath);
+        if (!isValidStackName(stackName) || !isSafeRelPath(relPath)) throw new Error('Invalid stack file path');
+        const stackRoot = path.resolve(composeDir, stackName);
+        const resolved = path.resolve(stackRoot, relPath);
+        if (!isPathWithinBase(resolved, stackRoot)) throw new Error('Stack file path escapes the stack root');
+        return resolved;
+    }
+
+    /** Exact file paths owned by one manifest, excluding directory inventory entries. */
+    private manifestFilePaths(manifest: Pick<GitProjectManifest, 'inputs' | 'buildContexts'>): string[] {
+        const paths = new Map<string, string>();
+        for (const entry of manifest.inputs) {
+            if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
+            if (entry.dependencyKind === 'build-context' || entry.dependencyKind === 'build-additional-context') continue;
+            paths.set(entry.materializedPath.toLowerCase(), entry.materializedPath);
+        }
+        for (const context of manifest.buildContexts) {
+            for (const file of context.files) {
+                const rel = context.repoPath ? `${context.repoPath}/${file.path}` : file.path;
+                paths.set(rel.toLowerCase(), rel);
+            }
+        }
+        return [...paths.values()].sort((a, b) => a.localeCompare(b));
+    }
+
+    /** Hash one snapshot file, preserving the distinction between missing and unreadable. */
+    private async hashSnapshotFile(baseDir: string, relPath: string): Promise<string | null> {
+        const resolved = path.resolve(baseDir, relPath);
+        if (!isPathWithinBase(resolved, baseDir)) throw new Error(`Snapshot path escapes its generation: ${relPath}`);
+        try {
+            return sha256Of(await fs.promises.readFile(resolved));
+        } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+            throw e;
+        }
     }
 
     /**
      * Copy one candidate path into the stack dir through the guarded FS
-     * service. Directory entries (build contexts) are copied recursively,
-     * preserving the nested layout. Content is written BYTE-EXACT: build
+     * service. Content is written BYTE-EXACT: build
      * contexts, configs, and secrets can be binary, and the manifest hashes
      * are computed over raw bytes, so a lossy string conversion would corrupt
      * files and permanently trip the divergence guard on re-apply.
      */
     private async writeStackFileFromCandidate(stackName: string, candidateAbs: string, destRel: string, maxFileBytes: number): Promise<void> {
-        const src = path.join(candidateAbs, destRel);
+        if (!isNonEmptyRelPath(destRel)) throw new Error('Invalid candidate file path');
+        const src = path.resolve(candidateAbs, destRel);
+        if (!isPathWithinBase(src, candidateAbs)) throw new Error(`Candidate file path escapes its generation: ${destRel}`);
         const stat = await fs.promises.stat(src);
         if (stat.isDirectory()) {
-            const entries = await fs.promises.readdir(src, { withFileTypes: true });
-            for (const entry of entries) {
-                await this.writeStackFileFromCandidate(stackName, candidateAbs, `${destRel}/${entry.name}`, maxFileBytes);
-            }
-            return;
+            throw new Error(`Expected a materialized file but found a directory: ${destRel}`);
         }
         if (stat.size > maxFileBytes) {
             throw new Error(`Materialized file too large: ${destRel} (${stat.size} bytes)`);
@@ -575,61 +725,52 @@ export class GitProjectManifestService {
         const candidateAbs = path.join(this.managedRoot(stackName), candidateRelPath);
         const markerPath = await this.markerPath(stackName);
         const bounds = this.boundsConfig();
+        const appliedRel = `${GENERATIONS_DIR}/applied-${sha}-${manifest.manifestVersion}`;
+        const appliedAbs = path.join(this.managedRoot(stackName), appliedRel);
+        const incomingFiles = this.manifestFilePaths(manifest);
+        const priorFiles = priorManifest ? this.manifestFilePaths(priorManifest) : [];
+        const priorKeys = new Set(priorFiles.map((rel) => rel.toLowerCase()));
+        const priorByCaseFold = new Map(priorFiles.map((rel) => [rel.toLowerCase(), rel]));
+        const caseOnlyChange = incomingFiles.find((rel) => {
+            const priorRel = priorByCaseFold.get(rel.toLowerCase());
+            return priorRel !== undefined && priorRel !== rel;
+        });
+        if (caseOnlyChange !== undefined) {
+            throw new Error(`Case-only managed path changes are not supported: ${priorByCaseFold.get(caseOnlyChange.toLowerCase())} -> ${caseOnlyChange}`);
+        }
+        const introduced = incomingFiles.filter((rel) => !priorKeys.has(rel.toLowerCase()));
+        const affected = [...new Map([...priorFiles, ...incomingFiles].map((rel) => [rel.toLowerCase(), rel])).values()]
+            .sort((a, b) => a.localeCompare(b));
+        const markerBase: Omit<PromotionMarker, 'phase'> = {
+            schemaVersion: 2,
+            sha,
+            manifestVersion: manifest.manifestVersion,
+            candidateRelPath,
+            appliedRelPath: appliedRel,
+            affected,
+            introduced,
+        };
+        let liveMutationStarted = false;
 
         try {
             // The candidate must be complete; a partial build is never promoted.
-            try {
-                await fs.promises.access(path.join(candidateAbs, CANDIDATE_COMPLETE_MARKER));
-            } catch {
+            if (!(await this.pathExists(path.join(candidateAbs, CANDIDATE_COMPLETE_MARKER)))) {
                 throw new Error('Candidate is incomplete; pull again before applying');
             }
 
             await fs.promises.mkdir(this.managedRoot(stackName), { recursive: true });
-            // The introduced set (paths the incoming generation OWNS that the
-            // prior does not) is persisted in every marker write so boot recovery
-            // can restore exactly the prior generation even when the incoming
-            // manifest is no longer available.
-            const introduced = this.introducedPaths(priorManifest, { inputs: manifest.inputs, buildContexts: manifest.buildContexts });
-            await this.writeMarker(stackName, { sha, candidateRelPath, written: [], introduced });
+            // Persist the complete journal before the first live write. This
+            // covers every write and deletion even if the process exits between
+            // individual operations.
+            await this.writeMarker(stackName, { ...markerBase, phase: 'applying' });
+            liveMutationStarted = true;
 
-            // 1. Write every managed, present input from the candidate. The
-            //    marker is rewritten in BATCHES (every 25 files) with the full
-            //    written list: per-file rewrites are O(n^2) I/O on the large
-            //    projects this feature enables, and the recovery invariant only
-            //    needs the marker to exist with the last-known written set.
+            // 1. Write every owned file exactly once. Context directory input
+            // entries are inventory only; their files are listed explicitly by
+            // manifestFilePaths.
             const managed = manifest.inputs.filter((i) => i.ownership === 'managed' && i.state === 'present' && i.materializedPath !== null);
-            const written: string[] = [];
-            // Track directories to skip in the written list: directory paths
-            // cannot be hashed by recovery, and the context-file loop below
-            // records every individual file.
-            const dirPaths = new Set<string>();
-            for (const entry of managed) {
-                await this.writeStackFileFromCandidate(stackName, candidateAbs, entry.materializedPath!, bounds.maxFileBytes);
-                // Non-root context directories are expanded by the context-file
-                // loop below; only individual file paths go to the marker.
-                const candidateSrc = path.join(candidateAbs, entry.materializedPath!);
-                if (await fs.promises.stat(candidateSrc).then((s) => s.isDirectory()).catch(() => false)) {
-                    dirPaths.add(entry.materializedPath!);
-                } else {
-                    written.push(entry.materializedPath!);
-                }
-                if (written.length % 25 === 0) {
-                    await this.writeMarker(stackName, { sha, candidateRelPath, written, introduced });
-                }
-            }
-
-            // 1b. Context files: every file in every build context (root and
-            //     non-root) is promoted individually so the marker's written
-            //     list records exact file paths for recovery verification.
-            for (const ctx of manifest.buildContexts) {
-                for (const f of ctx.files) {
-                    const destRel = ctx.repoPath ? `${ctx.repoPath}/${f.path}` : f.path;
-                    await this.writeStackFileFromCandidate(stackName, candidateAbs, destRel, bounds.maxFileBytes);
-                    written.push(destRel);
-                }
-            }
-            if (written.length % 25 === 0 || written.length === managed.length + manifest.buildContexts.reduce((s, ctx) => s + ctx.files.length, 0)) {
-                await this.writeMarker(stackName, { sha, candidateRelPath, written, introduced });
+            for (const rel of incomingFiles) {
+                await this.writeStackFileFromCandidate(stackName, candidateAbs, rel, bounds.maxFileBytes);
             }
 
             // 2. Stale cleanup: prior-manifest paths Sencho owns (deletionAuthority
@@ -661,7 +802,7 @@ export class GitProjectManifestService {
                         .pathKind(stackName, entry.materializedPath)
                         .then((kind) => kind === 'directory')
                         .catch(() => false);
-                    await fsSvc.deleteStackPath(stackName, entry.materializedPath, isDir);
+                    await fsSvc.deleteStackPath(stackName, entry.materializedPath, isDir, { protectedEnabled: false });
                     removed.push({ ...entry, state: 'tombstoned', contentSha256: null, sizeBytes: null });
                 }
                 // Context-file reconciliation for contexts retained in both sets.
@@ -671,19 +812,14 @@ export class GitProjectManifestService {
                     for (const priorFile of priorCtx.files) {
                         if (newFiles.has(priorFile.path)) continue;
                         const rel = priorCtx.repoPath ? `${priorCtx.repoPath}/${priorFile.path}` : priorFile.path;
-                        await fsSvc.deleteStackPath(stackName, rel, false);
+                        await fsSvc.deleteStackPath(stackName, rel, false, { protectedEnabled: false });
                     }
                 }
             }
 
-            // 3. Move candidate -> applied FIRST, then write the manifest.
-            //    Ordering invariant: the sweep treats the on-disk manifest as
-            //    the previous generation, so a crash before the manifest write
-            //    must leave the OLD manifest on disk (restore works); a crash
-            //    after the write restores the idempotently rewritten new
-            //    generation, which is harmless.
-            const appliedRel = `${GENERATIONS_DIR}/applied-${sha}`;
-            const appliedAbs = path.join(this.managedRoot(stackName), appliedRel);
+            // 3. Move candidate to a versioned applied snapshot. The manifest
+            // version keeps a same-revision re-apply from deleting its own
+            // previous recovery snapshot.
             manifest.generation = {
                 candidateDir: candidateRelPath,
                 appliedDir: appliedRel,
@@ -696,27 +832,33 @@ export class GitProjectManifestService {
                 refused: manifest.refusals.length,
             };
             await fs.promises.rm(appliedAbs, { recursive: true, force: true });
-            // Rename FIRST so the marker can trust the applied dir exists.
-            // A crash after rename but before marker update: the sweep reads
-            // the old marker path (candidate-<sha>, gone) and falls through to
-            // isAppliedGen which sees the applied dir is present. A crash
-            // before rename: the original candidate is still there.
             await fs.promises.rename(candidateAbs, appliedAbs);
-            await this.writeMarker(stackName, { sha, candidateRelPath: appliedRel, written: written.map((w) => w), introduced });
             await this.pruneGenerations(stackName, appliedRel, manifest.generation.previousDir);
 
-            // 4. Write the manifest, then the DB cache + mount-root invalidation.
-            await this.writeManifest(stackName, manifest);
+            // 4. Mark the commit phase before replacing the manifest. Recovery
+            // can now distinguish an old-manifest rollback from a committed
+            // manifest that only needs its DB cache finalized.
+            await this.writeMarker(stackName, { ...markerBase, phase: 'committing' });
             DatabaseService.getInstance().setGitSourceManifestState(stackName, manifest.manifestVersion, manifest.state, appliedRel);
+            await this.writeManifest(stackName, manifest);
             StackFileRootsService.invalidate(NodeRegistry.getInstance().getDefaultNodeId(), stackName);
 
-            // 5. Clear the marker (last step; its presence means "recover").
-            await fs.promises.rm(markerPath, { force: true });
+            // Marker cleanup is post-commit housekeeping. If it fails, the
+            // next boot recognizes the committed manifest and finalizes it.
+            try {
+                await fs.promises.rm(markerPath, { force: true });
+            } catch (e) {
+                console.warn('[GitManifest] committed promotion marker cleanup failed:', (e as Error).message);
+            }
         } catch (error) {
+            if (!liveMutationStarted) throw error;
             // Mid-write failure: restore the previous applied generation and
             // rethrow so the caller reports the failure honestly.
             try {
-                await this.restorePreviousGeneration(stackName, { ...opts, incoming: { inputs: opts.manifest.inputs, buildContexts: opts.manifest.buildContexts } });
+                await this.restorePreviousGeneration(stackName, {
+                    priorManifest: opts.priorManifest,
+                    incoming: { inputs: opts.manifest.inputs, buildContexts: opts.manifest.buildContexts },
+                });
             } catch (restoreError) {
                 console.error('[GitManifest] promotion failed and recovery restore also failed:', (restoreError as Error).message);
             }
@@ -734,30 +876,8 @@ export class GitProjectManifestService {
         prior: GitProjectManifest | null,
         incoming: { inputs: ComposeInputEntry[]; buildContexts: BuildContextPlan[] },
     ): string[] {
-        // Only PRESENT prior entries count: tombstoned files were already
-        // removed and their paths can safely be reused by the incoming set.
-        const priorTop = new Set(
-            (prior?.inputs ?? [])
-                .filter((i) => i.ownership === 'managed' && i.state === 'present' && i.materializedPath !== null)
-                .map((i) => i.materializedPath as string),
-        );
-        const priorContextFiles = new Map<string, Set<string>>();
-        for (const ctx of prior?.buildContexts ?? []) {
-            priorContextFiles.set(ctx.repoPath, new Set(ctx.files.map((f) => f.path)));
-        }
-        const introduced: string[] = [];
-        for (const entry of incoming.inputs) {
-            if (entry.ownership !== 'managed' || entry.materializedPath === null) continue;
-            if (!priorTop.has(entry.materializedPath)) introduced.push(entry.materializedPath);
-        }
-        for (const ctx of incoming.buildContexts) {
-            const priorFiles = priorContextFiles.get(ctx.repoPath) ?? new Set<string>();
-            for (const f of ctx.files) {
-                if (priorFiles.has(f.path)) continue;
-                introduced.push(ctx.repoPath ? `${ctx.repoPath}/${f.path}` : f.path);
-            }
-        }
-        return introduced;
+        const priorPaths = new Set((prior ? this.manifestFilePaths(prior) : []).map((rel) => rel.toLowerCase()));
+        return this.manifestFilePaths(incoming).filter((rel) => !priorPaths.has(rel.toLowerCase()));
     }
 
     /**
@@ -771,29 +891,25 @@ export class GitProjectManifestService {
      */
     async restorePreviousGeneration(
         stackName: string,
-        opts: { sha: string; candidateRelPath: string; manifest: GitProjectManifest; priorManifest: GitProjectManifest | null; incoming?: { inputs?: ComposeInputEntry[]; buildContexts?: BuildContextPlan[]; introducedPaths?: string[] } | null },
-    ): Promise<void> {
+        opts: { priorManifest: GitProjectManifest | null; incoming?: RecoveryIncoming | null },
+    ): Promise<boolean> {
         const prior = opts.priorManifest;
         let failures = 0;
         const fsSvc = FileSystemService.getInstance();
         const removeStackPath = async (relPath: string): Promise<void> => {
-            const isDir = await fsSvc
-                .pathKind(stackName, relPath)
-                .then((kind) => kind === 'directory')
-                .catch(() => false);
-            if (isDir || (await fsSvc.pathKind(stackName, relPath).catch(() => null)) !== null) {
-                await fsSvc.deleteStackPath(stackName, relPath, isDir);
+            const kind = await fsSvc.pathKind(stackName, relPath);
+            if (kind !== null) {
+                await fsSvc.deleteStackPath(stackName, relPath, kind === 'directory', { protectedEnabled: false });
             }
         };
         if (prior) {
             const priorDir = path.join(this.managedRoot(stackName), prior.generation.appliedDir);
-            for (const entry of prior.inputs) {
-                if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
+            for (const rel of this.manifestFilePaths(prior)) {
                 try {
-                    await this.writeStackFileFromCandidate(stackName, priorDir, entry.materializedPath, this.boundsConfig().maxFileBytes);
+                    await this.writeStackFileFromCandidate(stackName, priorDir, rel, this.boundsConfig().maxFileBytes);
                 } catch (e) {
                     failures += 1;
-                    console.error(`[GitManifest] restore could not write ${entry.materializedPath}:`, (e as Error).message);
+                    console.error(`[GitManifest] restore could not write ${rel}:`, (e as Error).message);
                 }
             }
             // Exact-generation restore: paths the failed promotion introduced
@@ -801,8 +917,9 @@ export class GitProjectManifestService {
             // must be removed, or the stack would keep a mixed old/new file
             // set. Context files are included.
             if (failures === 0 && opts.incoming) {
-                const removeList =
-                    opts.incoming.introducedPaths ?? this.introducedPaths(prior, opts.incoming as { inputs: ComposeInputEntry[]; buildContexts: BuildContextPlan[] });
+                const removeList = 'introducedPaths' in opts.incoming
+                    ? opts.incoming.introducedPaths
+                    : this.introducedPaths(prior, opts.incoming);
                 for (const rel of removeList) {
                     try {
                         await removeStackPath(rel);
@@ -826,12 +943,11 @@ export class GitProjectManifestService {
             );
         } else {
             // First-ever promotion failed with no prior generation to restore:
-            // remove everything the failed promotion wrote so the stack dir is
-            // not left with a partial file set, flag migration_required, and
-            // KEEP the marker so the boot sweep reports the stack.
+            // remove everything the failed promotion wrote and flag the row.
             if (opts.incoming && failures === 0) {
-                const removeList =
-                    opts.incoming.introducedPaths ?? this.introducedPaths(null, opts.incoming as { inputs: ComposeInputEntry[]; buildContexts: BuildContextPlan[] });
+                const removeList = 'introducedPaths' in opts.incoming
+                    ? opts.incoming.introducedPaths
+                    : this.introducedPaths(null, opts.incoming);
                 for (const rel of removeList) {
                     try {
                         await removeStackPath(rel);
@@ -842,12 +958,12 @@ export class GitProjectManifestService {
                 }
             }
             DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
-            failures = 1;
         }
         if (failures === 0) {
             await fs.promises.rm(await this.markerPath(stackName), { force: true });
         }
         StackFileRootsService.invalidate(NodeRegistry.getInstance().getDefaultNodeId(), stackName);
+        return failures === 0;
     }
 
     private async pruneGenerations(stackName: string, keepAppliedRel: string, previousDir: string | null): Promise<void> {
@@ -870,16 +986,21 @@ export class GitProjectManifestService {
         }
     }
 
+    private async flagRecoveryRequired(stackName: string, reason: string): Promise<void> {
+        DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
+        await fs.promises.rm(await this.markerPath(stackName), { force: true });
+        console.warn(`[GitManifest] ${reason}; flagged migration_required`);
+    }
+
     // ─── Boot sweep ──────────────────────────────────────────────────────────
 
     /**
-     * One stack's crash-recovery + orphan sweep. Callers run this under the
-     * per-stack lock. When a promotion marker exists, the stack-dir files
-     * recorded as written are verified against the candidate; a match means
-     * recovery restores the previous applied generation, a mismatch means the
-     * operator hand-repaired after the crash: decline, flag migration_required,
-     * and report. Candidates without the completion marker are deleted; the
-     * whole managed area is dropped when the stack no longer exists.
+     * One stack's crash recovery and orphan sweep. Callers run this under the
+     * per-stack lock. Every journaled path must match either the prior or the
+     * incoming snapshot before recovery writes anything. A committed manifest
+     * is finalized; an uncommitted promotion restores the prior generation.
+     * A third state is treated as an operator edit, so recovery declines and
+     * flags migration_required. Interrupted detach snapshots are restored first.
      */
     async sweepManagedArea(
         stackName: string,
@@ -890,86 +1011,85 @@ export class GitProjectManifestService {
             await this.deleteManagedArea(stackName);
             return;
         }
+        await this.recoverInterruptedDetach(stackName, repoUrl, branch);
         const marker = await this.readMarker(stackName);
         if (marker) {
             if ('corrupt' in marker) {
                 // A corrupt marker (crash mid-marker-write) is NOT a clean slate:
                 // the stack dir may be half-written. Flag recovery-required.
-                await fs.promises.rm(await this.markerPath(stackName), { force: true });
-                DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
-                console.warn(`[GitManifest] promotion marker for ${sanitizeForLog(stackName)} is corrupt (${marker.corrupt}); flagged migration_required`);
+                await this.flagRecoveryRequired(stackName, `promotion marker for ${sanitizeForLog(stackName)} is corrupt (${marker.corrupt})`);
                 return;
             }
-            const candidateAbs = path.join(this.managedRoot(stackName), marker.candidateRelPath);
-            let candidateOk = false;
-            try {
-                await fs.promises.access(path.join(candidateAbs, CANDIDATE_COMPLETE_MARKER));
-                candidateOk = true;
-            } catch {
-                candidateOk = false;
-            }
-            if (!candidateOk) {
-                // The marker may point at an applied generation (post-rename
-                // crash): check whether the directory is non-empty before
-                // giving up.
-                let isAppliedGen = false;
-                try {
-                    const entries = await fs.promises.readdir(candidateAbs);
-                    isAppliedGen = entries.length > 0 && !entries.every((e) => e === CANDIDATE_COMPLETE_MARKER);
-                } catch {
-                    isAppliedGen = false;
+            const current = await this.readManifest(stackName, repoUrl, branch);
+
+            // Once the incoming manifest is visible, promotion is committed.
+            // A remaining marker only means DB cache or marker cleanup did not
+            // finish, so finalize without touching live stack files.
+            if (marker.phase === 'committing'
+                && current !== null
+                && !('corrupt' in current)
+                && current.manifestVersion === marker.manifestVersion
+                && current.resolvedRevision.commitSha === marker.sha
+                && current.generation.appliedDir === marker.appliedRelPath) {
+                DatabaseService.getInstance().setGitSourceManifestState(
+                    stackName,
+                    current.manifestVersion,
+                    current.state,
+                    current.generation.appliedDir,
+                );
+                StackFileRootsService.invalidate(NodeRegistry.getInstance().getDefaultNodeId(), stackName);
+                await fs.promises.rm(await this.markerPath(stackName), { force: true });
+                console.warn(`[GitManifest] finalized committed promotion for ${sanitizeForLog(stackName)} after a crash`);
+            } else {
+                const candidateAbs = path.join(this.managedRoot(stackName), marker.candidateRelPath);
+                const appliedAbs = path.join(this.managedRoot(stackName), marker.appliedRelPath);
+                let incomingAbs: string | null = null;
+                if (await this.pathExists(path.join(candidateAbs, CANDIDATE_COMPLETE_MARKER))) {
+                    incomingAbs = candidateAbs;
+                } else if (await this.pathExists(path.join(appliedAbs, CANDIDATE_COMPLETE_MARKER))) {
+                    incomingAbs = appliedAbs;
                 }
-                if (!isAppliedGen) {
-                    // Candidate vanished; nothing to verify or restore against.
-                    await fs.promises.rm(await this.markerPath(stackName), { force: true });
-                    DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
-                    console.warn(`[GitManifest] promotion marker found for ${sanitizeForLog(stackName)} but the candidate is missing; flagged migration_required`);
+                if (incomingAbs === null) {
+                    await this.flagRecoveryRequired(stackName, `promotion snapshots for ${sanitizeForLog(stackName)} are missing`);
                     return;
                 }
-                // Applied generation is present (post-rename crash); proceed
-                // with restore as if the candidate were complete.
-                candidateOk = true;
-            }
-            const prior = await this.readManifest(stackName, repoUrl, branch);
-            if (prior === null || 'corrupt' in prior) {
-                await fs.promises.rm(await this.markerPath(stackName), { force: true });
-                DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
-                console.warn(`[GitManifest] promotion marker found for ${sanitizeForLog(stackName)} but no trustworthy prior manifest; flagged migration_required`);
-                return;
-            }
-            // Verify the recorded mid-write state still matches the candidate.
-            // A missing candidate file is a mismatch (decline + flag), never a
-            // throw that would abort the sweep for the remaining stacks.
-            let mismatch: string | null = null;
-            for (const rel of marker.written) {
-                let expected: string | null = null;
-                try {
-                    expected = sha256Of(await fs.promises.readFile(path.join(candidateAbs, rel)));
-                } catch {
-                    mismatch = `${rel} (candidate file missing)`;
-                    break;
+                if (current !== null && 'corrupt' in current) {
+                    await this.flagRecoveryRequired(stackName, `promotion marker found for ${sanitizeForLog(stackName)} but the prior manifest is corrupt`);
+                    return;
                 }
-                const actual = await this.hashStackFile(stackName, rel);
-                if (actual !== expected) {
-                    mismatch = `${rel} (${actual ?? 'missing'} != ${expected})`;
-                    break;
+
+                const prior = current;
+                const priorAbs = prior ? path.join(this.managedRoot(stackName), prior.generation.appliedDir) : null;
+                let mismatch: string | null = null;
+                for (const rel of marker.affected) {
+                    try {
+                        const actual = await this.hashStackFile(stackName, rel);
+                        const before = priorAbs ? await this.hashSnapshotFile(priorAbs, rel) : null;
+                        const after = await this.hashSnapshotFile(incomingAbs, rel);
+                        if (actual !== before && actual !== after) {
+                            mismatch = `${rel} does not match either recovery snapshot`;
+                            break;
+                        }
+                    } catch (e) {
+                        mismatch = `${rel} could not be verified: ${(e as Error).message}`;
+                        break;
+                    }
+                }
+                if (mismatch !== null) {
+                    await this.flagRecoveryRequired(
+                        stackName,
+                        `promotion marker for ${sanitizeForLog(stackName)} does not match the stack dir (${mismatch}); restore declined`,
+                    );
+                    return;
+                }
+                const restored = await this.restorePreviousGeneration(stackName, {
+                    priorManifest: prior,
+                    incoming: marker.introduced.length > 0 ? { introducedPaths: marker.introduced } : null,
+                });
+                if (restored) {
+                    console.warn(`[GitManifest] restored previous applied generation for ${sanitizeForLog(stackName)} after a crash`);
                 }
             }
-            if (mismatch !== null) {
-                // Hand-repaired after the crash: do NOT overwrite user work.
-                await fs.promises.rm(await this.markerPath(stackName), { force: true });
-                DatabaseService.getInstance().setGitSourceManifestState(stackName, null, 'migration_required', null);
-                console.warn(`[GitManifest] promotion marker for ${sanitizeForLog(stackName)} does not match the stack dir (${mismatch}); restore declined, flagged migration_required`);
-                return;
-            }
-            await this.restorePreviousGeneration(stackName, {
-                sha: marker.sha,
-                candidateRelPath: marker.candidateRelPath,
-                manifest: prior,
-                priorManifest: prior,
-                incoming: marker.introduced.length > 0 ? { introducedPaths: marker.introduced } : null,
-            });
-            console.warn(`[GitManifest] restored previous applied generation for ${sanitizeForLog(stackName)} after a crash`);
         }
 
         // Orphan candidates: incomplete or stale.
@@ -998,6 +1118,179 @@ export class GitProjectManifestService {
         }
     }
 
+    private detachStagedRoot(stackName: string): string {
+        const root = this.managedRoot(stackName);
+        return path.join(path.dirname(root), `.detach-${stackName}`);
+    }
+
+    /** Persist exact stack-file snapshots before detach mutates the live files. */
+    async prepareDetachRecovery(
+        stackName: string,
+        repoUrl: string,
+        branch: string,
+        files: DetachRecoveryInput[],
+    ): Promise<void> {
+        const root = this.managedRoot(stackName);
+        const managedAreaExisted = await this.pathExists(root);
+        const bounds = this.boundsConfig();
+        if (files.length > bounds.maxFiles) throw new Error('Detach recovery snapshot exceeds the file bound');
+        if (files.some((file) => !isNonEmptyRelPath(file.path))) throw new Error('Invalid detach recovery path');
+        if (new Set(files.map((file) => file.path.toLowerCase())).size !== files.length) {
+            throw new Error('Detach recovery snapshot has duplicate paths');
+        }
+        let snapshotBytes = 0;
+        for (const file of files) {
+            if (!file.existed) continue;
+            if (file.content.length > bounds.maxFileBytes) throw new Error(`Detach recovery file exceeds the size bound: ${file.path}`);
+            snapshotBytes += file.content.length;
+            if (snapshotBytes > bounds.maxBytes) throw new Error('Detach recovery snapshot exceeds the byte bound');
+        }
+        const marker: DetachRecoveryMarker = {
+            schemaVersion: 1,
+            identity: { stackName, repoUrl, branch },
+            managedAreaExisted,
+            files: files.map((file): DetachRecoveryFile => file.existed
+                ? { path: file.path, existed: true, contentBase64: file.content.toString('base64') }
+                : { path: file.path, existed: false, contentBase64: null }),
+        };
+        await fs.promises.mkdir(root, { recursive: true });
+        const target = path.join(root, DETACH_RECOVERY_MARKER);
+        const tmp = `${target}.tmp`;
+        await fs.promises.writeFile(tmp, JSON.stringify(marker), 'utf8');
+        await fs.promises.rename(tmp, target);
+    }
+
+    /** Restore a detach snapshot and remove its marker after every file succeeds. */
+    private async restoreDetachRecoveryFromRoot(stackName: string, repoUrl: string, branch: string, root: string): Promise<boolean> {
+        const markerPath = path.join(root, DETACH_RECOVERY_MARKER);
+        let raw: string;
+        try {
+            raw = await fs.promises.readFile(markerPath, 'utf8');
+        } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
+            throw e;
+        }
+        const rawMarker: unknown = JSON.parse(raw);
+        if (!rawMarker || typeof rawMarker !== 'object' || Array.isArray(rawMarker)) throw new Error('Detach recovery marker is invalid');
+        const marker = rawMarker as Record<string, unknown>;
+        const identity = marker.identity as Record<string, unknown> | undefined;
+        const bounds = this.boundsConfig();
+        if (marker.schemaVersion !== 1
+            || !identity
+            || identity.stackName !== stackName
+            || identity.repoUrl !== repoUrl
+            || identity.branch !== branch
+            || typeof marker.managedAreaExisted !== 'boolean'
+            || !Array.isArray(marker.files)
+            || marker.files.length > bounds.maxFiles) {
+            throw new Error('Detach recovery marker is invalid');
+        }
+        let snapshotBytes = 0;
+        for (const file of marker.files as unknown[]) {
+            if (!file || typeof file !== 'object' || Array.isArray(file)) throw new Error('Detach recovery file entry is invalid');
+            const entry = file as Record<string, unknown>;
+            if (!isNonEmptyRelPath(entry.path) || typeof entry.existed !== 'boolean') throw new Error('Detach recovery file entry is invalid');
+            if (entry.existed && typeof entry.contentBase64 !== 'string') throw new Error('Detach recovery content is missing');
+            if (!entry.existed && entry.contentBase64 !== null) throw new Error('Detach recovery absent file has content');
+            if (typeof entry.contentBase64 === 'string') {
+                const maxEncodedLength = Math.ceil(bounds.maxFileBytes / 3) * 4;
+                if (entry.contentBase64.length > maxEncodedLength
+                    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(entry.contentBase64)) {
+                    throw new Error('Detach recovery content is invalid');
+                }
+                const contentBytes = Buffer.byteLength(entry.contentBase64, 'base64');
+                if (contentBytes > bounds.maxFileBytes) throw new Error('Detach recovery content exceeds the file-size bound');
+                snapshotBytes += contentBytes;
+                if (snapshotBytes > bounds.maxBytes) throw new Error('Detach recovery content exceeds the byte bound');
+            }
+        }
+        const parsed = marker as unknown as DetachRecoveryMarker;
+        if (new Set(parsed.files.map((file) => file.path.toLowerCase())).size !== parsed.files.length) {
+            throw new Error('Detach recovery marker has duplicate paths');
+        }
+
+        const fsSvc = FileSystemService.getInstance();
+        for (const file of parsed.files) {
+            if (file.existed) {
+                const content = Buffer.from(file.contentBase64, 'base64');
+                if (file.path === 'compose.yaml') {
+                    await fsSvc.saveStackContent(stackName, content);
+                } else {
+                    await fsSvc.writeStackFile(stackName, file.path, content);
+                }
+            } else {
+                try {
+                    await fsSvc.deleteStackPath(stackName, file.path, false, { protectedEnabled: false });
+                } catch (e) {
+                    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+                }
+            }
+        }
+        await fs.promises.rm(markerPath, { force: true });
+        if (!parsed.managedAreaExisted) {
+            await fs.promises.rm(root, { recursive: true, force: true });
+        }
+        return true;
+    }
+
+    /** Recover an interrupted detach while its Git source row still exists. */
+    async recoverInterruptedDetach(stackName: string, repoUrl: string, branch: string): Promise<boolean> {
+        const root = this.managedRoot(stackName);
+        const staged = this.detachStagedRoot(stackName);
+        const stagedExists = await this.pathExists(staged);
+        if (stagedExists) {
+            const rootExists = await this.pathExists(root);
+            if (rootExists) throw new Error('Detach recovery has both live and staged managed areas');
+            await fs.promises.rename(staged, root);
+            try {
+                return await this.restoreDetachRecoveryFromRoot(stackName, repoUrl, branch, root);
+            } catch (e) {
+                try {
+                    const restoredRootExists = await this.pathExists(root);
+                    if (restoredRootExists) await fs.promises.rename(root, staged);
+                } catch (cleanupError) {
+                    const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+                    console.error('[GitManifest] detach recovery restaging failed:', sanitizeForLog(cleanupMessage));
+                }
+                throw e;
+            }
+        }
+        return this.restoreDetachRecoveryFromRoot(stackName, repoUrl, branch, root);
+    }
+
+    /** Move the managed area aside until the Git source row deletion commits. */
+    async stageManagedAreaForDetach(stackName: string): Promise<boolean> {
+        const root = this.managedRoot(stackName);
+        const staged = this.detachStagedRoot(stackName);
+        await fs.promises.rm(staged, { recursive: true, force: true });
+        try {
+            await fs.promises.rename(root, staged);
+            return true;
+        } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
+            throw e;
+        }
+    }
+
+    /** Put a staged managed area back, then restore its durable file snapshot. */
+    async rollbackStagedDetach(stackName: string, repoUrl: string, branch: string): Promise<boolean> {
+        const root = this.managedRoot(stackName);
+        const staged = this.detachStagedRoot(stackName);
+        await fs.promises.rename(staged, root);
+        return this.restoreDetachRecoveryFromRoot(stackName, repoUrl, branch, root);
+    }
+
+    /** Delete a staged managed area after the database row is gone. */
+    async finalizeStagedDetach(stackName: string): Promise<boolean> {
+        try {
+            await fs.promises.rm(this.detachStagedRoot(stackName), { recursive: true, force: true });
+            return true;
+        } catch (e) {
+            console.warn('[GitManifest] staged detach cleanup failed:', sanitizeForLog(stackName), (e as Error).message);
+            return false;
+        }
+    }
+
     /**
      * Delete the whole managed area. Failures are logged and reported as
      * false so callers can decide whether the operation should proceed
@@ -1010,7 +1303,7 @@ export class GitProjectManifestService {
             await fs.promises.rm(root, { recursive: true, force: true });
             return true;
         } catch (e) {
-            console.warn(`[GitManifest] could not delete managed area for ${sanitizeForLog(stackName)}:`, (e as Error).message);
+            console.warn('[GitManifest] could not delete managed area:', sanitizeForLog(stackName), (e as Error).message);
             return false;
         }
     }

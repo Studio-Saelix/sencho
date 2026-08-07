@@ -193,6 +193,51 @@ configs:
         expect(result.refusals.some((r) => r.kind === 'context-unbounded')).toBe(true);
     });
 
+    it('counts a shared-context union once per unique file', async () => {
+        const clone = makeClone({
+            'compose.yaml': `services:
+  one:
+    build:
+      context: web
+      dockerfile: Dockerfile.one
+  two:
+    build:
+      context: web
+      dockerfile: Dockerfile.two
+`,
+            'web/Dockerfile.one': 'FROM scratch\n',
+            'web/Dockerfile.two': 'FROM scratch\n',
+            'web/Dockerfile.one.dockerignore': 'b.bin\n',
+            'web/Dockerfile.two.dockerignore': 'a.bin\n',
+            'web/common.bin': 'c'.repeat(100),
+            'web/a.bin': 'a'.repeat(100),
+            'web/b.bin': 'b'.repeat(100),
+        });
+        const result = await discovery().discoverFromClone({
+            cloneDir: clone,
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            bounds: { ...BOUNDS, maxContextBytes: 350 },
+        });
+
+        expect(result.refusals.some((r) => r.kind === 'context-unbounded')).toBe(false);
+        expect(result.buildContexts).toHaveLength(1);
+        expect(result.buildContexts[0].contextBytes).toBe(338);
+        expect(result.buildContexts[0].files).toHaveLength(7);
+
+        const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-context-union-'));
+        tmpRoots.push(dest);
+        const managedFiles = result.inputs
+            .filter((input) => input.ownership === 'managed'
+                && input.materializedPath !== null
+                && input.dependencyKind !== 'build-context'
+                && input.dependencyKind !== 'build-additional-context')
+            .map((input) => ({ srcRel: input.sourcePath!, destRel: input.materializedPath! }));
+        await discovery().walkAndCopy(clone, dest, managedFiles, result.contextCopyPlans, BOUNDS);
+        expect(fs.existsSync(path.join(dest, 'web/a.bin'))).toBe(true);
+        expect(fs.existsSync(path.join(dest, 'web/b.bin'))).toBe(true);
+    });
+
     it('refuses LFS pointers inside a build context', async () => {
         const clone = makeClone({
             'compose.yaml': 'services:\n  web:\n    build: web\n',

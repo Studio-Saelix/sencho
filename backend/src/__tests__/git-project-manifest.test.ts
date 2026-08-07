@@ -90,6 +90,46 @@ function makeClone(files: Record<string, string>): string {
 
 const REPO = { repo_url: 'https://github.com/example/repo.git', branch: 'main' };
 
+function seedGitSource(stackName: string): void {
+    DatabaseService.getInstance().upsertGitSource({
+        stack_name: stackName,
+        repo_url: REPO.repo_url,
+        branch: REPO.branch,
+        compose_path: 'compose.yaml',
+        compose_paths: ['compose.yaml'],
+        context_dir: null,
+        sync_env: false,
+        env_path: null,
+        auth_type: 'none',
+        encrypted_token: null,
+        auto_apply_on_webhook: false,
+        auto_deploy_on_apply: false,
+        last_applied_commit_sha: null,
+        last_applied_content_hash: null,
+        pending_commit_sha: null,
+        pending_compose_content: null,
+        pending_env_content: null,
+        pending_fetched_at: null,
+        last_debounce_at: null,
+    });
+}
+
+function writePromotionMarker(stackName: string, marker: {
+    phase?: 'applying' | 'committing';
+    sha: string;
+    manifestVersion: number;
+    candidateRelPath: string;
+    appliedRelPath: string;
+    affected: string[];
+    introduced?: string[];
+}): void {
+    fs.writeFileSync(
+        path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER),
+        JSON.stringify({ schemaVersion: 2, phase: marker.phase ?? 'applying', introduced: [], ...marker }),
+        'utf8',
+    );
+}
+
 describe('readManifest / writeManifest', () => {
     it('round-trips and bumps the manifest version', async () => {
         const svc = GitProjectManifestService.getInstance();
@@ -136,6 +176,51 @@ describe('readManifest / writeManifest', () => {
         // A same-named successor pointing at a different repository must not adopt it.
         const read = await svc.readManifest('identity-a', 'https://github.com/other/repo.git', 'main');
         expect(read && 'corrupt' in read).toBe(true);
+    });
+
+    it('degrades legacy context inventories without file sizes to directory granularity', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'legacy-context-sizes';
+        const manifest = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })], null, [{
+            repoPath: 'app',
+            dockerfile: null,
+            contextBytes: 12,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'file.txt', sha256: 'a'.repeat(64), sizeBytes: 12 }],
+        }]);
+        await svc.writeManifest(stackName, manifest);
+        const manifestPath = path.join(tmpDir, 'git-managed', '1', stackName, 'manifest.v1.json');
+        const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        delete raw.buildContexts[0].files[0].sizeBytes;
+        fs.writeFileSync(manifestPath, JSON.stringify(raw), 'utf8');
+
+        const read = await svc.readManifest(stackName, REPO.repo_url, REPO.branch);
+        if (read === null || 'corrupt' in read) throw new Error('expected a legacy manifest');
+        expect(read.buildContexts[0].files).toEqual([]);
+    });
+
+    it('rejects empty file paths and malformed nested counters', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'deep-validation';
+        const manifest = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]);
+        await svc.writeManifest(stackName, manifest);
+        const manifestPath = path.join(tmpDir, 'git-managed', '1', stackName, 'manifest.v1.json');
+
+        const emptyPath = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        emptyPath.inputs[0].materializedPath = '';
+        fs.writeFileSync(manifestPath, JSON.stringify(emptyPath), 'utf8');
+        const emptyRead = await svc.readManifest(stackName, REPO.repo_url, REPO.branch);
+        expect(emptyRead && 'corrupt' in emptyRead).toBe(true);
+
+        await svc.writeManifest(stackName, manifest);
+        const malformed = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        malformed.bounds.maxFiles = -1;
+        fs.writeFileSync(manifestPath, JSON.stringify(malformed), 'utf8');
+        const malformedRead = await svc.readManifest(stackName, REPO.repo_url, REPO.branch);
+        expect(malformedRead && 'corrupt' in malformedRead).toBe(true);
     });
 
     it('returns null after the managed area is deleted', async () => {
@@ -265,6 +350,73 @@ describe('promoteGeneration', () => {
         const tombstone = read.inputs.find((i) => i.materializedPath === 'stale.yaml');
         expect(tombstone?.state).toBe('tombstoned');
     });
+
+    it('keeps the prior snapshot when reapplying the same commit', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'promote-same-sha';
+        writeStackFile(stackName, 'compose.yaml', 'PRIOR\n');
+        const prior = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]);
+        const priorRel = 'generations/applied-abc123-1';
+        const priorAbs = path.join(tmpDir, 'git-managed', '1', stackName, priorRel);
+        fs.mkdirSync(priorAbs, { recursive: true });
+        fs.writeFileSync(path.join(priorAbs, 'compose.yaml'), 'PRIOR\n');
+        prior.generation.appliedDir = priorRel;
+        await svc.writeManifest(stackName, prior);
+        const next = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })], prior);
+        const clone = makeClone({ 'compose.yaml': 'NEW\n' });
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'abc123',
+            clone,
+            [{ srcRel: 'compose.yaml', destRel: 'compose.yaml' }],
+            [],
+            BOUNDS,
+        );
+
+        await svc.promoteGeneration(stackName, { sha: 'abc123', candidateRelPath: candidateRel, manifest: next, priorManifest: prior });
+
+        expect(readStackFile(stackName, 'compose.yaml')).toBe('NEW\n');
+        expect(fs.readFileSync(path.join(priorAbs, 'compose.yaml'), 'utf8')).toBe('PRIOR\n');
+        const current = await svc.readManifest(stackName, REPO.repo_url, REPO.branch);
+        if (current === null || 'corrupt' in current) throw new Error('expected a manifest');
+        expect(current.generation.appliedDir).toBe('generations/applied-abc123-2');
+        expect(current.generation.previousDir).toBe(priorRel);
+        expect(fs.existsSync(path.join(priorAbs, 'compose.yaml'))).toBe(true);
+    });
+
+    it('refuses case-only managed path changes before mutating the stack', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'promote-case-only';
+        writeStackFile(stackName, 'Config.yml', 'PRIOR\n');
+        const prior = buildManifest(stackName, [managedEntry({
+            materializedPath: 'Config.yml',
+            role: 'config',
+            dependencyKind: 'config',
+        })]);
+        const incoming = buildManifest(stackName, [managedEntry({
+            materializedPath: 'config.yml',
+            role: 'config',
+            dependencyKind: 'config',
+        })], prior);
+        const clone = makeClone({ 'config.yml': 'NEW\n' });
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'case-only',
+            clone,
+            [{ srcRel: 'config.yml', destRel: 'config.yml' }],
+            [],
+            BOUNDS,
+        );
+
+        await expect(svc.promoteGeneration(stackName, {
+            sha: 'case-only',
+            candidateRelPath: candidateRel,
+            manifest: incoming,
+            priorManifest: prior,
+        })).rejects.toThrow(/Case-only managed path changes/);
+        expect(readStackFile(stackName, 'Config.yml')).toBe('PRIOR\n');
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
+    });
 });
 
 describe('sweepManagedArea (crash recovery)', () => {
@@ -292,8 +444,13 @@ describe('sweepManagedArea (crash recovery)', () => {
         fs.writeFileSync(path.join(candidateAbs, CANDIDATE_COMPLETE_MARKER), 'crash');
         fs.writeFileSync(path.join(candidateAbs, 'compose.yaml'), 'NEW\n');
         writeStackFile(stackName, 'compose.yaml', 'NEW\n');
-        const marker = { sha: 'crash', candidateRelPath: candidateRel, written: ['compose.yaml'], introduced: [] };
-        fs.writeFileSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER), JSON.stringify(marker), 'utf8');
+        writePromotionMarker(stackName, {
+            sha: 'crash',
+            manifestVersion: prior.manifestVersion + 1,
+            candidateRelPath: candidateRel,
+            appliedRelPath: 'generations/applied-crash-2',
+            affected: ['app.env', 'compose.yaml'],
+        });
 
         await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
 
@@ -340,8 +497,13 @@ describe('sweepManagedArea (crash recovery)', () => {
         fs.writeFileSync(path.join(candidateAbs, CANDIDATE_COMPLETE_MARKER), 'crash2');
         fs.writeFileSync(path.join(candidateAbs, 'compose.yaml'), 'NEW\n');
         writeStackFile(stackName, 'compose.yaml', 'OPERATOR FIXED ME\n'); // hand-repaired
-        const marker = { sha: 'crash2', candidateRelPath: candidateRel, written: ['compose.yaml'], introduced: [] };
-        fs.writeFileSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER), JSON.stringify(marker), 'utf8');
+        writePromotionMarker(stackName, {
+            sha: 'crash2',
+            manifestVersion: prior.manifestVersion + 1,
+            candidateRelPath: candidateRel,
+            appliedRelPath: 'generations/applied-crash2-2',
+            affected: ['compose.yaml'],
+        });
 
         await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
 
@@ -349,6 +511,158 @@ describe('sweepManagedArea (crash recovery)', () => {
         expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
         const row = DatabaseService.getInstance().getGitSource(stackName);
         expect(row?.manifest_state).toBe('migration_required');
+    });
+
+    it('restores through the candidate-to-applied rename window', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'sweep-rename-window';
+        writeStackFile(stackName, 'compose.yaml', 'PRIOR\n');
+        const prior = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]);
+        const priorRel = 'generations/applied-prior';
+        const priorAbs = path.join(tmpDir, 'git-managed', '1', stackName, priorRel);
+        fs.mkdirSync(priorAbs, { recursive: true });
+        fs.writeFileSync(path.join(priorAbs, 'compose.yaml'), 'PRIOR\n');
+        prior.generation.appliedDir = priorRel;
+        await svc.writeManifest(stackName, prior);
+
+        const candidateRel = 'generations/candidate-rename';
+        const appliedRel = 'generations/applied-rename-2';
+        const appliedAbs = path.join(tmpDir, 'git-managed', '1', stackName, appliedRel);
+        fs.mkdirSync(appliedAbs, { recursive: true });
+        fs.writeFileSync(path.join(appliedAbs, CANDIDATE_COMPLETE_MARKER), 'rename');
+        fs.writeFileSync(path.join(appliedAbs, 'compose.yaml'), 'NEW\n');
+        writeStackFile(stackName, 'compose.yaml', 'NEW\n');
+        writePromotionMarker(stackName, {
+            sha: 'rename',
+            manifestVersion: prior.manifestVersion + 1,
+            candidateRelPath: candidateRel,
+            appliedRelPath: appliedRel,
+            affected: ['compose.yaml'],
+        });
+
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
+
+        expect(readStackFile(stackName, 'compose.yaml')).toBe('PRIOR\n');
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
+    });
+
+    it('finalizes a committed manifest instead of rolling it back', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'sweep-post-manifest';
+        seedGitSource(stackName);
+        writeStackFile(stackName, 'compose.yaml', 'NEW\n');
+        const prior = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]);
+        prior.generation.appliedDir = 'generations/applied-prior';
+        const incoming = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })], prior);
+        incoming.resolvedRevision.commitSha = 'committed';
+        const appliedRel = `generations/applied-committed-${incoming.manifestVersion}`;
+        const appliedAbs = path.join(tmpDir, 'git-managed', '1', stackName, appliedRel);
+        fs.mkdirSync(appliedAbs, { recursive: true });
+        fs.writeFileSync(path.join(appliedAbs, CANDIDATE_COMPLETE_MARKER), 'committed');
+        fs.writeFileSync(path.join(appliedAbs, 'compose.yaml'), 'NEW\n');
+        incoming.generation = {
+            candidateDir: 'generations/candidate-committed',
+            appliedDir: appliedRel,
+            previousDir: prior.generation.appliedDir,
+        };
+        await svc.writeManifest(stackName, incoming);
+        writePromotionMarker(stackName, {
+            phase: 'committing',
+            sha: 'committed',
+            manifestVersion: incoming.manifestVersion,
+            candidateRelPath: incoming.generation.candidateDir,
+            appliedRelPath: appliedRel,
+            affected: ['compose.yaml'],
+        });
+
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
+
+        expect(readStackFile(stackName, 'compose.yaml')).toBe('NEW\n');
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
+        const read = await svc.readManifest(stackName, REPO.repo_url, REPO.branch);
+        if (read === null || 'corrupt' in read) throw new Error('expected committed manifest');
+        expect(read.manifestVersion).toBe(incoming.manifestVersion);
+        const row = DatabaseService.getInstance().getGitSource(stackName);
+        expect(row?.manifest_version).toBe(incoming.manifestVersion);
+        expect(row?.manifest_state).toBe(incoming.state);
+        expect(row?.manifest_generation).toBe(appliedRel);
+    });
+
+    it('rolls back a committing marker while the prior manifest is still authoritative', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'sweep-pre-manifest';
+        seedGitSource(stackName);
+        writeStackFile(stackName, 'compose.yaml', 'NEW\n');
+        const prior = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]);
+        const priorRel = 'generations/applied-prior';
+        const priorAbs = path.join(tmpDir, 'git-managed', '1', stackName, priorRel);
+        fs.mkdirSync(priorAbs, { recursive: true });
+        fs.writeFileSync(path.join(priorAbs, 'compose.yaml'), 'PRIOR\n');
+        prior.generation.appliedDir = priorRel;
+        await svc.writeManifest(stackName, prior);
+
+        const appliedRel = `generations/applied-committing-${prior.manifestVersion + 1}`;
+        const appliedAbs = path.join(tmpDir, 'git-managed', '1', stackName, appliedRel);
+        fs.mkdirSync(appliedAbs, { recursive: true });
+        fs.writeFileSync(path.join(appliedAbs, CANDIDATE_COMPLETE_MARKER), 'committing');
+        fs.writeFileSync(path.join(appliedAbs, 'compose.yaml'), 'NEW\n');
+        writePromotionMarker(stackName, {
+            phase: 'committing',
+            sha: 'committing',
+            manifestVersion: prior.manifestVersion + 1,
+            candidateRelPath: 'generations/candidate-committing',
+            appliedRelPath: appliedRel,
+            affected: ['compose.yaml'],
+        });
+
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
+
+        expect(readStackFile(stackName, 'compose.yaml')).toBe('PRIOR\n');
+        const row = DatabaseService.getInstance().getGitSource(stackName);
+        expect(row?.manifest_version).toBe(prior.manifestVersion);
+        expect(row?.manifest_state).toBe(prior.state);
+        expect(row?.manifest_generation).toBe(priorRel);
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
+    });
+
+    it('detects a hand edit in the former marker batch tail', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'sweep-batch-tail';
+        seedGitSource(stackName);
+        writeStackFile(stackName, 'compose.yaml', 'NEW\n');
+        writeStackFile(stackName, 'app.env', 'OPERATOR\n');
+        const prior = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml' }),
+            managedEntry({ materializedPath: 'app.env', dependencyKind: 'env_file', role: 'env' }),
+        ]);
+        const priorRel = 'generations/applied-prior';
+        const priorAbs = path.join(tmpDir, 'git-managed', '1', stackName, priorRel);
+        fs.mkdirSync(priorAbs, { recursive: true });
+        fs.writeFileSync(path.join(priorAbs, 'compose.yaml'), 'PRIOR\n');
+        fs.writeFileSync(path.join(priorAbs, 'app.env'), 'A=1\n');
+        prior.generation.appliedDir = priorRel;
+        await svc.writeManifest(stackName, prior);
+
+        const candidateRel = 'generations/candidate-tail';
+        const candidateAbs = path.join(tmpDir, 'git-managed', '1', stackName, candidateRel);
+        fs.mkdirSync(candidateAbs, { recursive: true });
+        fs.writeFileSync(path.join(candidateAbs, CANDIDATE_COMPLETE_MARKER), 'tail');
+        fs.writeFileSync(path.join(candidateAbs, 'compose.yaml'), 'NEW\n');
+        fs.writeFileSync(path.join(candidateAbs, 'app.env'), 'A=2\n');
+        writePromotionMarker(stackName, {
+            sha: 'tail',
+            manifestVersion: prior.manifestVersion + 1,
+            candidateRelPath: candidateRel,
+            appliedRelPath: 'generations/applied-tail-2',
+            affected: ['app.env', 'compose.yaml'],
+        });
+
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
+
+        expect(readStackFile(stackName, 'compose.yaml')).toBe('NEW\n');
+        expect(readStackFile(stackName, 'app.env')).toBe('OPERATOR\n');
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
+        expect(DatabaseService.getInstance().getGitSource(stackName)?.manifest_state).toBe('migration_required');
     });
 
     it('drops the managed area when the stack no longer exists', async () => {
@@ -372,6 +686,10 @@ describe('buildMigratedManifest', () => {
         });
         expect(manifest.state).toBe('migrated');
         expect(manifest.inputs.some((i) => i.materializedPath === 'compose.yaml' && i.deletionAuthority === 'sencho')).toBe(true);
+        await svc.writeManifest(stackName, manifest);
+        const read = await svc.readManifest(stackName, REPO.repo_url, REPO.branch);
+        expect(read).not.toBeNull();
+        expect(read && 'corrupt' in read).toBe(false);
     });
 
     it('grants sencho authority only for spec files and grants none to contextDir contents', async () => {
@@ -415,6 +733,79 @@ describe('exportForDetach', () => {
     it('throws on invalid yaml render output', async () => {
         const svc = GitProjectManifestService.getInstance();
         await expect(svc.exportForDetach('detach-bad', async () => 'services: [unclosed\n')).rejects.toThrow(/parse/);
+    });
+});
+
+describe('detach crash recovery', () => {
+    it('restores the durable snapshot when the managed area was staged before a crash', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'detach-crash';
+        const original = Buffer.from('services:\n  web:\n    image: nginx:old\n');
+        writeStackFile(stackName, 'compose.yaml', original.toString('utf8'));
+        await svc.writeManifest(stackName, buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]));
+        await svc.prepareDetachRecovery(stackName, REPO.repo_url, REPO.branch, [{ path: 'compose.yaml', existed: true, content: original }]);
+        writeStackFile(stackName, 'compose.yaml', 'services:\n  web:\n    image: nginx:new\n');
+        expect(await svc.stageManagedAreaForDetach(stackName)).toBe(true);
+
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
+
+        expect(readStackFile(stackName, 'compose.yaml')).toBe(original.toString('utf8'));
+        const restored = await svc.readManifest(stackName, REPO.repo_url, REPO.branch);
+        expect(restored).not.toBeNull();
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', `.detach-${stackName}`))).toBe(false);
+    });
+
+    it('round-trips snapshots larger than the former fixed entry limit', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'detach-many-files';
+        stackDir(stackName);
+        const snapshots = Array.from({ length: 17 }, (_, index) => ({
+            path: `override-${index}.yaml`,
+            existed: false as const,
+            content: null,
+        }));
+        await svc.prepareDetachRecovery(stackName, REPO.repo_url, REPO.branch, snapshots);
+
+        expect(await svc.recoverInterruptedDetach(stackName, REPO.repo_url, REPO.branch)).toBe(true);
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName))).toBe(false);
+    });
+
+    it('rejects duplicate snapshot paths before writing a recovery marker', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'detach-duplicate';
+        await expect(svc.prepareDetachRecovery(stackName, REPO.repo_url, REPO.branch, [
+            { path: 'compose.yaml', existed: false, content: null },
+            { path: 'compose.yaml', existed: false, content: null },
+        ])).rejects.toThrow(/duplicate paths/);
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName))).toBe(false);
+    });
+
+    it('does not treat an unreadable staged detach as absent', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'detach-stage-io';
+        const staged = path.join(tmpDir, 'git-managed', '1', `.detach-${stackName}`);
+        const originalAccess = fs.promises.access.bind(fs.promises);
+        const accessSpy = vi.spyOn(fs.promises, 'access').mockImplementation(async (...args: Parameters<typeof fs.promises.access>) => {
+            if (path.resolve(String(args[0])) === path.resolve(staged)) {
+                throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+            }
+            return originalAccess(...args);
+        });
+        try {
+            await expect(svc.recoverInterruptedDetach(stackName, REPO.repo_url, REPO.branch)).rejects.toThrow(/permission denied/);
+        } finally {
+            accessSpy.mockRestore();
+        }
+    });
+
+    it('reports when a staged detach has no recovery snapshot to restore', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'detach-missing-snapshot';
+        await svc.writeManifest(stackName, buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]));
+        expect(await svc.stageManagedAreaForDetach(stackName)).toBe(true);
+
+        expect(await svc.rollbackStagedDetach(stackName, REPO.repo_url, REPO.branch)).toBe(false);
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName))).toBe(true);
     });
 });
 
@@ -492,6 +883,86 @@ describe('promoteGeneration mid-write failure recovery', () => {
         expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
     });
 
+    it('restores files, manifest, and cache when the manifest commit write fails', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'promote-commit-fail';
+        seedGitSource(stackName);
+        writeStackFile(stackName, 'compose.yaml', 'PRIOR\n');
+        const prior = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]);
+        const priorRel = 'generations/applied-prior';
+        const priorAbs = path.join(tmpDir, 'git-managed', '1', stackName, priorRel);
+        fs.mkdirSync(priorAbs, { recursive: true });
+        fs.writeFileSync(path.join(priorAbs, 'compose.yaml'), 'PRIOR\n');
+        prior.generation.appliedDir = priorRel;
+        await svc.writeManifest(stackName, prior);
+        DatabaseService.getInstance().setGitSourceManifestState(stackName, prior.manifestVersion, prior.state, priorRel);
+
+        const clone = makeClone({ 'compose.yaml': 'NEW\n' });
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'commit-fail',
+            clone,
+            [{ srcRel: 'compose.yaml', destRel: 'compose.yaml' }],
+            [],
+            BOUNDS,
+        );
+        const next = buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })], prior);
+        const manifestWriteSpy = vi.spyOn(svc, 'writeManifest').mockRejectedValueOnce(new Error('simulated manifest write failure'));
+        try {
+            await expect(svc.promoteGeneration(stackName, {
+                sha: 'commit-fail',
+                candidateRelPath: candidateRel,
+                manifest: next,
+                priorManifest: prior,
+            })).rejects.toThrow(/simulated manifest write failure/);
+        } finally {
+            manifestWriteSpy.mockRestore();
+        }
+
+        expect(readStackFile(stackName, 'compose.yaml')).toBe('PRIOR\n');
+        const restored = await svc.readManifest(stackName, REPO.repo_url, REPO.branch);
+        if (restored === null || 'corrupt' in restored) throw new Error('expected the prior manifest');
+        expect(restored.manifestVersion).toBe(prior.manifestVersion);
+        const row = DatabaseService.getInstance().getGitSource(stackName);
+        expect(row?.manifest_version).toBe(prior.manifestVersion);
+        expect(row?.manifest_state).toBe(prior.state);
+        expect(row?.manifest_generation).toBe(priorRel);
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
+    });
+
+    it('cleans protected files after a failed first promotion', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'promote-first-fail';
+        seedGitSource(stackName);
+        stackDir(stackName);
+        const clone = makeClone({ 'compose.yaml': 'NEW\n', 'new.txt': 'NEW FILE\n' });
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'first-fail',
+            clone,
+            [{ srcRel: 'compose.yaml', destRel: 'compose.yaml' }, { srcRel: 'new.txt', destRel: 'new.txt' }],
+            [],
+            BOUNDS,
+        );
+        const manifest = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml' }),
+            managedEntry({ materializedPath: 'new.txt', role: 'other', dependencyKind: 'config' }),
+        ]);
+        const writeSpy = vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockRejectedValueOnce(new Error('simulated second write failure'));
+        try {
+            await expect(
+                svc.promoteGeneration(stackName, { sha: 'first-fail', candidateRelPath: candidateRel, manifest, priorManifest: null }),
+            ).rejects.toThrow(/simulated second write failure/);
+        } finally {
+            writeSpy.mockRestore();
+        }
+
+        expect(fs.existsSync(path.join(stackDir(stackName), 'compose.yaml'))).toBe(false);
+        expect(fs.existsSync(path.join(stackDir(stackName), 'new.txt'))).toBe(false);
+        expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
+        expect(DatabaseService.getInstance().getGitSource(stackName)?.manifest_state).toBe('migration_required');
+    });
+
     it('treats a corrupt promotion marker as recovery-required, not a clean slate', async () => {
         const svc = GitProjectManifestService.getInstance();
         const stackName = 'sweep-corrupt-marker';
@@ -522,6 +993,95 @@ describe('promoteGeneration mid-write failure recovery', () => {
         await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
         expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
         expect(DatabaseService.getInstance().getGitSource(stackName)?.manifest_state).toBe('migration_required');
+    });
+
+    it('rejects a null candidate path without attempting snapshot recovery', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'sweep-null-candidate';
+        writeStackFile(stackName, 'compose.yaml', 'ANY\n');
+        fs.mkdirSync(path.join(tmpDir, 'git-managed', '1', stackName), { recursive: true });
+        fs.writeFileSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER), JSON.stringify({
+            schemaVersion: 2,
+            phase: 'applying',
+            sha: 'abc123',
+            manifestVersion: 1,
+            candidateRelPath: null,
+            appliedRelPath: 'generations/applied-abc123-1',
+            affected: ['compose.yaml'],
+            introduced: ['compose.yaml'],
+        }), 'utf8');
+        const stateSpy = vi.spyOn(DatabaseService.getInstance(), 'setGitSourceManifestState');
+        try {
+            await expect(svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true })).resolves.toBeUndefined();
+            expect(stateSpy).toHaveBeenCalledWith(stackName, null, 'migration_required', null);
+        } finally {
+            stateSpy.mockRestore();
+        }
+    });
+
+    it('retains a corrupt promotion marker when persisting recovery state fails', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'sweep-state-failure';
+        writeStackFile(stackName, 'compose.yaml', 'ANY\n');
+        const markerPath = path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER);
+        fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+        fs.writeFileSync(markerPath, '{"broken":', 'utf8');
+        const stateSpy = vi.spyOn(DatabaseService.getInstance(), 'setGitSourceManifestState').mockImplementationOnce(() => {
+            throw new Error('database unavailable');
+        });
+        try {
+            await expect(svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true })).rejects.toThrow(/database unavailable/);
+            expect(fs.existsSync(markerPath)).toBe(true);
+        } finally {
+            stateSpy.mockRestore();
+        }
+    });
+
+    it('retains the promotion marker when a recovery snapshot cannot be inspected', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'sweep-snapshot-io';
+        writeStackFile(stackName, 'compose.yaml', 'ANY\n');
+        const markerPath = path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER);
+        fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+        writePromotionMarker(stackName, {
+            sha: 'snapshot-io',
+            manifestVersion: 1,
+            candidateRelPath: 'generations/candidate-snapshot-io',
+            appliedRelPath: 'generations/applied-snapshot-io-1',
+            affected: ['compose.yaml'],
+        });
+        const originalAccess = fs.promises.access.bind(fs.promises);
+        const accessSpy = vi.spyOn(fs.promises, 'access').mockImplementation(async (...args: Parameters<typeof fs.promises.access>) => {
+            if (String(args[0]).endsWith(CANDIDATE_COMPLETE_MARKER)) {
+                throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+            }
+            return originalAccess(...args);
+        });
+        try {
+            await expect(svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true })).rejects.toThrow(/permission denied/);
+            expect(fs.existsSync(markerPath)).toBe(true);
+        } finally {
+            accessSpy.mockRestore();
+        }
+    });
+
+    it('does not treat an unreadable introduced path as absent during restore', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'restore-path-error';
+        writeStackFile(stackName, 'new.txt', 'NEW\n');
+        const pathKindSpy = vi.spyOn(FileSystemService.prototype, 'pathKind').mockRejectedValueOnce(new Error('permission denied'));
+        const deleteSpy = vi.spyOn(FileSystemService.prototype, 'deleteStackPath');
+        try {
+            await expect(svc.restorePreviousGeneration(stackName, {
+                priorManifest: null,
+                incoming: { introducedPaths: ['new.txt'] },
+            })).resolves.toBe(false);
+            expect(deleteSpy).not.toHaveBeenCalled();
+            expect(readStackFile(stackName, 'new.txt')).toBe('NEW\n');
+        } finally {
+            pathKindSpy.mockRestore();
+            deleteSpy.mockRestore();
+        }
     });
 });
 

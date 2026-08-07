@@ -709,6 +709,7 @@ export class GitSourceService {
             const src = DatabaseService.getInstance().getGitSource(stackName);
             if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
             const manifestSvc = GitProjectManifestService.getInstance();
+            await manifestSvc.recoverInterruptedDetach(stackName, src.repo_url, src.branch);
 
             // Phase 1: render the effective model. A render failure aborts
             // before anything on disk changes.
@@ -718,13 +719,6 @@ export class GitSourceService {
 
             // Phase 2: snapshot compose.yaml and every managed override so a
             // mid-detach failure can restore the exact pre-detach state.
-            let priorCompose: string | null = null;
-            try {
-                priorCompose = await FileSystemService.getInstance().getStackContent(stackName);
-            } catch {
-                // Stack has no compose.yaml yet (fresh, never deployed).
-            }
-            const overrideSnapshots: Array<{ path: string; content: string }> = [];
             const manifest = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
             // A corrupt manifest means the stack's ownership status is unknown:
             // detach cannot know which files are auto-discovered overrides and
@@ -733,74 +727,128 @@ export class GitSourceService {
             if (manifest !== null && 'corrupt' in manifest) {
                 throw new GitSourceError('GIT_ERROR', 'Managed-project manifest cannot be trusted; detach aborted. Pull to rebuild before detaching.');
             }
-            if (manifest !== null) {
-                const overrideNames = new Set(['compose.override.yaml', 'compose.override.yml', 'docker-compose.override.yaml', 'docker-compose.override.yml']);
-                for (const entry of manifest.inputs) {
-                    if (entry.ownership !== 'managed' || entry.materializedPath === null) continue;
-                    const base = entry.materializedPath.split('/').pop() ?? '';
-                    if (!overrideNames.has(base)) continue;
-                    try {
-                        const content = await FileSystemService.getInstance().readStackFile(stackName, entry.materializedPath);
-                        overrideSnapshots.push({ path: entry.materializedPath, content: content.content ?? '' });
-                    } catch (e) {
-                        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
-                            throw new GitSourceError('GIT_ERROR', `Cannot read override ${entry.materializedPath} for snapshot; detach aborted.`);
-                        }
-                        // ENOENT: file not present on disk; nothing to snapshot.
-                    }
+            const snapshotFileLimit = manifest?.bounds.maxFileBytes ?? manifestSvc.boundsConfig().maxFileBytes;
+            let priorCompose: Buffer | null = null;
+            try {
+                const content = await FileSystemService.getInstance().readStackFile(stackName, 'compose.yaml', snapshotFileLimit, { forceText: true });
+                if (content.oversized || content.content === undefined) {
+                    throw new GitSourceError('GIT_ERROR', 'compose.yaml cannot be snapshotted within the managed file-size limit; detach aborted.');
+                }
+                priorCompose = Buffer.from(content.content, 'utf8');
+            } catch (e) {
+                if (e instanceof GitSourceError) throw e;
+                if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+                    const cause = e instanceof Error ? e.message : String(e);
+                    console.error(`[GitSource] compose snapshot read failed for ${sanitizeForLog(stackName)}:`, sanitizeForLog(cause));
+                    throw new GitSourceError('GIT_ERROR', 'Cannot read compose.yaml for snapshot; detach aborted.');
                 }
             }
+            const overrideSnapshots: Array<{ path: string; content: Buffer }> = [];
+            const overrideNames = new Set(['compose.override.yaml', 'compose.override.yml', 'docker-compose.override.yaml', 'docker-compose.override.yml']);
+            const managedOverridePaths = manifest?.inputs
+                .flatMap((entry) => entry.ownership === 'managed' && entry.materializedPath !== null ? [entry.materializedPath] : [])
+                .filter((materializedPath) => overrideNames.has(materializedPath.split('/').pop() ?? '')) ?? [];
+            for (const overridePath of managedOverridePaths) {
+                try {
+                    const content = await FileSystemService.getInstance().readStackFile(stackName, overridePath, snapshotFileLimit, { forceText: true });
+                    if (content.oversized || content.content === undefined) {
+                        throw new GitSourceError('GIT_ERROR', `Override ${overridePath} cannot be snapshotted within the managed file-size limit; detach aborted.`);
+                    }
+                    overrideSnapshots.push({ path: overridePath, content: Buffer.from(content.content, 'utf8') });
+                } catch (e) {
+                    if (e instanceof GitSourceError) throw e;
+                    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+                        const cause = e instanceof Error ? e.message : String(e);
+                        console.error(`[GitSource] override snapshot read failed for ${sanitizeForLog(stackName)}:`, sanitizeForLog(cause));
+                        throw new GitSourceError('GIT_ERROR', `Cannot read override ${overridePath} for snapshot; detach aborted.`);
+                    }
+                    // ENOENT: file not present on disk; nothing to snapshot.
+                }
+            }
+
+            // The snapshot lives in the managed area and is restored by the
+            // boot sweep if the process exits before the database commit point.
+            const detachSnapshots = [
+                priorCompose !== null
+                    ? { path: 'compose.yaml', existed: true as const, content: priorCompose }
+                    : { path: 'compose.yaml', existed: false as const, content: null },
+                ...overrideSnapshots.map((snapshot) => ({ path: snapshot.path, existed: true as const, content: snapshot.content })),
+            ];
+            await manifestSvc.prepareDetachRecovery(stackName, src.repo_url, src.branch, detachSnapshots);
 
             // Phase 3: write the flattened compose.yaml, then delete
             // overrides. If anything fails, restore compose.yaml and every
             // deleted override so the stack is byte-identical to pre-detach.
-            await FileSystemService.getInstance().saveStackContent(stackName, rendered);
-
-            const rollback = async (): Promise<string[]> => {
-                const errors: string[] = [];
-                if (priorCompose !== null) {
-                    try {
-                        await FileSystemService.getInstance().saveStackContent(stackName, priorCompose);
-                    } catch (e) {
-                        errors.push(`compose restore: ${(e as Error).message}`);
+            let areaStaged = false;
+            const rollback = async (): Promise<'complete' | 'missing' | 'failed'> => {
+                try {
+                    let restored: boolean;
+                    if (areaStaged) {
+                        restored = await manifestSvc.rollbackStagedDetach(stackName, src.repo_url, src.branch);
+                        areaStaged = false;
+                    } else {
+                        restored = await manifestSvc.recoverInterruptedDetach(stackName, src.repo_url, src.branch);
                     }
-                }
-                for (const snap of overrideSnapshots) {
-                    try {
-                        await FileSystemService.getInstance().writeStackFile(stackName, snap.path, snap.content);
-                    } catch (e) {
-                        errors.push(`override ${snap.path}: ${(e as Error).message}`);
+                    if (!restored) {
+                        console.error(`[GitSource] detach rollback for ${sanitizeForLog(stackName)} found no recovery snapshot`);
+                        return 'missing';
                     }
+                } catch (e) {
+                    const cause = e instanceof Error ? e.message : String(e);
+                    console.error(`[GitSource] detach rollback failed for ${sanitizeForLog(stackName)}:`, sanitizeForLog(cause));
+                    return 'failed';
                 }
-                return errors;
+                return 'complete';
             };
+            const rollbackAndThrow = async (message: string, cause?: unknown): Promise<never> => {
+                if (cause !== undefined) {
+                    const causeMessage = cause instanceof Error ? cause.message : String(cause);
+                    console.error(`[GitSource] detach failed for ${sanitizeForLog(stackName)}:`, sanitizeForLog(causeMessage));
+                }
+                const rollbackResult = await rollback();
+                let outcome = 'detach rolled back.';
+                if (rollbackResult === 'failed') {
+                    outcome = 'detach rollback is incomplete; restart Sencho to retry recovery.';
+                } else if (rollbackResult === 'missing') {
+                    outcome = 'detach rollback could not find its recovery snapshot; inspect the stack files before retrying.';
+                }
+                throw new GitSourceError('GIT_ERROR', `${message}; ${outcome} Retry to complete it.`);
+            };
+            try {
+                await FileSystemService.getInstance().saveStackContent(stackName, rendered);
+            } catch (e) {
+                await rollbackAndThrow('Could not write the detached compose model', e);
+            }
 
-            if (manifest !== null && !('corrupt' in manifest)) {
-                const overrideNames = new Set(['compose.override.yaml', 'compose.override.yml', 'docker-compose.override.yaml', 'docker-compose.override.yml']);
-                for (const entry of manifest.inputs) {
-                    if (entry.ownership !== 'managed' || entry.materializedPath === null) continue;
-                    const base = entry.materializedPath.split('/').pop() ?? '';
-                    if (!overrideNames.has(base)) continue;
-                    try {
-                        await FileSystemService.getInstance().deleteStackPath(stackName, entry.materializedPath, false);
-                    } catch (e) {
-                        const rbErrors = await rollback();
-                        const suffix = rbErrors.length > 0 ? ` (rollback errors: ${rbErrors.join('; ')})` : '';
-                        throw new GitSourceError('GIT_ERROR', `Could not remove auto-discovered override ${entry.materializedPath}; detach rolled back.${suffix} Retry to complete it.`);
-                    }
+            for (const snapshot of overrideSnapshots) {
+                try {
+                    await FileSystemService.getInstance().deleteStackPath(stackName, snapshot.path, false);
+                } catch (e) {
+                    await rollbackAndThrow(`Could not remove auto-discovered override ${snapshot.path}`, e);
                 }
             }
 
-            // Phase 4: delete the managed area, then drop the row. All three
-            // steps (compose write, override cleanup, managed area removal)
-            // succeeded; the row deletion commits the detach.
-            const areaDeleted = await manifestSvc.deleteManagedArea(stackName);
-            if (!areaDeleted) {
-                const rbErrors = await rollback();
-                const suffix = rbErrors.length > 0 ? ` (rollback errors: ${rbErrors.join('; ')})` : '';
-                throw new GitSourceError('GIT_ERROR', `Could not remove the managed project data; detach rolled back.${suffix} Retry to complete it.`);
+            // Phase 4: stage the managed area, then delete the row as the
+            // commit point. A database failure puts the area back and restores
+            // the durable file snapshot. A crash before the commit is handled
+            // by the boot sweep; a crash after it leaves an orphan stage that
+            // the normal orphan sweep removes.
+            try {
+                areaStaged = await manifestSvc.stageManagedAreaForDetach(stackName);
+            } catch (e) {
+                await rollbackAndThrow('Could not stage the managed project data', e);
             }
-            DatabaseService.getInstance().deleteGitSource(stackName);
+            if (!areaStaged) {
+                await rollbackAndThrow('Managed project data disappeared during detach');
+            }
+            try {
+                DatabaseService.getInstance().deleteGitSource(stackName);
+            } catch (e) {
+                await rollbackAndThrow('Could not commit the Git source removal', e);
+            }
+            if (!(await manifestSvc.finalizeStagedDetach(stackName))) {
+                console.warn(`[GitManifest] detach for ${sanitizeForLog(stackName)} committed with managed cleanup pending`);
+            }
         });
     }
 
@@ -2047,7 +2095,9 @@ export class GitSourceService {
             // One failing stack must never abort recovery for the rest.
             try {
                 if (!stacks.has(row.stack_name)) {
-                    await manifestSvc.deleteManagedArea(row.stack_name);
+                    const liveRemoved = await manifestSvc.deleteManagedArea(row.stack_name);
+                    const stagedRemoved = await manifestSvc.finalizeStagedDetach(row.stack_name);
+                    if (!liveRemoved || !stagedRemoved) throw new Error('Could not remove orphaned managed project data');
                     continue;
                 }
                 await this.withStackLock(row.stack_name, () =>
@@ -2062,14 +2112,23 @@ export class GitSourceService {
         const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
         const managedRoot = path.join(dataDir, 'git-managed', String(NodeRegistry.getInstance().getDefaultNodeId()));
         const known = new Set(rows.map((r) => r.stack_name));
+        let entries;
         try {
-            const entries = await fsPromises.readdir(managedRoot, { withFileTypes: true });
-            for (const entry of entries) {
-                if (!entry.isDirectory() || known.has(entry.name)) continue;
-                await fsPromises.rm(path.join(managedRoot, entry.name), { recursive: true, force: true });
+            entries = await fsPromises.readdir(managedRoot, { withFileTypes: true });
+        } catch (e) {
+            if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+                console.error('[GitManifest] could not read the managed project root:', (e as Error).message);
             }
-        } catch {
-            // no managed root yet; nothing to sweep
+            return;
+        }
+        for (const entry of entries) {
+            if (!entry.isDirectory() || known.has(entry.name)) continue;
+            if (entry.name.startsWith('.detach-') && known.has(entry.name.slice('.detach-'.length))) continue;
+            try {
+                await fsPromises.rm(path.join(managedRoot, entry.name), { recursive: true, force: true });
+            } catch (e) {
+                console.error(`[GitManifest] could not remove orphaned area ${sanitizeForLog(entry.name)}:`, (e as Error).message);
+            }
         }
     }
 

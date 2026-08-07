@@ -608,6 +608,91 @@ describe('DELETE /api/stacks/:stackName/git-source, detach/export contract', () 
             render.mockRestore();
         }
     });
+
+    it('reaps staged managed data after detach cleanup is deferred', async () => {
+        seedGitSource('deferred-cleanup');
+        const stackDir = path.join(process.env.COMPOSE_DIR!, 'deferred-cleanup');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const manifestSvc = GitProjectManifestService.getInstance();
+        const finalizeSpy = vi.spyOn(manifestSvc, 'finalizeStagedDetach').mockResolvedValueOnce(false);
+        const render = mockRender('services:\n  web:\n    image: nginx\n');
+        const staged = path.join(process.env.DATA_DIR!, 'git-managed', '1', '.detach-deferred-cleanup');
+        try {
+            const res = await request(app)
+                .delete('/api/stacks/deferred-cleanup/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            expect(DatabaseService.getInstance().getGitSource('deferred-cleanup')).toBeUndefined();
+            expect(fs.existsSync(staged)).toBe(true);
+
+            await GitSourceService.getInstance().sweepOrphans();
+            expect(fs.existsSync(staged)).toBe(false);
+        } finally {
+            finalizeSpy.mockRestore();
+            render.mockRestore();
+        }
+    });
+
+    it('restores files and managed data when the database commit fails', async () => {
+        seedGitSource('db-fail-unlink');
+        const stackDir = path.join(process.env.COMPOSE_DIR!, 'db-fail-unlink');
+        fs.mkdirSync(stackDir, { recursive: true });
+        const original = `${'#'.repeat((2 * 1024 * 1024) + 1)}\nservices:\n  web:\n    image: nginx:old\n`;
+        const originalOverride = Buffer.from('services:\n  web:\n    environment:\n      LABEL: café\n', 'utf8');
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), original);
+        fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'), originalOverride);
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const svc = GitProjectManifestService.getInstance();
+        const manifest = svc.buildManifest({
+            stackName: 'db-fail-unlink',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: 'db-fail-unlink',
+            invocation: ['-f', 'compose.yaml', '-p', 'db-fail-unlink'],
+            inputs: [
+                {
+                    sourcePath: 'compose.yaml', materializedPath: 'compose.yaml', role: 'compose-primary', dependencyKind: 'explicit',
+                    ownership: 'managed', provenance: 'fetch', sensitivity: 'medium', contentSha256: null, sizeBytes: original.length,
+                    state: 'present', deletionAuthority: 'sencho', note: null,
+                },
+                {
+                    sourcePath: 'compose.override.yaml', materializedPath: 'compose.override.yaml', role: 'compose-override', dependencyKind: 'implicit-override',
+                    ownership: 'managed', provenance: 'fetch', sensitivity: 'medium', contentSha256: null, sizeBytes: originalOverride.length,
+                    state: 'present', deletionAuthority: 'sencho', note: null,
+                },
+            ],
+            refusals: [],
+            buildContexts: [],
+            bounds: { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 },
+            priorManifest: null,
+            state: 'active',
+        });
+        await svc.writeManifest('db-fail-unlink', manifest);
+        const render = mockRender('services:\n  web:\n    image: nginx:new\n');
+        const deleteSpy = vi.spyOn(DatabaseService.getInstance(), 'deleteGitSource').mockImplementationOnce(() => {
+            throw new Error('database unavailable');
+        });
+        try {
+            const res = await request(app)
+                .delete('/api/stacks/db-fail-unlink/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(400);
+            expect(DatabaseService.getInstance().getGitSource('db-fail-unlink')).toBeTruthy();
+            expect(fs.readFileSync(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(original);
+            expect(fs.readFileSync(path.join(stackDir, 'compose.override.yaml')).equals(originalOverride)).toBe(true);
+            const restored = await svc.readManifest('db-fail-unlink', 'https://github.com/example/repo.git', 'main');
+            expect(restored).not.toBeNull();
+            expect(fs.existsSync(path.join(process.env.DATA_DIR!, 'git-managed', '1', '.detach-db-fail-unlink'))).toBe(false);
+        } finally {
+            deleteSpy.mockRestore();
+            render.mockRestore();
+        }
+    });
 });
 
 describe('GET /api/stacks/:stackName/git-source/manifest', () => {

@@ -105,7 +105,7 @@ export interface BuildContextPlan {
    * edits and files removed upstream are detected per file, so a removed file
    * can be cleared on promotion and a locally edited one refuses apply.
    */
-  files: Array<{ path: string; sha256: string }>;
+  files: Array<{ path: string; sha256: string; sizeBytes: number }>;
 }
 
 export interface ManifestBounds {

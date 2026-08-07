@@ -343,7 +343,7 @@ export class ComposeInputDiscoveryService {
             let ignoredCount = 0;
             let lfsInContext = false;
             let specialInContext: string | null = null;
-            const contextFiles: Array<{ path: string; sha256: string }> = [];
+            const contextFiles: Array<{ path: string; sha256: string; sizeBytes: number }> = [];
             const walk = async (dir: string, rel: string): Promise<void> => {
                 let entriesList: fs.Dirent[];
                 try {
@@ -387,7 +387,7 @@ export class ComposeInputDiscoveryService {
                     }
                     contextBytes += st.size;
                     const content = await fs.promises.readFile(path.join(dir, entry.name));
-                    contextFiles.push({ path: childRel, sha256: createHash('sha256').update(content).digest('hex') });
+                    contextFiles.push({ path: childRel, sha256: createHash('sha256').update(content).digest('hex'), sizeBytes: st.size });
                     if (!lfsInContext) {
                         const handle = await fs.promises.open(path.join(dir, entry.name), 'r');
                         try {
@@ -411,17 +411,6 @@ export class ComposeInputDiscoveryService {
             }
             if (lfsInContext) {
                 refusals.push(this.refusal(resolved, 'lfs-in-context', `Build context ${resolved} contains Git LFS pointers`, true));
-                continue;
-            }
-            if (contextBytes > bounds.maxContextBytes) {
-                refusals.push(
-                    this.refusal(
-                        resolved,
-                        'context-unbounded',
-                        `Build context ${resolved} is ${contextBytes} bytes after .dockerignore filtering; the maximum is ${bounds.maxContextBytes}`,
-                        true,
-                    ),
-                );
                 continue;
             }
             if (isRepoRoot) {
@@ -478,25 +467,11 @@ export class ComposeInputDiscoveryService {
                 for (const f of plan.context.files) {
                     if (!existing.context.files.some((ef) => caseKey(ef.path) === caseKey(f.path))) {
                         existing.context.files.push(f);
-                        existing.context.contextBytes += plan.context.contextBytes;
+                        existing.context.contextBytes += f.sizeBytes;
                     }
                 }
             } else {
                 mergedPlans.push(plan);
-            }
-        }
-        // Recheck bounds after merge: the union may exceed the configured cap
-        // even though each individual plan stayed under it.
-        for (const plan of mergedPlans) {
-            if (plan.context.contextBytes > bounds.maxContextBytes) {
-                refusals.push(
-                    this.refusal(
-                        plan.context.repoPath || '.',
-                        'context-unbounded',
-                        `Merged build context ${plan.context.repoPath || '.'} is ${plan.context.contextBytes} bytes after union; the maximum is ${bounds.maxContextBytes}`,
-                        true,
-                    ),
-                );
             }
         }
         return { plans: mergedPlans, entries };
@@ -763,16 +738,32 @@ export class ComposeInputDiscoveryService {
         // .env, configs). Remove context files that already have a managed-input
         // owner so the manifest collision check and candidate copy never dupe.
         const managedPaths = new Set(inputs.filter((i) => i.materializedPath !== null).map((i) => caseKey(i.materializedPath!)));
-        const reconciledBuildContexts = plans.map((p) => ({
-            ...p,
-            context: {
-                ...p.context,
-                files: p.context.files.filter((f) => {
+        const reconciledBuildContexts = plans.map((p) => {
+            const files = p.context.files.filter((f) => {
                     const key = caseKey(p.context.repoPath ? `${p.context.repoPath}/${f.path}` : f.path);
                     return !managedPaths.has(key);
-                }),
-            },
-        }));
+                });
+            return {
+                ...p,
+                context: {
+                    ...p.context,
+                    files,
+                    contextBytes: files.reduce((total, file) => total + file.sizeBytes, 0),
+                },
+            };
+        });
+        for (const plan of reconciledBuildContexts) {
+            if (plan.context.contextBytes > bounds.maxContextBytes) {
+                refusals.push(
+                    this.refusal(
+                        plan.context.repoPath || '.',
+                        'context-unbounded',
+                        `Merged build context ${plan.context.repoPath || '.'} is ${plan.context.contextBytes} bytes after ownership reconciliation; the maximum is ${bounds.maxContextBytes}`,
+                        true,
+                    ),
+                );
+            }
+        }
 
         // Deduplicate managed inputs by stack-relative path: two services
         // referencing the same file (shared env_file, config, or Dockerfile)

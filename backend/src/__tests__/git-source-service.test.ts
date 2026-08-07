@@ -1687,8 +1687,16 @@ describe('GitSourceService managed-area lifecycle', () => {
             state: 'active',
         });
         await manifestSvc.writeManifest('ghost-stack', manifest);
+        await manifestSvc.prepareDetachRecovery(
+            'ghost-stack',
+            'https://github.com/example/repo.git',
+            'main',
+            [{ path: 'compose.yaml', existed: false, content: null }],
+        );
+        expect(await manifestSvc.stageManagedAreaForDetach('ghost-stack')).toBe(true);
         await GitSourceService.getInstance().sweepOrphans();
         expect(await manifestSvc.readManifest('ghost-stack', 'https://github.com/example/repo.git', 'main')).toBeNull();
+        expect(fs.existsSync(path.join(process.env.DATA_DIR!, 'git-managed', '1', '.detach-ghost-stack'))).toBe(false);
     });
 });
 
