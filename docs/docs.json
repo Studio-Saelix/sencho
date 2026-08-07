@@ -216,7 +216,7 @@
             "group": "Fleet & nodes",
             "pages": [
               "tutorials/enroll-a-remote-node",
-              "tutorials/set-up-sencho-mesh",
+              "tutorials/set-up-fleet-secrets",
               "tutorials/set-up-fleet-federation",
               "tutorials/configure-recovery-vault-backups"
             ]
@@ -235,8 +235,6 @@
           {
             "group": "Secure & integrate",
             "pages": [
-              "tutorials/connect-a-private-registry",
-              "tutorials/set-up-rbac",
               "tutorials/set-up-sso",
               "tutorials/configure-environment-guardrails",
               "tutorials/set-up-a-webhook",
