@@ -2427,7 +2427,14 @@ fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Re
             return { bytes: 0, error: errBody.error || `Remote returned ${response.status}` };
           }
           const remote = (await response.json().catch(() => null)) as { reclaimableBytes?: number } | null;
-          if (!remote || typeof remote.reclaimableBytes !== 'number') {
+          // Remote nodes are an untrusted boundary: reject non-finite or
+          // negative values so a bad estimate cannot shrink the fleet total.
+          if (
+            !remote
+            || typeof remote.reclaimableBytes !== 'number'
+            || !Number.isFinite(remote.reclaimableBytes)
+            || remote.reclaimableBytes < 0
+          ) {
             return { bytes: 0, error: 'Invalid response from remote node' };
           }
           return { bytes: remote.reclaimableBytes };
