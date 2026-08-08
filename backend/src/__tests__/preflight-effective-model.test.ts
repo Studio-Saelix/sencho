@@ -179,6 +179,43 @@ describe('parseEffectiveModel', () => {
     }, 'p');
     expect(absent.services[0].enabledProxyApiFlags).toEqual(['CONTAINERS']);
     expect(absent.services[0].enabledProxyApiFlags).not.toContain('POST');
+
+    // Anything not explicitly "off" enables the group, so an unrecognized
+    // value is reported rather than silently treated as disabled.
+    const truthyWords = parseEffectiveModel({
+      services: {
+        proxy: {
+          environment: {
+            POST: 'true', DELETE: ' YES ', IMAGES: 'false', INFO: 'on',
+            EVENTS: 'off', NETWORKS: '', VOLUMES: 'enabled',
+          },
+        },
+      },
+    }, 'p');
+    expect(truthyWords.services[0].enabledProxyApiFlags.sort())
+      .toEqual(['DELETE', 'INFO', 'POST', 'VOLUMES']);
+  });
+
+  it('keeps only the host of a tcp:// Docker endpoint from command and entrypoint', () => {
+    const m = parseEffectiveModel({
+      services: {
+        traefik: {
+          command: ['--providers.docker.endpoint=tcp://dockerproxy:2375', `--certificatesresolvers.le.acme.email=${SECRET}`],
+          entrypoint: '/entrypoint.sh --host tcp://other-proxy',
+        },
+        plain: { command: 'serve' },
+      },
+    }, 'p');
+    expect(m.services[0].dockerEndpointHosts.sort()).toEqual(['dockerproxy', 'other-proxy']);
+    expect(m.services[1].dockerEndpointHosts).toEqual([]);
+    expect(JSON.stringify(m)).not.toContain(SECRET);
+
+    const withUserInfo = parseEffectiveModel({
+      services: { app: { command: [`-H tcp://admin:${SECRET}@dockerproxy:2375`] } },
+    }, 'p');
+    expect(withUserInfo.services[0].dockerEndpointHosts).toEqual(['dockerproxy']);
+    expect(JSON.stringify(withUserInfo)).not.toContain(SECRET);
+    expect(JSON.stringify(withUserInfo)).not.toContain('admin');
   });
 
   it('parses the short-string port form and drops container-only EXPOSE', () => {

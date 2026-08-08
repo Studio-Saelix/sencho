@@ -133,7 +133,7 @@ describe('buildMounts', () => {
             { type: 'named', source: 'shared', target: '/s', readOnly: false },
           ],
           privileged: false, hasHealthcheck: true, composeHealthcheck: 'active',
-          envKeys: [], enabledProxyApiFlags: [], networks: [], extraHosts: [], labelKeys: [],
+          envKeys: [], enabledProxyApiFlags: [], dockerEndpointHosts: [], networks: [], extraHosts: [], labelKeys: [],
         },
       ],
       networks: {},
@@ -163,7 +163,7 @@ describe('assembleStorageInventory', () => {
         name: 'app', ports: [], binds: [], namedVolumes: [],
         storageMounts: [{ type: 'named', source: 'db', target: '/db', readOnly: false }],
         privileged: false, hasHealthcheck: true, composeHealthcheck: 'active',
-        envKeys: [], enabledProxyApiFlags: [], networks: [], extraHosts: [], labelKeys: [],
+        envKeys: [], enabledProxyApiFlags: [], dockerEndpointHosts: [], networks: [], extraHosts: [], labelKeys: [],
       }], networks: {}, volumes: {},
     };
     expect(assembleStorageInventory('a', stateful, null, new Map()).stateful).toBe(true);
@@ -181,7 +181,7 @@ describe('assembleStorageInventory', () => {
         name: 'app', ports: [], binds: [], namedVolumes: [],
         storageMounts: [{ type: 'bind', source: '/var/run/docker.sock', target: '/var/run/docker.sock', readOnly: false }],
         privileged: false, hasHealthcheck: true, composeHealthcheck: 'active',
-        envKeys: [], enabledProxyApiFlags: [], networks: [], extraHosts: [], labelKeys: [],
+        envKeys: [], enabledProxyApiFlags: [], dockerEndpointHosts: [], networks: [], extraHosts: [], labelKeys: [],
       }], networks: {}, volumes: {},
     };
     expect(assembleStorageInventory('a', socketOnly, null, new Map()).stateful).toBe(false);

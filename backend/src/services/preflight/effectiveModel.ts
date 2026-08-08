@@ -3,9 +3,10 @@
  * effective model). It extracts only the STRUCTURAL facts the preflight rules
  * need; it never retains an environment VALUE. Service environment is read for
  * its key NAMES (to detect PUID/PGID style directives) and, for a finite
- * whitelist of Docker socket-proxy API flags, whether the rendered value is
- * exactly `1` (stored as enabled flag names only). Render errors are handled
- * by the caller, not here.
+ * whitelist of Docker socket-proxy API flags, whether the rendered value
+ * enables the group (stored as enabled flag names only). `command` and
+ * `entrypoint` are read for `tcp://` endpoint host names only. Render errors
+ * are handled by the caller, not here.
  */
 
 import { classifyComposeHealthcheck } from '../../helpers/healthcheckPresence';
@@ -77,6 +78,12 @@ export interface EffService {
    * exactly `1`. Raw values are never retained; only the enabled flag name.
    */
   enabledProxyApiFlags: string[];
+  /**
+   * Host names of `tcp://host[:port]` endpoints referenced by `command` or
+   * `entrypoint`. Used to spot services that talk to a socket proxy through a
+   * CLI flag rather than `DOCKER_HOST`. Only the host name is retained.
+   */
+  dockerEndpointHosts: string[];
   /** Network membership by network key, with any aliases. */
   networks: EffServiceNetwork[];
   /** `extra_hosts` entries as `host:value` strings (host names / static IPs; a value built from a `${VAR}` is resolved upstream by `docker compose config`, so it can carry an interpolated secret). */
@@ -297,21 +304,29 @@ function envKeysOf(env: unknown): string[] {
 
 /**
  * Docker socket-proxy API group / verb env keys recognized for topology and
- * mutation detection. Only names whose rendered value is exactly `1` are kept
- * on the model (see `enabledProxyApiFlagsOf`).
+ * mutation detection. Only names whose rendered value is truthy are kept on the
+ * model (see `enabledProxyApiFlagsOf`).
  */
 export const PROXY_API_FLAG_KEYS: ReadonlySet<string> = new Set([
   'CONTAINERS', 'IMAGES', 'INFO', 'EVENTS', 'NETWORKS', 'VOLUMES', 'POST', 'DELETE',
 ]);
 
 /**
- * Whitelisted proxy API flag names whose rendered value is exactly `1`.
+ * Values a socket proxy treats as "off" for an API group flag. Anything else
+ * enables the group, so an unrecognized value is reported rather than hidden.
+ */
+const PROXY_FLAG_FALSY: ReadonlySet<string> = new Set(['', '0', 'false', 'no', 'off']);
+
+/**
+ * Whitelisted proxy API flag names whose rendered value enables the group.
  * Inspects values only long enough to decide enablement; never returns them.
  */
 function enabledProxyApiFlagsOf(env: unknown): string[] {
   const enabled = new Set<string>();
   const consider = (key: string, raw: unknown): void => {
-    if (PROXY_API_FLAG_KEYS.has(key) && str(raw) === '1') enabled.add(key);
+    if (!PROXY_API_FLAG_KEYS.has(key)) return;
+    const value = str(raw)?.trim().toLowerCase();
+    if (value !== undefined && !PROXY_FLAG_FALSY.has(value)) enabled.add(key);
   };
   if (Array.isArray(env)) {
     for (const entry of env) {
@@ -327,6 +342,26 @@ function enabledProxyApiFlagsOf(env: unknown): string[] {
     }
   }
   return [...enabled];
+}
+
+/** Matches a `tcp://[user:pass@]host[:port]` endpoint, capturing the host only. */
+const TCP_ENDPOINT_RE = /tcp:\/\/(?:[^/@\s]*@)?([A-Za-z0-9._-]+)/g;
+
+/**
+ * Host names of any `tcp://host[:port]` endpoint referenced by a service's
+ * `command` or `entrypoint`, used to spot a service pointed at a socket proxy
+ * by a CLI flag. Only the host name is retained; the rest of the argument
+ * (which can carry a credential) is not, and any `user:pass@` prefix is
+ * dropped rather than captured.
+ */
+function dockerEndpointHostsOf(...sources: unknown[]): string[] {
+  const hosts = new Set<string>();
+  for (const source of sources.flat()) {
+    const s = str(source);
+    if (s === undefined) continue;
+    for (const match of s.matchAll(TCP_ENDPOINT_RE)) hosts.add(match[1].toLowerCase());
+  }
+  return [...hosts];
 }
 
 /** Label KEY names only. A label VALUE can carry a secret, so it is never read. */
@@ -460,6 +495,7 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       user: str(svc.user),
       envKeys: envKeysOf(svc.environment),
       enabledProxyApiFlags: enabledProxyApiFlagsOf(svc.environment),
+      dockerEndpointHosts: dockerEndpointHostsOf(svc.command, svc.entrypoint),
       networks: parseServiceNetworks(svc.networks),
       extraHosts: parseExtraHosts(svc.extra_hosts),
       labelKeys: labelKeysOf(svc.labels),
