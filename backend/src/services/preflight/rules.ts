@@ -126,15 +126,24 @@ function proxyReachableNames(svc: EffService): string[] {
     .map(n => n.toLowerCase());
 }
 
+function proxyApiKeyCount(svc: EffService): number {
+  return svc.envKeys.filter(k => PROXY_API_FLAG_KEYS.has(k)).length;
+}
+
 /**
- * Dedicated Docker socket proxy: known image, name hint, or RO socket plus at
- * least two whitelisted API-group env keys. Prefer false negatives (stay high).
+ * Dedicated Docker socket proxy. A known image is an artifact identity, so it
+ * stands on its own. A service NAME is free text the author controls, so it
+ * only counts alongside an observable fact: a read-only socket or a scoped API
+ * group key. Without a name or image hint, both are required. Prefer false
+ * negatives here, since a miss keeps the high direct-mount finding.
  */
 function isSocketProxyService(svc: EffService): boolean {
   if (!mountsDockerSocket(svc)) return false;
-  if (hasSocketProxyImage(svc) || hasSocketProxyNameHint(svc)) return true;
-  const proxyApiKeyCount = svc.envKeys.filter(k => PROXY_API_FLAG_KEYS.has(k)).length;
-  return hasReadOnlyDockerSocket(svc) && proxyApiKeyCount >= 2;
+  if (hasSocketProxyImage(svc)) return true;
+  const readOnly = hasReadOnlyDockerSocket(svc);
+  const apiKeys = proxyApiKeyCount(svc);
+  if (hasSocketProxyNameHint(svc)) return readOnly || apiKeys >= 1;
+  return readOnly && apiKeys >= 2;
 }
 
 function socketProxyServices(model: EffectiveModel): EffService[] {

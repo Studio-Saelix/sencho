@@ -221,15 +221,30 @@ describe('security rules', () => {
     expect(f[0].severity).toBe('info');
   });
 
-  it('classifies tecnativa image and name-hint proxies', () => {
+  it('classifies tecnativa image and corroborated name-hint proxies', () => {
     const byImage = model([svc({
       name: 'api', image: 'tecnativa/docker-socket-proxy:latest', binds: [sockBind], storageMounts: [sockRw],
     })]);
     expect(ids(runRules(ctx({ model: byImage })), 'docker-socket-proxy')).toHaveLength(1);
-    const byName = model([svc({
+    const byNameAndReadOnly = model([svc({
+      name: 'docker-socket-proxy', image: 'custom/proxy:1', binds: [sockBind], storageMounts: [sockRo],
+    })]);
+    expect(ids(runRules(ctx({ model: byNameAndReadOnly })), 'docker-socket-proxy')).toHaveLength(1);
+    const byNameAndApiKey = model([svc({
+      name: 'docker-socket-proxy', image: 'custom/proxy:1', binds: [sockBind], storageMounts: [sockRw],
+      envKeys: ['CONTAINERS'],
+    })]);
+    expect(ids(runRules(ctx({ model: byNameAndApiKey })), 'docker-socket-proxy')).toHaveLength(1);
+  });
+
+  it('does not let a service name alone downgrade a writable socket mount', () => {
+    // The name is free text the author controls; without a read-only socket or
+    // a scoped API group key there is nothing observable to corroborate it.
+    const nameOnly = model([svc({
       name: 'docker-socket-proxy', image: 'custom/proxy:1', binds: [sockBind], storageMounts: [sockRw],
     })]);
-    expect(ids(runRules(ctx({ model: byName })), 'docker-socket-proxy')).toHaveLength(1);
+    expect(ids(runRules(ctx({ model: nameOnly })), 'docker-socket-proxy')).toHaveLength(0);
+    expect(ids(runRules(ctx({ model: nameOnly })), 'docker-socket-mount')[0].severity).toBe('high');
   });
 
   it('classifies unknown RO socket plus two API keys as proxy; RW stays high', () => {
@@ -364,9 +379,10 @@ describe('security rules', () => {
     const f = ids(runRules(ctx({ model: rw })), 'docker-socket-proxy-writable');
     expect(f).toHaveLength(1);
     expect(f[0].severity).toBe('high');
-    // A name-hint-only match cannot silence the risk either.
+    // A name-hint match corroborated by an API group key cannot silence it either.
     const byName = model([svc({
       name: 'my-socket-proxy', image: 'custom:1', binds: [sockBind], storageMounts: [sockRw],
+      envKeys: ['CONTAINERS'],
     })]);
     expect(ids(runRules(ctx({ model: byName })), 'docker-socket-proxy-writable')[0].severity).toBe('high');
     const ro = model([svc({
