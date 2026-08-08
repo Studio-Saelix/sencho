@@ -7,6 +7,7 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { PAYLOAD_TEMPLATE_MAX_LENGTH } from '../helpers/notificationPayloadTemplate';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -640,5 +641,114 @@ describe('POST /api/notifications/test', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it('dispatches a templated test with substituted variables', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const res = await request(app)
+        .post('/api/notifications/test')
+        .set('Cookie', authCookie)
+        .send({
+          type: 'webhook',
+          url: 'https://example.com/hooks/sencho',
+          payload_template: '{"message": "{{message}}", "level": "{{level}}", "category": "{{category}}"}',
+        });
+      expect(res.status).toBe(200);
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(JSON.parse(String(init.body))).toEqual({
+        message: '🔌 Test Notification from Sencho!',
+        level: 'info',
+        category: 'system',
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rejects an unknown variable on a templated test without dispatching', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const res = await request(app)
+        .post('/api/notifications/test')
+        .set('Cookie', authCookie)
+        .send({
+          type: 'webhook',
+          url: 'https://example.com/hooks/sencho',
+          payload_template: '{"a": "{{nope}}"}',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/Unknown template variable/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rejects an over-length template on a templated test', async () => {
+    const res = await request(app)
+      .post('/api/notifications/test')
+      .set('Cookie', authCookie)
+      .send({
+        type: 'webhook',
+        url: 'https://example.com/hooks/sencho',
+        payload_template: `{"msg":"${'x'.repeat(PAYLOAD_TEMPLATE_MAX_LENGTH - 9)}"}`,
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('8000 characters or fewer');
+  });
+
+  it('keeps the built-in payload when the test template is blank', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const res = await request(app)
+        .post('/api/notifications/test')
+        .set('Cookie', authCookie)
+        .send({ type: 'webhook', url: 'https://example.com/hooks/sencho', payload_template: '   ' });
+      expect(res.status).toBe(200);
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(String(init.body)) as { source?: string };
+      expect(body.source).toBe('sencho');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('merges Apprise destinations into a templated test dispatch', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const res = await request(app)
+        .post('/api/notifications/test')
+        .set('Cookie', authCookie)
+        .send({
+          type: 'apprise',
+          url: 'http://apprise.local/notify/test-key',
+          config: { tags: 'ops' },
+          payload_template: '{"title": "{{level}}"}',
+        });
+      expect(res.status).toBe(200);
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(JSON.parse(String(init.body))).toEqual({ title: 'info', tag: 'ops' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rejects an Apprise templated test that carries urls', async () => {
+    const res = await request(app)
+      .post('/api/notifications/test')
+      .set('Cookie', authCookie)
+      .send({
+        type: 'apprise',
+        url: 'http://apprise.local/notify',
+        config: { urls: 'discord://token@id' },
+        payload_template: '{"urls": "discord://token@id"}',
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('urls');
   });
 });

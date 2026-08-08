@@ -12,6 +12,7 @@ import {
   serializePublicAgent,
   validateNotificationChannel,
 } from '../helpers/notificationChannels';
+import { resolvePayloadTemplate } from '../helpers/notificationPayloadTemplate';
 
 export const agentsRouter = Router();
 
@@ -42,6 +43,19 @@ agentsRouter.post('/', authMiddleware, async (req: Request, res: Response): Prom
     const existing = DatabaseService.getInstance().getAgents(nodeId).find(agent => agent.type === type);
     const effectiveUrl = url === undefined ? existing?.url : url;
 
+    // Optional payload template: omitted preserves the stored value; blank
+    // clears it; Apprise templates may not carry urls/tag (destinations are
+    // managed by the channel fields and merged server-side at dispatch).
+    const resolvedTemplate = resolvePayloadTemplate(
+      req.body.payload_template,
+      existing?.payload_template ?? null,
+      type,
+    );
+    if (!resolvedTemplate.ok) {
+      res.status(400).json({ error: `payload_template ${resolvedTemplate.error}` });
+      return;
+    }
+
     let effectiveConfig: unknown = config ?? null;
     if (type === 'apprise' && config === undefined && existing) {
       const resolved = resolvePreservedAppriseConfig(typeof effectiveUrl === 'string' ? effectiveUrl : existing.url, existing.config);
@@ -58,6 +72,7 @@ agentsRouter.post('/', authMiddleware, async (req: Request, res: Response): Prom
       url: effectiveUrl.trim(),
       enabled,
       config: type === 'apprise' ? normalizeAppriseStoredJson(effectiveUrl.trim(), effectiveConfig) : null,
+      payload_template: resolvedTemplate.value,
     });
     console.log('[Agents] Agent %s updated', sanitizeForLog(type));
     if (isDebugEnabled()) console.log('[Agents:diag] Agent %s upsert: enabled=%s', sanitizeForLog(type), sanitizeForLog(enabled));

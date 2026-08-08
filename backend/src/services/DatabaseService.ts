@@ -29,6 +29,8 @@ export interface Agent {
     url: string;
     enabled: boolean;
     config?: string | null;
+    /** Optional user-authored JSON payload template; null = built-in payload. */
+    payload_template?: string | null;
 }
 
 export interface GlobalSetting {
@@ -2428,6 +2430,7 @@ export class DatabaseService {
 
     private migrateNotificationChannelConfig(): void {
         this.tryAddColumn('agents', 'config', 'TEXT NULL');
+        this.tryAddColumn('agents', 'payload_template', 'TEXT NULL');
         this.tryAddColumn('notification_routes', 'config', 'TEXT NULL');
     }
 
@@ -2979,11 +2982,11 @@ export class DatabaseService {
         const stored = this.storeAppriseFields(agent.type === 'apprise', agent.url, agent.config);
         const existing = this.db.prepare('SELECT id FROM agents WHERE node_id = ? AND type = ?').get(nodeId, agent.type) as any;
         if (existing) {
-            const stmt = this.db.prepare('UPDATE agents SET url = ?, enabled = ?, config = ? WHERE node_id = ? AND type = ?');
-            stmt.run(stored.url, agent.enabled ? 1 : 0, stored.config, nodeId, agent.type);
+            const stmt = this.db.prepare('UPDATE agents SET url = ?, enabled = ?, config = ?, payload_template = ? WHERE node_id = ? AND type = ?');
+            stmt.run(stored.url, agent.enabled ? 1 : 0, stored.config, agent.payload_template ?? null, nodeId, agent.type);
         } else {
-            const stmt = this.db.prepare('INSERT INTO agents (node_id, type, url, enabled, config) VALUES (?, ?, ?, ?, ?)');
-            stmt.run(nodeId, agent.type, stored.url, agent.enabled ? 1 : 0, stored.config);
+            const stmt = this.db.prepare('INSERT INTO agents (node_id, type, url, enabled, config, payload_template) VALUES (?, ?, ?, ?, ?, ?)');
+            stmt.run(nodeId, agent.type, stored.url, agent.enabled ? 1 : 0, stored.config, agent.payload_template ?? null);
         }
     }
 
