@@ -1,12 +1,12 @@
 /**
  * Parser for the output of `docker compose config` (the fully-resolved
- * effective model). It extracts only the STRUCTURAL facts the preflight rules
- * need; it never retains an environment VALUE. Service environment is read for
- * its key NAMES (to detect PUID/PGID style directives) and, for a finite
- * whitelist of Docker socket-proxy API flags, whether the rendered value
- * enables the group (stored as enabled flag names only). `command` and
- * `entrypoint` are read for `tcp://` endpoint host names only. Render errors
- * are handled by the caller, not here.
+ * effective model). It keeps structural facts for preflight and related
+ * consumers; it never retains an environment VALUE. Service environment is
+ * read for its key NAMES (to detect PUID/PGID style directives) and, for a
+ * finite whitelist of Docker socket-proxy API flags, whether the rendered
+ * value is exactly `1` (stored as enabled flag names only). `command`,
+ * `entrypoint`, and `DOCKER_HOST` are read for `tcp://` endpoint host names
+ * only. Render errors are handled by the caller, not here.
  */
 
 import { classifyComposeHealthcheck } from '../../helpers/healthcheckPresence';
@@ -75,13 +75,16 @@ export interface EffService {
   envKeys: string[];
   /**
    * Names of recognized Docker socket-proxy API flags whose rendered value is
-   * exactly `1`. Raw values are never retained; only the enabled flag name.
+   * exactly `1` (after trim). Matches the upstream images, which grant a group
+   * only for the literal value `1`. Raw values are never retained.
    */
   enabledProxyApiFlags: string[];
   /**
-   * Host names of `tcp://host[:port]` endpoints referenced by `command` or
-   * `entrypoint`. Used to spot services that talk to a socket proxy through a
-   * CLI flag rather than `DOCKER_HOST`. Only the host name is retained.
+   * Host names of `tcp://host[:port]` endpoints referenced by `command`,
+   * `entrypoint`, or a `DOCKER_HOST` environment value. Used to spot services
+   * pointed at a socket proxy. Only the host name is retained; any
+   * `user:pass@` prefix is dropped. Non-tcp schemes (unix://, npipe://) and
+   * empty values contribute nothing.
    */
   dockerEndpointHosts: string[];
   /** Network membership by network key, with any aliases. */
@@ -303,44 +306,49 @@ function envKeysOf(env: unknown): string[] {
 }
 
 /**
- * Docker socket-proxy API group / verb env keys recognized for topology and
- * mutation detection. Only names whose rendered value is truthy are kept on the
- * model (see `enabledProxyApiFlagsOf`).
+ * Visit each environment key/value pair without retaining values. Handles both
+ * map form (`{ KEY: value }`) and array form (`["KEY=value"]`).
  */
-export const PROXY_API_FLAG_KEYS: ReadonlySet<string> = new Set([
-  'CONTAINERS', 'IMAGES', 'INFO', 'EVENTS', 'NETWORKS', 'VOLUMES', 'POST', 'DELETE',
-]);
-
-/**
- * Values a socket proxy treats as "off" for an API group flag. Anything else
- * enables the group, so an unrecognized value is reported rather than hidden.
- */
-const PROXY_FLAG_FALSY: ReadonlySet<string> = new Set(['', '0', 'false', 'no', 'off']);
-
-/**
- * Whitelisted proxy API flag names whose rendered value enables the group.
- * Inspects values only long enough to decide enablement; never returns them.
- */
-function enabledProxyApiFlagsOf(env: unknown): string[] {
-  const enabled = new Set<string>();
-  const consider = (key: string, raw: unknown): void => {
-    if (!PROXY_API_FLAG_KEYS.has(key)) return;
-    const value = str(raw)?.trim().toLowerCase();
-    if (value !== undefined && !PROXY_FLAG_FALSY.has(value)) enabled.add(key);
-  };
+function forEachEnvEntry(env: unknown, visit: (key: string, value: unknown) => void): void {
   if (Array.isArray(env)) {
     for (const entry of env) {
       const s = str(entry);
       if (s === undefined) continue;
       const eq = s.indexOf('=');
       if (eq <= 0) continue;
-      consider(s.slice(0, eq), s.slice(eq + 1));
+      visit(s.slice(0, eq), s.slice(eq + 1));
     }
-  } else if (env && typeof env === 'object') {
+    return;
+  }
+  if (env && typeof env === 'object') {
     for (const [key, value] of Object.entries(env as Record<string, unknown>)) {
-      consider(key, value);
+      visit(key, value);
     }
   }
+}
+
+/**
+ * Docker socket-proxy API group / verb env keys recognized for topology and
+ * mutation detection. Only names whose rendered value is exactly `1` are kept
+ * on the model (see `enabledProxyApiFlagsOf`).
+ */
+const PROXY_API_FLAG_KEYS: ReadonlySet<string> = new Set([
+  'CONTAINERS', 'IMAGES', 'INFO', 'EVENTS', 'NETWORKS', 'VOLUMES', 'POST', 'DELETE',
+]);
+
+/**
+ * Whitelisted proxy API flag names whose rendered value is exactly `1` (after
+ * trim). Both tecnativa/docker-socket-proxy and linuxserver/socket-proxy grant
+ * a group only for that literal; values like `true`, `yes`, or arbitrary
+ * strings still 403. Inspects values only long enough to decide enablement;
+ * never returns them.
+ */
+function enabledProxyApiFlagsOf(env: unknown): string[] {
+  const enabled = new Set<string>();
+  forEachEnvEntry(env, (key, raw) => {
+    if (!PROXY_API_FLAG_KEYS.has(key)) return;
+    if (str(raw)?.trim() === '1') enabled.add(key);
+  });
   return [...enabled];
 }
 
@@ -349,18 +357,24 @@ const TCP_ENDPOINT_RE = /tcp:\/\/(?:[^/@\s]*@)?([A-Za-z0-9._-]+)/g;
 
 /**
  * Host names of any `tcp://host[:port]` endpoint referenced by a service's
- * `command` or `entrypoint`, used to spot a service pointed at a socket proxy
- * by a CLI flag. Only the host name is retained; the rest of the argument
- * (which can carry a credential) is not, and any `user:pass@` prefix is
- * dropped rather than captured.
+ * `command`, `entrypoint`, or `DOCKER_HOST`. Only the host name is retained;
+ * credentials and the rest of the argument are dropped. Non-tcp schemes and
+ * empty values contribute nothing.
  */
-function dockerEndpointHostsOf(...sources: unknown[]): string[] {
+function dockerEndpointHostsOf(command: unknown, entrypoint: unknown, env: unknown): string[] {
   const hosts = new Set<string>();
-  for (const source of sources.flat()) {
-    const s = str(source);
-    if (s === undefined) continue;
-    for (const match of s.matchAll(TCP_ENDPOINT_RE)) hosts.add(match[1].toLowerCase());
+  function addFrom(source: unknown): void {
+    for (const item of [source].flat()) {
+      const s = str(item);
+      if (s === undefined) continue;
+      for (const match of s.matchAll(TCP_ENDPOINT_RE)) hosts.add(match[1].toLowerCase());
+    }
   }
+  addFrom(command);
+  addFrom(entrypoint);
+  forEachEnvEntry(env, (key, value) => {
+    if (key === 'DOCKER_HOST' && value !== undefined) addFrom(value);
+  });
   return [...hosts];
 }
 
@@ -495,7 +509,7 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       user: str(svc.user),
       envKeys: envKeysOf(svc.environment),
       enabledProxyApiFlags: enabledProxyApiFlagsOf(svc.environment),
-      dockerEndpointHosts: dockerEndpointHostsOf(svc.command, svc.entrypoint),
+      dockerEndpointHosts: dockerEndpointHostsOf(svc.command, svc.entrypoint, svc.environment),
       networks: parseServiceNetworks(svc.networks),
       extraHosts: parseExtraHosts(svc.extra_hosts),
       labelKeys: labelKeysOf(svc.labels),

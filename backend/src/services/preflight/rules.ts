@@ -1,6 +1,5 @@
 import type { PreflightContext, PreflightFinding, PreflightSeverity, NodePortBinding } from './types';
 import type { EffService, EffPortSpec, EffectiveModel } from './effectiveModel';
-import { PROXY_API_FLAG_KEYS } from './effectiveModel';
 import type { ExposureIntent } from '../network/types';
 import { isLoopback, runtimeResourceName } from '../network/normalize';
 import { classifyMissingExternalNetworks } from '../network/missingExternalNetworks';
@@ -67,7 +66,6 @@ function hasUidGidSignal(svc: EffService): boolean {
   return svc.user !== undefined || svc.envKeys.some(k => UID_GID_KEYS.has(k));
 }
 
-/** True when a bind or storage mount path references the Docker socket. */
 function pathIsDockerSocket(path: string | undefined): boolean {
   return path !== undefined && path.includes('docker.sock');
 }
@@ -76,15 +74,19 @@ function mountTouchesDockerSocket(source: string | undefined, target: string | u
   return pathIsDockerSocket(source) || pathIsDockerSocket(target);
 }
 
-function mountsDockerSocket(svc: EffService): boolean {
-  if (svc.binds.some(b => mountTouchesDockerSocket(b.source, b.target))) return true;
-  return (svc.storageMounts ?? []).some(m =>
+/** Bind mounts that touch the Docker socket (from the storage inventory). */
+function dockerSocketBinds(svc: EffService) {
+  return (svc.storageMounts ?? []).filter(m =>
     m.type === 'bind' && mountTouchesDockerSocket(m.source, m.target));
 }
 
+function mountsDockerSocket(svc: EffService): boolean {
+  if (svc.binds.some(b => mountTouchesDockerSocket(b.source, b.target))) return true;
+  return dockerSocketBinds(svc).length > 0;
+}
+
 function hasReadOnlyDockerSocket(svc: EffService): boolean {
-  return (svc.storageMounts ?? []).some(m =>
-    m.type === 'bind' && m.readOnly && mountTouchesDockerSocket(m.source, m.target));
+  return dockerSocketBinds(svc).some(m => m.readOnly);
 }
 
 /**
@@ -93,8 +95,7 @@ function hasReadOnlyDockerSocket(svc: EffService): boolean {
  * read-only mount does not make a second writable one safe.
  */
 function hasWritableDockerSocket(svc: EffService): boolean {
-  return (svc.storageMounts ?? []).some(m =>
-    m.type === 'bind' && !m.readOnly && mountTouchesDockerSocket(m.source, m.target));
+  return dockerSocketBinds(svc).some(m => !m.readOnly);
 }
 
 const SOCKET_PROXY_IMAGE_HINTS = [
@@ -106,9 +107,8 @@ const SOCKET_PROXY_IMAGE_HINTS = [
 const MUTATING_PROXY_API_FLAGS = new Set(['POST', 'DELETE']);
 
 function hasSocketProxyImage(svc: EffService): boolean {
-  if (svc.image === undefined) return false;
-  const image = svc.image.toLowerCase();
-  return SOCKET_PROXY_IMAGE_HINTS.some(h => image.includes(h));
+  const image = svc.image?.toLowerCase();
+  return image !== undefined && SOCKET_PROXY_IMAGE_HINTS.some(h => image.includes(h));
 }
 
 function hasSocketProxyNameHint(svc: EffService): boolean {
@@ -126,24 +126,22 @@ function proxyReachableNames(svc: EffService): string[] {
     .map(n => n.toLowerCase());
 }
 
-function proxyApiKeyCount(svc: EffService): number {
-  return svc.envKeys.filter(k => PROXY_API_FLAG_KEYS.has(k)).length;
-}
-
 /**
  * Dedicated Docker socket proxy. A known image is an artifact identity, so it
  * stands on its own. A service NAME is free text the author controls, so it
- * only counts alongside an observable fact: a read-only socket or a scoped API
- * group key. Without a name or image hint, both are required. Prefer false
- * negatives here, since a miss keeps the high direct-mount finding.
+ * only counts alongside an observable fact: a read-only socket or an enabled
+ * API group flag (value exactly `1`). Without a name or image hint, both are
+ * required. Prefer false negatives here, since a miss keeps the high
+ * direct-mount finding.
  */
 function isSocketProxyService(svc: EffService): boolean {
   if (!mountsDockerSocket(svc)) return false;
   if (hasSocketProxyImage(svc)) return true;
   const readOnly = hasReadOnlyDockerSocket(svc);
-  const apiKeys = proxyApiKeyCount(svc);
-  if (hasSocketProxyNameHint(svc)) return readOnly || apiKeys >= 1;
-  return readOnly && apiKeys >= 2;
+  // Only flags whose rendered value is exactly `1` are counted; key presence alone is not.
+  const apiKeyCount = (svc.enabledProxyApiFlags ?? []).length;
+  if (hasSocketProxyNameHint(svc)) return readOnly || apiKeyCount >= 1;
+  return readOnly && apiKeyCount >= 2;
 }
 
 function socketProxyServices(model: EffectiveModel): EffService[] {
@@ -431,7 +429,7 @@ const dockerSocketProxyPublished: PreflightRule = {
         ruleId: 'docker-socket-proxy-published',
         severity: 'high' as const,
         title: 'Docker socket proxy publishes a host port',
-        message: `Service "${svc.name}" is a Docker socket proxy and publishes ${svc.ports.map(specLabel).join(', ')} to the host, which can expose Docker API access beyond the Compose network.`,
+        message: `Service "${svc.name}" is a Docker socket proxy and publishes ${svc.ports.map(specLabel).join(', ')} to the host, which can make the proxy reachable beyond the Compose network.`,
         sourcePath: svc.name,
         service: svc.name,
         remediation: 'Remove host port mappings from the proxy and let dependents reach it only over an internal Compose network.',
@@ -443,21 +441,19 @@ const dockerSocketProxyMutating: PreflightRule = {
   id: 'docker-socket-proxy-mutating',
   run(ctx) {
     if (!ctx.model) return [];
-    const findings: PreflightFinding[] = [];
-    for (const svc of socketProxyServices(ctx.model)) {
+    return socketProxyServices(ctx.model).flatMap(svc => {
       const mutating = (svc.enabledProxyApiFlags ?? []).filter(f => MUTATING_PROXY_API_FLAGS.has(f));
-      if (mutating.length === 0) continue;
-      findings.push({
+      if (mutating.length === 0) return [];
+      return [{
         ruleId: 'docker-socket-proxy-mutating',
-        severity: 'warning',
+        severity: 'warning' as const,
         title: 'Docker socket proxy allows mutating API access',
         message: `Service "${svc.name}" enables ${mutating.join(' and ')} on the Docker socket proxy, which permits write and delete operations through the proxy.`,
         sourcePath: svc.name,
         service: svc.name,
         remediation: 'Disable POST and DELETE on the proxy unless dependents require mutating Docker API calls.',
-      });
-    }
-    return findings;
+      }];
+    });
   },
 };
 
@@ -486,21 +482,28 @@ const dockerSocketProxyClient: PreflightRule = {
     if (!ctx.model) return [];
     const proxies = socketProxyServices(ctx.model);
     if (proxies.length === 0) return [];
-    const proxyNetworkKeys = new Set(proxies.flatMap(p => p.networks.map(n => n.key)));
-    const proxyNames = new Set(proxies.flatMap(proxyReachableNames));
-    // Both `DOCKER_HOST` and a `tcp://<proxy>` endpoint on the command line
-    // (how Traefik and friends point at a proxy) count as using the proxy.
-    const referencesProxy = (svc: EffService): boolean =>
-      svc.envKeys.includes('DOCKER_HOST')
-      || svc.dockerEndpointHosts.some(host => proxyNames.has(host));
-    // An empty membership list means the implicit default network, which every
-    // other service without an explicit list also joins.
-    const sharesProxyNetwork = (svc: EffService): boolean =>
-      svc.networks.length === 0
-        ? proxies.some(p => p.networks.length === 0)
-        : svc.networks.some(n => proxyNetworkKeys.has(n.key));
+
+    // Per-proxy correlation: the client must name a reachable identity of a
+    // specific proxy AND share a network with that same proxy. Aggregate
+    // name/network sets would false-positive when a client on proxy-A's
+    // network points at unreachable proxy-B.
+    //
+    // Hosts come from `DOCKER_HOST` and from `tcp://` endpoints on command /
+    // entrypoint (how Traefik and friends point at a proxy). Presence of the
+    // `DOCKER_HOST` key alone is not enough; only a tcp host that matches.
+    function isClientOf(svc: EffService, proxy: EffService): boolean {
+      const names = new Set(proxyReachableNames(proxy));
+      if (!svc.dockerEndpointHosts.some(host => names.has(host))) return false;
+      // Empty membership = implicit default network. Only match when both are on it.
+      if (svc.networks.length === 0 || proxy.networks.length === 0) {
+        return svc.networks.length === 0 && proxy.networks.length === 0;
+      }
+      const proxyNets = new Set(proxy.networks.map(n => n.key));
+      return svc.networks.some(n => proxyNets.has(n.key));
+    }
+
     return ctx.model.services
-      .filter(svc => !mountsDockerSocket(svc) && referencesProxy(svc) && sharesProxyNetwork(svc))
+      .filter(svc => !mountsDockerSocket(svc) && proxies.some(proxy => isClientOf(svc, proxy)))
       .map(svc => ({
         ruleId: 'docker-socket-proxy-client',
         severity: 'info' as const,

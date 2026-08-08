@@ -180,23 +180,23 @@ describe('parseEffectiveModel', () => {
     expect(absent.services[0].enabledProxyApiFlags).toEqual(['CONTAINERS']);
     expect(absent.services[0].enabledProxyApiFlags).not.toContain('POST');
 
-    // Anything not explicitly "off" enables the group, so an unrecognized
-    // value is reported rather than silently treated as disabled.
-    const truthyWords = parseEffectiveModel({
+    // Only the literal value `1` enables a group. Upstream proxy images 403
+    // every other value (true/yes/banana/on), so truthy-word semantics would
+    // false-positive a locked-down config as mutating.
+    const nonExact = parseEffectiveModel({
       services: {
         proxy: {
           environment: {
             POST: 'true', DELETE: ' YES ', IMAGES: 'false', INFO: 'on',
-            EVENTS: 'off', NETWORKS: '', VOLUMES: 'enabled',
+            EVENTS: 'off', NETWORKS: '', VOLUMES: 'enabled', CONTAINERS: '1',
           },
         },
       },
     }, 'p');
-    expect(truthyWords.services[0].enabledProxyApiFlags.sort())
-      .toEqual(['DELETE', 'INFO', 'POST', 'VOLUMES']);
+    expect(nonExact.services[0].enabledProxyApiFlags).toEqual(['CONTAINERS']);
   });
 
-  it('keeps only the host of a tcp:// Docker endpoint from command and entrypoint', () => {
+  it('keeps only the host of a tcp:// Docker endpoint from command, entrypoint, and DOCKER_HOST', () => {
     const m = parseEffectiveModel({
       services: {
         traefik: {
@@ -216,6 +216,22 @@ describe('parseEffectiveModel', () => {
     expect(withUserInfo.services[0].dockerEndpointHosts).toEqual(['dockerproxy']);
     expect(JSON.stringify(withUserInfo)).not.toContain(SECRET);
     expect(JSON.stringify(withUserInfo)).not.toContain('admin');
+
+    // DOCKER_HOST contributes its tcp host; unix:// and empty values do not.
+    const fromEnv = parseEffectiveModel({
+      services: {
+        app: { environment: { DOCKER_HOST: `tcp://admin:${SECRET}@proxy:2375` } },
+        unix: { environment: { DOCKER_HOST: 'unix:///var/run/docker.sock' } },
+        empty: { environment: { DOCKER_HOST: '' } },
+        arrayForm: { environment: [`DOCKER_HOST=tcp://socket-proxy:2375`] },
+      },
+    }, 'p');
+    expect(fromEnv.services.find(s => s.name === 'app')!.dockerEndpointHosts).toEqual(['proxy']);
+    expect(fromEnv.services.find(s => s.name === 'unix')!.dockerEndpointHosts).toEqual([]);
+    expect(fromEnv.services.find(s => s.name === 'empty')!.dockerEndpointHosts).toEqual([]);
+    expect(fromEnv.services.find(s => s.name === 'arrayForm')!.dockerEndpointHosts).toEqual(['socket-proxy']);
+    expect(JSON.stringify(fromEnv)).not.toContain(SECRET);
+    expect(JSON.stringify(fromEnv)).not.toContain('admin');
   });
 
   it('parses the short-string port form and drops container-only EXPOSE', () => {
