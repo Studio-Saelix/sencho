@@ -58,6 +58,10 @@ A confirmation dialog appears before any destructive prune. Sencho first builds 
   Quick Clean is admin-only. The panel is hidden for users without admin permissions.
 </Note>
 
+<Note>
+  Every prune action on this page runs through the Docker API. When Sencho runs behind a Docker socket proxy, pruning requires POST plus the IMAGES, VOLUMES, NETWORKS, and CONTAINERS groups for the resources being cleaned. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy).
+</Note>
+
 ## Resource tabs
 
 Below the hero, three tabs partition your inventory: **Images**, **Volumes**, and **Unmanaged**. The Unmanaged tab shows a count badge whenever orphan containers are detected.

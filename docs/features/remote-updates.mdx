@@ -90,6 +90,10 @@ If the new container does not come up within 5 minutes, the overlay surfaces a *
   The self-update helper container inherits all bind mounts from the main Sencho container 1:1. If your `docker-compose.yml` references `env_file`, `configs`, or `secrets` outside the compose working directory, those host paths must be mounted into the Sencho container at the *same container path* as on the host. See [Troubleshooting](/operations/troubleshooting#local-self-update-fails-with-env-file-not-found) if you encounter `env file not found` errors during a local update.
 </Note>
 
+<Note>
+  Self-update helpers always mount the host `/var/run/docker.sock` into the helper container, independent of `DOCKER_HOST`. On a TCP-only socket proxy, update and reapply helpers do not reach the proxy, so use a deployment where the helpers still receive a working host socket path. The generated Pilot Agent compose also mounts the raw socket path, so a TCP-only proxy on an agent node requires editing the generated compose. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#self-update-behind-a-proxy).
+</Note>
+
 
 ## Pinned image tags
 
