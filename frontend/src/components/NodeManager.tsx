@@ -14,7 +14,6 @@ import { formatTimeUntil, formatTimeAgo } from '@/lib/relativeTime';
 import { SettingsPrimaryButton } from './settings/SettingsActions';
 import { useMastheadStats } from './settings/MastheadStatsContext';
 import { NodeLabelPicker } from './blueprints/NodeLabelPicker';
-import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
 import { useNodeActions, type NodeTestInfo } from './nodes/useNodeActions';
 import { useFleetSyncStatus } from '@/hooks/useFleetSyncStatus';
@@ -39,14 +38,10 @@ export interface SenchoNavigateDetail {
 }
 
 export function NodeManager() {
-  const { isPaid } = useLicense();
   const { isAdmin, can } = useAuth();
-  // Mirror the backend node:manage guard. This top-level flag checks the global
-  // role only (admin or global node-admin); the per-row Test/Edit/Delete buttons
-  // below additionally honor scoped per-node grants via can('node:manage', 'node', id).
-  // Admins resolve immediately via isAdmin; node-admins once /permissions/me lands.
-  // Generate-token and reset-anchor below stay admin-only to match their stricter
-  // backend guards (requireAdmin, and requireAdmin + requirePaid).
+  // Global node:manage only (admin or global node-admin). Per-row actions also
+  // check scoped can('node:manage', 'node', id). Generate-token and reset-anchor
+  // stay isAdmin-only to match their requireAdmin backend guards.
   const canManageNodes = isAdmin || can('node:manage');
   const { nodes, refreshNodeMeta } = useNodes();
   useMastheadStats([
@@ -277,7 +272,7 @@ export function NodeManager() {
                   {' '}Reset the anchor on the peer to resume sync, or remove the node from this fleet.
                 </div>
                 <div className="flex flex-wrap items-center gap-2 pt-1">
-                  {isAdmin && isPaid && (
+                  {isAdmin && (
                     <Button
                       size="sm"
                       variant="destructive"
