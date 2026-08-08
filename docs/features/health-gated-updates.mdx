@@ -107,7 +107,11 @@ Before a full-stack update runs, Sencho captures the running image of every serv
 
 Each capture is one **rollback generation**. The generation currently backing a stack's live deployment is retained for as long as it is current; once a newer update supersedes it, it is retained for a configurable window before Sencho cleans it up automatically. A stack updated repeatedly in a short span can have more than one superseded generation in that window at once.
 
-**Resources → Rollback** lists every generation on the node: the stack it belongs to, a short generation id, whether it is the current protection or a superseded one awaiting cleanup, and roughly when it clears. An admin can release a generation's protection early from that list, including the current one, which immediately frees its image but means Sencho cannot automatically roll that stack back until its next successful full-stack update; the confirmation dialog says so before you proceed. A generation that is mid-recovery or still being observed by a health gate cannot be released until that finishes.
+**Resources → Rollback** lists every generation on the node: the stack it belongs to, a short generation id, whether it is the current protection or a superseded one awaiting cleanup, and roughly when it clears. Search by stack name or generation id, filter to Current or Superseded, and click a column header to sort. An admin can release a generation's protection early from that list, including the current one, which immediately frees its image but means Sencho cannot automatically roll that stack back until its next successful full-stack update; the confirmation dialog says so before you proceed. A generation that is mid-recovery or still being observed by a health gate cannot be released until that finishes.
+
+<Frame>
+  <img src="/images/health-gated-updates/rollback-generations.png" alt="Resources Rollback tab showing search, All Current and Superseded filter buttons, an info icon for help, and sortable Stack, Generation, State, and Retention column headers above the generations table" />
+</Frame>
 
 Because these images are deliberately held, deleting one directly (by id, including through the API) is refused. Release the generation from **Resources → Rollback** instead, or leave it to clear on its own.
 
