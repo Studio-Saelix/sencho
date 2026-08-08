@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.97.1](https://github.com/Studio-Saelix/sencho/compare/v0.97.0...v0.97.1) (2026-08-08)
+
+
+### Fixed
+
+* **compose-doctor:** recognize Docker socket proxy topologies ([#1791](https://github.com/Studio-Saelix/sencho/issues/1791)) ([bb98cba](https://github.com/Studio-Saelix/sencho/commit/bb98cba1f2ca7796a3732c1de6b77e2bd579ea69))
+* **fleet-sync:** open status and reset-anchor to Community admins ([#1792](https://github.com/Studio-Saelix/sencho/issues/1792)) ([b9e73f7](https://github.com/Studio-Saelix/sencho/commit/b9e73f7bd8423e8b8c2279925de241e91903f853))
+* **rbac:** make complete built-in RBAC available on Community ([#1793](https://github.com/Studio-Saelix/sencho/issues/1793)) ([5c52ae2](https://github.com/Studio-Saelix/sencho/commit/5c52ae26eb602cc581f08bdbc5d35a12c21def7d))
+* **sso:** forward RFC 9207 iss parameter in OIDC callback ([#1785](https://github.com/Studio-Saelix/sencho/issues/1785)) ([e084ad4](https://github.com/Studio-Saelix/sencho/commit/e084ad424c1f8ee85b61a0dba2aa8acc0b94e9a0))
+
 ## [0.97.0](https://github.com/Studio-Saelix/sencho/compare/v0.96.0...v0.97.0) (2026-08-06)
 
 
