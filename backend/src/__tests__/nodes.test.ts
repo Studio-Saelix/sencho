@@ -272,7 +272,7 @@ describe('PUT /api/nodes/:id name collision', () => {
 
   it('treats names that differ only by case as distinct', async () => {
     const bName = `case-prod-${Date.now()}`;
-    const bId = await createRemoteWithName(bName);
+    await createRemoteWithName(bName);
     const aId = await createRemoteWithName(`other-${Date.now()}`);
     const res = await request(app)
       .put(`/api/nodes/${aId}`)
