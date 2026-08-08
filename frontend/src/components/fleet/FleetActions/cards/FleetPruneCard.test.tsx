@@ -126,6 +126,31 @@ it('shows 0 reclaimable · partial when successful targets report zero bytes', a
   expect(screen.getByText('PART')).toBeInTheDocument();
 });
 
+it('truncates a long unreachable error without clipping reachable byte counts', async () => {
+  const longError = `Pilot tunnel is disconnected: ${'x'.repeat(400)}`;
+  const twoNodes = [...nodes, { id: 2, name: 'edge', status: 'offline' }] as unknown as FleetNode[];
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/prune/estimate') {
+      return Promise.resolve(jsonResponse(200, {
+        totalBytes: 4096,
+        perNode: [
+          { nodeId: 1, nodeName: 'central', reclaimableBytes: 4096, reachable: true },
+          { nodeId: 2, nodeName: 'edge', reclaimableBytes: 0, reachable: false, error: longError },
+        ],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+
+  render(<FleetPruneCard nodes={twoNodes} />);
+  const errorSpan = await screen.findByText(longError);
+  expect(errorSpan.className).toContain('truncate');
+  expect(errorSpan.className).toContain('max-w-[55%]');
+  expect(screen.getByTitle(longError)).toBeInTheDocument();
+  const byteSpan = screen.getByText('4 KB');
+  expect(byteSpan.className).not.toContain('truncate');
+});
+
 it('drops the unlock footer once dry run review is valid', async () => {
   const user = userEvent.setup();
   mockedFetch.mockImplementation((url: string) => {
