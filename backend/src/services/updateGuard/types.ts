@@ -52,6 +52,12 @@ export interface RollbackReadinessReport {
   computedAt: number;
   overall: RollbackOverall;
   items: RollbackReadinessItem[];
+  /**
+   * Scope disclosure for stacks whose project is partly Git-managed: rollback
+   * restores compose files and .env only; other materialized inputs are not
+   * reverted. Set when the stack has a managed-project manifest.
+   */
+  note?: string;
 }
 
 /** Normalized per-container probe used by readiness and the health gate. */

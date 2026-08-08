@@ -16,6 +16,10 @@ export interface PullResult {
   currentEnv: string | null;
   validation: { ok: boolean; error?: string };
   hasLocalChanges: boolean;
+  /** Tolerated refusals from complete-project discovery; intentionally not surfaced in this dialog (actionable refusals abort the pull, so this is always empty). */
+  refusals?: Array<{ sourcePath: string | null; kind: string; reason: string; actionable: boolean }>;
+  /** Clone-time warnings (submodules present, for example). */
+  warnings?: string[];
 }
 
 interface GitSourceDiffDialogProps {
@@ -97,7 +101,6 @@ export function GitSourceDiffDialog({
               </div>
             </div>
           )}
-
           {envAvailable && (
             <Tabs value={diffTab} onValueChange={(v) => setDiffTab(v as 'compose' | 'env')}>
               <TabsList>

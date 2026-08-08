@@ -28,7 +28,7 @@ import { applyPilotModeCapabilityFilter } from '../services/CapabilityRegistry';
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { PilotMetrics } from '../services/PilotMetrics';
 import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
-import { sweepStaleTempDirs as sweepStaleGitTempDirs } from '../services/GitSourceService';
+import { sweepStaleTempDirs as sweepStaleGitTempDirs, sweepGitManifestOrphans } from '../services/GitSourceService';
 import { PORT } from '../helpers/constants';
 import { LOW_MEMORY_FLOOR_BYTES } from '../utils/spawnErrors';
 
@@ -193,6 +193,9 @@ export async function startServer(server: Server): Promise<void> {
   // Fire-and-forget housekeeping; logged but never awaited.
   sweepStaleGitTempDirs().catch((err) => {
     console.warn('[GitSource] Temp dir sweep failed:', (err as Error).message);
+  });
+  sweepGitManifestOrphans().catch((err) => {
+    console.warn('[GitManifest] Managed-area sweep failed:', (err as Error).message);
   });
   sweepStaleTrivyTempDirs().catch((err) => {
     console.warn('[Trivy] Temp dir sweep failed:', (err as Error).message);

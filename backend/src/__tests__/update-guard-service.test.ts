@@ -17,6 +17,7 @@ const {
   mockGetGlobalSettings,
   mockFsSize,
   mockBuildEffectiveServiceModel,
+  mockGetGitSource,
 } = vi.hoisted(() => ({
   mockListContainers: vi.fn(),
   mockGetContainer: vi.fn(),
@@ -29,6 +30,7 @@ const {
   mockGetGlobalSettings: vi.fn(),
   mockFsSize: vi.fn(),
   mockBuildEffectiveServiceModel: vi.fn(),
+  mockGetGitSource: vi.fn(),
 }));
 
 vi.mock('../services/DockerController', () => ({
@@ -69,6 +71,9 @@ vi.mock('../services/DatabaseService', () => ({
       getOpenDriftFindings: mockGetOpenDriftFindings,
       getGlobalSettings: mockGetGlobalSettings,
       getStackActivity: vi.fn().mockReturnValue([]),
+      // Rollback-readiness partial-revert disclosure reads the git source row;
+      // no git-managed stacks in these fixtures by default.
+      getGitSource: mockGetGitSource,
     }),
   },
 }));
@@ -323,4 +328,22 @@ describe('UpdateGuardService.computeRollbackReadiness moving-tag wiring', () => 
     expect(report.items.find(i => i.id === 'previous_images')?.state).toBe('ready');
     expect(report.overall).toBe('ready');
   });
+});
+
+describe('UpdateGuardService.computeRollbackReadiness git-managed disclosure', () => {
+    beforeEach(() => {
+        mockGetGitSource.mockReturnValue(undefined);
+    });
+
+    it('adds the partial-revert note when the stack is Git-managed and active', async () => {
+        mockGetGitSource.mockReturnValue({ manifest_state: 'active' });
+        const report = await UpdateGuardService.getInstance().computeRollbackReadiness(1, 'git-stack');
+        expect(report.note).toContain('Git-managed');
+        expect(report.note).toContain('compose files and .env');
+    });
+
+    it('omits the note when the stack has no Git source or no manifest', async () => {
+        const report = await UpdateGuardService.getInstance().computeRollbackReadiness(1, 'plain-stack');
+        expect(report.note).toBeUndefined();
+    });
 });

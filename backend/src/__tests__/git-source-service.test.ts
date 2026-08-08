@@ -13,6 +13,8 @@
  * - Per-stack mutex serialization ordering
  */
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
@@ -352,6 +354,138 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
         })).rejects.toMatchObject({ code: 'REPO_NOT_FOUND' });
 
         expect(DatabaseService.getInstance().getGitSource('unreachable')).toBeUndefined();
+    });
+
+    describe('repository identity changes on managed stacks (audit round 8 B-5)', () => {
+        async function seedManifest(stackName: string, repoUrl = 'https://github.com/example/repo.git', branch = 'main') {
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const manifest = GitProjectManifestService.getInstance().buildManifest({
+                stackName,
+                repoUrl,
+                branch,
+                commitSha: 'abc123',
+                projectRoot: null,
+                composeFiles: ['compose.yaml'],
+                projectName: stackName,
+                invocation: ['-f', 'compose.yaml', '-p', stackName],
+                inputs: [{
+                    sourcePath: 'compose.yaml',
+                    materializedPath: 'compose.yaml',
+                    role: 'compose-primary',
+                    dependencyKind: 'explicit',
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    sensitivity: 'medium',
+                    contentSha256: null,
+                    sizeBytes: null,
+                    state: 'present',
+                    deletionAuthority: 'sencho',
+                    note: null,
+                }],
+                refusals: [],
+                buildContexts: [],
+                bounds: {
+                    maxFiles: 10_000,
+                    maxBytes: 512 * 1024 * 1024,
+                    maxContextBytes: 256 * 1024 * 1024,
+                    maxPathDepth: 64,
+                    maxFileBytes: 10 * 1024 * 1024,
+                },
+                priorManifest: null,
+                state: 'active',
+            });
+            await GitProjectManifestService.getInstance().writeManifest(stackName, manifest);
+        }
+
+        const baseInput = {
+            stackName: 'id-change',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none' as const,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        };
+
+        async function seedSource(stackName: string) {
+            mockSuccessfulClone();
+            const svc = GitSourceService.getInstance();
+            await svc.upsert({ ...baseInput, stackName });
+        }
+
+        it('rejects a repository change when a managed-project manifest exists', async () => {
+            await seedSource('id-change-repo');
+            await seedManifest('id-change-repo');
+            const svc = GitSourceService.getInstance();
+            mockGitClone.mockClear();
+
+            await expect(svc.upsert({
+                ...baseInput,
+                stackName: 'id-change-repo',
+                repoUrl: 'https://github.com/example/other.git',
+            })).rejects.toMatchObject({
+                code: 'GIT_ERROR',
+                message: expect.stringMatching(/Detach the Git source first/),
+            });
+
+            // Nothing persisted, no dry-run fetch attempted.
+            expect(DatabaseService.getInstance().getGitSource('id-change-repo')?.repo_url).toBe('https://github.com/example/repo.git');
+            expect(mockGitClone).not.toHaveBeenCalled();
+        });
+
+        it('rejects a branch change when a managed-project manifest exists', async () => {
+            await seedSource('id-change-branch');
+            await seedManifest('id-change-branch');
+            const svc = GitSourceService.getInstance();
+
+            await expect(svc.upsert({
+                ...baseInput,
+                stackName: 'id-change-branch',
+                branch: 'develop',
+            })).rejects.toMatchObject({ code: 'GIT_ERROR', message: expect.stringMatching(/Detach the Git source first/) });
+            expect(DatabaseService.getInstance().getGitSource('id-change-branch')?.branch).toBe('main');
+        });
+
+        it('allows a repository change when no manifest exists (legacy stack)', async () => {
+            await seedSource('id-change-legacy');
+            const svc = GitSourceService.getInstance();
+
+            await svc.upsert({ ...baseInput, stackName: 'id-change-legacy', repoUrl: 'https://github.com/example/other.git' });
+            expect(DatabaseService.getInstance().getGitSource('id-change-legacy')?.repo_url).toBe('https://github.com/example/other.git');
+        });
+
+        it('allows non-identity config changes on a managed stack', async () => {
+            await seedSource('id-change-paths');
+            await seedManifest('id-change-paths');
+            const svc = GitSourceService.getInstance();
+            // The dry-run reachability fetch must find every configured file.
+            mockSuccessfulClone({ extraFiles: { 'override.yaml': 'services: {}\n' } });
+
+            await svc.upsert({ ...baseInput, stackName: 'id-change-paths', composePaths: ['compose.yaml', 'override.yaml'] });
+            const row = DatabaseService.getInstance().getGitSource('id-change-paths');
+            expect(row?.compose_paths).toEqual(['compose.yaml', 'override.yaml']);
+        });
+
+        it('apply refuses a stale-identity manifest with a detach-first instruction', async () => {
+            const sha = 'abc1234567890abc1234567890abc1234567890a';
+            await seedSource('id-change-apply');
+            // Manifest stamped for a different repository than the source row.
+            await seedManifest('id-change-apply', 'https://github.com/example/other.git', 'main');
+            const svc = GitSourceService.getInstance();
+
+            mockSuccessfulClone({ sha });
+            await svc.pull('id-change-apply');
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            try {
+                await expect(svc.apply('id-change-apply', sha))
+                    .rejects.toMatchObject({ code: 'GIT_ERROR', message: expect.stringMatching(/Detach the Git source/) });
+            } finally {
+                validateSpy.mockRestore();
+            }
+        });
     });
 });
 
@@ -705,14 +839,16 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
             autoApplyOnWebhook: false,
             autoDeployOnApply: false,
         });
-        // upsert runs a dry-run fetch but not validateCompose, so the stub only
-        // affects the webhook pull below.
-        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: false, error: 'bad compose' });
+        // Complete-project pulls validate the staged candidate via the docker
+        // runner; stub it to fail so the webhook pull reports the error.
+        const runSpy = vi
+            .spyOn(svc as unknown as { runDockerCompose: (a: string[], c: string, t: number) => Promise<{ code: number; stdout: string; stderr: string }> }, 'runDockerCompose')
+            .mockResolvedValue({ code: 1, stdout: '', stderr: 'bad compose' });
 
         const result = await svc.handleWebhookPull('webhook-validate-fail');
         expect(result.status).toBe('error');
         expect(result.message).toMatch(/validation failed/i);
-        validateSpy.mockRestore();
+        runSpy.mockRestore();
     });
 });
 
@@ -930,6 +1066,18 @@ describe('GitSourceService.createStackFromGit', () => {
         expect(result.envWritten).toBe(false);
         expect(result.source.last_applied_commit_sha).toBe(sha);
         expect(result.source.pending_commit_sha).toBeNull();
+
+        // The manifest cache is persisted after the row insert (audit S-2):
+        // the immediate response and the DB row report the real state, not
+        // the default 'absent'.
+        expect(result.source.manifest_state).toBe('active');
+        const row = DatabaseService.getInstance().getGitSource('create-happy');
+        expect(row?.manifest_state).toBe('active');
+        expect(row?.manifest_version).toBe(1);
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const manifest = await GitProjectManifestService.getInstance().readManifest('create-happy', 'https://github.com/example/repo.git', 'main');
+        if (manifest === null || 'corrupt' in manifest) throw new Error('expected a manifest');
+        expect(manifest.resolvedRevision.commitSha).toBe(sha);
 
         const { FileSystemService } = await import('../services/FileSystemService');
         const onDisk = await FileSystemService.getInstance().getStackContent('create-happy');
@@ -1220,6 +1368,53 @@ describe('GitSourceService.apply', () => {
             saveSpy.mockRestore();
             deploySpy.mockRestore();
         }
+    });
+
+    it('refuses the first complete-project apply when an unowned local file collides (audit round 9 B-1)', async () => {
+        const sha = '9999aaaa9999aaaa9999aaaa9999aaaa9999aaaa';
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n    configs: [app]\nconfigs:\n  app:\n    file: configs/app.json\n',
+            extraFiles: { 'configs/app.json': '{"repo": true}\n' },
+            sha,
+        });
+        const svc = GitSourceService.getInstance();
+        const stackName = 'pre-manifest-collision';
+        await svc.upsert({
+            stackName,
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        // Legacy state: only compose.yaml was ever applied (no manifest).
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, { files: ['compose.yaml'], contextDir: null });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const fsSvc = FileSystemService.getInstance();
+        await fsSvc.createStack(stackName);
+        await fsSvc.saveStackContent(stackName, 'services:\n  web:\n    image: nginx:old\n');
+        // A local file Sencho never owned, colliding with the incoming revision.
+        await fsSvc.writeStackFile(stackName, 'configs/app.json', 'local user data\n');
+
+        await svc.pull(stackName);
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        try {
+            await expect(svc.apply(stackName, sha)).rejects.toMatchObject({
+                code: 'GIT_ERROR',
+                message: expect.stringMatching(/does not manage/),
+            });
+            // The local file is preserved byte-for-byte.
+            const onDisk = await fsSvc.readStackFile(stackName, 'configs/app.json');
+            expect(onDisk.content).toBe('local user data\n');
+            expect(DatabaseService.getInstance().getGitSource(stackName)?.pending_commit_sha).toBe(sha);
+        } finally {
+            validateSpy.mockRestore();
+        }
+        await cleanupStackDir(stackName);
     });
 
     it('returns deployError and skips compose deploy when policy blocks apply deploy', async () => {
@@ -1561,5 +1756,431 @@ describe('GitSourceService multi-file create + apply flow', () => {
 
         validateSpy.mockRestore();
         await cleanupStackDir('pending-config');
+    });
+});
+
+describe('GitSourceService pending blob decode branches', () => {
+    function svc(): unknown { return GitSourceService.getInstance(); }
+    type DecodeApi = {
+        crypto: { encrypt(s: string): string; decrypt(s: string): string };
+        encodePendingCompose(files: { path: string; content: string }[], ctx: string | null, cand: string | null, inv: unknown): string;
+        decodePendingCompose(s: string): { files: { path: string; content: string }[]; contextDir: string | null; candidateRelPath: string | null; inventory: unknown };
+    };
+
+    it('round-trips the v3 blob with candidate path and inventory', () => {
+        const s = svc() as unknown as DecodeApi;
+        const encoded = s.encodePendingCompose([{ path: 'compose.yaml', content: 'x' }], null, 'generations/candidate-abc', { inputs: [], refusals: [], buildContexts: [] });
+        const decoded = s.decodePendingCompose(encoded);
+        expect(decoded.candidateRelPath).toBe('generations/candidate-abc');
+        expect(decoded.files[0].content).toBe('x');
+        expect(decoded.inventory).toEqual({ inputs: [], refusals: [], buildContexts: [] });
+    });
+
+    it('decodes a v2 blob without a candidate', () => {
+        const s = svc() as unknown as DecodeApi;
+        const encoded = s.crypto.encrypt(JSON.stringify({ v: 2, files: [{ path: 'compose.yaml', content: 'y' }], contextDir: null }));
+        const decoded = s.decodePendingCompose(encoded);
+        expect(decoded.candidateRelPath).toBeNull();
+        expect(decoded.files[0].content).toBe('y');
+    });
+
+    it('falls back to legacy plaintext for unknown shapes', () => {
+        const s = svc() as unknown as DecodeApi;
+        const decoded = s.decodePendingCompose(s.crypto.encrypt('legacy content'));
+        expect(decoded.files).toEqual([{ path: 'compose.yaml', content: 'legacy content' }]);
+        expect(decoded.candidateRelPath).toBeNull();
+    });
+
+    it('rejects a corrupt v3 blob as corrupt state instead of falling back to legacy', () => {
+        const s = svc() as unknown as DecodeApi;
+        const encoded = s.crypto.encrypt('{"v":3 not json');
+        expect(() => s.decodePendingCompose(encoded)).toThrow(/corrupt/);
+    });
+});
+
+describe('GitSourceService managed-area lifecycle', () => {
+    it('removes the managed area when createStackFromGit fails after staging', async () => {
+        const sha = 'f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1';
+        mockSuccessfulClone({ sha });
+        const svc = GitSourceService.getInstance();
+        const runSpy = vi
+            .spyOn(svc as unknown as { runDockerCompose: (a: string[], c: string, t: number) => Promise<{ code: number; stdout: string; stderr: string }> }, 'runDockerCompose')
+            .mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const createSpy = vi
+            .spyOn(FileSystemService.prototype, 'createStack')
+            .mockRejectedValue(new Error('simulated create failure'));
+        try {
+            await expect(
+                svc.createStackFromGit({
+                    stackName: 'rollback-area',
+                    repoUrl: 'https://github.com/example/repo.git',
+                    branch: 'main',
+                    composePaths: ['compose.yaml'],
+                    contextDir: null,
+                    syncEnv: false,
+                    envPath: null,
+                    authType: 'none',
+                    token: null,
+                    autoApplyOnWebhook: false,
+                    autoDeployOnApply: false,
+                }),
+            ).rejects.toThrow(/simulated create failure/);
+        } finally {
+            runSpy.mockRestore();
+            createSpy.mockRestore();
+        }
+        // The staged candidate lived in the managed area; the rollback must reap it.
+        const stagedCandidate = path.join(process.env.DATA_DIR!, 'git-managed', '1', 'rollback-area', 'generations', 'candidate-f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1');
+        expect(fs.existsSync(stagedCandidate)).toBe(false);
+        expect(DatabaseService.getInstance().getGitSource('rollback-area')).toBeUndefined();
+    });
+
+    it('sweeps managed areas whose stack no longer exists', async () => {
+        mockSuccessfulClone();
+        DatabaseService.getInstance().upsertGitSource({
+            stack_name: 'ghost-stack',
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: null,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const manifestSvc = GitProjectManifestService.getInstance();
+        const manifest = manifestSvc.buildManifest({
+            stackName: 'ghost-stack',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: 'ghost-stack',
+            invocation: ['-f', 'compose.yaml', '-p', 'ghost-stack'],
+            inputs: [],
+            refusals: [],
+            buildContexts: [],
+            bounds: { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 },
+            priorManifest: null,
+            state: 'active',
+        });
+        await manifestSvc.writeManifest('ghost-stack', manifest);
+        await manifestSvc.prepareDetachRecovery(
+            'ghost-stack',
+            'https://github.com/example/repo.git',
+            'main',
+            [{ path: 'compose.yaml', existed: false, content: null }],
+        );
+        expect(await manifestSvc.stageManagedAreaForDetach('ghost-stack')).toBe(true);
+        await GitSourceService.getInstance().sweepOrphans();
+        expect(await manifestSvc.readManifest('ghost-stack', 'https://github.com/example/repo.git', 'main')).toBeNull();
+        expect(fs.existsSync(path.join(process.env.DATA_DIR!, 'git-managed', '1', '.detach-ghost-stack'))).toBe(false);
+    });
+
+    const SWEEP_BOUNDS = { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 };
+
+    function insertGitSourceRow(stackName: string): void {
+        DatabaseService.getInstance().upsertGitSource({
+            stack_name: stackName,
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: null,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+    }
+
+    /** Live managed-stack fixture: on-disk stack, row, and written manifest. */
+    async function seedManagedStack(stackName: string): Promise<void> {
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await FileSystemService.getInstance().createStack(stackName);
+        await FileSystemService.getInstance().saveStackContent(stackName, 'services: {}\n');
+        insertGitSourceRow(stackName);
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const manifestSvc = GitProjectManifestService.getInstance();
+        await manifestSvc.writeManifest(stackName, manifestSvc.buildManifest({
+            stackName,
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: stackName,
+            invocation: ['-f', 'compose.yaml', '-p', stackName],
+            inputs: [],
+            refusals: [],
+            buildContexts: [],
+            bounds: SWEEP_BOUNDS,
+            priorManifest: null,
+            state: 'active',
+        }));
+    }
+
+    it('does not delete managed areas when the stack listing fails', async () => {
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const svc = GitSourceService.getInstance();
+        const stackName = 'live-sweep-listing-fail';
+        await seedManagedStack(stackName);
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const manifestSvc = GitProjectManifestService.getInstance();
+        // A retained recovery generation, as the sweep would otherwise reap.
+        const genDir = path.join(process.env.DATA_DIR!, 'git-managed', '1', stackName, 'generations', 'applied-abc-1');
+        fs.mkdirSync(genDir, { recursive: true });
+
+        const strictSpy = vi.spyOn(FileSystemService.prototype, 'getStacksStrict').mockRejectedValue(new Error('EIO: readdir failed'));
+        // Also mock the SOFT listing: the pre-fix sweep called getStacks(),
+        // which swallows the failure into an empty list and deletes the area.
+        // Post-fix the sweep uses the strict variant and is unaffected, so the
+        // test goes red on the pre-fix call path and green here.
+        const softSpy = vi.spyOn(FileSystemService.prototype, 'getStacks').mockRejectedValue(new Error('EIO: readdir failed'));
+        try {
+            await svc.sweepOrphans();
+        } finally {
+            strictSpy.mockRestore();
+            softSpy.mockRestore();
+        }
+        // The manifest and every retained generation survive the failed listing.
+        expect(await manifestSvc.readManifest(stackName, 'https://github.com/example/repo.git', 'main')).not.toBeNull();
+        expect(fs.existsSync(genDir)).toBe(true);
+        await cleanupStackDir(stackName);
+    });
+
+    it('skips a live stack\'s managed area when the listing omits it', async () => {
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const svc = GitSourceService.getInstance();
+        const stackName = 'live-sweep-empty-listing';
+        await seedManagedStack(stackName);
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const manifestSvc = GitProjectManifestService.getInstance();
+
+        const strictSpy = vi.spyOn(FileSystemService.prototype, 'getStacksStrict').mockResolvedValue([]);
+        const softSpy = vi.spyOn(FileSystemService.prototype, 'getStacks').mockResolvedValue([]);
+        try {
+            await svc.sweepOrphans();
+        } finally {
+            strictSpy.mockRestore();
+            softSpy.mockRestore();
+        }
+        expect(await manifestSvc.readManifest(stackName, 'https://github.com/example/repo.git', 'main')).not.toBeNull();
+        await cleanupStackDir(stackName);
+    });
+
+    it('reaps a vanished stack\'s managed area while live stacks survive in the same sweep', async () => {
+        const svc = GitSourceService.getInstance();
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const manifestSvc = GitProjectManifestService.getInstance();
+        const liveA = 'live-sweep-a';
+        const liveB = 'live-sweep-b';
+        const ghost = 'vanished-sweep';
+        for (const name of [liveA, liveB]) {
+            await seedManagedStack(name);
+        }
+        // A row whose stack directory is genuinely gone: row + manifest only.
+        insertGitSourceRow(ghost);
+        await manifestSvc.writeManifest(ghost, manifestSvc.buildManifest({
+            stackName: ghost,
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: ghost,
+            invocation: ['-f', 'compose.yaml', '-p', ghost],
+            inputs: [],
+            refusals: [],
+            buildContexts: [],
+            bounds: SWEEP_BOUNDS,
+            priorManifest: null,
+            state: 'active',
+        }));
+
+        await svc.sweepOrphans();
+
+        // Both live areas and manifests survive; the vanished stack's area is reaped.
+        expect(await manifestSvc.readManifest(liveA, 'https://github.com/example/repo.git', 'main')).not.toBeNull();
+        expect(await manifestSvc.readManifest(liveB, 'https://github.com/example/repo.git', 'main')).not.toBeNull();
+        expect(await manifestSvc.readManifest(ghost, 'https://github.com/example/repo.git', 'main')).toBeNull();
+        for (const name of [liveA, liveB]) {
+            await cleanupStackDir(name);
+        }
+    });
+
+    it('reports migration_required when the manifest file is gone but the cache claims an applied state', async () => {
+        const svc = GitSourceService.getInstance();
+        DatabaseService.getInstance().upsertGitSource({
+            stack_name: 'stale-cache-summary',
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: null,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+        DatabaseService.getInstance().setGitSourceManifestState('stale-cache-summary', 3, 'active', 'generations/applied-abc-3');
+        const summary = await svc.getManifestSummary('stale-cache-summary');
+        expect(summary?.state).toBe('migration_required');
+        expect(summary?.managedCount).toBe(0);
+
+        // A row that never had a manifest still reports absent.
+        DatabaseService.getInstance().upsertGitSource({
+            stack_name: 'never-manifested',
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: null,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+        expect((await svc.getManifestSummary('never-manifested'))?.state).toBe('absent');
+    });
+});
+
+describe('GitSourceService legacy pending apply (migration path)', () => {
+    it('applies a v2 pending blob via the historical path and builds a migrated manifest', async () => {
+        const sha = '9999aaa9999aaa9999aaa9999aaa9999aaa9999a';
+        const svc = GitSourceService.getInstance();
+        const db = DatabaseService.getInstance();
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const fsSvc = FileSystemService.getInstance();
+        await fsSvc.createStack('legacy-apply');
+        db.upsertGitSource({
+            stack_name: 'legacy-apply',
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: sha,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+        // Seed the v2 blob directly, as a pre-upgrade row would carry it.
+        const svcPriv = svc as unknown as { crypto: { encrypt(s: string): string } };
+        db.setGitSourcePending('legacy-apply', sha, svcPriv.crypto.encrypt(JSON.stringify({ v: 2, files: [{ path: 'compose.yaml', content: 'services:\n  web:\n    image: nginx\n' }], contextDir: null })), null);
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+
+        try {
+            const applied = await svc.apply('legacy-apply', sha, { deploy: false });
+            expect(applied.applied).toBe(true);
+            expect(await fsSvc.getStackContent('legacy-apply')).toContain('image: nginx');
+            const row = db.getGitSource('legacy-apply');
+            expect(row?.manifest_state).toBe('migrated');
+        } finally {
+            validateSpy.mockRestore();
+            await cleanupStackDir('legacy-apply');
+        }
+    });
+});
+
+describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => {
+    it('applies twice without a divergence refusal when the repo carries a root .env', async () => {
+        const sha = 'abcd1111abcd1111abcd1111abcd1111abcd1111';
+        const svc = GitSourceService.getInstance();
+        const db = DatabaseService.getInstance();
+        const runSpy = vi
+            .spyOn(svc as unknown as { runDockerCompose: (a: string[], c: string, t: number) => Promise<{ code: number; stdout: string; stderr: string }> }, 'runDockerCompose')
+            .mockResolvedValue({ code: 0, stdout: '', stderr: '' });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const fsSvc = FileSystemService.getInstance();
+        await fsSvc.createStack('sync-env-double');
+        // Repo carries a root .env; sync_env is on and the sync env path is the same file.
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n',
+            env: 'SYNCED=1\n',
+            envPath: '.env',
+            extraFiles: { '.env': 'REPO=1\n' },
+            sha,
+        });
+        try {
+            await svc.upsert({
+                stackName: 'sync-env-double',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: true,
+                envPath: '.env',
+                authType: 'none',
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+            const pull1 = await svc.pull('sync-env-double');
+            const apply1 = await svc.apply('sync-env-double', pull1.commitSha, { deploy: false });
+            expect(apply1.applied).toBe(true);
+            // The manifest has exactly one .env entry.
+            const manifest = await svc.getManifest('sync-env-double');
+            const envEntries = manifest?.inputs.filter((i) => i.materializedPath === '.env') ?? [];
+            expect(envEntries).toHaveLength(1);
+            expect(envEntries[0].dependencyKind).toBe('sync-env');
+
+            // Second cycle must not raise the divergence refusal.
+            const pull2 = await svc.pull('sync-env-double');
+            const apply2 = await svc.apply('sync-env-double', pull2.commitSha, { deploy: false });
+            expect(apply2.applied).toBe(true);
+            void db;
+        } finally {
+            runSpy.mockRestore();
+            await cleanupStackDir('sync-env-double');
+        }
     });
 });

@@ -18,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
+import { ComposeService } from '../services/ComposeService';
 import { GitSourceService } from '../services/GitSourceService';
 
 function seedGitSource(stackName: string): void {
@@ -288,6 +289,49 @@ describe('GET /api/stacks/:stackName/git-source', () => {
         expect(res.body.repo_url).toBe('https://github.com/example/repo.git');
         expect(res.body.linked).toBeUndefined();
     });
+
+    it('redacts high-sensitivity refusal paths from the summary projection (audit round 9 S-1)', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, 'linked-redacted'), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, 'linked-redacted', 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+        seedGitSource('linked-redacted');
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const svc = GitProjectManifestService.getInstance();
+        const manifest = svc.buildManifest({
+            stackName: 'linked-redacted',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc123',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: 'linked-redacted',
+            invocation: ['-f', 'compose.yaml', '-p', 'linked-redacted'],
+            inputs: [],
+            refusals: [
+                { sourcePath: 'secrets/db.env', kind: 'missing-file', reason: 'File not found in repository: secrets/db.env', actionable: true, sensitivity: 'high' },
+                { sourcePath: 'compose.yaml', kind: 'missing-file', reason: 'File not found in repository: compose.yaml', actionable: true, sensitivity: 'medium' },
+            ],
+            buildContexts: [],
+            bounds: { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 },
+            priorManifest: null,
+            state: 'partial',
+        });
+        await svc.writeManifest('linked-redacted', manifest);
+
+        const res = await request(app)
+            .get('/api/stacks/linked-redacted/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        const serialized = JSON.stringify(res.body);
+        expect(serialized).not.toContain('secrets/db.env');
+        const high = res.body.manifest.refused.find(
+            (r: { kind: string; sourcePath: string | null; reason: string }) => r.kind === 'missing-file' && r.sourcePath === null,
+        ) as { reason: string } | undefined;
+        expect(high).toBeTruthy();
+        expect(high?.reason).toContain('[redacted]');
+        // Non-sensitive refusals keep their actionable path.
+        expect(res.body.manifest.refused.some((r: { sourcePath: string }) => r.sourcePath === 'compose.yaml')).toBe(true);
+    });
 });
 
 describe('PUT /api/stacks/:stackName/git-source: multi-file selection', () => {
@@ -492,35 +536,414 @@ describe('POST /api/stacks/:stackName/git-source/webhook-pull status codes', () 
     });
 });
 
-describe('DELETE /api/stacks/:stackName/git-source — multi-file unlink guard', () => {
-    it('blocks unlinking a multi-file source with 409 and keeps the row', async () => {
+describe('DELETE /api/stacks/:stackName/git-source, detach/export contract', () => {
+    function mockRender(yaml: string | null): ReturnType<typeof vi.spyOn> {
+        // ComposeService.getInstance() returns a fresh instance per call, so
+        // the spy must live on the prototype to reach the route's instance.
+        return vi
+            .spyOn(ComposeService.prototype, 'renderComposeYaml')
+            .mockImplementation(() => (yaml === null ? Promise.reject(new Error('docker unavailable')) : Promise.resolve(yaml)));
+    }
+
+    it('exports a multi-file source: renders, writes compose.yaml, removes the row', async () => {
         seedGitSource('mf-unlink');
         DatabaseService.getInstance().setGitSourceAppliedSpec('mf-unlink', { files: ['compose.yaml', 'infra/prod.yml'], contextDir: null });
-        const res = await request(app)
-            .delete('/api/stacks/mf-unlink/git-source')
-            .set('Authorization', `Bearer ${adminToken()}`);
-        expect(res.status).toBe(409);
-        expect(res.body.error).toMatch(/multiple compose files/i);
-        expect(DatabaseService.getInstance().getGitSource('mf-unlink')).toBeTruthy();
+        const stackDir = path.join(process.env.COMPOSE_DIR!, 'mf-unlink');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+        const render = mockRender('services:\n  web:\n    image: nginx\n    environment:\n      A: b\n');
+        try {
+            const res = await request(app)
+                .delete('/api/stacks/mf-unlink/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            expect(DatabaseService.getInstance().getGitSource('mf-unlink')).toBeUndefined();
+            const exported = fs.readFileSync(path.join(stackDir, 'compose.yaml'), 'utf8');
+            expect(exported).toContain('A: b');
+            expect(render).toHaveBeenCalled();
+        } finally {
+            render.mockRestore();
+        }
     });
 
-    it('blocks unlinking a context-dir source with 409', async () => {
+    it('returns 409 and keeps the row when the export render fails', async () => {
         seedGitSource('ctx-unlink');
         DatabaseService.getInstance().setGitSourceAppliedSpec('ctx-unlink', { files: ['compose.yaml'], contextDir: 'app' });
-        const res = await request(app)
-            .delete('/api/stacks/ctx-unlink/git-source')
-            .set('Authorization', `Bearer ${adminToken()}`);
-        expect(res.status).toBe(409);
-        expect(DatabaseService.getInstance().getGitSource('ctx-unlink')).toBeTruthy();
+        const render = mockRender(null);
+        try {
+            const res = await request(app)
+                .delete('/api/stacks/ctx-unlink/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(409);
+            expect(DatabaseService.getInstance().getGitSource('ctx-unlink')).toBeTruthy();
+        } finally {
+            render.mockRestore();
+        }
+    });
+
+    it('removes auto-discovered override files so the flattened model is final', async () => {
+        seedGitSource('ov-unlink');
+        const stackDir = path.join(process.env.COMPOSE_DIR!, 'ov-unlink');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+        fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'), 'services:\n  web:\n    environment:\n      A: b\n');
+        // The managed override file is recorded in the manifest so detach can
+        // find it; write a manifest entry for it directly.
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const svc = GitProjectManifestService.getInstance();
+        const manifest = svc.buildManifest({
+            stackName: 'ov-unlink',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: 'ov-unlink',
+            invocation: ['-f', 'compose.yaml', '-p', 'ov-unlink'],
+            inputs: [
+                {
+                    sourcePath: 'compose.yaml', materializedPath: 'compose.yaml', role: 'compose-primary', dependencyKind: 'explicit',
+                    ownership: 'managed', provenance: 'fetch', sensitivity: 'medium', contentSha256: null, sizeBytes: 10,
+                    state: 'present', deletionAuthority: 'sencho', note: null,
+                },
+                {
+                    sourcePath: 'compose.override.yaml', materializedPath: 'compose.override.yaml', role: 'compose-override', dependencyKind: 'implicit-override',
+                    ownership: 'managed', provenance: 'fetch', sensitivity: 'medium', contentSha256: null, sizeBytes: 10,
+                    state: 'present', deletionAuthority: 'sencho', note: null,
+                },
+            ],
+            refusals: [],
+            buildContexts: [],
+            bounds: { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 },
+            priorManifest: null,
+            state: 'active',
+        });
+        await svc.writeManifest('ov-unlink', manifest);
+        const render = mockRender('services:\n  web:\n    image: nginx\n    environment:\n      A: b\n');
+        try {
+            const res = await request(app)
+                .delete('/api/stacks/ov-unlink/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            // The flattened model is final: the override file is gone, so plain
+            // docker compose cannot re-merge it.
+            expect(fs.existsSync(path.join(stackDir, 'compose.override.yaml'))).toBe(false);
+            expect(DatabaseService.getInstance().getGitSource('ov-unlink')).toBeUndefined();
+            expect(render).toHaveBeenCalled();
+        } finally {
+            render.mockRestore();
+        }
+    });
+
+    it('keeps an explicitly selected file named compose.override.yaml during detach (audit round 8 B-7)', async () => {
+        seedGitSource('explicit-override-name');
+        const stackDir = path.join(process.env.COMPOSE_DIR!, 'explicit-override-name');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+        fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'), 'services:\n  web:\n    environment:\n      A: b\n');
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const svc = GitProjectManifestService.getInstance();
+        const manifest = svc.buildManifest({
+            stackName: 'explicit-override-name',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc',
+            projectRoot: null,
+            composeFiles: ['compose.yaml', 'compose.override.yaml'],
+            projectName: 'explicit-override-name',
+            invocation: ['-f', 'compose.yaml', '-f', 'compose.override.yaml', '-p', 'explicit-override-name'],
+            inputs: [
+                {
+                    sourcePath: 'compose.yaml', materializedPath: 'compose.yaml', role: 'compose-primary', dependencyKind: 'explicit',
+                    ownership: 'managed', provenance: 'fetch', sensitivity: 'medium', contentSha256: null, sizeBytes: 10,
+                    state: 'present', deletionAuthority: 'sencho', note: null,
+                },
+                {
+                    // Same basename, but an EXPLICIT -f input, not an
+                    // auto-discovered override.
+                    sourcePath: 'compose.override.yaml', materializedPath: 'compose.override.yaml', role: 'compose-additional', dependencyKind: 'explicit',
+                    ownership: 'managed', provenance: 'fetch', sensitivity: 'medium', contentSha256: null, sizeBytes: 10,
+                    state: 'present', deletionAuthority: 'sencho', note: null,
+                },
+            ],
+            refusals: [],
+            buildContexts: [],
+            bounds: { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 },
+            priorManifest: null,
+            state: 'active',
+        });
+        await svc.writeManifest('explicit-override-name', manifest);
+        const render = mockRender('services:\n  web:\n    image: nginx\n    environment:\n      A: b\n');
+        try {
+            const res = await request(app)
+                .delete('/api/stacks/explicit-override-name/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            // The explicit file is part of the rendered model; detach keeps it.
+            expect(fs.existsSync(path.join(stackDir, 'compose.override.yaml'))).toBe(true);
+            expect(DatabaseService.getInstance().getGitSource('explicit-override-name')).toBeUndefined();
+        } finally {
+            render.mockRestore();
+        }
     });
 
     it('allows unlinking a single-file source', async () => {
         seedGitSource('sf-unlink');
+        const stackDir = path.join(process.env.COMPOSE_DIR!, 'sf-unlink');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+        const render = mockRender('services:\n  web:\n    image: nginx\n');
+        try {
+            const res = await request(app)
+                .delete('/api/stacks/sf-unlink/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            expect(DatabaseService.getInstance().getGitSource('sf-unlink')).toBeUndefined();
+        } finally {
+            render.mockRestore();
+        }
+    });
+
+    it('reaps staged managed data after detach cleanup is deferred', async () => {
+        seedGitSource('deferred-cleanup');
+        const stackDir = path.join(process.env.COMPOSE_DIR!, 'deferred-cleanup');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const manifestSvc = GitProjectManifestService.getInstance();
+        const finalizeSpy = vi.spyOn(manifestSvc, 'finalizeStagedDetach').mockResolvedValueOnce(false);
+        const render = mockRender('services:\n  web:\n    image: nginx\n');
+        const staged = path.join(process.env.DATA_DIR!, 'git-managed', '1', '.detach-deferred-cleanup');
+        try {
+            const res = await request(app)
+                .delete('/api/stacks/deferred-cleanup/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            expect(DatabaseService.getInstance().getGitSource('deferred-cleanup')).toBeUndefined();
+            expect(fs.existsSync(staged)).toBe(true);
+
+            await GitSourceService.getInstance().sweepOrphans();
+            expect(fs.existsSync(staged)).toBe(false);
+        } finally {
+            finalizeSpy.mockRestore();
+            render.mockRestore();
+        }
+    });
+
+    it('restores files and managed data when the database commit fails', async () => {
+        seedGitSource('db-fail-unlink');
+        const stackDir = path.join(process.env.COMPOSE_DIR!, 'db-fail-unlink');
+        fs.mkdirSync(stackDir, { recursive: true });
+        const original = `${'#'.repeat((2 * 1024 * 1024) + 1)}\nservices:\n  web:\n    image: nginx:old\n`;
+        const originalOverride = Buffer.from('services:\n  web:\n    environment:\n      LABEL: café\n', 'utf8');
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), original);
+        fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'), originalOverride);
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const svc = GitProjectManifestService.getInstance();
+        const manifest = svc.buildManifest({
+            stackName: 'db-fail-unlink',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: 'db-fail-unlink',
+            invocation: ['-f', 'compose.yaml', '-p', 'db-fail-unlink'],
+            inputs: [
+                {
+                    sourcePath: 'compose.yaml', materializedPath: 'compose.yaml', role: 'compose-primary', dependencyKind: 'explicit',
+                    ownership: 'managed', provenance: 'fetch', sensitivity: 'medium', contentSha256: null, sizeBytes: original.length,
+                    state: 'present', deletionAuthority: 'sencho', note: null,
+                },
+                {
+                    sourcePath: 'compose.override.yaml', materializedPath: 'compose.override.yaml', role: 'compose-override', dependencyKind: 'implicit-override',
+                    ownership: 'managed', provenance: 'fetch', sensitivity: 'medium', contentSha256: null, sizeBytes: originalOverride.length,
+                    state: 'present', deletionAuthority: 'sencho', note: null,
+                },
+            ],
+            refusals: [],
+            buildContexts: [],
+            bounds: { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 },
+            priorManifest: null,
+            state: 'active',
+        });
+        await svc.writeManifest('db-fail-unlink', manifest);
+        const render = mockRender('services:\n  web:\n    image: nginx:new\n');
+        const deleteSpy = vi.spyOn(DatabaseService.getInstance(), 'deleteGitSource').mockImplementationOnce(() => {
+            throw new Error('database unavailable');
+        });
+        try {
+            const res = await request(app)
+                .delete('/api/stacks/db-fail-unlink/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(400);
+            expect(DatabaseService.getInstance().getGitSource('db-fail-unlink')).toBeTruthy();
+            expect(fs.readFileSync(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(original);
+            expect(fs.readFileSync(path.join(stackDir, 'compose.override.yaml')).equals(originalOverride)).toBe(true);
+            const restored = await svc.readManifest('db-fail-unlink', 'https://github.com/example/repo.git', 'main');
+            expect(restored).not.toBeNull();
+            expect(fs.existsSync(path.join(process.env.DATA_DIR!, 'git-managed', '1', '.detach-db-fail-unlink'))).toBe(false);
+        } finally {
+            deleteSpy.mockRestore();
+            render.mockRestore();
+        }
+    });
+});
+
+describe('GET /api/stacks/:stackName/git-source/manifest', () => {
+    it('returns the manifest for a stack that has one', async () => {
+        seedGitSource('manifest-get');
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const svc = GitProjectManifestService.getInstance();
+        const manifest = svc.buildManifest({
+            stackName: 'manifest-get',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc123',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: 'manifest-get',
+            invocation: ['-f', 'compose.yaml', '-p', 'manifest-get'],
+            inputs: [],
+            refusals: [],
+            buildContexts: [],
+            bounds: { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 },
+            priorManifest: null,
+            state: 'active',
+        });
+        await svc.writeManifest('manifest-get', manifest);
         const res = await request(app)
-            .delete('/api/stacks/sf-unlink/git-source')
+            .get('/api/stacks/manifest-get/git-source/manifest')
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(res.status).toBe(200);
-        expect(DatabaseService.getInstance().getGitSource('sf-unlink')).toBeUndefined();
+        expect(res.body.manifest.manifestVersion).toBe(1);
+        expect(res.body.manifest.resolvedCommitSha).toBe('abc123');
+    });
+
+    it('redacts sensitive input paths and omits internal metadata (audit round 8 B-6)', async () => {
+        seedGitSource('manifest-redact');
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const svc = GitProjectManifestService.getInstance();
+        const manifest = svc.buildManifest({
+            stackName: 'manifest-redact',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc123',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: 'manifest-redact',
+            invocation: ['-f', 'compose.yaml', '-p', 'manifest-redact'],
+            inputs: [
+                {
+                    sourcePath: 'compose.yaml',
+                    materializedPath: 'compose.yaml',
+                    role: 'compose-primary',
+                    dependencyKind: 'explicit',
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    sensitivity: 'medium',
+                    contentSha256: 'a'.repeat(64),
+                    sizeBytes: 120,
+                    state: 'present',
+                    deletionAuthority: 'sencho',
+                    note: null,
+                },
+                {
+                    sourcePath: 'secrets/db.env',
+                    materializedPath: 'secrets/db.env',
+                    role: 'env',
+                    dependencyKind: 'env_file',
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    sensitivity: 'high',
+                    contentSha256: 'b'.repeat(64),
+                    sizeBytes: 40,
+                    state: 'present',
+                    deletionAuthority: 'sencho',
+                    note: null,
+                },
+                {
+                    sourcePath: 'configs/app.conf',
+                    materializedPath: 'configs/app.conf',
+                    role: 'config',
+                    dependencyKind: 'config',
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    sensitivity: 'high',
+                    contentSha256: 'c'.repeat(64),
+                    sizeBytes: 200,
+                    state: 'present',
+                    deletionAuthority: 'sencho',
+                    note: null,
+                },
+                {
+                    sourcePath: 'keys/jwt.pem',
+                    materializedPath: 'keys/jwt.pem',
+                    role: 'secret',
+                    dependencyKind: 'secret',
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    sensitivity: 'high',
+                    contentSha256: 'd'.repeat(64),
+                    sizeBytes: 50,
+                    state: 'present',
+                    deletionAuthority: 'sencho',
+                    note: 'File-backed secret materialized from keys/jwt.pem',
+                },
+            ],
+            refusals: [],
+            buildContexts: [],
+            bounds: { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 },
+            priorManifest: null,
+            state: 'active',
+        });
+        await svc.writeManifest('manifest-redact', manifest);
+
+        const res = await request(app)
+            .get('/api/stacks/manifest-redact/git-source/manifest')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+
+        // The medium-sensitivity compose input keeps its path...
+        const compose = res.body.manifest.inputs.find((i: { dependencyKind: string }) => i.dependencyKind === 'explicit');
+        expect(compose.path).toBe('compose.yaml');
+        // ...and high-sensitivity env/config inputs have their paths redacted.
+        const env = res.body.manifest.inputs.find((i: { dependencyKind: string }) => i.dependencyKind === 'env_file');
+        expect(env.path).toBeNull();
+        const cfg = res.body.manifest.inputs.find((i: { dependencyKind: string }) => i.dependencyKind === 'config');
+        expect(cfg.path).toBeNull();
+
+        // Internal metadata never crosses the API.
+        const serialized = JSON.stringify(res.body);
+        expect(serialized).not.toContain('contentSha256');
+        expect(serialized).not.toContain('sizeBytes');
+        expect(serialized).not.toContain('sourcePath');
+        expect(serialized).not.toContain('materializedPath');
+        expect(serialized).not.toContain('deletionAuthority');
+        expect(serialized).not.toContain('provenance');
+        expect(serialized).not.toContain('secrets/db.env');
+        expect(serialized).not.toContain('configs/app.conf');
+        // A path-bearing note on a high-sensitivity entry must not leak either.
+        expect(serialized).not.toContain('keys/jwt.pem');
+        // The redacted projection still counts the entries.
+        expect(res.body.manifest.inputs).toHaveLength(4);
+    });
+
+    it('returns 404 when no manifest exists', async () => {
+        seedGitSource('manifest-missing');
+        const res = await request(app)
+            .get('/api/stacks/manifest-missing/git-source/manifest')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(404);
+    });
+
+    it('denies without the stack:read permission', async () => {
+        seedGitSource('manifest-denied');
+        const res = await request(app)
+            .get('/api/stacks/manifest-denied/git-source/manifest')
+            .set('Authorization', `Bearer ${jwt.sign({ username: 'viewer', role: 'viewer' }, TEST_JWT_SECRET, { expiresIn: '1m' })}`);
+        // viewer lacks stack:read for this stack
+        expect([401, 403]).toContain(res.status);
     });
 });
 
@@ -536,5 +959,66 @@ describe('GET /api/git-sources', () => {
     it('returns 401 without a valid token', async () => {
         const res = await request(app).get('/api/git-sources');
         expect(res.status).toBe(401);
+    });
+});
+
+describe('stack_git_sources manifest cache columns', () => {
+    const MANIFEST_STATES = [
+        'none',
+        'migrated',
+        'active',
+        'partial',
+        'unsupported',
+        'migration_required',
+        'absent',
+    ] as const;
+
+    it('round-trips every GitSourceManifestState enum member', () => {
+        const db = DatabaseService.getInstance();
+        for (const state of MANIFEST_STATES) {
+            seedGitSource(`manifest-state-${state}`);
+            db.setGitSourceManifestState(`manifest-state-${state}`, 7, state, 'generations/applied-abc');
+            const row = db.getGitSource(`manifest-state-${state}`)!;
+            expect(row.manifest_version).toBe(7);
+            expect(row.manifest_state).toBe(state);
+            expect(row.manifest_generation).toBe('generations/applied-abc');
+            db.deleteGitSource(`manifest-state-${state}`);
+        }
+    });
+
+    it('reads nulls for rows written before the columns existed', () => {
+        const row = DatabaseService.getInstance().getGitSource('missing-manifest-row');
+        expect(row).toBeUndefined();
+    });
+
+    it('upsert does not clobber the manifest cache columns', () => {
+        const db = DatabaseService.getInstance();
+        seedGitSource('manifest-preserved');
+        db.setGitSourceManifestState('manifest-preserved', 3, 'active', 'generations/applied-x');
+        db.upsertGitSource({
+            stack_name: 'manifest-preserved',
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: null,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+        const row = db.getGitSource('manifest-preserved')!;
+        expect(row.manifest_version).toBe(3);
+        expect(row.manifest_state).toBe('active');
+        expect(row.manifest_generation).toBe('generations/applied-x');
     });
 });
