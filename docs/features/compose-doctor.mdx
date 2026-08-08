@@ -5,7 +5,7 @@ description: Run a preflight check on a stack before you deploy. Compose Doctor 
 
 The **Doctor** tab in the right-hand **Anatomy** panel answers one question before you apply a change: *what will Docker actually run, and is it safe on this node?* Compose Doctor renders the effective Compose model (the fully resolved result after interpolation, includes, profiles, `.env`, and `env_file` are applied) and then runs a set of deterministic checks against it and the live Docker state on the node it would deploy to.
 
-The check is advisory: on its own it never blocks a deploy or changes a stack. (One rule is the exception: see [Self-management](#self-management) below for the one case where Sencho actively blocks an action, independent of this report.) It runs on demand: press **run preflight** and Sencho renders the model, runs all 36 checks, and stores the result so the tab still shows it the next time you open the stack.
+The check is advisory: on its own it never blocks a deploy or changes a stack. (One rule is the exception: see [Self-management](#self-management) below for the one case where Sencho actively blocks an action, independent of this report.) It runs on demand: press **run preflight** and Sencho renders the model, runs all 42 checks, and stores the result so the tab still shows it the next time you open the stack.
 
 ## Where to find it
 
@@ -24,7 +24,7 @@ Every preflight run follows three steps:
 
 1. **Render** the effective model. Sencho calls `docker compose config` on the stack, which resolves all variable interpolation, `include` directives, profile overrides, and `env_file` references into a single, normalized model.
 2. **Snapshot** live Docker state. Sencho reads which host ports are in use, which containers are running, and which named networks and volumes exist on the target node.
-3. **Run 36 deterministic rules** against the combination. Each rule is pure and produces zero or more findings with a severity, a message, and a suggested fix.
+3. **Run 42 deterministic rules** against the combination. Each rule is pure and produces zero or more findings with a severity, a message, and a suggested fix.
 
 Sencho stores exactly one run per stack per node, so a new run immediately overwrites the previous one; there is no history.
 
@@ -73,7 +73,7 @@ A small colored dot appears on the **Doctor** tab label when the last run's acti
 
 ## What it checks
 
-All 36 rules are listed below, organized by topic.
+All 42 rules are listed below, organized by topic.
 
 ### Model rendering
 
@@ -108,7 +108,13 @@ All 36 rules are listed below, organized by topic.
 
 | Rule | Severity | What it detects |
 |------|----------|----------------|
-| Docker socket mounted | High | A service mounts `docker.sock`, which grants it root-equivalent control over the host. |
+| Docker socket mounted | High | A service mounts `docker.sock` directly, granting broad control over the Docker host. When the stack already runs a socket proxy, the fix names that proxy instead of suggesting you adopt one. |
+| Docker socket proxy detected | Info | A dedicated Docker socket proxy service mounts `docker.sock`. A known proxy image is enough on its own; a proxy-shaped service name counts only alongside a read-only socket or an enabled API group flag (value exactly `1`), and without either hint the service needs a read-only socket and at least two enabled API group flags. Verify trust boundaries and enabled API groups. |
+| Docker socket proxy mounts the socket read-write | High | A service classified as a socket proxy mounts `docker.sock` without `:ro`, so compromising the proxy grants full control over the Docker host. |
+| Docker socket proxy publishes a host port | High | A classified socket proxy publishes any host port, which can make the proxy reachable beyond the Compose network. |
+| Docker socket proxy allows mutating API access | Warning | A classified socket proxy enables `POST` and/or `DELETE` on the proxied Docker API (flag value exactly `1`). |
+| Docker socket proxy on a non-internal network | Warning | A classified socket proxy joins a network that is not declared `internal`, including the implicit default network and any network the rendered model does not describe. |
+| Docker API access routed through socket proxy | Note | A service does not mount `docker.sock`, shares a network with a classified proxy, and points at that same proxy through a `tcp://` host in `DOCKER_HOST`, `command`, or `entrypoint`. Coverage is treated as satisfied for All Clear; the note explains the topology. |
 | Privileged container | High | A service runs with `privileged: true`, disabling most container isolation. |
 | Host network mode | High | A service uses `network_mode: host`, bypassing Docker's network isolation and ignoring published-port mappings. |
 | Check UID/GID alignment | Warning | A service sets a UID or GID and mounts host paths that Sencho cannot inspect from inside its container. Mismatched ownership between the host path and the container user is a common source of permission errors. |
@@ -167,7 +173,7 @@ These rules activate when the stack publishes at least one host port. They use t
 
 ## Exposure intent checks
 
-Five of the 36 rules cross-reference the stack's exposure intent and the access URLs documented in the Stack Dossier. These rules only fire when the stack publishes at least one host port.
+The five rules in the [Exposure intent](#exposure-intent) category above cross-reference the stack's exposure intent and the access URLs documented in the Stack Dossier. These rules only fire when the stack publishes at least one host port.
 
 To resolve exposure-related findings:
 
@@ -190,7 +196,7 @@ The networking-relevant rules on this page (host mode, exposure intent, port con
 
 ## Node-state checks and graceful degradation
 
-Six of the 36 rules require live Docker state to run: five are in the Node state category (external networks and volumes, new-resource notices, and container_name collision) and one is "Host port is already in use" in Port conflicts. All six are skipped when the Docker daemon is unreachable. Healthcheck inheritance checks also read Docker when Compose does not declare a healthcheck; those degrade to an Info finding when the daemon or image is unavailable.
+Six of the 42 rules require live Docker state to run: five are in the Node state category (external networks and volumes, new-resource notices, and container_name collision) and one is "Host port is already in use" in Port conflicts. All six are skipped when the Docker daemon is unreachable. Healthcheck inheritance checks also read Docker when Compose does not declare a healthcheck; those degrade to an Info finding when the daemon or image is unavailable.
 
 When the daemon is unreachable:
 

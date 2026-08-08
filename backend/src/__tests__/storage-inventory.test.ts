@@ -132,7 +132,8 @@ describe('buildMounts', () => {
             { type: 'bind', source: '/app/stack/conf', target: '/conf', readOnly: true },
             { type: 'named', source: 'shared', target: '/s', readOnly: false },
           ],
-          privileged: false, hasHealthcheck: true, composeHealthcheck: 'active', envKeys: [], networks: [], extraHosts: [], labelKeys: [],
+          privileged: false, hasHealthcheck: true, composeHealthcheck: 'active',
+          envKeys: [], enabledProxyApiFlags: [], dockerEndpointHosts: [], networks: [], extraHosts: [], labelKeys: [],
         },
       ],
       networks: {},
@@ -161,7 +162,8 @@ describe('assembleStorageInventory', () => {
       projectName: 'a', services: [{
         name: 'app', ports: [], binds: [], namedVolumes: [],
         storageMounts: [{ type: 'named', source: 'db', target: '/db', readOnly: false }],
-        privileged: false, hasHealthcheck: true, composeHealthcheck: 'active', envKeys: [], networks: [], extraHosts: [], labelKeys: [],
+        privileged: false, hasHealthcheck: true, composeHealthcheck: 'active',
+        envKeys: [], enabledProxyApiFlags: [], dockerEndpointHosts: [], networks: [], extraHosts: [], labelKeys: [],
       }], networks: {}, volumes: {},
     };
     expect(assembleStorageInventory('a', stateful, null, new Map()).stateful).toBe(true);
@@ -178,7 +180,8 @@ describe('assembleStorageInventory', () => {
       projectName: 'a', services: [{
         name: 'app', ports: [], binds: [], namedVolumes: [],
         storageMounts: [{ type: 'bind', source: '/var/run/docker.sock', target: '/var/run/docker.sock', readOnly: false }],
-        privileged: false, hasHealthcheck: true, composeHealthcheck: 'active', envKeys: [], networks: [], extraHosts: [], labelKeys: [],
+        privileged: false, hasHealthcheck: true, composeHealthcheck: 'active',
+        envKeys: [], enabledProxyApiFlags: [], dockerEndpointHosts: [], networks: [], extraHosts: [], labelKeys: [],
       }], networks: {}, volumes: {},
     };
     expect(assembleStorageInventory('a', socketOnly, null, new Map()).stateful).toBe(false);

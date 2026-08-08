@@ -146,6 +146,94 @@ describe('parseEffectiveModel', () => {
     expect(JSON.stringify(m)).not.toContain(SECRET);
   });
 
+  it('records enabled socket-proxy API flags when the value is exactly 1', () => {
+    const mapForm = parseEffectiveModel({
+      services: {
+        proxy: {
+          environment: {
+            CONTAINERS: '1',
+            POST: '1',
+            DELETE: '0',
+            IMAGES: '1',
+            DB_PASSWORD: SECRET,
+          },
+        },
+      },
+    }, 'p');
+    expect(mapForm.services[0].enabledProxyApiFlags.sort()).toEqual(['CONTAINERS', 'IMAGES', 'POST']);
+    expect(mapForm.services[0].envKeys).toContain('DB_PASSWORD');
+    expect(JSON.stringify(mapForm)).not.toContain(SECRET);
+
+    const arrayForm = parseEffectiveModel({
+      services: {
+        proxy: {
+          environment: ['POST=1', 'DELETE=0', 'EVENTS=1', `TOKEN=${SECRET}`],
+        },
+      },
+    }, 'p');
+    expect(arrayForm.services[0].enabledProxyApiFlags.sort()).toEqual(['EVENTS', 'POST']);
+    expect(JSON.stringify(arrayForm)).not.toContain(SECRET);
+
+    const absent = parseEffectiveModel({
+      services: { proxy: { environment: { CONTAINERS: '1' } } },
+    }, 'p');
+    expect(absent.services[0].enabledProxyApiFlags).toEqual(['CONTAINERS']);
+    expect(absent.services[0].enabledProxyApiFlags).not.toContain('POST');
+
+    // Only the literal value `1` enables a group. Upstream proxy images 403
+    // every other value (true/yes/banana/on), so truthy-word semantics would
+    // false-positive a locked-down config as mutating.
+    const nonExact = parseEffectiveModel({
+      services: {
+        proxy: {
+          environment: {
+            POST: 'true', DELETE: ' YES ', IMAGES: 'false', INFO: 'on',
+            EVENTS: 'off', NETWORKS: '', VOLUMES: 'enabled', CONTAINERS: '1',
+          },
+        },
+      },
+    }, 'p');
+    expect(nonExact.services[0].enabledProxyApiFlags).toEqual(['CONTAINERS']);
+  });
+
+  it('keeps only the host of a tcp:// Docker endpoint from command, entrypoint, and DOCKER_HOST', () => {
+    const m = parseEffectiveModel({
+      services: {
+        traefik: {
+          command: ['--providers.docker.endpoint=tcp://dockerproxy:2375', `--certificatesresolvers.le.acme.email=${SECRET}`],
+          entrypoint: '/entrypoint.sh --host tcp://other-proxy',
+        },
+        plain: { command: 'serve' },
+      },
+    }, 'p');
+    expect(m.services[0].dockerEndpointHosts.sort()).toEqual(['dockerproxy', 'other-proxy']);
+    expect(m.services[1].dockerEndpointHosts).toEqual([]);
+    expect(JSON.stringify(m)).not.toContain(SECRET);
+
+    const withUserInfo = parseEffectiveModel({
+      services: { app: { command: [`-H tcp://admin:${SECRET}@dockerproxy:2375`] } },
+    }, 'p');
+    expect(withUserInfo.services[0].dockerEndpointHosts).toEqual(['dockerproxy']);
+    expect(JSON.stringify(withUserInfo)).not.toContain(SECRET);
+    expect(JSON.stringify(withUserInfo)).not.toContain('admin');
+
+    // DOCKER_HOST contributes its tcp host; unix:// and empty values do not.
+    const fromEnv = parseEffectiveModel({
+      services: {
+        app: { environment: { DOCKER_HOST: `tcp://admin:${SECRET}@proxy:2375` } },
+        unix: { environment: { DOCKER_HOST: 'unix:///var/run/docker.sock' } },
+        empty: { environment: { DOCKER_HOST: '' } },
+        arrayForm: { environment: [`DOCKER_HOST=tcp://socket-proxy:2375`] },
+      },
+    }, 'p');
+    expect(fromEnv.services.find(s => s.name === 'app')!.dockerEndpointHosts).toEqual(['proxy']);
+    expect(fromEnv.services.find(s => s.name === 'unix')!.dockerEndpointHosts).toEqual([]);
+    expect(fromEnv.services.find(s => s.name === 'empty')!.dockerEndpointHosts).toEqual([]);
+    expect(fromEnv.services.find(s => s.name === 'arrayForm')!.dockerEndpointHosts).toEqual(['socket-proxy']);
+    expect(JSON.stringify(fromEnv)).not.toContain(SECRET);
+    expect(JSON.stringify(fromEnv)).not.toContain('admin');
+  });
+
   it('parses the short-string port form and drops container-only EXPOSE', () => {
     const m = parseEffectiveModel({ services: { s: { ports: ['127.0.0.1:8080:80/udp', '8443:443', '90'] } } }, 'p');
     expect(m.services[0].ports).toEqual([
