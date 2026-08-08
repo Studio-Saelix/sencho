@@ -895,7 +895,17 @@ export class GitSourceService {
         if (manifest !== null && !('corrupt' in manifest)) {
             return manifestSvc.summaryFrom(manifest);
         }
-        const state = manifest !== null && 'corrupt' in manifest ? 'migration_required' : (src.manifest_state ?? 'absent');
+        // No manifest file (or an untrusted one). When the DB cache claims an
+        // applied state but the file is gone, report migration_required
+        // instead of manufacturing a healthy state: the manifest may have
+        // been lost and the stack's ownership is unknown.
+        let state: GitSourceManifestState;
+        if (manifest !== null && 'corrupt' in manifest) {
+            state = 'migration_required';
+        } else {
+            const cached = src.manifest_state ?? 'absent';
+            state = cached === 'absent' || cached === 'none' ? 'absent' : 'migration_required';
+        }
         return {
             state,
             manifestVersion: src.manifest_version ?? 0,
@@ -2169,20 +2179,73 @@ export class GitSourceService {
     /**
      * Boot sweep for every managed-project area, under the per-stack lock:
      * crash-recovery restore, orphan candidates, and areas whose stack no
-     * longer exists (either the row or the directory is gone).
+     * longer exists (the row is gone, or the directory is gone). A stack
+     * whose directory exists but has no discoverable compose file is left in
+     * place (the managed area lingers until the row is removed), a deliberate
+     * fail-safe trade: never delete on uncertainty.
+     *
+     * The stack listing is read STRICTLY: a listing failure (EIO, EACCES,
+     * ENOMEM on the compose base dir) must never look like every stack
+     * disappeared, or the sweep would delete the manifest and every retained
+     * recovery generation of live Git-managed stacks. A failed listing aborts
+     * the whole sweep (orphan cleanup is deferred to the next boot), and each
+     * candidate is verified to be genuinely gone before its area is deleted
+     * (this also covers the per-stack read errors the listing's compose-file
+     * probe swallows).
      */
+    /**
+     * Whether the stack directory still exists. Read errors other than
+     * ENOENT are logged and treated as "exists": the sweep must never delete
+     * a managed area it could not verify was gone.
+     */
+    private async stackDirExists(stackRoot: string, stackName: string): Promise<boolean> {
+        try {
+            await fsPromises.lstat(stackRoot);
+            return true;
+        } catch (e) {
+            if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+                console.warn(`[GitSource] cannot verify stack ${stackName} is gone; skipping managed cleanup:`, (e as Error).message);
+                return true;
+            }
+            return false;
+        }
+    }
+
     public async sweepOrphans(): Promise<void> {
         const fsSvc = FileSystemService.getInstance();
         const manifestSvc = GitProjectManifestService.getInstance();
         const rows = DatabaseService.getInstance().getGitSources();
-        const stacks = new Set(await fsSvc.getStacks());
+        const composeDir = NodeRegistry.getInstance().getComposeDir(NodeRegistry.getInstance().getDefaultNodeId());
+        const stackRootBase = path.resolve(composeDir);
+        let stacks: Set<string>;
+        try {
+            stacks = new Set(await fsSvc.getStacksStrict());
+        } catch (e) {
+            console.error('[GitSource] stack listing failed; aborting the orphan sweep to protect managed areas:', e instanceof Error ? e.stack ?? e.message : String(e));
+            return;
+        }
         for (const row of rows) {
             // One failing stack must never abort recovery for the rest.
             try {
                 if (!stacks.has(row.stack_name)) {
-                    const liveRemoved = await manifestSvc.deleteManagedArea(row.stack_name);
-                    const stagedRemoved = await manifestSvc.finalizeStagedDetach(row.stack_name);
-                    if (!liveRemoved || !stagedRemoved) throw new Error('Could not remove orphaned managed project data');
+                    const stackRoot = path.resolve(composeDir, row.stack_name);
+                    if (!isPathWithinBase(stackRoot, stackRootBase)) {
+                        console.warn(`[GitSource] stack ${row.stack_name} escapes the compose directory; skipping managed cleanup`);
+                        continue;
+                    }
+                    // The probe and the delete run under the per-stack lock so
+                    // a concurrent create for the same row cannot stage a
+                    // candidate into the area this branch is about to reap.
+                    await this.withStackLock(row.stack_name, async () => {
+                        if (await this.stackDirExists(stackRoot, row.stack_name)) {
+                            console.warn(`[GitSource] stack ${row.stack_name} is missing from the listing but its directory exists; skipping managed cleanup`);
+                            return;
+                        }
+                        console.log(`[GitSource] removing managed area for vanished stack ${row.stack_name}: not listed and the stack directory is gone`);
+                        const liveRemoved = await manifestSvc.deleteManagedArea(row.stack_name);
+                        const stagedRemoved = await manifestSvc.finalizeStagedDetach(row.stack_name);
+                        if (!liveRemoved || !stagedRemoved) throw new Error('Could not remove orphaned managed project data');
+                    });
                     continue;
                 }
                 await this.withStackLock(row.stack_name, () =>

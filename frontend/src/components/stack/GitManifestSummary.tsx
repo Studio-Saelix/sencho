@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ChevronDown, ChevronRight, FileBox, TriangleAlert } from 'lucide-react';
+import { ChevronDown, ChevronRight, FileBox } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -97,7 +97,6 @@ export function GitManifestSummary({ stackName, summary }: GitManifestSummaryPro
   if (!summary) return null;
 
   const state = summary.state;
-  const actionableRefusals = summary.refused.filter((r) => r.actionable);
   const shownInputs = manifest ? manifest.inputs.slice(0, LIST_CAP) : [];
   const visibleCount = manifest?.inputs.length ?? 0;
 
@@ -141,18 +140,6 @@ export function GitManifestSummary({ stackName, summary }: GitManifestSummaryPro
               manifest v{summary.manifestVersion}
             </span>
           </div>
-
-          {actionableRefusals.length > 0 && (
-            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2">
-              <TriangleAlert className="w-4 h-4 shrink-0 mt-0.5 text-destructive" strokeWidth={1.5} />
-              <div className="flex-1 space-y-1">
-                <p className="font-medium text-destructive">Unsupported inputs</p>
-                {actionableRefusals.slice(0, 5).map((r, i) => (
-                  <p key={i} className="text-destructive/80">{r.reason}</p>
-                ))}
-              </div>
-            </div>
-          )}
 
           {state === 'migrated' && (
             <p className="text-stat-subtitle">

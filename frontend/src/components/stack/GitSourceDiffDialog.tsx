@@ -16,7 +16,7 @@ export interface PullResult {
   currentEnv: string | null;
   validation: { ok: boolean; error?: string };
   hasLocalChanges: boolean;
-  /** Tolerated refusals from complete-project discovery (documented limitations). */
+  /** Tolerated refusals from complete-project discovery; intentionally not surfaced in this dialog (actionable refusals abort the pull, so this is always empty). */
   refusals?: Array<{ sourcePath: string | null; kind: string; reason: string; actionable: boolean }>;
   /** Clone-time warnings (submodules present, for example). */
   warnings?: string[];
@@ -101,18 +101,6 @@ export function GitSourceDiffDialog({
               </div>
             </div>
           )}
-          {pull.refusals && pull.refusals.length > 0 && (
-            <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" strokeWidth={1.5} />
-              <div>
-                <p className="font-medium">Some project inputs are not materialized</p>
-                {pull.refusals.slice(0, 5).map((r, i) => (
-                  <p key={i} className="mt-0.5">{r.reason}</p>
-                ))}
-              </div>
-            </div>
-          )}
-
           {envAvailable && (
             <Tabs value={diffTab} onValueChange={(v) => setDiffTab(v as 'compose' | 'env')}>
               <TabsList>

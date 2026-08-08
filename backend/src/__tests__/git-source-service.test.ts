@@ -1889,6 +1889,200 @@ describe('GitSourceService managed-area lifecycle', () => {
         expect(await manifestSvc.readManifest('ghost-stack', 'https://github.com/example/repo.git', 'main')).toBeNull();
         expect(fs.existsSync(path.join(process.env.DATA_DIR!, 'git-managed', '1', '.detach-ghost-stack'))).toBe(false);
     });
+
+    const SWEEP_BOUNDS = { maxFiles: 10_000, maxBytes: 512 * 1024 * 1024, maxContextBytes: 256 * 1024 * 1024, maxPathDepth: 64, maxFileBytes: 10 * 1024 * 1024 };
+
+    function insertGitSourceRow(stackName: string): void {
+        DatabaseService.getInstance().upsertGitSource({
+            stack_name: stackName,
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: null,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+    }
+
+    /** Live managed-stack fixture: on-disk stack, row, and written manifest. */
+    async function seedManagedStack(stackName: string): Promise<void> {
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await FileSystemService.getInstance().createStack(stackName);
+        await FileSystemService.getInstance().saveStackContent(stackName, 'services: {}\n');
+        insertGitSourceRow(stackName);
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const manifestSvc = GitProjectManifestService.getInstance();
+        await manifestSvc.writeManifest(stackName, manifestSvc.buildManifest({
+            stackName,
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: stackName,
+            invocation: ['-f', 'compose.yaml', '-p', stackName],
+            inputs: [],
+            refusals: [],
+            buildContexts: [],
+            bounds: SWEEP_BOUNDS,
+            priorManifest: null,
+            state: 'active',
+        }));
+    }
+
+    it('does not delete managed areas when the stack listing fails', async () => {
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const svc = GitSourceService.getInstance();
+        const stackName = 'live-sweep-listing-fail';
+        await seedManagedStack(stackName);
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const manifestSvc = GitProjectManifestService.getInstance();
+        // A retained recovery generation, as the sweep would otherwise reap.
+        const genDir = path.join(process.env.DATA_DIR!, 'git-managed', '1', stackName, 'generations', 'applied-abc-1');
+        fs.mkdirSync(genDir, { recursive: true });
+
+        const strictSpy = vi.spyOn(FileSystemService.prototype, 'getStacksStrict').mockRejectedValue(new Error('EIO: readdir failed'));
+        // Also mock the SOFT listing: the pre-fix sweep called getStacks(),
+        // which swallows the failure into an empty list and deletes the area.
+        // Post-fix the sweep uses the strict variant and is unaffected, so the
+        // test goes red on the pre-fix call path and green here.
+        const softSpy = vi.spyOn(FileSystemService.prototype, 'getStacks').mockRejectedValue(new Error('EIO: readdir failed'));
+        try {
+            await svc.sweepOrphans();
+        } finally {
+            strictSpy.mockRestore();
+            softSpy.mockRestore();
+        }
+        // The manifest and every retained generation survive the failed listing.
+        expect(await manifestSvc.readManifest(stackName, 'https://github.com/example/repo.git', 'main')).not.toBeNull();
+        expect(fs.existsSync(genDir)).toBe(true);
+        await cleanupStackDir(stackName);
+    });
+
+    it('skips a live stack\'s managed area when the listing omits it', async () => {
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const svc = GitSourceService.getInstance();
+        const stackName = 'live-sweep-empty-listing';
+        await seedManagedStack(stackName);
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const manifestSvc = GitProjectManifestService.getInstance();
+
+        const strictSpy = vi.spyOn(FileSystemService.prototype, 'getStacksStrict').mockResolvedValue([]);
+        const softSpy = vi.spyOn(FileSystemService.prototype, 'getStacks').mockResolvedValue([]);
+        try {
+            await svc.sweepOrphans();
+        } finally {
+            strictSpy.mockRestore();
+            softSpy.mockRestore();
+        }
+        expect(await manifestSvc.readManifest(stackName, 'https://github.com/example/repo.git', 'main')).not.toBeNull();
+        await cleanupStackDir(stackName);
+    });
+
+    it('reaps a vanished stack\'s managed area while live stacks survive in the same sweep', async () => {
+        const svc = GitSourceService.getInstance();
+        const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+        const manifestSvc = GitProjectManifestService.getInstance();
+        const liveA = 'live-sweep-a';
+        const liveB = 'live-sweep-b';
+        const ghost = 'vanished-sweep';
+        for (const name of [liveA, liveB]) {
+            await seedManagedStack(name);
+        }
+        // A row whose stack directory is genuinely gone: row + manifest only.
+        insertGitSourceRow(ghost);
+        await manifestSvc.writeManifest(ghost, manifestSvc.buildManifest({
+            stackName: ghost,
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            commitSha: 'abc',
+            projectRoot: null,
+            composeFiles: ['compose.yaml'],
+            projectName: ghost,
+            invocation: ['-f', 'compose.yaml', '-p', ghost],
+            inputs: [],
+            refusals: [],
+            buildContexts: [],
+            bounds: SWEEP_BOUNDS,
+            priorManifest: null,
+            state: 'active',
+        }));
+
+        await svc.sweepOrphans();
+
+        // Both live areas and manifests survive; the vanished stack's area is reaped.
+        expect(await manifestSvc.readManifest(liveA, 'https://github.com/example/repo.git', 'main')).not.toBeNull();
+        expect(await manifestSvc.readManifest(liveB, 'https://github.com/example/repo.git', 'main')).not.toBeNull();
+        expect(await manifestSvc.readManifest(ghost, 'https://github.com/example/repo.git', 'main')).toBeNull();
+        for (const name of [liveA, liveB]) {
+            await cleanupStackDir(name);
+        }
+    });
+
+    it('reports migration_required when the manifest file is gone but the cache claims an applied state', async () => {
+        const svc = GitSourceService.getInstance();
+        DatabaseService.getInstance().upsertGitSource({
+            stack_name: 'stale-cache-summary',
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: null,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+        DatabaseService.getInstance().setGitSourceManifestState('stale-cache-summary', 3, 'active', 'generations/applied-abc-3');
+        const summary = await svc.getManifestSummary('stale-cache-summary');
+        expect(summary?.state).toBe('migration_required');
+        expect(summary?.managedCount).toBe(0);
+
+        // A row that never had a manifest still reports absent.
+        DatabaseService.getInstance().upsertGitSource({
+            stack_name: 'never-manifested',
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: null,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+        expect((await svc.getManifestSummary('never-manifested'))?.state).toBe('absent');
+    });
 });
 
 describe('GitSourceService legacy pending apply (migration path)', () => {

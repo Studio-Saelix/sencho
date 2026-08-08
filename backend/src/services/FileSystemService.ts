@@ -300,22 +300,26 @@ export class FileSystemService {
     return null;
   }
 
+  private async listStacksRaw(): Promise<string[]> {
+    const items = await fsPromises.readdir(this.baseDir, { withFileTypes: true });
+    const stackNames: string[] = [];
+
+    for (const item of items) {
+      if (!item.isDirectory()) continue;
+      if (!item.name || typeof item.name !== 'string') continue;
+
+      const stackDir = path.join(this.baseDir, item.name);
+      if (await this.hasComposeFile(stackDir)) {
+        stackNames.push(item.name);
+      }
+    }
+
+    return stackNames;
+  }
+
   async getStacks(): Promise<string[]> {
     try {
-      const items = await fsPromises.readdir(this.baseDir, { withFileTypes: true });
-      const stackNames: string[] = [];
-
-      for (const item of items) {
-        if (!item.isDirectory()) continue;
-        if (!item.name || typeof item.name !== 'string') continue;
-
-        const stackDir = path.join(this.baseDir, item.name);
-        if (await this.hasComposeFile(stackDir)) {
-          stackNames.push(item.name);
-        }
-      }
-
-      return stackNames;
+      return await this.listStacksRaw();
     } catch (error: any) {
       if (error?.code === 'ENOMEM') {
         const freeMiB = Math.round(os.freemem() / (1024 * 1024));
@@ -325,6 +329,16 @@ export class FileSystemService {
       }
       return [];
     }
+  }
+
+  /**
+   * Like getStacks(), but PROPAGATES listing errors instead of returning an
+   * empty list. Callers that must distinguish "no stacks" from "could not
+   * list stacks" (the boot orphan sweep) use this variant: a swallowed read
+   * failure must never look like every stack disappeared.
+   */
+  async getStacksStrict(): Promise<string[]> {
+    return this.listStacksRaw();
   }
 
   async getStackContent(stackName: string): Promise<string> {
