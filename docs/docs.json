@@ -236,6 +236,7 @@
             "group": "Secure & integrate",
             "pages": [
               "tutorials/set-up-sso",
+              "tutorials/grant-scoped-stack-access",
               "tutorials/configure-environment-guardrails",
               "tutorials/set-up-a-webhook",
               "tutorials/resolve-stack-drift"
