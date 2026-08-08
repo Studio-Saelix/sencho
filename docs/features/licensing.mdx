@@ -43,7 +43,7 @@ Admiral is arranged directly with Studio Saelix rather than a self-serve checkou
 - A 14-day recent-activity audit log with Stream and Table views and filtering
 - Alert rules with Discord, Slack, Apprise, and webhook targets
 - API tokens for CI/CD pipelines and scripts (admin role required)
-- Unlimited accounts with the Admin and Viewer roles
+- Unlimited accounts with the full built-in RBAC system (Admin, Viewer, Deployer, Node Admin, Auditor) and stack or node scoped assignments
 - Two-factor authentication (TOTP plus backup codes)
 - Single sign-on with Custom OIDC (Authelia, Keycloak, Authentik, Zitadel, Pocket ID, or any spec-compliant OIDC provider) and preset providers for Google, GitHub, and Okta
 
@@ -52,9 +52,9 @@ Admiral is arranged directly with Studio Saelix rather than a self-serve checkou
 - **Hardened Build:** an Admiral image channel with published supply-chain assurance artifacts, switched from **Settings → Admiral Account**; see [Switching to Hardened Build](#switching-to-hardened-build) below
 - **Managed continuity:** Recovery Vault (a managed, off-site snapshot allowance)
 - **Assurance and support:** priority email support and Studio Saelix-backed continuity for production fleets
-- **Governance:** advanced RBAC roles (Deployer, Node Admin, Auditor), scoped permissions per stack or node, and audit log export (CSV, JSON), anomaly detection, and configurable retention beyond the recent window
+- **Governance:** extended audit (export as CSV or JSON, anomaly detection, configurable retention beyond the recent window) and planned organizational controls such as advanced identity mapping and approval workflows
 - **Directory integration:** LDAP / Active Directory authentication
-- **Current plan availability:** some product surfaces (including AWS ECR credentials and Fleet Sync policy replication) still require an Admiral plan today. That access rule is temporary availability, not the reason Admiral exists. Other operator surfaces may be limited-availability on a given instance and are documented on their own feature pages when enabled.
+- **Current plan availability:** some product surfaces (including AWS ECR credentials) still require an Admiral plan today. That access rule is temporary availability, not the reason Admiral exists. Other operator surfaces may be limited-availability on a given instance and are documented on their own feature pages when enabled.
 
 **Planned assurance services** (not available today; no delivery date committed): Release Safety Channel, Production Assurance Reports, and Fleet Beacon.
 

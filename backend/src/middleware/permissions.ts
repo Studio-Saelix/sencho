@@ -1,11 +1,9 @@
 import type { Request, Response } from 'express';
 import { DatabaseService, type UserRole, type ResourceType } from '../services/DatabaseService';
-import type { LicenseTier } from '../services/license-types';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
-import { effectiveTier } from './tierGates';
 
-// --- Scoped RBAC Permission Engine (paid) ---
+// --- Scoped RBAC Permission Engine ---
 
 /** Permission subject decoupled from Express Request; used by in-process callers like the scheduler. */
 export interface PermissionSubject { username: string; role: UserRole; userId: number; }
@@ -84,14 +82,13 @@ export function scopedActionsForStack(
 
 /**
  * Core permission resolver without a Request dependency. Admin bypasses
- * all checks; scoped assignments only apply on the paid tier. Used by
- * in-process callers (e.g. the scheduler) that have a subject + tier but
- * no HTTP context. Does NOT handle scopedStackEvidence (machine-auth hop
- * elevation) — that path requires a Request.
+ * all checks; scoped assignments are evaluated on every tier. Used by
+ * in-process callers (e.g. the scheduler) that have a subject but no HTTP
+ * context. Does NOT handle scopedStackEvidence (machine-auth hop elevation);
+ * that path requires a Request.
  */
 export function checkPermissionForSubject(
   subject: PermissionSubject,
-  tier: LicenseTier,
   action: PermissionAction,
   resourceType?: ResourceType,
   resourceId?: string,
@@ -103,8 +100,6 @@ export function checkPermissionForSubject(
   if (ROLE_PERMISSIONS[subject.role]?.includes(action)) return true;
 
   if (!resourceType || !resourceId) return false;
-
-  if (tier !== 'paid') return false;
 
   const db = DatabaseService.getInstance();
   const nodeId = resourceType === 'stack' ? (resourceNodeId ?? undefined) : null;
@@ -135,7 +130,7 @@ export function checkPermissionForSubject(
   return false;
 }
 
-/** Core permission resolver. Admin bypasses all checks; scoped assignments only apply on the paid tier. */
+/** Core permission resolver. Admin bypasses all checks; scoped assignments apply on every tier. */
 export function checkPermission(
   req: Request,
   action: PermissionAction,
@@ -166,12 +161,6 @@ export function checkPermission(
     && evidence.actions.has(action)
   ) {
     return true;
-  }
-
-  const tier = effectiveTier(req);
-  if (tier !== 'paid') {
-    console.warn('[RBAC] Scoped assignment check blocked: effective tier is', sanitizeForLog(tier), 'license_status:', sanitizeForLog(DatabaseService.getInstance().getSystemState('license_status') ?? ''));
-    return false;
   }
 
   const db = DatabaseService.getInstance();
