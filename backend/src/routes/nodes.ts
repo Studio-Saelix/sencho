@@ -322,6 +322,21 @@ nodesRouter.put('/:id', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Node not found' });
     }
 
+    // updateNode writes any non-undefined name verbatim against a NOT NULL
+    // UNIQUE column, so validate shape here with the same message as POST /
+    // (stricter on blank names; the stored value is not trimmed, matching
+    // create). An unchanged name is exempt so a node whose stored name
+    // predates this validation can still be saved as-is.
+    const nameChanged = updates.name !== undefined && updates.name !== existingNode.name;
+    if (nameChanged && (typeof updates.name !== 'string' || updates.name.trim() === '')) {
+      return res.status(400).json({ error: 'Node name is required' });
+    }
+    // Best-effort pre-check; the catch below remaps a racing UNIQUE violation
+    // to the same 409.
+    if (nameChanged && DatabaseService.getInstance().getNodes().some((n) => n.name === updates.name)) {
+      return res.status(409).json({ error: 'A node with that name already exists' });
+    }
+
     if (existingNode.mode === 'pilot_agent' && updates.compose_dir !== undefined) {
       const composeDir = normalizePilotComposeDir(updates.compose_dir);
       if (!composeDir) {
@@ -377,6 +392,9 @@ nodesRouter.put('/:id', async (req: Request, res: Response) => {
     const message = error instanceof Error ? error.message : '';
     if (message.includes('Node type cannot be changed')) {
       return res.status(400).json({ error: message });
+    }
+    if (message.includes('UNIQUE constraint')) {
+      return res.status(409).json({ error: 'A node with that name already exists' });
     }
     console.error('Failed to update node:', error);
     res.status(500).json({ error: message || 'Failed to update node' });
