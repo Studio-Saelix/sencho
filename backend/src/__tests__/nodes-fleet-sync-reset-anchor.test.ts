@@ -1,5 +1,5 @@
 /**
- * Tests for POST /api/nodes/:id/fleet-sync/reset-anchor (F-16 fix).
+ * Tests for POST /api/nodes/:id/fleet-sync/reset-anchor.
  *
  * The endpoint proxies the peer's reanchor endpoint and clears every
  * sticky-error row for the node on success. Covers:
@@ -7,7 +7,8 @@
  *   - peer 401/403 → 502 with helpful message.
  *   - peer unreachable → 504.
  *   - missing/non-proxy node → 400.
- *   - non-paid tier → 403.
+ *   - Community admin success (no paid gate).
+ *   - non-admin viewer → 403.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
@@ -54,14 +55,9 @@ afterAll(() => {
   cleanupTestDb(tmpDir);
 });
 
-beforeEach(async () => {
+beforeEach(() => {
   vi.restoreAllMocks();
   globalThis.fetch = originalFetch;
-  // Re-establish the paid-tier spy after restoreAllMocks. Individual tests
-  // can override with `mockReturnValue('community')` to exercise the tier
-  // gate's deny path.
-  const { LicenseService } = await import('../services/LicenseService');
-  vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
 });
 
 describe('POST /api/nodes/:id/fleet-sync/reset-anchor', () => {
@@ -144,15 +140,66 @@ describe('POST /api/nodes/:id/fleet-sync/reset-anchor', () => {
     expect(res.status).toBe(404);
   });
 
-  it('returns 403 (PAID_REQUIRED) when the license is community-tier', async () => {
+  it('succeeds for a Community admin', async () => {
     const { LicenseService } = await import('../services/LicenseService');
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().setFleetSyncSticky(
+      peerNodeId, 'scan_policies', 'CONTROL_IDENTITY_MISMATCH', 'aaa', 'bbb',
+    );
+    const fetchSpy = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    );
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const res = await request(app)
       .post(`/api/nodes/${peerNodeId}/fleet-sync/reset-anchor`)
       .set('Authorization', authHeader)
       .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 403 PERMISSION_DENIED for a viewer', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().addUser({
+      username: 'reset-anchor-viewer',
+      password_hash: 'x',
+      role: 'viewer',
+    });
+    const viewerAuth = `Bearer ${jwt.sign(
+      { username: 'reset-anchor-viewer', role: 'viewer' },
+      TEST_JWT_SECRET,
+      { expiresIn: '1m' },
+    )}`;
+
+    const res = await request(app)
+      .post(`/api/nodes/${peerNodeId}/fleet-sync/reset-anchor`)
+      .set('Authorization', viewerAuth)
+      .send({});
     expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
+    expect(res.body.code).toBe('PERMISSION_DENIED');
+  });
+
+  it('returns 403 ADMIN_REQUIRED for a node-admin (status is admin-only)', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().addUser({
+      username: 'reset-anchor-node-admin',
+      password_hash: 'x',
+      role: 'node-admin',
+    });
+    const nodeAdminAuth = `Bearer ${jwt.sign(
+      { username: 'reset-anchor-node-admin', role: 'node-admin' },
+      TEST_JWT_SECRET,
+      { expiresIn: '1m' },
+    )}`;
+
+    const res = await request(app)
+      .post(`/api/nodes/${peerNodeId}/fleet-sync/reset-anchor`)
+      .set('Authorization', nodeAdminAuth)
+      .send({});
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('ADMIN_REQUIRED');
   });
 });
