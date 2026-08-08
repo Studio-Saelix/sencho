@@ -1,0 +1,111 @@
+---
+title: Deploy a Stack Automatically From Your CI Pipeline
+sidebarTitle: Deploy from CI on push
+description: Create a signed webhook that lets an external pipeline trigger a real stack redeploy, and verify it end to end with a signed request standing in for your CI job.
+---
+
+Say a small nginx-backed service, `storefront`, gets rebuilt every time its image changes. Without a webhook, redeploying it after a new build means someone opening Sencho and clicking **Update** by hand. This walks through wiring a webhook so an external pipeline can trigger that redeploy itself: you'll create the webhook, stage a new image tag the way a pipeline would, fire a signed HTTP request that stands in for the pipeline's own call, and confirm the container actually recreated on the new image.
+
+This tutorial covers creating and triggering one webhook for the **Deploy (down + up)** action. It doesn't cover the other five actions (Restart, Stop, Start, Pull & Update, Git source sync), writing CI YAML for a specific provider, or key rotation across many webhooks; see the [Webhooks](/features/webhooks) feature page for the complete picture.
+
+## Prerequisites
+
+- The `admin` role specifically. Creating, editing, and deleting webhooks needs the `system:webhooks` permission, which only `admin` holds; `node-admin`, `deployer`, `viewer`, and `auditor` can view a read-only list but not manage one.
+- A running stack to target. If you don't have one, select **Create Stack**, name it `storefront`, and replace its Compose file with:
+
+  ```yaml
+  services:
+    web:
+      image: nginx:1.27-alpine
+      restart: always
+      ports:
+        - "8095:80"
+  ```
+
+  Select **Save & Deploy**. This tutorial's steps and screenshots use this exact stack and tag, so if you use a different one, adjust the specific image tag named in step 3 to match.
+- The **Local** node active in the node switcher. The Webhooks page only appears while Local is active, and a webhook's execution is pinned to whichever node was active when you created it.
+- A way to send a signed HTTP POST request. This tutorial uses `curl` and `openssl` from a terminal to stand in for your CI platform's HTTP step.
+- Available on every tier; no Admiral requirement.
+
+<Steps>
+  <Step title="Create the webhook">
+    Open **Settings → Automation → Webhooks** and select **Create webhook**. Fill in **Name** (`Deploy storefront`), pick **Stack** (`storefront`), and leave **Action** on its default, **Deploy (down + up)**. **Node** is read-only and shows **Local**: execution stays pinned to whichever node was active when you created the webhook, regardless of which node is active later.
+
+    <Frame>
+      <img src="/images/tutorials/set-up-a-webhook/webhook-create-form-filled.png" alt="New webhook form with Name set to Deploy storefront, Stack set to storefront, Node showing Local, and Action set to Deploy (down + up)." />
+    </Frame>
+
+    Select **Create**.
+  </Step>
+  <Step title="Copy the secret before you dismiss it">
+    A green callout appears once, showing the full signing secret in a monospace block. Copy it now: every later view of this webhook, in the list or the API, shows only the masked form (`********` plus the last four characters). If you dismiss the callout without copying it, the only fix is to delete the webhook and create a new one, which rotates the secret and the trigger URL's id.
+
+    <Frame>
+      <img src="/images/tutorials/set-up-a-webhook/webhook-secret-reveal.png" alt="Green success callout reading Webhook created. Copy your secret now, with the full secret in a monospace block above a Copy button. Below, the configured-webhooks list shows the Deploy storefront card with its trigger URL and masked secret." />
+    </Frame>
+
+    Note the numeric id in the **Trigger URL** (`/api/webhooks/<id>/trigger`); you'll need both the id and the secret in the next steps.
+  </Step>
+  <Step title="Stage a change for the webhook to apply">
+    A trigger against a stack that already matches its compose file is a no-op: Sencho still reports success, but nothing visibly changes, the same way a plain `docker compose up -d` only recreates a container whose configuration actually changed. To see a real redeploy, stage a change first, the way your pipeline would after a new build.
+
+    Open the `storefront` stack, edit `compose.yaml`, and bump the pinned tag from `nginx:1.27-alpine` to `nginx:1.28-alpine`. Instead of **Save & Deploy**, open the dropdown next to it and select **Save Only**. This writes the change to disk without deploying it, the same gap that exists in a real pipeline between committing a new image reference and the moment something actually applies it.
+
+    <Frame>
+      <img src="/images/tutorials/set-up-a-webhook/webhook-save-only-menu.png" alt="Compose editor for storefront with the image line changed to nginx:1.28-alpine, and the Save & Deploy dropdown open showing Save Only and Discard Changes. The running container's logs below still show nginx/1.27.5, confirming the change is staged but not yet deployed." />
+    </Frame>
+  </Step>
+  <Step title="Trigger it like your pipeline would">
+    Compute an HMAC-SHA256 signature over the exact request body using the secret from step 2, and send it in the `X-Webhook-Signature` header with a `sha256=` prefix:
+
+    ```bash
+    SECRET="your-webhook-secret"
+    BODY='{}'
+    SIGNATURE=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | cut -d' ' -f2)
+
+    curl -X POST https://your-sencho.example.com/api/webhooks/<id>/trigger \
+      -H "Content-Type: application/json" \
+      -H "X-Webhook-Signature: sha256=$SIGNATURE" \
+      -d "$BODY"
+    ```
+
+    A valid request returns `202 Accepted` with `{"message":"Webhook accepted","action":"deploy"}` immediately. That confirms the signature checked out and the deploy is now running asynchronously, not that it has finished.
+  </Step>
+</Steps>
+
+## Verify it worked
+
+Check from two independent surfaces so you're not trusting a single UI element.
+
+**The stack itself.** Reopen `storefront`. The container recreated on the new image: a fresh uptime, and its logs now start with `nginx/1.28.3` instead of `1.27.5`.
+
+<Frame>
+  <img src="/images/tutorials/set-up-a-webhook/webhook-storefront-redeployed.png" alt="storefront stack page showing storefront-web-1 up 22 seconds, with logs starting from nginx/1.28.3, and the compose editor showing image nginx:1.28-alpine." />
+</Frame>
+
+**The webhook's own history.** Back on **Settings → Automation → Webhooks**, expand **Recent executions** on the card. A green check confirms `deploy` succeeded, with the timestamp and duration of the run you just triggered.
+
+<Frame>
+  <img src="/images/tutorials/set-up-a-webhook/webhook-recent-executions.png" alt="Deploy storefront webhook card with Recent executions expanded, showing one entry: a green check, deploy, a timestamp, and a duration of 4.1 seconds." />
+</Frame>
+
+## If something goes wrong
+
+**The trigger returns `404 Webhook not found or signature invalid`, but the id and secret are both right.** This is almost always a signing mismatch, and the most common cause is a shell adding bytes you didn't sign. `echo "$BODY"` appends a trailing newline that `echo -n "$BODY"` does not, so if any step in your pipeline signs with one and sends with the other, the signature won't match the bytes Sencho actually received, and it returns the same generic 404 it returns for every unauthenticated case (unknown id, disabled webhook, missing header). Confirm you're signing the exact same string you send, byte for byte, with no incidental newline.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Webhooks" icon="satellite-dish" href="/features/webhooks">
+    The full action list, concurrency behavior, execution history retention, and security model.
+  </Card>
+  <Card title="Git Sources" icon="code-branch" href="/features/git-sources">
+    The Git source sync action pulls the latest commit and deploys, an alternative to bumping a pinned tag by hand.
+  </Card>
+  <Card title="Auto-Update Policies" icon="arrows-rotate" href="/features/auto-update-policies">
+    A hands-off way to keep a stack current on a schedule, without needing an external pipeline to call a webhook at all.
+  </Card>
+  <Card title="Deploy Compose Changes by Pulling From Git Instead of Editing by Hand" icon="code-branch" href="/tutorials/connect-a-git-source">
+    Link a stack to a Git repository and run the same pull-review-apply cycle by hand from the panel, no webhook required.
+  </Card>
+</CardGroup>

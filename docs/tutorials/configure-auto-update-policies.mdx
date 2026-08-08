@@ -1,0 +1,105 @@
+---
+title: Automatically Patch a Stack With an Auto-Update Label
+sidebarTitle: Auto-patch a stack with a label
+description: Tag a stack for hands-off patching, schedule a label-driven check, and confirm a real digest rebuild gets applied without you clicking Apply yourself.
+---
+
+Say you're running a self-hosted app on a rolling image tag like `latest`. The upstream maintainer regularly rebuilds that tag with security patches, same version, same tag name, new image content, and every rebuild is one you'd apply if you noticed it. Nobody wants to check the **Update** board every day for that. This walks through tagging a stack with a **Stack Label** built for exactly this ("safe to patch unattended"), pointing a schedule at that label instead of at one specific stack, and running it once to watch a real pending rebuild get pulled and recreated.
+
+The worked example is `jackett`, a small self-hosted indexer proxy pinned to `lscr.io/linuxserver/jackett:latest`. This tutorial does not cover bumping a stack to a *newer semver tag* (that always needs a manual Compose edit first, since a schedule never rewrites an image reference) or building the label itself from Settings instead of inline. See the [Auto-Update Policies](/features/auto-update-policies) feature page for the semver workflow and risk badges, and [Stack Labels](/features/stack-labels) for every other way to create and manage labels.
+
+## Prerequisites
+
+- **An admin or node-admin account.** Assigning a Stack Label and creating a scheduled task both require one of these roles; viewers and deployers can see the result but can't set it up.
+- **A running stack.** Any stack works, but only a stack whose currently-pinned tag has a real pending **same-tag digest rebuild** actually gets pulled and recreated by the schedule. A stack that's fully up to date, or one pinned to a tag with a *newer* tag available instead, still gets checked on schedule, it just has nothing to apply until you edit its Compose pin (see [Auto-Update Policies · Workflow](/features/auto-update-policies#workflow)).
+- **The hub (Local) selected as the active node for the scheduling step.** Schedules is a hub-level view and isn't available while a remote node is the active selection; labeling the stack itself works from whichever node it lives on.
+
+<Steps>
+  <Step title="Spot the pending update and create the label">
+    Open the stack that has an update pending. Its **Anatomy** tab shows an **Update available** panel naming the image and marking it `same-tag digest rebuild`, the same signal the sidebar's dot and the **Update** board also carry for this stack.
+
+    Right-click the stack in the sidebar (or use its kebab menu) and choose **Labels → New label**. Type a name that describes the policy, not the app, since you'll likely tag other stacks with it later: `Auto-update`. Pick a color and click **Create**.
+
+    <Frame caption="The stack's own Update available panel, alongside the sidebar context menu's Labels submenu with the inline New label form filled in.">
+      <img src="/images/tutorials/configure-auto-update-policies/context-menu-new-label-form.png" alt="jackett's Anatomy tab showing an Update available panel for lscr.io/linuxserver/jackett:latest marked 'patch · same-tag digest rebuild', with the stack's right-click context menu open on the Labels submenu showing an inline New label form: a text input reading 'Auto-update', a row of ten color swatches with green selected, and Create and Cancel buttons." />
+    </Frame>
+
+    Creating a label from this menu assigns it to the stack in the same round trip, no separate assignment step.
+  </Step>
+  <Step title="Confirm the sidebar grouped by label">
+    The sidebar now splits into label groups instead of one flat list: an **AUTO-UPDATE** section holding this stack, and an **UNLABELED** section for everything else on the node.
+
+    <Frame caption="The sidebar after the label exists, grouped by label instead of flat.">
+      <img src="/images/tutorials/configure-auto-update-policies/sidebar-auto-update-group.png" alt="Sidebar showing an AUTO-UPDATE group containing jackett, and an UNLABELED group containing keycloak-idp and whoami-edge." />
+    </Frame>
+
+    This is cosmetic confirmation, not the policy itself: the schedule you create next is what actually drives updates.
+  </Step>
+  <Step title="Create a schedule that targets the label">
+    Open **More → Schedules**, click **New Schedule**, and set **Action** to **Auto-update stacks by label** (in the **Updates** group). Fill in:
+
+    - **Name**: `Nightly patch check`
+    - **Stack Label**: type `Auto-update` and pick the suggestion that appears (it shows the live match count: `1 stack · 1 node`)
+    - **Scope**: **Entire fleet**. A stack-label schedule resolves membership at run time, so leaving it fleet-wide means any stack you tag with this label later, on any node, is covered automatically without editing the schedule again.
+    - **Schedule**: leave the default **Daily** at **03:00**
+
+    Below the Stack Label field, **Current matches** previews exactly which stacks this task would act on right now, before you save anything.
+
+    <Frame caption="The New scheduled task modal with the label-driven fields filled in and the live match preview resolved.">
+      <img src="/images/tutorials/configure-auto-update-policies/new-schedule-label-filled.png" alt="New scheduled task modal: Name 'Nightly patch check', Action 'Auto-update stacks by label', Stack Label 'Auto-update', Scope segmented control with Entire fleet selected, a Current matches panel reading '1 stack on 1 node' with 'Local: jackett' listed, and Schedule set to Daily at 03:00 with the cron preview 0 3 * * *." />
+    </Frame>
+
+    Click **Create**. See [Schedule an Operation](/tutorials/schedule-an-operation) for the general mechanics of the Schedules timeline and table if this is your first scheduled task; this tutorial goes straight to running it.
+  </Step>
+  <Step title="Confirm the task, then run it once">
+    Switch to **All tasks**. The new row shows **Auto-update stacks by label** as the action and `Label: Auto-update · Entire fleet` as the target, with **Status** `Never run`.
+
+    <Frame caption="The new label-driven task in the All tasks table before its first run.">
+      <img src="/images/tutorials/configure-auto-update-policies/all-tasks-row.png" alt="All tasks table with one row: Nightly patch check, Auto-update stacks by label, Label: Auto-update · Entire fleet, At 03:00 AM / 0 3 * * *, Status Never run, Next Run 8/6/2026 11:00:00 PM, Enabled ON." />
+    </Frame>
+
+    Click **Run now** (play icon) rather than waiting for 03:00. This is a real pull and recreate, so it takes longer than a restart task, tens of seconds rather than a fraction of one. Click **Refresh** after it finishes.
+
+    <Frame caption="The same row after a successful run: Status flips to Success and the pending update clears.">
+      <img src="/images/tutorials/configure-auto-update-policies/all-tasks-success.png" alt="All tasks table with the Nightly patch check row now showing a green Success badge, and the sidebar's UPDATES filter chip reading 0 instead of 1." />
+    </Frame>
+  </Step>
+</Steps>
+
+## Verify it worked
+
+Check from two places, since a status badge alone can't tell you *what* got updated, and a cleared update alone can't tell you it was this schedule that cleared it.
+
+**The Execution history.** Click the **Execution history** button (clock icon) on the row. The run shows **Source** `Manual`, **Status** `Success`, and details naming exactly what happened: `Selector: stack-label="Auto-update" · scope=entire fleet` followed by `Stack "jackett": updated (lscr.io/linuxserver/jackett:latest).`
+
+<Frame caption="Execution history showing the label selector that was resolved and the exact image that got updated.">
+  <img src="/images/tutorials/configure-auto-update-policies/run-history.png" alt="Execution history sheet for Nightly patch check showing one run: Source Manual, Status Success, Duration 24.1s, and details naming the stack-label selector and 'Stack jackett: updated (lscr.io/linuxserver/jackett:latest)'." />
+</Frame>
+
+**The Update readiness board.** Open **More → Update**. Where jackett's card used to show `Rebuild available`, the board now reads `Everything is up to date`, and the sidebar's **Updates** filter chip is back to `0`.
+
+<Frame caption="The Update readiness board after the schedule cleared the only pending rebuild.">
+  <img src="/images/tutorials/configure-auto-update-policies/readiness-board-up-to-date.png" alt="Update readiness board showing the empty state: a shield icon, the headline 'All stacks on current builds', and the subtitle 'Sencho rechecks registries on the configured interval.' The sidebar's UPDATES chip reads 0." />
+</Frame>
+
+## If something goes wrong
+
+**A later run reports success but changes nothing.** Run the task again (or let it fire at 03:00 the next night) once jackett is already current, and the row still shows the green **Success** badge, not a failure. Open its Execution history and the details read `Stack "jackett": all images up to date.` instead of naming an updated image. This is the expected steady state, not a bug: the label schedule checks every stack under the label on every run, and "nothing changed because there was nothing to change" is success, not skipped. It only becomes worth investigating if a stack you know has a real pending digest rebuild keeps reporting "up to date"; in that case, confirm the label is still assigned to that stack (right-click it and check the **Labels** submenu for a checkmark) and that the stack's own image reference still uses the same tag Sencho detected the rebuild against.
+
+<Frame caption="A second run against an already-current stack: still Success, with a different, unambiguous detail message.">
+  <img src="/images/tutorials/configure-auto-update-policies/run-history-two-runs.png" alt="Execution history sheet showing two runs for Nightly patch check: the newer run at 9:49:09 PM with Status Success, Duration 0.8s, and details 'Stack jackett: all images up to date', and the earlier run at 9:44:20 PM with Duration 24.1s and details naming the updated image." />
+</Frame>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Auto-Update Policies" icon="arrows-rotate" href="/features/auto-update-policies">
+    The full readiness board reference: risk badges, the semver-bump workflow this tutorial doesn't cover, and multi-node behavior.
+  </Card>
+  <Card title="Stack Labels" icon="tags" href="/features/stack-labels">
+    Every other way to create, assign, and manage labels, plus the label-driven Fleet Actions and mute shortcuts.
+  </Card>
+  <Card title="Scheduled Operations" icon="calendar-clock" href="/features/scheduled-operations">
+    The full action list and cron reference shared by every scheduled task type, including this one.
+  </Card>
+</CardGroup>

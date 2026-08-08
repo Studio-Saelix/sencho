@@ -1,0 +1,116 @@
+---
+title: Create and Approve a Blueprint
+sidebarTitle: Create and approve a blueprint
+description: Author a fleet-wide compose template, target it at a node with a label, and walk through the confirm-before-mutate rollout that puts it on the fleet.
+---
+
+Every other lane in Sencho manages one Compose file on one node. A **Blueprint** is the other lane: you declare a Compose file once, point it at the nodes you want by label or by ID, and Sencho keeps those nodes in sync with that declaration going forward, deploying it where it's missing and telling you the moment a targeted node drifts from what you declared. This walks through the two-part motion every Blueprint goes through before it touches your fleet: you **create** it (author the compose, pick a target, choose how drift gets handled), then you **approve** it (review exactly what Sencho is about to place, and confirm). By the end, a small stateless service is running on a real node, deployed entirely through the Blueprint you approved rather than a manual `docker compose up`.
+
+This tutorial does not cover stateful Blueprints (the extra confirmation step for named volumes and bind mounts), pinning a Blueprint to a specific node, or moving a deployment between nodes. See the [Blueprints](/features/blueprint-model) feature page for stateful workflows, and [Move a Blueprint Deployment to a New Node](/tutorials/set-up-fleet-federation) once you've completed this one and want to relocate a deployment with Federation.
+
+## Prerequisites
+
+- **An admin account.** Creating, editing, and applying a Blueprint all require the admin role. Operators and viewers can read the catalog and the detail sheet but can't act on either.
+- **At least one node**, local or remote, that you can attach a label to. Blueprints are a Community-tier capability; no paid plan is required.
+
+<Steps>
+  <Step title="Label the node you're targeting">
+    Blueprints target nodes by label or by explicit node ID. Open **Settings → Infrastructure → Nodes**, find the node you want this Blueprint to reach, and click the **+** button in its **Labels** column. Type `edge` and click **Add**.
+
+    <Frame caption="Adding the edge label to a node from Settings · Infrastructure · Nodes.">
+      <img src="/images/tutorials/create-and-approve-a-blueprint/node-labels-add-edge.png" alt="Add label popover open on a node's row in the Nodes settings table, with 'edge' typed into the input and an Add button." />
+    </Frame>
+
+    Labels are plain lowercase strings, not key/value pairs. You can add more than one to a node, and a Blueprint's selector can match on any combination of them.
+  </Step>
+  <Step title="Author the Blueprint">
+    Go to **Fleet → Deployments** and click **New Blueprint**. Fill in:
+
+    - **Name**: `whoami-edge`
+    - **Description**: `Minimal identity endpoint for the edge tier`
+
+    In the **Compose** editor, replace the placeholder YAML with a small, stateless HTTP service that just echoes back which container answered, useful for confirming a deploy actually landed:
+
+    ```yaml
+    services:
+      app:
+        image: traefik/whoami:v1.10
+        restart: unless-stopped
+        ports:
+          - "8080:80"
+    ```
+
+    As you type, the classification banner above the editor updates. With no volumes in this compose, it settles on **Stateless · portable**: Sencho can deploy and evict this Blueprint freely, with none of the extra confirmation prompts a stateful Blueprint requires.
+
+    <Frame caption="Name, description, and compose filled in. The classification banner reads Stateless · portable.">
+      <img src="/images/tutorials/create-and-approve-a-blueprint/blueprint-editor-compose.png" alt="Blueprint editor dialog with Name whoami-edge, Description 'Minimal identity endpoint for the edge tier', and a compose YAML editor showing the traefik/whoami service. The classification banner above the editor reads Stateless · portable, no persistent volumes detected." />
+    </Frame>
+
+    Scroll down to **Selector** and leave **Labels** selected. Click the `edge` pill under **Match nodes with ANY of these labels**. The line below confirms `Resolves to nodes labelled any of [edge]`. Under **Drift policy**, leave **Suggest** selected, the middle option: Sencho will always detect drift on this Blueprint, and Suggest additionally sends a notification when it happens, without redeploying anything on its own. (**Observe** stays silent about drift beyond the deployment row; **Enforce** auto-redeploys to fix it.)
+
+    <Frame caption="Selector set to the edge label, Suggest drift policy selected.">
+      <img src="/images/tutorials/create-and-approve-a-blueprint/blueprint-editor-selector-drift.png" alt="Blueprint editor scrolled to the Selector and Drift policy sections. The edge label pill is selected under 'Match nodes with ANY of these labels', with the resolves-to summary line beneath it. The Suggest drift policy card is selected among Observe, Suggest, and Enforce." />
+    </Frame>
+
+    Click **Create blueprint**.
+  </Step>
+  <Step title="See the blueprint land in pending state">
+    The detail sheet opens on your new Blueprint: `any=[edge] · suggest · rev 1`, with **Apply now**, **Edit**, **Disable**, and **Delete** across the top. The **Deployments** section is still empty, with the note `No matching nodes yet. Add a label or pick a node ID, then click Apply now.`
+
+    <Frame caption="The Blueprint immediately after creation. No deployment row exists yet, even though the label already matches a real node.">
+      <img src="/images/tutorials/create-and-approve-a-blueprint/blueprint-created-pending.png" alt="Blueprint detail sheet for whoami-edge right after creation, showing the Apply now, Edit, Disable, and Delete actions, the description, and an empty Deployments section reading 'No matching nodes yet. Add a label or pick a node ID, then click Apply now.' The footer reads Updated just now, pending." />
+    </Frame>
+
+    This is expected, not a bug: creating a Blueprint only declares intent. Sencho computes what it would actually do, and does it, only once you open the rollout preview.
+  </Step>
+  <Step title="Review and confirm the rollout">
+    Click **Apply now**. Sencho computes a rollout preview: `Safe 1 · Warnings 1 · Blockers 0`, with a warning noting `no persistent volumes detected` (informational for a stateless Blueprint, not a problem), and one line under **Changes**: `Local (local/online) · create · safe: New placement`.
+
+    <Frame caption="The rollout preview for the first deploy: one safe create, one informational warning.">
+      <img src="/images/tutorials/create-and-approve-a-blueprint/rollout-preview.png" alt="Confirm rollout dialog for whoami-edge reading Safe 1, Warnings 1, Blockers 0, pending. A Warnings section lists 'no persistent volumes detected'. A Changes section lists Local (local/online) · create · safe: New placement." />
+    </Frame>
+
+    This preview is the actual authorization step: nothing on the fleet has changed yet, and Sencho is showing you exactly what it's about to do before it does it. Click **Confirm Apply**.
+  </Step>
+</Steps>
+
+## Verify it worked
+
+Check from two places, since a single stale UI element could tell you the wrong thing.
+
+**The Deployments tab.** Back on **Fleet → Deployments**, the `whoami-edge` tile now shows a green dot, the **stateless** chip, and `1/1 active · any=[edge]`. Open the tile: the deployment table lists **Local**, status **Active**, with a **Withdraw** action now available. The stack also appears in the left sidebar's stack list like any other running stack, materialized on disk the same way a per-stack deploy would be.
+
+<Frame caption="The Deployments tab after the rollout: one active deployment, stateless, matched on the edge label.">
+  <img src="/images/tutorials/create-and-approve-a-blueprint/catalog-active.png" alt="Deployments · Blueprints catalog with one tile: whoami-edge, stateless, 1/1 active, any=[edge], drift suggest. The left sidebar stack list now includes whoami-edge alongside the node's other stacks." />
+</Frame>
+
+<Frame caption="The detail sheet's deployment table: Local, Active, with Withdraw available.">
+  <img src="/images/tutorials/create-and-approve-a-blueprint/detail-sheet-active.png" alt="Blueprint detail sheet for whoami-edge with the deployment table showing one row: Local, status Active, last activity 1m ago, and a Withdraw action." />
+</Frame>
+
+**The audit log.** Open **Audit**, switch to **Table**, and search `blueprints/1` (or whatever ID your Blueprint got, visible in the browser's address bar or in the raw preview response). You'll see a `POST /api/blueprints/1/apply` row for each time you clicked **Confirm Apply**, each logged with your account, a timestamp, and a 200 status. If you also hit and fixed a port conflict (see below), a `PUT /api/blueprints/1` row from saving the edit shows up between the two applies.
+
+<Frame caption="Audit log filtered to this Blueprint's requests: the first apply, the compose edit, and the second apply after the fix.">
+  <img src="/images/tutorials/create-and-approve-a-blueprint/audit-log-blueprint-actions.png" alt="Audit log table filtered by search term blueprints/1, showing two POST /api/blueprints/1/apply rows and one PUT /api/blueprints/1 row, each with status 200 and node 1." />
+</Frame>
+
+## If something goes wrong
+
+The most common first-time failure is a host port that's already taken. `8080` is a common default that other containers on the same node may already be bound to. If that happens, the deployment row moves to **Failed**, and the notes column carries the real Docker error, ending in something like `Bind for 0.0.0.0:8080 failed: port is already allocated`.
+
+<Frame caption="A failed first deploy: the notes column carries the exact daemon error, including the port conflict.">
+  <img src="/images/tutorials/create-and-approve-a-blueprint/deployment-failed-port-conflict.png" alt="Blueprint deployment row for Local in Failed status, with a Retry action, and a notes column showing the full container startup log ending in 'Bind for 0.0.0.0:8080 failed: port is already allocated'." />
+</Frame>
+
+To recover, click **Edit**, change the host-side port in the `ports` mapping to something free (`8091:80`, for instance), and **Save changes**. Saving bumps the revision and clears approval back to pending, so click **Apply now** again: the preview this time shows an `update` action instead of `create`. Confirm it, and the deployment moves through **Deploying** to **Active** on the new port.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Blueprint Model" icon="drafting-compass" href="/features/blueprint-model">
+    The full mental model: markers, drift modes, stateful safety rails, and the reconciler's approval mechanics.
+  </Card>
+  <Card title="Move a Blueprint Deployment to a New Node" icon="network-wired" href="/tutorials/set-up-fleet-federation">
+    Once a Blueprint is running, use Federation's pin and cordon controls to relocate it to a different node.
+  </Card>
+</CardGroup>
