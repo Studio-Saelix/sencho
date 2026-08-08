@@ -366,6 +366,47 @@ services: {}
         expect(envFiles.map((e) => e.sourcePath)).toEqual(['app/x.env']);
     });
 
+    it('parses Windows drive-letter short-form bind mounts (audit round 10 S-2)', () => {
+        // Plain YAML scalars keep backslashes literally (no escape processing).
+        const { result } = parse({
+            'compose.yaml': `services:
+  web:
+    image: nginx
+    volumes:
+      - C:\\data:/data
+      - C:creds:/creds
+      - \\\\server\\share:/share
+      - ./data:/data
+      - named-vol:/vol
+      - C:\\data:/data:ro
+`,
+        });
+        const binds = byKind(result, 'bind-mount');
+        // Drive-letter, drive-relative, and UNC short binds are recorded as
+        // host entries (sourcePath null per the host-bind convention) instead
+        // of being mistaken for named volumes and dropped; ./data resolves
+        // project-relative; named-vol is not a bind.
+        expect(binds).toHaveLength(5);
+        expect(binds.map((b) => b.baseDir)).toEqual(['host', 'host', 'host', 'project-root', 'host']);
+        expect(binds.find((b) => b.kind === 'bind-mount' && b.materializedPath === 'data')?.sourcePath).toBe('data');
+    });
+
+    it('preserves env_file required: false and required: true (audit round 10 S-1)', () => {
+        const { result } = parse({
+            'compose.yaml': `services:
+  web:
+    image: nginx
+    env_file:
+      - path: optional.env
+        required: false
+      - required.env
+`,
+        });
+        const envFiles = byKind(result, 'env_file');
+        expect(envFiles.find((e) => e.sourcePath === 'optional.env')?.required).toBe(false);
+        expect(envFiles.find((e) => e.sourcePath === 'required.env')?.required).toBe(true);
+    });
+
     it('classifies absolute and home-relative paths as host paths', () => {
         const { result } = parse({
             'compose.yaml': `include:

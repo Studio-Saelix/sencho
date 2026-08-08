@@ -221,6 +221,11 @@ export interface DeclaredInput {
   baseDir: 'repo-root' | 'project-root' | 'compose-file-dir' | 'host';
   kind: InputDependencyKind;
   role: InputRole;
+  /**
+   * When false (env_file map form with required: false), a missing file is
+   * recorded as an unmanaged entry (never a refusal).
+   */
+  required: boolean;
   /** Compose source context for diagnostics. */
   fromFile: string | null;
   /**

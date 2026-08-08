@@ -9,30 +9,36 @@
  * Every declaration is resolved in TWO coordinate systems:
  * - source: the repository path of the file (what the clone contains), and
  * - materialized: the stack-relative path the file occupies at runtime.
- * They diverge only when the runtime layout relocates a file: the primary
- * compose file always lands at the stack root, so its entire include/extends
- * graph (and every project-relative path declared in it) shifts by the
- * primary's repository directory prefix. Merged (-f) files keep their
- * repository paths; include/extends-reached files keep their own directory
- * unless a relocation applies.
+ * They diverge when the runtime layout relocates a file: the primary compose
+ * file always lands at the stack root, so its entire include/extends graph
+ * (and every project-relative path declared in it) shifts by the primary's
+ * repository directory prefix. Merged (-f) files keep their own repository
+ * paths, but their include/extends graph resolves against the base file's
+ * directory at source and shifts to the stack root at runtime when no context
+ * dir is configured; include/extends-reached files keep their own project
+ * directory unless a relocation applies.
  *
- * Resolution rules (compose spec):
- * - `include:` and `extends.file` paths resolve relative to the declaring
- *   file's directory, in both coordinate systems.
- * - include map-form `env_file` resolves relative to the invoking file, per
- *   the compose-go include env resolution.
- * - include map-form `project_directory` re-bases the included subtree's
- *   project-relative paths.
+ * Resolution rules (compose spec / compose-go loader):
+ * - `include:`, `extends.file`, and include map-form `env_file` paths resolve
+ *   against the current level's EFFECTIVE PROJECT base (the compose-go local
+ *   resource loader's WorkingDir is the project directory): the context dir,
+ *   or the base file's directory for merged (-f) files at the top level; the
+ *   including include-entry's project directory for nested includes.
+ * - An included project's interpolation env defaults to `.env` in its project
+ *   directory; absence is tolerated.
+ * - For a long-form include path LIST, the FIRST resolved path is the
+ *   included project's main file and defines its directory; later paths are
+ *   overrides of the same project. include map-form `project_directory`
+ *   overrides the included project's directory.
  * - service `env_file`, top-level `configs`/`secrets` `file:`, `label_file`
  *   and `build.context` resolve against the effective project directory: the
  *   context dir, or the base file's directory for merged (-f) files; files
- *   reached via include/extends keep their own directory (or the included
- *   `project_directory`). An omitted build context defaults to that project
- *   directory.
- * - Absolute (POSIX, Windows drive/UNC) and home-relative (`~`) paths are
- *   HOST paths: emitted with baseDir 'host' so the classifier records them as
- *   unmanaged (data inputs) or refuses them (include/extends), never adopting
- *   a same-named repository file.
+ *   reached via include/extends keep their own project directory. An omitted
+ *   build context defaults to that project directory.
+ * - Absolute (POSIX, Windows drive/UNC, drive-relative, root-relative) and
+ *   home-relative (`~`) paths are HOST paths: emitted with baseDir 'host' so
+ *   the classifier records them as unmanaged (data inputs) or refuses them
+ *   (include/extends), never adopting a same-named repository file.
  *
  * Never throws: parse errors are collected into `parseErrors` and surface as
  * refusals at classification time.
@@ -121,12 +127,13 @@ function emitInput(
     fromFile: string,
     baseDir: DeclaredInput['baseDir'],
     service: string | null = null,
+    required = true,
 ): void {
     if (rawPath !== null && isDynamicPath(rawPath)) {
         refs.dynamic.push({ sourcePath: rawPath, kind, note: 'Path contains a variable; resolved by Compose at deploy time, not enumerated.' });
         return;
     }
-    refs.inputs.push({ sourcePath, materializedPath, baseDir, kind, role, fromFile, service });
+    refs.inputs.push({ sourcePath, materializedPath, baseDir, kind, role, fromFile, service, required });
 }
 
 /**
@@ -143,18 +150,19 @@ function emitProjectRelative(
     ctx: FileContext,
     baseDir: DeclaredInput['baseDir'],
     service: string | null = null,
+    required = true,
 ): void {
     if (isHostAbsolutePath(raw)) {
-        emitInput(refs, raw, raw, null, kind, role, fromFile, 'host', service);
+        emitInput(refs, raw, raw, null, kind, role, fromFile, 'host', service, required);
         return;
     }
     const source = resolveWithinBase(ctx.projectBase, raw);
     const materialized = resolveWithinBase(ctx.runtimeProjectBase, raw);
     if (source === null || materialized === null) {
-        emitInput(refs, raw, raw, null, kind, role, fromFile, 'host', service);
+        emitInput(refs, raw, raw, null, kind, role, fromFile, 'host', service, required);
         return;
     }
-    emitInput(refs, raw, source, materialized, kind, role, fromFile, baseDir, service);
+    emitInput(refs, raw, source, materialized, kind, role, fromFile, baseDir, service, required);
 }
 
 function asString(value: unknown): string | undefined {
@@ -173,21 +181,25 @@ function asStringList(value: unknown): string[] {
     return [];
 }
 
-/** Normalize an env_file entry (string, list item, or map {path, required}) to its path. */
-function envFilePath(value: unknown): string | undefined {
-    if (typeof value === 'string') return value;
+/** Normalize an env_file entry (string, list item, or map {path, required}) to its path and optionality. */
+function envFilePath(value: unknown): { path: string; required: boolean } | undefined {
+    if (typeof value === 'string') return { path: value, required: true };
     if (value && typeof value === 'object' && !Array.isArray(value)) {
         const p = (value as Record<string, unknown>).path;
-        return asString(p);
+        const path = asString(p);
+        if (path === undefined) return undefined;
+        const required = (value as Record<string, unknown>).required;
+        return { path, required: required !== false };
     }
     return undefined;
 }
+
 
 /** Normalize a configs/secrets entry to a file path, or null for external/env forms. */
 function resourceFilePath(value: unknown): string | null {
     if (value && typeof value === 'object' && !Array.isArray(value)) {
         const record = value as Record<string, unknown>;
-        if (record.external === true || record.external !== undefined) return null; // docker supplies it
+        if (record.external === true) return null; // docker supplies it; only an explicit true applies
         if ('env' in record || 'environment' in record) return null; // env-injected
         const f = record.file;
         if (f !== undefined) return asString(f) ?? null;
@@ -197,9 +209,12 @@ function resourceFilePath(value: unknown): string | null {
 }
 
 function shortFormBindSource(volume: string): string | null {
-    const colon = volume.indexOf(':');
-    if (colon === -1) return null;
-    const src = volume.slice(0, colon);
+    // A drive-letter prefix (C:\ or C:) keeps its colon as part of the
+    // source; the source/target separator is the NEXT colon. UNC sources
+    // (\\server\share) have no colon and split at the separator as usual.
+    const separator = /^[A-Za-z]:/.test(volume) ? volume.indexOf(':', 2) : volume.indexOf(':');
+    if (separator === -1) return null;
+    const src = volume.slice(0, separator);
     // Named volumes have no path separators or leading dot/slash/tilde.
     if (/^[A-Za-z0-9_.-]+$/.test(src) && !src.startsWith('.') && !src.startsWith('~')) return null;
     return src;
@@ -305,7 +320,11 @@ function walkService(serviceName: string, service: unknown, fromFile: string, re
         const entries = Array.isArray(envFile) ? envFile : [envFile];
         for (const entry of entries) {
             const p = envFilePath(entry);
-            if (p !== undefined) emitProjectRelative(refs, p, 'env_file', 'env', fromFile, ctx, 'compose-file-dir');
+            if (p !== undefined) {
+                emitProjectRelative(refs, p.path, 'env_file', 'env', fromFile, ctx, 'compose-file-dir', null, p.required);
+            } else {
+                refs.parseErrors.push(`env_file entry in ${fromFile} has no resolvable path`);
+            }
         }
     }
 
@@ -342,8 +361,12 @@ function emitFileRelative(
         emitInput(refs, raw, raw.trim(), null, kind, role, fromFile, baseDir);
         return { source: null, materialized: null };
     }
-    const source = resolveWithinBase(dirOf(ctx.repoPath), raw);
-    const materialized = resolveWithinBase(dirOf(ctx.runtimePath), raw);
+    // Include, include-env, and extends paths resolve against the current
+    // level's EFFECTIVE PROJECT base (compose-go: the local resource
+    // loader's WorkingDir is the project directory), not the declaring
+    // file's own directory.
+    const source = resolveWithinBase(ctx.projectBase, raw);
+    const materialized = resolveWithinBase(ctx.runtimeProjectBase, raw);
     if (source === null || materialized === null) {
         emitInput(refs, raw, raw, null, kind, role, fromFile, 'host');
         return { source: null, materialized: null };
@@ -424,8 +447,7 @@ function parseFileInner(
         const items = Array.isArray(include) ? include : [include];
         for (const item of items) {
             if (typeof item === 'string') {
-                const resolved = emitFileRelative(refs, item, 'include', 'compose-additional', normalized, ctx);
-                readAndRecurse(resolved, ctx, opts, refs, visited, stack, depth, 'Included compose file');
+                processIncludeEntry(refs, [item], undefined, normalized, ctx, opts, visited, stack, depth);
             } else if (item && typeof item === 'object' && !Array.isArray(item)) {
                 const map = item as Record<string, unknown>;
                 // path accepts a string or a list of strings (merged in order).
@@ -434,30 +456,7 @@ function parseFileInner(
                     refs.parseErrors.push(`Include entry in ${normalized} has no resolvable path`);
                     continue;
                 }
-                // project_directory re-bases the included subtree's
-                // project-relative paths; when omitted it defaults to the
-                // included file's own directory (readAndRecurse's fallback),
-                // matching the string-form include behavior.
-                const projectDir = asString(map.project_directory);
-                let childOverride: { projectBase: string | null; runtimeProjectBase: string | null } | undefined;
-                if (projectDir !== undefined) {
-                    const childProjectBase = resolveWithinBase(dirOf(ctx.repoPath), projectDir);
-                    const childRuntimeProjectBase = resolveWithinBase(dirOf(ctx.runtimePath), projectDir);
-                    if (childProjectBase === null || childRuntimeProjectBase === null) {
-                        refs.parseErrors.push(`Include project_directory ${projectDir} in ${normalized} escapes its base`);
-                    } else {
-                        childOverride = { projectBase: childProjectBase, runtimeProjectBase: childRuntimeProjectBase };
-                    }
-                }
-                for (const p of paths) {
-                    const resolved = emitFileRelative(refs, p, 'include', 'compose-additional', normalized, ctx);
-                    readAndRecurse(resolved, ctx, opts, refs, visited, stack, depth, 'Included compose file', childOverride);
-                }
-                // env_file accepts a string or a list of strings; resolves
-                // relative to the invoking file (compose-go include env).
-                for (const env of asStringList(map.env_file)) {
-                    emitFileRelative(refs, env, 'include-env', 'env', normalized, ctx);
-                }
+                processIncludeEntry(refs, paths, map, normalized, ctx, opts, visited, stack, depth);
             }
         }
     }
@@ -497,6 +496,70 @@ function parseFileInner(
                 emitInput(refs, null, null, null, kind, role, normalized, 'host');
             }
         }
+    }
+}
+
+/**
+ * Process one include entry (string path, or map with a path list): resolve
+ * each path against the current level's project base, derive the included
+ * project's bases (project_directory, or the FIRST resolved path's directory
+ * per the compose-go "main file" rule), emit the included project's default
+ * interpolation .env, and recurse.
+ */
+function processIncludeEntry(
+    refs: ComposeRefs,
+    paths: string[],
+    map: Record<string, unknown> | undefined,
+    fromFile: string,
+    ctx: FileContext,
+    opts: ParseOptions,
+    visited: Set<string>,
+    stack: Set<string>,
+    depth: number,
+): void {
+    const resolvedPaths = paths.map((p) => emitFileRelative(refs, p, 'include', 'compose-additional', fromFile, ctx));
+    const first = resolvedPaths[0];
+    // interpolation: false disables interpolation for the included project,
+    // so its default .env is never probed.
+    const interpolate = map?.interpolation !== false;
+    const projectDir = asString(map?.project_directory);
+    let childProjectBase: string | null;
+    let childRuntimeProjectBase: string | null;
+    if (projectDir !== undefined) {
+        childProjectBase = resolveWithinBase(ctx.projectBase, projectDir);
+        childRuntimeProjectBase = resolveWithinBase(ctx.runtimeProjectBase, projectDir);
+        if (childProjectBase === null || childRuntimeProjectBase === null) {
+            refs.parseErrors.push(`Include project_directory ${projectDir} in ${fromFile} escapes its base`);
+            return;
+        }
+    } else if (first !== undefined && first.source !== null && first.materialized !== null) {
+        // Without project_directory, the FIRST resolved path is the included
+        // project's main file and defines its directory; later paths are
+        // overrides of the same project.
+        childProjectBase = dirOf(first.source);
+        childRuntimeProjectBase = dirOf(first.materialized);
+    } else {
+        return; // host/URL/escape: emitted, the classifier decides
+    }
+
+    // The included project's interpolation env defaults to .env in its
+    // project directory (compose include spec); absence is tolerated.
+    // interpolation: false disables it (handled above). When the included
+    // project's bases equal the parent's (a same-directory include), the
+    // entry would duplicate the parent's interpolation env, so it is skipped.
+    if (interpolate && !(childProjectBase === ctx.projectBase && childRuntimeProjectBase === ctx.runtimeProjectBase)) {
+        emitInput(refs, '.env', resolveWithinBase(childProjectBase, '.env')!, resolveWithinBase(childRuntimeProjectBase, '.env')!, 'interpolation-env', 'env', fromFile, 'repo-root');
+    }
+
+    const childOverride = { projectBase: childProjectBase, runtimeProjectBase: childRuntimeProjectBase };
+    for (const resolved of resolvedPaths) {
+        readAndRecurse(resolved, ctx, opts, refs, visited, stack, depth, 'Included compose file', childOverride);
+    }
+
+    // Explicit env_file accepts a string or a list of strings; resolves
+    // against the current level's project base (compose-go include env).
+    for (const env of asStringList(map?.env_file)) {
+        emitFileRelative(refs, env, 'include-env', 'env', fromFile, ctx);
     }
 }
 

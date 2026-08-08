@@ -190,6 +190,24 @@ export class ComposeInputDiscoveryService {
         return { sourcePath, kind, reason, actionable, sensitivity };
     }
 
+    /** Unmanaged entry for an optional env_file compose skips at deploy time. */
+    private optionalEnvUnmanaged(input: DeclaredInput, sourcePath: string, note: string): ComposeInputEntry {
+        return {
+            sourcePath,
+            materializedPath: null,
+            role: input.role,
+            dependencyKind: input.kind,
+            ownership: 'unmanaged',
+            provenance: 'fetch',
+            sensitivity: sensitivityFor(input.kind, 'medium'),
+            contentSha256: null,
+            sizeBytes: null,
+            state: 'present',
+            deletionAuthority: 'none',
+            note,
+        };
+    }
+
     /**
      * Classify one resolved clone-relative path. Returns the refusal on
      * failure; callers record actionable refusals.
@@ -732,9 +750,15 @@ export class ComposeInputDiscoveryService {
                 continue;
             }
 
-            // Submodule containment check.
+            // Submodule containment check. An OPTIONAL env_file inside a
+            // submodule is absent at deploy time and compose skips it, so it
+            // is recorded as unmanaged like any other missing optional file.
             const inSubmodule = submoduleOwner(sourcePath, submodules) ?? null;
             if (inSubmodule !== null) {
+                if (input.required === false) {
+                    inputs.push(this.optionalEnvUnmanaged(input, sourcePath, 'Optional env file inside a Git submodule; compose skips it at deploy time'));
+                    continue;
+                }
                 refusals.push(this.refusal(sourcePath, 'submodule', `${sourcePath} is inside Git submodule ${inSubmodule}; submodule contents are not fetched`, true, sensitivityFor(kind, 'medium')));
                 continue;
             }
@@ -785,7 +809,14 @@ export class ComposeInputDiscoveryService {
 
             const classified = await this.classifyPath(cloneDir, sourcePath, bounds);
             if (!classified.ok) {
-                refusals.push({ ...classified.refusal, sensitivity: isSensitiveKind(kind) ? 'high' : 'medium' });
+                if (classified.refusal.kind === 'missing-file' && input.required === false) {
+                    // env_file map form with required: false: compose skips a
+                    // missing optional file instead of failing. Record it as
+                    // an unmanaged entry (never a refusal).
+                    inputs.push(this.optionalEnvUnmanaged(input, sourcePath, 'Optional env file not present in the repository; compose skips it'));
+                    continue;
+                }
+                refusals.push({ ...classified.refusal, sensitivity: sensitivityFor(kind, 'medium') });
                 continue;
             }
             if (managedCount + 1 > bounds.maxFiles) {

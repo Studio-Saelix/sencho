@@ -65,7 +65,14 @@ describe('discoverFromClone', () => {
         // The included file's env_file resolves against its own directory.
         expect(envFiles.some((i) => i.sourcePath === 'common/redis.env')).toBe(true);
         expect(byKind('config')[0].sourcePath).toBe('nginx/nginx.conf');
-        expect(result.inputs.every((i) => i.ownership === 'managed')).toBe(true);
+        // The included project's default interpolation .env (common/.env) is
+        // absent here, so it is recorded unmanaged and tolerated; every file
+        // actually present in the repository is managed.
+        const missingDefaultEnv = result.inputs.find((i) => i.dependencyKind === 'interpolation-env' && i.sourcePath === 'common/.env');
+        expect(missingDefaultEnv?.ownership).toBe('unmanaged');
+        expect(missingDefaultEnv?.note).toContain('No project .env');
+        expect(result.inputs.filter((i) => i.ownership === 'unmanaged')).toHaveLength(1);
+        expect(result.inputs.filter((i) => i.ownership === 'managed').every((i) => i.state === 'present')).toBe(true);
         // content hashes are computed for file-backed inputs.
         expect(envFiles[0].contentSha256).toBeTruthy();
     });
@@ -500,19 +507,25 @@ describe('effective invocation path resolution (audit round 8 B-3)', () => {
         expect(result.inputs.some((i) => i.sourcePath === 'app.env' && i.ownership === 'managed')).toBe(false);
     });
 
-    it('keeps included files on their own project directory even when a context dir is configured', async () => {
+    it('resolves the primary\'s includes against the context dir but keeps the included file\'s own paths on its own project directory', async () => {
         const clone = makeClone({
+            // With --project-directory deploy, the primary's include path
+            // resolves against deploy/ (the top-level project base).
             'compose.yaml': 'include:\n  - common/redis.yaml\nservices: {}\n',
-            'common/redis.yaml': 'services:\n  redis:\n    image: redis\n    env_file: redis.env\n',
-            'common/redis.env': 'REDIS=1\n',
-            // The context dir must NOT redirect the included file's paths.
-            'deploy/common/redis.env': 'WRONG=1\n',
+            'deploy/common/redis.yaml': 'services:\n  redis:\n    image: redis\n    env_file: redis.env\n',
+            // The included file's own env_file resolves against ITS project
+            // directory (deploy/common), not the context dir.
+            'deploy/common/redis.env': 'REDIS=1\n',
+            'deploy/redis.env': 'WRONG=1\n',
         });
         const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: 'deploy', bounds: BOUNDS });
         expect(result.refusals).toEqual([]);
+        const include = result.inputs.find((i) => i.dependencyKind === 'include');
+        expect(include?.sourcePath).toBe('deploy/common/redis.yaml');
+        expect(include?.materializedPath).toBe('deploy/common/redis.yaml');
         const env = result.inputs.find((i) => i.dependencyKind === 'env_file');
-        expect(env?.sourcePath).toBe('common/redis.env');
-        expect(env?.materializedPath).toBe('common/redis.env');
+        expect(env?.sourcePath).toBe('deploy/common/redis.env');
+        expect(env?.materializedPath).toBe('deploy/common/redis.env');
     });
 
     it('materializes base-file-relative paths at the stack root, stripping the base directory prefix', async () => {
@@ -622,17 +635,22 @@ describe('nested-primary runtime path equivalence (audit round 9 B-3)', () => {
         expect(env?.materializedPath).toBe('nested/inner.env');
     });
 
-    it('keeps an additional -f file\'s include graph at repository-relative paths', async () => {
+    it('resolves an additional -f file\'s includes against the base file\'s directory', async () => {
         const clone = makeClone({
             'deploy/base.yaml': 'services: {}\n',
+            // The merged project's base is deploy/ (the first -f file); an
+            // include declared in the second file resolves against it.
             'infra/prod.yaml': 'include:\n  - prod-common.yaml\nservices: {}\n',
-            'infra/prod-common.yaml': 'services:\n  web:\n    image: nginx\n',
+            'deploy/prod-common.yaml': 'services:\n  web:\n    image: nginx\n',
+            'infra/prod-common.yaml': 'services:\n  WRONG:\n    image: nginx\n',
         });
         const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['deploy/base.yaml', 'infra/prod.yaml'], contextDir: null, bounds: BOUNDS });
         expect(result.refusals).toEqual([]);
         const include = result.inputs.find((i) => i.dependencyKind === 'include');
-        expect(include?.sourcePath).toBe('infra/prod-common.yaml');
-        expect(include?.materializedPath).toBe('infra/prod-common.yaml');
+        expect(include?.sourcePath).toBe('deploy/prod-common.yaml');
+        // At runtime the project dir is the stack root, so the included file
+        // moves there too.
+        expect(include?.materializedPath).toBe('prod-common.yaml');
     });
 
     it('applies a divergent include project_directory to the subtree project base', async () => {
@@ -678,6 +696,132 @@ describe('nested-primary runtime path equivalence (audit round 9 B-3)', () => {
         // silently dropped or adopted from the repo root.
         expect(result.refusals.some((r) => r.actionable && r.kind === 'out-of-bounds' && String(r.sourcePath).includes('../shared.yaml'))).toBe(true);
         expect(result.inputs.some((i) => i.sourcePath === 'shared.yaml' && i.ownership === 'managed')).toBe(false);
+    });
+});
+
+describe('included-project default env and project-base includes (audit round 10 B-1/B-2)', () => {
+    it('materializes an included project\'s default .env as a managed sensitive input', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'include:\n  - modules/app/compose.yaml\nservices: {}\n',
+            'modules/app/compose.yaml': 'services:\n  app:\n    image: app:${TAG:-latest}\n',
+            'modules/app/.env': 'TAG=production\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const defaultEnv = result.inputs.find((i) => i.dependencyKind === 'interpolation-env' && i.sourcePath === 'modules/app/.env');
+        expect(defaultEnv?.ownership).toBe('managed');
+        expect(defaultEnv?.materializedPath).toBe('modules/app/.env');
+        expect(defaultEnv?.contentSha256).toBeTruthy();
+        expect(defaultEnv?.sensitivity).toBe('high');
+    });
+
+    it('tolerates a missing included-project default .env without refusing', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'include:\n  - modules/app/compose.yaml\nservices: {}\n',
+            'modules/app/compose.yaml': 'services:\n  app:\n    image: app:${TAG:-latest}\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const defaultEnv = result.inputs.find((i) => i.dependencyKind === 'interpolation-env' && i.sourcePath === 'modules/app/.env');
+        expect(defaultEnv?.ownership).toBe('unmanaged');
+        expect(defaultEnv?.note).toContain('No project .env');
+    });
+
+    it('resolves extends.file in an additional -f file against the base file\'s directory', async () => {
+        const clone = makeClone({
+            'deploy/base.yaml': 'services: {}\n',
+            'infra/prod.yaml': 'services:\n  web:\n    extends:\n      file: web-base.yaml\n      service: web-base\n',
+            'deploy/web-base.yaml': 'services:\n  web-base:\n    image: nginx\n',
+            'infra/web-base.yaml': 'services:\n  WRONG:\n    image: nginx\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['deploy/base.yaml', 'infra/prod.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const ext = result.inputs.find((i) => i.dependencyKind === 'extends');
+        expect(ext?.sourcePath).toBe('deploy/web-base.yaml');
+        expect(ext?.materializedPath).toBe('web-base.yaml');
+    });
+
+    it('resolves extends.file against the context dir with the subtree on its own project directory', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    extends:\n      file: web-base.yaml\n      service: web-base\n',
+            'deploy/web-base.yaml': 'services:\n  web-base:\n    image: nginx\n    label_file: labels.txt\n',
+            'deploy/labels.txt': 'a=b\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: 'deploy', bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const ext = result.inputs.find((i) => i.dependencyKind === 'extends');
+        expect(ext?.sourcePath).toBe('deploy/web-base.yaml');
+        const label = result.inputs.find((i) => i.dependencyKind === 'label_file');
+        expect(label?.sourcePath).toBe('deploy/labels.txt');
+    });
+
+    it('uses the first path as the included project\'s main file for a multi-directory path list', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'include:\n  - path:\n      - modules/base/compose.yaml\n      - overrides/compose.yaml\nservices: {}\n',
+            'modules/base/compose.yaml': 'services:\n  base:\n    image: nginx\n',
+            'overrides/compose.yaml': 'services:\n  base:\n    env_file: shared.env\n',
+            // The included project's base is modules/base (the first path);
+            // the override's relative inputs resolve against it, never the
+            // override's own directory.
+            'modules/base/shared.env': 'A=1\n',
+            'overrides/shared.env': 'WRONG=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const env = result.inputs.find((i) => i.dependencyKind === 'env_file');
+        expect(env?.sourcePath).toBe('modules/base/shared.env');
+        expect(env?.materializedPath).toBe('modules/base/shared.env');
+    });
+});
+
+describe('optional env_file and external: false semantics (audit round 10 S-1)', () => {
+    it('does not refuse a missing optional env_file', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    image: nginx\n    env_file:\n      - path: optional.env\n        required: false\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const env = result.inputs.find((i) => i.dependencyKind === 'env_file');
+        expect(env?.ownership).toBe('unmanaged');
+        expect(env?.note).toContain('Optional env file');
+    });
+
+    it('materializes a present optional env_file as managed', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    image: nginx\n    env_file:\n      - path: optional.env\n        required: false\n',
+            'optional.env': 'A=1\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const env = result.inputs.find((i) => i.dependencyKind === 'env_file');
+        expect(env?.ownership).toBe('managed');
+        expect(env?.contentSha256).toBeTruthy();
+    });
+
+    it('treats only external: true as external for file-backed configs', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'configs:\n  app:\n    file: configs/app.conf\n    external: false\nservices:\n  web:\n    image: nginx\n    configs: [app]\n',
+            'configs/app.conf': 'server {}\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const cfg = result.inputs.find((i) => i.dependencyKind === 'config');
+        expect(cfg?.sourcePath).toBe('configs/app.conf');
+        expect(cfg?.ownership).toBe('managed');
+        expect(cfg?.contentSha256).toBeTruthy();
+    });
+
+    it('treats only external: true as external for file-backed secrets', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'secrets:\n  app-key:\n    file: secrets/app.key\n    external: false\nservices:\n  web:\n    image: nginx\n    secrets: [app-key]\n',
+            'secrets/app.key': 'secret\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals).toEqual([]);
+        const sec = result.inputs.find((i) => i.dependencyKind === 'secret');
+        expect(sec?.sourcePath).toBe('secrets/app.key');
+        expect(sec?.ownership).toBe('managed');
+        expect(sec?.sensitivity).toBe('high');
     });
 });
 
