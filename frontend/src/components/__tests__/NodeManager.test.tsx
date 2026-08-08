@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import type { Node } from '@/context/NodeContext';
 
@@ -6,7 +6,6 @@ import type { Node } from '@/context/NodeContext';
 // the test renders the panel in isolation and can drive the role/permission
 // inputs that gate the write affordances.
 const useAuthMock = vi.fn();
-const useLicenseMock = vi.fn();
 
 const testNode: Node = {
   id: 2,
@@ -25,7 +24,6 @@ vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({ nodes: [testNode], refreshNodeMeta: vi.fn() }),
 }));
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => useAuthMock() }));
-vi.mock('@/context/LicenseContext', () => ({ useLicense: () => useLicenseMock() }));
 vi.mock('@/lib/api', () => ({
   apiFetch: vi.fn(() => Promise.resolve({ ok: false, json: () => Promise.resolve({}) })),
 }));
@@ -53,9 +51,6 @@ function canFor(...granted: string[]) {
   return (action: string) => granted.includes(action);
 }
 
-beforeEach(() => {
-  useLicenseMock.mockReturnValue({ isPaid: false });
-});
 afterEach(() => vi.clearAllMocks());
 
 describe('NodeManager write-affordance gating', () => {

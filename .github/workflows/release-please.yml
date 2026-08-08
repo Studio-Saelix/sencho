@@ -58,6 +58,21 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+      # release-please stores the release notes in the release PR body when it
+      # opens that PR, and builds the GitHub Release from that stored body at
+      # merge time. The credit step below runs afterwards and only rewrites
+      # CHANGELOG.md on the branch, so credits never reach the published notes.
+      # Re-publish them from CHANGELOG.md, which by now carries the credits.
+      # Runs before the credit step, which checks out the next release branch
+      # and would otherwise leave the wrong CHANGELOG.md in the working tree.
+      - name: Sync published release notes with credited changelog
+        if: ${{ steps.release.outputs.releases_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          TAG="$(node scripts/release-notes-from-changelog.mjs "$RUNNER_TEMP/release-notes.md")"
+          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+
       - name: Credit external contributors in changelog
         if: ${{ steps.release.outputs.prs_created == 'true' }}
         env:

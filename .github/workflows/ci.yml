@@ -252,7 +252,11 @@ jobs:
           args: .github/workflows/release-please.yml .github/workflows/ci.yml
 
       - name: Syntax check
-        run: node --check scripts/credit-changelog-contributors.mjs
+        run: |
+          node --check scripts/credit-changelog-contributors.mjs
+          node --check scripts/release-notes-from-changelog.mjs
 
       - name: Unit tests
-        run: node --test scripts/credit-changelog-contributors.test.mjs
+        run: |
+          node --test scripts/credit-changelog-contributors.test.mjs
+          node --test scripts/release-notes-from-changelog.test.mjs

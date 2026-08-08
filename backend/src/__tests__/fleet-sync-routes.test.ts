@@ -115,20 +115,22 @@ describe('GET /api/fleet/sync-status', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 PAID_REQUIRED on community tier', async () => {
+  it('returns status rows for a Community admin (no paid gate)', async () => {
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
-    const res = await request(app).get('/api/fleet/sync-status').set('Authorization', adminAuthHeader);
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
-    vi.restoreAllMocks();
-  });
-
-  it('returns an empty list for an admin on paid tier', async () => {
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
     const res = await request(app).get('/api/fleet/sync-status').set('Authorization', adminAuthHeader);
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body)).toBe(true);
     vi.restoreAllMocks();
+  });
+
+  it('returns 403 ADMIN_REQUIRED for a non-admin viewer', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    db.addUser({ username: 'sync-status-viewer', password_hash: 'x', role: 'viewer' });
+    const viewerAuth = `Bearer ${jwt.sign({ username: 'sync-status-viewer', role: 'viewer' }, TEST_JWT_SECRET, { expiresIn: '1m' })}`;
+    const res = await request(app).get('/api/fleet/sync-status').set('Authorization', viewerAuth);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('ADMIN_REQUIRED');
   });
 });
 
