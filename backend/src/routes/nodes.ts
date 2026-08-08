@@ -5,7 +5,7 @@ import path from 'path';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permissions';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
-import { requireAdmin, requirePaid } from '../middleware/tierGates';
+import { requireAdmin } from '../middleware/tierGates';
 import { enrollmentLimiter } from '../middleware/rateLimiters';
 import { DeployedStackDeletionService } from '../services/DeployedStackDeletionService';
 import { DatabaseService } from '../services/DatabaseService';
@@ -494,24 +494,20 @@ nodesRouter.post('/:id/uncordon', (req: Request, res: Response) => {
  * Reset the FleetSync control anchor on a remote peer.
  *
  * Proxies POST /api/fleet/role/reanchor to the peer using its stored
- * Bearer token. A successful reanchor clears every sticky-error row for
- * this node so the next push (event-driven or via the 5-minute retry
- * service) re-attempts cleanly and the peer accepts the central's
+ * Bearer token. On success, clears every sticky-error row for this node
+ * so the next push re-attempts cleanly and the peer accepts the central's
  * fingerprint as the new anchor.
  *
- * Surfaces UI affordance for the F-16 audit (mesh-e2e-2026-05-17.md):
- * when a peer was previously enrolled by a different central, FleetSync
- * keeps 409'ing every reconcile tick; the sticky flag halts retries and
- * this endpoint is the single one-click recovery for the operator.
+ * Used when a peer was previously enrolled by a different central:
+ * FleetSync keeps 409'ing every reconcile tick, the sticky flag halts
+ * retries, and this endpoint is the one-click operator recovery.
  */
 nodesRouter.post('/:id/fleet-sync/reset-anchor', async (req: Request, res: Response) => {
   if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
   const nodeIdParam = req.params.id as string;
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
-  if (!requirePaid(req, res)) return;
-  // Reset-anchor is symmetric with `/api/fleet/sync-status` (admin-only).
-  // Keeping read and write gated at the same role avoids a banner-invisible-to-the-actor
-  // gap where a node-admin could call reset without ever seeing why.
+  // Also requireAdmin so reset stays symmetric with GET /api/fleet/sync-status.
+  // A node-admin must not reset anchors they cannot observe (status is admin-only).
   if (!requireAdmin(req, res)) return;
   try {
     const id = parseInt(nodeIdParam, 10);
