@@ -2,14 +2,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 
 const fetchStatusesMock = vi.fn();
-let mockIsPaid = false;
 let mockIsAdmin = false;
 
 vi.mock('@/lib/fleetSyncApi', () => ({
   fetchFleetSyncStatuses: (...args: unknown[]) => fetchStatusesMock(...args),
-}));
-vi.mock('@/context/LicenseContext', () => ({
-  useLicense: () => ({ isPaid: mockIsPaid }),
 }));
 vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ isAdmin: mockIsAdmin }),
@@ -24,14 +20,12 @@ import { useFleetSyncStatus } from '../useFleetSyncStatus';
 
 beforeEach(() => {
   fetchStatusesMock.mockReset().mockResolvedValue([{ node_id: 1, resource: 'scan_policies' }]);
-  mockIsPaid = false;
   mockIsAdmin = false;
 });
 afterEach(() => vi.clearAllMocks());
 
-describe('useFleetSyncStatus gate parity', () => {
-  it('fetches for a paid admin (mirrors requireAdmin + requirePaid)', async () => {
-    mockIsPaid = true;
+describe('useFleetSyncStatus admin parity', () => {
+  it('fetches for an admin (mirrors requireAdmin on sync-status)', async () => {
     mockIsAdmin = true;
     const { result } = renderHook(() => useFleetSyncStatus());
 
@@ -40,8 +34,7 @@ describe('useFleetSyncStatus gate parity', () => {
     expect(result.current.loading).toBe(false);
   });
 
-  it('does not fetch for a paid non-admin (the 403-loop this fix prevents)', async () => {
-    mockIsPaid = true;
+  it('does not fetch for a non-admin (avoids a 403 poll loop)', async () => {
     mockIsAdmin = false;
     const { result } = renderHook(() => useFleetSyncStatus());
 
@@ -50,28 +43,10 @@ describe('useFleetSyncStatus gate parity', () => {
     expect(result.current.statuses).toEqual([]);
   });
 
-  it('does not fetch for an admin on a community license', async () => {
-    mockIsPaid = false;
-    mockIsAdmin = true;
-    const { result } = renderHook(() => useFleetSyncStatus());
-
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(fetchStatusesMock).not.toHaveBeenCalled();
-    expect(result.current.statuses).toEqual([]);
-  });
-
-  it('does not fetch when neither paid nor admin', async () => {
-    const { result } = renderHook(() => useFleetSyncStatus());
-
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(fetchStatusesMock).not.toHaveBeenCalled();
-  });
-
-  it('ignores rows from a fetch that resolves after the gate flips ineligible', async () => {
+  it('ignores rows from a fetch that resolves after admin is lost', async () => {
     let resolveFetch!: (rows: Array<{ node_id: number; resource: string }>) => void;
     const pending = new Promise<Array<{ node_id: number; resource: string }>>((res) => { resolveFetch = res; });
     fetchStatusesMock.mockReturnValue(pending);
-    mockIsPaid = true;
     mockIsAdmin = true;
     const { result, rerender } = renderHook(() => useFleetSyncStatus());
     expect(fetchStatusesMock).toHaveBeenCalled();
@@ -82,7 +57,7 @@ describe('useFleetSyncStatus gate parity', () => {
     act(() => { rerender(); });
     expect(result.current.statuses).toEqual([]);
 
-    // The late resolve must not republish rows to the now-ineligible client.
+    // Late resolve must not republish rows to a non-admin client.
     await act(async () => {
       resolveFetch([{ node_id: 9, resource: 'scan_policies' }]);
       await Promise.resolve();
@@ -91,12 +66,11 @@ describe('useFleetSyncStatus gate parity', () => {
     expect(result.current.statuses).toEqual([]);
   });
 
-  it('starts fetching once the user becomes a paid admin', async () => {
+  it('starts fetching once the user becomes an admin', async () => {
     const { result, rerender } = renderHook(() => useFleetSyncStatus());
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(fetchStatusesMock).not.toHaveBeenCalled();
 
-    mockIsPaid = true;
     mockIsAdmin = true;
     act(() => { rerender(); });
 
