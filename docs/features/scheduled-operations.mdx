@@ -73,6 +73,10 @@ The All tasks toggle swaps the lane track for a sortable table.
 | **Stop Container** | A specific container by name on a specific node | Stops one container. The container remains on disk for a faster start later. |
 | **Start Container** | A specific container by name on a specific node | Starts one stopped container by name. |
 
+<Note>
+  Every action in the table runs through the same Docker endpoint as the interactive flows. When Sencho runs behind a Docker socket proxy, scheduled operations inherit whatever API groups the proxy allows. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy).
+</Note>
+
 ## Creating a scheduled task
 
 Click **New Schedule** in the header. The form opens in a centered modal. The Action picker lists every supported operation, grouped by category: Lifecycle, Updates, Security, Upkeep, and Backups.

@@ -119,6 +119,8 @@ All 42 rules are listed below, organized by topic.
 | Host network mode | High | A service uses `network_mode: host`, bypassing Docker's network isolation and ignoring published-port mappings. |
 | Check UID/GID alignment | Warning | A service sets a UID or GID and mounts host paths that Sencho cannot inspect from inside its container. Mismatched ownership between the host path and the container user is a common source of permission errors. |
 
+For guidance on which API groups a socket proxy needs for each Sencho feature, see [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy).
+
 ### Reliability
 
 | Rule | Severity | What it detects |
