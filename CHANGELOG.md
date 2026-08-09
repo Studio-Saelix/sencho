@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.97.1](https://github.com/Studio-Saelix/sencho/compare/v0.97.0...v0.97.1) (2026-08-09)
+
+
+### Fixed
+
+* **compose-doctor:** recognize Docker socket proxy topologies ([#1791](https://github.com/Studio-Saelix/sencho/issues/1791)) ([bb98cba](https://github.com/Studio-Saelix/sencho/commit/bb98cba1f2ca7796a3732c1de6b77e2bd579ea69))
+* **fleet-sync:** open status and reset-anchor to Community admins ([#1792](https://github.com/Studio-Saelix/sencho/issues/1792)) ([b9e73f7](https://github.com/Studio-Saelix/sencho/commit/b9e73f7bd8423e8b8c2279925de241e91903f853))
+* **fleet:** reject negative or non-finite remote reclaimableBytes in prune estimate ([#1803](https://github.com/Studio-Saelix/sencho/issues/1803)) ([0d5ff26](https://github.com/Studio-Saelix/sencho/commit/0d5ff26a8ffa68d54cd0a4d1c9514dd527f3cee1))
+* **nodes:** return conflict on duplicate rename ([#1801](https://github.com/Studio-Saelix/sencho/issues/1801)) ([5014ad2](https://github.com/Studio-Saelix/sencho/commit/5014ad20a6ee8ff42075138ec4a75371c6fa14e1))
+* **rbac:** make complete built-in RBAC available on Community ([#1793](https://github.com/Studio-Saelix/sencho/issues/1793)) ([5c52ae2](https://github.com/Studio-Saelix/sencho/commit/5c52ae26eb602cc581f08bdbc5d35a12c21def7d))
+* **resources:** center rollback state badges in their column ([#1807](https://github.com/Studio-Saelix/sencho/issues/1807)) ([4aae09d](https://github.com/Studio-Saelix/sencho/commit/4aae09db4a3ff2e1f87550771c22bc1449cde85a))
+* **resources:** exclude rollback-held images from reclaimable figure ([#1808](https://github.com/Studio-Saelix/sencho/issues/1808)) ([12d80c5](https://github.com/Studio-Saelix/sencho/commit/12d80c5ca759aed344b9aeb16368cb4873d3a3bf))
+* **sso:** forward RFC 9207 iss parameter in OIDC callback ([#1785](https://github.com/Studio-Saelix/sencho/issues/1785)) ([e084ad4](https://github.com/Studio-Saelix/sencho/commit/e084ad424c1f8ee85b61a0dba2aa8acc0b94e9a0))
+* truncate long error text in fleet prune estimate per-node rows ([#1802](https://github.com/Studio-Saelix/sencho/issues/1802)) ([4f30db3](https://github.com/Studio-Saelix/sencho/commit/4f30db3abc9b5cbfb6df8a107750eb48f14e4485))
+* **whats-new:** backfill entries for unannounced 0.97.0 features ([#1804](https://github.com/Studio-Saelix/sencho/issues/1804)) ([fe003d5](https://github.com/Studio-Saelix/sencho/commit/fe003d5c49abb5a95709da076f7181c4deacd6aa))
+
 ## [0.97.0](https://github.com/Studio-Saelix/sencho/compare/v0.96.0...v0.97.0) (2026-08-06)
 
 
