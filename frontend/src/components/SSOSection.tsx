@@ -535,7 +535,7 @@ function AuthenticationModePanel({
                 <p className="text-xs text-muted-foreground">
                     Local password login is disabled. Emergency recovery:{' '}
                     <code className="bg-muted px-1 rounded">{ENABLE_LOCAL_LOGIN_CLI}</code>
-                    {' '}then restart Sencho.
+                    {' '}(no restart required).
                 </p>
             )}
 
@@ -557,7 +557,7 @@ function AuthenticationModePanel({
                     <p className="text-xs text-muted-foreground">
                         If the identity provider is unavailable, recover with{' '}
                         <code className="bg-muted px-1 rounded">{ENABLE_LOCAL_LOGIN_CLI}</code>
-                        {' '}and restart Sencho.
+                        {' '}(no restart required).
                     </p>
                     <label className="flex items-start gap-2 text-sm">
                         <Checkbox

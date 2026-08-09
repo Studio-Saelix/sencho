@@ -1090,6 +1090,9 @@ export class DatabaseService {
     // so the round-trip to SQLite is worth eliminating. Assumes this
     // process is the sole writer to global_settings; sidecar tools that
     // edit the row directly will not invalidate the cache.
+    // Sidecar CLI writes still leave this cache stale. authentication_mode
+    // recovery works because getAuthenticationMode uses getGlobalSettingFresh,
+    // not because this key is omitted from the cache.
     private cachedGlobalSettings: Readonly<Record<string, string>> | null = null;
     private auditLogBuffer: Array<Omit<AuditLogEntry, 'id'>> = [];
     private auditLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -3468,6 +3471,20 @@ export class DatabaseService {
         const stmt = this.db.prepare('INSERT OR REPLACE INTO global_settings (key, value) VALUES (?, ?)');
         stmt.run(key, value);
         this.cachedGlobalSettings = null;
+    }
+
+    /**
+     * Read one global_settings value straight from SQLite, ignoring the
+     * in-process cache. Emergency CLIs (enableLocalLogin, disableSso) write
+     * from a sidecar Node process; the running server's getGlobalSettings()
+     * cache cannot see those writes. Use this for settings that must honor
+     * out-of-process recovery without a restart.
+     */
+    public getGlobalSettingFresh(key: string): string | undefined {
+        const row = this.db.prepare('SELECT value FROM global_settings WHERE key = ?').get(key) as
+            | { value: string }
+            | undefined;
+        return row?.value;
     }
 
     // --- System State (operational/runtime values - not user-defined config) ---
