@@ -40,5 +40,12 @@
     "blurb": "Drag the divider in the Files tab to give the tree pane more room, or shrink it out of the way. Your preferred width is remembered.",
     "docUrl": "https://docs.sencho.io/features/stack-file-explorer",
     "screenshot": "file-explorer.png"
+  },
+  {
+    "id": "rbac",
+    "title": "Role-based access control",
+    "blurb": "Every instance ships with five built-in roles, Admin, Viewer, Deployer, Node Admin, and Auditor, plus scoped permissions to grant access to one stack or node without elevating anywhere else.",
+    "docUrl": "https://docs.sencho.io/features/rbac",
+    "screenshot": "rbac.png"
   }
 ]
