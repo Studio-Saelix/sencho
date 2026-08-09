@@ -70,7 +70,20 @@ beforeEach(() => {
   vi.clearAllMocks();
   composeDirRef.current = '/test/compose';
   mockExecFileAsync.mockResolvedValue({ stdout: '', stderr: '' });
+  // Empty held sets by default so the held-image exclusion paths (getDiskUsage
+  // with excludeHeldImages, estimateManagedReclaim) are hermetic. The
+  // DatabaseService mock above exposes none of the recovery-row queries, so
+  // an unspied getHeldImageIds would return null and the fail-closed
+  // predicate would treat every image as held. Tests that need specific
+  // holds re-spy after this beforeEach runs.
+  vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set());
+  vi.spyOn(ServiceUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set());
 });
+
+/** Hold specific images via the stack-side recovery service for one test. */
+const holdStackImages = (ids: string[]) => {
+  vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set(ids));
+};
 
 // ── validateApiData ────────────────────────────────────────────────────
 
@@ -383,7 +396,12 @@ describe('DockerController - getDiskUsage', () => {
     expect(usage.reclaimableContainerCount).toBe(2);
   });
 
-  it('estimateSystemReclaim returns same bytes as getDiskUsage for every target type', async () => {
+  it('estimateSystemReclaim returns same bytes as getDiskUsage for every target type when no images are held', async () => {
+    // Scoped to the no-holds case: estimateSystemReclaim('images') now
+    // excludes rollback-held images (getDiskUsage({ excludeHeldImages: true })),
+    // so the equality only holds when the held set is empty (the beforeEach
+    // default). The deliberate divergence with a hold present is asserted by
+    // the companion test below.
     mockDocker.df.mockResolvedValue({
       LayersSize: 1_000_000_000,
       Images: [
@@ -423,6 +441,214 @@ describe('DockerController - getDiskUsage', () => {
     expect(mockDocker.listVolumes).not.toHaveBeenCalled();
     expect(mockDocker.listNetworks).not.toHaveBeenCalled();
     expect(mockDocker.listContainers).not.toHaveBeenCalled();
+  });
+
+  it('estimateSystemReclaim images estimate excludes held bytes; other targets are untouched', async () => {
+    // The deliberate divergence: the estimate claims "what a prune can free",
+    // so the images estimate must drop the held image's unique bytes while the
+    // other targets still match the raw daemon figure exactly.
+    holdStackImages(['held-1']);
+    mockDocker.df.mockResolvedValue({
+      LayersSize: 2_000_000,
+      Images: [
+        { Id: 'held-1', Containers: 0, Size: 1_000, VirtualSize: 1_000, SharedSize: 0 },
+        { Id: 'free-1', Containers: 0, Size: 500, VirtualSize: 500, SharedSize: 0 },
+        { Id: 'used-1', Containers: 1, Size: 800, VirtualSize: 800, SharedSize: 0 },
+      ],
+      Containers: [
+        { State: 'exited', SizeRw: 200 },
+      ],
+      Volumes: [
+        { UsageData: { RefCount: 0, Size: 400 } },
+      ],
+    });
+
+    const dc = DockerController.getInstance(1);
+    const usage = await dc.getDiskUsage();
+
+    // Base reclaimable images: LayersSize 2_000_000 minus the in-use image's
+    // 800 = 1_999_200. Held unique bytes = 1_000. Estimate = 1_998_200.
+    expect(usage.reclaimableImages).toBe(1_999_200);
+    const estimate = await dc.estimateSystemReclaim('images', []);
+    expect(estimate.reclaimableBytes).toBe(usage.reclaimableImages - 1_000);
+
+    const containers = await dc.estimateSystemReclaim('containers', []);
+    expect(containers.reclaimableBytes).toBe(usage.reclaimableContainers);
+    const volumes = await dc.estimateSystemReclaim('volumes', []);
+    expect(volumes.reclaimableBytes).toBe(usage.reclaimableVolumes);
+    const networks = await dc.estimateSystemReclaim('networks', []);
+    expect(networks.reclaimableBytes).toBe(0);
+  });
+
+  // ── held-image exclusion (excludeHeldImages) ──────────────────────────
+
+  it('getDiskUsage default keeps rollback-held images in the reclaimable figure', async () => {
+    holdStackImages(['held-1']);
+    mockDocker.df.mockResolvedValue({
+      ImageUsage: { Reclaimable: 1_500 },
+      Images: [
+        { Id: 'held-1', Containers: 0, Size: 1_000, VirtualSize: 1_000, SharedSize: 0 },
+        { Id: 'free-1', Containers: 0, Size: 500, VirtualSize: 500, SharedSize: 0 },
+      ],
+      Volumes: [],
+      Containers: [],
+    });
+
+    const dc = DockerController.getInstance(1);
+    const usage = await dc.getDiskUsage();
+
+    // Default call keeps the daemon's own figure: held images are "unused
+    // Docker data" for callers whose claim is not "what a prune can free".
+    expect(usage.reclaimableImages).toBe(1_500);
+    expect(usage.reclaimableImageCount).toBe(2);
+  });
+
+  it('getDiskUsage with excludeHeldImages subtracts held bytes and count on the daemon-reclaimable fast path', async () => {
+    holdStackImages(['held-1']);
+    mockDocker.df.mockResolvedValue({
+      ImageUsage: { Reclaimable: 1_500 },
+      Images: [
+        { Id: 'held-1', Containers: 0, Size: 1_000, VirtualSize: 1_000, SharedSize: 0 },
+        { Id: 'free-1', Containers: 0, Size: 500, VirtualSize: 500, SharedSize: 0 },
+      ],
+      Volumes: [],
+      Containers: [],
+    });
+
+    const dc = DockerController.getInstance(1);
+    const usage = await dc.getDiskUsage({ excludeHeldImages: true });
+
+    expect(usage.reclaimableImages).toBe(500);
+    expect(usage.reclaimableImageCount).toBe(1);
+  });
+
+  it('getDiskUsage with excludeHeldImages subtracts held unique bytes on the LayersSize fallback path', async () => {
+    holdStackImages(['held-1']);
+    mockDocker.df.mockResolvedValue({
+      LayersSize: 2_000,
+      Images: [
+        { Id: 'held-1', Containers: 0, Size: 1_000, VirtualSize: 1_000, SharedSize: 200 },
+        { Id: 'free-1', Containers: 0, Size: 500, VirtualSize: 500, SharedSize: 0 },
+        { Id: 'used-1', Containers: 1, Size: 800, VirtualSize: 800, SharedSize: 0 },
+      ],
+      Volumes: [],
+      Containers: [],
+    });
+
+    const dc = DockerController.getInstance(1);
+    const usage = await dc.getDiskUsage({ excludeHeldImages: true });
+
+    // Base: LayersSize 2_000 minus the in-use image's 800 = 1_200, count 2.
+    // Held unique bytes = 1_000 - 200 = 800. Excluded: 400, count 1.
+    expect(usage.reclaimableImages).toBe(400);
+    expect(usage.reclaimableImageCount).toBe(1);
+  });
+
+  it('getDiskUsage with excludeHeldImages clamps at zero when held bytes exceed the figure', async () => {
+    holdStackImages(['held-1']);
+    mockDocker.df.mockResolvedValue({
+      ImageUsage: { Reclaimable: 100 },
+      Images: [
+        { Id: 'held-1', Containers: 0, Size: 1_000, VirtualSize: 1_000, SharedSize: 0 },
+      ],
+      Volumes: [],
+      Containers: [],
+    });
+
+    const dc = DockerController.getInstance(1);
+    const usage = await dc.getDiskUsage({ excludeHeldImages: true });
+
+    expect(usage.reclaimableImages).toBe(0);
+    expect(usage.reclaimableImageCount).toBe(0);
+  });
+
+  it('getDiskUsage with excludeHeldImages does not subtract a held image that a container references', async () => {
+    holdStackImages(['held-1']);
+    mockDocker.df.mockResolvedValue({
+      ImageUsage: { Reclaimable: 1_500 },
+      Images: [
+        // Held but in use: never part of the reclaimable set, so exclusion
+        // must leave both bytes and count untouched.
+        { Id: 'held-1', Containers: 1, Size: 1_000, VirtualSize: 1_000, SharedSize: 0 },
+        { Id: 'free-1', Containers: 0, Size: 500, VirtualSize: 500, SharedSize: 0 },
+      ],
+      Volumes: [],
+      Containers: [],
+    });
+
+    const dc = DockerController.getInstance(1);
+    const usage = await dc.getDiskUsage({ excludeHeldImages: true });
+
+    expect(usage.reclaimableImages).toBe(1_500);
+    expect(usage.reclaimableImageCount).toBe(1);
+  });
+
+  it('getDiskUsage with excludeHeldImages fails closed to zero when the held lookup fails', async () => {
+    // A null held lookup means "held state unknown"; the predicate protects
+    // every image, matching the delete guard and the prune plan. The figure
+    // claims 0 rather than advertising bytes no prune can free.
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(null);
+    mockDocker.df.mockResolvedValue({
+      ImageUsage: { Reclaimable: 1_500 },
+      Images: [
+        { Id: 'free-1', Containers: 0, Size: 1_500, VirtualSize: 1_500, SharedSize: 0 },
+      ],
+      Volumes: [],
+      Containers: [],
+    });
+
+    const dc = DockerController.getInstance(1);
+    const excluded = await dc.getDiskUsage({ excludeHeldImages: true });
+    expect(excluded.reclaimableImages).toBe(0);
+    expect(excluded.reclaimableImageCount).toBe(0);
+
+    const plain = await dc.getDiskUsage();
+    expect(plain.reclaimableImages).toBe(1_500);
+    expect(plain.reclaimableImageCount).toBe(1);
+  });
+
+  it('getDiskUsage with excludeHeldImages subtracts service-scoped holds too', async () => {
+    // The unified predicate unions stack and service holds; a regression that
+    // dropped the service arm from the figure paths would not be caught by
+    // the stack-only tests.
+    vi.spyOn(ServiceUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set(['held-svc']));
+    mockDocker.df.mockResolvedValue({
+      ImageUsage: { Reclaimable: 1_500 },
+      Images: [
+        { Id: 'held-svc', Containers: 0, Size: 700, VirtualSize: 700, SharedSize: 0 },
+        { Id: 'free-1', Containers: 0, Size: 800, VirtualSize: 800, SharedSize: 0 },
+      ],
+      Volumes: [],
+      Containers: [],
+    });
+
+    const dc = DockerController.getInstance(1);
+    const usage = await dc.getDiskUsage({ excludeHeldImages: true });
+
+    expect(usage.reclaimableImages).toBe(800);
+    expect(usage.reclaimableImageCount).toBe(1);
+  });
+
+  it('getDiskUsage with excludeHeldImages clamps bytes but keeps the remaining count', async () => {
+    // Mixed boundary: held bytes exceed the daemon figure (bytes clamp to 0)
+    // while a non-held image keeps the count positive. Pins the bytes-side
+    // clamp independently of the count-side one.
+    holdStackImages(['held-1']);
+    mockDocker.df.mockResolvedValue({
+      ImageUsage: { Reclaimable: 100 },
+      Images: [
+        { Id: 'held-1', Containers: 0, Size: 1_000, VirtualSize: 1_000, SharedSize: 0 },
+        { Id: 'free-1', Containers: 0, Size: 50, VirtualSize: 50, SharedSize: 0 },
+      ],
+      Volumes: [],
+      Containers: [],
+    });
+
+    const dc = DockerController.getInstance(1);
+    const usage = await dc.getDiskUsage({ excludeHeldImages: true });
+
+    expect(usage.reclaimableImages).toBe(0);
+    expect(usage.reclaimableImageCount).toBe(1);
   });
 });
 
@@ -751,6 +977,78 @@ describe('DockerController - getClassifiedResources', () => {
     const img = result.images.find(i => i.Id === 'img-unrelated');
     expect(img?.rollbackProtected).toBe(true);
   });
+
+  it('getDiskUsageClassified excludes held bytes from the reclaimable figure but keeps inventory totals', async () => {
+    // The actual producer of the hero and treemap figures (GET /system/docker-df):
+    // the held image's bytes and count leave reclaimableImages, while the
+    // managed/unmanaged inventory totals are untouched.
+    holdStackImages(['img-held']);
+    mockDocker.df.mockResolvedValue({
+      ImageUsage: { Reclaimable: 1_500 },
+      Images: [
+        { Id: 'img-held', Containers: 0, Size: 1_000, VirtualSize: 1_000, SharedSize: 0 },
+        { Id: 'img-free', Containers: 0, Size: 500, VirtualSize: 500, SharedSize: 0 },
+        { Id: 'img-used', Containers: 1, Size: 2_000, VirtualSize: 2_000, SharedSize: 0 },
+        { Id: 'img-unmanaged', Containers: 1, Size: 300, VirtualSize: 300, SharedSize: 0 },
+      ],
+      Volumes: [],
+      Containers: [],
+    });
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-held', RepoTags: ['sencho-rb/abc123456789/web:hold'], Size: 1_000, Containers: 0 },
+      { Id: 'img-free', RepoTags: ['myregistry/app:1.4'], Size: 500, Containers: 0 },
+      { Id: 'img-used', RepoTags: ['myregistry/app:2.0'], Size: 2_000, Containers: 1 },
+      { Id: 'img-unmanaged', RepoTags: ['other/container:1'], Size: 300, Containers: 1 },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([
+      { Id: 'c1', ImageID: 'img-used', Labels: { 'com.docker.compose.project': 'my-stack' } },
+      { Id: 'c2', ImageID: 'img-unmanaged', Labels: { 'com.docker.compose.project': 'other' } },
+    ]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
+    mockDocker.listNetworks.mockResolvedValue([]);
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getDiskUsageClassified(['my-stack']);
+
+    expect(result.reclaimableImages).toBe(500);
+    expect(result.reclaimableImageCount).toBe(1);
+    expect(result.managedImageBytes).toBe(2_000);
+    expect(result.unmanagedImageBytes).toBe(300);
+  });
+
+  it('getDiskUsageClassified stays internally consistent when the held lookup fails', async () => {
+    // Split-read state: the reclaimable figure and the rollback badges run
+    // independent held lookups. A null stack lookup fails both sides closed,
+    // so the response claims 0 reclaimable images while every classified
+    // image is badged protected, never the reverse.
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(null);
+    mockDocker.df.mockResolvedValue({
+      ImageUsage: { Reclaimable: 1_500 },
+      Images: [
+        { Id: 'img-free', Containers: 0, Size: 1_500, VirtualSize: 1_500, SharedSize: 0 },
+      ],
+      Volumes: [],
+      Containers: [],
+    });
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-free', RepoTags: ['myregistry/app:1.4'], Size: 1_500, Containers: 0 },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
+    mockDocker.listNetworks.mockResolvedValue([]);
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getDiskUsageClassified(['my-stack']);
+
+    expect(result.reclaimableImages).toBe(0);
+    expect(result.reclaimableImageCount).toBe(0);
+    // The badge side (a separate /system/resources response) fails closed the
+    // same way under the same null lookup, so the two surfaces never disagree
+    // in direction.
+    const classified = await dc.getClassifiedResources(['my-stack']);
+    const img = classified.images.find(i => i.Id === 'img-free');
+    expect(img?.rollbackProtected).toBe(true);
+  });
 });
 
 // ── pruneManagedOnly / estimateManagedReclaim (images) ─────────────────
@@ -783,6 +1081,42 @@ describe('DockerController - managed image prune accounting', () => {
     const result = await dc.estimateManagedReclaim('images', ['any-stack']);
 
     expect(result.reclaimableBytes).toBe(1200);
+  });
+
+  it('estimateManagedReclaim skips a held image even when its compose labels match', async () => {
+    // docker tag preserves labels, so a held image can carry the stack's
+    // com.docker.compose.project label and would otherwise pass the
+    // repo/label classifier. The held check runs before classification so
+    // the estimate matches the destructive path (pruneManagedOnly).
+    holdStackImages(['img-held']);
+    mockDocker.df.mockResolvedValue({
+      Images: [
+        { Id: 'img-held', SharedSize: 0 },
+        { Id: 'img-free', SharedSize: 0 },
+      ],
+    });
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-held', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
+      { Id: 'img-free', Containers: 0, Size: 600, Labels: { 'com.docker.compose.project': 'any-stack' } },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([]);
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.estimateManagedReclaim('images', ['any-stack']);
+
+    expect(result.reclaimableBytes).toBe(600);
+  });
+
+  it('estimateManagedReclaim fails closed to zero when the held lookup fails', async () => {
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(null);
+    mockDocker.df.mockResolvedValue(sharedLayerDfMock);
+    mockDocker.listImages.mockResolvedValue(unusedManagedListMock);
+    mockDocker.listContainers.mockResolvedValue([]);
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.estimateManagedReclaim('images', ['any-stack']);
+
+    expect(result.reclaimableBytes).toBe(0);
   });
 
   it('pruneManagedOnly reports the LayersSize delta as the reclaimed total', async () => {

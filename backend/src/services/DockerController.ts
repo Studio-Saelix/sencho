@@ -324,7 +324,16 @@ class DockerController {
     return data as T;
   }
 
-  public async getDiskUsage() {
+  /**
+   * Docker daemon disk usage, with an optional rollback-hold exclusion.
+   * `excludeHeldImages` makes the figure mean "what a prune can actually
+   * free": rollback-held images (sencho-rb/*:hold) are counted by the daemon
+   * as unused but every Sencho prune path refuses to remove them, so figures
+   * that claim prunability must subtract them. The default keeps the raw
+   * daemon math for callers whose claim is "unused Docker data" (the
+   * MonitorService janitor alert), not "what a prune frees".
+   */
+  public async getDiskUsage(opts?: { excludeHeldImages: boolean }) {
     const df = await this.docker.df();
 
     const reclaimableContainers = (items: any[]) => {
@@ -402,9 +411,31 @@ class DockerController {
     };
 
     const imageUsage = (df as { ImageUsage?: { Reclaimable?: number } }).ImageUsage;
-    const images = df.Images
+    let images = df.Images
       ? reclaimableImages(df.Images, df.LayersSize ?? 0, imageUsage?.Reclaimable)
       : { bytes: 0, count: 0 };
+
+    if (opts?.excludeHeldImages === true && Array.isArray(df.Images) && df.Images.length > 0) {
+      // Only images that counted as reclaimable (Containers === 0) are
+      // adjusted, so bytes and count stay consistent subsets of the base
+      // figures. Dynamic import avoids the static cycle (StackUpdateRecoveryService
+      // imports this class; see getClassifiedResources below for the same pattern).
+      const { buildUnifiedHeldImagePredicate } = await import('./recoveryHeldImages');
+      const isImageHeld = buildUnifiedHeldImagePredicate(this.nodeId);
+      const sharedSizes = DockerController.mapSharedSizesFromDf(df);
+      let heldBytes = 0;
+      let heldCount = 0;
+      for (const img of df.Images) {
+        if (!img?.Id || (img.Containers ?? 0) !== 0 || !isImageHeld(img.Id)) continue;
+        heldBytes += DockerController.imageUniqueBytes(img, sharedSizes);
+        heldCount += 1;
+      }
+      images = {
+        bytes: Math.max(0, images.bytes - heldBytes),
+        count: Math.max(0, images.count - heldCount),
+      };
+    }
+
     const containers = df.Containers ? reclaimableContainers(df.Containers) : { bytes: 0, count: 0 };
     const volumes = df.Volumes ? reclaimableVolumes(df.Volumes) : { bytes: 0, count: 0 };
     const buildCache = df.BuildCache ? reclaimableBuildCache(df.BuildCache) : { bytes: 0, count: 0 };
@@ -941,8 +972,13 @@ class DockerController {
         Containers?: number;
       }>;
       const { repoKeys } = buildManagedImageRepoSet(managedContainers, rawImages);
+      // Dynamic import for the same cycle reason as getDiskUsage: a held image
+      // can carry compose labels (docker tag preserves them), so the repo/label
+      // classifier would otherwise count it and over-report the estimate.
+      const { buildUnifiedHeldImagePredicate } = await import('./recoveryHeldImages');
+      const isImageHeld = buildUnifiedHeldImagePredicate(this.nodeId);
       const prunable = rawImages.filter((img) => {
-        if (img.Containers !== 0 || selfIdentity.isOwnImage(img.Id)) return false;
+        if (img.Containers !== 0 || selfIdentity.isOwnImage(img.Id) || isImageHeld(img.Id)) return false;
         return classifyManagedImageCandidate({
           imageId: img.Id,
           labels: img.Labels,
@@ -966,15 +1002,17 @@ class DockerController {
   /**
    * Non-destructive estimate for the `all` (system) prune scope. Uses only
    * `docker system df` so the readout matches the daemon's own reclaimable
-   * totals for each resource type. `knownStackNames` is retained for
-   * call-site symmetry with {@link estimateManagedReclaim} and is unused
-   * by this method.
+   * totals for each resource type, except the images figure, which excludes
+   * rollback-held images so the estimate matches what the prune plan will
+   * actually remove (the plan skips held images). `knownStackNames` is
+   * retained for call-site symmetry with {@link estimateManagedReclaim} and
+   * is unused by this method.
    */
   public async estimateSystemReclaim(
     target: 'containers' | 'images' | 'networks' | 'volumes',
     _knownStackNames: string[],
   ): Promise<{ reclaimableBytes: number }> {
-    const df = await this.getDiskUsage();
+    const df = await this.getDiskUsage(target === 'images' ? { excludeHeldImages: true } : undefined);
     if (target === 'images') return { reclaimableBytes: df.reclaimableImages };
     if (target === 'containers') return { reclaimableBytes: df.reclaimableContainers };
     if (target === 'volumes') return { reclaimableBytes: df.reclaimableVolumes };
@@ -1653,7 +1691,9 @@ class DockerController {
     unmanagedVolumeBytes: number;
   }> {
     const [base, classified] = await Promise.all([
-      this.getDiskUsage(),
+      // Exclude rollback-held images so the banner/treemap figure matches
+      // what a prune can actually free (see getDiskUsage docs).
+      this.getDiskUsage({ excludeHeldImages: true }),
       this.getClassifiedResources(knownStackNames),
     ]);
 
