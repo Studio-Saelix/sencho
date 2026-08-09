@@ -106,6 +106,45 @@ export async function isSelfStack(stackName: string, composeDir?: string): Promi
   }
 }
 
+/**
+ * Identity sources for the self-stack check, resolved once and reused
+ * across every stack in a request (the /statuses handler resolves it once
+ * per request). The compose project name is a boot-cached property lookup;
+ * the container labels fallback (which lists every container on the node)
+ * is a single read shared by all stacks. Either source degrades
+ * independently to null, so a failure in one never discards the other.
+ */
+export interface SelfStackIdentity {
+  projectName: string | null;
+  labels: Record<string, string> | null;
+}
+
+/**
+ * Resolves both identity sources. Each failure degrades only its own
+ * source to null, matching the old per-stack behavior where a labels
+ * failure never discarded the resolved project name.
+ */
+export async function resolveSelfStackIdentity(): Promise<SelfStackIdentity> {
+  const projectName = await getSelfStackProjectName().catch((error) => {
+    console.error('Failed to resolve self-stack project name; self-stack check degraded:', error);
+    return null;
+  });
+  const labels = await getRunningContainerLabels().catch((error) => {
+    console.error('Failed to resolve self-stack container labels; self-stack check degraded:', error);
+    return null;
+  });
+  return { projectName, labels };
+}
+
+/** isSelf semantics identical to isSelfStack() when the identity resolves successfully. */
+export function isSelfStackByIdentity(identity: SelfStackIdentity, stackName: string, composeDir?: string): boolean {
+  if (identity.projectName === stackName) return true;
+  const labels = identity.labels;
+  if (!labels) return false;
+  if (labels['com.docker.compose.project'] === stackName) return true;
+  return workingDirMatchesStack(labels['com.docker.compose.project.working_dir'], stackName, composeDir);
+}
+
 export interface SelfStackProtectedResult {
   stackName: string;
   ok: false;

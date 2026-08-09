@@ -20,6 +20,7 @@ import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_PASSWORD } from './help
 import { installArcstatsFsMock, arcstatsBody, DEFAULT_ARC_PATH, type ArcstatsFsMock } from './helpers/arcstatsFsMock';
 import { GitSourceService } from '../services/GitSourceService';
 import type { PublicGitSource } from '../services/GitSourceService';
+import * as selfStackGuard from '../helpers/selfStackGuard';
 
 // ── Hoisted mocks (must come before importing the app) ─────────────────
 
@@ -282,6 +283,49 @@ describe('GET /api/stacks/statuses caching', () => {
     expect(mockGetBulkStackStatuses).toHaveBeenCalledTimes(1); // status portion served from cache
 
     listSpy.mockRestore();
+  });
+
+  it('resolves self-stack identity once per request, cache hits included, and labels each stack from it', async () => {
+    mockGetStacks.mockResolvedValue(['sencho.yml', 'web.yml']);
+    mockGetBulkStackStatuses.mockResolvedValue({
+      sencho: { status: 'running' },
+      web: { status: 'running' },
+    });
+    const identitySpy = vi
+      .spyOn(selfStackGuard, 'resolveSelfStackIdentity')
+      .mockResolvedValue({ projectName: 'sencho', labels: null });
+
+    const first = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+    const second = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+
+    // Hoisted: one resolution per request (including the cache hit) serves
+    // every stack in the response.
+    expect(identitySpy).toHaveBeenCalledTimes(2);
+    for (const res of [first, second]) {
+      expect(res.body['sencho.yml'].isSelf).toBe(true);
+      expect(res.body['web.yml'].isSelf).toBe(false);
+    }
+
+    identitySpy.mockRestore();
+  });
+
+  it('serves 200 with isSelf false everywhere when identity resolution degrades', async () => {
+    mockGetStacks.mockResolvedValue(['web.yml', 'db.yml']);
+    mockGetBulkStackStatuses.mockResolvedValue({
+      web: { status: 'running' },
+      db: { status: 'running' },
+    });
+    const identitySpy = vi
+      .spyOn(selfStackGuard, 'resolveSelfStackIdentity')
+      .mockResolvedValue({ projectName: null, labels: null });
+
+    const res = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body['web.yml'].isSelf).toBe(false);
+    expect(res.body['db.yml'].isSelf).toBe(false);
+
+    identitySpy.mockRestore();
   });
 
   it('falls back to local labels (200, not 500) when the git-source lookup throws', async () => {

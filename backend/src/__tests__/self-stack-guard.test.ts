@@ -3,7 +3,9 @@ import SelfIdentityService from '../services/SelfIdentityService';
 import DockerController from '../services/DockerController';
 import {
   isSelfStack,
+  isSelfStackByIdentity,
   getSelfStackProjectName,
+  resolveSelfStackIdentity,
   SELF_STACK_PROTECTED_CODE,
   SELF_STACK_PROTECTED_MESSAGE,
   selfStackProtectedBulkResult,
@@ -90,6 +92,96 @@ describe('getSelfStackProjectName', () => {
   it('returns the compose project from SelfIdentityService', async () => {
     stubComposeProject('my-sencho');
     expect(await getSelfStackProjectName()).toBe('my-sencho');
+  });
+});
+
+describe('resolveSelfStackIdentity + isSelfStackByIdentity', () => {
+  it('matches the stack whose name equals the resolved project name', async () => {
+    stubComposeProject('sencho');
+    const identity = await resolveSelfStackIdentity();
+    expect(isSelfStackByIdentity(identity, 'sencho')).toBe(true);
+    expect(isSelfStackByIdentity(identity, 'web')).toBe(false);
+  });
+
+  it('matches by the container compose project label when the project name is unknown', async () => {
+    const runtimeId = 'c'.repeat(64);
+    process.env.HOSTNAME = runtimeId.slice(0, 12);
+    stubComposeProject(null);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDocker: () => ({
+        listContainers: vi.fn().mockResolvedValue([
+          {
+            Id: runtimeId,
+            Labels: { 'com.docker.compose.project': 'renamed-project' },
+          },
+        ]),
+      }),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const identity = await resolveSelfStackIdentity();
+    expect(isSelfStackByIdentity(identity, 'renamed-project')).toBe(true);
+    expect(isSelfStackByIdentity(identity, 'web')).toBe(false);
+  });
+
+  it('matches by the working directory basename inside the compose dir', async () => {
+    const runtimeId = 'd'.repeat(64);
+    process.env.HOSTNAME = runtimeId.slice(0, 12);
+    stubComposeProject(null);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDocker: () => ({
+        listContainers: vi.fn().mockResolvedValue([
+          {
+            Id: runtimeId,
+            Labels: { 'com.docker.compose.project.working_dir': '/app/compose/sencho' },
+          },
+        ]),
+      }),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const identity = await resolveSelfStackIdentity();
+    expect(isSelfStackByIdentity(identity, 'sencho', '/app/compose')).toBe(true);
+  });
+
+  it('does not match a working directory outside the compose dir', async () => {
+    const runtimeId = 'g'.repeat(64);
+    process.env.HOSTNAME = runtimeId.slice(0, 12);
+    stubComposeProject(null);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDocker: () => ({
+        listContainers: vi.fn().mockResolvedValue([
+          {
+            Id: runtimeId,
+            Labels: { 'com.docker.compose.project.working_dir': '/srv/other/sencho' },
+          },
+        ]),
+      }),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const identity = await resolveSelfStackIdentity();
+    expect(isSelfStackByIdentity(identity, 'sencho', '/app/compose')).toBe(false);
+  });
+
+  it('is false when no identity source is available', async () => {
+    stubComposeProject(null);
+    const identity = await resolveSelfStackIdentity();
+    expect(isSelfStackByIdentity(identity, 'sencho')).toBe(false);
+  });
+
+  it('resolves identity with at most one container list read, shared by all stacks', async () => {
+    const runtimeId = 'e'.repeat(64);
+    process.env.HOSTNAME = runtimeId.slice(0, 12);
+    stubComposeProject('sencho');
+    const listContainers = vi.fn().mockResolvedValue([]);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDocker: () => ({ listContainers }),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const identity = await resolveSelfStackIdentity();
+    // Reuse the resolved identity across every stack in the request.
+    for (const name of ['sencho', 'web', 'db', 'cache']) {
+      isSelfStackByIdentity(identity, name, '/app/compose');
+    }
+    expect(listContainers).toHaveBeenCalledTimes(1);
   });
 });
 
