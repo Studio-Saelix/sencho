@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-* **compose-doctor:** recognize Docker socket proxy topologies ([#1791](https://github.com/Studio-Saelix/sencho/issues/1791)) ([bb98cba](https://github.com/Studio-Saelix/sencho/commit/bb98cba1f2ca7796a3732c1de6b77e2bd579ea69))
+* **compose-doctor:** recognize Docker socket proxy topologies ([#1791](https://github.com/Studio-Saelix/sencho/issues/1791)) ([bb98cba](https://github.com/Studio-Saelix/sencho/commit/bb98cba1f2ca7796a3732c1de6b77e2bd579ea69)), thanks @Crosis47
 * **fleet-sync:** open status and reset-anchor to Community admins ([#1792](https://github.com/Studio-Saelix/sencho/issues/1792)) ([b9e73f7](https://github.com/Studio-Saelix/sencho/commit/b9e73f7bd8423e8b8c2279925de241e91903f853))
 * **fleet:** reject negative or non-finite remote reclaimableBytes in prune estimate ([#1803](https://github.com/Studio-Saelix/sencho/issues/1803)) ([0d5ff26](https://github.com/Studio-Saelix/sencho/commit/0d5ff26a8ffa68d54cd0a4d1c9514dd527f3cee1))
 * **nodes:** return conflict on duplicate rename ([#1801](https://github.com/Studio-Saelix/sencho/issues/1801)) ([5014ad2](https://github.com/Studio-Saelix/sencho/commit/5014ad20a6ee8ff42075138ec4a75371c6fa14e1))
