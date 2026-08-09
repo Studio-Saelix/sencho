@@ -69,7 +69,13 @@ import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelec
 import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/envFileResolution';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
-import { isSelfStack, refuseIfSelfStack, selfStackProtectedBulkResult } from '../helpers/selfStackGuard';
+import {
+  isSelfStack,
+  isSelfStackByIdentity,
+  refuseIfSelfStack,
+  resolveSelfStackIdentity,
+  selfStackProtectedBulkResult,
+} from '../helpers/selfStackGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { classifyStackApiPath } from '../helpers/stackRouteAuth';
@@ -335,6 +341,7 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
   let outcome: 'ok' | 'error' = 'ok';
   let cacheOutcome: CacheFetchOutcome | null = null;
   let dockerMs: number | null = null;
+  let enrichmentMs: number | null = null;
   let count = 0;
   try {
     const { value: result, outcome: fetchOutcome } = await CacheService.getInstance().getOrFetchWithMeta(
@@ -357,6 +364,7 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
     );
     cacheOutcome = fetchOutcome;
     count = Object.keys(result).length;
+    const enrichmentStartedAt = Date.now();
     // Git-source labels are computed live, outside the cache, so linking or
     // unlinking a stack's Git source is reflected immediately. The Docker
     // status portion keeps its short TTL; only the cheap source label is fresh.
@@ -368,17 +376,20 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
     } catch (sourceError) {
       console.error('Failed to load git sources for status labels; defaulting to local:', sourceError);
     }
+    // Self-stack identity is resolved once per request instead of once per
+    // stack, so cache hits no longer pay N container-list calls.
+    const selfIdentity = count > 0 ? await resolveSelfStackIdentity() : { projectName: null, labels: null };
     const withSource: Record<string, BulkStackInfo & { source: 'local' | 'git' }> = {};
     const composeDir = FileSystemService.getInstance(req.nodeId).getBaseDir();
     for (const [stack, info] of Object.entries(result)) {
       const name = stack.replace(/\.(yml|yaml)$/, '');
-      const isSelf = await isSelfStack(name, composeDir);
       withSource[stack] = {
         ...info,
         source: gitStackNames.has(name) ? 'git' : 'local',
-        isSelf,
+        isSelf: isSelfStackByIdentity(selfIdentity, name, composeDir),
       };
     }
+    enrichmentMs = Date.now() - enrichmentStartedAt;
     res.json(withSource);
   } catch (error) {
     outcome = 'error';
@@ -391,6 +402,7 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
       cacheOutcome,
       count,
       dockerMs,
+      enrichmentMs,
       elapsedMs: Date.now() - startedAt,
       outcome,
     });
