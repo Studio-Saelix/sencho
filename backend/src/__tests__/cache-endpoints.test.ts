@@ -309,6 +309,20 @@ describe('GET /api/stacks/statuses caching', () => {
     identitySpy.mockRestore();
   });
 
+  it('skips identity resolution entirely when the node has no stacks', async () => {
+    mockGetStacks.mockResolvedValue([]);
+    mockGetBulkStackStatuses.mockResolvedValue({});
+    const identitySpy = vi.spyOn(selfStackGuard, 'resolveSelfStackIdentity');
+
+    const res = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({});
+    expect(identitySpy).not.toHaveBeenCalled();
+
+    identitySpy.mockRestore();
+  });
+
   it('serves 200 with isSelf false everywhere when identity resolution degrades', async () => {
     mockGetStacks.mockResolvedValue(['web.yml', 'db.yml']);
     mockGetBulkStackStatuses.mockResolvedValue({
