@@ -107,7 +107,7 @@ export function RollbackGenerationsTab({ generations, isLoading, isAdmin, nodeId
                         <TableRow>
                             <TableHead>Stack</TableHead>
                             <TableHead>Generation</TableHead>
-                            <TableHead>State</TableHead>
+                            <TableHead className="text-center">State</TableHead>
                             <TableHead>Retention</TableHead>
                             <TableHead className="text-right">Actions</TableHead>
                         </TableRow>
@@ -139,7 +139,7 @@ export function RollbackGenerationsTab({ generations, isLoading, isAdmin, nodeId
                                     </button>
                                 </TableCell>
                                 <TableCell className="font-mono text-xs text-muted-foreground">{gen.shortId}</TableCell>
-                                <TableCell><StateBadge gen={gen} /></TableCell>
+                                <TableCell className="text-center"><StateBadge gen={gen} /></TableCell>
                                 <TableCell className="text-xs text-stat-subtitle">{formatExpiry(gen)}</TableCell>
                                 <TableCell className="text-right">
                                     {isAdmin && (
