@@ -38,6 +38,10 @@ The user-facing effect is `psql -h db.api.opsix.sencho` from a container on any 
 - Functioning `sencho_mesh` data plane on every node that should participate. The Routing tab shows a red banner if a node's data plane did not come up; the troubleshooting section below covers each cause.
 - Per-stack opt-in. Enabling mesh on a node does not automatically place every stack into the mesh; each stack is opted in individually.
 
+<Note>
+  Enabling the mesh creates and connects Docker networks on each participating node. When a node runs behind a Docker socket proxy, the proxy must allow the NETWORKS group (create, inspect, connect) and POST. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy).
+</Note>
+
 App-layer authentication is **not** in scope. Postgres still needs a password, Redis still needs an ACL, your internal HTTP API still needs whatever auth it normally uses. The mesh moves bytes; it does not authenticate the protocols inside those bytes.
 
 ## Enable the mesh

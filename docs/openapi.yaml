@@ -2793,9 +2793,9 @@ paths:
 
         Compute the signature as: `sha256=` + HMAC-SHA256(raw_request_body, webhook_secret).
 
-        Every unauthenticated rejection (unknown id, disabled webhook, non-paid licence,
-        missing or invalid signature, empty body) returns the same `404` response so callers
-        cannot enumerate webhook ids or fingerprint the instance's licence tier.
+        Every unauthenticated rejection (unknown id, disabled webhook, missing or invalid
+        signature, empty body) returns the same `404` response so callers cannot enumerate
+        webhook ids from the response surface.
       security:
         - webhookSignature: []
       parameters:
@@ -2833,7 +2833,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "404":
-          description: Authentication failed. The webhook is unknown, disabled, the licence is not paid, the signature header is missing, the body was empty, or the signature did not match. Sencho returns the same response for every unauthenticated case.
+          description: Authentication failed. The webhook is unknown or disabled, the signature header is missing, the body was empty, or the signature did not match. Sencho returns the same response for every unauthenticated case.
           content:
             application/json:
               schema:
@@ -3908,7 +3908,7 @@ paths:
       summary: List registries
       description: |
         Returns all configured private container registries. Secrets are never included in the response.
-        Requires Admiral license and admin role. API tokens receive `SCOPE_DENIED`.
+        Admin role required. Available on every tier. API tokens receive `SCOPE_DENIED`.
       responses:
         "200":
           description: Array of registry objects.
@@ -3928,7 +3928,7 @@ paths:
       summary: Create registry
       description: |
         Adds a new private container registry. The secret is encrypted at rest using AES-256-GCM.
-        Requires Admiral license and admin role. API tokens receive `SCOPE_DENIED`.
+        Admin role required. Docker Hub, GHCR, and custom registries are available on every tier. Creating an AWS ECR registry requires an Admiral license. API tokens receive `SCOPE_DENIED`.
       requestBody:
         required: true
         content:
@@ -3963,8 +3963,8 @@ paths:
       tags: [Registries]
       summary: Update registry
       description: |
-        Updates an existing registry. All fields are optional — only provided fields are changed.
-        Requires Admiral license and admin role. API tokens receive `SCOPE_DENIED`.
+        Updates an existing registry. All fields are optional; only provided fields are changed.
+        Admin role required. Updating a Docker Hub, GHCR, or custom registry is available on every tier. Updating an AWS ECR registry requires an Admiral license. API tokens receive `SCOPE_DENIED`.
       parameters:
         - $ref: "#/components/parameters/idPath"
       requestBody:
@@ -3998,7 +3998,7 @@ paths:
       summary: Delete registry
       description: |
         Removes a registry and its encrypted credentials.
-        Requires Admiral license and admin role. API tokens receive `SCOPE_DENIED`.
+        Admin role required. Available on every tier. API tokens receive `SCOPE_DENIED`.
       parameters:
         - $ref: "#/components/parameters/idPath"
       responses:
@@ -4028,7 +4028,7 @@ paths:
       summary: Test registry connection
       description: |
         Tests connectivity and authentication against a configured registry.
-        Requires Admiral license and admin role. API tokens receive `SCOPE_DENIED`.
+        Admin role required. Testing a Docker Hub, GHCR, or custom registry is available on every tier. Testing an AWS ECR registry requires an Admiral license. API tokens receive `SCOPE_DENIED`.
       parameters:
         - $ref: "#/components/parameters/idPath"
       responses:

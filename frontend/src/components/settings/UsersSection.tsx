@@ -11,7 +11,6 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { apiFetch } from '@/lib/api';
 import { useAuth, type UserRole } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
 import { CapabilityGate } from '@/components/CapabilityGate';
 import { RefreshCw, Trash2, Plus, Pencil, ShieldOff, AlertTriangle } from 'lucide-react';
 import { SettingsCallout } from './SettingsCallout';
@@ -169,7 +168,6 @@ function SessionPolicySection() {
 
 export function UsersSection() {
     const { user: currentUser } = useAuth();
-    const { isPaid } = useLicense();
     const [users, setUsers] = useState<UserItem[]>([]);
     const [loading, setLoading] = useState(true);
     const [showForm, setShowForm] = useState(false);
@@ -458,11 +456,9 @@ export function UsersSection() {
                                     options={[
                                         { value: 'admin', label: 'Admin' },
                                         { value: 'viewer', label: 'Viewer' },
-                                        ...(isPaid ? [
-                                            { value: 'deployer', label: 'Deployer' },
-                                            { value: 'node-admin', label: 'Node Admin' },
-                                            { value: 'auditor', label: 'Auditor' },
-                                        ] : []),
+                                        { value: 'deployer', label: 'Deployer' },
+                                        { value: 'node-admin', label: 'Node Admin' },
+                                        { value: 'auditor', label: 'Auditor' },
                                     ]}
                                     value={formRole}
                                     onValueChange={(v) => setFormRole(v as UserRole)}
@@ -504,8 +500,8 @@ export function UsersSection() {
                             </SettingsPrimaryButton>
                         </div>
 
-                        {/* Scoped Permissions (paid, editing only) */}
-                        {editingUser && isPaid && (
+                        {/* Scoped Permissions (editing only) */}
+                        {editingUser && (
                             <div className="border border-glass-border rounded-lg p-4 space-y-3 mt-4">
                                 <h4 className="text-sm font-medium">Scoped Permissions</h4>
                                 <p className="text-xs text-muted-foreground">

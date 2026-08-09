@@ -1,0 +1,111 @@
+---
+title: Set Up SSO with Custom OIDC
+sidebarTitle: Set up SSO
+description: Connect Sencho to your identity provider so your team signs in with credentials they already have, verified with a real end-to-end login.
+---
+
+Say your team already authenticates against a self-hosted identity provider, such as Keycloak, Authentik, or Authelia, and you'd rather they sign in to Sencho the same way than maintain a second password. This walks through registering Sencho as an OAuth client in that provider, wiring up Sencho's **Custom OIDC** provider to point at it, and confirming a real sign-in works end to end, using Keycloak as the worked example.
+
+By the end, a **Sign in with your identity provider** button appears on the Sencho login page, and signing in through it auto-provisions a new Sencho account with the role you configured.
+
+This tutorial covers **Custom OIDC** on Community, connected to a self-hosted provider. It does not cover the built-in **Google**, **GitHub**, or **Okta** presets (the same Sencho-side steps apply, with fewer fields to fill in), **LDAP / Active Directory** (Admiral only), **SSO only** mode, or mapping identity-provider groups to the Sencho Admin role. See the [SSO & LDAP Authentication](/features/sso) feature page for all of those, plus setup notes for other self-hosted providers.
+
+## Prerequisites
+
+- An **admin** account on the Sencho instance. Configuring SSO providers requires admin, on every tier.
+- An OIDC-compliant identity provider already running, with access to register a new OAuth client on it. This tutorial uses Keycloak; the Sencho-side steps are identical for Authentik, Authelia, or any other spec-compliant provider.
+- The identity provider must be reachable from Sencho over **HTTPS with a valid certificate**. A local dev instance behind plain HTTP, or a self-signed certificate Sencho doesn't trust, will not work.
+
+<Warning>
+  Sencho's OIDC discovery step rejects a plain `http://` Issuer URL outright, even for a same-host or `localhost` identity provider. If you're self-hosting your identity provider for the first time, put it behind a reverse proxy with a real certificate (Caddy with automatic HTTPS, or Traefik with Let's Encrypt) before starting this tutorial.
+</Warning>
+
+<Steps>
+  <Step title="Register Sencho as a client in your identity provider">
+    In Keycloak, open **Clients → Create client**. Set **Client ID** to `sencho`, leave **Client type** as **OpenID Connect**, and click **Next**. On the **Capability config** step, turn **Client authentication** on (this makes it a confidential client with a secret, which the form in the next step expects) and click **Next**. On **Login settings**, set **Valid redirect URIs** to your Sencho URL plus the callback path Sencho's SSO page displays at the bottom of the provider list:
+
+    ```
+    https://<your-sencho-url>/api/auth/sso/oidc/oidc_custom/callback
+    ```
+
+    Click **Save**. Open the new client's **Credentials** tab and copy the **Client secret**; you'll paste it into Sencho in the next step.
+  </Step>
+  <Step title="Open Custom OIDC in Sencho and fill in the provider">
+    In Sencho, click your avatar, choose **Settings**, then under **Access** pick **SSO**. Click the **Custom OIDC** card to expand it.
+
+    Fill in:
+
+    - **Display Name**: the label shown on the login button, for example `Corporate SSO`.
+    - **Issuer URL**: your identity provider's realm URL, without the `/.well-known/openid-configuration` suffix. For Keycloak this is `https://<your-idp-url>/realms/<realm-name>`.
+    - **Client ID**: `sencho`, matching what you set in step 1.
+    - **Client Secret**: the secret you copied from the Credentials tab.
+    - **Default Role**: leave as **Viewer**. This is the role a new SSO user gets unless they match the optional Admin Claim mapping (not covered here; see the feature page for group-based role mapping).
+
+    Leave **Admin Claim**, **Scopes**, and the claim-mapping fields blank; they fall back to sensible OIDC defaults for a standard Keycloak realm.
+
+    <Frame>
+      <img src="/images/tutorials/set-up-sso/custom-oidc-filled.png" alt="The Custom OIDC card expanded and toggled ON, with Display Name 'Corporate SSO', an Issuer URL ending in /realms/master, Client ID 'sencho', a Client Secret entered, and Default Role set to Viewer." />
+    </Frame>
+
+    Toggle the card's switch to **ON**, then click **Save**.
+  </Step>
+  <Step title="Test the connection">
+    Click **Test Connection**. Sencho performs live OIDC discovery against your Issuer URL and reports success or failure next to the button within a few seconds, before you attempt a real sign-in.
+
+    <Frame>
+      <img src="/images/tutorials/set-up-sso/test-connection-success.png" alt="The Custom OIDC card after clicking Test Connection, showing a green checkmark next to the Save and Test Connection buttons." />
+    </Frame>
+
+    A green check confirms Sencho reached the Issuer URL and parsed a valid OIDC discovery document. If it fails, see [If something goes wrong](#if-something-goes-wrong) below before continuing.
+  </Step>
+  <Step title="Sign out and sign in through SSO">
+    Log out of Sencho. The login page now shows your provider's button under **Or continue with**, using the Display Name you set.
+
+    <Frame>
+      <img src="/images/tutorials/set-up-sso/login-page-sso-button.png" alt="The Sencho sign-in page with the normal username and password fields, a divider labeled 'Or continue with', and a Corporate SSO button below it." />
+    </Frame>
+
+    Click it. Sencho redirects you to your identity provider's own login page.
+
+    <Frame>
+      <img src="/images/tutorials/set-up-sso/idp-login-redirect.png" alt="Keycloak's hosted sign-in page, reached by redirect from the Sencho login button, showing Username or email and Password fields." />
+    </Frame>
+
+    Sign in with a directory account that has never logged into Sencho before. On success, the identity provider redirects back and you land on the Sencho dashboard, already signed in.
+  </Step>
+</Steps>
+
+## Verify it worked
+
+Check from two places, since either alone only shows one side of provisioning.
+
+**Your own profile menu.** Click your avatar. It shows the username from your identity provider, a **Viewer** role pill (the Default Role from step 2), and a **Community** tier pill, confirming you're signed in as a newly provisioned account, not your admin session.
+
+<Frame>
+  <img src="/images/tutorials/set-up-sso/profile-badge-viewer.png" alt="The profile dropdown for the newly signed-in SSO user, showing the username, a Viewer role badge, and a Community tier badge, with Settings, Documentation, Open New Issue, and Log Out below." />
+</Frame>
+
+**The admin Users list.** Sign back in as an admin (local password, or an SSO account you've mapped to Admin) and open **Settings → Access → Users**. The new account appears in the table with today's date under **Created** and the same **Viewer** role, confirming the server-side record matches what the user saw.
+
+<Frame>
+  <img src="/images/tutorials/set-up-sso/users-list-provisioned.png" alt="The Users table under Settings, Access, Users, with a row for the newly auto-provisioned SSO user showing role Viewer and today's date under Created." />
+</Frame>
+
+On every later sign-in, this same account is reused. Its email and role are re-synced from the identity provider each time, so promoting or removing someone from your directory takes effect on their next login.
+
+## If something goes wrong
+
+**Test Connection fails immediately with an HTTPS-related error.** The Issuer URL almost certainly starts with `http://`. Sencho's discovery step requires HTTPS with a certificate it trusts; put a reverse proxy with a valid certificate in front of your identity provider (see the Warning above) and update the Issuer URL, then test again. If the URL is already `https://`, check that it doesn't include the `/.well-known/openid-configuration` suffix and that it exactly matches the `issuer` value your provider's own discovery document reports.
+
+The [SSO troubleshooting section](/features/sso#troubleshooting) covers issuer mismatches, wrong-username-on-first-login, and the redirect URI error message from the identity provider side.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="SSO & LDAP Authentication" icon="key" href="/features/sso">
+    Every provider (including LDAP), role mapping, SSO-only mode, and full troubleshooting.
+  </Card>
+  <Card title="Two-Factor Authentication" icon="shield-check" href="/features/two-factor-authentication">
+    Require a TOTP code on every SSO sign-in for a stricter posture than SSO alone.
+  </Card>
+</CardGroup>

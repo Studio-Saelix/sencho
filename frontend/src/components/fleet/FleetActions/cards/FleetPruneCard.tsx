@@ -416,7 +416,7 @@ function EstimateSection({ estimate }: { estimate: EstimateState }) {
                 {node.reachable ? (node.partial ? 'PART' : 'OK') : '--'}
               </span>
               <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-stat-value">{node.nodeName}</span>
-              <span className={cn(KICKER, 'shrink-0 tabular-nums', node.reachable ? 'text-stat-subtitle' : 'text-stat-icon')}>
+              <span className={cn(KICKER, 'shrink-0 tabular-nums', node.reachable ? 'text-stat-subtitle' : 'max-w-[55%] truncate text-stat-icon')}>
                 {node.reachable ? formatBytes(node.reclaimableBytes) : (node.error ?? 'unreachable')}
               </span>
             </li>

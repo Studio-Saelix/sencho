@@ -1,0 +1,117 @@
+---
+title: Stop a Deploy When a Required Environment Variable Is Missing
+sidebarTitle: Block a missing required var
+description: Turn on the deploy guardrail that refuses a stack update when a required environment variable has no value, and watch it catch a real missing password before anything breaks.
+---
+
+Say a stack declares a required database password with `${DB_PASSWORD:?message}` in its Compose file. Nothing stops a teammate from clearing that value in `.env` by accident, and a normal `docker compose up` would let the mistake ride until the container fails at runtime. This walks through turning on the guardrail that catches it up front instead: you'll deploy a small Postgres stack with a required password, clear the password to simulate the mistake, watch the next update get refused with a clear message naming the variable, then fix it and confirm the update goes through.
+
+This tutorial covers one guardrail: **Block deploy on missing required env vars**. It doesn't cover the rest of the Environment inventory (secret classification, duplicate or shell-only detection, project environment file selection) or the other Deploy Guardrails settings (health observation, rollback retention, automatic external network creation); see the [Environment and Secrets Guardrails](/features/environment-guardrails) feature page for the complete picture.
+
+## Prerequisites
+
+- The `admin` or `node-admin` role. Changing the guardrail setting needs `node:manage` permission, which both roles hold; updating the stack needs `stack:deploy`, which every role except `viewer` and `auditor` holds.
+- Available on every tier; no Admiral requirement.
+- The setting is scoped to one node. If you manage more than one, turn it on for the node you deploy the scenario stack to.
+
+<Steps>
+  <Step title="Deploy a stack with a required password">
+    Select **Create Stack**, name it `inventory-db`, and replace its Compose file with:
+
+    ```yaml
+    services:
+      db:
+        image: postgres:16
+        restart: always
+        environment:
+          POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env before deploying}
+          POSTGRES_DB: inventory
+        ports:
+          - "5432:5432"
+    ```
+
+    The `${DB_PASSWORD:?message}` syntax tells Compose the variable is required: it refuses to render the stack at all if `DB_PASSWORD` has no value, anywhere in the file. The **.env** tab stays disabled until a project environment file exists, so switch to the **Files** tab, select **New file**, and create one named `.env`. Open it and add `DB_PASSWORD=devpassword123` before your first deploy. Setting it now gets you a clean first deploy; the next steps remove it on purpose to see the guardrail react.
+
+    <Frame>
+      <img src="/images/tutorials/configure-environment-guardrails/compose-required-password.png" alt="Compose editor for inventory-db showing a single db service: image postgres:16, restart always, environment with POSTGRES_PASSWORD set to the interpolation ${DB_PASSWORD:?Set DB_PASSWORD in .env before deploying}, POSTGRES_DB inventory, and port 5432 published." />
+    </Frame>
+
+    Select **Save & Deploy**. The container comes up healthy.
+  </Step>
+  <Step title="Confirm the variable in the Environment tab">
+    Open the stack and switch to the **Environment** tab in the Anatomy panel header. `DB_PASSWORD` appears under **present** with **secret** and **required** badges, sourced from `.env` and scoped to interpolation. The lock badge means its value is never read into the inventory, only its presence and status.
+
+    <Frame>
+      <img src="/images/tutorials/configure-environment-guardrails/env-tab-db-password-required.png" alt="Environment tab for inventory-db showing 3 vars, 2 likely secret, and a present group listing DB_PASSWORD (secret, required, present, source .env, scope interpolation), POSTGRES_DB (present, source inline, scope injected), and POSTGRES_PASSWORD (secret, present, source inline, scope injected)." />
+    </Frame>
+  </Step>
+  <Step title="Turn on the guardrail">
+    Open **Settings** → **Infrastructure** → **Stacks** and find the **Deploy Guardrails** section. Turn on **Block deploy on missing required env vars**, then select **Save settings**. It's off by default: without it, Compose only reports a missing required variable when the deploy or update actually runs.
+
+    <Frame>
+      <img src="/images/tutorials/configure-environment-guardrails/deploy-guardrails-setting-on.png" alt="Deploy Guardrails settings section with Block deploy on missing required env vars set to ON, alongside Observe health after updates, Observation window, Superseded rollback retention, Maximum retained rollback generations, and Automatically create missing external networks." />
+    </Frame>
+  </Step>
+  <Step title="Clear the password to simulate the mistake">
+    Back on `inventory-db`, open the **.env** tab and clear the value so the line reads `DB_PASSWORD=`. Select **Save & Deploy** and choose **Save Only** from the dropdown next to it, so the change is written to disk without triggering a deploy yet.
+
+    <Frame>
+      <img src="/images/tutorials/configure-environment-guardrails/env-file-password-cleared.png" alt=".env editor for inventory-db showing a single line, DB_PASSWORD with no value, with the stack still running above." />
+    </Frame>
+  </Step>
+  <Step title="Update the stack and watch the guardrail fire">
+    Select **Update**. A readiness dialog summarizes preflight, drift, current containers, and a few other checks; note that none of them mention environment variables; the dialog can say **ready** even though this update is about to be refused. Select **Update now** anyway.
+
+    The update fails immediately, before any image pull or container change, with **Deploy blocked: required environment variable DB_PASSWORD is missing. Define it in a .env or env_file, then deploy again.** The full message is easiest to read from the notification bell in the top bar.
+
+    <Frame>
+      <img src="/images/tutorials/configure-environment-guardrails/update-blocked-notification.png" alt="Notifications panel with the top entry reading 'Deploy blocked: required environment variable DB_PASSWORD is missing. Define it in a .env or env_file, then deploy again.', 2 minutes ago, above older entries for a vulnerability scan, a health gate pass, and an image update." />
+    </Frame>
+  </Step>
+  <Step title="Fix it and confirm the update succeeds">
+    Reopen the **.env** tab, set the line back to `DB_PASSWORD=devpassword123`, and save. Select **Update** again. This time it runs to completion: the image pulls, the container recreates, and the health gate passes.
+
+    <Frame>
+      <img src="/images/tutorials/configure-environment-guardrails/update-succeeded-health-gate.png" alt="Updating inventory-db progress dialog showing Succeeded, a passed health gate message, and a log ending in '=== Stack updated successfully ===' and '=== Pruned dangling images ==='." />
+    </Frame>
+  </Step>
+</Steps>
+
+## Verify it worked
+
+Check from two independent surfaces so you're not trusting a single UI element.
+
+**The Activity tab.** Open the stack's **Activity** tab. Reading newest first, you'll see the health gate pass and the successful update sitting right above the earlier **Deploy blocked** entry, so the block and the recovery are both on the record with the account that triggered each one.
+
+<Frame>
+  <img src="/images/tutorials/configure-environment-guardrails/activity-tab-block-and-fix.png" alt="Activity tab for inventory-db listing, newest first: health gate passed, stack updated, update started, Deploy blocked: required environment variable DB_PASSWORD is missing, an earlier vulnerability scan and health gate pass, and the original deploy." />
+</Frame>
+
+**The Environment tab.** Reopen it: `DB_PASSWORD` is back under **present** with its **required** badge, and the summary line reads 0 missing.
+
+## If something goes wrong
+
+**The variable still shows missing after you set it, but in the wrong place.** Compose's `${VAR:?message}` interpolation only resolves from the project `.env` file (or the shell), never from a service's `env_file:` entries: those are only injected into the container after interpolation already ran. Moving `DB_PASSWORD` into a separate `env_file:`-declared file instead of the project `.env` reproduces the exact same block, because as far as interpolation is concerned the variable is still unset.
+
+<Frame>
+  <img src="/images/tutorials/configure-environment-guardrails/compose-env-file-mistake.png" alt="Compose editor for inventory-db showing env_file: - secrets.env added under the db service, with POSTGRES_PASSWORD still set to the ${DB_PASSWORD:?...} interpolation." />
+</Frame>
+
+Move the value back into the project `.env` file (or add it there in addition to the `env_file`) and redeploy; the guardrail clears as soon as interpolation can see it. See [Environment and Secrets Guardrails](/features/environment-guardrails#interpolation-versus-container-injection) for the full interpolation-versus-injection explanation.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Environment and Secrets Guardrails" icon="triangle-exclamation" href="/features/environment-guardrails">
+    The full inventory: secret classification, env file status, and project environment file selection.
+  </Card>
+  <Card title="Compose Doctor" icon="stethoscope" href="/features/compose-doctor">
+    Pre-deploy preflight that also surfaces a missing `env_file:` as a high-risk finding.
+  </Card>
+  <Card title="Fleet Secrets" icon="lock" href="/features/fleet-secrets">
+    Author encrypted env-var bundles on the hub and push them to labeled stacks across the fleet.
+  </Card>
+  <Card title="Health-Gated Updates" icon="shield-check" href="/features/health-gated-updates">
+    The post-deploy health observation configured in the same Deploy Guardrails settings section.
+  </Card>
+</CardGroup>

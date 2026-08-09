@@ -1,0 +1,105 @@
+---
+title: Give a Teammate Deploy Access to One Stack, Not the Whole Fleet
+sidebarTitle: Scope deploy access to one stack
+description: Create a teammate account that can deploy and restart one stack, without editing its compose file, touching any other stack, or reaching system settings.
+---
+
+Say a new on-call engineer needs to be able to restart `support-portal` at 2 AM without waking you up, but they have no business editing its compose file, deleting stacks, or managing users. This walks through creating that account, granting it a scoped Deployer permission on `support-portal` alone, and confirming from the teammate's own session that the access is exactly as narrow as intended: they can act on the one stack they were granted, and nothing else.
+
+## Prerequisites
+
+- The `admin` role. Creating accounts and granting scoped permissions is Admin-only, on every tier.
+- A running stack to scope the permission to. This tutorial uses a small stack called `support-portal`:
+
+  ```yaml
+  services:
+    web:
+      image: nginx:alpine
+      restart: unless-stopped
+      ports:
+        - "8097:80"
+      depends_on:
+        - db
+    db:
+      image: postgres:16-alpine
+      restart: unless-stopped
+      environment:
+        POSTGRES_PASSWORD: supportportal
+  ```
+
+- Available on Community and Admiral. Both tiers ship the same five built-in roles and the same additive stack and node scopes; nothing here requires a paid plan.
+
+<Note>
+  Stack scopes are node-specific: granting Deployer on `support-portal` authorizes only that stack name on the node you pick in the next section. The same stack name on a different node needs its own grant. If your fleet has more than one node, keep this in mind when you choose the node in Step 2.
+</Note>
+
+<Steps>
+  <Step title="Create the teammate's account">
+    Open your avatar in the top-right corner, choose **Settings**, then under **Access** pick **Users**. Click **Add user**.
+
+    Fill in a **Username** (for example `jordan`), leave **Role** at its default of **Viewer** (the floor you'll add the scoped permission on top of), and set a **Password**. Leaving the global role at Viewer, rather than picking Deployer here, is the point: the account starts with read-only access everywhere, and the next step grants deploy rights on exactly one stack.
+
+    <Frame>
+      <img src="/images/tutorials/grant-scoped-stack-access/new-user-form.png" alt="The New User form in Settings Users, with Username jordan, Role combobox defaulting to Viewer, and Password and Confirm Password fields filled." />
+    </Frame>
+
+    Click **Create user**. The table refreshes with the new row.
+  </Step>
+  <Step title="Grant a scoped Deployer permission on the stack">
+    Click the pencil icon on the new user's row to open **Edit User**. A **Scoped Permissions** box appears below the form.
+
+    Set **Role** to **Deployer**, **Resource Type** to **Stack**, pick the **Node** that hosts `support-portal`, then pick **support-portal** in the **Stack** field that unlocks once a node is selected.
+
+    <Frame>
+      <img src="/images/tutorials/grant-scoped-stack-access/scoped-permission-form.png" alt="The Scoped Permissions form filled in: Role Deployer, Resource Type Stack, Node Local, Stack support-portal, with the Add button enabled." />
+    </Frame>
+
+    Click **Add**. A toast confirms the scope was added, and it appears as a row above the form.
+  </Step>
+  <Step title="Sign in as the teammate and confirm the boundary">
+    Log out and sign in as the account you just created. Open the `support-portal` stack: **Restart**, **Stop**, **Take down**, and **Update** all appear in the toolbar, matching the Deployer permission you granted.
+
+    <Frame>
+      <img src="/images/tutorials/grant-scoped-stack-access/jordan-toolbar.png" alt="The support-portal stack as the teammate account, with Restart, Stop, Take down, and Update buttons in the toolbar." />
+    </Frame>
+
+    Open the `compose.yaml` tab. The file is visible (Viewer's global `stack:read` covers this), but there is no **Save & Deploy** button and no **Git Source** button, the way there would be for an account with `stack:edit`, only a close icon.
+
+    <Frame>
+      <img src="/images/tutorials/grant-scoped-stack-access/jordan-compose-readonly.png" alt="The compose.yaml tab as the teammate account, showing the file contents with only a close icon in the toolbar and no Save or Git Source button." />
+    </Frame>
+
+    Click **Restart** to confirm the granted action actually works, then open a stack you did *not* grant a scope on. Its toolbar has no deploy actions at all: the scope really is limited to the one stack.
+  </Step>
+</Steps>
+
+## Verify it worked
+
+Check from two places, since a single screen showing "it looks right" isn't proof the permission is actually enforced.
+
+**The scope itself.** Sign back in as an admin, reopen the teammate's user record from **Settings · Users**, and confirm the Scoped Permissions box lists `deployer` on `stack: support-portal` for the node you picked.
+
+<Frame>
+  <img src="/images/tutorials/grant-scoped-stack-access/scope-added.png" alt="The Edit User panel's Scoped Permissions box showing one row: deployer on stack support-portal at Local, with a trash icon to remove it." />
+</Frame>
+
+**The audit log.** Open **Audit** from the navigation's **More** menu. Two entries confirm the setup, both attributed to your account: a **created user** entry (`POST /api/users`) and an **assigned role** entry (`POST /api/users/:id/roles`). If the teammate restarted the stack in Step 3, a third entry and a `manual` count on the dashboard's **Stack Restarts (7d)** card confirm the permission was exercised, not just granted.
+
+<Frame>
+  <img src="/images/tutorials/grant-scoped-stack-access/audit-log.png" alt="Audit log showing entries for assigning a role (POST /api/users/3/roles) and creating a user (POST /api/users), both attributed to the admin account." />
+</Frame>
+
+## If something goes wrong
+
+**The teammate says they can't deploy the stack you scoped them to.** The two most common causes are both silent: the scope was added for the wrong node (stack scopes are node-specific, and a multi-node fleet's node picker is easy to skip past), or the stack name doesn't match exactly (names are case-sensitive, though the picker prevents typos since it lists real stacks). Reopen the user's **Edit User** panel and check the existing-scope row reads the resource and node you expect. If it doesn't, remove it with the trash icon and add it again with the correct node selected first. See [RBAC & User Management · Troubleshooting](/features/rbac#troubleshooting) for the other ways a scoped assignment can fail to apply.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="RBAC & User Management" icon="user-shield" href="/features/rbac">
+    The full permission matrix, all five built-in roles, session security, and SSO auto-provisioning.
+  </Card>
+  <Card title="Set Up SSO with Custom OIDC" icon="key" href="/tutorials/set-up-sso">
+    Provision accounts automatically from your identity provider instead of creating them one at a time.
+  </Card>
+</CardGroup>

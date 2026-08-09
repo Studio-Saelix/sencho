@@ -280,7 +280,7 @@ export function RollbackGenerationsTab({ generations, isLoading, isAdmin, nodeId
                         <TableRow>
                             <SortableTableHead label="Stack" columnKey="stack" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={SORT_HEAD_MOBILE} />
                             <SortableTableHead label="Generation" columnKey="generation" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={SORT_HEAD_MOBILE} />
-                            <SortableTableHead label="State" columnKey="state" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={SORT_HEAD_MOBILE} />
+                            <SortableTableHead label="State" columnKey="state" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={`text-center ${SORT_HEAD_MOBILE}`} />
                             <SortableTableHead label="Retention" columnKey="retention" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={SORT_HEAD_MOBILE} />
                             <TableHead className="text-right">Actions</TableHead>
                         </TableRow>
@@ -318,7 +318,7 @@ export function RollbackGenerationsTab({ generations, isLoading, isAdmin, nodeId
                                     </button>
                                 </TableCell>
                                 <TableCell className="font-mono text-xs text-muted-foreground">{gen.shortId}</TableCell>
-                                <TableCell><StateBadge gen={gen} /></TableCell>
+                                <TableCell className="text-center"><StateBadge gen={gen} /></TableCell>
                                 <TableCell className="text-xs text-stat-subtitle">{formatExpiry(gen)}</TableCell>
                                 <TableCell className="text-right">
                                     {isAdmin && (

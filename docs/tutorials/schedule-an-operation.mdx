@@ -1,0 +1,116 @@
+---
+title: Schedule an Operation
+sidebarTitle: Schedule an operation
+description: Create a recurring stack restart in Sencho, verify it with a manual run, and read its execution history.
+---
+
+Say you run a small web app that slowly accumulates stale connections as the week goes on, and the fix is a restart every night while nobody is using it. You could log in at 3:00 AM, or you could let Sencho do it for you. This walks through creating a scheduled task that restarts the `my-website` stack (an nginx web tier with a postgres database) every day at 3:00 AM, running it once by hand to confirm it works, and checking the execution history.
+
+By the end, the task is running on its own schedule, and you have a green run in the history that proves it works.
+
+This tutorial covers one recurring **Restart Stack** task on the hub. It does not cover the other scheduled actions (auto-update, vulnerability scans, prunes, fleet snapshots), advanced cron expressions, per-service restart scoping, one-shot tasks, or scheduling actions against a remote node. See the [Scheduled Operations](/features/scheduled-operations) feature page for the full action list and the [cron expression reference](/features/scheduled-operations#cron-expression-reference).
+
+## Prerequisites
+
+- An **admin** account on the Sencho hub. Creating and managing schedules requires admin.
+- A running stack on the hub. This tutorial schedules a restart of `my-website`, deployed as an nginx service with a postgres service behind it.
+- The hub (Local) selected as the active node. Schedules is a hub-level view: it is not available while a remote node is the active selection. If you manage remote nodes, switch back to **Local** before continuing.
+
+<Note>
+  A scheduled restart restarts the stack's containers in place. It does not recreate them, so the compose configuration and any bind-mounted data are left untouched.
+</Note>
+
+<Steps>
+  <Step title="Open the Schedules page">
+    In the top navigation, click **More**, then under **Operations** pick **Schedules**.
+
+    <Frame>
+      <img src="/images/tutorials/schedule-an-operation/more-menu-schedules.png" alt="The More navigation menu with Audit under Security & review, Logs, Update, and Schedules under Operations, and Console under Tools." />
+    </Frame>
+
+    The page opens on the **Timeline** view: a 24-hour strip with five lanes, one per operation category (Lifecycle, Updates, Security, Upkeep, Backups). With no tasks yet, it shows the empty-state message `Nothing scheduled in the next 24 hours`.
+
+    <Frame>
+      <img src="/images/tutorials/schedule-an-operation/schedules-timeline-empty.png" alt="The Scheduled Operations page on the Timeline view, showing the Next 24 hours header, an empty Next readout, the five category lanes, and the message 'Nothing scheduled in the next 24 hours. Toggle to All tasks to see every schedule, or create a new one.'" />
+    </Frame>
+  </Step>
+  <Step title="Open the New Schedule form">
+    Click **New Schedule** in the top right of the page. The **New scheduled task** modal opens.
+
+    Open the **Action** picker. The actions are grouped by category, each with a risk badge and one-line helper text so you can see the blast radius before you commit: **Lifecycle** holds the stack and container actions, **Updates** the auto-update variants, **Security** the vulnerability scan, **Upkeep** the resource prune, and **Backups** the fleet snapshot.
+
+    <Frame>
+      <img src="/images/tutorials/schedule-an-operation/new-schedule-action-picker.png" alt="The New scheduled task modal with the Action picker open, showing the Lifecycle, Updates, Security, Upkeep, and Backups groups with their actions listed." />
+    </Frame>
+  </Step>
+  <Step title="Configure the nightly restart">
+    Fill in the form:
+
+    - **Name**: `Nightly website restart`
+    - **Action**: **Restart Stack** (the default, in the Lifecycle group). The **Interruptive** badge and the helper text "Restarts containers in place" describe exactly what a run will do: stop and start the containers on the same configuration.
+    - **Node**: **Local**.
+    - **Stack**: `my-website`. The stack defines two services, so a **Services (leave empty for all)** grid appears with `web` and `db` checkboxes. Leave both unchecked to restart the entire stack.
+    - **Schedule**: leave **Simple** mode selected, with **Daily**, **Hour** `03`, and **Minute** `00`. The preview below the controls reads `At 03:00 AM · 0 3 * * *`, and the note under it says the schedule runs in the node's local timezone. This is where you pick the off-peak window: 3:00 AM, when nobody is hitting the site.
+    - **Enabled**: leave ON.
+    - **Delete after successful run**: leave unchecked. This task is meant to fire every night, not remove itself after one success.
+
+    <Frame>
+      <img src="/images/tutorials/schedule-an-operation/create-task-filled.png" alt="The New scheduled task modal configured with Name 'Nightly website restart', Action Restart Stack with the Interruptive badge, Node Local, Stack my-website with the web and db service checkboxes, a Daily schedule at 03:00 with the preview 'At 03:00 AM · 0 3 * * *', and the Enabled switch on." />
+    </Frame>
+
+    Click **Create**. The modal closes and a toast confirms the task was created.
+  </Step>
+  <Step title="Confirm the task in the timeline and the table">
+    The timeline now shows a blue pill on the **Lifecycle** lane at the next firing, and the **Next** readout shows the task name with a countdown.
+
+    <Frame>
+      <img src="/images/tutorials/schedule-an-operation/timeline-pill.png" alt="The Scheduled Operations timeline with a blue pill labelled 23:00 my-website on the Lifecycle lane, and the Next readout showing 'Nightly website restart · in 20h 21m'." />
+    </Frame>
+
+    Note the time: the schedule fires at 3:00 AM **in the node's timezone**, and the timeline displays firing times **in your browser's timezone**, so the pill time may differ from the form's preview. Here the node is on UTC, the browser on Eastern Daylight Time, and 03:00 UTC shows as 23:00.
+
+    Toggle to **All tasks** for the tabular view. The new row shows the name, the **Restart Stack** action badge, the `my-website` target, the human-readable schedule over its raw cron `0 3 * * *`, **Status** `Never run`, the next firing in your local time, and the **Enabled** switch set to ON.
+
+    <Frame>
+      <img src="/images/tutorials/schedule-an-operation/all-tasks-row.png" alt="The All tasks table with one row: Nightly website restart, Restart Stack, my-website, At 03:00 AM / 0 3 * * *, Status Never run, Next Run 8/6/2026 11:00:00 PM, Enabled ON, and the Run now, Execution history, Edit, and Delete buttons." />
+    </Frame>
+  </Step>
+  <Step title="Run the task now to prove it works">
+    Click the **Run now** button (play icon) on the row. The task executes immediately instead of waiting for the next firing. After a few seconds, click **Refresh**; the row's **Status** flips to **Success** (green badge).
+
+    <Frame>
+      <img src="/images/tutorials/schedule-an-operation/all-tasks-success.png" alt="The All tasks table with the Nightly website restart row now showing a green Success badge in the Status column." />
+    </Frame>
+  </Step>
+</Steps>
+
+## Verify it worked
+
+Check from two places, since either alone could be misleading (a table that has not refreshed, or a run that updated the badge but left an error behind).
+
+**The Status badge.** In **All tasks**, the row shows the green **Success** badge, and the task is still **Enabled**, so the next firing is still scheduled.
+
+**The Execution history.** Click the **Execution history** button (clock icon) on the row. The sheet opens with the breadcrumb `Schedules › Nightly website restart › Runs`, a `1 run` count, and the run's row: **Source** `Manual` (it was triggered by Run now, not by the cron), **Status** `Success`, a short **Duration**, and the details `Restarted 2 container(s) in stack "my-website"`: both services, exactly as configured.
+
+<Frame>
+  <img src="/images/tutorials/schedule-an-operation/run-history.png" alt="The Execution history sheet for Nightly website restart, showing 1 run with Source Manual, Status Success, Duration 0.7s, and Details 'Restarted 2 container(s) in stack my-website'. The footer shows the next scheduled run." />
+</Frame>
+
+The footer confirms the schedule is alive: the next run time is shown there too, matching the row's **Next Run** in the table. You can now rely on the nightly restart without being at the console at 3:00 AM.
+
+## If something goes wrong
+
+**You don't see Schedules in the More menu.** Schedules is a hub-level view. If a remote node is the active selection, the More menu shows only **Console**, and the hub-only views (Schedules, Audit, Logs, Update) are missing. Click the node switcher next to the Sencho logo, pick **Local**, and reopen **More**: Schedules is back under **Operations**.
+
+A run that fails shows a red **Failed** badge in the row and an error-level notification; the failure notification carries the task name and the error so you can diagnose without opening the run history. The task stays enabled and fires again at its next cron tick, or you can click **Run now** to retry immediately. See [Scheduled Operations · Troubleshooting](/features/scheduled-operations#troubleshooting) for the full failure list.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Scheduled Operations" icon="clock" href="/features/scheduled-operations">
+    Every supported action, the cron expression reference, and failure notifications.
+  </Card>
+  <Card title="Auto-Update Policies" icon="arrows-rotate" href="/features/auto-update-policies">
+    Schedule image updates the same way, then review what changed on the companion board.
+  </Card>
+</CardGroup>

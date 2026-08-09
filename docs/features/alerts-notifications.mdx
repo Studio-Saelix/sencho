@@ -53,7 +53,7 @@ Sencho sends the alert title, body, severity, and either tags or destination URL
 
 ### Test sends and delivery semantics
 
-The **Test** button on each tab dispatches the literal message `🔌 Test Notification from Sencho!` at level `info` through the same path a real alert would take, including the node's delivery-retries setting. Test sends require the admin role; the server returns 403 if an operator or viewer submits one.
+The **Test** button on each tab dispatches the literal message `🔌 Test Notification from Sencho!` at level `info` through the same path a real alert would take, including the node's delivery-retries setting. Test sends require the admin role; the server returns 403 for any non-admin user.
 
 Each delivery attempt is an HTTP POST with a 10-second `AbortSignal.timeout`. By default (`Delivery retries` = 0) Sencho makes one attempt. You can allow up to three extra in-process attempts with a fixed one-second delay between them. Retries apply only to classified transient failures (for example HTTP 5xx or network timeouts). Client errors such as HTTP 4xx and Apprise HTTP 204 are not retried. There is no durable retry queue: if the process exits mid-dispatch, remaining attempts are not persisted. Delivery is at-least-once under ambiguous timeouts or connection resets, so a receiver that accepted a request whose response was lost can receive a duplicate. If every attempt fails, the alert remains in the bell with `dispatch_error` set.
 
@@ -75,7 +75,7 @@ A route with all five matchers left unconstrained (`Node` = any, and empty Stack
 
 ### Creating a routing rule
 
-Open **Settings · Notifications · Notification Routing** and click **+ Add Route**.
+Open **Settings · Notifications · Routing** and click **+ Add route**.
 
 | Field | Purpose |
 |-------|---------|
@@ -132,9 +132,11 @@ Rules you create on the control instance replicate to remote nodes so alerts emi
 
 From the bell, admins can open a row menu and choose **Mute this category**, **Mute notifications like this**, or **Mute this stack** to create a quick rule with default **Both** targeting and no weekly window. The same presets are available from stack menus (sidebar, stack header, activity tab), fleet node cards, and label groups.
 
+The masthead carries `SCOPE` (`global`), `RULES` (total), and `ACTIVE` (count).
+
 ### Built-in bell quieting (not a mute rule)
 
-Sencho also hides one class of notification from the popover without a user rule: rows where the category is one of `deploy_success`, `stack_started`, `stack_stopped`, `stack_restarted`, or `image_update_applied`, and the row carries an `actor_username` other than `system`. These are confirmations of an action you just clicked. The rows are still persisted and still dispatched externally; only the bell render hides them. Use mute rules when you need configurable, operator-controlled muting.
+Sencho also hides one class of notification from the popover without a user rule: `info`-level rows where the category is one of `deploy_success`, `stack_started`, `stack_stopped`, `stack_restarted`, `stack_taken_down`, or `image_update_applied`, and the row carries an `actor_username` other than `system`. These are confirmations of an action you just clicked. The rows are still persisted and still dispatched externally; only the bell render hides them. Use mute rules when you need configurable, user-controlled muting.
 
 ## Notification categories
 
@@ -147,6 +149,7 @@ Every alert Sencho dispatches carries a category that you can filter on in the b
 | `stack_started` | Stack started | Stack started via the dashboard or API |
 | `stack_stopped` | Stack stopped | Stack stopped via the dashboard or API |
 | `stack_restarted` | Stack restarted | Stack restarted via the dashboard or API |
+| `stack_taken_down` | Stack taken down | Stack taken down via the dashboard or API |
 | `image_update_available` | Update available | Image-update poll found a newer digest |
 | `node_update_available` | Node update | Sencho self-update available for this node |
 | `image_update_applied` | Update applied | Manual or scheduled auto-update applied new images |
@@ -160,6 +163,8 @@ Every alert Sencho dispatches carries a category that you can filter on in the b
 | `blueprint_drift_correction_failed` | `blueprint_drift_correction_failed` | Blueprint enforce-mode redeploy failed |
 
 The four `blueprint_*` categories are accepted by routing rules but render as raw category strings in the bell because the frontend label map omits them.
+
+Seven further categories are written to notification history and the stack activity timeline, and can be targeted by a mute rule, but are never dispatched to external channels or accepted by a routing rule: `drift_detected` (Drift detected), `drift_resolved` (Drift resolved), `update_started` (Update started), `health_gate_passed` (Health gate passed), `health_gate_failed` (Health gate failed), `rollback_generation_released` (Rollback protection released), and `network_auto_created` (renders as a raw category string, same reason as the blueprint categories above).
 
 ## Stack alert rules
 
@@ -211,7 +216,7 @@ The **NOTIFICATION CHANNELS** banner above the rules list reflects what dispatch
 - **Active** is a green banner reading `Notifications active via Discord, Slack, …` with the configured channels listed.
 
 <Frame>
-  <img src="/images/alerts-notifications/alert-panel-remote-banner.png" alt="The Stack › SAELIX-DB › MONITOR sheet on a remote node, with the blue 'Remote node: node-a' banner explaining that rules are stored and evaluated on the remote, plus a follow-up amber line noting that no notification channels are configured on that remote." />
+  <img src="/images/alerts-notifications/alert-panel-remote-banner.png" alt="The Stack › nakama › MONITOR sheet on a remote node, with the blue 'Remote node: Pitt-Moba' banner explaining that rules are stored and evaluated on the remote, plus a follow-up amber line noting that no notification channels are configured on that remote." />
 </Frame>
 
 ### Example: alert on high CPU
@@ -228,7 +233,7 @@ To page when CPU on a stack stays above 80% for at least five minutes, with no m
 
 ### Permissions and validation
 
-Operators and viewers see existing rules read-only; only admins see the add and delete affordances. Submitting an empty threshold surfaces `Please enter a threshold.` Successful saves toast `Alert rule added.` and `Alert rule deleted.` A failed POST surfaces `Network error. Could not reach the node.`
+Stack alert rules are gated by the `stack:edit` permission on the target stack, not a fixed admin check. A user sees the **Add new rule** form and the delete action on each row only if their role (or a scoped grant) carries `stack:edit` for that stack; a user with only `stack:read` sees existing rules read-only. Built-in roles: `admin` and `node-admin` have `stack:edit` on every stack; `deployer`, `viewer`, and `auditor` do not, so they see a read-only list. Submitting an empty threshold surfaces `Please enter a threshold.` Successful saves toast `Alert rule added.` and `Alert rule deleted.` A failed POST surfaces `Network error. Could not reach the node.`
 
 The delete confirmation dialog reads `Delete Alert Rule` / `This will permanently remove this alert rule. Notifications for this condition will no longer be sent.` with a destructive **Delete** button.
 
@@ -237,7 +242,7 @@ The delete confirmation dialog reads `Delete Alert Rule` / `This will permanentl
 The bell icon at the top of the shell is the live feed of every alert across the fleet. A pulsing red dot surfaces unread items.
 
 <Frame>
-  <img src="/images/alerts-notifications/notification-popover.png" alt="The notification bell open, with a 'Notifications' italic title, '9 UNREAD' uppercase mono caption, an All / Unread / Alerts segmented control, the filter-toggle, mark-all-read, and clear-all icon actions, a 'TODAY' day-band header, and a stack of severity-tinted rows describing Sencho version updates and a recent stack stop, each with a node-name pill, a relative timestamp, and a per-row dismiss target." />
+  <img src="/images/alerts-notifications/notification-popover.png" alt="The notification bell open, with a 'Notifications' italic title, '1 UNREAD' uppercase mono caption, an All / Unread / Alerts segmented control, the filter-toggle, mark-all-read, and clear-all icon actions, a 'TODAY' day-band header, and a warning-tinted row reporting a CPU threshold breach on the plex stack with a relative timestamp and a per-row dismiss target." />
 </Frame>
 
 ### Anatomy
@@ -286,11 +291,11 @@ The popover renders three different empty states:
 
 ### What you won't see in the bell
 
-Sencho deliberately suppresses one class of notification from the popover: rows where the category is one of `deploy_success`, `stack_started`, `stack_stopped`, `stack_restarted`, or `image_update_applied`, AND the row carries an `actor_username` other than `system`. These are confirmations of an action you just clicked, surfaced as a toast at the moment of the action; replaying them in the bell would be noise. The rows are still persisted to `notification_history` and still dispatched to global channels and matching routes; only the bell render hides them.
+Sencho deliberately suppresses one class of notification from the popover: `info`-level rows where the category is one of `deploy_success`, `stack_started`, `stack_stopped`, `stack_restarted`, `stack_taken_down`, or `image_update_applied`, AND the row carries an `actor_username` other than `system`. These are confirmations of an action you just clicked, surfaced as a toast at the moment of the action; replaying them in the bell would be noise. The rows are still persisted to `notification_history` and still dispatched to global channels and matching routes; only the bell render hides them.
 
 ### Limits
 
-The popover holds the latest 50 rows per node per fetch. The backend caps `notification_history` at 100 rows per node, regardless of the user-tunable retention setting; the cap evicts the oldest rows on every insert. There is no `Load more` affordance; older rows roll off the cap.
+The popover holds the latest 50 rows per node per fetch. There is no `Load more` affordance; older rows roll off the caps described in [Retention and limits](#retention-and-limits) below.
 
 ## Cross-node delivery
 
@@ -397,10 +402,10 @@ Fleet Sync requires Admiral on the control instance.
 
 ## Retention and limits
 
-Three retention controls live under **Settings · Operations · Data Retention**.
+**Settings · Operations · Data Retention** hosts the notification and audit retention windows alongside two vulnerability-scan retention controls (**Scan history per digest** and **Remove scans for deleted images and stacks**); those two are covered in [Vulnerability scanning](/features/vulnerability-scanning), not here.
 
 <Frame>
-  <img src="/images/alerts-notifications/developer-retention.png" alt="Settings · Operations · Data Retention card showing three rows: Container metrics with a 24 HRS field, Notification log with a 30 DAYS field, and Audit log (Admiral) with a 90 DAYS field, plus a SAVE SETTINGS button." />
+  <img src="/images/alerts-notifications/developer-retention.png" alt="Settings · Operations · Data Retention card showing Container metrics with a 24 HRS field, Notification log with a 30 DAYS field, Scan history per digest with a 50 SCANS field, a Remove scans for deleted images and stacks toggle in the ON state, and Audit log with a 90 DAYS field, plus a SAVE SETTINGS button." />
 </Frame>
 
 | Control | Range | Default | What it prunes |
@@ -409,7 +414,7 @@ Three retention controls live under **Settings · Operations · Data Retention**
 | **Notification log** | 1 to 365 days | 30 days | The bell's `notification_history` table |
 | **Audit log** *(Admiral)* | 1 to 365 days | 90 days | Audit trail entries |
 
-A hard 100-row per-node cap inside `notification_history` always applies on top of the user-tunable retention; new inserts evict the oldest rows beyond 100 even if your retention window is longer.
+Beyond the time-based window above, `notification_history` also carries two hard row caps that a cleanup pass enforces on every monitor tick: up to 500 rows per (node, stack) pair, and up to 1,000 rows per node for stack-less system events (host thresholds, fleet-sync warnings, scheduled-task results). A chatty stack cannot evict a quieter stack's history because each stack has its own 500-row quota. These caps apply on top of your retention window, whichever prunes first.
 
 A separate rate limit applies to crash and health alerts only: 20 emits per fixed 60-second window per node (not a rolling window). When the cap is hit, individual overflow alerts are not written to history or the bell; at the end of the window Sencho emits a single `warning`/`monitor_alert` roll-up that names crash-only, health-only, or mixed suppression.
 
@@ -465,7 +470,7 @@ Switching the active node tears down per-stack rule editors and reloads channel 
     Sencho rate-limits crash and health dispatches together to 20 emits per fixed 60-second window per node, then emits a single `warning`/`monitor_alert` roll-up such as `N additional container crash alerts were rate-limited in the last minute.`, a health-only variant, or a mixed `(X crash, Y health)` summary once the window closes. Rate-limited overflow individuals are not written to `notification_history` and do not appear in the bell; only the roll-up is persisted for that overflow. Separately, health flaps on the same container are deduped for 60 minutes after a persisted unhealthy alert, even if Docker recovered and failed again inside that window.
   </Accordion>
   <Accordion title="My deploy success doesn't appear in the bell, only as a toast">
-    Sencho deliberately hides rows whose category is one of `deploy_success`, `stack_started`, `stack_stopped`, `stack_restarted`, or `image_update_applied` AND whose `actor_username` is set to a real user. The reasoning: those are confirmations of the action you just clicked and are already shown as a toast. The rows are still persisted to `notification_history` and still dispatched to global channels and matching routes; only the bell render hides them.
+    Sencho deliberately hides `info`-level rows whose category is one of `deploy_success`, `stack_started`, `stack_stopped`, `stack_restarted`, `stack_taken_down`, or `image_update_applied` AND whose `actor_username` is set to a real user. The reasoning: those are confirmations of the action you just clicked and are already shown as a toast. The rows are still persisted to `notification_history` and still dispatched to global channels and matching routes; only the bell render hides them.
   </Accordion>
   <Accordion title="A routing rule is set up but the global channel still fires">
     Routing matchers AND together: every non-empty matcher must match the alert. A rule with **Stacks** set to `prod-api` will not match a `monitor_alert` for a different stack, and a rule with a populated **Stacks** matcher will not match host-level alerts (which carry no stack target). Stack patterns may use `*` as a wildcard (for example `prod-*`). When zero rules match, Sencho falls back to global channels. To intercept everything, leave Node as any and leave Stacks, Labels, Categories, and Severity empty. Also confirm the rule's **Enabled** pill is `ON`.

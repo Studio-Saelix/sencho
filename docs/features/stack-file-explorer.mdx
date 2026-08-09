@@ -38,6 +38,10 @@ The same source mounted by more than one service is shown as a single root, summ
   Editing a config file does not restart the service that reads it. After you save, restart the relevant service so it picks up the new content.
 </Note>
 
+<Note>
+  Browsing a named volume works by creating a short-lived helper container through the Docker API. When Sencho runs behind a Docker socket proxy, the proxy must allow CONTAINERS (create, attach, start, wait, remove) and POST for volume browsing to work. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy).
+</Note>
+
 ### When a volume cannot be browsed
 
 A volume root shows a short explanation in place of its tree and is not browsable when:

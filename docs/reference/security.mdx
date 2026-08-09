@@ -72,7 +72,7 @@ Every self-hosted instance includes the full security stack. Some advanced gover
 
 ## Tier availability
 
-Every Sencho instance includes the foundational security stack. Advanced access-control and compliance features are available on paid tiers.
+Every Sencho instance includes the foundational security stack. Organizational identity and extended audit governance features are available on paid tiers.
 
 | Feature | Community | Admiral |
 |---------|:---------:|:-------:|
@@ -86,15 +86,13 @@ Every Sencho instance includes the foundational security stack. Advanced access-
 | Rate limiting (auth + API) | ✓ | ✓ |
 | Node-to-node authentication | ✓ | ✓ |
 | Vulnerability scanning (on-demand + post-deploy + scheduled) | ✓ | ✓ |
-| Multi-user with RBAC (Admin, Viewer) | ✓ | ✓ |
+| Built-in RBAC (five roles + scoped assignments) | ✓ | ✓ |
 | Webhook signatures (HMAC-SHA256) | ✓ | ✓ |
 | API tokens (scoped, expiring) | ✓ | ✓ |
 | SBOM generation (SPDX, CycloneDX) | ✓ | ✓ |
 | Recent-activity audit log (14-day window) | ✓ | ✓ |
 | Scan policies (`block_on_deploy`) | ✓ | ✓ |
 | SARIF export (admin) | ✓ | ✓ |
-| Advanced RBAC (Deployer, Node Admin, Auditor) | | ✓ |
-| Scoped permissions (per-stack, per-node) | | ✓ |
 | Audit log export, anomaly detection, and extended retention | | ✓ |
 
 ## Password authentication
@@ -182,7 +180,7 @@ Webhooks are available on every tier. For setup and verification recipes, see [W
 
 ## Role-based access control
 
-Sencho defines five roles with increasing levels of access. Admin and Viewer are available on every tier; Deployer, Node Admin, and Auditor require Admiral.
+Sencho defines five built-in roles with increasing levels of access. All five roles and stack or node scoped assignments are available on every plan.
 
 ### Permission matrix
 
@@ -202,9 +200,9 @@ Sencho defines five roles with increasing levels of access. Admin and Viewer are
 | API tokens | ✓ | | | | |
 | Host console | ✓ | | | | |
 
-On Admiral, you can create **scoped assignments** that grant a user elevated permissions on specific stacks or nodes without giving them broad access. For example, a Viewer can be promoted to Deployer on a single production stack.
+You can create **scoped assignments** that grant a user elevated permissions on specific stacks or nodes without giving them broad access. For example, a Viewer can be promoted to Deployer on a single production stack. Scoped assignments are available on Community and Admiral.
 
-Both tiers support unlimited accounts. Community uses the Admin and Viewer roles; Admiral adds the Deployer, Node Admin, and Auditor roles plus scoped permissions.
+Both tiers support unlimited accounts and the same five built-in roles with additive stack and node scopes.
 
 For user management and scoped permissions, see [RBAC & User Management](/features/rbac).
 
@@ -287,13 +285,14 @@ For copy-paste verification commands, see [Verifying Images](/operations/verifyi
 </Note>
 
 1. **Place Sencho behind a TLS reverse proxy** (nginx, Traefik, Caddy) so that session cookies are transmitted over HTTPS only. See [Self-Hosting](/operations/self-hosting).
-2. **Enable at least one SSO provider** to centralize identity management and reduce password sprawl. See [SSO & LDAP Authentication](/features/sso).
-3. **Enroll all admin accounts in 2FA** to protect against credential theft. See [Two-Factor Authentication](/features/two-factor-authentication).
-4. **Use scoped API tokens** instead of sharing admin credentials with CI/CD pipelines. See [API Tokens](/features/api-tokens).
-5. **Set `FRONTEND_URL`** to restrict CORS to your domain. See [Configuration](/getting-started/configuration).
-6. **Verify Docker image signatures** before deploying to confirm the image has not been tampered with. See [Verifying Images](/operations/verifying-images).
-7. **Review the audit log regularly** or assign a dedicated Auditor-role user for ongoing compliance monitoring. See [Audit Log](/features/audit-log).
-8. **Keep Sencho updated** to receive security patches and dependency upgrades. See [Upgrade](/operations/upgrade).
+2. **Configure the Docker socket proxy** with the minimum API groups the Sencho features you use require, keeping mutating and build groups disabled where possible. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy).
+3. **Enable at least one SSO provider** to centralize identity management and reduce password sprawl. See [SSO & LDAP Authentication](/features/sso).
+4. **Enroll all admin accounts in 2FA** to protect against credential theft. See [Two-Factor Authentication](/features/two-factor-authentication).
+5. **Use scoped API tokens** instead of sharing admin credentials with CI/CD pipelines. See [API Tokens](/features/api-tokens).
+6. **Set `FRONTEND_URL`** to restrict CORS to your domain. See [Configuration](/getting-started/configuration).
+7. **Verify Docker image signatures** before deploying to confirm the image has not been tampered with. See [Verifying Images](/operations/verifying-images).
+8. **Review the audit log regularly** or assign a dedicated Auditor-role user for ongoing compliance monitoring. See [Audit Log](/features/audit-log).
+9. **Keep Sencho updated** to receive security patches and dependency upgrades. See [Upgrade](/operations/upgrade).
 
 ## Reporting a vulnerability
 

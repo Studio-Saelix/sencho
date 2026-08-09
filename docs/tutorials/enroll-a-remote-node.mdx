@@ -1,0 +1,96 @@
+---
+title: Enroll a Remote Node
+sidebarTitle: Enroll a remote node
+description: Bring a second server under management in the same Sencho console, without opening any inbound ports on it.
+---
+
+Say you run Sencho on one server already, and you separately have a home media server running a Jellyfin stack via Docker Compose, on a connection with no port forwarding. This walks through bringing that second server into your Sencho console as a remote node, using **Pilot Agent** mode: the remote host only needs outbound HTTPS, so nothing has to be opened on your router or firewall.
+
+By the end, both servers appear side by side in the same console, and Sencho can see the Jellyfin containers already running on the second one.
+
+This tutorial does not cover **Distributed API Proxy** mode (for a remote host you already expose on a stable URL), [Sencho Mesh](/features/sencho-mesh) cross-node networking, or adopting a discovered Compose file into a managed stack. See the [Multi-Node Management](/features/multi-node) feature page for those.
+
+## Prerequisites
+
+- An **admin** account on the Sencho instance that will act as the control instance. Adding, editing, and testing nodes requires admin.
+- Docker and the Docker Compose plugin installed on the second server, with SSH or console access as the user that owns the Docker socket.
+- The second server must be able to reach your control instance over outbound HTTPS (or HTTP, if both are on the same private network or VPN).
+
+<Warning>
+  If your control instance is not reachable from the public internet or the remote server's network (for example, it only listens on `localhost` with no port forwarding and no `SENCHO_PUBLIC_URL` set), the agent will never dial home and the node will sit at `tunnel (waiting)` indefinitely. Confirm the remote host can reach your control instance's URL before starting.
+</Warning>
+
+<Steps>
+  <Step title="Open the Add node form">
+    On your control instance, click your avatar in the top-right and choose **Settings**. In the sidebar, under **Infrastructure**, pick **Nodes**, then click **Add node**.
+
+    Set **Name** to something that identifies the host (`media-server` here). Leave **Type** as **Remote** and **Mode** as **Pilot Agent**, both defaults. In **Compose Directory**, enter the absolute path on the remote host where its Compose stacks already live, or where you want them to live, `/home/ubuntu/docker` in this example. The agent mounts that same path inside its own container, so existing bind-mount paths in your Compose files keep working unchanged.
+
+    <Frame>
+      <img src="/images/tutorials/enroll-a-remote-node/add-node-filled.png" alt="Add remote node dialog with Name set to media-server, Type set to Remote, Mode set to Pilot Agent, and Compose Directory set to /home/ubuntu/docker." />
+    </Frame>
+
+    Click **Add node**.
+  </Step>
+  <Step title="Deploy the agent on the remote host">
+    A dialog opens with a generated Compose file and a start command.
+
+    <Frame>
+      <img src="/images/tutorials/enroll-a-remote-node/pilot-enroll-modal.png" alt="Enroll the pilot agent dialog. Step 1 shows a generated compose.yaml with SENCHO_MODE set to pilot, SENCHO_PRIMARY_URL pointing at the control instance, and a SENCHO_ENROLL_TOKEN. Step 2 shows the docker compose up -d start command. The footer reads Expires 14m from now, with a Copy compose file button." />
+    </Frame>
+
+    Save Step 1's contents as `compose.yaml` in a directory on the remote host (it does not need to be the Compose Directory itself), then run Step 2's command in that same directory as the user that owns Docker:
+
+    ```bash
+    docker compose up -d
+    ```
+
+    This pulls the `saelix/sencho:latest` image, mounts the host's Docker socket, and starts a container named `sencho-agent` that dials out to your control instance. It does not touch or restart anything already running on the host, including your existing Jellyfin container.
+
+    The enrollment token embedded in the file is valid for **15 minutes and can only be used once**. If it expires before you run the command, see [If something goes wrong](#if-something-goes-wrong) below.
+  </Step>
+  <Step title="Verify the tunnel connects">
+    Back on the Nodes table, the new row starts at **Status: Unknown** with Endpoint `tunnel (waiting)`. Once the agent dials home, usually within a few seconds of `docker compose up -d` finishing, the row flips to **Status: Online** and the Endpoint reads `tunnel (seen Xs ago)`.
+
+    <Frame>
+      <img src="/images/tutorials/enroll-a-remote-node/nodes-table-online.png" alt="Nodes table with two rows: Local showing Online and docker.sock, and media-server showing Remote, Pilot Agent, tunnel (seen 2m ago), and Online." />
+    </Frame>
+  </Step>
+</Steps>
+
+## Verify it worked
+
+Check from two places, since either alone could be misleading (a stuck browser tab, or a table row that has not refreshed).
+
+**The node switcher.** Click the switcher at the top of the sidebar. Your new node appears in the **Connected** list with an `AGENT` kicker and a `SEEN Xm AGO` timestamp.
+
+<Frame>
+  <img src="/images/tutorials/enroll-a-remote-node/node-switcher-popover.png" alt="Node switcher popover listing 2 connected nodes: Local with a star icon, and media-server with an AGENT kicker and SEEN 2M AGO." />
+</Frame>
+
+**The Fleet view.** Switch back to Local if you navigated away, then open the **Fleet** tab. Both nodes show as separate cards with independent CPU, RAM, and disk stats pulled live from each host. The media-server card's running-container count reflects Jellyfin (and the agent itself), not just an empty shell.
+
+<Frame>
+  <img src="/images/tutorials/enroll-a-remote-node/fleet-view-two-nodes.png" alt="Fleet overview with two cards: Local showing 1 running container, and media-server showing 3 running containers, 0 stopped, with independent CPU, RAM, and disk gauges." />
+</Frame>
+
+Click the node switcher and select your new node to confirm you can operate against it directly. Every top-level view scoped to that host, Home, Resources, Networking, Security, works the same way it does for Local. Fleet-wide views (Fleet itself, Schedules, Audit, Logs, Auto-Update) stay hidden until you switch back to Local, because they only make sense from the hub.
+
+## If something goes wrong
+
+The most common first-time snag is the 15-minute enrollment token expiring before you run `docker compose up -d`, usually because of a copy-paste detour or a slow SSH session. The node row stays on `tunnel (waiting)` indefinitely; it does not time out or show an error on its own. If more than 15 minutes have passed, open **Edit node** on that row, click **Regenerate enrollment token**, and repeat the save-and-run-compose steps with the fresh file. The previous tunnel attempt is closed automatically, so there is nothing to clean up on the remote host first.
+
+<Frame>
+  <img src="/images/tutorials/enroll-a-remote-node/edit-node-regenerate.png" alt="Edit node dialog for the media-server Pilot Agent node, showing a card labeled 'Re-enroll the agent if the container was lost or the enrollment token expired' with a Regenerate enrollment token button." />
+</Frame>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Multi-node" icon="sitemap" href="/features/multi-node">
+    Distributed API Proxy mode, Sencho Mesh, license inheritance across nodes, and full troubleshooting.
+  </Card>
+  <Card title="Pilot Agent" icon="satellite-dish" href="/features/pilot-agent">
+    Credential lifecycle, resource limits, and pilot-specific troubleshooting for the tunnel itself.
+  </Card>
+</CardGroup>

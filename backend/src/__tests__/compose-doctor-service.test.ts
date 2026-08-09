@@ -207,6 +207,94 @@ describe('runPreflight', () => {
     expect(report.status).toBe('pass');
   });
 
+  it('classifies a safe socket proxy as info instead of a high socket mount', async () => {
+    stubDocker({
+      name: STACK,
+      services: {
+        proxy: {
+          image: 'lscr.io/linuxserver/socket-proxy:v1',
+          restart: 'unless-stopped',
+          healthcheck: { test: ['CMD', 'true'] },
+          volumes: [{
+            type: 'bind',
+            source: '/var/run/docker.sock',
+            target: '/var/run/docker.sock',
+            read_only: true,
+          }],
+          environment: { CONTAINERS: '1', IMAGES: '1' },
+          networks: { app_internal: null },
+        },
+      },
+      networks: { app_internal: { name: `${STACK}_app_internal`, internal: true } },
+      volumes: {},
+    });
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(report.findings.some(f => f.ruleId === 'docker-socket-mount')).toBe(false);
+    expect(report.findings.some(f => f.ruleId === 'docker-socket-proxy')).toBe(true);
+    expect(report.activeStatus).toBe('info');
+    expect(report.activeHighestSeverity).toBe('info');
+  });
+
+  it('keeps a direct application socket mount as high', async () => {
+    stubDocker({
+      name: STACK,
+      services: {
+        app: {
+          image: 'portainer/portainer-ce:2.19.0',
+          restart: 'unless-stopped',
+          healthcheck: { test: ['CMD', 'true'] },
+          volumes: [{
+            type: 'bind',
+            source: '/var/run/docker.sock',
+            target: '/var/run/docker.sock',
+          }],
+        },
+      },
+      networks: {},
+      volumes: {},
+    });
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(report.findings.some(f => f.ruleId === 'docker-socket-mount')).toBe(true);
+    expect(report.activeStatus).toBe('high');
+  });
+
+  it('excludes the socket-proxy client note from active severity while keeping proxy info', async () => {
+    stubDocker({
+      name: STACK,
+      services: {
+        proxy: {
+          image: 'tecnativa/docker-socket-proxy:v0.1',
+          restart: 'unless-stopped',
+          healthcheck: { test: ['CMD', 'true'] },
+          volumes: [{
+            type: 'bind',
+            source: '/var/run/docker.sock',
+            target: '/var/run/docker.sock',
+            read_only: true,
+          }],
+          environment: { CONTAINERS: '1' },
+          networks: { app_internal: null },
+        },
+        app: {
+          image: 'myapp:1.0',
+          restart: 'unless-stopped',
+          healthcheck: { test: ['CMD', 'true'] },
+          environment: { DOCKER_HOST: 'tcp://proxy:2375' },
+          networks: { app_internal: null },
+        },
+      },
+      networks: { app_internal: { name: `${STACK}_app_internal`, internal: true } },
+      volumes: {},
+    });
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(report.findings.some(f => f.ruleId === 'docker-socket-proxy-client')).toBe(true);
+    expect(report.findings.some(f => f.ruleId === 'docker-socket-proxy')).toBe(true);
+    expect(report.activeStatus).toBe('info');
+    const issueCount = report.findings.filter(f => f.ruleId !== 'docker-socket-proxy-client').length;
+    expect(report.activeCount).toBe(issueCount);
+    expect(JSON.stringify(report)).not.toContain('tcp://proxy:2375');
+  });
+
   it('returns an unrenderable report and never stores raw stderr', async () => {
     stubDocker(null, `bad yaml near ${SECRET}`); // stderr can echo arbitrary file content
     const report = await doctor().runPreflight(nodeId, STACK, null);

@@ -163,6 +163,28 @@ describe('PreflightPanel', () => {
     expect(screen.queryByTestId('preflight-ack-btn-healthcheck-inherited-web')).not.toBeInTheDocument();
   });
 
+  it('renders socket-proxy client findings as Notes without acknowledgement', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'pass',
+      activeStatus: 'pass',
+      activeCount: 0,
+      findings: [{
+        ruleId: 'docker-socket-proxy-client',
+        severity: 'info',
+        title: 'Docker API access routed through socket proxy',
+        message: 'Service "app" does not mount docker.sock directly and appears to use a Docker socket proxy instead.',
+        service: 'app',
+      }],
+    })));
+    render(<PreflightPanel stackName="web" canEdit />);
+    const status = await screen.findByTestId('preflight-status');
+    expect(status).toHaveAttribute('data-status', 'pass');
+    expect(status).toHaveTextContent(/all clear/i);
+    expect(screen.getByTestId('preflight-notes-section')).toHaveTextContent(/Docker API access routed through socket proxy/i);
+    expect(screen.queryByTestId('preflight-ack-btn-docker-socket-proxy-client-app')).not.toBeInTheDocument();
+    expect(status).not.toHaveTextContent(/info/i);
+  });
+
   it('excludes notes from the graded summary line when issue findings remain', async () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
       status: 'warning',

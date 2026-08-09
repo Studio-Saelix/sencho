@@ -5,8 +5,7 @@ import { isWhatsNewEntry, WHATS_NEW_CAP } from './types';
 // These are authoring guards on the committed data, not tests of behaviour:
 // they fail the build when a hand-written entry is malformed, duplicated, or
 // pushes the file past the cap. The loader's own behaviour is covered in
-// loader.test.ts. While entries.json is still empty they pass trivially, which
-// is expected; they start biting as soon as the first entry lands.
+// loader.test.ts.
 describe('whats-new entries.json', () => {
   it('contains only valid entries', () => {
     for (const entry of rawEntries) {

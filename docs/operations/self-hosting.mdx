@@ -57,6 +57,144 @@ If your environment requires stricter isolation, the Docker socket itself is the
 
 ---
 
+## Docker socket proxy
+
+A Docker socket proxy sits between Sencho and the Docker Engine. Instead of mounting `/var/run/docker.sock` directly into the Sencho container, the deployment mounts a proxy socket in its place, or points Sencho at the proxy with `DOCKER_HOST`, and the proxy forwards only the Engine API groups its configuration allows. This reduces the blast radius of a compromised Sencho container: an attacker who gains control of Sencho can still call the Docker API, but only the groups the proxy permits.
+
+A socket proxy is defense-in-depth, not a security boundary. Docker API access remains highly privileged even through a proxy, and the full profile below is still root-equivalent in practice. Use the profiles as a starting point for sizing a proxy, not as a guarantee that a restrictive proxy makes Sencho low-risk.
+
+Sencho has no socket-proxy setting or UI. The proxy is configured entirely in the deployment compose file, in one of two ways:
+
+- Mount the proxy socket at `/var/run/docker.sock` so Sencho and the `docker` CLI reach the proxy through the default Docker endpoint
+- Set `DOCKER_HOST` to the proxy address (for example `tcp://proxy:2375`) on the Sencho container so the SDK and the Compose CLI reach the proxy through the same endpoint
+
+The second option matters because Sencho talks to Docker through two paths, and both honor the same endpoint:
+
+| Path | Mechanism | Proxy-aware? |
+|------|-----------|--------------|
+| Inventory, stats, events, lifecycle, prune, interactive shell, mesh network operations | Dockerode SDK over the default Docker endpoint | Yes |
+| Stack deploy, update, down, pull, compose logs and config | `docker compose` CLI, inherits the container environment | Yes |
+| Volume browser helper containers | Dockerode create, attach, start, wait, remove | Yes |
+| Self-update and reapply helpers | Helper container mounts `/var/run/docker.sock` directly | Host Unix socket only |
+
+The last row is the exception to everything above. See [Self-update behind a proxy](#self-update-behind-a-proxy).
+
+The profiles below use `tecnativa/docker-socket-proxy` style flags as a worked example. Other proxies (for example `linuxserver/socket-proxy`) expose similar API-group flags, and the exact lifecycle allow flags vary by implementation, so check the flag names against the proxy image and version you run. Profile values are the literal strings `1` and `0`.
+
+Compose Doctor classifies socket-proxy topologies in-app and flags risky configurations such as a proxy that allows mutating API access, publishes a host port, or joins a non-internal network. See [Compose Doctor](/features/compose-doctor).
+
+### Monitoring / read-only profile
+
+```env
+CONTAINERS=1
+IMAGES=1
+NETWORKS=1
+VOLUMES=1
+INFO=1
+SYSTEM=1
+EVENTS=1
+PING=1
+VERSION=1
+POST=0
+EXEC=0
+BUILD=0
+SESSION=0
+```
+
+This profile supports dashboards, inventory, topology, logs, stats, Docker events, disk usage, prune previews, and read-only health and update evidence.
+
+It does **not** support container start, stop, or restart, Compose deploy, update, or down, prune execution, volume-browser helper containers, the interactive shell, mesh network setup, auto-heal restarts, or self-update.
+
+### Minimum management profile
+
+```env
+CONTAINERS=1
+IMAGES=1
+NETWORKS=1
+VOLUMES=1
+INFO=1
+SYSTEM=1
+EVENTS=1
+PING=1
+VERSION=1
+POST=1
+ALLOW_START=1
+ALLOW_STOP=1
+ALLOW_RESTARTS=1
+EXEC=0
+BUILD=0
+SESSION=0
+```
+
+This profile adds everything in the monitoring profile plus image-backed Compose management, container start, stop, and restart, auto-heal restarts, pruning, mesh setup, and volume-browser helper containers.
+
+It still does **not** support the interactive shell, build-backed stacks, or reliable self-update on a TCP-only proxy.
+
+### Full functionality profile
+
+```env
+CONTAINERS=1
+IMAGES=1
+NETWORKS=1
+VOLUMES=1
+INFO=1
+SYSTEM=1
+EVENTS=1
+PING=1
+VERSION=1
+POST=1
+ALLOW_START=1
+ALLOW_STOP=1
+ALLOW_RESTARTS=1
+EXEC=1
+BUILD=1
+SESSION=1
+GRPC=1
+```
+
+This profile supports the full Sencho surface: the interactive shell, build-backed stacks, helper containers, cleanup actions, and self-update where a usable host Docker socket path is available to helpers (see the caveat below).
+
+### Keep these disabled
+
+Sencho does not use these API groups today. Keep them disabled unless a future feature adds a direct dependency:
+
+```env
+AUTH=0
+CONFIGS=0
+SECRETS=0
+SWARM=0
+SERVICES=0
+TASKS=0
+NODES=0
+PLUGINS=0
+COMMIT=0
+DISTRIBUTION=0
+```
+
+### Feature-to-API reference
+
+| Capability | What the proxy must allow |
+|------------|---------------------------|
+| Dashboard inventory, topology, logs, stats | CONTAINERS (list, inspect, logs, stats), IMAGES, NETWORKS, VOLUMES, INFO, SYSTEM (disk usage), EVENTS, PING, VERSION |
+| Container start, stop, restart, auto-heal | CONTAINERS plus POST plus the lifecycle allow flags |
+| Compose deploy, update, down, pull | POST plus the CONTAINERS, IMAGES, NETWORKS, and VOLUMES groups the Compose Engine uses through the same endpoint |
+| Build-backed stacks | BUILD plus SESSION and GRPC as the BuildKit path requires |
+| Interactive shell | EXEC plus CONTAINERS |
+| Volume browser | CONTAINERS create, attach, start, wait, remove, IMAGES (helper image), POST; no EXEC |
+| Mesh network setup | NETWORKS create, inspect, connect plus POST |
+| Image update checks | IMAGES inspect plus CONTAINERS inspect |
+| Prune execution | IMAGES, VOLUMES, NETWORKS, CONTAINERS prune or remove plus POST |
+| Vulnerability scanning (local images) | IMAGES list and inspect (Sencho enumerates local images through the API; Trivy runs as a host binary) |
+| Self-update and reapply | Helper mounts the host `/var/run/docker.sock`; a TCP-only `DOCKER_HOST` does not substitute |
+
+### Self-update behind a proxy
+
+Self-update and reapply helpers hardcode the host Unix socket mount into the helper container (`-v /var/run/docker.sock:/var/run/docker.sock`). They do not inherit `DOCKER_HOST`, so in a TCP-only proxy setup the day-to-day Dockerode and Compose traffic works but the update and reapply helpers will not reach the proxy.
+
+If the deployment is behind a TCP-only proxy, use the fleet update or manual upgrade paths that fit the topology, or make sure the helpers still receive a working host socket path. The generated Pilot Agent compose also mounts the raw socket path, so a TCP-only proxy on an agent node requires editing the generated compose.
+
+---
+
 ## Resource recommendations
 
 | Resource | Minimum | Recommended | Notes |

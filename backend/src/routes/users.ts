@@ -2,7 +2,6 @@ import { Router, type Request, type Response } from 'express';
 import bcrypt from 'bcrypt';
 import { DatabaseService, type UserRole, type ResourceType } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { BCRYPT_SALT_ROUNDS, MIN_PASSWORD_LENGTH } from '../helpers/constants';
@@ -18,13 +17,6 @@ const USERS_SCOPE_MESSAGE = 'API tokens cannot access user management.';
 const VALID_USER_ROLES: UserRole[] = ['admin', 'viewer', 'deployer', 'node-admin', 'auditor'];
 const VALID_ASSIGNMENT_ROLES: UserRole[] = ['admin', 'viewer', 'deployer', 'node-admin'];
 const VALID_RESOURCE_TYPES: ResourceType[] = ['stack', 'node'];
-
-// Roles that require a paid license. Viewer and admin are available on the
-// free tier; the advanced roles unlock per-resource scoping that is only
-// meaningful on paid.
-function roleRequiresPaid(role: UserRole): boolean {
-  return role === 'deployer' || role === 'node-admin' || role === 'auditor';
-}
 
 export const usersRouter = Router();
 
@@ -69,7 +61,6 @@ usersRouter.post('/', authMiddleware, async (req: Request, res: Response): Promi
       res.status(400).json({ error: 'Role must be "admin", "viewer", "deployer", "node-admin", or "auditor"' });
       return;
     }
-    if (roleRequiresPaid(role) && !requirePaid(req, res)) return;
 
     const db = DatabaseService.getInstance();
     const existing = db.getUserByUsername(username);
@@ -88,8 +79,6 @@ usersRouter.post('/', authMiddleware, async (req: Request, res: Response): Promi
   }
 });
 
-// PUT/DELETE intentionally do NOT enforce requirePaid. Admins must be able
-// to manage existing users even if their license lapses.
 usersRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
   if (!requirePermission(req, res, 'system:users')) return;
@@ -124,7 +113,6 @@ usersRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Pro
         res.status(400).json({ error: 'Role must be "admin", "viewer", "deployer", "node-admin", or "auditor"' });
         return;
       }
-      if (roleRequiresPaid(role) && !requirePaid(req, res)) return;
       if (user.username === req.user!.username && role !== user.role) {
         res.status(400).json({ error: 'Cannot change your own role' });
         return;
@@ -229,12 +217,11 @@ usersRouter.post('/:id/mfa/reset', authMiddleware, (req: Request, res: Response)
   }
 });
 
-// --- Scoped Role Assignments (paid) ---
+// --- Scoped Role Assignments ---
 
 usersRouter.get('/:id/roles', authMiddleware, (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
   if (!requirePermission(req, res, 'system:users')) return;
-  if (!requirePaid(req, res)) return;
   try {
     const userId = parseInt(req.params.id as string, 10);
     const db = DatabaseService.getInstance();
@@ -253,7 +240,6 @@ usersRouter.get('/:id/roles', authMiddleware, (req: Request, res: Response): voi
 usersRouter.post('/:id/roles', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
   if (!requirePermission(req, res, 'system:users')) return;
-  if (!requirePaid(req, res)) return;
   try {
     const userId = parseInt(req.params.id as string, 10);
     const { role, resource_type, resource_id, node_id: rawNodeId } = req.body;
@@ -359,7 +345,6 @@ usersRouter.post('/:id/roles', authMiddleware, async (req: Request, res: Respons
 usersRouter.delete('/:id/roles/:assignId', authMiddleware, (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
   if (!requirePermission(req, res, 'system:users')) return;
-  if (!requirePaid(req, res)) return;
   try {
     const userId = parseInt(req.params.id as string, 10);
     const assignId = parseInt(req.params.assignId as string, 10);

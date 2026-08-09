@@ -5,14 +5,14 @@ description: Role-based access control for Sencho. Manage admin, viewer, deploye
 ---
 
 <Note>
-  Community supports unlimited accounts with the **Admin** and **Viewer** roles. The **Deployer**, **Node Admin**, and **Auditor** roles, plus scoped permissions, require **Admiral**.
+  Community includes complete built-in RBAC: unlimited accounts, all five global roles, and stack or node scoped assignments. Admiral adds organizational identity governance, extended audit depth, and related assurance workflows.
 </Note>
 
 <Note>
   The Users panel is hub-only. It does not appear under Settings on a remote node, since accounts and roles are managed from the gateway that proxies the fleet.
 </Note>
 
-Sencho ships with five built-in roles that map to the permissions most operators reach for: full operator access, read-only observation, day-to-day deploys, scoped fleet management, and audit-only compliance. Admiral adds **scoped permissions** so you can grant a viewer the right to deploy one specific stack without elevating them anywhere else.
+Sencho ships with five built-in roles that map to the permissions most operators reach for: full operator access, read-only observation, day-to-day deploys, scoped fleet management, and audit-only compliance. **Scoped permissions** let you grant a viewer the right to deploy one specific stack without elevating them anywhere else. Built-in roles and scopes are available on every plan.
 
 ## Roles
 
@@ -20,9 +20,9 @@ Sencho ships with five built-in roles that map to the permissions most operators
 |------|----------------|------|
 | **Admin** | Full operator access: deploy, edit compose, manage users, configure nodes, view audit log, every system setting | Community |
 | **Viewer** | Read-only access to stacks, logs, stats, file contents, and node listings | Community |
-| **Deployer** | Deploy, restart, stop, and start stacks, and check individual stacks for image updates. Cannot edit compose files, create or delete stacks, view nodes, or manage alert and auto-heal rules | Admiral |
-| **Node Admin** | Full stack and node management across the fleet, including node-scoped operational Settings. No access to users, licensing, credentials, or system-only Settings | Admiral |
-| **Auditor** | Read-only access to stacks, nodes, and the audit log. No write access anywhere | Admiral |
+| **Deployer** | Deploy, restart, stop, and start stacks, and check individual stacks for image updates. Cannot edit compose files, create or delete stacks, view nodes, or manage alert and auto-heal rules | Community |
+| **Node Admin** | Full stack and node management across the fleet, including node-scoped operational Settings. No access to users, licensing, credentials, or system-only Settings | Community |
+| **Auditor** | Read-only access to stacks, nodes, and the audit log. No write access anywhere | Community |
 
 ### Permission matrix
 
@@ -46,23 +46,23 @@ Each row is one of the permission keys the backend checks. The matrix below is t
 | Host console (`system:console`) | Yes | No | No | No | No |
 | Container registries (`system:registries`) | Yes | No | No | No | No |
 
-On Admiral, a user with a lower global role can still hold extra permissions on specific stacks or nodes through scoped assignments (covered below). Scoped permissions are additive: they grant more, never less.
+A user with a lower global role can still hold extra permissions on specific stacks or nodes through scoped assignments (covered below). Scoped permissions are additive: they grant more, never less.
 
 ## Account limits by tier
 
-| Tier | Admin accounts | Non-admin accounts | Intermediate roles | Scoped permissions |
-|------|---------------|--------------------|--------------------|--------------------|
-| **Community** | Unlimited | Unlimited | No | No |
-| **Admiral** | Unlimited | Unlimited | Yes | Yes |
+| Tier | Admin accounts | Non-admin accounts | Built-in roles | Scoped permissions |
+|------|---------------|--------------------|----------------|--------------------|
+| **Community** | Unlimited | Unlimited | All five | Yes |
+| **Admiral** | Unlimited | Unlimited | All five | Yes |
 
-Community accounts use the **Admin** and **Viewer** roles. Admiral adds the intermediate roles (Deployer, Node Admin, Auditor) and scoped permissions.
+Both plans use the same five built-in roles and the same additive stack and node scopes. Admiral extends identity and audit governance beyond this foundation.
 
 ## Managing users
 
 The Users panel lives at **Settings · Users**, under the **Access** group of the settings sidebar. It is visible only to users with the Admin role, and is hidden when a remote node is the active selection.
 
 <Frame>
-  <img src="/images/rbac/users-list.png" alt="Settings Users panel showing the Access sidebar selection, a SCOPE global chip, an OPERATORS 2 counter, an Add user button, and a four-column table (Username, Role, Created, Actions) with two rows: admin marked (you) with a disabled trash icon and viewer with active edit and trash icons." />
+  <img src="/images/rbac/users-list.png" alt="Settings Users panel showing the Access sidebar selection, a SCOPE global chip, an OPERATORS 3 counter, an Add user button, and a four-column table (Username, Role, Created, Actions) with three rows: an Admin row marked (you) with a disabled trash icon, a second Admin row, and a Viewer row, both with active edit and trash icons." />
 </Frame>
 
 The table shows one row per user with their **Username**, **Role** badge, account **Created** date, and per-row action icons. The signed-in admin's row carries a small `(you)` marker after the username and the delete icon is disabled, so you cannot lock yourself out by deleting your own account.
@@ -84,21 +84,21 @@ Click **Add user**. The form opens inline below the button (it is not a modal), 
 | Field | Rules |
 |-------|-------|
 | **Username** | At least 3 characters. Letters, numbers, underscores, and hyphens only. Submitting with `.` or whitespace returns `Username can only contain letters, numbers, underscores, and hyphens.` |
-| **Role** | Combobox. On Admiral you see all five roles; on Community you see Admin and Viewer only. |
+| **Role** | Combobox listing Admin, Viewer, Deployer, Node Admin, and Auditor. |
 | **Password** | At least 8 characters. The placeholder reads `min. 8 characters`. |
 | **Confirm Password** | Must match the password field, validated on submit. |
 
-The role combobox on Admiral exposes the full set:
+The role combobox exposes the full built-in set:
 
 <Frame>
-  <img src="/images/rbac/role-selector.png" alt="Role combobox open inside the New User form on an Admiral instance, listing Admin, Viewer (checkmark), Deployer, Node Admin, and Auditor as selectable options." />
+  <img src="/images/rbac/role-selector.png" alt="Role combobox open inside the New User form, listing Admin, Viewer (checkmark), Deployer, Node Admin, and Auditor as selectable options." />
 </Frame>
 
 Click **Create user** to submit. The form clears, the table refreshes, and an audit-log entry is written with the actor, target username, and assigned role.
 
 ### Editing a user
 
-Click the pencil icon on a row to switch the form into **Edit User** mode. The same four fields render with the existing values pre-filled, plus a separate **Scoped Permissions** box below for Admiral instances (see [Scoped permissions](#scoped-permissions)).
+Click the pencil icon on a row to switch the form into **Edit User** mode. The same four fields render with the existing values pre-filled, plus a separate **Scoped Permissions** box below (see [Scoped permissions](#scoped-permissions)).
 
 The password fields change subtly in edit mode:
 
@@ -109,17 +109,13 @@ Click **Update user** to save. Changing the role takes effect on the next API re
 
 ## Scoped permissions
 
-<Note>
-  Scoped permissions require **Admiral**.
-</Note>
-
-Scoped permissions let you grant a user a higher role on a specific stack or node without elevating them globally. A Viewer can be granted Deployer on one stack; a Deployer can be granted Node Admin on one server.
+Scoped permissions let you grant a user a higher role on a specific stack or node without elevating them globally. A Viewer can be granted Deployer on one stack; a Deployer can be granted Node Admin on one server. Built-in stack and node scopes are available on Community and Admiral.
 
 **Stack scopes are node-specific.** The same stack name on two different nodes is two independent grants. Assigning a stack scope means choosing the node first, then picking a stack that exists on that node. Display form conceptually: stack name @ node name (for example `frontend @ prod`).
 
 **Node scopes are node-wide.** The resource is the node itself. There is no separate node qualifier on a node assignment row. Granting Node Admin (or Deployer, or Admin) on `staging-server` authorizes that role's stack and node operations for every stack on that node, without a separate per-stack grant.
 
-The box appears below the user form whenever you are editing a user on Admiral.
+The box appears below the user form whenever you are editing a user.
 
 The add-scope form has these controls and an **Add** button:
 
@@ -161,7 +157,7 @@ If you need to track repeated lockouts, the audit log records each failed login 
 Click the trash icon on a user row. A confirmation modal with the kicker `USERS · DELETE · IRREVERSIBLE` opens.
 
 <Frame>
-  <img src="/images/rbac/delete-confirm.png" alt="Delete confirmation modal with the kicker USERS DELETE IRREVERSIBLE, the title Delete user viewer in italic display type, the body Removes the user immediately. They lose access right away., and Cancel and Delete buttons on the lower right." />
+  <img src="/images/rbac/delete-confirm.png" alt="Delete confirmation modal with the kicker USERS DELETE IRREVERSIBLE, the bold title Delete user site-viewer, the body Removes the user immediately. They lose access right away., and Cancel and Delete buttons on the lower right." />
 </Frame>
 
 The body reads:
@@ -193,7 +189,7 @@ Admins can turn this renewal off from **Settings > Users > Session policy** (**K
 
 ## SSO auto-provisioning
 
-With SSO configured on Admiral, users authenticate through an identity provider (LDAP, Custom OIDC, Google, GitHub, Okta). On their first successful sign-in, Sencho auto-creates a user record. SSO accounts appear in the Users list alongside local accounts and can be edited the same way; only the password and (optionally) the role differ.
+With SSO configured, users authenticate through an identity provider (Custom OIDC and preset providers on every plan; LDAP on Admiral). On their first successful sign-in, Sencho auto-creates a user record. SSO accounts appear in the Users list alongside local accounts and can be edited the same way; only the password and (optionally) the role differ.
 
 Two SSO-specific behaviors to keep in mind:
 
@@ -231,8 +227,8 @@ Entries include the acting user, IP address, HTTP method and path, response stat
   <Accordion title="The Users entry is missing from the Settings sidebar">
     The Users entry is hidden in two cases. **One,** you are signed in as a non-admin (Viewer, Deployer, Auditor): the entry is admin-only. **Two,** you have a remote node selected: the panel is hub-only and is hidden in the sidebar when any remote node is active. Switch back to the local node via the node switcher in the masthead.
   </Accordion>
-  <Accordion title="The role I want is greyed out in the role combobox">
-    The combobox only shows roles available on your tier. On Community, the combobox lists Admin and Viewer only. **Deployer**, **Node Admin**, and **Auditor** are Admiral roles. Upgrade to Admiral to use them, or the scoped-permission equivalents.
+  <Accordion title="The role I want is missing from the role combobox">
+    The combobox lists the five built-in roles: Admin, Viewer, Deployer, Node Admin, and Auditor. Custom roles are not available. If a role is missing after a UI refresh, sign out and back in, or confirm you are editing from the hub (local node) under **Settings · Users**.
   </Accordion>
   <Accordion title="A user complains they were signed out unexpectedly">
     Token-version bumps invalidate sessions. Two events do this: an admin changed the user's password, or an admin reset their 2FA. Both rotate the user's token version, so every JWT issued before the rotation is rejected on the next request. The user can sign in again with their (possibly new) password. Role changes do **not** sign the user out; they take effect on the next request without rotating the token version.
@@ -241,7 +237,7 @@ Entries include the acting user, IP address, HTTP method and path, response stat
     Check whether **Session policy > Keep active sessions alive** was turned off in **Settings > Users**. With it off, every session hits a strict, fixed 24-hour (or 30-day, with **Stay signed in**) ceiling regardless of activity. Turn it back on so an active session renews itself instead of hard-expiring, or have the user check **Stay signed in** at their next sign-in for a longer session between visits.
   </Accordion>
   <Accordion title="A scoped Deployer cannot deploy a stack they were granted">
-    Three causes. **One,** the assignment was created on Admiral but the license has since dropped to Community. The permission resolver only consults scoped assignments when the effective tier is Admiral; on Community the scope is ignored and the user falls back to their global role. **Two,** the resource type or stack name on the assignment does not match the request's resource (names are case-sensitive). **Three,** the stack grant is tied to a different node than the one the user is acting on: the same stack name on another node is a separate grant. Re-open the user in the edit form and confirm the existing-scope row shows the expected stack name at the expected node.
+    Two common causes. **One,** the resource type or stack name on the assignment does not match the request's resource (names are case-sensitive). **Two,** the stack grant is tied to a different node than the one the user is acting on: the same stack name on another node is a separate grant. Re-open the user in the edit form and confirm the existing-scope row shows the expected stack name at the expected node. Built-in scopes remain active on Community and Admiral.
   </Accordion>
   <Accordion title="The shield (Reset 2FA) icon is missing on a user I expected to see it on">
     The icon only appears for users with a finished TOTP enrollment. If the user started enrollment but never confirmed their first code, the enrollment is incomplete and the icon stays hidden. Ask the user to finish enrollment from their account settings, or, if they cannot, leave the row alone: there is nothing to reset.
