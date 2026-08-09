@@ -92,12 +92,39 @@ describe('GET /api/auth/status', () => {
     const { DatabaseService } = await import('../services/DatabaseService');
     const db = DatabaseService.getInstance();
     db.getDb().prepare('DELETE FROM global_settings WHERE key = ?').run('authentication_mode');
-    // Bust the settings cache so the next read rebuilds without the deleted key.
-    const cpu = db.getDb().prepare('SELECT value FROM global_settings WHERE key = ?').get('host_cpu_limit') as { value: string };
-    db.updateGlobalSetting('host_cpu_limit', cpu.value);
     const res = await request(app).get('/api/auth/status');
     expect(res.status).toBe(200);
     expect(res.body.localLoginEnabled).toBe(true);
+  });
+
+  it('honors a sidecar CLI write to authentication_mode without clearing the settings cache', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const { setAuthenticationMode, getAuthenticationMode, isLocalLoginEnabled } = await import('../helpers/authenticationMode');
+    setAuthenticationMode('sso_only');
+    const db = DatabaseService.getInstance();
+    // Warm the process cache so a naive getGlobalSettings() read would still
+    // report sso_only after a direct SQLite write (the enableLocalLogin /
+    // disableSso sidecar path).
+    expect(db.getGlobalSettings().authentication_mode).toBe('sso_only');
+    db.getDb()
+      .prepare('INSERT OR REPLACE INTO global_settings (key, value) VALUES (?, ?)')
+      .run('authentication_mode', 'local_and_sso');
+    expect(db.getGlobalSettings().authentication_mode).toBe('sso_only');
+    expect(getAuthenticationMode()).toBe('local_and_sso');
+    expect(isLocalLoginEnabled()).toBe(true);
+
+    const status = await request(app).get('/api/auth/status');
+    expect(status.status).toBe(200);
+    expect(status.body.localLoginEnabled).toBe(true);
+    expect(status.body.authenticationMode).toBe('local_and_sso');
+
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ username: TEST_USERNAME, password: TEST_PASSWORD });
+    expect(login.status).toBe(200);
+
+    // Restore via the normal path so later tests see a coherent cache.
+    setAuthenticationMode('local_and_sso');
   });
 });
 

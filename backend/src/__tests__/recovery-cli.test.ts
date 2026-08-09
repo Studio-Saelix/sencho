@@ -167,6 +167,7 @@ describe('disableSso', () => {
         db.upsertSSOConfig('oidc_custom', true, '{"clientId":"abc"}');
         const result = disableSso();
         expect(result.ok).toBe(true);
+        expect(result.message).toMatch(/no restart required/i);
         expect(db.getGlobalSettings().authentication_mode).toBe('local_and_sso');
         expect(db.getEnabledSSOConfigs()).toHaveLength(0);
     });
@@ -178,7 +179,7 @@ describe('enableLocalLogin', () => {
         db.updateGlobalSetting('authentication_mode', 'sso_only');
         const result = enableLocalLogin();
         expect(result.ok).toBe(true);
-        expect(result.message).toMatch(/Restart Sencho/i);
+        expect(result.message).toMatch(/no restart is required/i);
         expect(db.getGlobalSettings().authentication_mode).toBe('local_and_sso');
     });
 });

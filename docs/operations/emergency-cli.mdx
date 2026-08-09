@@ -80,7 +80,17 @@ docker compose exec sencho node dist/cli/disableSso.js [provider]
 docker compose exec sencho node dist/cli/disableSso.js oidc_google
 ```
 
-With no argument it disables every enabled provider. The stored configuration is preserved (only the enabled flag is cleared), so you can correct it and turn it back on from **Settings · SSO**.
+With no argument it disables every enabled provider and, if **SSO only** mode is active, restores **Local and SSO** so password login works again. The stored configuration is preserved (only the enabled flag is cleared), so you can correct it and turn it back on from **Settings · SSO**. No Sencho restart is required.
+
+### Re-enable local password login (SSO only)
+
+When authentication mode is **SSO only** and the identity provider is unavailable, restore local password login without disabling providers:
+
+```bash
+docker compose exec sencho node dist/cli/enableLocalLogin.js
+```
+
+Takes effect on the next login attempt; no restart is required. See [SSO & LDAP Authentication](/features/sso#authentication-mode) for the full SSO-only recovery path.
 
 ## Inspecting and protecting your data
 

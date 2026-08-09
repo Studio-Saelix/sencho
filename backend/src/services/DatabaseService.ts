@@ -3470,6 +3470,20 @@ export class DatabaseService {
         this.cachedGlobalSettings = null;
     }
 
+    /**
+     * Read one global_settings value straight from SQLite, ignoring the
+     * in-process cache. Emergency CLIs (enableLocalLogin, disableSso) write
+     * from a sidecar Node process; the running server's getGlobalSettings()
+     * cache cannot see those writes. Use this for settings that must honor
+     * out-of-process recovery without a restart.
+     */
+    public getGlobalSettingFresh(key: string): string | undefined {
+        const row = this.db.prepare('SELECT value FROM global_settings WHERE key = ?').get(key) as
+            | { value: string }
+            | undefined;
+        return row?.value;
+    }
+
     // --- System State (operational/runtime values - not user-defined config) ---
 
     public getSystemState(key: string): string | null {

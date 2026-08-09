@@ -79,10 +79,14 @@ export function disableSso(provider?: string): CliResult {
   }
 
   const enabled = db.getEnabledSSOConfigs();
+  const wasSsoOnly = getAuthenticationMode(db) === 'sso_only';
   if (enabled.length === 0) {
     const modeError = restoreLocalLoginIfNeeded(db);
     if (modeError) return modeError;
-    return { ok: true, message: 'No SSO providers are currently enabled.' };
+    const modeNote = wasSsoOnly
+      ? ' Local password login is available again (no restart required).'
+      : '';
+    return { ok: true, message: `No SSO providers are currently enabled.${modeNote}` };
   }
 
   const modeError = restoreLocalLoginIfNeeded(db);
@@ -93,7 +97,13 @@ export function disableSso(provider?: string): CliResult {
   }
   const names = enabled.map(c => c.provider).join(', ');
   auditCli(db, '/cli/disable-sso', `CLI disabled all SSO providers (${enabled.length})`);
-  return { ok: true, message: `Disabled ${enabled.length} SSO provider(s): ${names}. Configurations were preserved.` };
+  const modeNote = wasSsoOnly
+    ? ' Local password login is available again (no restart required).'
+    : '';
+  return {
+    ok: true,
+    message: `Disabled ${enabled.length} SSO provider(s): ${names}. Configurations were preserved.${modeNote}`,
+  };
 }
 
 function main(): void {

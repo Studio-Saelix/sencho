@@ -6,9 +6,14 @@ export type AuthenticationMode = (typeof AUTHENTICATION_MODES)[number];
 export const AUTHENTICATION_MODE_KEY = 'authentication_mode';
 export const DEFAULT_AUTHENTICATION_MODE: AuthenticationMode = 'local_and_sso';
 
-/** Read the cached global setting; missing or unknown values default to local_and_sso. */
+/**
+ * Read authentication_mode with a fresh SQLite lookup. Must not use the
+ * getGlobalSettings() process cache: enableLocalLogin / disableSso write this
+ * key from a sidecar CLI process, and a stale sso_only cache would keep
+ * rejecting local password login after recovery until Sencho restarts.
+ */
 export function getAuthenticationMode(db: DatabaseService = DatabaseService.getInstance()): AuthenticationMode {
-  const raw = db.getGlobalSettings()[AUTHENTICATION_MODE_KEY];
+  const raw = db.getGlobalSettingFresh(AUTHENTICATION_MODE_KEY);
   if (raw === 'sso_only') return 'sso_only';
   return DEFAULT_AUTHENTICATION_MODE;
 }
