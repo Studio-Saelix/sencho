@@ -78,12 +78,18 @@ export interface HydrationEvent {
 }
 
 export interface HydrationSnapshot {
-  schemaVersion: 1;
   clock: HydrationClock;
   bootSessionId: string;
   bootStartAt: number | null;
   nodeSessionId: string | null;
   nodeId: number | null;
+  /** Clock time when the active node session began; null before the first node resolves. */
+  nodeSessionStartAt: number | null;
+  /** Resolved foreground list attempt (see `resolveForegroundAttempt`); null
+   *  until a list attempt commits `list_visible`. Unversioned by policy: the
+   *  snapshot never leaves the process; `HydrationReport` is the versioned,
+   *  serialized artifact. */
+  lastAttempt: ForegroundAttempt | null;
   events: readonly HydrationEvent[];
 }
 
@@ -104,7 +110,7 @@ export interface HydrationReportPhase {
 }
 
 export interface HydrationReport {
-  schemaVersion: 1;
+  schemaVersion: 2;
   /** Wall-clock capture time (Date.now), only for human reference. */
   capturedAt: number;
   clock: HydrationClock;
@@ -112,7 +118,37 @@ export interface HydrationReport {
   bootSessionId: string;
   nodeSessionId: string | null;
   nodeId: number | null;
+  /** Raw boot-relative elapsed ms from `boot_start` to the most recent
+   *  `list_visible`, kept for diagnostic back-compat. The truthful foreground
+   *  duration is `lastAttemptListVisibleMs` (attempt-relative). */
   listVisibleMs: number | null;
+  /** Page age at capture: `boot_start` to now. */
+  bootAgeMs: number | null;
+  /** `boot_start` to `auth_resolved`. */
+  bootAuthResolvedMs: number | null;
+  /** `boot_start` to `nodes_resolved`. */
+  bootNodesResolvedMs: number | null;
+  /** `boot_start` to `shell_committed`. */
+  bootShellCommittedMs: number | null;
+  /** Elapsed ms since the active node session began (node-session age). */
+  sessionAgeMs: number | null;
+  /** `node-session start` to the session's most recent committed `list_visible`. */
+  sessionListVisibleMs: number | null;
+  /** `node-session start` to the session's most recent committed `list_hydrated`. */
+  sessionListHydratedMs: number | null;
+  /** Foreground list attempt: the newest committed `list_visible` attempt in
+   *  the active node session that is still live (not aborted or superseded). */
+  lastAttemptId: string | null;
+  /** `attempt start` to its committed `list_visible`. */
+  lastAttemptListVisibleMs: number | null;
+  /** `attempt start` to its committed `list_hydrated`; null until the foreground attempt hydrates. */
+  lastAttemptListHydratedMs: number | null;
+  /** `list_visible` to `list_hydrated` for the same foreground attempt. */
+  lastAttemptHydrationGapMs: number | null;
+  /** Proxy flag from the foreground attempt's own `list_visible` event. */
+  lastAttemptProxied: boolean | null;
+  /** Node id from the foreground attempt's own `list_visible` event. */
+  lastAttemptNodeId: number | null;
   anyProxied: boolean;
   phases: HydrationReportPhase[];
 }
@@ -195,8 +231,10 @@ function round(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-interface AttemptRecord {
+export interface AttemptRecord {
   sessionId: string;
+  /** Clock time when the attempt was created (`newAttemptId`). */
+  createdAt: number;
   aborted: boolean;
   superseded: boolean;
 }
@@ -222,6 +260,7 @@ function newSessionId(prefix: string): string {
 const bootSessionId = newSessionId('boot');
 let bootStartAt: number | null = null;
 let nodeSessionId: string | null = null;
+let nodeSessionStartAt: number | null = null;
 let currentNodeId: number | null = null;
 
 let events: HydrationEvent[] = [];
@@ -306,13 +345,15 @@ let flushScheduled = false;
 let lastEmitAt = 0;
 
 function rebuildSnapshot(): void {
+  const foreground = resolveForegroundAttempt(events, nodeSessionId, attempts);
   snapshot = {
-    schemaVersion: 1,
     clock: clockKind,
     bootSessionId,
     bootStartAt,
     nodeSessionId,
     nodeId: currentNodeId,
+    nodeSessionStartAt,
+    lastAttempt: foreground,
     events: events.slice(),
   };
 }
@@ -380,6 +421,7 @@ export function beginNodeSession(nodeId: number): string {
     committedKeys.clear();
   }
   nodeSessionId = newSessionId('node');
+  nodeSessionStartAt = now();
   currentNodeId = nodeId;
   scheduleEmit();
   return nodeSessionId;
@@ -387,7 +429,12 @@ export function beginNodeSession(nodeId: number): string {
 
 export function newAttemptId(): string {
   const id = newSessionId('attempt');
-  attempts.set(id, { sessionId: currentSessionId(), aborted: false, superseded: false });
+  attempts.set(id, {
+    sessionId: currentSessionId(),
+    createdAt: now(),
+    aborted: false,
+    superseded: false,
+  });
   if (attempts.size > MAX_ATTEMPTS) {
     const oldest = attempts.keys().next().value;
     if (oldest !== undefined) attempts.delete(oldest);
@@ -418,6 +465,9 @@ export function abortAttempt(attemptId: string): void {
       nodeId: sessionNodeId(span.sessionId),
     });
   }
+  // Rebuild the snapshot even when no span was open, so the aborted attempt
+  // cannot linger as the resolved foreground attempt until unrelated activity.
+  scheduleEmit();
 }
 
 export function markMilestone(phase: HydrationMark, opts: MilestoneOptions = {}): void {
@@ -556,23 +606,200 @@ export function classifyCritical(phase: string): boolean {
   return !BACKGROUND_PHASES.has(phase);
 }
 
-/** Elapsed ms from `boot_start` to the most recent `list_visible` in `events`. */
+/** Newest event in `eventList` matching `predicate`, or null. */
+function findLatestEvent(
+  eventList: readonly HydrationEvent[],
+  predicate: (e: HydrationEvent) => boolean,
+): HydrationEvent | null {
+  for (let i = eventList.length - 1; i >= 0; i--) {
+    if (predicate(eventList[i])) return eventList[i];
+  }
+  return null;
+}
+
+/** Raw boot-relative elapsed ms from `boot_start` to the most recent
+ *  `list_visible`, with no session or attempt filtering. Retained as the
+ *  compatibility surface; consumers needing a truthful foreground hydration
+ *  duration should use `getAttemptListVisibleMsFrom` (attempt-relative) or
+ *  `getSessionListVisibleMsFrom` (session-relative). */
 export function listVisibleMsFrom(
   eventList: readonly HydrationEvent[],
   bootAt: number | null,
 ): number | null {
   if (bootAt == null) return null;
+  const event = findLatestEvent(eventList, (e) => e.phase === 'list_visible');
+  return event == null ? null : round(event.t0 - bootAt);
+}
+
+/** Boot-relative compatibility getter: elapsed ms from `boot_start` to the
+ *  most recent `list_visible` across all sessions, or null. */
+export function getListVisibleMs(): number | null {
+  return listVisibleMsFrom(events, bootStartAt);
+}
+
+// ---------------------------------------------------------------------------
+// Session-correct derivations. The `*From` functions below are pure scans
+// over the event list and explicit anchors, so React consumers can derive
+// from the snapshot they last read (see `useHydrationTiming`). The no-arg
+// getters wrap them with live module state for the report capture, a
+// point-in-time read rather than a reactive derivation.
+// ---------------------------------------------------------------------------
+
+export interface ForegroundAttempt {
+  attemptId: string;
+  createdAt: number;
+  /** Proxy flag from the foreground `list_visible` event itself. */
+  proxied: boolean | null;
+  /** Node id from the foreground `list_visible` event itself. */
+  nodeId: number | null;
+}
+
+/** The foreground list attempt: the newest committed `list_visible` event in
+ *  the active node session whose attempt record is still live (exists, not
+ *  aborted, not superseded, same session). Selection is anchored on committed
+ *  events, so a later stack-detail attempt can never steal the headline; the
+ *  attempt map only filters for liveness and supplies `createdAt`. */
+export function resolveForegroundAttempt(
+  eventList: readonly HydrationEvent[],
+  sessionId: string | null,
+  attemptRecords: ReadonlyMap<string, AttemptRecord>,
+): ForegroundAttempt | null {
+  if (sessionId == null) return null;
   for (let i = eventList.length - 1; i >= 0; i--) {
-    if (eventList[i].phase === 'list_visible') {
-      return round(eventList[i].t0 - bootAt);
-    }
+    const event = eventList[i];
+    if (event.phase !== 'list_visible' || event.commit !== true) continue;
+    if (event.sessionId !== sessionId) continue;
+    const attemptId = event.attemptId;
+    if (!attemptId) continue;
+    const record = attemptRecords.get(attemptId);
+    if (!record || record.aborted || record.superseded) continue;
+    if (record.sessionId !== sessionId) continue;
+    return {
+      attemptId,
+      createdAt: record.createdAt,
+      proxied: event.proxied ?? null,
+      nodeId: event.nodeId ?? null,
+    };
   }
   return null;
 }
 
-/** Elapsed ms from `boot_start` to the most recent `list_visible`, or null. */
-export function getListVisibleMs(): number | null {
-  return listVisibleMsFrom(events, bootStartAt);
+/** Elapsed ms from `boot_start` to the most recent `phase` event belonging to
+ *  the boot session, or null when the phase has not fired (or was evicted). */
+export function getBootMilestoneMsFrom(
+  eventList: readonly HydrationEvent[],
+  sessionId: string,
+  phase: string,
+  bootAt: number | null,
+): number | null {
+  if (bootAt == null) return null;
+  const event = findLatestEvent(
+    eventList,
+    (e) => e.phase === phase && e.sessionId === sessionId,
+  );
+  return event == null ? null : round(event.t0 - bootAt);
+}
+
+/** Elapsed ms from the active node-session start to its most recent committed
+ *  `list_visible`, or null before one exists. */
+export function getSessionListVisibleMsFrom(
+  eventList: readonly HydrationEvent[],
+  sessionId: string | null,
+  sessionStartAt: number | null,
+): number | null {
+  if (sessionStartAt == null) return null;
+  const event = findLatestEvent(
+    eventList,
+    (e) => e.phase === 'list_visible' && e.commit === true && e.sessionId === sessionId,
+  );
+  return event == null ? null : round(event.t0 - sessionStartAt);
+}
+
+/** Elapsed ms from the active node-session start to its most recent committed
+ *  `list_hydrated`, or null before one exists. */
+export function getSessionListHydratedMsFrom(
+  eventList: readonly HydrationEvent[],
+  sessionId: string | null,
+  sessionStartAt: number | null,
+): number | null {
+  if (sessionStartAt == null) return null;
+  const event = findLatestEvent(
+    eventList,
+    (e) => e.phase === 'list_hydrated' && e.commit === true && e.sessionId === sessionId,
+  );
+  return event == null ? null : round(event.t0 - sessionStartAt);
+}
+
+/** Elapsed ms from the attempt's creation to its committed `list_visible`, or
+ *  null. Only commit-aligned events count, matching `resolveForegroundAttempt`
+ *  and the session getters; an uncommitted error mark never reads as success. */
+export function getAttemptListVisibleMsFrom(
+  eventList: readonly HydrationEvent[],
+  attemptId: string,
+  attemptCreatedAt: number,
+): number | null {
+  const event = findLatestEvent(
+    eventList,
+    (e) => e.phase === 'list_visible' && e.attemptId === attemptId && e.commit === true,
+  );
+  return event == null ? null : round(event.t0 - attemptCreatedAt);
+}
+
+/** Elapsed ms from the attempt's creation to its committed `list_hydrated`, or
+ *  null until the attempt actually hydrates. Only commit-aligned events count,
+ *  so a failed hydration marked via `markMilestone` never reads as completed.
+ *  Never borrowed from another attempt. */
+export function getAttemptListHydratedMsFrom(
+  eventList: readonly HydrationEvent[],
+  attemptId: string,
+  attemptCreatedAt: number,
+): number | null {
+  const event = findLatestEvent(
+    eventList,
+    (e) => e.phase === 'list_hydrated' && e.attemptId === attemptId && e.commit === true,
+  );
+  return event == null ? null : round(event.t0 - attemptCreatedAt);
+}
+
+/** Elapsed ms from committed `list_visible` to committed `list_hydrated` for
+ *  the same attempt, or null when either phase has not committed for it (or
+ *  when hydration committed before visibility, which is not a valid gap).
+ *  Defined only when visible precedes hydrated. */
+export function getAttemptHydrationGapMsFrom(
+  eventList: readonly HydrationEvent[],
+  attemptId: string,
+): number | null {
+  const visible = findLatestEvent(
+    eventList,
+    (e) => e.attemptId === attemptId && e.commit === true && e.phase === 'list_visible',
+  );
+  const hydrated = findLatestEvent(
+    eventList,
+    (e) => e.attemptId === attemptId && e.commit === true && e.phase === 'list_hydrated',
+  );
+  if (visible == null || hydrated == null || hydrated.t0 < visible.t0) return null;
+  return round(hydrated.t0 - visible.t0);
+}
+
+/** Page age at call time: elapsed ms from `boot_start` to now, or null. */
+function getBootAgeMs(): number | null {
+  return bootStartAt == null ? null : round(now() - bootStartAt);
+}
+
+/** Active node-session age at call time: elapsed ms from `beginNodeSession`
+ *  to now, or null before the first node resolves. */
+function getSessionAgeMs(): number | null {
+  return nodeSessionStartAt == null ? null : round(now() - nodeSessionStartAt);
+}
+
+/** Session-relative `list_visible` for the active node session, or null. */
+function getSessionListVisibleMs(): number | null {
+  return getSessionListVisibleMsFrom(events, nodeSessionId, nodeSessionStartAt);
+}
+
+/** Session-relative `list_hydrated` for the active node session, or null. */
+function getSessionListHydratedMs(): number | null {
+  return getSessionListHydratedMsFrom(events, nodeSessionId, nodeSessionStartAt);
 }
 
 function toReportPhase(event: HydrationEvent): HydrationReportPhase {
@@ -594,9 +821,14 @@ function toReportPhase(event: HydrationEvent): HydrationReportPhase {
   };
 }
 
+function bootMilestoneMs(phase: string): number | null {
+  return getBootMilestoneMsFrom(events, bootSessionId, phase, bootStartAt);
+}
+
 export function getHydrationReport(): HydrationReport {
+  const foreground = resolveForegroundAttempt(events, nodeSessionId, attempts);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     capturedAt: Date.now(),
     clock: clockKind,
     ...(appVersion ? { appVersion } : {}),
@@ -604,6 +836,26 @@ export function getHydrationReport(): HydrationReport {
     nodeSessionId,
     nodeId: currentNodeId,
     listVisibleMs: getListVisibleMs(),
+    bootAgeMs: getBootAgeMs(),
+    bootAuthResolvedMs: bootMilestoneMs('auth_resolved'),
+    bootNodesResolvedMs: bootMilestoneMs('nodes_resolved'),
+    bootShellCommittedMs: bootMilestoneMs('shell_committed'),
+    sessionAgeMs: getSessionAgeMs(),
+    sessionListVisibleMs: getSessionListVisibleMs(),
+    sessionListHydratedMs: getSessionListHydratedMs(),
+    lastAttemptId: foreground?.attemptId ?? null,
+    lastAttemptListVisibleMs:
+      foreground != null
+        ? getAttemptListVisibleMsFrom(events, foreground.attemptId, foreground.createdAt)
+        : null,
+    lastAttemptListHydratedMs:
+      foreground != null
+        ? getAttemptListHydratedMsFrom(events, foreground.attemptId, foreground.createdAt)
+        : null,
+    lastAttemptHydrationGapMs:
+      foreground != null ? getAttemptHydrationGapMsFrom(events, foreground.attemptId) : null,
+    lastAttemptProxied: foreground?.proxied ?? null,
+    lastAttemptNodeId: foreground?.nodeId ?? null,
     anyProxied: events.some((e) => e.proxied === true),
     phases: events.map(toReportPhase),
   };

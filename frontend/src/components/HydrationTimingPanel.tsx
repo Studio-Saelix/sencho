@@ -30,12 +30,13 @@ const POSITION_CLASS =
  * Developer-mode-only overlay for startup and stack-hydration timing.
  *
  * Mount this only when developer mode is on for the active node; it does not
- * gate itself. It shows a collapsed chip with the boot-to-`list_visible`
- * elapsed time, expanding to a phase table with copy/clear actions. It sits
- * below toasts and modals and never covers the mobile tab bar or safe area.
+ * gate itself. It shows a collapsed chip with the foreground (attempt- or
+ * session-relative) `list_visible` elapsed time and its anchor, expanding to a
+ * phase table with copy/clear actions. It sits below toasts and modals and
+ * never covers the mobile tab bar or safe area.
  */
 export function HydrationTimingPanel() {
-  const { listVisibleMs } = useHydrationTiming();
+  const { listVisibleMs, listAnchor } = useHydrationTiming();
   const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
@@ -47,7 +48,10 @@ export function HydrationTimingPanel() {
     return () => window.removeEventListener('keydown', onKey);
   }, [expanded]);
 
-  const chipLabel = listVisibleMs == null ? 'list …' : `list ${formatMs(listVisibleMs)}`;
+  const chipLabel =
+    listVisibleMs == null
+      ? 'list …'
+      : `list ${formatMs(listVisibleMs)} · ${listAnchor}`;
 
   const handleCopy = useCallback(async () => {
     try {
@@ -96,6 +100,16 @@ export function HydrationTimingPanel() {
           Hydration timing
         </span>
         <span className="font-mono tabular-nums text-muted-foreground">{chipLabel}</span>
+      </div>
+
+      <div className="flex items-center justify-between gap-2 border-b border-glass-border px-3 py-1.5 text-[0.65rem] text-muted-foreground">
+        <span>
+          Boot age <span className="font-mono tabular-nums">{formatOffset(report.bootAgeMs)}</span>
+        </span>
+        <span>
+          Session age{' '}
+          <span className="font-mono tabular-nums">{formatOffset(report.sessionAgeMs)}</span>
+        </span>
       </div>
 
       <div className="max-h-[50vh] overflow-y-auto max-md:max-h-[40vh]">
