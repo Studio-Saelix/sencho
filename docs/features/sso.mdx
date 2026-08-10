@@ -87,14 +87,19 @@ At the top of the page, **Authentication mode** chooses how interactive login wo
 
 SSO only cannot be enabled until at least one provider is enabled, a connection test succeeds, and the signed-in administrator authenticated through SSO with the Admin role. Confirm the outage-risk warning before saving. Existing sessions stay valid until they expire or are revoked.
 
+<Frame>
+  <img src="/images/sso/sso-settings-sso-only-confirm.png" alt="SSO-only confirmation panel showing the outage-risk warning, the list of providers that remain available, the emergency recovery command, and the confirmation checkbox required before saving" />
+</Frame>
+
+Once SSO only is active, you cannot disable or remove the last enabled provider from the Settings UI; doing so would lock out every SSO user with no way to sign in. Switch back to **Local and SSO** first, or use the emergency recovery CLI below, before disabling or removing that provider.
+
 If the identity provider is unavailable after SSO only is enabled, restore local password login from the host:
 
 ```bash
 docker compose exec sencho node dist/cli/enableLocalLogin.js
-docker compose restart sencho
 ```
 
-Restart is required so the running process reloads the setting. The same command is listed under **Settings → System → Recovery**.
+No restart is required; the next login attempt honors the restored mode. The same command is listed under **Settings → Operations → Recovery** and in [Emergency command-line recovery](/operations/emergency-cli).
 
 <Frame>
   <img src="/images/sso/sso-settings.png" alt="SSO settings panel listing the five identity providers as collapsible cards with enable / disable toggles" />
@@ -318,7 +323,7 @@ If not set, Sencho auto-detects the URL from the request's `Host` header and pro
   </Accordion>
 
   <Accordion title="Users land with the wrong username or no email">
-    Enable **Developer Mode** (Settings → Operations → Developer Diagnostics) to log the raw claims Sencho receives from the provider in the server logs. Check your provider's documentation for which claims it includes in the ID token and `userinfo` response, and verify that the configured **Scopes** include everything your provider needs to emit `email` and group claims. For Custom OIDC, override **User ID Claim**, **Username Claim**, or **Email Claim** to match the names your provider actually emits.
+    Enable **Developer mode** (Settings → Operations → Developer Diagnostics) to log the raw claims Sencho receives from the provider in the server logs. Check your provider's documentation for which claims it includes in the ID token and `userinfo` response, and verify that the configured **Scopes** include everything your provider needs to emit `email` and group claims. For Custom OIDC, override **User ID Claim**, **Username Claim**, or **Email Claim** to match the names your provider actually emits.
   </Accordion>
 
   <Accordion title="The provider returns 'invalid redirect URI' during sign-in">
@@ -329,14 +334,17 @@ If not set, Sencho auto-detects the URL from the request's `Host` header and pro
     Confirm the provider is enabled (toggle on, showing the Active badge) under **Settings → Access → SSO** and that the configuration saved successfully. The login page fetches the list of enabled providers when it loads; hard-refresh the tab if changes were just made.
   </Accordion>
   <Accordion title="Locked out after enabling SSO only">
-    From the host that runs Sencho, re-enable local password login and restart so the setting takes effect:
+    From the host that runs Sencho, re-enable local password login:
 
     ```bash
     docker compose exec sencho node dist/cli/enableLocalLogin.js
-    docker compose restart sencho
     ```
 
-    Then sign in with a local administrator account and repair the identity provider configuration before enabling SSO only again.
+    Then sign in with a local administrator account and repair the identity provider configuration before enabling SSO only again. No restart is required.
+  </Accordion>
+
+  <Accordion title="'Cannot disable/delete the last SSO provider while SSO-only mode is active'">
+    Sencho blocks this to prevent a lockout: with SSO only active and no local password fallback, disabling or removing the one remaining enabled provider would leave nobody able to sign in. Switch **Authentication mode** back to **Local and SSO** first, then disable or remove the provider, or re-enable it under a different configuration if you are migrating identity providers.
   </Accordion>
 </AccordionGroup>
 

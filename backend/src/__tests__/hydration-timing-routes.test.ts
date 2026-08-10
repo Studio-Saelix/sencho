@@ -103,6 +103,10 @@ describe('[Stacks:debug] GET /api/stacks/statuses', () => {
     expect(second).toMatch(/cacheOutcome=hit/);
     // No docker call on a cache hit, so the subspan is null rather than 0.
     expect(second).toMatch(/dockerMs=null/);
+    // Enrichment is part of the cached payload, so both subspans are
+    // compute-only telemetry: numbers on the compute leg, null on a hit.
+    expect(first).toMatch(/enrichmentMs=\d+/);
+    expect(second).toMatch(/enrichmentMs=null/);
     // The compute ran the fetcher exactly once across both requests.
     expect(dockerCalls).toBe(1);
   });

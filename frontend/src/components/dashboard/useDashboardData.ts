@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNodes } from '@/context/NodeContext';
 import { apiFetch } from '@/lib/api';
+import { fetchStackStatusesShared } from '@/lib/stackStatusesFetch';
 import { visibilityInterval } from '@/lib/utils';
 import type {
   Stats,
@@ -270,6 +271,10 @@ export function useDashboardData(): DashboardData {
     currentNodeId: number | undefined,
     mode: 'foreground' | 'soft',
   ) => {
+    // Skip until activeNode resolves. Passing null/"local" here would fetch the
+    // hub while a remembered remote node is still loading and commit under an
+    // unresolved guard.
+    if (currentNodeId === undefined) return;
     if (nodeIdRef.current !== currentNodeId) return;
     if (mode === 'soft' && stackStatusesInFlightRef.current) return;
     const generation = ++stackStatusesFetchGenRef.current;
@@ -279,19 +284,18 @@ export function useDashboardData(): DashboardData {
       setStackStatusesLoadError(null);
     }
     try {
-      const res = await apiFetch('/stacks/statuses');
+      const result = await fetchStackStatusesShared(currentNodeId);
       if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
-      if (!res.ok) {
+      if (!result.ok) {
         commitStackStatusesFailure(
           currentNodeId,
           generation,
           mode,
-          `Could not load stack health (${res.status}).`,
+          `Could not load stack health (${result.status}).`,
         );
         return;
       }
-      const body: unknown = await res.json();
-      if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
+      const body = result.body;
       if (body && typeof body === 'object' && !Array.isArray(body)) {
         // Drop any entry isValidStatusEntry rejects rather than trusting the
         // whole map: one bad entry must not crash or misrepresent the rest of
@@ -352,6 +356,9 @@ export function useDashboardData(): DashboardData {
     setStackStatusesLoadStatus('loading');
     setStackStatusesLoadError(null);
     const currentNodeId = nodeId;
+    // Stay in loading while NodeContext has not resolved activeNode; do not
+    // fetch against an unknown target (and do not treat that window as empty).
+    if (currentNodeId === undefined) return;
     void fetchStackStatuses(currentNodeId, 'foreground');
     const cleanup = visibilityInterval(() => {
       void fetchStackStatuses(currentNodeId, 'soft');
@@ -370,6 +377,7 @@ export function useDashboardData(): DashboardData {
   // refresh instead of one HTTP request per event.
   useEffect(() => {
     const currentNodeId = nodeId;
+    if (currentNodeId === undefined) return;
     let active = true;
     let invalidateTimer: ReturnType<typeof setTimeout> | null = null;
     const refresh = async () => {

@@ -508,7 +508,8 @@ describe('ResourcesView', () => {
 
     expect(await screen.findByText('seerr')).toBeInTheDocument();
     expect(screen.getByText('abc123456789')).toBeInTheDocument();
-    expect(screen.getByText('Current')).toBeInTheDocument();
+    // State badge and the Current filter pill both render this label.
+    expect(screen.getAllByText('Current').length).toBeGreaterThanOrEqual(2);
     expect(screen.getByRole('button', { name: /release rollback protection/i })).toBeInTheDocument();
   });
 });

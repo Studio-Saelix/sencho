@@ -16,6 +16,8 @@ function svc(overrides: Record<string, unknown>) {
     hasHealthcheck: false,
     composeHealthcheck: 'absent' as const,
     envKeys: [],
+    enabledProxyApiFlags: [],
+    dockerEndpointHosts: [],
     networks: [],
     extraHosts: [],
     labelKeys: [],

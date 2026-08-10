@@ -37,7 +37,7 @@ The transition from control to replica happens automatically the first time a re
 The read-only banner above only appears when you sign in **directly** to the replica's own URL. Scan policies, CVE suppressions, and misconfig acknowledgements are fetched with a `localOnly` request, so they are not proxied through the Distributed API the way most other per-node pages are. If you instead browse a remote node's **Security** page from the control by switching nodes in the top-left node switcher, the Policies and Suppressions tabs show a different message and no replicated data at all:
 
 <Frame>
-  <img src="/images/fleet-sync/fleet-sync-proxy-notice.png" alt="The Security page Policies tab on the control, with the node switcher set to a remote named Opsix. A callout reads 'Managed on the local instance: Scan policies are managed on the local Sencho instance. Switch to the local node to manage them,' with no policy list below it." />
+  <img src="/images/fleet-sync/fleet-sync-proxy-notice.png" alt="The Security page Policies tab on the control, with the node switcher set to a remote. A callout reads 'Managed on the local instance: Scan policies are managed on the local Sencho instance. Switch to the local node to manage them,' with no policy list below it." />
 </Frame>
 
 To see a replica's mirrored rules, sign in to that instance's own URL instead of viewing it through the control's node switcher. This is different from most other Security page tabs (Images, Secrets, Scanner setup) and most other Sencho pages generally, which do proxy through the node switcher; scan policies, CVE suppressions, and misconfig acknowledgements are the exception.
@@ -47,7 +47,7 @@ To see a replica's mirrored rules, sign in to that instance's own URL instead of
 The three replicated resources share one wire protocol, one retry queue, and one anchor. Each push carries the full current state of one resource (not a delta); the receiver replaces every `replicated_from_control = 1` row in a single transaction. On the replica, each mirrored row carries a **replicated** tag so you can tell it apart from a local one at a glance:
 
 <Frame>
-  <img src="/images/fleet-sync/fleet-sync-suppressions-replica.png" alt="The Security page Suppressions tab on a replica. Two CVE suppressions for github.com/docker/docker are listed, each tagged 'Accepted risk' and 'replicated,' with no Add suppression or Export VEX buttons visible. A Misconfig acknowledgements section below is empty." />
+  <img src="/images/fleet-sync/fleet-sync-suppressions-replica.png" alt="The Security page Suppressions tab on a replica. A CVE suppression is listed, tagged 'Accepted risk' and 'replicated,' with no Add suppression or Export VEX buttons visible. A Misconfig acknowledgements section below is empty." />
 </Frame>
 
 What does *not* replicate:
@@ -81,7 +81,9 @@ A replica binds to the first non-empty fingerprint it sees. After that:
 - A push carrying a different non-empty fingerprint is rejected with `HTTP 409` and the body code `CONTROL_IDENTITY_MISMATCH`. This prevents an operator from accidentally pointing a second control at an existing replica and overwriting its mirrored state.
 - A push with no fingerprint at all is accepted (this is the legacy code path; the receiver treats absence as "unknown control" and applies the rows without binding).
 
-When you need to re-bind a replica to a different control (for example, the original control was rebuilt and now carries a fresh install ID), an admin on the replica calls the re-anchor endpoint with an explicit override flag:
+When you need to re-bind a replica to a different control (for example, the original control was rebuilt and now carries a fresh install ID), the control itself surfaces the mismatch: **Settings → Nodes** shows a banner on the affected node reading "Node is anchored to another central," with a **Reset anchor on peer** button. An admin clicks it and the control proxies the reset to the peer over its existing bearer token, no direct access to the replica required.
+
+If you need to script it or the node is not reachable from the control's own Settings → Nodes list, call the endpoint directly on the replica with an admin JWT and an explicit override flag:
 
 ```bash
 curl -X POST https://<replica-url>/api/fleet/role/reanchor \
@@ -90,7 +92,7 @@ curl -X POST https://<replica-url>/api/fleet/role/reanchor \
   -d '{"override": true}'
 ```
 
-Re-anchor clears the cached fingerprint, clears the per-resource watermarks, and drops every replicated row inside one transaction. The replica stays a replica (it remains a passive receiver) and the next push from any control becomes the new anchor.
+Either path clears the cached fingerprint, clears the per-resource watermarks, and drops every replicated row inside one transaction. The replica stays a replica (it remains a passive receiver) and the next push from any control becomes the new anchor.
 
 ## Push ordering and retry
 
@@ -127,9 +129,10 @@ Demote requires `{"confirm": true}` in the request body to prevent a misclick fr
 
 ## Prerequisites
 
+Fleet Sync works on every tier: authoring scan policies, CVE suppressions, and misconfig acknowledgements, and the replication, anchor, and demote mechanics that ship them to remotes, all run on Community. Replicas accept pushes regardless of their own tier.
+
 | Requirement | Why it matters |
 |---|---|
-| **A Sencho Admiral plan on the control instance** | Authoring scan policies, CVE suppressions, and misconfig acknowledgements works on every tier. Fleet Sync (cross-node replication and anchor controls) requires Admiral on the control instance. Replicas accept pushes regardless of their own tier. |
 | **Admin user role on the control** | Authoring the rules that replicate, and operating the re-anchor and demote endpoints on a replica, are all admin-only actions. Operator and viewer roles can read rules but cannot create or remove them. |
 | **Proxy-mode remotes with `api_url` and `api_token` configured in Settings → Nodes** | Fleet Sync pushes over HTTPS to each remote's Sencho API using its long-lived bearer token. Remotes without an `api_url` or `api_token`, or remotes that connect over the pilot tunnel, are skipped. |
 | **Network reachability from the control to each remote** | Pushes are HTTP requests originating on the control. A remote that is firewalled off, behind NAT without a forwarded port, or otherwise unreachable will queue retries until it returns. |
@@ -155,7 +158,7 @@ Fleet Sync v1 ships the three replicated resources and the control mechanics des
     This usually means the remote has not yet received its first push (it is still a fresh control from its own perspective). Any write on the control triggers a fresh push, or you can add the remote again in **Settings → Nodes** to trigger the add-node backfill. Once the first push lands, the remote flips to replica and shows the "Managed by control node" callout above the policy list.
   </Accordion>
   <Accordion title="A push returns 409 CONTROL_IDENTITY_MISMATCH">
-    The replica is already anchored to a different control's fingerprint. Either point your browser at the original control and continue authoring there, or sign in as admin on the replica and call the re-anchor endpoint with `{"override": true}` to clear the anchor. The next push from any control then becomes the new anchor.
+    The replica is already anchored to a different control's fingerprint. **Settings → Nodes** on the control shows a banner on the affected node with a **Reset anchor on peer** button; click it to clear the anchor without leaving the control. Alternatively, point your browser at the original control and continue authoring there, or sign in as admin on the replica and call the re-anchor endpoint with `{"override": true}` directly. The next push from any control then becomes the new anchor.
   </Accordion>
   <Accordion title="A push returns 409 STALE_SYNC_PUSH">
     A newer push for the same resource has already landed on this replica, so the older retry is silently dropped. No action needed; the next write on the control will produce a fresher timestamp and succeed.

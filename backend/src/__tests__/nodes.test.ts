@@ -223,6 +223,125 @@ describe('PUT /api/nodes/:id preserves the token unless a new one is supplied (H
   });
 });
 
+describe('PUT /api/nodes/:id name collision', () => {
+  async function createRemoteWithName(name: string): Promise<number> {
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Authorization', authHeader)
+      .send({
+        name,
+        type: 'remote',
+        mode: 'proxy',
+        api_url: 'http://192.168.1.77:1852',
+        api_token: 'tok-name-collision',
+        compose_dir: '/app/compose',
+      });
+    expect(res.status).toBe(200);
+    return res.body.id as number;
+  }
+
+  it('rejects a colliding rename with 409 and leaves the row untouched', async () => {
+    const aId = await createRemoteWithName(`collide-a-${Date.now()}`);
+    const bId = await createRemoteWithName(`collide-b-${Date.now()}`);
+    const bName = DatabaseService.getInstance().getNode(bId)!.name;
+    const aBefore = DatabaseService.getInstance().getNode(aId)!;
+
+    const res = await request(app)
+      .put(`/api/nodes/${aId}`)
+      .set('Authorization', authHeader)
+      .send({ name: bName });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('A node with that name already exists');
+
+    const aAfter = DatabaseService.getInstance().getNode(aId)!;
+    expect(aAfter.name).toBe(aBefore.name);
+    expect(aAfter.compose_dir).toBe(aBefore.compose_dir);
+    expect(aAfter.api_url).toBe(aBefore.api_url);
+  });
+
+  it('allows renaming a node to its own current name', async () => {
+    const id = await createRemoteWithName(`same-name-${Date.now()}`);
+    const name = DatabaseService.getInstance().getNode(id)!.name;
+    const res = await request(app)
+      .put(`/api/nodes/${id}`)
+      .set('Authorization', authHeader)
+      .send({ name });
+    expect(res.status).toBe(200);
+  });
+
+  it('treats names that differ only by case as distinct', async () => {
+    const bName = `case-prod-${Date.now()}`;
+    await createRemoteWithName(bName);
+    const aId = await createRemoteWithName(`other-${Date.now()}`);
+    const res = await request(app)
+      .put(`/api/nodes/${aId}`)
+      .set('Authorization', authHeader)
+      .send({ name: bName.toUpperCase() });
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects a blank name with 400', async () => {
+    const id = await createRemoteWithName(`blank-name-${Date.now()}`);
+    const res = await request(app)
+      .put(`/api/nodes/${id}`)
+      .set('Authorization', authHeader)
+      .send({ name: '' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Node name is required');
+  });
+
+  it('rejects a null name with 400 instead of a raw SQLite 500', async () => {
+    const id = await createRemoteWithName(`null-name-${Date.now()}`);
+    const res = await request(app)
+      .put(`/api/nodes/${id}`)
+      .set('Authorization', authHeader)
+      .send({ name: null });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Node name is required');
+  });
+
+  it('allows saving a whitespace-only name unchanged', async () => {
+    // POST accepts whitespace-only names (truthiness check), so a legacy node
+    // may carry one; the full-form echo on Save must not 400 it.
+    const id = await createRemoteWithName('   ');
+    const save = await request(app)
+      .put(`/api/nodes/${id}`)
+      .set('Authorization', authHeader)
+      .send({ name: '   ' });
+    expect(save.status).toBe(200);
+  });
+
+  it('still updates other fields when name is absent', async () => {
+    const id = await createRemoteWithName(`partial-update-${Date.now()}`);
+    const res = await request(app)
+      .put(`/api/nodes/${id}`)
+      .set('Authorization', authHeader)
+      .send({ compose_dir: '/tmp/renamed-compose' });
+    expect(res.status).toBe(200);
+    const node = DatabaseService.getInstance().getNode(id)!;
+    expect(node.compose_dir).toBe('/tmp/renamed-compose');
+    expect(node.name).toMatch(/^partial-update-/);
+  });
+
+  it('remaps a UNIQUE constraint from the DB to a clean 409', async () => {
+    const id = await createRemoteWithName(`unique-race-${Date.now()}`);
+    const uniqueErr = Object.assign(new Error('UNIQUE constraint failed: nodes.name'), { code: 'SQLITE_CONSTRAINT_UNIQUE' });
+    const spy = vi.spyOn(DatabaseService.getInstance(), 'updateNode').mockImplementation(() => { throw uniqueErr; });
+    try {
+      const res = await request(app)
+        .put(`/api/nodes/${id}`)
+        .set('Authorization', authHeader)
+        .send({ name: 'race-rename' });
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('A node with that name already exists');
+      expect(res.body.error).not.toMatch(/UNIQUE/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe('POST /api/nodes/:id/test authorization (H-3)', () => {
   it('403s a non-admin (viewer) with PERMISSION_DENIED', async () => {
     const id = await createRemoteNode(authHeader);

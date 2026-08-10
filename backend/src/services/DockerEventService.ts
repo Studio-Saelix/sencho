@@ -3,6 +3,7 @@ import { NodeRegistry } from './NodeRegistry';
 import { NotificationCategory, NotificationService } from './NotificationService';
 import { DatabaseService } from './DatabaseService';
 import SelfIdentityService from './SelfIdentityService';
+import { CacheService } from './CacheService';
 import {
     classifyDie,
     classifyGapExit,
@@ -449,8 +450,14 @@ export class DockerEventService {
         // Push a lightweight state-invalidate signal so connected UIs can
         // refetch stack statuses immediately on a real container event,
         // without waiting for the next polling tick. This is fire-and-forget
-        // and is NOT persisted to the alerts history.
+        // and is NOT persisted to the alerts history. Drop the statuses cache
+        // key alongside the broadcast so the UI's refetch recomputes instead
+        // of serving an entry the event just made stale. The full
+        // invalidateNodeCaches helper is not used: container events do not
+        // reshape the project-name map or file-root allowlists, and the stats
+        // key self-refreshes on its own 2s TTL.
         if (STATE_INVALIDATE_ACTIONS.has(baseAction) && !isSelf) {
+            CacheService.getInstance().invalidate(`stack-statuses:${this.nodeId}`);
             this.notifier.broadcastEvent({
                 type: 'state-invalidate',
                 scope: 'stack',

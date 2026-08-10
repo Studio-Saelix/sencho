@@ -4,7 +4,7 @@ description: Track every mutating action on your Sencho instance with a searchab
 ---
 
 <Note>
-  Audit requires the `system:audit` permission (Admin, or Auditor on Admiral). Community shows the rolling 14-day recent-activity window. Admiral adds the 24h signal rail, CSV/JSON export, anomaly detection, and configurable retention beyond that window.
+  Audit requires the `system:audit` permission (Admin or Auditor). Community shows the rolling 14-day recent-activity window. Admiral adds the 24h signal rail, CSV/JSON export, anomaly detection, and configurable retention beyond that window.
 </Note>
 
 <Note>
@@ -66,7 +66,7 @@ Expanding a row in the Table view reveals additional detail:
 
 ## Viewing the audit log
 
-The **Audit** tab appears for any signed-in user whose role grants the `system:audit` permission (by default **Admin**, and **Auditor** when that role is available). Community shows the last 14 days of activity. Admiral shows the full retained history; retention defaults to 90 days and is configurable up to 365.
+The **Audit** tab appears for any signed-in user whose role grants the `system:audit` permission (by default **Admin** or **Auditor**). Community shows the last 14 days of activity. Admiral shows the full retained history; retention defaults to 90 days and is configurable up to 365.
 
 Navigate to the **Audit** tab in the top navigation when it is available for your role.
 
@@ -152,14 +152,14 @@ Exports are capped at 10,000 entries per download. To export a larger window, na
 ## Auditor role
 
 <Note>
-  Assigning the **Auditor** role requires a Sencho **Admiral** license; Community can assign **Admin** or **Viewer** only.
+  The **Auditor** role is available on every plan. Assign it under **Settings · Users**.
 </Note>
 
 The **Auditor** role provides read-only access to the audit log without granting any administrative privileges. Auditors can:
 
-- View the full audit log
+- View the audit log (Community: last 14 days; Admiral: full retained history)
 - Search and filter entries (Table view)
-- Export audit data as CSV or JSON
+- Export as CSV or JSON (Admiral)
 - View stacks and nodes (read-only)
 
 Auditors **cannot** modify settings, manage users, deploy stacks, or perform any other administrative action. The role is ideal for compliance officers, security reviewers, or team leads who need visibility into system activity without operational access.
@@ -194,7 +194,7 @@ Sensitive database values (such as remote node API tokens) are encrypted at rest
 
 <AccordionGroup>
   <Accordion title="The Audit tab is missing from the navigation">
-    The Audit tab appears only for users with the `system:audit` permission (by default **Admin**, or **Auditor** when that role is available). If you are signed in as a Viewer, Deployer, or Node Admin, ask an admin to grant you a role that includes audit access. On Community, Admin is the role that can open Audit; the Auditor role requires Admiral to assign.
+    The Audit tab appears only for users with the `system:audit` permission (by default **Admin** or **Auditor**). If you are signed in as a Viewer, Deployer, or Node Admin, ask an admin to grant you a role that includes audit access.
   </Accordion>
   <Accordion title="Stream view shows everything but I want to filter to a specific user, action, or date">
     Filters live in **Table view only**. Toggle the segmented control in the card header from **Stream** to **Table** and the search box, method dropdown, and From / To date pickers will appear above the grid. Switching back to Stream clears the filter strip but does not remember the last filter.

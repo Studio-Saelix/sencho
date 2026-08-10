@@ -22,6 +22,7 @@ vi.mock('@/hooks/useImageUpdates', () => ({
 }));
 
 import { useStackListState } from './useStackListState';
+import { __resetStackStatusesFetchForTests } from '@/lib/stackStatusesFetch';
 
 function okJson(payload: unknown): Response {
   return new Response(JSON.stringify(payload), {
@@ -35,6 +36,7 @@ function notFound(): Response {
 }
 
 beforeEach(() => {
+  __resetStackStatusesFetchForTests();
   apiFetchMock.mockReset();
   useNodesMock.mockReset();
   useImageUpdatesMock.mockReset();

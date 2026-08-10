@@ -7,8 +7,9 @@
  *   docker compose exec sencho node dist/cli/enableLocalLogin.js
  *
  * Requires local shell or Docker-host access. Does not contact the identity
- * provider. Written to the audit log with actor `cli`. Restart Sencho after
- * running so the in-process settings cache picks up the change.
+ * provider. Written to the audit log with actor `cli`. Takes effect on the
+ * next login/status request without restarting Sencho (getAuthenticationMode
+ * reads this key uncached).
  */
 import { DatabaseService } from '../services/DatabaseService';
 import {
@@ -39,7 +40,7 @@ export function enableLocalLogin(): CliResult {
   return {
     ok: true,
     message:
-      'Local login re-enabled. Restart Sencho for the change to take effect: docker compose restart sencho',
+      'Local login re-enabled. Sign in with a local administrator password; no restart is required.',
   };
 }
 

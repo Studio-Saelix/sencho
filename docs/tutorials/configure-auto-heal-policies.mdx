@@ -1,0 +1,127 @@
+---
+title: Automatically Restart a Container When It Goes Unhealthy
+sidebarTitle: Auto-restart an unhealthy container
+description: Add an Auto-Heal policy that restarts a container when its healthcheck fails or it crashes, then prove it fires against a real failure.
+---
+
+Say a small internal service starts failing its healthcheck at 3 AM: a dependency hiccups, a worker wedges, whatever the cause. Nobody wants to be paged for a problem a restart would fix. This walks through adding an Auto-Heal policy to a two-service stack, `ops-status` (an nginx `web` service in front of a `redis` cache), so that if `web` stays unhealthy past a threshold you set, Sencho restarts it on its own, then confirms the policy actually fired by breaking the healthcheck for real and watching the restart happen.
+
+This tutorial covers one Auto-Heal policy scoped to a single Compose service. It does not cover alert rules (a related but separate tab in the same sheet), stack-wide **All services** policies, or the crash-based healing path (no healthcheck required, triggered by a non-zero exit instead). See the [Auto-Heal Policies](/features/auto-heal-policies) feature page for the full picture, including the four safety rails and the multi-node behavior.
+
+## Prerequisites
+
+- An account with edit access to this stack (admin by default, or a custom role granted `stack:edit` for this stack). Viewing existing policies is open to every signed-in role.
+- A running stack with at least one service that declares a Docker `HEALTHCHECK`. Auto-Heal's healthcheck-based path only sees containers that report a health status; a service with no `HEALTHCHECK` block never goes `unhealthy`, no matter how broken it is.
+- This tutorial uses a small stack called `ops-status`:
+
+  ```yaml
+  services:
+    web:
+      image: nginx:alpine
+      restart: unless-stopped
+      ports:
+        - "8092:80"
+      healthcheck:
+        test: ["CMD-SHELL", "wget -q --spider http://localhost/ || exit 1"]
+        interval: 15s
+        timeout: 5s
+        retries: 3
+        start_period: 5s
+    cache:
+      image: redis:alpine
+      restart: unless-stopped
+  ```
+
+  `web` has the healthcheck; `cache` doesn't need one for this tutorial. Deploy this stack (or adapt an existing one with a `HEALTHCHECK` block) before continuing.
+
+<Note>
+  Auto-Heal restarts the container in place; it does not recreate it. If the thing making a container unhealthy lives in its writable layer (a moved file, a corrupted local state), a restart alone won't fix it and the container will go unhealthy again on the next check. This matters for the verification step below.
+</Note>
+
+<Steps>
+  <Step title="Open the stack's Monitor sheet on the Auto-heal tab">
+    Right-click the `ops-status` stack in the sidebar (or focus it and press **H**) and select **Auto-Heal** in the **Inspect** group. The Monitor sheet opens directly on the **Auto-heal** tab, with **Active policies** showing `No auto-heal policies configured for this stack.`
+
+    <Frame>
+      <img src="/images/tutorials/configure-auto-heal-policies/sidebar-context-menu-auto-heal.png" alt="The ops-status stack's sidebar context menu with Alerts and Auto-Heal listed under Inspect, Auto-Heal highlighted with its H shortcut." />
+    </Frame>
+
+    <Frame>
+      <img src="/images/tutorials/configure-auto-heal-policies/monitor-sheet-empty.png" alt="The Stack ops-status Monitor sheet on the Auto-heal tab, showing no active policies and the empty Add new policy form with Service, Unhealthy for, Cooldown, Max restarts per hr, and Auto-disable after fields." />
+    </Frame>
+  </Step>
+  <Step title="Scope the policy to the web service and set thresholds">
+    In **Add new policy**, open the **Service** combobox and pick **web** instead of the default **All services**, since this policy should only watch the service that has a healthcheck. Set **Unhealthy for (minutes)** to `1` and **Cooldown (minutes)** to `1` so you don't have to wait long to see it fire; leave **Max restarts / hr** at `3` and **Auto-disable after (failures)** at `5`.
+
+    <Frame>
+      <img src="/images/tutorials/configure-auto-heal-policies/add-policy-form-filled.png" alt="The Add new policy form filled in: Service web, Unhealthy for 1, Cooldown 1, Max restarts per hr 3, Auto-disable after failures 5." />
+    </Frame>
+
+    In production you'd typically set **Unhealthy for** higher (5 minutes or more) so a brief blip doesn't trigger a restart. The 1-minute value here is only to make the next step observable without a long wait.
+  </Step>
+  <Step title="Add the policy and confirm it's active">
+    Click **Add Policy**. A toast confirms `Policy added.`, and the policy now appears in **Active policies**: `web` with the summary `Unhealthy for 1 min · Cooldown: 1 min · Max 3/hr` and its **ON** toggle already enabled.
+
+    <Frame>
+      <img src="/images/tutorials/configure-auto-heal-policies/active-policy-web.png" alt="Active policies showing one policy for the web service, Unhealthy for 1 min, Cooldown 1 min, Max 3 per hr, with the ON toggle enabled, a history chevron, and a delete icon." />
+    </Frame>
+  </Step>
+</Steps>
+
+## Verify it worked
+
+The policy is saved and enabled, but that alone doesn't prove it fires. Auto-Heal evaluates every 30 seconds in the background, and there's no manual "run now" button, so the only real proof is causing an actual failure and watching Sencho react to it.
+
+If you have shell access to the host running this stack, break the `web` container's healthcheck on purpose:
+
+```bash
+docker exec ops-status-web-1 mv /usr/share/nginx/html/index.html /usr/share/nginx/html/index.html.bak
+```
+
+Nginx now returns an error for every request, so the healthcheck's `wget --spider` fails. Within about a minute, the stack header and the `web` container both flip to **unhealthy**:
+
+<Frame>
+  <img src="/images/tutorials/configure-auto-heal-policies/container-unhealthy-triggered.png" alt="The ops-status stack showing RUNNING UNHEALTHY, with ops-status-web-1 marked unhealthy and nginx forbidden errors in the logs." />
+</Frame>
+
+Give it another 30–60 seconds for the next evaluation tick, then reopen the Monitor sheet and expand the policy's history chevron. **Recent activity** shows a **Restarted** entry with the reason `Container unhealthy for 1 minute(s); auto-restarted.`:
+
+<Frame>
+  <img src="/images/tutorials/configure-auto-heal-policies/policy-recent-activity-restarted.png" alt="The web policy's Recent activity panel showing two Restarted entries for ops-status-web-1, each with the reason Container unhealthy for 1 minute(s); auto-restarted." />
+</Frame>
+
+Because a restart doesn't recreate the container, the moved file is still missing after the restart, so the container goes unhealthy again and the policy keeps restarting it every cooldown window (you can see two **Restarted** entries above, roughly two minutes apart). Restore the file to let it actually recover:
+
+```bash
+docker exec ops-status-web-1 mv /usr/share/nginx/html/index.html.bak /usr/share/nginx/html/index.html
+```
+
+The next few healthchecks pass, and the container settles back to **healthy** on its own, with no further restarts needed:
+
+<Frame>
+  <img src="/images/tutorials/configure-auto-heal-policies/container-healthy-recovered.png" alt="The ops-status stack back to RUNNING HEALTHY, with ops-status-web-1 showing healthy status about a minute after restarting." />
+</Frame>
+
+Check from a second, independent surface too: open the dashboard's **Stack Restarts (7d)** card. It shows an `ops-status` row tagged **AUTO-HEAL** with a restart count, confirming the restarts came from the policy and not a manual action:
+
+<Frame>
+  <img src="/images/tutorials/configure-auto-heal-policies/dashboard-stack-restarts-autoheal.png" alt="The dashboard's Stack Restarts (7d) card showing an ops-status row with an AUTO-HEAL badge and a restart count of 2, and the Configuration Status card showing Auto-heal policies 1 / 1 active." />
+</Frame>
+
+## If something goes wrong
+
+**The policy never fires, and the container never shows a health word at all.** Compare the container card's status line: a container with a working healthcheck reads `up X minutes · healthy` (or `unhealthy`); a container with no `HEALTHCHECK` declared just reads `up X minutes`, with nothing after it. If your service is missing the health word entirely, Auto-Heal's healthcheck path has nothing to evaluate: add a `healthcheck` block to that service in `docker-compose.yml` (see the [Prerequisites](#prerequisites) snippet above) and redeploy the stack. See [Auto-Heal Policies · Troubleshooting](/features/auto-heal-policies#troubleshooting) for the other ways a policy can fail to fire.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Auto-Heal Policies" icon="heart-pulse" href="/features/auto-heal-policies">
+    The full mechanics: safety rails, stack vs. service scope, multi-node behavior, and notifications.
+  </Card>
+  <Card title="Alerts & Notifications" icon="bell" href="/features/alerts-notifications">
+    Pair a policy with an alert rule on the same Monitor sheet for visibility before a restart even fires.
+  </Card>
+  <Card title="Automatically Patch a Stack With an Auto-Update Label" icon="arrows-rotate" href="/tutorials/configure-auto-update-policies">
+    Another hands-off stack policy: keep images current instead of watching for unhealthy containers.
+  </Card>
+</CardGroup>

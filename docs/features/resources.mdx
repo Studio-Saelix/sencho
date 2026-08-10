@@ -15,6 +15,8 @@ Once enabled for a node, an amber banner leads the view whenever there is reclai
 
 The hero stays hidden when there is nothing to reclaim, keeping the view focused on the rest of your inventory.
 
+The total does not include images Sencho holds as rollback protection points: a prune plan never removes those images. They surface in the Rollback tab and are freed once the hold is released or superseded.
+
 To set the banner aside without pruning, use the **×** in its top-right corner. It stays hidden on that browser until the reclaimable total grows past the amount it held when you dismissed it, so a small, stubborn remainder will not keep reappearing while a genuine new build-up still surfaces.
 
 The banner is off by default and applies per node. To turn it on, open **Settings → Monitoring → Docker & Storage** and switch on **Show reclaimable-space banner**.
@@ -31,7 +33,7 @@ The left card under the hero breaks down your Docker disk usage into three tiles
 |------|---------|
 | **Sencho managed** (green) | Images and volumes **currently used** by stacks in your `COMPOSE_DIR` |
 | **External** (amber) | Images and volumes used by Docker projects outside Sencho |
-| **Reclaimable** (neutral) | Unused images, stopped containers, and dangling volumes Docker can free |
+| **Reclaimable** (neutral) | Unused images, stopped containers, and dangling volumes Docker can free. Images Sencho holds as rollback protection points are not included; they surface in the Rollback tab and are freed once the hold is released or superseded |
 
 The managed tile does not count free (unused) images. Those rows appear under reclaimable space and in the Images tab as unused until you prune them.
 
@@ -56,6 +58,10 @@ A confirmation dialog appears before any destructive prune. Sencho first builds 
 
 <Note>
   Quick Clean is admin-only. The panel is hidden for users without admin permissions.
+</Note>
+
+<Note>
+  Every prune action on this page runs through the Docker API. When Sencho runs behind a Docker socket proxy, pruning requires POST plus the IMAGES, VOLUMES, NETWORKS, and CONTAINERS groups for the resources being cleaned. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy).
 </Note>
 
 ## Resource tabs
@@ -164,6 +170,6 @@ When no unmanaged containers are detected, the tab shows a success state with th
     The Unmanaged tab filters the running Sencho container out by design so it cannot be selected and purged. Other containers started outside Sencho (with `docker run` or by a Compose project outside `COMPOSE_DIR`) still appear normally. To inspect the Sencho container itself, use **Host Console** or `docker ps` on the host.
   </Accordion>
   <Accordion title="The reclaim banner will not go away, or shows a small amount that will not prune">
-    The banner mirrors what Docker reports as reclaimable on the node, and it counts only the resources a standard prune can actually remove. After a prune, some storage drivers still report a few megabytes as reclaimable that the prune does not free. To stop the banner drawing attention to a stubborn remainder, dismiss it with the **×** in its top-right corner; it stays hidden until the reclaimable total grows past that point. To turn it off for the node entirely, switch off **Show reclaimable-space banner** in **Settings → Monitoring → Docker & Storage**.
+    The banner starts from what Docker reports as reclaimable on the node, subtracts images Sencho holds as rollback protection points, and counts only the resources a standard prune can actually remove. Held images are never part of that total and never appear in a prune plan, so the residue after a prune is normally the storage driver still reporting a few megabytes that the prune did not free. Held images are listed in the **Rollback** tab and are freed once the hold is released or superseded. To stop the banner drawing attention to a stubborn remainder, dismiss it with the **×** in its top-right corner; it stays hidden until the reclaimable total grows past that point. To turn it off for the node entirely, switch off **Show reclaimable-space banner** in **Settings → Monitoring → Docker & Storage**.
   </Accordion>
 </AccordionGroup>

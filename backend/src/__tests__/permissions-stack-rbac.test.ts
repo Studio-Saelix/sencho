@@ -97,6 +97,30 @@ describe('scopedActionsForStack', () => {
   });
 });
 
+describe('checkPermission on Community tier with scoped grants', () => {
+  it('honors stack scoped deployer grants when proxyTier is community', () => {
+    const db = DatabaseService.getInstance();
+    db.addRoleAssignment({
+      user_id: viewerId,
+      role: 'deployer',
+      resource_type: 'stack',
+      resource_id: 'community-deploy-me',
+      node_id: defaultNodeId,
+    });
+
+    const req = mockReq({
+      userId: viewerId,
+      role: 'viewer',
+      proxyTier: 'community',
+    });
+    expect(checkPermission(req, 'stack:deploy', 'stack', 'community-deploy-me')).toBe(true);
+    expect(checkPermission(req, 'stack:edit', 'stack', 'community-deploy-me')).toBe(false);
+    expect(checkPermission(req, 'stack:deploy', 'stack', 'other-stack')).toBe(false);
+
+    db.deleteRoleAssignmentsByStack(defaultNodeId, 'community-deploy-me');
+  });
+});
+
 describe('checkPermission with node-scoped stack grants', () => {
   it('viewer + scoped deploy grant succeeds for stack:deploy when req.nodeId matches', () => {
     const db = DatabaseService.getInstance();

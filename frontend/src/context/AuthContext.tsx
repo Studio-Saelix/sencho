@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import { markMilestone } from '@/lib/hydrationTiming';
+import { clearStackStatusesFetch } from '@/lib/stackStatusesFetch';
 import { resolveCan } from '@/lib/resolveCan';
 
 type AppStatus = 'loading' | 'needsSetup' | 'notAuthenticated' | 'mfaChallenge' | 'authenticated';
@@ -132,6 +133,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     checkAuth();
     const handleUnauthorized = () => {
+      clearStackStatusesFetch();
       setUser(null);
       resetPermissions();
       setAppStatus('notAuthenticated');
@@ -235,6 +237,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       console.error('Cancel MFA error:', error);
     } finally {
+      clearStackStatusesFetch();
       setUser(null);
       resetPermissions();
       setAppStatus('notAuthenticated');
@@ -250,6 +253,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       console.error('Logout error:', error);
     } finally {
+      clearStackStatusesFetch();
       setUser(null);
       resetPermissions();
       setAppStatus('notAuthenticated');

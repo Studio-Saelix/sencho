@@ -1,5 +1,5 @@
 import type { PreflightContext, PreflightFinding, PreflightSeverity, NodePortBinding } from './types';
-import type { EffService, EffPortSpec } from './effectiveModel';
+import type { EffService, EffPortSpec, EffectiveModel } from './effectiveModel';
 import type { ExposureIntent } from '../network/types';
 import { isLoopback, runtimeResourceName } from '../network/normalize';
 import { classifyMissingExternalNetworks } from '../network/missingExternalNetworks';
@@ -13,6 +13,7 @@ export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warni
  */
 export const PREFLIGHT_NOTE_RULE_IDS: ReadonlySet<string> = new Set([
   'healthcheck-inherited',
+  'docker-socket-proxy-client',
 ]);
 
 export function isPreflightNoteFinding(ruleId: string): boolean {
@@ -63,6 +64,99 @@ function usesLatestTag(image: string): boolean {
 const UID_GID_KEYS = new Set(['PUID', 'PGID', 'UID', 'GID']);
 function hasUidGidSignal(svc: EffService): boolean {
   return svc.user !== undefined || svc.envKeys.some(k => UID_GID_KEYS.has(k));
+}
+
+function pathIsDockerSocket(path: string | undefined): boolean {
+  return path !== undefined && path.includes('docker.sock');
+}
+
+function mountTouchesDockerSocket(source: string | undefined, target: string | undefined): boolean {
+  return pathIsDockerSocket(source) || pathIsDockerSocket(target);
+}
+
+/** Bind mounts that touch the Docker socket (from the storage inventory). */
+function dockerSocketBinds(svc: EffService) {
+  return (svc.storageMounts ?? []).filter(m =>
+    m.type === 'bind' && mountTouchesDockerSocket(m.source, m.target));
+}
+
+function mountsDockerSocket(svc: EffService): boolean {
+  if (svc.binds.some(b => mountTouchesDockerSocket(b.source, b.target))) return true;
+  return dockerSocketBinds(svc).length > 0;
+}
+
+function hasReadOnlyDockerSocket(svc: EffService): boolean {
+  return dockerSocketBinds(svc).some(m => m.readOnly);
+}
+
+/**
+ * True when any socket mount is writable. Deliberately not the negation of
+ * `hasReadOnlyDockerSocket`: a service can mount the socket twice, and one
+ * read-only mount does not make a second writable one safe.
+ */
+function hasWritableDockerSocket(svc: EffService): boolean {
+  return dockerSocketBinds(svc).some(m => !m.readOnly);
+}
+
+const SOCKET_PROXY_IMAGE_HINTS = [
+  'tecnativa/docker-socket-proxy',
+  'lscr.io/linuxserver/socket-proxy',
+  'docker-socket-proxy',
+] as const;
+
+const MUTATING_PROXY_API_FLAGS = new Set(['POST', 'DELETE']);
+
+function hasSocketProxyImage(svc: EffService): boolean {
+  const image = svc.image?.toLowerCase();
+  return image !== undefined && SOCKET_PROXY_IMAGE_HINTS.some(h => image.includes(h));
+}
+
+function hasSocketProxyNameHint(svc: EffService): boolean {
+  // Covers `socket-proxy`, `docker-socket-proxy`, and `_`/`.` separated variants.
+  return `${svc.name} ${svc.containerName ?? ''}`
+    .toLowerCase()
+    .replace(/[_.]/g, '-')
+    .includes('socket-proxy');
+}
+
+/** Names a dependent service could use to reach this proxy on a shared network. */
+function proxyReachableNames(svc: EffService): string[] {
+  return [svc.name, svc.containerName, ...svc.networks.flatMap(n => n.aliases)]
+    .filter((n): n is string => n !== undefined)
+    .map(n => n.toLowerCase());
+}
+
+/**
+ * Dedicated Docker socket proxy. A known image is an artifact identity, so it
+ * stands on its own. A service NAME is free text the author controls, so it
+ * only counts alongside an observable fact: a read-only socket or an enabled
+ * API group flag (value exactly `1`). Without a name or image hint, both are
+ * required. Prefer false negatives here, since a miss keeps the high
+ * direct-mount finding.
+ */
+function isSocketProxyService(svc: EffService): boolean {
+  if (!mountsDockerSocket(svc)) return false;
+  if (hasSocketProxyImage(svc)) return true;
+  const readOnly = hasReadOnlyDockerSocket(svc);
+  // Only flags whose rendered value is exactly `1` are counted; key presence alone is not.
+  const apiKeyCount = (svc.enabledProxyApiFlags ?? []).length;
+  if (hasSocketProxyNameHint(svc)) return readOnly || apiKeyCount >= 1;
+  return readOnly && apiKeyCount >= 2;
+}
+
+function socketProxyServices(model: EffectiveModel): EffService[] {
+  return model.services.filter(isSocketProxyService);
+}
+
+/**
+ * True unless every network the proxy joins is declared `internal: true`. A
+ * service with no explicit membership lands on the implicit default network,
+ * and a network the model does not describe cannot be shown to be internal, so
+ * both count as non-internal.
+ */
+function proxyAttachesNonInternalNetwork(svc: EffService, model: EffectiveModel): boolean {
+  if (svc.networks.length === 0) return true;
+  return svc.networks.some(membership => model.networks[membership.key]?.internal !== true);
 }
 
 // ----- rules ----------------------------------------------------------------
@@ -271,21 +365,153 @@ const dockerSocketMount: PreflightRule = {
   id: 'docker-socket-mount',
   run(ctx) {
     if (!ctx.model) return [];
-    const findings: PreflightFinding[] = [];
-    for (const svc of ctx.model.services) {
-      const hit = svc.binds.some(b => b.source.includes('docker.sock') || b.target.includes('docker.sock'));
-      if (!hit) continue;
-      findings.push({
+    const proxies = socketProxyServices(ctx.model);
+    // When the stack already runs a proxy, point at it rather than suggesting
+    // the user adopt a mitigation they have implemented.
+    const remediation = proxies.length > 0
+      ? `This stack already runs a socket proxy (${proxies.map(p => `"${p.name}"`).join(', ')}); route this service through it instead of mounting docker.sock directly.`
+      : 'Avoid direct socket mounts when possible; consider using a scoped socket proxy.';
+    return ctx.model.services
+      .filter(svc => mountsDockerSocket(svc) && !isSocketProxyService(svc))
+      .map(svc => ({
         ruleId: 'docker-socket-mount',
-        severity: 'high',
+        severity: 'high' as const,
         title: 'Docker socket mounted',
-        message: `Service "${svc.name}" mounts the Docker socket, which grants it root-equivalent control over the host.`,
+        message: `Service "${svc.name}" mounts the Docker socket directly, granting broad control over the Docker host.`,
         sourcePath: svc.name,
         service: svc.name,
-        remediation: 'Avoid mounting docker.sock unless required; consider a scoped socket proxy.',
-      });
+        remediation,
+      }));
+  },
+};
+
+const dockerSocketProxyWritable: PreflightRule = {
+  id: 'docker-socket-proxy-writable',
+  run(ctx) {
+    if (!ctx.model) return [];
+    return socketProxyServices(ctx.model)
+      .filter(hasWritableDockerSocket)
+      .map(svc => ({
+        ruleId: 'docker-socket-proxy-writable',
+        severity: 'high' as const,
+        title: 'Docker socket proxy mounts the socket read-write',
+        message: `Service "${svc.name}" looks like a Docker socket proxy but mounts the Docker socket read-write, so a compromise of the proxy grants full control over the Docker host.`,
+        sourcePath: svc.name,
+        service: svc.name,
+        remediation: 'Mount the socket read-only (append `:ro` to the bind) and let the proxy restrict which API groups dependents can reach.',
+      }));
+  },
+};
+
+const dockerSocketProxy: PreflightRule = {
+  id: 'docker-socket-proxy',
+  run(ctx) {
+    if (!ctx.model) return [];
+    return socketProxyServices(ctx.model).map(svc => ({
+      ruleId: 'docker-socket-proxy',
+      severity: 'info' as const,
+      title: 'Docker socket proxy detected',
+      message: `Service "${svc.name}" intentionally mounts the Docker socket because it is acting as a socket proxy. Verify that only trusted services can reach the proxy and that the enabled Docker API groups are limited to what dependent services require.`,
+      sourcePath: svc.name,
+      service: svc.name,
+      remediation: 'Keep the proxy on an internal network, avoid publishing its API port to the host, and enable only the API groups dependents need.',
+    }));
+  },
+};
+
+const dockerSocketProxyPublished: PreflightRule = {
+  id: 'docker-socket-proxy-published',
+  run(ctx) {
+    if (!ctx.model) return [];
+    return socketProxyServices(ctx.model)
+      .filter(svc => svc.ports.length > 0)
+      .map(svc => ({
+        ruleId: 'docker-socket-proxy-published',
+        severity: 'high' as const,
+        title: 'Docker socket proxy publishes a host port',
+        message: `Service "${svc.name}" is a Docker socket proxy and publishes ${svc.ports.map(specLabel).join(', ')} to the host, which can make the proxy reachable beyond the Compose network.`,
+        sourcePath: svc.name,
+        service: svc.name,
+        remediation: 'Remove host port mappings from the proxy and let dependents reach it only over an internal Compose network.',
+      }));
+  },
+};
+
+const dockerSocketProxyMutating: PreflightRule = {
+  id: 'docker-socket-proxy-mutating',
+  run(ctx) {
+    if (!ctx.model) return [];
+    return socketProxyServices(ctx.model).flatMap(svc => {
+      const mutating = (svc.enabledProxyApiFlags ?? []).filter(f => MUTATING_PROXY_API_FLAGS.has(f));
+      if (mutating.length === 0) return [];
+      return [{
+        ruleId: 'docker-socket-proxy-mutating',
+        severity: 'warning' as const,
+        title: 'Docker socket proxy allows mutating API access',
+        message: `Service "${svc.name}" enables ${mutating.join(' and ')} on the Docker socket proxy, which permits write and delete operations through the proxy.`,
+        sourcePath: svc.name,
+        service: svc.name,
+        remediation: 'Disable POST and DELETE on the proxy unless dependents require mutating Docker API calls.',
+      }];
+    });
+  },
+};
+
+const dockerSocketProxyExposure: PreflightRule = {
+  id: 'docker-socket-proxy-exposure',
+  run(ctx) {
+    const model = ctx.model;
+    if (!model) return [];
+    return socketProxyServices(model)
+      .filter(svc => proxyAttachesNonInternalNetwork(svc, model))
+      .map(svc => ({
+        ruleId: 'docker-socket-proxy-exposure',
+        severity: 'warning' as const,
+        title: 'Docker socket proxy on a non-internal network',
+        message: `Service "${svc.name}" is a Docker socket proxy attached to at least one network that is not marked internal, which widens who can reach the proxied Docker API.`,
+        sourcePath: svc.name,
+        service: svc.name,
+        remediation: 'Attach the proxy only to internal Compose networks used by trusted dependents.',
+      }));
+  },
+};
+
+const dockerSocketProxyClient: PreflightRule = {
+  id: 'docker-socket-proxy-client',
+  run(ctx) {
+    if (!ctx.model) return [];
+    const proxies = socketProxyServices(ctx.model);
+    if (proxies.length === 0) return [];
+
+    // Per-proxy correlation: the client must name a reachable identity of a
+    // specific proxy AND share a network with that same proxy. Aggregate
+    // name/network sets would false-positive when a client on proxy-A's
+    // network points at unreachable proxy-B.
+    //
+    // Hosts come from `DOCKER_HOST` and from `tcp://` endpoints on command /
+    // entrypoint (how Traefik and friends point at a proxy). Presence of the
+    // `DOCKER_HOST` key alone is not enough; only a tcp host that matches.
+    function isClientOf(svc: EffService, proxy: EffService): boolean {
+      const names = new Set(proxyReachableNames(proxy));
+      if (!svc.dockerEndpointHosts.some(host => names.has(host))) return false;
+      // Empty membership = implicit default network. Only match when both are on it.
+      if (svc.networks.length === 0 || proxy.networks.length === 0) {
+        return svc.networks.length === 0 && proxy.networks.length === 0;
+      }
+      const proxyNets = new Set(proxy.networks.map(n => n.key));
+      return svc.networks.some(n => proxyNets.has(n.key));
     }
-    return findings;
+
+    return ctx.model.services
+      .filter(svc => !mountsDockerSocket(svc) && proxies.some(proxy => isClientOf(svc, proxy)))
+      .map(svc => ({
+        ruleId: 'docker-socket-proxy-client',
+        severity: 'info' as const,
+        title: 'Docker API access routed through socket proxy',
+        message: `Service "${svc.name}" does not mount docker.sock directly and appears to use a Docker socket proxy instead.`,
+        sourcePath: svc.name,
+        service: svc.name,
+      }));
   },
 };
 
@@ -896,6 +1122,12 @@ export const PREFLIGHT_RULES: PreflightRule[] = [
   bindPathMissing,
   bindPathPermission,
   dockerSocketMount,
+  dockerSocketProxy,
+  dockerSocketProxyWritable,
+  dockerSocketProxyPublished,
+  dockerSocketProxyMutating,
+  dockerSocketProxyExposure,
+  dockerSocketProxyClient,
   privileged,
   networkModeHost,
   uidGidRisk,

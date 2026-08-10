@@ -87,4 +87,48 @@ describe('WhatsNewModal', () => {
     await userEvent.click(screen.getByRole('button', { name: 'View full changelog' }));
     expect(onViewChangelog).toHaveBeenCalledTimes(1);
   });
+
+  it('clicking a screenshot opens a zoomed overlay with the same image', async () => {
+    render(<WhatsNewModal open onOpenChange={vi.fn()} onViewChangelog={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Zoom in on Second feature screenshot' }));
+    const zoomed = screen.getByRole('dialog', { name: 'Zoomed screenshot' });
+    expect(zoomed.querySelector('img')).toHaveAttribute('src', '/whats-new/second.png');
+  });
+
+  it('the close button dismisses only the zoom overlay, leaving the parent modal open', async () => {
+    const onOpenChange = vi.fn();
+    render(<WhatsNewModal open onOpenChange={onOpenChange} onViewChangelog={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Zoom in on Second feature screenshot' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Close zoomed screenshot' }));
+    expect(screen.queryByRole('dialog', { name: 'Zoomed screenshot' })).not.toBeInTheDocument();
+    // The regression this guards against: an earlier implementation portaled
+    // the overlay to document.body, outside Radix's Dialog content subtree,
+    // so Radix treated every zoom-dismiss click as an outside click and also
+    // closed the parent. If that regressed, onOpenChange(false) fires here.
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: "What's New" })).toBeInTheDocument();
+  });
+
+  it('clicking the backdrop dismisses only the zoom overlay, leaving the parent modal open', async () => {
+    const onOpenChange = vi.fn();
+    render(<WhatsNewModal open onOpenChange={onOpenChange} onViewChangelog={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Zoom in on Second feature screenshot' }));
+    await userEvent.click(screen.getByRole('dialog', { name: 'Zoomed screenshot' }));
+    expect(screen.queryByRole('dialog', { name: 'Zoomed screenshot' })).not.toBeInTheDocument();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: "What's New" })).toBeInTheDocument();
+  });
+
+  it('Escape dismisses only the zoom overlay, leaving the parent modal open', async () => {
+    const onOpenChange = vi.fn();
+    render(<WhatsNewModal open onOpenChange={onOpenChange} onViewChangelog={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Zoom in on Second feature screenshot' }));
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog', { name: 'Zoomed screenshot' })).not.toBeInTheDocument();
+    // Radix's own Escape handling for the parent Dialog is a document-level
+    // capture listener; without stopPropagation this fires too and also
+    // requests the parent close.
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: "What's New" })).toBeInTheDocument();
+  });
 });

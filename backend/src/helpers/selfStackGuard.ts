@@ -50,19 +50,18 @@ function workingDirMatchesStack(workingDir: string | undefined, stackName: strin
 }
 
 async function getRunningContainerLabels(): Promise<Record<string, string> | null> {
-  try {
-    const runtimeIds = await getRuntimeContainerIdCandidates();
-    if (runtimeIds.length === 0) return null;
+  const runtimeIds = await getRuntimeContainerIdCandidates();
+  if (runtimeIds.length === 0) return null;
 
-    const containers = await DockerController.getInstance().getDocker().listContainers({ all: true }) as ListedContainer[];
-    const selfContainer = containers.find((container) => {
-      const containerId = container.Id;
-      return typeof containerId === 'string' && runtimeIds.some(id => matchesContainerId(containerId, id));
-    });
-    return selfContainer?.Labels ?? null;
-  } catch {
-    return null;
-  }
+  // A listContainers failure (Docker socket unreachable) propagates so
+  // resolveSelfStackIdentity can mark the resolution degraded. Callers that
+  // need null-on-failure wrap this call themselves.
+  const containers = await DockerController.getInstance().getDocker().listContainers({ all: true }) as ListedContainer[];
+  const selfContainer = containers.find((container) => {
+    const containerId = container.Id;
+    return typeof containerId === 'string' && runtimeIds.some(id => matchesContainerId(containerId, id));
+  });
+  return selfContainer?.Labels ?? null;
 }
 
 async function runningContainerMatchesStack(stackName: string, composeDir?: string): Promise<boolean> {
@@ -89,10 +88,14 @@ export async function getSelfStackProjectName(): Promise<string | null> {
 
 /** Directory name of the running Sencho compose project, when it is under COMPOSE_DIR. */
 export async function getSelfStackDirectoryName(composeDir?: string): Promise<string | null> {
-  const labels = await getRunningContainerLabels();
-  const workingDirStack = stackNameFromWorkingDir(labels?.['com.docker.compose.project.working_dir'], composeDir);
-  if (workingDirStack) return workingDirStack;
-  return getSelfStackProjectName();
+  try {
+    const labels = await getRunningContainerLabels();
+    const workingDirStack = stackNameFromWorkingDir(labels?.['com.docker.compose.project.working_dir'], composeDir);
+    if (workingDirStack) return workingDirStack;
+    return getSelfStackProjectName();
+  } catch {
+    return null;
+  }
 }
 
 /** True when the stack appears to be the running Sencho compose project. */
@@ -104,6 +107,66 @@ export async function isSelfStack(stackName: string, composeDir?: string): Promi
   } catch {
     return false;
   }
+}
+
+/**
+ * Identity sources for the self-stack check, resolved once and reused
+ * across every stack in a request (the /statuses handler resolves it once
+ * per request). The compose project name is a boot-cached property lookup;
+ * the container labels fallback (which lists every container on the node)
+ * is a single read shared by all stacks. Either source degrades
+ * independently to null, so a failure in one never discards the other.
+ */
+export interface SelfStackIdentity {
+  projectName: string | null;
+  labels: Record<string, string> | null;
+  /**
+   * True when the container-labels probe failed (Docker socket unreachable).
+   * A degraded identity cannot be trusted to classify every stack correctly,
+   * so it must not be cached: the next request should re-resolve. Running
+   * outside Docker is NOT degraded: both sources legitimately resolve to
+   * null there and the identity is correct as-is.
+   */
+  degraded: boolean;
+}
+
+/**
+ * Resolves both identity sources. A labels-probe failure degrades only that
+ * source to null and marks the resolution degraded, matching the old
+ * per-stack behavior where a labels failure never discarded the resolved
+ * project name. getSelfStackProjectName swallows its own failures and
+ * returns null, so it cannot mark the identity degraded.
+ */
+export async function resolveSelfStackIdentity(): Promise<SelfStackIdentity> {
+  const projectName = await getSelfStackProjectName();
+  let labels: Record<string, string> | null = null;
+  let degraded = false;
+  try {
+    labels = await getRunningContainerLabels();
+  } catch (error) {
+    console.error('Failed to resolve self-stack container labels; self-stack check degraded:', error);
+    degraded = true;
+  }
+  return { projectName, labels, degraded };
+}
+
+/**
+ * Identity used when no resolution is attempted (empty fleet). Not degraded:
+ * with no stacks there is nothing to mislabel, so the payload caches as-is.
+ */
+export const UNRESOLVED_SELF_STACK_IDENTITY: SelfStackIdentity = {
+  projectName: null,
+  labels: null,
+  degraded: false,
+};
+
+/** isSelf semantics identical to isSelfStack() when the identity resolves successfully. */
+export function isSelfStackByIdentity(identity: SelfStackIdentity, stackName: string, composeDir?: string): boolean {
+  if (identity.projectName === stackName) return true;
+  const labels = identity.labels;
+  if (!labels) return false;
+  if (labels['com.docker.compose.project'] === stackName) return true;
+  return workingDirMatchesStack(labels['com.docker.compose.project.working_dir'], stackName, composeDir);
 }
 
 export interface SelfStackProtectedResult {

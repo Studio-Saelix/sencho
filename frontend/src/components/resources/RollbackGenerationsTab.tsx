@@ -1,11 +1,14 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { SortableTableHead } from '@/components/ui/sortable-table';
+import { useTableSort } from '@/hooks/useTableSort';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { ConfirmModal } from '@/components/ui/modal';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { Unlock } from 'lucide-react';
+import { Info, Search, Unlock } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
@@ -33,6 +36,21 @@ interface RollbackGenerationsTabProps {
     onReleased: () => void | Promise<void>;
 }
 
+/** Displayed State badge values; used by both StateBadge and the State comparator. */
+type DisplayedRollbackState = 'current' | 'recovery_required' | 'superseded';
+
+function getDisplayedState(gen: RollbackGeneration): DisplayedRollbackState {
+    if (gen.status === 'recovery_required') return 'recovery_required';
+    if (gen.isCurrent) return 'current';
+    return 'superseded';
+}
+
+const DISPLAYED_STATE_ORDER: Record<DisplayedRollbackState, number> = {
+    current: 0,
+    recovery_required: 1,
+    superseded: 2,
+};
+
 function formatExpiry(gen: RollbackGeneration): string {
     if (gen.isCurrent) return 'Protected while current';
     if (gen.status === 'recovery_required') return 'Recovery required';
@@ -44,21 +62,96 @@ function formatExpiry(gen: RollbackGeneration): string {
 }
 
 function StateBadge({ gen }: { gen: RollbackGeneration }) {
-    switch (gen.status) {
+    const displayed = getDisplayedState(gen);
+    switch (displayed) {
         case 'recovery_required':
             return <Badge variant="destructive" className="text-[10px] h-5">Recovery required</Badge>;
+        case 'current':
+            return <Badge variant="default" className="text-[10px] h-5">Current</Badge>;
         case 'superseded':
             return <Badge variant="secondary" className="text-[10px] h-5">Superseded</Badge>;
-        case 'active':
-        case 'restored_current':
-            return gen.isCurrent
-                ? <Badge variant="default" className="text-[10px] h-5">Current</Badge>
-                : <Badge variant="secondary" className="text-[10px] h-5">Superseded</Badge>;
         default: {
-            const unhandled: never = gen.status;
+            const unhandled: never = displayed;
             return <Badge variant="secondary" className="text-[10px] h-5">{String(unhandled)}</Badge>;
         }
     }
+}
+
+function tieBreak(a: RollbackGeneration, b: RollbackGeneration): number {
+    // Newer first, then stable id ascending.
+    if (a.createdAt !== b.createdAt) return b.createdAt - a.createdAt;
+    return a.id.localeCompare(b.id);
+}
+
+type RollbackSortKey = 'stack' | 'generation' | 'state' | 'retention';
+
+// Stable comparator map (module scope so useTableSort does not re-sort every
+// render). Primary keys fall through to createdAt desc then id asc on ties.
+const ROLLBACK_COMPARATORS: Record<RollbackSortKey, (a: RollbackGeneration, b: RollbackGeneration) => number> = {
+    stack: (a, b) => {
+        const byName = a.stackName.localeCompare(b.stackName);
+        return byName !== 0 ? byName : tieBreak(a, b);
+    },
+    generation: (a, b) => {
+        if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+        return a.id.localeCompare(b.id);
+    },
+    state: (a, b) => {
+        const byState = DISPLAYED_STATE_ORDER[getDisplayedState(a)] - DISPLAYED_STATE_ORDER[getDisplayedState(b)];
+        return byState !== 0 ? byState : tieBreak(a, b);
+    },
+    // Asc: finite expiries ascending, then rows without a finite expiry.
+    // Desc is the exact reverse via useTableSort's direction multiplier.
+    retention: (a, b) => {
+        const aExp = a.artifactExpiresAt;
+        const bExp = b.artifactExpiresAt;
+        if (aExp === null && bExp === null) return tieBreak(a, b);
+        if (aExp === null) return 1;
+        if (bExp === null) return -1;
+        if (aExp !== bExp) return aExp - bExp;
+        return tieBreak(a, b);
+    },
+};
+
+const SORT_HEAD_MOBILE = 'max-md:[&_button]:min-h-11 max-md:[&_button]:py-2';
+
+const ROLLBACK_HELP =
+    'Rollback-protected images from full-stack updates. Each generation is kept so a failed update can be automatically rolled back, and clears on its own once it is superseded and its retention window passes (configurable under Settings → Infrastructure → Stacks → Deploy Guardrails).';
+
+type RollbackStateFilter = 'all' | 'current' | 'superseded';
+
+const FILTER_OPTIONS: { key: RollbackStateFilter; label: string }[] = [
+    { key: 'all', label: 'All' },
+    { key: 'current', label: 'Current' },
+    { key: 'superseded', label: 'Superseded' },
+];
+
+function FilterToggle({
+    value,
+    onChange,
+    counts,
+}: {
+    value: RollbackStateFilter;
+    onChange: (v: RollbackStateFilter) => void;
+    counts: Record<RollbackStateFilter, number>;
+}) {
+    return (
+        <div className="flex items-center gap-1">
+            {FILTER_OPTIONS.map(({ key, label }) => (
+                <Button
+                    key={key}
+                    type="button"
+                    variant={value === key ? 'default' : 'outline'}
+                    size="sm"
+                    className="h-7 text-xs px-2.5 gap-1.5 max-md:min-h-11"
+                    onClick={() => onChange(key)}
+                >
+                    {label}
+                    <span className="font-mono tabular-nums text-[10px] opacity-70">{counts[key]}</span>
+                </Button>
+            ))}
+        </div>
+    );
 }
 
 /**
@@ -70,6 +163,35 @@ function StateBadge({ gen }: { gen: RollbackGeneration }) {
 export function RollbackGenerationsTab({ generations, isLoading, isAdmin, nodeId, onReleased }: RollbackGenerationsTabProps) {
     const [confirmRelease, setConfirmRelease] = useState<RollbackGeneration | null>(null);
     const [isReleasing, setIsReleasing] = useState(false);
+    const [search, setSearch] = useState('');
+    const [searchExpanded, setSearchExpanded] = useState(false);
+    const [stateFilter, setStateFilter] = useState<RollbackStateFilter>('all');
+    const searchRef = useRef<HTMLInputElement>(null);
+    useEffect(() => { if (searchExpanded) searchRef.current?.focus(); }, [searchExpanded]);
+
+    const filterCounts: Record<RollbackStateFilter, number> = {
+        all: generations.length,
+        current: 0,
+        superseded: 0,
+    };
+    for (const gen of generations) {
+        // Recovery-required rows count under Current so mid-recovery generations
+        // stay visible when that filter is active (badge still says Recovery required).
+        if (getDisplayedState(gen) === 'superseded') filterCounts.superseded++;
+        else filterCounts.current++;
+    }
+
+    const searchQuery = search.toLowerCase();
+    const filtered = generations.filter((gen) => {
+        const displayed = getDisplayedState(gen);
+        if (stateFilter === 'superseded' && displayed !== 'superseded') return false;
+        if (stateFilter === 'current' && displayed === 'superseded') return false;
+        if (searchQuery === '') return true;
+        return gen.stackName.toLowerCase().includes(searchQuery)
+            || gen.shortId.toLowerCase().includes(searchQuery);
+    });
+    // Default Generation descending preserves the API's newest-first order.
+    const { sorted, sortKey, sortDir, toggleSort } = useTableSort(filtered, ROLLBACK_COMPARATORS, 'generation', 'desc');
 
     const handleRelease = async () => {
         if (!confirmRelease) return;
@@ -95,20 +217,71 @@ export function RollbackGenerationsTab({ generations, isLoading, isAdmin, nodeId
 
     return (
         <>
-            <p className="mb-3 text-sm leading-relaxed text-stat-subtitle">
-                Rollback-protected images from full-stack updates. Each generation is kept so a failed update can be
-                automatically rolled back, and clears on its own once it is superseded and its retention window
-                passes (configurable under Settings → Infrastructure → Stacks → Deploy Guardrails).
-            </p>
+            <div className="flex flex-wrap items-center gap-2 mb-4">
+                {search !== '' || searchExpanded ? (
+                    <div className="relative flex-1 min-w-[200px] max-w-sm">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                        <Input
+                            ref={searchRef}
+                            placeholder="Search stack or generation..."
+                            value={search}
+                            onChange={(e) => setSearch(e.target.value)}
+                            onBlur={() => { if (search === '') setSearchExpanded(false); }}
+                            className="pl-9 h-9 max-md:min-h-11"
+                            aria-label="Search rollback generations"
+                        />
+                    </div>
+                ) : (
+                    <TooltipProvider>
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-9 w-9 p-0 shrink-0 max-md:min-h-11 max-md:min-w-11"
+                                    onClick={() => setSearchExpanded(true)}
+                                    aria-label="Search rollback generations"
+                                >
+                                    <Search className="w-4 h-4" />
+                                </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Search rollback generations</TooltipContent>
+                        </Tooltip>
+                    </TooltipProvider>
+                )}
+                <FilterToggle
+                    value={stateFilter}
+                    onChange={setStateFilter}
+                    counts={filterCounts}
+                />
+                <div className="flex-1" />
+                <TooltipProvider>
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-9 w-9 p-0 shrink-0 text-muted-foreground hover:text-foreground max-md:min-h-11 max-md:min-w-11"
+                                aria-label="About rollback generations"
+                            >
+                                <Info className="w-4 h-4" strokeWidth={1.5} />
+                            </Button>
+                        </TooltipTrigger>
+                        <TooltipContent side="left" className="max-w-sm">
+                            <p className="text-sm leading-relaxed">{ROLLBACK_HELP}</p>
+                        </TooltipContent>
+                    </Tooltip>
+                </TooltipProvider>
+            </div>
             <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
             <ScrollArea className="h-[62vh] max-md:h-auto">
                 <Table>
                     <TableHeader>
                         <TableRow>
-                            <TableHead>Stack</TableHead>
-                            <TableHead>Generation</TableHead>
-                            <TableHead>State</TableHead>
-                            <TableHead>Retention</TableHead>
+                            <SortableTableHead label="Stack" columnKey="stack" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={SORT_HEAD_MOBILE} />
+                            <SortableTableHead label="Generation" columnKey="generation" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={SORT_HEAD_MOBILE} />
+                            <SortableTableHead label="State" columnKey="state" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={`text-center ${SORT_HEAD_MOBILE}`} />
+                            <SortableTableHead label="Retention" columnKey="retention" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={SORT_HEAD_MOBILE} />
                             <TableHead className="text-right">Actions</TableHead>
                         </TableRow>
                     </TableHeader>
@@ -120,7 +293,13 @@ export function RollbackGenerationsTab({ generations, isLoading, isAdmin, nodeId
                                     No rollback-protected generations on this node.
                                 </TableCell>
                             </TableRow>
-                        ) : generations.map((gen, i) => (
+                        ) : sorted.length === 0 ? (
+                            <TableRow>
+                                <TableCell colSpan={5} className="text-center py-8 text-muted-foreground text-sm">
+                                    No generations match this filter.
+                                </TableCell>
+                            </TableRow>
+                        ) : sorted.map((gen, i) => (
                             <TableRow
                                 key={gen.id}
                                 className="animate-in fade-in-0 duration-200 hover:bg-muted/30 transition-colors"
@@ -139,7 +318,7 @@ export function RollbackGenerationsTab({ generations, isLoading, isAdmin, nodeId
                                     </button>
                                 </TableCell>
                                 <TableCell className="font-mono text-xs text-muted-foreground">{gen.shortId}</TableCell>
-                                <TableCell><StateBadge gen={gen} /></TableCell>
+                                <TableCell className="text-center"><StateBadge gen={gen} /></TableCell>
                                 <TableCell className="text-xs text-stat-subtitle">{formatExpiry(gen)}</TableCell>
                                 <TableCell className="text-right">
                                     {isAdmin && (

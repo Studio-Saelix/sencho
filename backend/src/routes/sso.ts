@@ -126,6 +126,7 @@ ssoRouter.get('/oidc/:provider/callback', ssoRateLimiter, async (req: Request, r
     const provider = String(req.params.provider);
     const code = String(req.query.code || '');
     const state = String(req.query.state || '');
+    const iss = req.query.iss ? String(req.query.iss) : undefined;
     const oidcError = req.query.error ? String(req.query.error) : '';
     const error_description = req.query.error_description ? String(req.query.error_description) : '';
 
@@ -168,7 +169,7 @@ ssoRouter.get('/oidc/:provider/callback', ssoRateLimiter, async (req: Request, r
 
     const result = await SSOService.getInstance().handleOIDCCallback(
       provider, callbackUrl,
-      { code, state },
+      { code, state, iss },
       statePayload.state,
       statePayload.codeVerifier,
     );

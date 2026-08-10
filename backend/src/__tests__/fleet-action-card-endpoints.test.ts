@@ -598,6 +598,135 @@ describe('POST /api/fleet/prune/estimate', () => {
     }
   });
 
+  it('rejects a negative remote reclaimableBytes without folding it into the totals', async () => {
+    estimateManagedReclaim.mockResolvedValue({ reclaimableBytes: 0 });
+    const remoteId = db.addNode({
+      name: 'remote-negative',
+      type: 'remote',
+      api_url: 'http://remote-negative.example:1852',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+    try {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+        JSON.stringify({ reclaimableBytes: -5 }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+      const res = await request(app)
+        .post('/api/fleet/prune/estimate')
+        .set('Authorization', authHeader)
+        .send({ targets: ['images'], scope: 'managed' });
+      expect(res.status).toBe(200);
+      const remote = res.body.perNode.find((n: { nodeId: number }) => n.nodeId === remoteId);
+      expect(remote.reachable).toBe(false);
+      expect(remote.partial).toBeUndefined();
+      expect(remote.reclaimableBytes).toBe(0);
+      expect(remote.error).toBe('Invalid response from remote node');
+      expect(res.body.totalBytes).toBe(0);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('rejects a negative remote target without discarding a successful sibling target', async () => {
+    estimateManagedReclaim.mockResolvedValue({ reclaimableBytes: 0 });
+    const remoteId = db.addNode({
+      name: 'remote-negative-partial',
+      type: 'remote',
+      api_url: 'http://remote-negative-partial.example:1852',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+    try {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { target?: string };
+        return new Response(
+          JSON.stringify({ reclaimableBytes: body.target === 'images' ? 42 : -5 }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      });
+      const res = await request(app)
+        .post('/api/fleet/prune/estimate')
+        .set('Authorization', authHeader)
+        .send({ targets: ['images', 'volumes'], scope: 'managed' });
+      expect(res.status).toBe(200);
+      const remote = res.body.perNode.find((n: { nodeId: number }) => n.nodeId === remoteId);
+      expect(remote.reachable).toBe(true);
+      expect(remote.partial).toBe(true);
+      expect(remote.reclaimableBytes).toBe(42);
+      expect(remote.error).toBe('Invalid response from remote node');
+      expect(res.body.totalBytes).toBe(42);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('rejects a non-finite remote reclaimableBytes value', async () => {
+    estimateManagedReclaim.mockResolvedValue({ reclaimableBytes: 0 });
+    const remoteId = db.addNode({
+      name: 'remote-infinity',
+      type: 'remote',
+      api_url: 'http://remote-infinity.example:1852',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+    try {
+      // 1e999 overflows JSON.parse to Infinity; JSON.stringify would emit null
+      // instead, so the raw body must be provided verbatim.
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+        '{"reclaimableBytes":1e999}',
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+      const res = await request(app)
+        .post('/api/fleet/prune/estimate')
+        .set('Authorization', authHeader)
+        .send({ targets: ['images'], scope: 'managed' });
+      expect(res.status).toBe(200);
+      const remote = res.body.perNode.find((n: { nodeId: number }) => n.nodeId === remoteId);
+      expect(remote.reachable).toBe(false);
+      expect(remote.partial).toBeUndefined();
+      expect(remote.reclaimableBytes).toBe(0);
+      expect(remote.error).toBe('Invalid response from remote node');
+      expect(res.body.totalBytes).toBe(0);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('accepts a zero remote reclaimableBytes as a valid estimate', async () => {
+    estimateManagedReclaim.mockResolvedValue({ reclaimableBytes: 0 });
+    const remoteId = db.addNode({
+      name: 'remote-zero',
+      type: 'remote',
+      api_url: 'http://remote-zero.example:1852',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+    try {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+        JSON.stringify({ reclaimableBytes: 0 }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+      const res = await request(app)
+        .post('/api/fleet/prune/estimate')
+        .set('Authorization', authHeader)
+        .send({ targets: ['images'], scope: 'managed' });
+      expect(res.status).toBe(200);
+      const remote = res.body.perNode.find((n: { nodeId: number }) => n.nodeId === remoteId);
+      expect(remote.reachable).toBe(true);
+      expect(remote.partial).toBeUndefined();
+      expect(remote.reclaimableBytes).toBe(0);
+      expect(remote.error).toBeUndefined();
+      expect(res.body.totalBytes).toBe(0);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
   it('keeps successful local bytes when a later target rejects without timing out', async () => {
     estimateManagedReclaim.mockImplementation(async (target: string) => {
       if (target === 'images') return { reclaimableBytes: 4096 };

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { apiFetch } from '@/lib/api';
+import { fetchStackStatusesShared, type StackStatusesFetchResult } from '@/lib/stackStatusesFetch';
 import {
   newAttemptId,
   abortAttempt,
@@ -297,27 +298,36 @@ export function useStackListState() {
       // format can express `partial`; a node lacking the endpoint or returning
       // the legacy plain-string format is re-derived from per-stack containers
       // so a crashed container is not hidden behind a healthy sibling.
+      // Skip statuses until activeNode resolves (null here means unresolved, not
+      // "local"); never pass an unknown target into the shared fetch.
+      if (fetchNodeId === null) {
+        return fileList;
+      }
       const statusHeaders = beginSpan('fetch_headers', { attemptId, background, proxied });
-      const statusRes = await apiFetch('/stacks/statuses');
-      const statusProxied = statusRes.headers.get('x-sencho-proxy') === '1' || proxied;
-      endSpan(statusHeaders, { proxied: statusProxied, detail: { status: statusRes.status } });
+      let statusResult: StackStatusesFetchResult;
+      try {
+        statusResult = await fetchStackStatusesShared(fetchNodeId);
+      } catch (statusErr) {
+        endSpan(statusHeaders, { outcome: 'error', detail: { coalesced: false } });
+        throw statusErr;
+      }
+      const statusProxied = statusResult.proxied || proxied;
+      // Joined waiters mark network spans superseded so truncated join timings
+      // are not mistaken for fast fetches.
+      endSpan(statusHeaders, {
+        outcome: statusResult.coalesced ? 'superseded' : undefined,
+        proxied: statusProxied,
+        detail: { status: statusResult.status, coalesced: statusResult.coalesced },
+      });
       if (stale()) { abortAttempt(attemptId); return fileList; }
       let bulkStatuses: Record<string, StackRowStatus> = {};
       const bulkPorts: Record<string, number | undefined> = {};
       const bulkSelf: Record<string, boolean> = {};
       const bulkCounts: StackCounts = {};
 
-      let raw: unknown = null;
-      if (statusRes.ok) {
-        const statusBodySpan = beginSpan('body_decode', { attemptId, background, proxied: statusProxied });
-        try {
-          raw = await statusRes.json();
-          endSpan(statusBodySpan);
-        } catch (decodeErr) {
-          endSpan(statusBodySpan, { outcome: 'error' });
-          throw decodeErr;
-        }
-      }
+      // Decode already happened inside the shared helper; do not emit a fake
+      // body_decode span that would look like near-zero network work.
+      const raw: unknown = statusResult.ok ? statusResult.body : null;
       if (isBulkStatusObjectFormat(raw)) {
         for (const [key, val] of Object.entries(raw as Record<string, StackStatusInfo>)) {
           bulkStatuses[key] = val.status;
@@ -330,7 +340,12 @@ export function useStackListState() {
       } else {
         bulkStatuses = await deriveStatusesFromContainers(fileList);
       }
-      const statusDispatch = beginSpan('state_dispatch', { attemptId, background, proxied: statusProxied });
+      const statusDispatch = beginSpan('state_dispatch', {
+        attemptId,
+        background,
+        proxied: statusProxied,
+        detail: { coalesced: statusResult.coalesced },
+      });
       setStackStatuses(prev => {
         const next: StackStatus = {};
         for (const file of fileList) {
@@ -346,7 +361,7 @@ export function useStackListState() {
       });
       setStackSelfFlags(bulkSelf);
       setStackCounts(bulkCounts);
-      endSpan(statusDispatch);
+      endSpan(statusDispatch, { detail: { coalesced: statusResult.coalesced } });
       refreshLabels();
       if (!background) {
         listHydratedPendingRef.current = { attemptId, token: listToken, proxied: statusProxied };

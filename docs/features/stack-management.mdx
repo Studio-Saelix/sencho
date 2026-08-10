@@ -9,6 +9,10 @@ A **stack** in Sencho is a Docker Compose project: a directory inside your `COMP
   <img src="/images/stack-management/sidebar-grouped.png" alt="Sencho sidebar showing the stack list grouped by label, with filter chips at the top" />
 </Frame>
 
+<Note>
+  Stack deploy, update, and down run `docker compose` through the same Docker endpoint as the rest of Sencho. When Sencho runs behind a Docker socket proxy, the proxy must allow POST and the CONTAINERS, IMAGES, NETWORKS, and VOLUMES groups for Compose operations to work. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy).
+</Note>
+
 ## Creating a stack
 
 Click **Create Stack** in the left sidebar to open the **New stack** dialog. Pick a source from the tabs at the top:
