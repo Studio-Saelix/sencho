@@ -5,13 +5,13 @@ import { SignalRail, type SignalTile } from '@/components/ui/SignalRail';
 import { cn } from '@/lib/utils';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useIsMobile } from '@/hooks/use-is-mobile';
-import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { SecuritySevStrip, SecurityTotalsGrid, SecurityFooterBand } from './SecurityMobile';
 import type { SecurityOverview, SecurityRiskTrendPoint, ExploitIntelFinding, PostureReason } from '@/types/security';
 import type { SecurityTab } from '@/lib/events';
 import type { ImageFilterValue } from '@/lib/severityStyles';
 import { reasonImageFilter, defaultReasonActionLabel } from './postureNavigation';
+import { triggerNodeImageUpdateCheck } from './imageUpdateRecheck';
 import {
   RiskTrendChart,
   ActionPostureChart,
@@ -81,25 +81,6 @@ const SEVERITY_LABEL: Record<PostureReason['severity'], string> = {
 
 function reasonNavLabel(r: PostureReason): string {
   return `${r.actionLabel ?? defaultReasonActionLabel(r.targetTab)} →`;
-}
-
-/** Node-scoped image-update refresh. Confirm via toast; do not refetch overview
- *  immediately (the check runs in the background). */
-export async function triggerNodeImageUpdateCheck(): Promise<void> {
-  const res = await apiFetch('/image-updates/refresh', { method: 'POST' });
-  const body = await res.json().catch(() => ({})) as { error?: string; message?: string };
-  if (res.status === 429) {
-    toast.warning(body.error || 'Rate limited. Please wait before checking again.');
-    return;
-  }
-  if (res.status === 409) {
-    toast.warning(body.error || 'Image update detection is disabled for this node.');
-    return;
-  }
-  if (!res.ok) {
-    throw new Error(body.error || 'Failed to start image update check');
-  }
-  toast.success(body.message || 'Image update check started in background.');
 }
 
 function ReasonRow({
