@@ -97,10 +97,9 @@ If the identity provider is unavailable after SSO only is enabled, restore local
 
 ```bash
 docker compose exec sencho node dist/cli/enableLocalLogin.js
-docker compose restart sencho
 ```
 
-Restart is required so the running process reloads the setting. The same command is listed under **Settings → Operations → Recovery**.
+No restart is required; the next login attempt honors the restored mode. The same command is listed under **Settings → Operations → Recovery** and in [Emergency command-line recovery](/operations/emergency-cli).
 
 <Frame>
   <img src="/images/sso/sso-settings.png" alt="SSO settings panel listing the five identity providers as collapsible cards with enable / disable toggles" />
@@ -335,14 +334,13 @@ If not set, Sencho auto-detects the URL from the request's `Host` header and pro
     Confirm the provider is enabled (toggle on, showing the Active badge) under **Settings → Access → SSO** and that the configuration saved successfully. The login page fetches the list of enabled providers when it loads; hard-refresh the tab if changes were just made.
   </Accordion>
   <Accordion title="Locked out after enabling SSO only">
-    From the host that runs Sencho, re-enable local password login and restart so the setting takes effect:
+    From the host that runs Sencho, re-enable local password login:
 
     ```bash
     docker compose exec sencho node dist/cli/enableLocalLogin.js
-    docker compose restart sencho
     ```
 
-    Then sign in with a local administrator account and repair the identity provider configuration before enabling SSO only again.
+    Then sign in with a local administrator account and repair the identity provider configuration before enabling SSO only again. No restart is required.
   </Accordion>
 
   <Accordion title="'Cannot disable/delete the last SSO provider while SSO-only mode is active'">
