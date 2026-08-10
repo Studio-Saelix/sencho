@@ -30,6 +30,7 @@ vi.mock('@/lib/utils', async () => {
 });
 
 import { useDashboardData } from '../useDashboardData';
+import { __resetStackStatusesFetchForTests } from '@/lib/stackStatusesFetch';
 
 function okJson(payload: unknown): Response {
   return new Response(JSON.stringify(payload), {
@@ -91,6 +92,7 @@ async function tickSys(): Promise<void> {
 
 beforeEach(() => {
   pollCallbacks = [];
+  __resetStackStatusesFetchForTests();
   apiFetchMock.mockReset();
   useNodesMock.mockReset();
   useNodesMock.mockReturnValue({
@@ -100,6 +102,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  __resetStackStatusesFetchForTests();
   vi.clearAllMocks();
 });
 
