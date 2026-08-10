@@ -106,12 +106,19 @@ stackGitSourceRouter.get('/:stackName/git-source', async (req: Request, res: Res
   }
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   try {
-    const source = GitSourceService.getInstance().get(stackName);
+    const gitSources = GitSourceService.getInstance();
+    const source = gitSources.get(stackName);
     if (source) {
       // The managed-project manifest summary rides the source branch; the
-      // unlinked {linked:false} shape below is unchanged.
-      const manifest = await GitSourceService.getInstance().getManifestSummary(stackName);
-      res.json({ ...source, manifest });
+      // unlinked {linked:false} shape below is unchanged. Heal-on-read may
+      // rewrite the DB cache, so re-read the flat row for same-response parity.
+      const manifest = await gitSources.getManifestSummary(stackName);
+      const refreshed = gitSources.get(stackName) ?? source;
+      res.json({
+        ...refreshed,
+        manifest_state: manifest?.state ?? refreshed.manifest_state,
+        manifest,
+      });
       return;
     }
     // No source row. A non-existent stack is a genuine 404, but an existing

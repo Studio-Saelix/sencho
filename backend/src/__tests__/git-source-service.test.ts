@@ -219,6 +219,50 @@ describe('GitSourceService.validateCompose (YAML pre-check)', () => {
         expect(r.ok).toBe(false);
         expect(r.error).toMatch(/YAML parse error/i);
     });
+
+    it('scrubs absolute validation paths from docker compose stderr', async () => {
+        const instance = svc();
+        const leak =
+            'open /app/data/git-managed/1/qa-refusal/generations/candidate-abc/case/config.yml: no such file or directory';
+        const runSpy = vi.spyOn(
+            instance as unknown as { runDockerCompose: (a: string[], c: string, t: number) => Promise<{ code: number; stdout: string; stderr: string }> },
+            'runDockerCompose',
+        ).mockResolvedValue({ code: 1, stdout: '', stderr: leak });
+        try {
+            const r = await instance.validateCompose(asFiles('services:\n  web:\n    image: nginx\n'), null, null);
+            expect(r.ok).toBe(false);
+            expect(r.error).toBeDefined();
+            expect(r.error).not.toContain('/app/data');
+            expect(r.error).not.toContain('git-managed/1');
+            expect(r.error).not.toContain('candidate-abc');
+            expect(r.error).toContain('[managed-path]');
+        } finally {
+            runSpy.mockRestore();
+        }
+    });
+
+    it('does not corrupt unrelated paths when scrubbing a DATA_DIR prefix', async () => {
+        const instance = svc();
+        // Simulate a temp validation dir whose basename is a prefix of another
+        // word in the message (data vs database). The scrubber must not turn
+        // "database" into "base".
+        const runSpy = vi.spyOn(
+            instance as unknown as { runDockerCompose: (a: string[], c: string, t: number) => Promise<{ code: number; stdout: string; stderr: string }> },
+            'runDockerCompose',
+        ).mockImplementation(async (_args, cwd) => ({
+            code: 1,
+            stdout: '',
+            stderr: `open ${cwd}/compose.yaml: failed; see /var/lib/database/notes`,
+        }));
+        try {
+            const r = await instance.validateCompose(asFiles('services:\n  web:\n    image: nginx\n'), null, null);
+            expect(r.ok).toBe(false);
+            expect(r.error).toContain('/var/lib/database/notes');
+            expect(r.error).not.toMatch(/\/var\/lib\/base\/notes/);
+        } finally {
+            runSpy.mockRestore();
+        }
+    });
 });
 
 describe('GitSourceService.upsert (encryption + reachability)', () => {
@@ -2057,7 +2101,11 @@ describe('GitSourceService managed-area lifecycle', () => {
         DatabaseService.getInstance().setGitSourceManifestState('stale-cache-summary', 3, 'active', 'generations/applied-abc-3');
         const summary = await svc.getManifestSummary('stale-cache-summary');
         expect(summary?.state).toBe('migration_required');
+        expect(summary?.manifestVersion).toBe(0);
         expect(summary?.managedCount).toBe(0);
+        // Heal-on-read keeps the flat cache aligned with the summary.
+        expect(DatabaseService.getInstance().getGitSource('stale-cache-summary')?.manifest_state).toBe('migration_required');
+        expect(DatabaseService.getInstance().getGitSource('stale-cache-summary')?.manifest_version).toBeNull();
 
         // A row that never had a manifest still reports absent.
         DatabaseService.getInstance().upsertGitSource({

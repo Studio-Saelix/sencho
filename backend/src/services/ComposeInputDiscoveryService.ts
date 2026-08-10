@@ -91,6 +91,13 @@ function posixRel(p: string): string {
     return p.replace(/\\/g, '/').replace(/^\.\//, '');
 }
 
+/** Parent directory of a POSIX relative path; empty string at repo root. */
+function posixDir(p: string): string {
+    const rel = posixRel(p);
+    const idx = rel.lastIndexOf('/');
+    return idx === -1 ? '' : rel.slice(0, idx);
+}
+
 function caseKey(s: string): string {
     return s.toLowerCase();
 }
@@ -611,11 +618,16 @@ export class ComposeInputDiscoveryService {
         // directory keeps auto-discovery (deriveAppliedSpec returns null), but
         // a configured project directory forces explicit -f arguments, which
         // suppress auto-discovery (compose merge docs: explicit -f disables it).
+        //
+        // Search next to the primary compose file (Compose's effective project
+        // directory), not at projectRoot / the repository root when those
+        // differ. A monorepo subproject must not absorb a sibling project's
+        // root-level override.
         let implicitOverridePath: string | null = null;
         if (composePaths.length === 1 && !contextDir) {
-            const overrideBase = projectRoot ?? '';
+            const primaryDir = posixDir(composePaths[0]);
             for (const candidate of COMPOSE_OVERRIDE_FILENAMES) {
-                const rel = overrideBase ? `${overrideBase}/${candidate}` : candidate;
+                const rel = primaryDir ? `${primaryDir}/${candidate}` : candidate;
                 const result = await this.classifyPath(cloneDir, rel, bounds);
                 if (result.ok) {
                     implicitOverridePath = rel;
@@ -680,9 +692,11 @@ export class ComposeInputDiscoveryService {
         });
         if (implicitOverridePath) {
             const content = ordered.find((o) => o.path === implicitOverridePath)?.content ?? '';
+            // Primary compose relocates to stack-root compose.yaml; the override
+            // must land beside it (basename only) so plain auto-discovery finds it.
             inputs.push({
                 sourcePath: implicitOverridePath,
-                materializedPath: posixRel(implicitOverridePath),
+                materializedPath: path.posix.basename(posixRel(implicitOverridePath)),
                 role: 'compose-override',
                 dependencyKind: 'implicit-override',
                 ownership: 'managed',
@@ -916,13 +930,29 @@ export class ComposeInputDiscoveryService {
         // Deduplicate managed inputs by stack-relative path: two services
         // referencing the same file (shared env_file, config, or Dockerfile)
         // produce one entry so the candidate writer never rejects a duplicate.
+        // Case-only collisions (Config.yml vs config.yml) are refused: silently
+        // dropping one leaves compose config looking for a file that was never
+        // staged, and leaks internal candidate paths into the validation error.
         const dedupedInputs: ComposeInputEntry[] = [];
-        const seenPaths = new Set<string>();
+        const seenByCase = new Map<string, ComposeInputEntry>();
         for (const entry of inputs) {
             if (entry.materializedPath !== null) {
                 const key = caseKey(entry.materializedPath);
-                if (seenPaths.has(key)) continue;
-                seenPaths.add(key);
+                const prior = seenByCase.get(key);
+                if (prior) {
+                    if (prior.materializedPath !== entry.materializedPath) {
+                        refusals.push(
+                            this.refusal(
+                                entry.sourcePath ?? entry.materializedPath,
+                                'case-collision',
+                                `Case-only path collision between ${prior.materializedPath} and ${entry.materializedPath}; both cannot be materialized on a case-insensitive filesystem`,
+                                true,
+                            ),
+                        );
+                    }
+                    continue;
+                }
+                seenByCase.set(key, entry);
             }
             dedupedInputs.push(entry);
         }

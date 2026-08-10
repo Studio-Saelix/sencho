@@ -1021,4 +1021,19 @@ describe('stack_git_sources manifest cache columns', () => {
         expect(row.manifest_state).toBe('active');
         expect(row.manifest_generation).toBe('generations/applied-x');
     });
+
+    it('GET keeps flat manifest_state aligned with the healed summary', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, 'stale-manifest-get'), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, 'stale-manifest-get', 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+        seedGitSource('stale-manifest-get');
+        DatabaseService.getInstance().setGitSourceManifestState('stale-manifest-get', 3, 'active', 'generations/applied-abc-3');
+
+        const res = await request(app)
+            .get('/api/stacks/stale-manifest-get/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(res.body.manifest?.state).toBe('migration_required');
+        expect(res.body.manifest_state).toBe('migration_required');
+    });
 });

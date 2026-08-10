@@ -358,6 +358,41 @@ function scrubCredentials(message: string): string {
 }
 
 /**
+ * Strip absolute DATA_DIR / candidate paths from compose validation stderr
+ * before it reaches the API, so operators never see host layout details.
+ * Only remove directory prefixes (root + separator), never a bare substring
+ * that could corrupt a longer path (for example `data` inside `database`).
+ */
+function scrubInternalPaths(message: string, ...roots: Array<string | null | undefined>): string {
+    let out = message;
+    for (const root of roots) {
+        if (!root) continue;
+        for (const variant of new Set([root, root.replace(/\\/g, '/'), root.replace(/\//g, '\\')])) {
+            if (!variant) continue;
+            const prefixes =
+                variant.endsWith('/') || variant.endsWith('\\')
+                    ? [variant]
+                    : [`${variant}/`, `${variant}\\`];
+            for (const prefix of prefixes) {
+                out = out.split(prefix).join('');
+            }
+        }
+    }
+    // Catch any remaining absolute .../git-managed/... path (temp dirs, other nodes).
+    out = out.replace(/(?:[A-Za-z]:)?(?:\/|\\)[^\s"']*?(?:\/|\\)git-managed(?:\/|\\)[^\s"']*/gi, '[managed-path]');
+    return out.replace(/\/{2,}/g, '/').replace(/\\{2,}/g, '\\').trim();
+}
+
+function publicComposeValidationError(
+    stderr: string,
+    exitCode: number,
+    ...roots: Array<string | null | undefined>
+): string {
+    const text = stderr.trim() || `docker compose exited with code ${exitCode}`;
+    return scrubCredentials(scrubInternalPaths(text, ...roots));
+}
+
+/**
  * Extract just the hostname for log lines so we never echo a full
  * repo URL that could contain an inline credential. Falls back to
  * `unknown` for malformed URLs.
@@ -906,9 +941,15 @@ export class GitSourceService {
             const cached = src.manifest_state ?? 'absent';
             state = cached === 'absent' || cached === 'none' ? 'absent' : 'migration_required';
         }
+        // Heal the flat cache so the same GET payload cannot report
+        // manifest_state:"active" beside manifest.state:"migration_required".
+        // Synthesized absent/migration_required never carries a trusted version.
+        if ((src.manifest_state ?? 'absent') !== state) {
+            DatabaseService.getInstance().setGitSourceManifestState(stackName, null, state, null);
+        }
         return {
             state,
-            manifestVersion: src.manifest_version ?? 0,
+            manifestVersion: 0,
             resolvedCommitSha: null,
             managedCount: 0,
             unmanagedCount: 0,
@@ -1264,7 +1305,7 @@ export class GitSourceService {
             args.push('config', '--quiet');
             const result = await this.runDockerCompose(args, dir, 10_000);
             if (result.code === 0) return { ok: true };
-            return { ok: false, error: result.stderr.trim() || `docker compose exited with code ${result.code}` };
+            return { ok: false, error: publicComposeValidationError(result.stderr, result.code, dir) };
         } finally {
             await removeTempDir(dir);
         }
@@ -1384,7 +1425,10 @@ export class GitSourceService {
         const result = await this.runDockerCompose(args, candidateAbs, 30_000);
         if (result.code === 0) return { ok: true };
         const timeoutHint = result.stderr.includes('Validation timed out') ? ' (docker compose config timed out after 30s)' : '';
-        return { ok: false, error: `${result.stderr.trim() || `docker compose exited with code ${result.code}`}${timeoutHint}` };
+        return {
+            ok: false,
+            error: `${publicComposeValidationError(result.stderr, result.code, candidateAbs, dataDir)}${timeoutHint}`,
+        };
     }
 
     private runDockerCompose(args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {

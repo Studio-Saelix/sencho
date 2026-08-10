@@ -273,6 +273,74 @@ configs:
         expect(multi.inputs.some((i) => i.dependencyKind === 'implicit-override')).toBe(false);
     });
 
+    it('scopes implicit override discovery to the primary file directory (monorepo isolation)', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  app:\n    image: nginx\n    ports: ["8099:80"]\n',
+            'compose.override.yaml': 'services:\n  app:\n    environment:\n      FROM: root\n',
+            'monorepo/project-a/compose.yaml': 'services:\n  a:\n    image: alpine\n',
+            'monorepo/project-a/compose.override.yaml': 'services:\n  a:\n    environment:\n      FROM: nested\n',
+            'monorepo/project-b/compose.yaml': 'services:\n  b:\n    image: busybox\n',
+        });
+
+        const nestedWithLocal = await discovery().discoverFromClone({
+            cloneDir: clone,
+            composePaths: ['monorepo/project-a/compose.yaml'],
+            contextDir: null,
+            bounds: BOUNDS,
+        });
+        const overrideA = nestedWithLocal.inputs.find((i) => i.dependencyKind === 'implicit-override');
+        expect(overrideA?.sourcePath).toBe('monorepo/project-a/compose.override.yaml');
+        expect(overrideA?.materializedPath).toBe('compose.override.yaml');
+        expect(nestedWithLocal.inputs.some((i) => i.sourcePath === 'compose.override.yaml')).toBe(false);
+
+        const nestedWithoutLocal = await discovery().discoverFromClone({
+            cloneDir: clone,
+            composePaths: ['monorepo/project-b/compose.yaml'],
+            contextDir: null,
+            bounds: BOUNDS,
+        });
+        expect(nestedWithoutLocal.inputs.some((i) => i.dependencyKind === 'implicit-override')).toBe(false);
+    });
+
+    it('refuses case-only materialized path collisions instead of dropping one file', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'include:\n  - case/Config.yml\n  - case/config.yml\nservices: {}\n',
+            'case/Config.yml': 'services:\n  upper:\n    image: alpine\n',
+            'case/config.yml': 'services:\n  lower:\n    image: busybox\n',
+        });
+        const result = await discovery().discoverFromClone({
+            cloneDir: clone,
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            bounds: BOUNDS,
+        });
+        expect(result.refusals.some((r) => r.kind === 'case-collision' && r.actionable)).toBe(true);
+        const collision = result.refusals.find((r) => r.kind === 'case-collision');
+        expect(collision?.reason).toMatch(/Config\.yml/i);
+        expect(collision?.reason).toMatch(/config\.yml/i);
+        const caseInputs = result.inputs.filter(
+            (i) => i.materializedPath !== null && /^case\/config\.yml$/i.test(i.materializedPath),
+        );
+        expect(caseInputs).toHaveLength(1);
+    });
+
+    it('materializes env_file paths that contain a literal $ but no Compose variable', async () => {
+        const clone = makeClone({
+            'compose.yaml': 'services:\n  web:\n    image: nginx\n    env_file: config$.env\n',
+            'config$.env': 'A=1\n',
+        });
+        const result = await discovery().discoverFromClone({
+            cloneDir: clone,
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            bounds: BOUNDS,
+        });
+        const env = result.inputs.find((i) => i.dependencyKind === 'env_file' && i.sourcePath === 'config$.env');
+        expect(env?.ownership).toBe('managed');
+        expect(env?.materializedPath).toBe('config$.env');
+        expect(result.dynamic.some((d) => d.sourcePath === 'config$.env')).toBe(false);
+    });
+
     it('enforces the aggregate file and byte caps during classification', async () => {
         const clone = makeClone({
             'compose.yaml': 'services:\n  web:\n    image: nginx\n    env_file:\n      - a.env\n      - b.env\n      - c.env\n',

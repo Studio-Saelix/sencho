@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseDeclaredInputs } from '../helpers/composeInputParse';
+import { isDynamicPath, parseDeclaredInputs } from '../helpers/composeInputParse';
 import type { DeclaredInput, DynamicInput } from '../types/gitProjectManifest';
 
 /** In-memory repo fixture: maps repo paths to contents. */
@@ -435,5 +435,20 @@ configs:
         expect(cfg.baseDir).toBe('host');
         const labelFile = byKind(result, 'label_file')[0];
         expect(labelFile.baseDir).toBe('host');
+    });
+});
+
+describe('isDynamicPath', () => {
+    it('treats Compose variable forms as dynamic', () => {
+        expect(isDynamicPath('${ENV_FILE}')).toBe(true);
+        expect(isDynamicPath('${ENV_FILE:-default.env}')).toBe(true);
+        expect(isDynamicPath('$ENV_FILE')).toBe(true);
+        expect(isDynamicPath('prefix-$ENV_FILE')).toBe(true);
+    });
+
+    it('treats a literal $ that is not a variable start as static', () => {
+        expect(isDynamicPath('config$.env')).toBe(false);
+        expect(isDynamicPath('file$.yaml')).toBe(false);
+        expect(isDynamicPath('plain.env')).toBe(false);
     });
 });
