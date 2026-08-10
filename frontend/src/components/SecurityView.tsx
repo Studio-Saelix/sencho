@@ -110,6 +110,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           kind: targeting.kind,
           label: targeting.label,
           imageRefs: targeting.imageRefs,
+          targets: targeting.targets,
           token: (prev?.token ?? 0) + 1,
         }));
         // R2: targeting navigation resets severity unless an explicit filter is supplied.

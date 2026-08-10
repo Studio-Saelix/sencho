@@ -110,16 +110,18 @@ describe('OverviewTab remediation affordances', () => {
     const { onNavigate } = renderOverview([
       reason({
         kind: 'public_exposure',
-        label: 'Publicly exposed affected images',
+        label: 'Network-exposed affected images',
         severity: 'blocker',
+        actionLabel: 'Review affected images',
         targets: [{ imageRef: 'exp:1' }, { imageRef: 'exp:2' }],
       }),
     ]);
-    await user.click(screen.getByRole('button', { name: /view findings/i }));
+    await user.click(screen.getByRole('button', { name: /review affected images/i }));
     expect(onNavigate).toHaveBeenCalledWith('images', undefined, {
       kind: 'public_exposure',
-      label: 'Publicly exposed affected images',
+      label: 'Network-exposed affected images',
       imageRefs: ['exp:1', 'exp:2'],
+      targets: [{ imageRef: 'exp:1' }, { imageRef: 'exp:2' }],
     });
   });
 

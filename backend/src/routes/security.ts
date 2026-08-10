@@ -18,7 +18,8 @@ import { generateOpenVex } from '../services/OpenVexExporter';
 import { deriveSecurityPosture, derivePostureReasons, HIGH_EPSS_THRESHOLD, type SecurityPostureFacts, type SecurityPostureState, type PostureReason, type PostureAction } from '../services/securityPosture';
 import { classifyImageRemediation, type RemediationFindingInput } from '../services/securityImageRemediation';
 import { ImageUpdateService } from '../services/ImageUpdateService';
-import { buildExposedImageMap } from '../services/preflight/exposure';
+import { buildExposedImageMap, type StackExposure } from '../services/preflight/exposure';
+import { buildSecurityExposureTargets } from '../services/securityExposureTargets';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
@@ -872,20 +873,19 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       }
     }
 
-    // Count distinct images that are publicly exposed AND have at least one
-    // non-suppressed Critical/High finding. The exposure descriptor is cached
-    // at deploy/update time, so this is O(stacks) + O(images), zero subprocess.
+    // Network-exposed image counts from cached Compose descriptors (O(stacks)+O(images)).
+    // publiclyExposed: network-exposed images in the Crit/High index (including fully suppressed).
+    // exposedBlocker / exposedReview: require at least one unsuppressed Crit/High finding.
     const exposures = db.getStackExposures(req.nodeId);
-    const exposedMap = buildExposedImageMap(
-      exposures.map((r) => {
-        try { return JSON.parse(r.descriptor); } catch { return null; }
-      }).filter(Boolean),
-    );
+    const parsedExposures: StackExposure[] = exposures.map((r) => {
+      try { return JSON.parse(r.descriptor) as StackExposure; } catch { return null; }
+    }).filter((e): e is StackExposure => e !== null);
+    const exposedMap = buildExposedImageMap(parsedExposures);
     let publiclyExposed = 0;
     let exposedBlocker = 0;
     let exposedReview = 0;
-    const exposedBlockerTargets: string[] = [];
-    const exposedReviewTargets: string[] = [];
+    const exposedBlockerImageRefs = new Set<string>();
+    const exposedReviewImageRefs = new Set<string>();
     for (const [imageRef, group] of critHighByImage) {
       if (exposedMap.get(imageRef) !== true) continue;
       publiclyExposed += 1;
@@ -906,12 +906,22 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       if (!hasUnsuppressedFinding) continue; // fully dismissed (still counted in publiclyExposed)
       if (hasKevOrFixOrHighEpss) {
         exposedBlocker += 1;
-        exposedBlockerTargets.push(imageRef);
+        exposedBlockerImageRefs.add(imageRef);
       } else {
         exposedReview += 1;
-        exposedReviewTargets.push(imageRef);
+        exposedReviewImageRefs.add(imageRef);
       }
     }
+    const exposedBlockerTargets = buildSecurityExposureTargets({
+      nodeId: req.nodeId,
+      exposures: parsedExposures,
+      qualifyingImageRefs: exposedBlockerImageRefs,
+    });
+    const exposedReviewTargets = buildSecurityExposureTargets({
+      nodeId: req.nodeId,
+      exposures: parsedExposures,
+      qualifyingImageRefs: exposedReviewImageRefs,
+    });
 
     const failedScans = db.countScansByStatus(req.nodeId, 'failed');
 

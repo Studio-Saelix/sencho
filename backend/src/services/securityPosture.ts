@@ -21,11 +21,20 @@
  * fix alone never produces an "Update affected images" instruction.
  */
 
+import {
+  allTargetsIntentionallyClassified,
+  anyTargetIntentConflict,
+  anyTargetIntentUnset,
+} from './securityExposureTargets';
+import type { ExposureIntent } from './network/types';
+
 /** EPSS score at or above this is treated as an elevated exploitation
  *  likelihood, matching the frontend threshold in SecurityCharts.tsx. */
 export const HIGH_EPSS_THRESHOLD = 0.1;
 
-/** Max distinct image targets attached to one posture reason (overview payload). */
+/** Max target rows attached to one posture reason (overview payload).
+ *  For exposure reasons rows are per stack/service and may repeat imageRef;
+ *  reason.count stays a distinct-image count and can diverge from targets.length. */
 export const POSTURE_TARGET_CAP = 200;
 
 export type SecurityPostureState = 'Action needed' | 'Monitoring' | 'Secure' | 'Unknown';
@@ -54,9 +63,27 @@ export type PostureReasonKind =
 
 export type PostureReasonSeverity = 'blocker' | 'review' | 'info';
 
-/** One concrete image identity behind a posture reason (raw scan image_ref). */
+/**
+ * Image identity behind a posture reason (raw scan image_ref).
+ * Exposure reasons may enrich with stack, service, and Networking intent;
+ * other reasons are typically imageRef-only.
+ */
 export interface PostureTarget {
   imageRef: string;
+  /** Stack with configured beyond-loopback or host-network exposure. */
+  stackName?: string;
+  /** Service within that stack. */
+  serviceName?: string;
+  exposureReason?: 'published-port' | 'host-network' | null;
+  /** Effective intent when context is available and set; omit when unset. */
+  exposureIntent?: ExposureIntent;
+  /**
+   * Intent resolution for this service.
+   * unavailable is distinct from unset (DB/context failure vs no classification).
+   */
+  intentStatus?: 'set' | 'unset' | 'unavailable';
+  /** True when intent is internal/same-node but configured exposure is beyond loopback. */
+  intentConflict?: boolean;
 }
 
 export interface PostureReason {
@@ -71,7 +98,10 @@ export interface PostureReason {
   targetTab: SecurityPostureTargetTab;
   /** Optional Open-button label; when omitted the UI derives from targetTab. */
   actionLabel?: string;
-  /** Distinct images that produced this reason. Omitted when empty or unknown. */
+  /**
+   * Target rows for this reason (image-only, or per stack/service for exposure).
+   * May repeat imageRef. Omitted when empty or unknown.
+   */
   targets?: PostureTarget[];
 }
 
@@ -137,8 +167,9 @@ export interface SecurityPostureFacts {
   fixableWaitingUpstreamTargets?: string[];
   fixableUpdateUnknownTargets?: string[];
   knownExploitedTargets?: string[];
-  exposedBlockerTargets?: string[];
-  exposedReviewTargets?: string[];
+  /** Per-service exposure targets (may repeat imageRef across stack/service). */
+  exposedBlockerTargets?: PostureTarget[];
+  exposedReviewTargets?: PostureTarget[];
 }
 
 /** Cap and convert raw refs to PostureTarget[]. Returns truncated=true when capped. */
@@ -153,13 +184,24 @@ export function capPostureTargets(refs: string[] | undefined): {
   };
 }
 
-function withTargets(
+/** Cap enriched target rows (imageRef+stack+service). */
+export function capPostureTargetRows(rows: PostureTarget[] | undefined): {
+  targets: PostureTarget[] | undefined;
+  truncated: boolean;
+} {
+  if (!rows || rows.length === 0) return { targets: undefined, truncated: false };
+  return {
+    targets: rows.slice(0, POSTURE_TARGET_CAP),
+    truncated: rows.length > POSTURE_TARGET_CAP,
+  };
+}
+
+function attachCappedTargets(
   reason: PostureReason,
-  refs: string[] | undefined,
+  capped: { targets: PostureTarget[] | undefined; truncated: boolean },
 ): { reason: PostureReason; truncated: boolean } {
-  const { targets, truncated } = capPostureTargets(refs);
-  if (!targets) return { reason, truncated: false };
-  return { reason: { ...reason, targets }, truncated };
+  if (!capped.targets) return { reason, truncated: false };
+  return { reason: { ...reason, targets: capped.targets }, truncated: capped.truncated };
 }
 
 /** Default CTA label when a reason omits actionLabel. */
@@ -168,7 +210,7 @@ const DEFAULT_ACTION_LABEL: Partial<Record<PostureReasonKind, string>> = {
   known_exploited: 'Review exploited findings',
   secret: 'Review detected secrets',
   dangerous_compose: 'Review Compose risks',
-  public_exposure: 'Review public exposure',
+  public_exposure: 'Review affected images',
 };
 
 function actionFrom(reason: PostureReason): PostureAction {
@@ -192,6 +234,28 @@ function actionFrom(reason: PostureReason): PostureAction {
  * state. The caller decides which subset to surface.
  */
 const VIEW_FINDINGS_LABEL = 'View findings';
+const REVIEW_AFFECTED_IMAGES_LABEL = 'Review affected images';
+
+function networkExposureDescription(
+  mode: 'blocker' | 'review',
+  targets: PostureTarget[] | undefined,
+): string {
+  const parts = [
+    mode === 'blocker'
+      ? 'Images with fixable, known-exploited, or elevated-EPSS findings are configured beyond loopback or with host networking.'
+      : 'Images configured beyond loopback or with host networking have no fix, no KEV, and no elevated EPSS.',
+  ];
+  if (allTargetsIntentionallyClassified(targets)) {
+    parts.push('Exposure is intentionally classified in Networking; that does not remove the vulnerability risk.');
+  }
+  if (anyTargetIntentConflict(targets)) {
+    parts.push('At least one service intent conflicts with configured exposure (internal or same-node while published beyond loopback).');
+  }
+  if (anyTargetIntentUnset(targets)) {
+    parts.push('Some services are not yet classified; set exposure intent in Networking.');
+  }
+  return parts.join(' ');
+}
 
 export function derivePostureReasons(f: SecurityPostureFacts): {
   reasons: PostureReason[];
@@ -203,13 +267,24 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
   let primaryAction: PostureAction | null = null;
   let targetsTruncated = false;
 
-  const push = (base: PostureReason, refs?: string[]): void => {
-    const { reason, truncated } = withTargets(base, refs);
+  const pushCapped = (
+    base: PostureReason,
+    capped: { targets: PostureTarget[] | undefined; truncated: boolean },
+  ): void => {
+    const { reason, truncated } = attachCappedTargets(base, capped);
     if (truncated) targetsTruncated = true;
     reasons.push(reason);
     if (!primaryAction && reason.severity === 'blocker') {
       primaryAction = actionFrom(reason);
     }
+  };
+
+  const push = (base: PostureReason, refs?: string[]): void => {
+    pushCapped(base, capPostureTargets(refs));
+  };
+
+  const pushRows = (base: PostureReason, rows?: PostureTarget[]): void => {
+    pushCapped(base, capPostureTargetRows(rows));
   };
 
   // Blockers. Each of these can keep the masthead red.
@@ -260,25 +335,26 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
   }
 
   if (f.exposedBlocker > 0) {
-    push({
+    pushRows({
       kind: 'public_exposure',
       count: f.exposedBlocker,
       severity: 'blocker',
-      label: 'Publicly exposed affected images',
-      description: 'Images with fixable, known-exploited, or elevated-EPSS findings published on a public interface.',
+      label: 'Network-exposed affected images',
+      description: networkExposureDescription('blocker', f.exposedBlockerTargets),
       targetTab: 'images',
+      actionLabel: REVIEW_AFFECTED_IMAGES_LABEL,
     }, f.exposedBlockerTargets);
   }
 
   // Review items. These appear in-page but do not force a red masthead.
 
   if (f.exposedReview > 0) {
-    push({
+    pushRows({
       kind: 'public_exposure',
       count: f.exposedReview,
       severity: 'review',
-      label: 'Exposed images (monitoring)',
-      description: 'Images published on a public interface with no fix, no KEV, and no elevated EPSS.',
+      label: 'Network-exposed images (monitoring)',
+      description: networkExposureDescription('review', f.exposedReviewTargets),
       targetTab: 'images',
       actionLabel: VIEW_FINDINGS_LABEL,
     }, f.exposedReviewTargets);

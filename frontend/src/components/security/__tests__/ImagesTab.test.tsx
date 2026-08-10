@@ -145,8 +145,13 @@ it('filters to posture targets and shows a clearable banner', async () => {
       onClearTargeting={onClear}
       targeting={{
         kind: 'public_exposure',
-        label: 'Publicly exposed affected images',
+        label: 'Network-exposed affected images',
         imageRefs: ['exp:1'],
+        targets: [{
+          imageRef: 'exp:1',
+          intentStatus: 'set',
+          exposureIntent: 'public',
+        }],
         token: 1,
       }}
       summaries={asMap(
@@ -155,10 +160,11 @@ it('filters to posture targets and shows a clearable banner', async () => {
       )}
     />,
   );
-  expect(screen.getByText(/Publicly exposed affected images · 1 affected image/)).toBeInTheDocument();
+  expect(screen.getByText(/Network-exposed affected images · 1 affected image/)).toBeInTheDocument();
   expect(screen.getByText('exp:1')).toBeInTheDocument();
   expect(screen.queryByText('other:1')).not.toBeInTheDocument();
-  expect(screen.getByText('Publicly exposed')).toBeInTheDocument();
+  expect(screen.getByText('Network exposed')).toBeInTheDocument();
+  expect(screen.getByText('Intent: public')).toBeInTheDocument();
   await userEvent.click(screen.getByRole('button', { name: 'Clear' }));
   expect(onClear).toHaveBeenCalled();
 });
@@ -172,6 +178,7 @@ it('shows matched of total when a target has no summary', () => {
         kind: 'public_exposure',
         label: 'Publicly exposed affected images',
         imageRefs: ['a:1', 'b:1', 'missing:1'],
+        targets: ['a:1', 'b:1', 'missing:1'].map((imageRef) => ({ imageRef })),
         token: 1,
       }}
       summaries={asMap(
@@ -193,6 +200,7 @@ it('does not change the banner count when searching within the targeted set', as
         kind: 'public_exposure',
         label: 'Publicly exposed affected images',
         imageRefs: ['a:1', 'b:1'],
+        targets: ['a:1', 'b:1'].map((imageRef) => ({ imageRef })),
         token: 1,
       }}
       summaries={asMap(
@@ -217,7 +225,7 @@ it('re-applies targeting when the token increments after Clear', () => {
   const { rerender } = render(
     <ImagesTab
       {...base}
-      targeting={{ kind: 'public_exposure', label: 'Public exposure', imageRefs: ['exp:1'], token: 1 }}
+      targeting={{ kind: 'public_exposure', label: 'Public exposure', imageRefs: ['exp:1'], targets: [{ imageRef: 'exp:1' }], token: 1 }}
       onClearTargeting={vi.fn()}
       summaries={data}
     />,
@@ -235,7 +243,7 @@ it('re-applies targeting when the token increments after Clear', () => {
   rerender(
     <ImagesTab
       {...base}
-      targeting={{ kind: 'public_exposure', label: 'Public exposure', imageRefs: ['exp:1'], token: 2 }}
+      targeting={{ kind: 'public_exposure', label: 'Public exposure', imageRefs: ['exp:1'], targets: [{ imageRef: 'exp:1' }], token: 2 }}
       onClearTargeting={vi.fn()}
       summaries={data}
     />,
@@ -259,7 +267,7 @@ it('resets a stale FIXABLE filter when targeting arrives without a filter', () =
       {...base}
       initialFilter={undefined}
       filterToken={2}
-      targeting={{ kind: 'public_exposure', label: 'Public exposure', imageRefs: ['exp:1'], token: 1 }}
+      targeting={{ kind: 'public_exposure', label: 'Public exposure', imageRefs: ['exp:1'], targets: [{ imageRef: 'exp:1' }], token: 1 }}
       onClearTargeting={vi.fn()}
       summaries={data}
     />,
@@ -291,6 +299,7 @@ it('shows a clearable zero-match note and keeps the full list', () => {
         kind: 'public_exposure',
         label: 'Publicly exposed affected images',
         imageRefs: ['missing:1'],
+        targets: ['missing:1'].map((imageRef) => ({ imageRef })),
         token: 1,
       }}
       summaries={asMap(

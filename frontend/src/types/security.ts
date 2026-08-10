@@ -269,9 +269,19 @@ export type PostureReasonKind =
   | 'failed_scan'
   | 'needs_review';
 
-/** One concrete image identity behind a posture reason (raw scan image_ref). */
+/**
+ * Image identity behind a posture reason (raw scan image_ref).
+ * Exposure reasons may enrich with stack, service, and Networking intent;
+ * other reasons are typically imageRef-only.
+ */
 export interface PostureTarget {
   imageRef: string;
+  stackName?: string;
+  serviceName?: string;
+  exposureReason?: 'published-port' | 'host-network' | null;
+  exposureIntent?: 'internal' | 'same-node' | 'lan' | 'reverse-proxy' | 'public' | 'temporary' | 'unknown';
+  intentStatus?: 'set' | 'unset' | 'unavailable';
+  intentConflict?: boolean;
 }
 
 /** One structured reason explaining why the security posture is what it is. */
@@ -284,7 +294,10 @@ export interface PostureReason {
   targetTab: SecurityTab;
   /** Optional Open-button label; when omitted the UI derives from targetTab. */
   actionLabel?: string;
-  /** Distinct images that produced this reason. Omitted when empty or unknown. */
+  /**
+   * Target rows for this reason (image-only, or per stack/service for exposure).
+   * May repeat imageRef. Omitted when empty or unknown.
+   */
   targets?: PostureTarget[];
 }
 

@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { ImageScanRow, ImageFilterChips, type ImageFilterChip } from './SecurityMobile';
 import type { ImagesTargetingState } from './imagesTargeting';
+import { primaryExposureIntentEvidence } from './imagesTargeting';
 import type { ScanSummary, ScanDetailTab, ScannerKind } from '@/types/security';
 
 // Mobile severity chips. 'FIXABLE' is a phone-only pseudo-filter (the desktop
@@ -67,11 +68,34 @@ const FILTER_OPTIONS: Array<{ value: ImageFilterValue; label: string }> = [
 
 const findingsCount = (s: ScanSummary) => s.total + (s.secret_count ?? 0) + (s.misconfig_count ?? 0);
 
-function PubliclyExposedBadge() {
+function NetworkExposedBadge() {
   return (
     <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-warning whitespace-nowrap">
-      Publicly exposed
+      Network exposed
     </span>
+  );
+}
+
+/** Intent evidence line for a targeted image, or null when not applicable. */
+function intentEvidenceFor(
+  targeting: ImagesTargetingState | null | undefined,
+  imageRef: string,
+): string | null {
+  if (!targeting?.imageRefs.includes(imageRef)) return null;
+  return primaryExposureIntentEvidence(targeting.targets, imageRef);
+}
+
+function IntentEvidenceLine({
+  targeting,
+  imageRef,
+}: {
+  targeting: ImagesTargetingState | null | undefined;
+  imageRef: string;
+}) {
+  const intentLine = intentEvidenceFor(targeting, imageRef);
+  if (!intentLine) return null;
+  return (
+    <div className="mt-0.5 font-mono text-[10px] text-stat-icon truncate">{intentLine}</div>
   );
 }
 
@@ -343,7 +367,12 @@ export function ImagesTab({
           <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
             <div className="px-4">
               {pageItems.map((s) => (
-                <ImageScanRow key={s.image_ref} summary={s} onInspect={onInspect} />
+                <ImageScanRow
+                  key={s.image_ref}
+                  summary={s}
+                  onInspect={onInspect}
+                  intentEvidence={intentEvidenceFor(targeting, s.image_ref)}
+                />
               ))}
             </div>
             {pageItems.length === 0 && (
@@ -408,8 +437,9 @@ export function ImagesTab({
                       <button type="button" className="hover:text-brand truncate block text-left min-w-0" onClick={() => onInspect(s.scan_id, 'vulns')}>
                         {s.image_ref}
                       </button>
-                      {s.publicly_exposed === true ? <PubliclyExposedBadge /> : null}
+                      {s.publicly_exposed === true ? <NetworkExposedBadge /> : null}
                     </div>
+                    <IntentEvidenceLine targeting={targeting} imageRef={s.image_ref} />
                   </TableCell>
                   <TableCell className="max-md:hidden">
                     <button

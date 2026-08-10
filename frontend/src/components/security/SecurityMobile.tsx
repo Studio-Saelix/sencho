@@ -122,9 +122,11 @@ function CountTag({ tone, children }: { tone: keyof typeof COUNT_TAG_TONE; child
 
 /** One image row in the mobile Images list: severity dot, truncated mono ref over
  *  a freshness meta line, trailing C/H count tags (or CLEAN), and a chevron. */
-export function ImageScanRow({ summary, onInspect }: {
+export function ImageScanRow({ summary, onInspect, intentEvidence = null }: {
   summary: ScanSummary;
   onInspect: (scanId: number, initialTab?: ScanDetailTab) => void;
+  /** Compact exposure-intent line while posture-targeting this image. */
+  intentEvidence?: string | null;
 }) {
   // Use the shared classifier so the count tags agree with the leading dot: a
   // medium/low-only image is not "clean", it is its highest severity.
@@ -139,11 +141,12 @@ export function ImageScanRow({ summary, onInspect }: {
       <span className={cn('h-[7px] w-[7px] shrink-0 rounded-full', SEVERITY_DOT_CLASSES[severityKey])} aria-hidden />
       <span className="min-w-0 flex-1">
         <span className="block truncate font-mono text-[13px] text-stat-value">{summary.image_ref}</span>
-        <span className="mt-px flex items-center gap-2 font-mono text-[10px] text-stat-icon">
+        <span className="mt-px flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[10px] text-stat-icon">
           <span>scanned {formatTimeAgo(summary.scanned_at)}</span>
           {summary.publicly_exposed === true ? (
-            <span className="uppercase tracking-[0.14em] text-warning">Publicly exposed</span>
+            <span className="uppercase tracking-[0.14em] text-warning">Network exposed</span>
           ) : null}
+          {intentEvidence ? <span className="normal-case tracking-normal">{intentEvidence}</span> : null}
         </span>
       </span>
       <span className="flex shrink-0 items-center gap-1">

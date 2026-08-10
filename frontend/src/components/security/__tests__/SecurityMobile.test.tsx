@@ -196,8 +196,13 @@ describe('ImagesTab (mobile)', () => {
         onClearTargeting={onClear}
         targeting={{
           kind: 'public_exposure',
-          label: 'Publicly exposed affected images',
+          label: 'Network-exposed affected images',
           imageRefs: ['exp:1'],
+          targets: [{
+            imageRef: 'exp:1',
+            intentStatus: 'set',
+            exposureIntent: 'lan',
+          }],
           token: 1,
         }}
         summaries={asMap(
@@ -206,9 +211,10 @@ describe('ImagesTab (mobile)', () => {
         )}
       />,
     );
-    expect(screen.getByText(/Publicly exposed affected images · 1 affected image/)).toBeInTheDocument();
+    expect(screen.getByText(/Network-exposed affected images · 1 affected image/)).toBeInTheDocument();
     expect(screen.getByText('exp:1')).toBeInTheDocument();
-    expect(screen.getByText('Publicly exposed')).toBeInTheDocument();
+    expect(screen.getByText('Network exposed')).toBeInTheDocument();
+    expect(screen.getByText('Intent: LAN')).toBeInTheDocument();
     expect(screen.queryByText('other:1')).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Clear' }));
     expect(onClear).toHaveBeenCalled();

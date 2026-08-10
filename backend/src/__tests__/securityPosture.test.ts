@@ -211,7 +211,7 @@ describe('derivePostureReasons', () => {
       fixableWaitingUpstream: 2,
       exposedBlocker: 1,
     }));
-    expect(primaryAction).toEqual({ label: 'Review public exposure', targetTab: 'images', kind: 'public_exposure' });
+    expect(primaryAction).toEqual({ label: 'Review affected images', targetTab: 'images', kind: 'public_exposure' });
     expect(reasons.some((r) => r.label === 'Update affected images' || r.description.includes('Update affected images'))).toBe(false);
     expect(primaryAction?.label).not.toBe('Update affected images');
   });
@@ -242,9 +242,9 @@ describe('derivePostureReasons', () => {
   it('attaches targets to reasons and omits them when empty', () => {
     const { reasons, primaryAction } = derivePostureReasons(facts({
       exposedBlocker: 2,
-      exposedBlockerTargets: ['a:1', 'b:1'],
+      exposedBlockerTargets: [{ imageRef: 'a:1' }, { imageRef: 'b:1' }],
       exposedReview: 1,
-      exposedReviewTargets: ['c:1'],
+      exposedReviewTargets: [{ imageRef: 'c:1' }],
       knownExploited: 3,
       knownExploitedTargets: ['kev:1'],
     }));
@@ -270,15 +270,73 @@ describe('derivePostureReasons', () => {
   it('primaryAction for public_exposure copies blocker targets, not review', () => {
     const { primaryAction } = derivePostureReasons(facts({
       exposedBlocker: 1,
-      exposedBlockerTargets: ['block:1'],
+      exposedBlockerTargets: [{ imageRef: 'block:1' }],
       exposedReview: 2,
-      exposedReviewTargets: ['rev:1', 'rev:2'],
+      exposedReviewTargets: [{ imageRef: 'rev:1' }, { imageRef: 'rev:2' }],
     }));
     expect(primaryAction).toEqual({
-      label: 'Review public exposure',
+      label: 'Review affected images',
       targetTab: 'images',
       kind: 'public_exposure',
       targets: [{ imageRef: 'block:1' }],
     });
+  });
+
+  it('uses network-exposed labels and never claims Internet reachability', () => {
+    const { reasons, primaryAction } = derivePostureReasons(facts({
+      exposedBlocker: 1,
+      exposedBlockerTargets: [{
+        imageRef: 'a:1',
+        intentStatus: 'set',
+        exposureIntent: 'public',
+      }],
+    }));
+    const blocker = reasons.find((r) => r.kind === 'public_exposure' && r.severity === 'blocker');
+    expect(blocker?.label).toBe('Network-exposed affected images');
+    expect(blocker?.description).toContain('beyond loopback');
+    expect(blocker?.description.toLowerCase()).not.toContain('internet');
+    expect(blocker?.description).toContain('intentionally classified');
+    expect(primaryAction?.label).toBe('Review affected images');
+  });
+
+  it('adds conflict and unset sentences when present', () => {
+    const conflict = derivePostureReasons(facts({
+      exposedBlocker: 1,
+      exposedBlockerTargets: [{
+        imageRef: 'a:1',
+        intentStatus: 'set',
+        exposureIntent: 'internal',
+        intentConflict: true,
+      }],
+    })).reasons.find((r) => r.kind === 'public_exposure');
+    expect(conflict?.description).toContain('conflicts with configured exposure');
+
+    const unset = derivePostureReasons(facts({
+      exposedBlocker: 1,
+      exposedBlockerTargets: [{ imageRef: 'a:1', intentStatus: 'unset' }],
+    })).reasons.find((r) => r.kind === 'public_exposure');
+    expect(unset?.description).toContain('not yet classified');
+  });
+
+  it('KEV plus intentional exposure still Action needed', () => {
+    expect(deriveSecurityPosture(facts({
+      knownExploited: 1,
+      exposedBlocker: 1,
+      exposedBlockerTargets: [{
+        imageRef: 'a:1',
+        intentStatus: 'set',
+        exposureIntent: 'public',
+      }],
+    }))).toBe('Action needed');
+  });
+
+  it('unavailable intent does not add the unset classification sentence', () => {
+    const { reasons } = derivePostureReasons(facts({
+      exposedBlocker: 1,
+      exposedBlockerTargets: [{ imageRef: 'a:1', intentStatus: 'unavailable' }],
+    }));
+    const blocker = reasons.find((r) => r.kind === 'public_exposure');
+    expect(blocker?.description).not.toContain('not yet classified');
+    expect(blocker?.description).toContain('beyond loopback');
   });
 });
