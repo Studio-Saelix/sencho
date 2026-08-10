@@ -16,6 +16,7 @@ import {
 import { ComposeService } from './ComposeService';
 import DockerController from './DockerController';
 import { FileSystemService } from './FileSystemService';
+import { GitProjectManifestService } from './GitProjectManifestService';
 import { NodeRegistry } from './NodeRegistry';
 import { MeshService } from './MeshService';
 import { NotificationService } from './NotificationService';
@@ -363,6 +364,9 @@ export class DeployedStackDeletionService {
       db.clearStackScanAttempts(nodeId, stackName);
       db.deleteRoleAssignmentsByStack(nodeId, stackName);
       db.deleteGitSource(stackName);
+      // R6: the managed-project area must not outlive the stack; failures are
+      // logged inside, never fatal to the deletion.
+      await GitProjectManifestService.getInstance().deleteManagedArea(stackName);
       db.deleteStackDossier(nodeId, stackName);
       db.deleteStackDriftFindings(nodeId, stackName);
       db.deleteStackExposureIntents(nodeId, stackName);

@@ -1237,6 +1237,96 @@ export class ComposeService {
   }
 
   /**
+   * Render the effective compose model as YAML (the default `docker compose
+   * config` output) with the exact authored invocation and NO mesh override.
+   * Used by the Git source detach/export contract: the rendered model becomes
+   * the stack's single compose.yaml. Throws when the render fails or times
+   * out, so the detach transaction aborts before anything changes.
+   */
+  public async renderComposeYaml(stackName: string): Promise<string> {
+    if (!isValidStackName(stackName)) {
+      throw new Error('Invalid stack path');
+    }
+    const baseResolved = path.resolve(this.baseDir);
+    const stackDir = path.resolve(baseResolved, stackName);
+    if (!stackDir.startsWith(baseResolved + path.sep)) {
+      throw new Error('Invalid stack path');
+    }
+    let filePrefix: string[];
+    try {
+      filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
+    } catch (err) {
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+    const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
+    const child = spawn('docker', ['compose', ...filePrefix, ...envFileArgs, 'config'], {
+      cwd: stackDir,
+      env: {
+        ...process.env,
+        PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      },
+    });
+    return new Promise((resolve, reject) => {
+      const MAX_OUTPUT = 5 * 1024 * 1024; // 5 MiB cap on each stream
+      const TIMEOUT_MS = 30_000;
+      // Accumulate Buffer chunks and decode ONCE at the end: chunk-wise
+      // toString() can split a multi-byte UTF-8 sequence across a chunk
+      // boundary and mangle non-ASCII values.
+      const outChunks: Buffer[] = [];
+      let outBytes = 0;
+      let stderr = '';
+      let capped = false;
+      let settled = false;
+      const timer = setTimeout(() => {
+        settled = true;
+        clearTimeout(timer);
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // best effort
+        }
+        reject(new Error(`docker compose config timed out after ${TIMEOUT_MS / 1000}s`));
+      }, TIMEOUT_MS);
+      const finish = (error: Error | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error) reject(error);
+        else resolve(Buffer.concat(outChunks).toString('utf8'));
+      };
+      child.stdout.on('data', (data: Buffer) => {
+        if (capped) return;
+        outBytes += data.length;
+        if (outBytes > MAX_OUTPUT) {
+          // A truncated model frequently still parses as YAML; overwriting a
+          // working compose.yaml with it would be silent corruption. The cap is
+          // an error, not a truncation.
+          capped = true;
+          settled = true;
+          clearTimeout(timer);
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            // best effort
+          }
+          reject(new Error(`docker compose config output exceeded ${MAX_OUTPUT} bytes`));
+          return;
+        }
+        outChunks.push(data);
+      });
+      child.stderr.on('data', (data: Buffer) => {
+        if (stderr.length < MAX_OUTPUT) stderr += data.toString();
+      });
+      child.on('close', (code) => {
+        if (capped) return;
+        if (code === 0) finish(null);
+        else finish(new Error(stderr.trim() || `docker compose config exited with code ${code}`));
+      });
+      child.on('error', (err) => finish(err));
+    });
+  }
+
+  /**
    * Render the fully-resolved effective Compose model via `docker compose
    * config --format json`. This is the AUTHORED model: it does NOT splice in
    * the Sencho Mesh override, so it stays read-only (the override is

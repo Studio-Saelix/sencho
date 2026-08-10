@@ -6,10 +6,16 @@ import { test, expect } from '@playwright/test';
 import { loginAs, waitForStacksLoaded } from './helpers';
 
 async function firstStackName(page: import('@playwright/test').Page): Promise<string | null> {
-  const row = page.locator('[role="listbox"] [role="option"]').first();
-  if (!(await row.isVisible().catch(() => false))) return null;
-  const text = await row.textContent();
-  return text?.trim() ?? null;
+  const response = await page.request.get('/api/stacks');
+  await expect(response).toBeOK();
+  const stacks = await response.json() as string[];
+  return stacks[0] ?? null;
+}
+
+async function openStack(page: import('@playwright/test').Page, stackName: string): Promise<void> {
+  const option = page.locator(`[data-stacks-loaded="true"] [cmdk-item][data-value="${stackName}"]`);
+  await expect(option).toBeVisible();
+  await option.click();
 }
 
 test.describe('URL routing', () => {
@@ -53,7 +59,7 @@ test.describe('URL routing', () => {
     const stackName = await firstStackName(page);
     test.skip(!stackName, 'No stacks available to open');
 
-    await page.locator('[role="listbox"]').getByText(stackName!, { exact: true }).click();
+    await openStack(page, stackName!);
     const slug = stackName!.replace(/^-+/, '').replace(/\.(ya?ml)$/i, '');
     const escaped = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/${escaped}/?$`));
@@ -95,7 +101,7 @@ test.describe('URL routing', () => {
     test.skip(!stackName, 'No stacks available to open');
 
     const slug = stackName!.replace(/^-+/, '').replace(/\.(ya?ml)$/i, '');
-    await page.locator('[role="listbox"]').getByText(stackName!, { exact: true }).click();
+    await openStack(page, stackName!);
     await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/`));
     await expect(page).not.toHaveURL(/\/compose$/);
 

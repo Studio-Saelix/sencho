@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { GitSourceService } from '../services/GitSourceService';
+import { GitProjectManifestService } from '../services/GitProjectManifestService';
 import { FileSystemService } from '../services/FileSystemService';
 import { DatabaseService } from '../services/DatabaseService';
 import { CryptoService } from '../services/CryptoService';
@@ -105,9 +106,19 @@ stackGitSourceRouter.get('/:stackName/git-source', async (req: Request, res: Res
   }
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   try {
-    const source = GitSourceService.getInstance().get(stackName);
+    const gitSources = GitSourceService.getInstance();
+    const source = gitSources.get(stackName);
     if (source) {
-      res.json(source);
+      // The managed-project manifest summary rides the source branch; the
+      // unlinked {linked:false} shape below is unchanged. Heal-on-read may
+      // rewrite the DB cache, so re-read the flat row for same-response parity.
+      const manifest = await gitSources.getManifestSummary(stackName);
+      const refreshed = gitSources.get(stackName) ?? source;
+      res.json({
+        ...refreshed,
+        manifest_state: manifest?.state ?? refreshed.manifest_state,
+        manifest,
+      });
       return;
     }
     // No source row. A non-existent stack is a genuine 404, but an existing
@@ -248,19 +259,11 @@ stackGitSourceRouter.delete('/:stackName/git-source', async (req: Request, res: 
   }
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   try {
-    // The deploy spec lives on the Git-source row, so unlinking a multi-file (or
-    // project-directory) source would silently drop the spec and revert future
-    // deploys to root compose.yaml auto-discovery, ignoring the override files
-    // still on disk. Refuse rather than change deploy semantics out from under the
-    // user; deleting the stack removes it cleanly.
-    const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
-    if (spec && (spec.files.length > 1 || spec.contextDir)) {
-      res.status(409).json({
-        error: 'This stack deploys multiple compose files configured by its Git source. Unlinking would change it to deploy only compose.yaml. Delete the stack to remove it, or keep the Git source.',
-      });
-      return;
-    }
-    GitSourceService.getInstance().delete(stackName);
+    // Detach with the export contract: the effective compose model is rendered
+    // into a single compose.yaml and the materialized files are kept, so a
+    // multi-file / project-directory stack stays deployable after unlinking.
+    // A render failure aborts with 409 and the row is left intact.
+    await GitSourceService.getInstance().detach(stackName);
     // The cached /stacks/statuses payload carries the source label; drop it
     // before responding so a client refetch on this response recomputes. The
     // full invalidateNodeCaches helper is deliberate here (matching every
@@ -268,8 +271,34 @@ stackGitSourceRouter.delete('/:stackName/git-source', async (req: Request, res: 
     // dropping the project-name map and file-root allowlists alongside is
     // harmless, unlike the high-frequency container-event path.
     invalidateNodeCaches(req.nodeId);
-    console.log(`[GitSource] Removed git source for ${stackName}`);
+    console.log(`[GitSource] Detached git source for ${stackName}`);
     res.json({ success: true });
+  } catch (error) {
+    const code = (error as { code?: string } | null)?.code;
+    if (code === 'RENDER_FAILED') {
+      res.status(409).json({ error: (error as Error).message });
+      return;
+    }
+    sendGitSourceError(res, error);
+  }
+});
+
+stackGitSourceRouter.get('/:stackName/git-source/manifest', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  try {
+    const manifest = await GitSourceService.getInstance().getManifest(stackName);
+    if (!manifest) {
+      res.status(404).json({ error: 'No managed-project manifest for this stack' });
+      return;
+    }
+    // The public projection: no content hashes, size metadata, provenance, or
+    // deletion authority, and high-sensitivity input paths are redacted.
+    res.json({ manifest: GitProjectManifestService.getInstance().toPublicManifest(manifest) });
   } catch (error) {
     sendGitSourceError(res, error);
   }

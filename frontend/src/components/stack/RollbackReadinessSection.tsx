@@ -20,6 +20,8 @@ interface RollbackReadinessReport {
   computedAt: number;
   overall: RollbackOverall;
   items: RollbackReadinessItem[];
+  /** Partial-revert scope disclosure for Git-managed stacks. */
+  note?: string;
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
@@ -87,6 +89,11 @@ export function RollbackReadinessSection({ stackName }: { stackName: string }) {
           {overall.label}
         </span>
       </div>
+      {report.note && (
+        <div className="mb-1.5 rounded-md border border-warning/30 bg-warning/[0.06] px-3 py-2 text-[12px] leading-relaxed text-warning">
+          {report.note}
+        </div>
+      )}
       <div className="rounded-lg border border-muted bg-card/40 px-3 py-1">
         {report.items.map(item => {
           const meta = STATE_META[item.state] ?? STATE_META.unknown;

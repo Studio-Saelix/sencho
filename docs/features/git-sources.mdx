@@ -29,7 +29,7 @@ The panel groups four regions:
 - **Pending update banner.** Appears at the top when a webhook in **Review only** mode has fetched a new commit. Click **Review** to re-fetch the incoming commit and open the diff dialog.
 - **Form fields.** Repository URL, branch, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication toggle, and the apply behavior radio group.
 - **Last applied stat strip.** Shows the short SHA of the last commit Sencho applied to disk, plus the timestamp of the most recent successful save or pull.
-- **Footer actions.** **Remove** disconnects the source without touching the stack files; **Pull now** fetches the configured branch's HEAD; **Save** or **Update** persists form changes after a reachability check passes.
+- **Footer actions.** **Remove** disconnects the source by exporting the effective compose model into a single `compose.yaml` and removing auto-discovered override files; the remaining materialized files are kept. **Pull now** fetches the configured branch's HEAD; **Save** or **Update** persists form changes after a reachability check passes.
 
 ## Create a stack from a Git repository
 
@@ -221,7 +221,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
   </Accordion>
 
   <Accordion title="A build context or volume points at an empty folder">
-    Repositories that use Git submodules do not have their submodule contents cloned during a Git Source fetch. Sencho surfaces a warning on create when `.gitmodules` is present. If the compose file references paths inside a submodule (build contexts, volume mounts, include directives), inline the referenced files into the main repository or flatten the submodule so the paths resolve at deploy time.
+    Repositories that use Git submodules do not have their submodule contents cloned during a Git Source fetch. Sencho surfaces a warning when `.gitmodules` is present, and refuses inputs and build contexts that reference submodule contents with an actionable message. Inline the referenced files into the main repository or flatten the submodule so the paths resolve at deploy time.
   </Accordion>
 
   <Accordion title="An additional file named compose.yaml is rejected">
@@ -229,7 +229,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
   </Accordion>
 
   <Accordion title="A relative build context or extends target is missing with multiple files">
-    A Git Source materializes only the compose and `.env` files you select, not the rest of the repository. Build contexts, bind-mount sources, and cross-file `extends:` targets referenced by relative path are not pulled, so they can be missing at deploy time. Set a **Project directory** to fix the base for relative paths, and for build-based stacks keep the referenced files in the repository alongside the compose files or build the image out of band.
+    Git Sources materializes the complete project, including recursive `include:` and `extends.file` dependencies, service env files, file-backed configs and secrets, and build contexts. If a referenced file is still missing, the pull refused it and the refusal message names the path and the reason (out-of-bound path, Git LFS pointer, submodule, symlink, or a size cap). Fix the declaration in the repository and pull again.
   </Accordion>
 
   <Accordion title="Only HTTPS is supported">
@@ -241,8 +241,12 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
 
 - **HTTPS only.** SSH URLs and SSH keys are not supported. Use a Personal Access Token for private repos.
 - **No Git LFS.** Compose and env files stored via LFS are rejected. Commit plain files instead.
-- **No submodules.** Submodule contents are not fetched; paths inside a submodule directory will be missing at deploy time. A warning is shown on create when `.gitmodules` is present.
-- **Branch-tracking only.** Sources follow the head of a branch. Specific commit SHAs and tags are not pinnable.
+- **No submodules.** Submodule contents are not fetched. Inputs and build contexts that reference submodule contents are refused with an actionable message; a warning is shown when `.gitmodules` is present.
+- **Branch-tracking only.** Sources follow the head of a branch. Specific commit SHAs and tags are not pinnable. Each pull resolves and pins the exact commit SHA, so apply always materializes the reviewed revision.
 - **Clone size cap.** A clone is bounded on how much it downloads (and each compose/env file is capped on read), so very large repositories are rejected. Operators can adjust the download ceiling with `GITSOURCE_MAX_CLONE_BYTES`.
-- **Referenced files are not materialized.** Only the selected compose and `.env` files are written to disk. Relative build contexts, bind-mount sources, and `extends:` targets are not pulled, so build-based stacks that depend on other repository files need those files committed alongside the compose files (or the image built out of band).
+- **Complete project materialization.** Every repository-local input the project needs is materialized: the ordered compose files, implicit `compose.override.*` files, recursive `include:` and `extends.file` dependencies, service env files, file-backed configs and secrets, label files, and build contexts with `.dockerignore` semantics. The materialized set is recorded in a versioned managed-project manifest, and each pull stages a candidate that is validated with the exact deployment invocation before anything on disk changes. If apply is interrupted, Sencho completes the accepted generation or restores the previous generation. If files were edited during the interruption and no longer match either generation, Sencho preserves them and requires manual recovery instead of overwriting them.
+- **Unsupported inputs are refused, not guessed.** Inputs that cannot be safely reproduced fail the pull with an actionable message: URL includes, Git LFS pointers, submodule contents, symbolic links, build contexts that exceed the size bounds, and include or extends declarations that point outside the repository or use dynamic `\${VAR}` paths (their contents cannot be enumerated). Nothing is applied until the declaration is fixed. Absolute host paths, host bind mounts, external resources, and dynamic `\${VAR}` data paths are never claimed as covered: they resolve at deploy time from the environment or the node, and the manifest records them as unmanaged.
+- **Materialization bounds.** The materialized project is bounded by file count, total bytes, per-file size, path depth, and build-context size, each adjustable with a `GITSOURCE_*` variable (see configuration). Crossing a bound refuses the pull with the counts so far rather than producing a partial project.
+- **Detach and export.** Removing a Git source renders the effective compose model into a single `compose.yaml`, keeps the remaining materialized files, removes auto-discovered override files so the exported model is final, and removes Git tracking. Resolved environment values are baked into the exported file. If removal is interrupted before it completes, Sencho restores the original files automatically.
+- **Rollback scope.** Rollback of a Git-managed stack restores compose files and `.env`. Other materialized inputs are not reverted by rollback; re-apply the previous revision from Git to restore them.
 - **Some read-only views read the primary file.** The dependency graph, drift snapshot, and networking inspector summarize the primary compose file, so a service declared only in an override may not appear in those views. Deploy, update, image-update checks, and mesh attachment use the full merged set.

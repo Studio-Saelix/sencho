@@ -8,6 +8,7 @@
  */
 import { test, expect, Page } from '@playwright/test';
 import { loginAs } from './helpers';
+import { gitAvailable, buildFixtureRepo, serveRepos, fullProjectFiles, multiFileFiles, refusalFiles } from './gitServer.helper';
 
 const TEST_STACK = 'e2e-git-source-stack';
 
@@ -192,10 +193,10 @@ test.describe('Git Sources', () => {
     // footer button and not the picker's per-file "Remove <path>" buttons.
     await page.getByRole('dialog').getByRole('button', { name: 'Remove', exact: true }).click();
     await expect(page.getByRole('alertdialog')).toBeVisible({ timeout: 5_000 });
-    await page.getByRole('alertdialog').getByRole('button', { name: /^Remove$/ }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: /^Detach$/ }).click();
 
-    // After removal, the "Remove" button is gone from the panel footer.
-    await expect(page.getByRole('dialog').getByRole('button', { name: /^Remove$/ })).not.toBeVisible({ timeout: 5_000 });
+    // After detach, the "Detach" button is gone from the panel footer.
+    await expect(page.getByRole('dialog').getByRole('button', { name: /^Detach$/ })).not.toBeVisible({ timeout: 5_000 });
   });
 });
 
@@ -380,5 +381,228 @@ test.describe('Create stack from Git', () => {
         await fetch(`/api/stacks/${name}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
       }, uiName);
     }
+  });
+});
+
+test.describe('Git Sources complete-project materialization (local git server)', () => {
+  test.skip(!gitAvailable(), 'system git binary is not available');
+
+  let server: { url: string; close: () => void };
+  let stackName: string;
+
+  test.beforeAll(async () => {
+    server = await serveRepos({
+      app: buildFixtureRepo(fullProjectFiles()),
+      multi: buildFixtureRepo(multiFileFiles()),
+      bad: buildFixtureRepo(refusalFiles()),
+    });
+  });
+
+  test.afterAll(() => {
+    server?.close();
+  });
+
+  test.beforeEach(async () => {
+    stackName = `e2e-mater-${Date.now()}`;
+  });
+
+  test.afterEach(async ({ page }) => {
+    await page.evaluate(async (name) => {
+      await fetch(`/api/stacks/${name}/git-source`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
+      await fetch(`/api/stacks/${name}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
+    }, stackName);
+  });
+
+  function saveSource(page: Page, repoUrl: string, composePaths: string[], contextDir: string | null = null) {
+    return page.evaluate(async ({ name, repoUrl, composePaths, contextDir }) => {
+      const res = await fetch(`/api/stacks/${name}/git-source`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          repo_url: repoUrl,
+          branch: 'main',
+          compose_paths: composePaths,
+          context_dir: contextDir,
+          sync_env: false,
+          auth_type: 'none',
+          auto_apply_on_webhook: false,
+          auto_deploy_on_apply: false,
+        }),
+      });
+      return res.status;
+    }, { name: stackName, repoUrl, composePaths, contextDir });
+  }
+
+  test('materializes the complete project and records it in the manifest', async ({ page }) => {
+    await loginAs(page);
+    await page.evaluate(async (name) => {
+      await fetch('/api/stacks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ stackName: name }),
+      });
+    }, stackName);
+    const repoUrl = `${server.url}/app.git`;
+    expect(await saveSource(page, repoUrl, ['compose.yaml'])).toBe(200);
+
+    const pull = await page.evaluate(async (name) => {
+      const res = await fetch(`/api/stacks/${name}/git-source/pull`, { method: 'POST', credentials: 'include' });
+      return { status: res.status, body: await res.json() };
+    }, stackName);
+    expect(pull.status, JSON.stringify(pull.body)).toBe(200);
+    expect(pull.body.candidateReady).toBe(true);
+
+    const applied = await page.evaluate(async ({ name, sha }) => {
+      const res = await fetch(`/api/stacks/${name}/git-source/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ commitSha: sha, deploy: false }),
+      });
+      return { status: res.status, body: await res.json() };
+    }, { name: stackName, sha: pull.body.commitSha });
+    expect(applied.status).toBe(200);
+    expect(applied.body.applied).toBe(true);
+
+    // The managed-project manifest records the complete materialized set.
+    const manifest = await page.evaluate(async (name) => {
+      const res = await fetch(`/api/stacks/${name}/git-source/manifest`, { credentials: 'include' });
+      return res.ok ? await res.json() : null;
+    }, stackName);
+    expect(manifest).not.toBeNull();
+    const kinds = manifest.manifest.inputs.map((i: { dependencyKind: string }) => i.dependencyKind);
+    expect(kinds).toContain('config');
+    expect(kinds).toContain('env_file');
+    expect(kinds).toContain('build-context');
+    expect(manifest.manifest.state).toBe('active');
+  });
+
+  test('refuses to overwrite local modifications on apply', async ({ page }) => {
+    await loginAs(page);
+    await page.evaluate(async (name) => {
+      await fetch('/api/stacks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ stackName: name }),
+      });
+    }, stackName);
+    const repoUrl = `${server.url}/app.git`;
+    expect(await saveSource(page, repoUrl, ['compose.yaml'])).toBe(200);
+    const pull = await page.evaluate(async (name) => {
+      const res = await fetch(`/api/stacks/${name}/git-source/pull`, { method: 'POST', credentials: 'include' });
+      return await res.json();
+    }, stackName);
+    const applied = await page.evaluate(async ({ name, sha }) => {
+      const res = await fetch(`/api/stacks/${name}/git-source/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ commitSha: sha, deploy: false }),
+      });
+      return res.status;
+    }, { name: stackName, sha: pull.commitSha });
+    expect(applied).toBe(200);
+
+    // Locally modify a managed input through the file editor API.
+    const writeStatus = await page.evaluate(async (name) => {
+      const res = await fetch(`/api/stacks/${name}/files/content?path=web.env`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ content: 'FOO=locally-edited\n' }),
+      });
+      return res.status;
+    }, stackName);
+    expect([200, 204]).toContain(writeStatus);
+
+    const secondPull = await page.evaluate(async (name) => {
+      const res = await fetch(`/api/stacks/${name}/git-source/pull`, { method: 'POST', credentials: 'include' });
+      return await res.json();
+    }, stackName);
+    const refused = await page.evaluate(async ({ name, sha }) => {
+      const res = await fetch(`/api/stacks/${name}/git-source/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ commitSha: sha, deploy: false }),
+      });
+      return { status: res.status, body: await res.json() };
+    }, { name: stackName, sha: secondPull.commitSha });
+    expect(refused.status).toBe(400);
+    expect(JSON.stringify(refused.body)).toContain('Local modifications');
+    expect(JSON.stringify(refused.body)).toContain('web.env');
+  });
+
+  test('detaches a multi-file stack with the export contract', async ({ page }) => {
+    await loginAs(page);
+    await page.evaluate(async (name) => {
+      await fetch('/api/stacks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ stackName: name }),
+      });
+    }, stackName);
+    const repoUrl = `${server.url}/multi.git`;
+    expect(await saveSource(page, repoUrl, ['deploy/base.yaml', 'deploy/prod.yaml'], 'deploy')).toBe(200);
+    const pull = await page.evaluate(async (name) => {
+      const res = await fetch(`/api/stacks/${name}/git-source/pull`, { method: 'POST', credentials: 'include' });
+      return await res.json();
+    }, stackName);
+    const applied = await page.evaluate(async ({ name, sha }) => {
+      const res = await fetch(`/api/stacks/${name}/git-source/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ commitSha: sha, deploy: false }),
+      });
+      return res.status;
+    }, { name: stackName, sha: pull.commitSha });
+    expect(applied).toBe(200);
+
+    const detached = await page.evaluate(async (name) => {
+      const res = await fetch(`/api/stacks/${name}/git-source`, { method: 'DELETE', credentials: 'include' });
+      return { status: res.status, body: await res.json() };
+    }, stackName);
+    expect(detached.status).toBe(200);
+
+    // The stack still deploys as a plain compose project: the effective model
+    // was exported into compose.yaml and the source row is gone.
+    const after = await page.evaluate(async (name) => {
+      const res = await fetch(`/api/stacks/${name}/git-source`, { credentials: 'include' });
+      return { sourceStatus: res.status, body: await res.json() };
+    }, stackName);
+    expect(after.sourceStatus).toBe(200);
+    expect(after.body).toEqual({ linked: false });
+    const exported = await page.evaluate(async (name) => {
+      const res = await fetch(`/api/stacks/${name}/files/content?path=compose.yaml`, { credentials: 'include' });
+      return res.ok ? await res.text() : '';
+    }, stackName);
+    expect(exported).toContain('image: nginx');
+  });
+
+  test('surfaces the refusal callout for an out-of-bound include on pull', async ({ page }) => {
+    await loginAs(page);
+    await page.evaluate(async (name) => {
+      await fetch('/api/stacks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ stackName: name }),
+      });
+    }, stackName);
+    const repoUrl = `${server.url}/bad.git`;
+    expect(await saveSource(page, repoUrl, ['compose.yaml'])).toBe(200);
+
+    const pull = await page.evaluate(async (name) => {
+      const res = await fetch(`/api/stacks/${name}/git-source/pull`, { method: 'POST', credentials: 'include' });
+      return { status: res.status, body: await res.json() };
+    }, stackName);
+    // The actionable refusal aborts the pull with an actionable message.
+    expect(pull.status).toBe(400);
+    expect(JSON.stringify(pull.body)).toMatch(/outside the repository|Cannot materialize/);
   });
 });

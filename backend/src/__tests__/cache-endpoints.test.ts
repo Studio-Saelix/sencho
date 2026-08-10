@@ -247,7 +247,7 @@ describe('GET /api/stacks/statuses caching', () => {
     // The git-link test seeds a 'web' source row; drop it even when that
     // test fails mid-way so later tests never see it. Delete is a no-op when
     // the row is absent.
-    GitSourceService.getInstance().delete('web');
+    DatabaseService.getInstance().deleteGitSource('web');
   });
 
   it('serves repeat calls from cache without re-invoking the filesystem', async () => {

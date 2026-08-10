@@ -70,6 +70,8 @@ const LINKED_SOURCE = {
   pending_fetched_at: null,
   created_at: 0,
   updated_at: 0,
+  manifest_state: 'absent' as const,
+  manifest: null,
 };
 
 function panel() {
@@ -135,5 +137,56 @@ describe('GitSourcePanel deploy-mode apply node binding', () => {
       expect(applyCall?.[1]).toEqual(expect.objectContaining({ nodeId: 4 }));
     });
     expect(dfCtl.params).toEqual(expect.objectContaining({ action: 'deploy', nodeId: 4 }));
+  });
+});
+
+describe('GitSourcePanel manifest summary', () => {
+  it('renders the managed-project section when the source carries a manifest', async () => {
+    const summary = {
+      state: 'active',
+      manifestVersion: 2,
+      resolvedCommitSha: 'abc1234567890abc1234567890abc1234567890a',
+      managedCount: 3,
+      unmanagedCount: 1,
+      refusedCount: 0,
+      refused: [],
+      hasBuildContexts: true,
+      generatedAt: 1,
+    };
+    vi.mocked(apiFetch).mockImplementation(async (url: string) =>
+      url.includes('/git-source/manifest')
+        ? jsonRes({
+            // The manifest endpoint serves the redacted PUBLIC projection
+            // (path, not sourcePath/materializedPath; no hashes or internals).
+            manifest: {
+              manifestVersion: 2,
+              state: 'active',
+              inputs: [
+                { path: 'compose.yaml', role: 'compose-primary', dependencyKind: 'explicit', ownership: 'managed', sensitivity: 'medium', state: 'present', note: null },
+              ],
+            },
+          })
+        : jsonRes({ ...LINKED_SOURCE, manifest_state: 'active', manifest: summary }),
+    );
+    render(panel());
+    const toggle = await screen.findByText('Managed project');
+    expect(screen.getByText('abc1234')).toBeTruthy();
+    expect(screen.getByText('Active')).toBeTruthy();
+    // Counts render in the expanded section; the inventory is lazy-fetched.
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.getByText('3')).toBeTruthy());
+    expect(screen.getByText('1')).toBeTruthy();
+    expect(screen.getByText('unmanaged')).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('explicit')).toBeTruthy());
+  });
+
+  it('renders the manifest section with the DB state when the source has no manifest file', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(LINKED_SOURCE));
+    render(panel());
+    await waitFor(() => expect(screen.getByText('Last applied commit')).toBeTruthy());
+    // The section is driven by the DB manifest_state ('absent') when the file
+    // has not been materialized yet.
+    expect(screen.getByText('Managed project')).toBeTruthy();
+    expect(screen.getByText('Not materialized')).toBeTruthy();
   });
 });
