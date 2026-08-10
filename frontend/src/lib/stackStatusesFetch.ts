@@ -15,10 +15,35 @@ export type StackStatusesFetchResult = {
 
 type NodeKey = string;
 
-const inflight = new Map<NodeKey, Promise<StackStatusesFetchResult>>();
+type InflightEntry = {
+  /** Monotonic id so settled owners clear only their own map slot. */
+  id: number;
+  promise: Promise<StackStatusesFetchResult>;
+};
+
+const inflight = new Map<NodeKey, InflightEntry>();
+let nextInflightId = 0;
 
 function nodeKey(nodeId: number | null): NodeKey {
   return nodeId === null ? 'local' : String(nodeId);
+}
+
+async function requestStackStatuses(
+  nodeId: number | null,
+): Promise<StackStatusesFetchResult> {
+  const res = await apiFetch('/stacks/statuses', { nodeId });
+  const proxied = res.headers.get('x-sencho-proxy') === '1';
+  let body: unknown = null;
+  if (res.ok) {
+    body = await res.json();
+  }
+  return {
+    ok: res.ok,
+    status: res.status,
+    proxied,
+    body,
+    coalesced: false,
+  };
 }
 
 /** Drop every in-flight join so a prior auth session cannot share results. */
@@ -41,31 +66,19 @@ export async function fetchStackStatusesShared(
   const key = nodeKey(nodeId);
   const existing = inflight.get(key);
   if (existing) {
-    const shared = await existing;
+    const shared = await existing.promise;
     return { ...shared, coalesced: true };
   }
 
-  const request = (async (): Promise<StackStatusesFetchResult> => {
-    const res = await apiFetch('/stacks/statuses', { nodeId });
-    const proxied = res.headers.get('x-sencho-proxy') === '1';
-    let body: unknown = null;
-    if (res.ok) {
-      body = await res.json();
-    }
-    return {
-      ok: res.ok,
-      status: res.status,
-      proxied,
-      body,
-      coalesced: false,
-    };
-  })();
-
-  inflight.set(key, request);
+  const id = ++nextInflightId;
+  const promise = requestStackStatuses(nodeId);
+  inflight.set(key, { id, promise });
   try {
-    return await request;
+    return await promise;
   } finally {
-    if (inflight.get(key) === request) {
+    // Clear only if this owner still holds the slot. A logout clear followed by
+    // a new fetch must not be deleted by a stale settlement.
+    if (inflight.get(key)?.id === id) {
       inflight.delete(key);
     }
   }
@@ -73,5 +86,5 @@ export async function fetchStackStatusesShared(
 
 /** Test-only: reset module state between vitest cases. */
 export function __resetStackStatusesFetchForTests(): void {
-  inflight.clear();
+  clearStackStatusesFetch();
 }

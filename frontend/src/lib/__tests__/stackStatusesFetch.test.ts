@@ -15,6 +15,17 @@ function jsonResponse(body: unknown, init: { status?: number; proxied?: boolean 
   });
 }
 
+function deferredResponse(): {
+  promise: Promise<Response>;
+  release: (res: Response) => void;
+} {
+  let release!: (res: Response) => void;
+  const promise = new Promise<Response>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
 describe('fetchStackStatusesShared', () => {
   let apiFetchSpy: ReturnType<typeof vi.spyOn>;
 
@@ -29,16 +40,15 @@ describe('fetchStackStatusesShared', () => {
   });
 
   it('coalesces concurrent callers for the same nodeId into one apiFetch', async () => {
-    let release!: (res: Response) => void;
-    const gate = new Promise<Response>((resolve) => { release = resolve; });
-    apiFetchSpy.mockReturnValueOnce(gate);
+    const gate = deferredResponse();
+    apiFetchSpy.mockReturnValueOnce(gate.promise);
 
     const a = fetchStackStatusesShared(1);
     const b = fetchStackStatusesShared(1);
     expect(apiFetchSpy).toHaveBeenCalledTimes(1);
     expect(apiFetchSpy).toHaveBeenCalledWith('/stacks/statuses', { nodeId: 1 });
 
-    release(jsonResponse({ 'demo.yml': { status: 'running' } }));
+    gate.release(jsonResponse({ 'demo.yml': { status: 'running' } }));
     const [ra, rb] = await Promise.all([a, b]);
     expect(ra.coalesced).toBe(false);
     expect(rb.coalesced).toBe(true);
@@ -81,30 +91,28 @@ describe('fetchStackStatusesShared', () => {
 
   it('ignores localStorage divergence when an explicit nodeId is passed', async () => {
     localStorage.setItem('sencho-active-node', '99');
-    let release!: (res: Response) => void;
-    const gate = new Promise<Response>((resolve) => { release = resolve; });
-    apiFetchSpy.mockReturnValueOnce(gate);
+    const gate = deferredResponse();
+    apiFetchSpy.mockReturnValueOnce(gate.promise);
 
     const a = fetchStackStatusesShared(3);
     const b = fetchStackStatusesShared(3);
     expect(apiFetchSpy).toHaveBeenCalledTimes(1);
     expect(apiFetchSpy).toHaveBeenCalledWith('/stacks/statuses', { nodeId: 3 });
-    release(jsonResponse({}));
+    gate.release(jsonResponse({}));
     await Promise.all([a, b]);
     localStorage.removeItem('sencho-active-node');
   });
 
   it('clears on sencho-unauthorized so the next caller issues a fresh fetch', async () => {
-    let release!: (res: Response) => void;
-    const gate = new Promise<Response>((resolve) => { release = resolve; });
+    const gate = deferredResponse();
     apiFetchSpy
-      .mockReturnValueOnce(gate)
+      .mockReturnValueOnce(gate.promise)
       .mockResolvedValueOnce(jsonResponse({ after: { status: 'exited' } }));
 
     const pending = fetchStackStatusesShared(1);
     window.dispatchEvent(new Event('sencho-unauthorized'));
-    release(jsonResponse({ before: { status: 'running' } }));
-    await pending.catch(() => undefined);
+    gate.release(jsonResponse({ before: { status: 'running' } }));
+    await pending;
 
     const next = await fetchStackStatusesShared(1);
     expect(apiFetchSpy).toHaveBeenCalledTimes(2);
@@ -113,19 +121,43 @@ describe('fetchStackStatusesShared', () => {
   });
 
   it('clearStackStatusesFetch clears without requiring the window event', async () => {
-    let release!: (res: Response) => void;
-    const gate = new Promise<Response>((resolve) => { release = resolve; });
+    const gate = deferredResponse();
     apiFetchSpy
-      .mockReturnValueOnce(gate)
+      .mockReturnValueOnce(gate.promise)
       .mockResolvedValueOnce(jsonResponse({}));
 
     const pending = fetchStackStatusesShared(1);
     clearStackStatusesFetch();
-    release(jsonResponse({ stale: true }));
+    gate.release(jsonResponse({ stale: true }));
     await pending;
 
     await fetchStackStatusesShared(1);
     expect(apiFetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('stale settlement after clear does not delete a newer in-flight entry', async () => {
+    const staleGate = deferredResponse();
+    const freshGate = deferredResponse();
+    apiFetchSpy
+      .mockReturnValueOnce(staleGate.promise)
+      .mockReturnValueOnce(freshGate.promise);
+
+    const stale = fetchStackStatusesShared(1);
+    clearStackStatusesFetch();
+    const fresh = fetchStackStatusesShared(1);
+    const joined = fetchStackStatusesShared(1);
+    expect(apiFetchSpy).toHaveBeenCalledTimes(2);
+
+    staleGate.release(jsonResponse({ stale: true }));
+    await stale;
+
+    // Fresh slot must still be joinable after the stale owner settles.
+    expect(apiFetchSpy).toHaveBeenCalledTimes(2);
+    freshGate.release(jsonResponse({ fresh: { status: 'running' } }));
+    const [freshResult, joinedResult] = await Promise.all([fresh, joined]);
+    expect(freshResult.coalesced).toBe(false);
+    expect(joinedResult.coalesced).toBe(true);
+    expect(freshResult.body).toEqual(joinedResult.body);
   });
 
   it('does not retain a rejected promise for later callers', async () => {
