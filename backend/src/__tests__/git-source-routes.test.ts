@@ -11,7 +11,7 @@
  * Service-layer logic (encryption, error mapping, mutex, pending lifecycle)
  * is covered in git-source-service.test.ts.
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import fs from 'fs';
@@ -19,6 +19,17 @@ import path from 'path';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import { GitSourceService } from '../services/GitSourceService';
+
+// ── Hoisted mocks (must come before importing the app) ─────────────────
+
+// The statuses cache carries the source label, so link/unlink must drop it.
+// Spy on the invalidation helper the routes call; the rest of the module
+// (remote-meta invalidation) stays real.
+const mockInvalidateNodeCaches = vi.hoisted(() => vi.fn());
+vi.mock('../helpers/cacheInvalidation', async () => {
+    const actual = await vi.importActual<typeof import('../helpers/cacheInvalidation')>('../helpers/cacheInvalidation');
+    return { ...actual, invalidateNodeCaches: mockInvalidateNodeCaches };
+});
 
 function seedGitSource(stackName: string): void {
     DatabaseService.getInstance().upsertGitSource({
@@ -536,5 +547,68 @@ describe('GET /api/git-sources', () => {
     it('returns 401 without a valid token', async () => {
         const res = await request(app).get('/api/git-sources');
         expect(res.status).toBe(401);
+    });
+});
+
+describe('git-source routes: statuses-cache invalidation', () => {
+    // The cached /stacks/statuses payload carries the source label, so link
+    // and unlink must drop the cache; read-only routes must not.
+    beforeEach(() => {
+        mockInvalidateNodeCaches.mockClear();
+    });
+
+    function seedStackDir(stackName: string): void {
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, stackName), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, stackName, 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+    }
+
+    it('invalidates node caches when linking a Git source', async () => {
+        seedStackDir('inv-link');
+        // Stub upsert so the assertion stays at the route layer without cloning a repo.
+        const upsertSpy = vi.spyOn(GitSourceService.getInstance(), 'upsert')
+            .mockResolvedValue({} as Awaited<ReturnType<typeof GitSourceService.prototype.upsert>>);
+        const res = await request(app)
+            .put('/api/stacks/inv-link/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: 'https://github.com/example/inv-link.git',
+                branch: 'main',
+                compose_path: 'compose.yaml',
+                auth_type: 'none',
+            });
+        expect(res.status).toBe(200);
+        expect(mockInvalidateNodeCaches).toHaveBeenCalledTimes(1);
+        expect(mockInvalidateNodeCaches).toHaveBeenCalledWith(expect.any(Number));
+        upsertSpy.mockRestore();
+    });
+
+    it('invalidates node caches when unlinking a Git source', async () => {
+        seedGitSource('inv-unlink');
+        const res = await request(app)
+            .delete('/api/stacks/inv-unlink/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(mockInvalidateNodeCaches).toHaveBeenCalledTimes(1);
+        expect(mockInvalidateNodeCaches).toHaveBeenCalledWith(expect.any(Number));
+    });
+
+    it('does not invalidate on GET of the Git source', async () => {
+        seedStackDir('inv-get');
+        seedGitSource('inv-get');
+        const res = await request(app)
+            .get('/api/stacks/inv-get/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(mockInvalidateNodeCaches).not.toHaveBeenCalled();
+    });
+
+    it('does not invalidate when dismissing a pending update', async () => {
+        seedGitSource('inv-dismiss');
+        const res = await request(app)
+            .post('/api/stacks/inv-dismiss/git-source/dismiss-pending')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(mockInvalidateNodeCaches).not.toHaveBeenCalled();
     });
 });

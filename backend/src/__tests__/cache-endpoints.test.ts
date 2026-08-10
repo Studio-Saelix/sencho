@@ -14,12 +14,13 @@
  * layer rather than hitting the real Docker socket, so they run in CI
  * without requiring any external daemon.
  */
-import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_PASSWORD } from './helpers/setupTestDb';
 import { installArcstatsFsMock, arcstatsBody, DEFAULT_ARC_PATH, type ArcstatsFsMock } from './helpers/arcstatsFsMock';
 import { GitSourceService } from '../services/GitSourceService';
 import type { PublicGitSource } from '../services/GitSourceService';
+import { DatabaseService } from '../services/DatabaseService';
 import * as selfStackGuard from '../helpers/selfStackGuard';
 
 // ── Hoisted mocks (must come before importing the app) ─────────────────
@@ -230,6 +231,25 @@ describe('GET /api/fleet/overview local-node memory', () => {
 // ── /api/stacks/statuses ───────────────────────────────────────────────
 
 describe('GET /api/stacks/statuses caching', () => {
+  // A healthy identity by default so computed results persist in the cache;
+  // a degraded resolution would intentionally drop the entry after the call.
+  // Tests that need a different identity override the mock on the shared spy.
+  let identitySpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    identitySpy = vi
+      .spyOn(selfStackGuard, 'resolveSelfStackIdentity')
+      .mockResolvedValue({ projectName: 'sencho', labels: null, degraded: false });
+  });
+
+  afterEach(() => {
+    identitySpy.mockRestore();
+    // The git-link test seeds a 'web' source row; drop it even when that
+    // test fails mid-way so later tests never see it. Delete is a no-op when
+    // the row is absent.
+    GitSourceService.getInstance().delete('web');
+  });
+
   it('serves repeat calls from cache without re-invoking the filesystem', async () => {
     mockGetStacks.mockResolvedValue(['web', 'db']);
     mockGetBulkStackStatuses.mockResolvedValue({
@@ -237,11 +257,12 @@ describe('GET /api/stacks/statuses caching', () => {
       db: { status: 'running' },
     });
 
-    await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
-    await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+    const first = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+    const second = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
 
     expect(mockGetStacks).toHaveBeenCalledTimes(1);
     expect(mockGetBulkStackStatuses).toHaveBeenCalledTimes(1);
+    expect(second.body).toEqual(first.body);
   });
 
   it('invalidates on POST /api/stacks', async () => {
@@ -260,7 +281,7 @@ describe('GET /api/stacks/statuses caching', () => {
     expect(mockGetStacks).toHaveBeenCalledTimes(2);
   });
 
-  it('labels each stack with its git/local source, computed outside the cache', async () => {
+  it('labels each stack with its git/local source, served from the cache', async () => {
     mockGetStacks.mockResolvedValue(['web.yml', 'db.yml']);
     mockGetBulkStackStatuses.mockResolvedValue({
       web: { status: 'running' },
@@ -275,83 +296,143 @@ describe('GET /api/stacks/statuses caching', () => {
     expect(first.body['web.yml'].source).toBe('git');
     expect(first.body['db.yml'].source).toBe('local');
 
-    // Source is recomputed live even when the Docker-status payload is cached:
-    // unlinking `web` flips it to local on the next request without a cache flush.
-    listSpy.mockReturnValue([]);
+    // The source label is part of the cached payload: the second request is a
+    // cache hit and does not re-scan the git-source table. Link/unlink keep
+    // the label fresh by invalidating the cache (git-source routes).
     const second = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
-    expect(second.body['web.yml'].source).toBe('local');
-    expect(mockGetBulkStackStatuses).toHaveBeenCalledTimes(1); // status portion served from cache
+    expect(second.body['web.yml'].source).toBe('git');
+    expect(listSpy).toHaveBeenCalledTimes(1);
+    expect(mockGetBulkStackStatuses).toHaveBeenCalledTimes(1);
 
     listSpy.mockRestore();
   });
 
-  it('resolves self-stack identity once per request, cache hits included, and labels each stack from it', async () => {
+  it('resolves self-stack identity on cache miss only and serves hits from the cached payload', async () => {
     mockGetStacks.mockResolvedValue(['sencho.yml', 'web.yml']);
     mockGetBulkStackStatuses.mockResolvedValue({
       sencho: { status: 'running' },
       web: { status: 'running' },
     });
-    const identitySpy = vi
-      .spyOn(selfStackGuard, 'resolveSelfStackIdentity')
-      .mockResolvedValue({ projectName: 'sencho', labels: null });
 
     const first = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
     const second = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
 
-    // Hoisted: one resolution per request (including the cache hit) serves
-    // every stack in the response.
-    expect(identitySpy).toHaveBeenCalledTimes(2);
+    // Identity resolves once per computed fetch; the second request is a
+    // cache hit and inherits the enriched isSelf flags.
+    expect(identitySpy).toHaveBeenCalledTimes(1);
     for (const res of [first, second]) {
       expect(res.body['sencho.yml'].isSelf).toBe(true);
       expect(res.body['web.yml'].isSelf).toBe(false);
     }
+  });
 
-    identitySpy.mockRestore();
+  it('reflects a Git link on the next statuses request without waiting for the TTL', async () => {
+    mockGetStacks.mockResolvedValue(['web']);
+    mockGetBulkStackStatuses.mockResolvedValue({ web: { status: 'running' } });
+    // Stub upsert so the link does not clone the repository over the network.
+    const upsertSpy = vi
+      .spyOn(GitSourceService.getInstance(), 'upsert')
+      .mockResolvedValue({ stack_name: 'web' } as Awaited<ReturnType<typeof GitSourceService.prototype.upsert>>);
+
+    const before = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+    expect(before.body.web.source).toBe('local');
+
+    await request(app)
+      .put('/api/stacks/web/git-source')
+      .set('Cookie', authCookie)
+      .send({
+        repo_url: 'https://github.com/example/web.git',
+        branch: 'main',
+        compose_path: 'compose.yaml',
+        auth_type: 'none',
+      });
+    // The stub skipped persistence; seed the row so the recompute sees it,
+    // standing in for what a real upsert would have stored.
+    DatabaseService.getInstance().upsertGitSource({
+      stack_name: 'web',
+      repo_url: 'https://github.com/example/web.git',
+      branch: 'main',
+      compose_path: 'compose.yaml',
+      compose_paths: ['compose.yaml'],
+      context_dir: null,
+      sync_env: false,
+      env_path: null,
+      auth_type: 'none',
+      encrypted_token: null,
+      auto_apply_on_webhook: false,
+      auto_deploy_on_apply: false,
+      last_applied_commit_sha: null,
+      last_applied_content_hash: null,
+      pending_commit_sha: null,
+      pending_compose_content: null,
+      pending_env_content: null,
+      pending_fetched_at: null,
+      last_debounce_at: null,
+    });
+
+    // Linking invalidated the statuses cache, so the next request recomputes
+    // with the fresh label instead of serving the stale cached 'local'.
+    const after = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+    expect(after.body.web.source).toBe('git');
+    expect(mockGetBulkStackStatuses).toHaveBeenCalledTimes(2);
+
+    upsertSpy.mockRestore();
   });
 
   it('skips identity resolution entirely when the node has no stacks', async () => {
     mockGetStacks.mockResolvedValue([]);
     mockGetBulkStackStatuses.mockResolvedValue({});
-    const identitySpy = vi.spyOn(selfStackGuard, 'resolveSelfStackIdentity');
 
     const res = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({});
     expect(identitySpy).not.toHaveBeenCalled();
-
-    identitySpy.mockRestore();
   });
 
-  it('serves 200 with isSelf false everywhere when identity resolution degrades', async () => {
+  it('serves 200 with isSelf false everywhere when identity resolution degrades, and does not cache the degraded payload', async () => {
     mockGetStacks.mockResolvedValue(['web.yml', 'db.yml']);
     mockGetBulkStackStatuses.mockResolvedValue({
       web: { status: 'running' },
       db: { status: 'running' },
     });
-    const identitySpy = vi
-      .spyOn(selfStackGuard, 'resolveSelfStackIdentity')
-      .mockResolvedValue({ projectName: null, labels: null });
+    identitySpy.mockResolvedValue({ projectName: null, labels: null, degraded: true });
 
-    const res = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+    const first = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
 
-    expect(res.status).toBe(200);
-    expect(res.body['web.yml'].isSelf).toBe(false);
-    expect(res.body['db.yml'].isSelf).toBe(false);
+    expect(first.status).toBe(200);
+    expect(first.body['web.yml'].isSelf).toBe(false);
+    expect(first.body['db.yml'].isSelf).toBe(false);
 
-    identitySpy.mockRestore();
+    // A degraded resolution reports every stack as not-self, which would
+    // un-gate destructive UI affordances on the Sencho stack itself, so it
+    // must not persist: the next request recomputes and re-resolves instead
+    // of serving a cached isSelf: false for a full TTL.
+    const second = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+    expect(second.status).toBe(200);
+    expect(identitySpy).toHaveBeenCalledTimes(2);
+    expect(mockGetBulkStackStatuses).toHaveBeenCalledTimes(2);
   });
 
-  it('falls back to local labels (200, not 500) when the git-source lookup throws', async () => {
+  it('falls back to local labels (200, not 500) when the git-source lookup throws, and does not cache the fallback', async () => {
     mockGetStacks.mockResolvedValue(['web.yml']);
     mockGetBulkStackStatuses.mockResolvedValue({ web: { status: 'running' } });
+    // The default healthy identity keeps the git-source scan as the only
+    // degradation source.
     const listSpy = vi
       .spyOn(GitSourceService.getInstance(), 'list')
       .mockImplementation(() => { throw new Error('db locked'); });
 
-    const res = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
-    expect(res.status).toBe(200);
-    expect(res.body['web.yml'].source).toBe('local');
+    const first = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+    expect(first.status).toBe(200);
+    expect(first.body['web.yml'].source).toBe('local');
+
+    // The 'local' fallback must not persist: the next request recomputes and
+    // re-reads the git sources instead of serving the mislabel for a full TTL.
+    const second = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+    expect(second.status).toBe(200);
+    expect(listSpy).toHaveBeenCalledTimes(2);
+    expect(mockGetBulkStackStatuses).toHaveBeenCalledTimes(2);
 
     listSpy.mockRestore();
   });

@@ -226,6 +226,13 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       autoDeployOnApply,
     });
 
+    // The cached /stacks/statuses payload carries the source label; drop it
+    // before responding so a client refetch on this response recomputes. The
+    // full invalidateNodeCaches helper is deliberate here (matching every
+    // other mutation route): link/unlink is a low-frequency user action, so
+    // dropping the project-name map and file-root allowlists alongside is
+    // harmless, unlike the high-frequency container-event path.
+    invalidateNodeCaches(req.nodeId);
     console.log(`[GitSource] Configured git source for ${stackName}`);
     res.json(source);
   } catch (error) {
@@ -254,6 +261,13 @@ stackGitSourceRouter.delete('/:stackName/git-source', async (req: Request, res: 
       return;
     }
     GitSourceService.getInstance().delete(stackName);
+    // The cached /stacks/statuses payload carries the source label; drop it
+    // before responding so a client refetch on this response recomputes. The
+    // full invalidateNodeCaches helper is deliberate here (matching every
+    // other mutation route): link/unlink is a low-frequency user action, so
+    // dropping the project-name map and file-root allowlists alongside is
+    // harmless, unlike the high-frequency container-event path.
+    invalidateNodeCaches(req.nodeId);
     console.log(`[GitSource] Removed git source for ${stackName}`);
     res.json({ success: true });
   } catch (error) {

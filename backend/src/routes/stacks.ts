@@ -75,6 +75,7 @@ import {
   refuseIfSelfStack,
   resolveSelfStackIdentity,
   selfStackProtectedBulkResult,
+  UNRESOLVED_SELF_STACK_IDENTITY,
 } from '../helpers/selfStackGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
@@ -344,6 +345,10 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
   let enrichmentMs: number | null = null;
   let count = 0;
   try {
+    // Enrichment (git-source labels, self identity) is part of the cached
+    // payload so cache hits serve fully decorated statuses with no per-request
+    // work. The git label lookup failure still falls back to 'local' and must
+    // not take down the primary status payload.
     const { value: result, outcome: fetchOutcome } = await CacheService.getInstance().getOrFetchWithMeta(
       `stack-statuses:${req.nodeId}`,
       STACK_STATUSES_CACHE_TTL_MS,
@@ -359,38 +364,54 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
           const name = stack.replace(/\.(yml|yaml)$/, '');
           data[stack] = bulkInfo[name] ?? { status: 'unknown' };
         }
-        return data;
+        const enrichmentStartedAt = Date.now();
+        let gitStackNames = new Set<string>();
+        let gitSourcesDegraded = false;
+        try {
+          gitStackNames = new Set(GitSourceService.getInstance().list().map((s) => s.stack_name));
+        } catch (sourceError) {
+          console.error(`Failed to load git sources for status labels on node ${req.nodeId}; defaulting to local:`, sourceError);
+          gitSourcesDegraded = true;
+        }
+        // Self-stack identity is resolved once per request instead of once per
+        // stack, so cache misses pay a single container-list call, not N.
+        const selfIdentity = stackNames.length > 0
+          ? await resolveSelfStackIdentity()
+          : UNRESOLVED_SELF_STACK_IDENTITY;
+        const withSource: Record<string, BulkStackInfo & { source: 'local' | 'git'; isSelf: boolean }> = {};
+        const composeDir = FileSystemService.getInstance(req.nodeId).getBaseDir();
+        for (const [stack, info] of Object.entries(data)) {
+          const name = stack.replace(/\.(yml|yaml)$/, '');
+          withSource[stack] = {
+            ...info,
+            source: gitStackNames.has(name) ? 'git' : 'local',
+            isSelf: isSelfStackByIdentity(selfIdentity, name, composeDir),
+          };
+        }
+        enrichmentMs = Date.now() - enrichmentStartedAt;
+        // The payload is flagged degraded when any enrichment source failed
+        // (Docker socket unreachable, git-source scan failure) so the route
+        // can refuse to let a mislabeled payload persist.
+        return { data: withSource, degraded: selfIdentity.degraded || gitSourcesDegraded };
       },
     );
     cacheOutcome = fetchOutcome;
-    count = Object.keys(result).length;
-    const enrichmentStartedAt = Date.now();
-    // Git-source labels are computed live, outside the cache, so linking or
-    // unlinking a stack's Git source is reflected immediately. The Docker
-    // status portion keeps its short TTL; only the cheap source label is fresh.
-    // The label is cosmetic, so a lookup failure must not take down the primary
-    // status payload: fall back to labeling everything 'local'.
-    let gitStackNames = new Set<string>();
-    try {
-      gitStackNames = new Set(GitSourceService.getInstance().list().map((s) => s.stack_name));
-    } catch (sourceError) {
-      console.error('Failed to load git sources for status labels; defaulting to local:', sourceError);
+    const { data, degraded } = result;
+    count = Object.keys(data).length;
+    // A degraded identity resolution (Docker socket unreachable) cannot be
+    // trusted to classify every stack, which un-gates destructive UI
+    // affordances on the Sencho stack itself, and a failed git-source scan
+    // mislabels every source badge as 'local'. Never let either mislabel
+    // persist for a full TTL: serve the live result, drop the cache entry,
+    // and let the next request re-resolve. Everything between the fetch and
+    // this invalidate is synchronous, so no concurrent reader can observe
+    // the degraded entry. Running outside Docker is not degraded (both
+    // identity sources legitimately resolve to null there), and an empty
+    // fleet skips resolution entirely; both are cached as-is.
+    if (fetchOutcome === 'computed' && count > 0 && degraded) {
+      CacheService.getInstance().invalidate(`stack-statuses:${req.nodeId}`);
     }
-    // Self-stack identity is resolved once per request instead of once per
-    // stack, so cache hits no longer pay N container-list calls.
-    const selfIdentity = count > 0 ? await resolveSelfStackIdentity() : { projectName: null, labels: null };
-    const withSource: Record<string, BulkStackInfo & { source: 'local' | 'git' }> = {};
-    const composeDir = FileSystemService.getInstance(req.nodeId).getBaseDir();
-    for (const [stack, info] of Object.entries(result)) {
-      const name = stack.replace(/\.(yml|yaml)$/, '');
-      withSource[stack] = {
-        ...info,
-        source: gitStackNames.has(name) ? 'git' : 'local',
-        isSelf: isSelfStackByIdentity(selfIdentity, name, composeDir),
-      };
-    }
-    enrichmentMs = Date.now() - enrichmentStartedAt;
-    res.json(withSource);
+    res.json(data);
   } catch (error) {
     outcome = 'error';
     console.error('Failed to fetch stack statuses:', error);
