@@ -90,6 +90,7 @@ function makeStream(): FakeStream {
 // ── Setup ──────────────────────────────────────────────────────────────
 
 import { DockerEventService } from '../services/DockerEventService';
+import { CacheService } from '../services/CacheService';
 
 let stream: FakeStream;
 let service: DockerEventService;
@@ -1324,7 +1325,17 @@ describe('DockerEventService - hardening', () => {
 // ── State-invalidate broadcasts ────────────────────────────────────────
 
 describe('DockerEventService - state-invalidate broadcasts', () => {
-    it('broadcasts state-invalidate on container start', async () => {
+    let invalidateSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+        invalidateSpy = vi.spyOn(CacheService.getInstance(), 'invalidate');
+    });
+
+    afterEach(() => {
+        invalidateSpy.mockRestore();
+    });
+
+    it('broadcasts state-invalidate and drops the statuses cache on container start', async () => {
         service = new DockerEventService(7, 'node-7');
         await service.start();
 
@@ -1344,6 +1355,11 @@ describe('DockerEventService - state-invalidate broadcasts', () => {
             containerId: 'aaa',
             action: 'start',
         }));
+        // The UI refetch this broadcast triggers must recompute, not hit a
+        // cache entry made stale by the event. Only the statuses key is
+        // touched; the full invalidateNodeCaches helper is not used here.
+        expect(invalidateSpy).toHaveBeenCalledTimes(1);
+        expect(invalidateSpy).toHaveBeenCalledWith('stack-statuses:7');
     });
 
     it('does not broadcast stack state-invalidate for Sencho self-container events', async () => {
@@ -1368,6 +1384,7 @@ describe('DockerEventService - state-invalidate broadcasts', () => {
         await vi.advanceTimersByTimeAsync(1);
 
         expect(mockBroadcastEvent).not.toHaveBeenCalled();
+        expect(invalidateSpy).not.toHaveBeenCalled();
     });
 
     it('broadcasts state-invalidate on health_status:unhealthy', async () => {
@@ -1386,6 +1403,7 @@ describe('DockerEventService - state-invalidate broadcasts', () => {
             (c[0] as { type?: string }).type === 'state-invalidate');
         expect(states.length).toBeGreaterThan(0);
         expect(states[0][0]).toMatchObject({ action: 'health_status', stackName: 'api' });
+        expect(invalidateSpy).toHaveBeenCalledWith('stack-statuses:1');
     });
 
     it('does not broadcast state-invalidate on non-state actions like exec_create', async () => {
@@ -1401,6 +1419,7 @@ describe('DockerEventService - state-invalidate broadcasts', () => {
         await vi.advanceTimersByTimeAsync(1);
 
         expect(mockBroadcastEvent).not.toHaveBeenCalled();
+        expect(invalidateSpy).not.toHaveBeenCalled();
     });
 });
 

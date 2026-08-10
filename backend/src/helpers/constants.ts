@@ -44,4 +44,8 @@ export const MFA_REPLAY_PURGE_INTERVAL_MS = 60 * 1000;
 // Keys are per-node: "stats:<nodeId>", "system-stats:<nodeId>", "stack-statuses:<nodeId>".
 export const STATS_CACHE_TTL_MS = 2_000;
 export const SYSTEM_STATS_CACHE_TTL_MS = 3_000;
-export const STACK_STATUSES_CACHE_TTL_MS = 3_000;
+// Stack statuses are cached past the frontend dashboard poll cadence (10s),
+// so ordinary polls hit instead of recomputing. Container events and
+// lifecycle mutations invalidate the key; 15s bounds worst-case staleness for
+// any missed invalidation path.
+export const STACK_STATUSES_CACHE_TTL_MS = 15_000;
