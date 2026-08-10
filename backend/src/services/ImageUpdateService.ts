@@ -778,6 +778,44 @@ export class ImageUpdateService {
         };
     }
 
+    private static readonly MIN_REMEDIATION_FRESHNESS_MS = 30 * 60 * 1000;
+    private static readonly MAX_REMEDIATION_FRESHNESS_MS = 48 * 60 * 60 * 1000;
+    private static readonly CRON_CADENCE_FALLBACK_MS = 24 * 60 * 60 * 1000;
+
+    /**
+     * Freshness window for Security remediation classification: 2× the
+     * expected check cadence. Interval mode uses the live intervalMs. Cron
+     * mode uses the gap between two successive fire times (not the unused
+     * interval setting). Missing/unparseable cron falls back to 24h. Clamped
+     * to [30m, 48h].
+     */
+    public getRemediationFreshnessWindowMs(): number {
+        let cadenceMs = this.intervalMs;
+        if (this.mode === 'cron') {
+            // Default to 24h; override only when two successive fire times yield a positive gap.
+            cadenceMs = ImageUpdateService.CRON_CADENCE_FALLBACK_MS;
+            if (this.cronExpression) {
+                try {
+                    const expr = CronExpressionParser.parse(this.cronExpression);
+                    const first = expr.next().toDate().getTime();
+                    const second = expr.next().toDate().getTime();
+                    const gap = second - first;
+                    if (gap > 0) cadenceMs = gap;
+                } catch (e) {
+                    console.warn(
+                        '[ImageUpdateService] Could not derive cron cadence for remediation freshness; using 24h fallback:',
+                        getErrorMessage(e, String(e)),
+                    );
+                }
+            }
+        }
+        const windowMs = 2 * cadenceMs;
+        return Math.min(
+            ImageUpdateService.MAX_REMEDIATION_FRESHNESS_MS,
+            Math.max(ImageUpdateService.MIN_REMEDIATION_FRESHNESS_MS, windowMs),
+        );
+    }
+
     // ─── Core check ──────────────────────────────────────────────────────────
 
     private async check() {

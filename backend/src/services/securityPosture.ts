@@ -15,6 +15,10 @@
  * because counts are zero-weighted, and never "Action needed" merely because a
  * Critical exists with nothing to do about it. "Secure" means nothing is
  * actionable right now, not a claim that no vulnerabilities exist.
+ *
+ * Package fix availability (Trivy fixed_version) and container-image update
+ * availability (canonical ImageUpdateService) are distinct facts. A package
+ * fix alone never produces an "Update affected images" instruction.
  */
 
 /** EPSS score at or above this is treated as an elevated exploitation
@@ -35,6 +39,8 @@ export type SecurityPostureTargetTab =
 
 export type PostureReasonKind =
   | 'fixable_cve'
+  | 'waiting_upstream'
+  | 'update_check_uncertain'
   | 'known_exploited'
   | 'secret'
   | 'dangerous_compose'
@@ -55,6 +61,8 @@ export interface PostureReason {
   description: string;
   /** Which Security tab the CTA navigates to. */
   targetTab: SecurityPostureTargetTab;
+  /** Optional Open-button label; when omitted the UI derives from targetTab. */
+  actionLabel?: string;
 }
 
 export interface PostureAction {
@@ -70,8 +78,25 @@ export interface SecurityPostureFacts {
   scannerAvailable: boolean;
   /** At least one scan has completed (a freshly installed node has none). */
   hasCompletedScan: boolean;
-  /** Critical/High findings with a fix available, net of suppressions. */
+  /** Critical/High findings with a package fix available, net of suppressions. */
   fixableCriticalHigh: number;
+  /**
+   * Subset of package-fix Crit/High findings whose managed image has a
+   * confirmed applicable image update (hasUpdate + checkStatus ok).
+   */
+  fixableWithImageUpdate: number;
+  /**
+   * Package-fix Crit/High on managed images where every checkable match is an
+   * authoritative negative (ok, no update, fresh).
+   */
+  fixableWaitingUpstream: number;
+  /**
+   * Package-fix Crit/High where update availability could not be established
+   * (partial, failed, stale, disabled, not_checkable, no stack match, etc.).
+   */
+  fixableUpdateUnknown: number;
+  /** When true, uncertain rows should explain disabled checks (no Check again). */
+  updateChecksDisabled: boolean;
   /** Detected secrets (not suppressible in the current model). */
   secrets: number;
   /** High-severity Compose misconfigurations, net of acknowledgements. */
@@ -107,6 +132,8 @@ export interface SecurityPostureFacts {
  * All reasons (blocker, review, info) are returned regardless of posture
  * state. The caller decides which subset to surface.
  */
+const VIEW_FINDINGS_LABEL = 'View findings';
+
 export function derivePostureReasons(f: SecurityPostureFacts): {
   reasons: PostureReason[];
   primaryAction: PostureAction | null;
@@ -116,17 +143,18 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
 
   // Blockers. Each of these can keep the masthead red.
 
-  if (f.fixableCriticalHigh > 0) {
+  if (f.fixableWithImageUpdate > 0) {
     const r: PostureReason = {
       kind: 'fixable_cve',
-      count: f.fixableCriticalHigh,
+      count: f.fixableWithImageUpdate,
       severity: 'blocker',
-      label: 'Fixable findings',
-      description: 'Critical or High findings with an available fix.',
+      label: 'Newer image available',
+      description: 'Critical or High findings have a newer image available to review. This does not prove the candidate removes the findings.',
       targetTab: 'images',
+      actionLabel: 'Review update',
     };
     reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Update affected images', targetTab: r.targetTab, kind: r.kind };
+    if (!primaryAction) primaryAction = { label: 'Review update', targetTab: r.targetTab, kind: r.kind };
   }
 
   if (f.knownExploited > 0) {
@@ -191,6 +219,7 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
       label: 'Exposed images (monitoring)',
       description: 'Images published on a public interface with no fix, no KEV, and no elevated EPSS.',
       targetTab: 'images',
+      actionLabel: VIEW_FINDINGS_LABEL,
     });
   }
 
@@ -206,6 +235,32 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
   }
 
   // Info items. Context only, never red.
+
+  if (f.fixableWaitingUpstream > 0) {
+    reasons.push({
+      kind: 'waiting_upstream',
+      count: f.fixableWaitingUpstream,
+      severity: 'info',
+      label: 'Waiting for upstream image',
+      description: 'Package fixes exist for findings in this image, but Sencho cannot currently identify a newer image to apply under its latest authoritative check.',
+      targetTab: 'images',
+      actionLabel: VIEW_FINDINGS_LABEL,
+    });
+  }
+
+  if (f.fixableUpdateUnknown > 0) {
+    reasons.push({
+      kind: 'update_check_uncertain',
+      count: f.fixableUpdateUnknown,
+      severity: 'info',
+      label: 'Update availability unknown',
+      description: f.updateChecksDisabled
+        ? 'Package fixes exist, but image update checks are disabled on this node, so Sencho cannot tell whether a newer image is available.'
+        : 'Package fixes exist, but Sencho could not establish whether an applicable image update is available (partial, failed, stale, not checkable, or unmatched image).',
+      targetTab: 'images',
+      actionLabel: VIEW_FINDINGS_LABEL,
+    });
+  }
 
   if (f.staleScans > 0) {
     reasons.push({

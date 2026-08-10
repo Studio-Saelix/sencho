@@ -16,6 +16,8 @@ import { applyMisconfigAcknowledgements } from '../utils/misconfig-ack-filter';
 import { generateSarif } from '../services/SarifExporter';
 import { generateOpenVex } from '../services/OpenVexExporter';
 import { deriveSecurityPosture, derivePostureReasons, HIGH_EPSS_THRESHOLD, type SecurityPostureFacts, type SecurityPostureState, type PostureReason, type PostureAction } from '../services/securityPosture';
+import { classifyImageRemediation, type RemediationFindingInput } from '../services/securityImageRemediation';
+import { ImageUpdateService } from '../services/ImageUpdateService';
 import { buildExposedImageMap } from '../services/preflight/exposure';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
@@ -196,6 +198,8 @@ interface SecurityOverviewResponse {
   postureReasons: PostureReason[];
   /** Highest-priority action for the masthead CTA, or null when no blockers. */
   primaryAction: PostureAction | null;
+  /** True when image-update checks are disabled and uncertain remediation exists. */
+  updateChecksDisabled?: boolean;
 }
 
 export const securityRouter = Router();
@@ -775,6 +779,7 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
     let accepted = 0;
     let notAffected = 0;
     let needsReview = 0;
+    const remediationByImage = new Map<string, number>();
     for (const [imageRef, group] of critHighByImage) {
       for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
         if (e.triage_status === 'needs_review') needsReview += 1;
@@ -785,9 +790,25 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
           continue;
         }
         // Not dismissed (no decision, needs_review, or affected): still actionable.
-        if (e.fixed_version) fixableCriticalHigh += 1;
+        if (e.fixed_version) {
+          fixableCriticalHigh += 1;
+          remediationByImage.set(imageRef, (remediationByImage.get(imageRef) ?? 0) + 1);
+        }
       }
     }
+
+    const remediationFindings: RemediationFindingInput[] = [];
+    for (const [image_ref, count] of remediationByImage) {
+      remediationFindings.push({ image_ref, count });
+    }
+    const imageUpdateSvc = ImageUpdateService.getInstance();
+    const remediation = classifyImageRemediation({
+      findings: remediationFindings,
+      details: db.getStackUpdateDetail(req.nodeId),
+      checksEnabled: ImageUpdateService.isChecksEnabled(),
+      freshnessWindowMs: imageUpdateSvc.getRemediationFreshnessWindowMs(),
+      now: Date.now(),
+    });
 
     // A known-exploited (KEV) finding gates a deploy at ANY severity, so the
     // posture fact counts non-suppressed KEV findings across all severities, not
@@ -862,6 +883,10 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       scannerAvailable: svc.isTrivyAvailable(),
       hasCompletedScan: lastSuccessfulScanAt !== null,
       fixableCriticalHigh,
+      fixableWithImageUpdate: remediation.fixableWithImageUpdate,
+      fixableWaitingUpstream: remediation.fixableWaitingUpstream,
+      fixableUpdateUnknown: remediation.fixableUpdateUnknown,
+      updateChecksDisabled: remediation.updateChecksDisabled,
       secrets,
       dangerousCompose,
       knownExploited,
@@ -876,7 +901,7 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
     };
     const posture = deriveSecurityPosture(postureFacts);
     const { reasons: postureReasons, primaryAction } = derivePostureReasons(postureFacts);
-    const actionable = fixableCriticalHigh + secrets + dangerousCompose + knownExploited + publiclyExposed;
+    const actionable = remediation.fixableWithImageUpdate + secrets + dangerousCompose + knownExploited + publiclyExposed;
 
     const overview: SecurityOverviewResponse = {
       scannedImages,
@@ -916,6 +941,7 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       posturePartial: critHigh.truncated || kevFindings.truncated || highMisconfigs.truncated,
       postureReasons,
       primaryAction,
+      updateChecksDisabled: remediation.updateChecksDisabled,
     };
     res.json(overview);
   } catch (error) {

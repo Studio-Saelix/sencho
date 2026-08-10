@@ -257,6 +257,8 @@ export type SecurityPostureState = 'Action needed' | 'Monitoring' | 'Secure' | '
 /** Kinds of posture reason the backend can report. */
 export type PostureReasonKind =
   | 'fixable_cve'
+  | 'waiting_upstream'
+  | 'update_check_uncertain'
   | 'known_exploited'
   | 'secret'
   | 'dangerous_compose'
@@ -273,6 +275,8 @@ export interface PostureReason {
   label: string;
   description: string;
   targetTab: SecurityTab;
+  /** Optional Open-button label; when omitted the UI derives from targetTab. */
+  actionLabel?: string;
 }
 
 /** Highest-priority action for the masthead CTA. */
@@ -328,6 +332,8 @@ export interface SecurityOverview {
   postureReasons?: PostureReason[];
   /** Highest-priority action for the masthead CTA, or null when no blockers. */
   primaryAction?: PostureAction | null;
+  /** True when image-update checks are disabled (gates Check again on uncertain rows). */
+  updateChecksDisabled?: boolean;
 }
 
 /** Which detail tab the scan sheet opens on. Matches VulnerabilityScanSheet's tabs. */

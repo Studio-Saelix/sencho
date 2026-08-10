@@ -268,6 +268,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
             onNavigate={handleNavigate}
             onInspect={onInspect}
             canScan={canScanNode}
+            canManageNode={!!activeNode?.id && can('node:manage', 'node', String(activeNode.id))}
             onScanComplete={() => setReloadToken((t) => t + 1)}
           />
         </TabsContent>

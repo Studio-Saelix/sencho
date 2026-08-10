@@ -9,7 +9,7 @@ center, so you can answer "what should I look at first?" without hunting through
 scoped to the active node: the findings and scanner status you see reflect whichever node is selected.
 
 <Frame>
-  <img src="/images/security/overview.png" alt="Security page Overview tab with an Action needed masthead reading '3 actions: fixable findings, detected secrets' and CRITICAL/HIGH/LAST SCAN stat tiles, a Why Action needed review-queue card, a 30-day risk trend chart, an Action posture breakdown, and a Scan this node button." />
+  <img src="/images/security/overview.png" alt="Security page Overview tab with an Action needed masthead, CRITICAL/HIGH/LAST SCAN stat tiles, a Why Action needed review-queue card, a 30-day risk trend chart, an Action posture breakdown, and a Scan this node button." />
 </Frame>
 
 The page is organized into tabs: Overview, Images, Compose risks, Secrets, Policies, Suppressions,
@@ -20,17 +20,24 @@ History, and Scanner setup.
 The overview opens with a status masthead that reads your **action posture** at a glance, the answer
 to "what can and should I do right now?":
 
-- **Action needed**: something concrete to act on, such as a fixable Critical or High finding, a
-  detected secret, a dangerous Compose setting, or a known-exploited (CISA KEV) CVE.
-- **Monitoring**: Critical or High findings exist, but none are currently actionable (no fix
-  available, or already triaged).
+- **Action needed**: something concrete to act on that Sencho can support right now, such as a
+  newer image available to review for Critical or High findings, a detected secret, a dangerous
+  Compose setting, a known-exploited (CISA KEV) CVE, or publicly exposed affected images.
+- **Monitoring**: Critical or High findings exist, but none currently have a concrete operator
+  action Sencho can drive. Package fixes may exist without an applicable container-image update,
+  or findings may already be triaged. Waiting for an upstream image and uncertain update
+  availability appear in the review queue without a red masthead.
 - **Secure**: nothing actionable right now. This is never a claim that no vulnerabilities exist.
 - **Unknown**: the scanner is not installed, or no scan has completed yet.
 
 Raw Critical and High counts stay visible next to the posture as **scanner detections**, not as the
 posture itself: a vulnerable component being present is not the same as a reachable, exploitable risk.
-The masthead carries a standing note to that effect, and posture weighs fix availability, exploit
-intelligence, and triage decisions rather than raw severity alone.
+The masthead carries a standing note to that effect, and posture weighs package-fix evidence,
+image-update availability, exploit intelligence, exposure, and triage decisions rather than raw
+severity alone. A Trivy package fix does not by itself mean Sencho can update the image; when a
+newer image is confirmed available the review queue offers **Review update**, and when no applicable
+update is identified it surfaces **Waiting for upstream image** instead of an impossible update
+instruction.
 
 An admin on a node with a ready scanner sees a **Scan this node** button above the review queue. It
 opens a popover to pick any combination of image vulnerabilities, image secrets, and Compose
@@ -40,11 +47,13 @@ clean.
 
 Below the masthead, a **Review queue** card leads the overview when actions or review items exist.
 When the posture is Action needed the card is titled **Why Action needed** and lists each concrete
-action with a count and a tab-shortcut button: fixable findings, known-exploited CVEs, detected
-secrets, unacknowledged Compose risks, and publicly exposed affected images. When only monitoring
-items remain (exposed images with no fix or known exploit, findings awaiting triage, stale or failed
-scans) the card is titled **Review queue** and lists them without the red masthead, so the operator
-can see what to keep an eye on without a permanent alarm.
+action with a count and a tab-shortcut button: newer images available to review, known-exploited
+CVEs, detected secrets, unacknowledged Compose risks, and publicly exposed affected images. When
+only monitoring items remain (waiting for an upstream image, update availability unknown, exposed
+images with no fix or known exploit, findings awaiting triage, stale or failed scans) the card is
+titled **Review queue** and lists them with View findings shortcuts (and Check again when image
+update availability could not be established and you can manage the node), so the operator can see
+what to keep an eye on without a permanent alarm.
 
 The charts then lead with prioritization rather than raw severity: a **risk trend** for context,
 an **action posture** breakdown (fixable, known-exploited, needs-review, accepted, not-affected), a

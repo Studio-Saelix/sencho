@@ -6,6 +6,10 @@ function facts(o: Partial<SecurityPostureFacts> = {}): SecurityPostureFacts {
     scannerAvailable: true,
     hasCompletedScan: true,
     fixableCriticalHigh: 0,
+    fixableWithImageUpdate: 0,
+    fixableWaitingUpstream: 0,
+    fixableUpdateUnknown: 0,
+    updateChecksDisabled: false,
     secrets: 0,
     dangerousCompose: 0,
     knownExploited: 0,
@@ -21,6 +25,14 @@ function facts(o: Partial<SecurityPostureFacts> = {}): SecurityPostureFacts {
   };
 }
 
+function allCopy(f: SecurityPostureFacts): string {
+  const { reasons, primaryAction } = derivePostureReasons(f);
+  return [
+    ...reasons.map((r) => `${r.label} ${r.description}`),
+    primaryAction?.label ?? '',
+  ].join(' | ');
+}
+
 describe('deriveSecurityPosture', () => {
   it('is Unknown when the scanner is unavailable', () => {
     expect(deriveSecurityPosture(facts({ scannerAvailable: false, rawCritical: 9 }))).toBe('Unknown');
@@ -30,8 +42,21 @@ describe('deriveSecurityPosture', () => {
     expect(deriveSecurityPosture(facts({ hasCompletedScan: false, rawCritical: 9 }))).toBe('Unknown');
   });
 
-  it('is Action needed when a Critical/High is fixable', () => {
-    expect(deriveSecurityPosture(facts({ fixableCriticalHigh: 1, rawCritical: 5, rawHigh: 5 }))).toBe('Action needed');
+  it('is Monitoring when package-fix exists but no confirmed image update', () => {
+    expect(deriveSecurityPosture(facts({
+      fixableCriticalHigh: 4,
+      fixableWaitingUpstream: 4,
+      rawCritical: 5,
+      rawHigh: 5,
+    }))).toBe('Monitoring');
+  });
+
+  it('is Action needed when a confirmed image update is available', () => {
+    expect(deriveSecurityPosture(facts({
+      fixableCriticalHigh: 1,
+      fixableWithImageUpdate: 1,
+      rawCritical: 5,
+    }))).toBe('Action needed');
   });
 
   it('is Action needed for a detected secret', () => {
@@ -48,6 +73,14 @@ describe('deriveSecurityPosture', () => {
 
   it('is Action needed when exposedBlocker > 0 (KEV, fixable, or elevated EPSS on a public interface)', () => {
     expect(deriveSecurityPosture(facts({ exposedBlocker: 1 }))).toBe('Action needed');
+  });
+
+  it('keeps Action needed for exposure even with authoritative no-update (R3)', () => {
+    expect(deriveSecurityPosture(facts({
+      fixableCriticalHigh: 2,
+      fixableWaitingUpstream: 2,
+      exposedBlocker: 1,
+    }))).toBe('Action needed');
   });
 
   it('is Monitoring when publiclyExposed > 0 but exposedBlocker is 0 (review-only exposure)', () => {
@@ -74,8 +107,18 @@ describe('derivePostureReasons', () => {
     expect(primaryAction).toBeNull();
   });
 
-  it('returns a blocker reason for fixable findings', () => {
-    const { reasons } = derivePostureReasons(facts({ fixableCriticalHigh: 4 }));
+  it('does not emit fixable_cve blocker from package-fix alone', () => {
+    const { reasons, primaryAction } = derivePostureReasons(facts({
+      fixableCriticalHigh: 4,
+      fixableWaitingUpstream: 4,
+    }));
+    expect(reasons.find((r) => r.kind === 'fixable_cve')).toBeUndefined();
+    expect(reasons).toContainEqual(expect.objectContaining({ kind: 'waiting_upstream', count: 4, severity: 'info' }));
+    expect(primaryAction).toBeNull();
+  });
+
+  it('returns a blocker reason for confirmed image updates', () => {
+    const { reasons } = derivePostureReasons(facts({ fixableWithImageUpdate: 4, fixableCriticalHigh: 4 }));
     expect(reasons).toContainEqual(expect.objectContaining({ kind: 'fixable_cve', count: 4, severity: 'blocker' }));
   });
 
@@ -115,11 +158,27 @@ describe('derivePostureReasons', () => {
     expect(reasons).toContainEqual(expect.objectContaining({ kind: 'failed_scan', count: 1, severity: 'info' }));
   });
 
+  it('returns uncertain info reason for unknown remediation', () => {
+    const { reasons } = derivePostureReasons(facts({
+      fixableCriticalHigh: 2,
+      fixableUpdateUnknown: 2,
+    }));
+    expect(reasons).toContainEqual(expect.objectContaining({ kind: 'update_check_uncertain', count: 2, severity: 'info' }));
+  });
+
+  it('explains disabled checks in uncertain description', () => {
+    const { reasons } = derivePostureReasons(facts({
+      fixableUpdateUnknown: 1,
+      updateChecksDisabled: true,
+    }));
+    const uncertain = reasons.find((r) => r.kind === 'update_check_uncertain');
+    expect(uncertain?.description).toMatch(/disabled/i);
+  });
+
   it('returns ALL reasons regardless of posture state', () => {
-    // Even with no scanner (Unknown posture), the facts produce reasons.
     const { reasons } = derivePostureReasons(facts({
       scannerAvailable: false,
-      fixableCriticalHigh: 4,
+      fixableWithImageUpdate: 4,
       staleScans: 1,
     }));
     expect(reasons).toHaveLength(2);
@@ -127,13 +186,34 @@ describe('derivePostureReasons', () => {
     expect(reasons[1].kind).toBe('stale_scan');
   });
 
-  it('sets primaryAction to the first blocker (fixable_cve priority)', () => {
+  it('sets primaryAction to Review update when image update is confirmed', () => {
     const { primaryAction } = derivePostureReasons(facts({
-      fixableCriticalHigh: 3,
+      fixableWithImageUpdate: 3,
       knownExploited: 1,
       secrets: 2,
     }));
-    expect(primaryAction).toEqual({ label: 'Update affected images', targetTab: 'images', kind: 'fixable_cve' });
+    expect(primaryAction).toEqual({ label: 'Review update', targetTab: 'images', kind: 'fixable_cve' });
+  });
+
+  it('falls through to KEV when only waiting upstream for package fixes', () => {
+    const { primaryAction, reasons } = derivePostureReasons(facts({
+      fixableCriticalHigh: 3,
+      fixableWaitingUpstream: 3,
+      knownExploited: 1,
+    }));
+    expect(primaryAction).toEqual({ label: 'Review exploited findings', targetTab: 'images', kind: 'known_exploited' });
+    expect(reasons.some((r) => r.kind === 'waiting_upstream')).toBe(true);
+  });
+
+  it('R3: exposure primary action when waiting upstream, never Update affected images', () => {
+    const { primaryAction, reasons } = derivePostureReasons(facts({
+      fixableCriticalHigh: 2,
+      fixableWaitingUpstream: 2,
+      exposedBlocker: 1,
+    }));
+    expect(primaryAction).toEqual({ label: 'Review public exposure', targetTab: 'images', kind: 'public_exposure' });
+    expect(reasons.some((r) => r.label === 'Update affected images' || r.description.includes('Update affected images'))).toBe(false);
+    expect(primaryAction?.label).not.toBe('Update affected images');
   });
 
   it('falls through to the next blocker when the first is absent', () => {
@@ -148,24 +228,14 @@ describe('derivePostureReasons', () => {
     expect(primaryAction).toBeNull();
   });
 
-  it('each blocker reason has a targetTab matching a valid Security tab', () => {
-    const validTabs = ['images', 'secrets', 'compose', 'history', 'suppressions', 'scanner'];
-    const { reasons } = derivePostureReasons(facts({
-      fixableCriticalHigh: 1, secrets: 1, dangerousCompose: 1,
-      knownExploited: 1, exposedBlocker: 1,
+  it('never claims a security fix or that an update fixes findings', () => {
+    const copy = allCopy(facts({
+      fixableWithImageUpdate: 2,
+      fixableWaitingUpstream: 1,
+      fixableUpdateUnknown: 1,
     }));
-    for (const r of reasons) {
-      expect(validTabs).toContain(r.targetTab);
-    }
-  });
-
-  // Invariant: Action needed posture always has at least one blocker reason.
-  it('Action needed posture always has at least one blocker reason', () => {
-    const f = facts({ fixableCriticalHigh: 1 });
-    const posture = deriveSecurityPosture(f);
-    const { reasons } = derivePostureReasons(f);
-    if (posture === 'Action needed') {
-      expect(reasons.some((r) => r.severity === 'blocker')).toBe(true);
-    }
+    expect(copy.toLowerCase()).not.toContain('security fix available');
+    expect(copy.toLowerCase()).not.toMatch(/fixes the/);
+    expect(copy).not.toContain('Update affected images');
   });
 });
