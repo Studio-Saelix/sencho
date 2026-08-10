@@ -12,6 +12,7 @@ import type { SecurityTab } from '@/lib/events';
 import type { ImageFilterValue } from '@/lib/severityStyles';
 import { reasonImageFilter, defaultReasonActionLabel } from './postureNavigation';
 import { triggerNodeImageUpdateCheck } from './imageUpdateRecheck';
+import { targetingFromTargets, type ImagesTargetingInput } from './imagesTargeting';
 import {
   RiskTrendChart,
   ActionPostureChart,
@@ -20,8 +21,13 @@ import {
 } from './SecurityCharts';
 import { ScanNodeLauncher } from './ScanNodeLauncher';
 
-/** Navigate to a security tab, optionally preselecting an Images filter. */
-type NavigateFn = (tab: SecurityTab, filter?: ImageFilterValue) => void;
+/** Navigate to a security tab, optionally with an Images severity filter and/or
+ *  posture targeting (image refs). */
+type NavigateFn = (
+  tab: SecurityTab,
+  filter?: ImageFilterValue,
+  targeting?: ImagesTargetingInput,
+) => void;
 
 interface OverviewTabProps {
   overview: SecurityOverview | null;
@@ -83,6 +89,13 @@ function reasonNavLabel(r: PostureReason): string {
   return `${r.actionLabel ?? defaultReasonActionLabel(r.targetTab)} →`;
 }
 
+function navigateReason(onNavigate: NavigateFn, reason: PostureReason): void {
+  const targeting = targetingFromTargets(reason.kind, reason.label, reason.targets);
+  // Prefer precise targets; severity filter is only the older-node fallback.
+  const filter = targeting ? undefined : reasonImageFilter(reason.kind);
+  onNavigate(reason.targetTab, filter, targeting);
+}
+
 function ReasonRow({
   reason,
   onNavigate,
@@ -116,7 +129,7 @@ function ReasonRow({
             ) : null}
             <button
               type="button"
-              onClick={() => onNavigate(reason.targetTab, reasonImageFilter(reason.kind))}
+              onClick={() => navigateReason(onNavigate, reason)}
               className="text-xs font-medium text-brand hover:underline whitespace-nowrap"
             >
               {reasonNavLabel(reason)}

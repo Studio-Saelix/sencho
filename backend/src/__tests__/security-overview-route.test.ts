@@ -89,6 +89,7 @@ function resetSecurity(): void {
   raw.prepare('DELETE FROM cve_suppressions').run();
   raw.prepare('DELETE FROM misconfig_acknowledgements').run();
   raw.prepare('DELETE FROM cve_intel').run();
+  raw.prepare('DELETE FROM stack_exposure').run();
 }
 
 describe('GET /api/security/overview', () => {
@@ -339,6 +340,94 @@ describe('GET /api/security/overview', () => {
   it('requires authentication', async () => {
     const res = await request(app).get('/api/security/overview');
     expect(res.status).toBe(401);
+  });
+
+  it('attaches public_exposure blocker targets for distinct exposed images', async () => {
+    const now = Date.now();
+    for (const ref of ['exp-a:1', 'exp-b:1', 'safe:1']) {
+      const scanId = db().createVulnerabilityScan({
+        node_id: 1, image_ref: ref, image_digest: `sha256:${ref}`, scanned_at: now,
+        total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+        unknown_count: 0, fixable_count: 1, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+        highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+        triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+      });
+      db().insertVulnerabilityDetails(scanId, [{
+        vulnerability_id: `CVE-2024-${ref}`, pkg_name: 'x', installed_version: '1', fixed_version: '2',
+        severity: 'CRITICAL', title: null, description: null, primary_url: null,
+      }]);
+    }
+    db().upsertStackExposure(1, 'web', JSON.stringify({
+      stack: 'web',
+      computedAt: now,
+      services: [
+        { service: 'a', image: 'exp-a:1', publiclyExposed: true, reason: 'published-port', bindings: ['0.0.0.0:80/tcp'] },
+        { service: 'b', image: 'exp-b:1', publiclyExposed: true, reason: 'published-port', bindings: ['0.0.0.0:81/tcp'] },
+        { service: 'c', image: 'safe:1', publiclyExposed: false, reason: null, bindings: [] },
+      ],
+    }), now);
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    const blocker = (res.body.postureReasons as Array<{ kind: string; severity: string; targets?: Array<{ imageRef: string }> }>)
+      .find((r) => r.kind === 'public_exposure' && r.severity === 'blocker');
+    expect(blocker?.targets?.map((t) => t.imageRef).sort()).toEqual(['exp-a:1', 'exp-b:1']);
+    expect(res.body.primaryAction.targets.map((t: { imageRef: string }) => t.imageRef).sort()).toEqual(['exp-a:1', 'exp-b:1']);
+  });
+
+  it('excludes fully suppressed exposed images from blocker and review targets', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'suppressed-exp:1', image_digest: 'sha256:se', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 1, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [{
+      vulnerability_id: 'CVE-2024-SUPP', pkg_name: 'x', installed_version: '1', fixed_version: '2',
+      severity: 'CRITICAL', title: null, description: null, primary_url: null,
+    }]);
+    db().createCveSuppression({
+      cve_id: 'CVE-2024-SUPP', pkg_name: null, image_pattern: null, reason: 'accepted',
+      created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0, status: 'accepted',
+    });
+    db().upsertStackExposure(1, 'web', JSON.stringify({
+      stack: 'web',
+      computedAt: now,
+      services: [
+        { service: 'a', image: 'suppressed-exp:1', publiclyExposed: true, reason: 'published-port', bindings: ['0.0.0.0:80/tcp'] },
+      ],
+    }), now);
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.publiclyExposed).toBe(1);
+    const exposureReasons = (res.body.postureReasons as Array<{ kind: string; targets?: unknown[] }>)
+      .filter((r) => r.kind === 'public_exposure');
+    expect(exposureReasons).toHaveLength(0);
+  });
+
+  it('attaches known_exploited targets as distinct image refs', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'kev-img:1', image_digest: 'sha256:kevimg', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [{
+      vulnerability_id: 'CVE-2024-KEVT', pkg_name: 'lib', installed_version: '1', fixed_version: null,
+      severity: 'CRITICAL', title: null, description: null, primary_url: null,
+    }]);
+    db().replaceKev([{ cve_id: 'CVE-2024-KEVT', date_added: '2024-01-01' }], now);
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    const kev = (res.body.postureReasons as Array<{ kind: string; targets?: Array<{ imageRef: string }> }>)
+      .find((r) => r.kind === 'known_exploited');
+    expect(kev?.targets).toEqual([{ imageRef: 'kev-img:1' }]);
   });
 });
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Boxes, AlertTriangle, Search, ArrowUp, ArrowDown, ChevronLeft, ChevronRight, ShieldCheck, Loader2 } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
@@ -14,6 +14,7 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { ImageScanRow, ImageFilterChips, type ImageFilterChip } from './SecurityMobile';
+import type { ImagesTargetingState } from './imagesTargeting';
 import type { ScanSummary, ScanDetailTab, ScannerKind } from '@/types/security';
 
 // Mobile severity chips. 'FIXABLE' is a phone-only pseudo-filter (the desktop
@@ -66,6 +67,41 @@ const FILTER_OPTIONS: Array<{ value: ImageFilterValue; label: string }> = [
 
 const findingsCount = (s: ScanSummary) => s.total + (s.secret_count ?? 0) + (s.misconfig_count ?? 0);
 
+function PubliclyExposedBadge() {
+  return (
+    <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-warning whitespace-nowrap">
+      Publicly exposed
+    </span>
+  );
+}
+
+const CLEAR_BTN_CLASS =
+  'text-xs font-medium text-brand hover:underline whitespace-nowrap shrink-0';
+
+function TargetingClearButton({ onClear }: { onClear?: () => void }) {
+  if (!onClear) return null;
+  return (
+    <button type="button" onClick={onClear} className={CLEAR_BTN_CLASS}>
+      Clear
+    </button>
+  );
+}
+
+function TargetingBannerFrame({ children }: { children: ReactNode }) {
+  return (
+    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card/60 px-3 py-2.5 max-md:px-3">
+      {children}
+    </div>
+  );
+}
+
+function formatTargetingTitle(label: string, matched: number, total: number): string {
+  if (matched < total) {
+    return `${label} · ${matched} of ${total} affected images`;
+  }
+  return `${label} · ${matched} affected image${matched === 1 ? '' : 's'}`;
+}
+
 interface ImagesTabProps {
   summaries: Record<string, ScanSummary>;
   loading: boolean;
@@ -78,12 +114,32 @@ interface ImagesTabProps {
   scanningRef: string | null;
   onScan: (imageRef: string, scanners: ScannerKind[]) => void;
   /** Preselects the severity/fixable filter, e.g. when arriving from an
-   *  overview "fixable findings" link. Applied whenever the value changes. */
+   *  overview "fixable findings" link. */
   initialFilter?: ImageFilterValue;
+  /** Bumped by SecurityView on each filter/targeting navigation so re-apply works. */
+  filterToken?: number;
+  /** Parent-owned posture targeting (R1). */
+  targeting?: ImagesTargetingState | null;
+  onClearTargeting?: () => void;
+  /** When true, targeting banner discloses the overview pass may be incomplete. */
+  posturePartial?: boolean;
 }
 
 /** Latest-scan index for real images (stack/config scans live in Compose risks). */
-export function ImagesTab({ summaries, loading, error, onInspect, canScan, scanningRef, onScan, initialFilter }: ImagesTabProps) {
+export function ImagesTab({
+  summaries,
+  loading,
+  error,
+  onInspect,
+  canScan,
+  scanningRef,
+  onScan,
+  initialFilter,
+  filterToken = 0,
+  targeting = null,
+  onClearTargeting,
+  posturePartial = false,
+}: ImagesTabProps) {
   const isMobile = useIsMobile();
   const [search, setSearch] = useState('');
   const [severity, setSeverity] = useState<ImageFilterValue>(initialFilter ?? 'all');
@@ -95,23 +151,57 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
 
   useEffect(() => { if (searchExpanded) searchInputRef.current?.focus(); }, [searchExpanded]);
 
-  // Apply an externally-driven filter (e.g. an overview "fixable" deep link).
-  // Keyed on the incoming value so re-navigating to the same filter re-applies.
+  // Apply externally-driven filter / targeting. Keyed on tokens so repeating the
+  // same navigation re-applies after Clear (R1) and resets severity (R2).
   useEffect(() => {
-    if (initialFilter) { setSeverity(initialFilter); setPage(0); }
-  }, [initialFilter]);
+    if (targeting) {
+      setSeverity(initialFilter ?? 'all');
+      setPage(0);
+      return;
+    }
+    if (initialFilter) {
+      setSeverity(initialFilter);
+      setPage(0);
+    }
+  }, [targeting?.token, filterToken, targeting, initialFilter]);
+
+  const imageSummaries = useMemo(
+    () => Object.values(summaries).filter((s) => !s.image_ref.startsWith('stack:')),
+    [summaries],
+  );
+
+  const matchedTargetMeta = useMemo(() => {
+    if (!targeting || targeting.imageRefs.length === 0) {
+      return { active: false as const, matched: 0, total: 0, refs: null as Set<string> | null };
+    }
+    const wanted = new Set(targeting.imageRefs);
+    const refs = new Set(
+      imageSummaries.filter((s) => wanted.has(s.image_ref)).map((s) => s.image_ref),
+    );
+    return {
+      active: true as const,
+      matched: refs.size,
+      total: targeting.imageRefs.length,
+      refs,
+      label: targeting.label,
+    };
+  }, [targeting, imageSummaries]);
+
+  // R3: never filter the list at zero matches; fall back to the full list.
+  const targetingActive = matchedTargetMeta.active && matchedTargetMeta.matched > 0;
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
-    return Object.values(summaries)
-      .filter((s) => !s.image_ref.startsWith('stack:'))
+    const targetRefs = targetingActive ? matchedTargetMeta.refs : null;
+    return imageSummaries
+      .filter((s) => (targetRefs ? targetRefs.has(s.image_ref) : true))
       .filter((s) => (term ? s.image_ref.toLowerCase().includes(term) : true))
       .filter((s) => {
         if (severity === 'all') return true;
         if (severity === 'FIXABLE') return s.fixable > 0;
         return getSeverityKey(s) === severity;
       });
-  }, [summaries, search, severity]);
+  }, [imageSummaries, search, severity, targetingActive, matchedTargetMeta.refs]);
 
   const sorted = useMemo(() => {
     const dir = sortDir === 'asc' ? 1 : -1;
@@ -155,19 +245,70 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
     );
   }
 
-  const noImagesAtAll = Object.values(summaries).every((s) => s.image_ref.startsWith('stack:'));
+  const noImagesAtAll = imageSummaries.length === 0;
   if (noImagesAtAll) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-center">
-        <Boxes className="w-12 h-12 text-muted-foreground/50 mb-4" strokeWidth={1.5} />
-        <h3 className="text-lg font-medium mb-1">No scanned images</h3>
-        <p className="text-sm text-muted-foreground">Scan an image from Resources to see its findings here.</p>
+      <div className="space-y-4">
+        {targeting && onClearTargeting ? (
+          <TargetingBannerFrame>
+            <div className="flex items-start gap-3 justify-between">
+              <p className="text-xs text-stat-subtitle">
+                None of the images for this Security action have a scan summary on this node.
+              </p>
+              <TargetingClearButton onClear={onClearTargeting} />
+            </div>
+          </TargetingBannerFrame>
+        ) : null}
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <Boxes className="w-12 h-12 text-muted-foreground/50 mb-4" strokeWidth={1.5} />
+          <h3 className="text-lg font-medium mb-1">No scanned images</h3>
+          <p className="text-sm text-muted-foreground">Scan an image from Resources to see its findings here.</p>
+        </div>
       </div>
+    );
+  }
+
+  let targetingBanner: ReactNode = null;
+  if (matchedTargetMeta.active && matchedTargetMeta.matched === 0) {
+    targetingBanner = (
+      <TargetingBannerFrame>
+        <div className="flex items-start gap-3 justify-between">
+          <p className="text-xs text-stat-subtitle">
+            None of the images for this Security action have a scan summary on this node. Showing all images.
+          </p>
+          <TargetingClearButton onClear={onClearTargeting} />
+        </div>
+      </TargetingBannerFrame>
+    );
+  } else if (matchedTargetMeta.active && matchedTargetMeta.matched > 0) {
+    const partialMatch = matchedTargetMeta.matched < matchedTargetMeta.total;
+    targetingBanner = (
+      <TargetingBannerFrame>
+        <div className="flex items-start gap-3 justify-between">
+          <div className="min-w-0">
+            <p className="font-mono text-xs text-stat-value">
+              {formatTargetingTitle(
+                matchedTargetMeta.label,
+                matchedTargetMeta.matched,
+                matchedTargetMeta.total,
+              )}
+            </p>
+            <p className="text-xs text-stat-subtitle mt-0.5">
+              Showing images responsible for the current Security action.
+              {partialMatch ? ' An affected image has no scan summary on this node.' : ''}
+              {posturePartial ? ' The overview pass may be incomplete.' : ''}
+            </p>
+          </div>
+          <TargetingClearButton onClear={onClearTargeting} />
+        </div>
+      </TargetingBannerFrame>
     );
   }
 
   return (
     <div className="space-y-4">
+      {targetingBanner}
+
       {isMobile ? (
         <>
           {search !== '' || searchExpanded ? (
@@ -263,9 +404,12 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
               {pageItems.map((s) => (
                 <TableRow key={s.image_ref} className="hover:bg-muted/30 transition-colors">
                   <TableCell className="font-mono text-xs truncate max-w-[280px]">
-                    <button type="button" className="hover:text-brand truncate block w-full text-left" onClick={() => onInspect(s.scan_id, 'vulns')}>
-                      {s.image_ref}
-                    </button>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <button type="button" className="hover:text-brand truncate block text-left min-w-0" onClick={() => onInspect(s.scan_id, 'vulns')}>
+                        {s.image_ref}
+                      </button>
+                      {s.publicly_exposed === true ? <PubliclyExposedBadge /> : null}
+                    </div>
                   </TableCell>
                   <TableCell className="max-md:hidden">
                     <button

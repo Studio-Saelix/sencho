@@ -238,4 +238,47 @@ describe('derivePostureReasons', () => {
     expect(copy.toLowerCase()).not.toMatch(/fixes the/);
     expect(copy).not.toContain('Update affected images');
   });
+
+  it('attaches targets to reasons and omits them when empty', () => {
+    const { reasons, primaryAction } = derivePostureReasons(facts({
+      exposedBlocker: 2,
+      exposedBlockerTargets: ['a:1', 'b:1'],
+      exposedReview: 1,
+      exposedReviewTargets: ['c:1'],
+      knownExploited: 3,
+      knownExploitedTargets: ['kev:1'],
+    }));
+    const blocker = reasons.find((r) => r.kind === 'public_exposure' && r.severity === 'blocker');
+    const review = reasons.find((r) => r.kind === 'public_exposure' && r.severity === 'review');
+    const kev = reasons.find((r) => r.kind === 'known_exploited');
+    expect(blocker?.targets).toEqual([{ imageRef: 'a:1' }, { imageRef: 'b:1' }]);
+    expect(review?.targets).toEqual([{ imageRef: 'c:1' }]);
+    expect(kev?.targets).toEqual([{ imageRef: 'kev:1' }]);
+    expect(primaryAction?.kind).toBe('known_exploited');
+    expect(primaryAction?.targets).toEqual([{ imageRef: 'kev:1' }]);
+  });
+
+  it('omits targets field when target arrays are empty', () => {
+    const { reasons } = derivePostureReasons(facts({
+      exposedBlocker: 1,
+      exposedBlockerTargets: [],
+    }));
+    const blocker = reasons.find((r) => r.kind === 'public_exposure');
+    expect(blocker?.targets).toBeUndefined();
+  });
+
+  it('primaryAction for public_exposure copies blocker targets, not review', () => {
+    const { primaryAction } = derivePostureReasons(facts({
+      exposedBlocker: 1,
+      exposedBlockerTargets: ['block:1'],
+      exposedReview: 2,
+      exposedReviewTargets: ['rev:1', 'rev:2'],
+    }));
+    expect(primaryAction).toEqual({
+      label: 'Review public exposure',
+      targetTab: 'images',
+      kind: 'public_exposure',
+      targets: [{ imageRef: 'block:1' }],
+    });
+  });
 });

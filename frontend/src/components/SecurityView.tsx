@@ -18,12 +18,17 @@ import { Masthead, type Tone } from './mobile/mobile-ui';
 import { SecurityMobileTabs, type SecurityMobileTab } from './security/SecurityMobile';
 import type { SecurityTab } from '@/lib/events';
 import type { ImageFilterValue } from '@/lib/severityStyles';
-import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, ExploitIntelFinding, FleetRole } from '@/types/security';
+import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, ExploitIntelFinding, FleetRole, PostureReasonKind } from '@/types/security';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SuppressionsPanel } from './settings/SuppressionsPanel';
 import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
 import { OverviewTab } from './security/OverviewTab';
 import { reasonImageFilter } from './security/postureNavigation';
+import {
+  targetingFromTargets,
+  type ImagesTargetingInput,
+  type ImagesTargetingState,
+} from './security/imagesTargeting';
 import { ImagesTab } from './security/ImagesTab';
 import { FindingsTab } from './security/FindingsTab';
 import { ScanPolicyManager } from './security/ScanPolicyManager';
@@ -86,16 +91,52 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
 
   const [inspectScanId, setInspectScanId] = useState<number | null>(null);
   const [inspectInitialTab, setInspectInitialTab] = useState<ScanDetailTab | undefined>(undefined);
-  // Filter to preselect on the Images tab when arriving from an overview link
-  // (e.g. "fixable findings"). Null leaves the Images tab on its own default.
+  // Filter / targeting for the Images tab when arriving from an overview link.
+  // SecurityView owns both; ImagesTab never clears targeting locally (R1).
   const [imagesFilter, setImagesFilter] = useState<ImageFilterValue | null>(null);
+  const [imagesFilterToken, setImagesFilterToken] = useState(0);
+  const [imagesTargeting, setImagesTargeting] = useState<ImagesTargetingState | null>(null);
 
-  // Navigate between security tabs, optionally preselecting an Images filter so
-  // an overview action link lands on exactly the affected images.
-  const handleNavigate = useCallback((tab: SecurityTab, filter?: ImageFilterValue) => {
-    if (tab === 'images' && filter) setImagesFilter(filter);
+  // Navigate between security tabs, optionally preselecting an Images filter
+  // and/or posture targeting so an overview action lands on the affected images.
+  const handleNavigate = useCallback((
+    tab: SecurityTab,
+    filter?: ImageFilterValue,
+    targeting?: ImagesTargetingInput,
+  ) => {
+    if (tab === 'images') {
+      if (targeting && targeting.imageRefs.length > 0) {
+        setImagesTargeting((prev) => ({
+          kind: targeting.kind,
+          label: targeting.label,
+          imageRefs: targeting.imageRefs,
+          token: (prev?.token ?? 0) + 1,
+        }));
+        // R2: targeting navigation resets severity unless an explicit filter is supplied.
+        setImagesFilter(filter ?? null);
+        setImagesFilterToken((t) => t + 1);
+      } else {
+        setImagesTargeting(null);
+        if (filter) {
+          setImagesFilter(filter);
+          setImagesFilterToken((t) => t + 1);
+        }
+      }
+    }
     onTabChange(tab);
   }, [onTabChange]);
+
+  const clearImagesTargeting = useCallback(() => {
+    setImagesTargeting(null);
+  }, []);
+
+  // Drop Images drill-down state when the active node changes so refs from
+  // node A never filter node B's summaries.
+  useEffect(() => {
+    setImagesTargeting(null);
+    setImagesFilter(null);
+    setImagesFilterToken(0);
+  }, [activeNode?.id]);
 
   const onInspect = useCallback((scanId: number, initialTab?: ScanDetailTab) => {
     setInspectInitialTab(initialTab);
@@ -284,6 +325,10 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               scanningRef={scanningRef}
               onScan={scanImage}
               initialFilter={imagesFilter ?? undefined}
+              filterToken={imagesFilterToken}
+              targeting={imagesTargeting}
+              onClearTargeting={clearImagesTargeting}
+              posturePartial={overview?.posturePartial === true}
             />
           </CapabilityGate>
         </TabsContent>
@@ -392,10 +437,19 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         {overview?.posture === 'Action needed' && overview.primaryAction ? (
           <button
             type="button"
-            onClick={() => handleNavigate(
-              overview.primaryAction!.targetTab,
-              reasonImageFilter(overview.primaryAction!.kind),
-            )}
+            onClick={() => {
+              const action = overview.primaryAction!;
+              const blockerLabel = overview.postureReasons?.find(
+                (r) => r.kind === action.kind && r.severity === 'blocker',
+              )?.label ?? action.label;
+              const targeting = targetingFromTargets(
+                action.kind as PostureReasonKind,
+                blockerLabel,
+                action.targets,
+              );
+              const filter = targeting ? undefined : reasonImageFilter(action.kind);
+              handleNavigate(action.targetTab, filter, targeting);
+            }}
             className="text-xs font-medium text-brand hover:underline whitespace-nowrap"
           >
             {overview.primaryAction.label} →

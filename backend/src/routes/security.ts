@@ -715,8 +715,31 @@ securityRouter.get(
 
 securityRouter.get('/image-summaries', authMiddleware, (req: Request, res: Response) => {
   try {
-    const summaries = DatabaseService.getInstance().getImageScanSummaries(req.nodeId);
-    res.json(summaries);
+    const db = DatabaseService.getInstance();
+    const summaries = db.getImageScanSummaries(req.nodeId);
+    // Route-level enrichment only: leave DatabaseService ScanSummary untouched.
+    // Fail soft on exposure read/parse so Resources and post-scan refresh stay up.
+    let exposedMap: Map<string, boolean> | null = null;
+    try {
+      const exposures = db.getStackExposures(req.nodeId);
+      exposedMap = buildExposedImageMap(
+        exposures.map((r) => {
+          try { return JSON.parse(r.descriptor); } catch { return null; }
+        }).filter(Boolean),
+      );
+    } catch (err) {
+      console.error('[Security] Failed to load stack exposures for image summaries:', err);
+      exposedMap = null;
+    }
+    const out: Record<string, (typeof summaries)[string] & { publicly_exposed: boolean | null }> = {};
+    for (const [key, summary] of Object.entries(summaries)) {
+      const exposed = exposedMap?.get(summary.image_ref);
+      out[key] = {
+        ...summary,
+        publicly_exposed: exposed === undefined ? null : exposed,
+      };
+    }
+    res.json(out);
   } catch (error) {
     console.error('[Security] Failed to fetch image summaries:', error);
     res.status(500).json({ error: 'Failed to fetch image summaries' });
@@ -822,10 +845,16 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       else kevByImage.set(f.image_ref, [f]);
     }
     let knownExploited = 0;
+    const knownExploitedTargets: string[] = [];
     for (const [imageRef, group] of kevByImage) {
+      let imageHasKev = false;
       for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
-        if (!e.suppressed) knownExploited += 1;
+        if (!e.suppressed) {
+          knownExploited += 1;
+          imageHasKev = true;
+        }
       }
+      if (imageHasKev) knownExploitedTargets.push(imageRef);
     }
 
     const acks = db.getMisconfigAcknowledgements();
@@ -855,6 +884,8 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
     let publiclyExposed = 0;
     let exposedBlocker = 0;
     let exposedReview = 0;
+    const exposedBlockerTargets: string[] = [];
+    const exposedReviewTargets: string[] = [];
     for (const [imageRef, group] of critHighByImage) {
       if (exposedMap.get(imageRef) !== true) continue;
       publiclyExposed += 1;
@@ -872,9 +903,14 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
           break;
         }
       }
-      if (!hasUnsuppressedFinding) continue; // fully dismissed
-      if (hasKevOrFixOrHighEpss) exposedBlocker += 1;
-      else exposedReview += 1;
+      if (!hasUnsuppressedFinding) continue; // fully dismissed (still counted in publiclyExposed)
+      if (hasKevOrFixOrHighEpss) {
+        exposedBlocker += 1;
+        exposedBlockerTargets.push(imageRef);
+      } else {
+        exposedReview += 1;
+        exposedReviewTargets.push(imageRef);
+      }
     }
 
     const failedScans = db.countScansByStatus(req.nodeId, 'failed');
@@ -898,9 +934,15 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       staleScans,
       failedScans,
       needsReview,
+      fixableWithImageUpdateTargets: remediation.imageRefsUpdateAvailable,
+      fixableWaitingUpstreamTargets: remediation.imageRefsWaitingUpstream,
+      fixableUpdateUnknownTargets: remediation.imageRefsUpdateUnknown,
+      knownExploitedTargets,
+      exposedBlockerTargets,
+      exposedReviewTargets,
     };
     const posture = deriveSecurityPosture(postureFacts);
-    const { reasons: postureReasons, primaryAction } = derivePostureReasons(postureFacts);
+    const { reasons: postureReasons, primaryAction, targetsTruncated } = derivePostureReasons(postureFacts);
     const actionable = remediation.fixableWithImageUpdate + secrets + dangerousCompose + knownExploited + publiclyExposed;
 
     const overview: SecurityOverviewResponse = {
@@ -938,7 +980,7 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       notAffected,
       actionable,
       posture,
-      posturePartial: critHigh.truncated || kevFindings.truncated || highMisconfigs.truncated,
+      posturePartial: critHigh.truncated || kevFindings.truncated || highMisconfigs.truncated || targetsTruncated,
       postureReasons,
       primaryAction,
       updateChecksDisabled: remediation.updateChecksDisabled,

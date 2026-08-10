@@ -64,6 +64,9 @@ describe('classifyImageRemediation', () => {
       fixableWaitingUpstream: 0,
       fixableUpdateUnknown: 0,
       updateChecksDisabled: false,
+      imageRefsUpdateAvailable: ['nginx:1.25'],
+      imageRefsWaitingUpstream: [],
+      imageRefsUpdateUnknown: [],
     });
   });
 
@@ -162,6 +165,9 @@ describe('classifyImageRemediation', () => {
       fixableWaitingUpstream: 0,
       fixableUpdateUnknown: 5,
       updateChecksDisabled: true,
+      imageRefsUpdateAvailable: [],
+      imageRefsWaitingUpstream: [],
+      imageRefsUpdateUnknown: ['nginx:1.25'],
     });
   });
 
@@ -240,5 +246,24 @@ describe('classifyImageRemediation', () => {
     });
     expect(facts.fixableWithImageUpdate).toBe(0);
     expect(facts.fixableUpdateUnknown).toBe(1);
+  });
+
+  it('returns raw finding image_ref even when stack match used normalizeImageRef', () => {
+    const facts = classifyImageRemediation({
+      findings: [{ image_ref: 'nginx:1.14', count: 2 }],
+      details: {
+        web: detail([service({
+          service: 'app',
+          image: 'docker.io/library/nginx:1.14',
+          hasUpdate: true,
+          checkStatus: 'ok',
+        })]),
+      },
+      checksEnabled: true,
+      freshnessWindowMs: FRESH_WINDOW,
+      now: NOW,
+    });
+    expect(facts.fixableWithImageUpdate).toBe(2);
+    expect(facts.imageRefsUpdateAvailable).toEqual(['nginx:1.14']);
   });
 });

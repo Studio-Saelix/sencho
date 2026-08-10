@@ -186,4 +186,31 @@ describe('ImagesTab (mobile)', () => {
     expect(screen.getByText('fix:1')).toBeInTheDocument();
     expect(screen.queryByText('nofix:1')).not.toBeInTheDocument();
   });
+
+  it('shows the targeting banner and Clear on the phone layout', async () => {
+    installMatchMedia(true);
+    const onClear = vi.fn();
+    render(
+      <ImagesTab
+        {...base}
+        onClearTargeting={onClear}
+        targeting={{
+          kind: 'public_exposure',
+          label: 'Publicly exposed affected images',
+          imageRefs: ['exp:1'],
+          token: 1,
+        }}
+        summaries={asMap(
+          summary({ image_ref: 'exp:1', scan_id: 1, publicly_exposed: true, critical: 2 }),
+          summary({ image_ref: 'other:1', scan_id: 2 }),
+        )}
+      />,
+    );
+    expect(screen.getByText(/Publicly exposed affected images · 1 affected image/)).toBeInTheDocument();
+    expect(screen.getByText('exp:1')).toBeInTheDocument();
+    expect(screen.getByText('Publicly exposed')).toBeInTheDocument();
+    expect(screen.queryByText('other:1')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(onClear).toHaveBeenCalled();
+  });
 });

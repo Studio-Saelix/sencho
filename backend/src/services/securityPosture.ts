@@ -25,6 +25,9 @@
  *  likelihood, matching the frontend threshold in SecurityCharts.tsx. */
 export const HIGH_EPSS_THRESHOLD = 0.1;
 
+/** Max distinct image targets attached to one posture reason (overview payload). */
+export const POSTURE_TARGET_CAP = 200;
+
 export type SecurityPostureState = 'Action needed' | 'Monitoring' | 'Secure' | 'Unknown';
 
 /** Valid Security tab targets for a posture reason CTA. Mirrors the frontend
@@ -51,6 +54,11 @@ export type PostureReasonKind =
 
 export type PostureReasonSeverity = 'blocker' | 'review' | 'info';
 
+/** One concrete image identity behind a posture reason (raw scan image_ref). */
+export interface PostureTarget {
+  imageRef: string;
+}
+
 export interface PostureReason {
   kind: PostureReasonKind;
   count: number;
@@ -63,6 +71,8 @@ export interface PostureReason {
   targetTab: SecurityPostureTargetTab;
   /** Optional Open-button label; when omitted the UI derives from targetTab. */
   actionLabel?: string;
+  /** Distinct images that produced this reason. Omitted when empty or unknown. */
+  targets?: PostureTarget[];
 }
 
 export interface PostureAction {
@@ -71,6 +81,8 @@ export interface PostureAction {
   /** The reason kind that produced this action, so the UI can target the
    *  affected items precisely (e.g. filter Images to fixable findings). */
   kind: PostureReasonKind;
+  /** Same targets as the reason that produced this action, when available. */
+  targets?: PostureTarget[];
 }
 
 export interface SecurityPostureFacts {
@@ -120,6 +132,53 @@ export interface SecurityPostureFacts {
   failedScans: number;
   /** Findings with triage_status = 'needs_review' (not dismissed, not accepted). */
   needsReview: number;
+  /** Raw image_refs for Images-bound reasons (optional; omit when unknown). */
+  fixableWithImageUpdateTargets?: string[];
+  fixableWaitingUpstreamTargets?: string[];
+  fixableUpdateUnknownTargets?: string[];
+  knownExploitedTargets?: string[];
+  exposedBlockerTargets?: string[];
+  exposedReviewTargets?: string[];
+}
+
+/** Cap and convert raw refs to PostureTarget[]. Returns truncated=true when capped. */
+export function capPostureTargets(refs: string[] | undefined): {
+  targets: PostureTarget[] | undefined;
+  truncated: boolean;
+} {
+  if (!refs || refs.length === 0) return { targets: undefined, truncated: false };
+  return {
+    targets: refs.slice(0, POSTURE_TARGET_CAP).map((imageRef) => ({ imageRef })),
+    truncated: refs.length > POSTURE_TARGET_CAP,
+  };
+}
+
+function withTargets(
+  reason: PostureReason,
+  refs: string[] | undefined,
+): { reason: PostureReason; truncated: boolean } {
+  const { targets, truncated } = capPostureTargets(refs);
+  if (!targets) return { reason, truncated: false };
+  return { reason: { ...reason, targets }, truncated };
+}
+
+/** Default CTA label when a reason omits actionLabel. */
+const DEFAULT_ACTION_LABEL: Partial<Record<PostureReasonKind, string>> = {
+  fixable_cve: 'Review update',
+  known_exploited: 'Review exploited findings',
+  secret: 'Review detected secrets',
+  dangerous_compose: 'Review Compose risks',
+  public_exposure: 'Review public exposure',
+};
+
+function actionFrom(reason: PostureReason): PostureAction {
+  const action: PostureAction = {
+    label: reason.actionLabel ?? DEFAULT_ACTION_LABEL[reason.kind] ?? 'Open',
+    targetTab: reason.targetTab,
+    kind: reason.kind,
+  };
+  if (reason.targets) action.targets = reason.targets;
+  return action;
 }
 
 /**
@@ -137,14 +196,26 @@ const VIEW_FINDINGS_LABEL = 'View findings';
 export function derivePostureReasons(f: SecurityPostureFacts): {
   reasons: PostureReason[];
   primaryAction: PostureAction | null;
+  /** True when any attached target list was capped at POSTURE_TARGET_CAP. */
+  targetsTruncated: boolean;
 } {
   const reasons: PostureReason[] = [];
   let primaryAction: PostureAction | null = null;
+  let targetsTruncated = false;
+
+  const push = (base: PostureReason, refs?: string[]): void => {
+    const { reason, truncated } = withTargets(base, refs);
+    if (truncated) targetsTruncated = true;
+    reasons.push(reason);
+    if (!primaryAction && reason.severity === 'blocker') {
+      primaryAction = actionFrom(reason);
+    }
+  };
 
   // Blockers. Each of these can keep the masthead red.
 
   if (f.fixableWithImageUpdate > 0) {
-    const r: PostureReason = {
+    push({
       kind: 'fixable_cve',
       count: f.fixableWithImageUpdate,
       severity: 'blocker',
@@ -152,67 +223,57 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
       description: 'Critical or High findings have a newer image available to review. This does not prove the candidate removes the findings.',
       targetTab: 'images',
       actionLabel: 'Review update',
-    };
-    reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Review update', targetTab: r.targetTab, kind: r.kind };
+    }, f.fixableWithImageUpdateTargets);
   }
 
   if (f.knownExploited > 0) {
-    const r: PostureReason = {
+    push({
       kind: 'known_exploited',
       count: f.knownExploited,
       severity: 'blocker',
       label: 'Known-exploited findings',
       description: 'Findings in the CISA Known Exploited Vulnerabilities catalog.',
       targetTab: 'images',
-    };
-    reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Review exploited findings', targetTab: r.targetTab, kind: r.kind };
+    }, f.knownExploitedTargets);
   }
 
   if (f.secrets > 0) {
-    const r: PostureReason = {
+    push({
       kind: 'secret',
       count: f.secrets,
       severity: 'blocker',
       label: 'Detected secrets',
       description: 'Images with exposed credentials or keys. Review on the Secrets tab.',
       targetTab: 'secrets',
-    };
-    reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Review detected secrets', targetTab: r.targetTab, kind: r.kind };
+    });
   }
 
   if (f.dangerousCompose > 0) {
-    const r: PostureReason = {
+    push({
       kind: 'dangerous_compose',
       count: f.dangerousCompose,
       severity: 'blocker',
       label: 'Unacknowledged Compose risks',
       description: 'High-severity misconfigurations that have not been acknowledged.',
       targetTab: 'compose',
-    };
-    reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Review Compose risks', targetTab: r.targetTab, kind: r.kind };
+    });
   }
 
   if (f.exposedBlocker > 0) {
-    const r: PostureReason = {
+    push({
       kind: 'public_exposure',
       count: f.exposedBlocker,
       severity: 'blocker',
       label: 'Publicly exposed affected images',
       description: 'Images with fixable, known-exploited, or elevated-EPSS findings published on a public interface.',
       targetTab: 'images',
-    };
-    reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Review public exposure', targetTab: r.targetTab, kind: r.kind };
+    }, f.exposedBlockerTargets);
   }
 
   // Review items. These appear in-page but do not force a red masthead.
 
   if (f.exposedReview > 0) {
-    reasons.push({
+    push({
       kind: 'public_exposure',
       count: f.exposedReview,
       severity: 'review',
@@ -220,11 +281,11 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
       description: 'Images published on a public interface with no fix, no KEV, and no elevated EPSS.',
       targetTab: 'images',
       actionLabel: VIEW_FINDINGS_LABEL,
-    });
+    }, f.exposedReviewTargets);
   }
 
   if (f.needsReview > 0) {
-    reasons.push({
+    push({
       kind: 'needs_review',
       count: f.needsReview,
       severity: 'review',
@@ -237,7 +298,7 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
   // Info items. Context only, never red.
 
   if (f.fixableWaitingUpstream > 0) {
-    reasons.push({
+    push({
       kind: 'waiting_upstream',
       count: f.fixableWaitingUpstream,
       severity: 'info',
@@ -245,11 +306,11 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
       description: 'Package fixes exist for findings in this image, but Sencho cannot currently identify a newer image to apply under its latest authoritative check.',
       targetTab: 'images',
       actionLabel: VIEW_FINDINGS_LABEL,
-    });
+    }, f.fixableWaitingUpstreamTargets);
   }
 
   if (f.fixableUpdateUnknown > 0) {
-    reasons.push({
+    push({
       kind: 'update_check_uncertain',
       count: f.fixableUpdateUnknown,
       severity: 'info',
@@ -259,11 +320,11 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
         : 'Package fixes exist, but Sencho could not establish whether an applicable image update is available (partial, failed, stale, not checkable, or unmatched image).',
       targetTab: 'images',
       actionLabel: VIEW_FINDINGS_LABEL,
-    });
+    }, f.fixableUpdateUnknownTargets);
   }
 
   if (f.staleScans > 0) {
-    reasons.push({
+    push({
       kind: 'stale_scan',
       count: f.staleScans,
       severity: 'info',
@@ -274,7 +335,7 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
   }
 
   if (f.failedScans > 0) {
-    reasons.push({
+    push({
       kind: 'failed_scan',
       count: f.failedScans,
       severity: 'info',
@@ -284,7 +345,7 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
     });
   }
 
-  return { reasons, primaryAction };
+  return { reasons, primaryAction, targetsTruncated };
 }
 
 /**

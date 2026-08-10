@@ -195,6 +195,8 @@ export interface ScanSummary {
   fixable: number;
   secret_count: number;
   misconfig_count: number;
+  /** Tri-state Compose exposure from cached stack descriptors (route enrichment). */
+  publicly_exposed?: boolean | null;
 }
 
 export interface ScanPolicy {
@@ -267,6 +269,11 @@ export type PostureReasonKind =
   | 'failed_scan'
   | 'needs_review';
 
+/** One concrete image identity behind a posture reason (raw scan image_ref). */
+export interface PostureTarget {
+  imageRef: string;
+}
+
 /** One structured reason explaining why the security posture is what it is. */
 export interface PostureReason {
   kind: PostureReasonKind;
@@ -277,6 +284,8 @@ export interface PostureReason {
   targetTab: SecurityTab;
   /** Optional Open-button label; when omitted the UI derives from targetTab. */
   actionLabel?: string;
+  /** Distinct images that produced this reason. Omitted when empty or unknown. */
+  targets?: PostureTarget[];
 }
 
 /** Highest-priority action for the masthead CTA. */
@@ -286,6 +295,8 @@ export interface PostureAction {
   /** The reason kind behind this action, so the UI can target the affected
    *  items precisely (e.g. filter Images to fixable findings). */
   kind: PostureReasonKind;
+  /** Same targets as the reason that produced this action, when available. */
+  targets?: PostureTarget[];
 }
 
 /** Node-scoped security posture rollup for the Security page Overview. */

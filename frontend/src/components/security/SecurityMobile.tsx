@@ -139,7 +139,12 @@ export function ImageScanRow({ summary, onInspect }: {
       <span className={cn('h-[7px] w-[7px] shrink-0 rounded-full', SEVERITY_DOT_CLASSES[severityKey])} aria-hidden />
       <span className="min-w-0 flex-1">
         <span className="block truncate font-mono text-[13px] text-stat-value">{summary.image_ref}</span>
-        <span className="mt-px block font-mono text-[10px] text-stat-icon">scanned {formatTimeAgo(summary.scanned_at)}</span>
+        <span className="mt-px flex items-center gap-2 font-mono text-[10px] text-stat-icon">
+          <span>scanned {formatTimeAgo(summary.scanned_at)}</span>
+          {summary.publicly_exposed === true ? (
+            <span className="uppercase tracking-[0.14em] text-warning">Publicly exposed</span>
+          ) : null}
+        </span>
       </span>
       <span className="flex shrink-0 items-center gap-1">
         {summary.critical > 0 && <CountTag tone="destructive">{summary.critical}C</CountTag>}

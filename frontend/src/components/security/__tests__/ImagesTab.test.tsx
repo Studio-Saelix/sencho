@@ -136,3 +136,170 @@ it('shows the scan action only when scanning is allowed', () => {
   rerender(<ImagesTab {...base} canScan={true} summaries={data} />);
   expect(screen.getByLabelText('Scan nginx:1')).toBeInTheDocument();
 });
+
+it('filters to posture targets and shows a clearable banner', async () => {
+  const onClear = vi.fn();
+  render(
+    <ImagesTab
+      {...base}
+      onClearTargeting={onClear}
+      targeting={{
+        kind: 'public_exposure',
+        label: 'Publicly exposed affected images',
+        imageRefs: ['exp:1'],
+        token: 1,
+      }}
+      summaries={asMap(
+        summary({ image_ref: 'exp:1', scan_id: 1, publicly_exposed: true }),
+        summary({ image_ref: 'other:1', scan_id: 2 }),
+      )}
+    />,
+  );
+  expect(screen.getByText(/Publicly exposed affected images · 1 affected image/)).toBeInTheDocument();
+  expect(screen.getByText('exp:1')).toBeInTheDocument();
+  expect(screen.queryByText('other:1')).not.toBeInTheDocument();
+  expect(screen.getByText('Publicly exposed')).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  expect(onClear).toHaveBeenCalled();
+});
+
+it('shows matched of total when a target has no summary', () => {
+  render(
+    <ImagesTab
+      {...base}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'public_exposure',
+        label: 'Publicly exposed affected images',
+        imageRefs: ['a:1', 'b:1', 'missing:1'],
+        token: 1,
+      }}
+      summaries={asMap(
+        summary({ image_ref: 'a:1', scan_id: 1 }),
+        summary({ image_ref: 'b:1', scan_id: 2 }),
+      )}
+    />,
+  );
+  expect(screen.getByText(/2 of 3 affected images/)).toBeInTheDocument();
+  expect(screen.getByText(/no scan summary on this node/i)).toBeInTheDocument();
+});
+
+it('does not change the banner count when searching within the targeted set', async () => {
+  render(
+    <ImagesTab
+      {...base}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'public_exposure',
+        label: 'Publicly exposed affected images',
+        imageRefs: ['a:1', 'b:1'],
+        token: 1,
+      }}
+      summaries={asMap(
+        summary({ image_ref: 'a:1', scan_id: 1 }),
+        summary({ image_ref: 'b:1', scan_id: 2 }),
+      )}
+    />,
+  );
+  expect(screen.getByText(/· 2 affected images/)).toBeInTheDocument();
+  await userEvent.click(screen.getByLabelText('Search images'));
+  await userEvent.type(screen.getByPlaceholderText('Search images...'), 'a:');
+  expect(screen.getByText('a:1')).toBeInTheDocument();
+  expect(screen.queryByText('b:1')).not.toBeInTheDocument();
+  expect(screen.getByText(/· 2 affected images/)).toBeInTheDocument();
+});
+
+it('re-applies targeting when the token increments after Clear', () => {
+  const data = asMap(
+    summary({ image_ref: 'exp:1', scan_id: 1 }),
+    summary({ image_ref: 'other:1', scan_id: 2 }),
+  );
+  const { rerender } = render(
+    <ImagesTab
+      {...base}
+      targeting={{ kind: 'public_exposure', label: 'Public exposure', imageRefs: ['exp:1'], token: 1 }}
+      onClearTargeting={vi.fn()}
+      summaries={data}
+    />,
+  );
+  expect(screen.queryByText('other:1')).not.toBeInTheDocument();
+  rerender(
+    <ImagesTab
+      {...base}
+      targeting={null}
+      onClearTargeting={vi.fn()}
+      summaries={data}
+    />,
+  );
+  expect(screen.getByText('other:1')).toBeInTheDocument();
+  rerender(
+    <ImagesTab
+      {...base}
+      targeting={{ kind: 'public_exposure', label: 'Public exposure', imageRefs: ['exp:1'], token: 2 }}
+      onClearTargeting={vi.fn()}
+      summaries={data}
+    />,
+  );
+  expect(screen.queryByText('other:1')).not.toBeInTheDocument();
+  expect(screen.getByText('exp:1')).toBeInTheDocument();
+});
+
+it('resets a stale FIXABLE filter when targeting arrives without a filter', () => {
+  const data = asMap(
+    summary({ image_ref: 'exp:1', scan_id: 1, fixable: 0, highest_severity: 'HIGH', high: 1, total: 1 }),
+    summary({ image_ref: 'fix:1', scan_id: 2, fixable: 2, highest_severity: 'HIGH', high: 2, total: 2 }),
+  );
+  const { rerender } = render(
+    <ImagesTab {...base} initialFilter="FIXABLE" filterToken={1} summaries={data} />,
+  );
+  expect(screen.getByText('fix:1')).toBeInTheDocument();
+  expect(screen.queryByText('exp:1')).not.toBeInTheDocument();
+  rerender(
+    <ImagesTab
+      {...base}
+      initialFilter={undefined}
+      filterToken={2}
+      targeting={{ kind: 'public_exposure', label: 'Public exposure', imageRefs: ['exp:1'], token: 1 }}
+      onClearTargeting={vi.fn()}
+      summaries={data}
+    />,
+  );
+  expect(screen.getByText('exp:1')).toBeInTheDocument();
+});
+
+it('falls back without a banner when targets are missing', () => {
+  render(
+    <ImagesTab
+      {...base}
+      summaries={asMap(
+        summary({ image_ref: 'a:1', scan_id: 1 }),
+        summary({ image_ref: 'b:1', scan_id: 2 }),
+      )}
+    />,
+  );
+  expect(screen.queryByText(/affected image/)).not.toBeInTheDocument();
+  expect(screen.getByText('a:1')).toBeInTheDocument();
+  expect(screen.getByText('b:1')).toBeInTheDocument();
+});
+
+it('shows a clearable zero-match note and keeps the full list', () => {
+  render(
+    <ImagesTab
+      {...base}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'public_exposure',
+        label: 'Publicly exposed affected images',
+        imageRefs: ['missing:1'],
+        token: 1,
+      }}
+      summaries={asMap(
+        summary({ image_ref: 'a:1', scan_id: 1 }),
+        summary({ image_ref: 'b:1', scan_id: 2 }),
+      )}
+    />,
+  );
+  expect(screen.getByText(/scan summary on this node/i)).toBeInTheDocument();
+  expect(screen.getByText('a:1')).toBeInTheDocument();
+  expect(screen.getByText('b:1')).toBeInTheDocument();
+});

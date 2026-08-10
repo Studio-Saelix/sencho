@@ -53,7 +53,9 @@ only monitoring items remain (waiting for an upstream image, update availability
 images with no fix or known exploit, findings awaiting triage, stale or failed scans) the card is
 titled **Review queue** and lists them with View findings shortcuts (and Check again when image
 update availability could not be established and you can manage the node), so the operator can see
-what to keep an eye on without a permanent alarm.
+what to keep an eye on without a permanent alarm. Shortcuts that carry affected image identities
+open Images already narrowed to those images, with a clearable banner so you can return to the full
+list.
 
 The charts then lead with prioritization rather than raw severity: a **risk trend** for context,
 an **action posture** breakdown (fixable, known-exploited, needs-review, accepted, not-affected), a
@@ -73,7 +75,10 @@ clear "overview unavailable" state and the other tabs keep working.
   <img src="/images/security/images-tab.png" alt="Security page Images tab listing scanned images with Image, Findings, Last scan, Severity, and Actions columns; findings show critical/high counts and fixable totals, and one row shows a Clean badge." />
 </Frame>
 
-Image findings list every scanned image on the active node with its highest severity. Selecting an
+Image findings list every scanned image on the active node with its highest severity. When you arrive
+from a Security posture action that named specific images, the list opens already filtered to those
+images and shows a clearable banner with the reason and count. Images published on a public interface
+also carry a **Publicly exposed** evidence label on the row. Selecting an
 image opens the full scan report, where you can review vulnerabilities, triage a CVE, compare against
 another scan, and export a CSV, a SARIF file, or an SBOM. Each finding carries evidence tags so you can
 tell scary from exploitable at a glance: known-exploited (KEV), EPSS exploitation probability, the
