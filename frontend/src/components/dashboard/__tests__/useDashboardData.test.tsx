@@ -28,6 +28,7 @@ vi.mock('@/lib/utils', async () => {
 });
 
 import { useDashboardData } from '../useDashboardData';
+import { __resetStackStatusesFetchForTests } from '@/lib/stackStatusesFetch';
 
 function okJson(payload: unknown): Response {
   return new Response(JSON.stringify(payload), {
@@ -49,6 +50,7 @@ const SYS_PAYLOAD = {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  __resetStackStatusesFetchForTests();
   apiFetchMock.mockReset();
   apiFetchMock.mockImplementation((endpoint: string) => {
     if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
@@ -65,6 +67,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  __resetStackStatusesFetchForTests();
   vi.useRealTimers();
 });
 
@@ -169,7 +172,7 @@ describe('useDashboardData stackStatuses load states', () => {
     expect(result.current.stackStatusesLoadStatus).toBe('success');
   });
 
-  it('ignores an older soft success after a newer foreground retry', async () => {
+  it('joins a foreground retry onto an in-flight soft statuses fetch', async () => {
     const resolvers: Array<(r: Response) => void> = [];
     apiFetchMock.mockImplementation((endpoint: string) => {
       if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
@@ -200,27 +203,20 @@ describe('useDashboardData stackStatuses load states', () => {
       result.current.retryStackStatuses();
       await Promise.resolve();
     });
-    expect(resolvers).toHaveLength(3);
+    // Soft and foreground share one in-flight /stacks/statuses.
+    expect(resolvers).toHaveLength(2);
 
-    const softMap = { 'old.yml': { status: 'exited' as const } };
-    const retryMap = { 'web.yml': { status: 'running' as const } };
+    const sharedMap = { 'web.yml': { status: 'running' as const } };
     await act(async () => {
-      resolvers[1](okJson(softMap));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(result.current.stackStatuses).toEqual({});
-
-    await act(async () => {
-      resolvers[2](okJson(retryMap));
+      resolvers[1](okJson(sharedMap));
       await Promise.resolve();
       await Promise.resolve();
     });
     expect(result.current.stackStatusesLoadStatus).toBe('success');
-    expect(result.current.stackStatuses).toEqual(retryMap);
+    expect(result.current.stackStatuses).toEqual(sharedMap);
   });
 
-  it('ignores an older soft failure after a newer foreground retry success', async () => {
+  it('lets the newer foreground generation commit a shared in-flight failure', async () => {
     const resolvers: Array<(r: Response) => void> = [];
     apiFetchMock.mockImplementation((endpoint: string) => {
       if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
@@ -237,7 +233,7 @@ describe('useDashboardData stackStatuses load states', () => {
     expect(resolvers).toHaveLength(1);
 
     await act(async () => {
-      resolvers[0](okJson({}));
+      resolvers[0](okJson({ 'web.yml': { status: 'running' } }));
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -250,23 +246,16 @@ describe('useDashboardData stackStatuses load states', () => {
       result.current.retryStackStatuses();
       await Promise.resolve();
     });
-    expect(resolvers).toHaveLength(3);
-
-    const retryMap = { 'web.yml': { status: 'running' as const } };
-    await act(async () => {
-      resolvers[2](okJson(retryMap));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(result.current.stackStatuses).toEqual(retryMap);
+    expect(resolvers).toHaveLength(2);
 
     await act(async () => {
       resolvers[1](new Response('nope', { status: 500 }));
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(result.current.stackStatusesLoadStatus).toBe('success');
-    expect(result.current.stackStatuses).toEqual(retryMap);
+    // Soft's older generation is ignored; the foreground generation commits
+    // the shared failure as an error status (rows are not cleared on failure).
+    expect(result.current.stackStatusesLoadStatus).toBe('error');
   });
 
   it('lets a slow foreground statuses response commit after soft poll and invalidate ticks', async () => {
@@ -381,5 +370,31 @@ describe('useDashboardData stackStatuses load states', () => {
 
     expect(result.current.stackStatusesLoadStatus).toBe('error');
     expect(result.current.stackStatuses).toEqual({});
+  });
+
+  it('does not fetch statuses while activeNode is unresolved and stays loading', async () => {
+    useNodesMock.mockReturnValue({
+      activeNode: undefined,
+      nodes: [],
+    });
+
+    const { result, rerender } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(countFetchCalls('/stacks/statuses')).toBe(0);
+    expect(result.current.stackStatusesLoadStatus).toBe('loading');
+    expect(result.current.stackStatuses).toEqual({});
+
+    useNodesMock.mockReturnValue({
+      activeNode: { id: 7, name: 'Remote', type: 'remote' },
+      nodes: [{ id: 7, name: 'Remote', type: 'remote' }],
+    });
+    rerender();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(countFetchCalls('/stacks/statuses')).toBe(1);
+    expect(apiFetchMock.mock.calls.some(
+      (call) => call[0] === '/stacks/statuses' && call[1]?.nodeId === 7,
+    )).toBe(true);
   });
 });
