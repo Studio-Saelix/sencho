@@ -19,7 +19,12 @@ import { deriveSecurityPosture, derivePostureReasons, HIGH_EPSS_THRESHOLD, type 
 import { classifyImageRemediation, type RemediationFindingInput } from '../services/securityImageRemediation';
 import { ImageUpdateService } from '../services/ImageUpdateService';
 import { buildExposedImageMap, type StackExposure } from '../services/preflight/exposure';
-import { buildSecurityExposureTargets } from '../services/securityExposureTargets';
+import {
+  buildImageExposureContextRows,
+  buildSecurityExposureTargets,
+  packageExposureContextsByImage,
+  type PackagedImageExposureContexts,
+} from '../services/securityExposureTargets';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
@@ -721,23 +726,44 @@ securityRouter.get('/image-summaries', authMiddleware, (req: Request, res: Respo
     // Route-level enrichment only: leave DatabaseService ScanSummary untouched.
     // Fail soft on exposure read/parse so Resources and post-scan refresh stay up.
     let exposedMap: Map<string, boolean> | null = null;
+    let packagedByImage: Map<string, PackagedImageExposureContexts> | null = null;
     try {
       const exposures = db.getStackExposures(req.nodeId);
-      exposedMap = buildExposedImageMap(
-        exposures.map((r) => {
-          try { return JSON.parse(r.descriptor); } catch { return null; }
-        }).filter(Boolean),
+      const parsed = exposures.map((r) => {
+        try { return JSON.parse(r.descriptor) as StackExposure; } catch { return null; }
+      }).filter((e): e is StackExposure => e !== null);
+      exposedMap = buildExposedImageMap(parsed);
+      const exposedRefs = new Set(
+        [...exposedMap].filter(([, exposed]) => exposed).map(([ref]) => ref),
       );
+      if (exposedRefs.size > 0) {
+        packagedByImage = packageExposureContextsByImage(
+          buildImageExposureContextRows({
+            nodeId: req.nodeId,
+            exposures: parsed,
+            qualifyingImageRefs: exposedRefs,
+          }),
+        );
+      }
     } catch (err) {
       console.error('[Security] Failed to load stack exposures for image summaries:', err);
       exposedMap = null;
+      packagedByImage = null;
     }
-    const out: Record<string, (typeof summaries)[string] & { publicly_exposed: boolean | null }> = {};
+    type EnrichedSummary = (typeof summaries)[string] & {
+      publicly_exposed: boolean | null;
+    } & Partial<PackagedImageExposureContexts>;
+    const out: Record<string, EnrichedSummary> = {};
     for (const [key, summary] of Object.entries(summaries)) {
       const exposed = exposedMap?.get(summary.image_ref);
+      const publicly_exposed = exposed === undefined ? null : exposed;
+      const packaged = publicly_exposed === true
+        ? packagedByImage?.get(summary.image_ref)
+        : undefined;
       out[key] = {
         ...summary,
-        publicly_exposed: exposed === undefined ? null : exposed,
+        publicly_exposed,
+        ...packaged,
       };
     }
     res.json(out);

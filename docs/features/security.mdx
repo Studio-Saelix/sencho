@@ -78,15 +78,19 @@ clear "overview unavailable" state and the other tabs keep working.
 Image findings list every scanned image on the active node with its highest severity. When you arrive
 from a Security posture action that named specific images, the list opens already filtered to those
 images and shows a clearable banner with the reason and count. Images configured beyond loopback (or
-with host networking) carry a **Network exposed** evidence label on the row. That label means Compose
-declares non-loopback reachability; it is not a claim that the service is reachable from the Internet.
-Exposure intent comes from Networking (public, LAN, reverse proxy, and so on). Intentional
-classification still counts as a risk factor for vulnerable images. Compose Doctor acknowledgements
-are a separate triage surface and do not clear Security exposure posture. Selecting an
-image opens the full scan report, where you can review vulnerabilities, triage a CVE, compare against
-another scan, and export a CSV, a SARIF file, or an SBOM. Each finding carries evidence tags so you can
-tell scary from exploitable at a glance: known-exploited (KEV), EPSS exploitation probability, the
-CVSS score, and vendor "will not fix" status, alongside whether a fix is available.
+with host networking) carry a **Network exposed** evidence label on the row during ordinary browsing,
+not only after a posture drill-down. That label means Compose declares non-loopback reachability; it
+is not a claim that the service is reachable from the Internet. When Networking exposure intent is
+available, the row also shows compact intent evidence (for example Intent: public, Intent mismatch,
+or Intent: not classified). Open Networking from that evidence to review or correct classification
+for the matching stack. Intentional public exposure still raises the security relevance of
+vulnerable findings: open the image, remediate, or triage individual findings (Accepted risk and
+related decisions). There is no image-level "accept residual risk" control. Compose Doctor
+acknowledgements are a separate triage surface and do not clear Security exposure posture. Selecting
+an image opens the full scan report, where you can review vulnerabilities, triage a finding, compare
+against another scan, and export a CSV, a SARIF file, or an SBOM. Each finding carries evidence tags
+so you can tell scary from exploitable at a glance: known-exploited (KEV), EPSS exploitation
+probability, the CVSS score, and vendor "will not fix" status, alongside whether a fix is available.
 
 <Frame>
   <img src="/images/security/scan-report.png" alt="Vulnerability scan report sheet for nginx:latest showing 340 vulnerabilities, a Critical/High/Medium/Low summary, Compare/CSV/SARIF/SBOM export buttons, and a findings table with CVE, package, severity, installed version, and per-row EPSS and CVSS evidence tags." />

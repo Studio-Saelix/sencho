@@ -287,6 +287,8 @@ describe('derivePostureReasons', () => {
       exposedBlocker: 1,
       exposedBlockerTargets: [{
         imageRef: 'a:1',
+        stackName: 'web',
+        serviceName: 'api',
         intentStatus: 'set',
         exposureIntent: 'public',
       }],
@@ -333,10 +335,24 @@ describe('derivePostureReasons', () => {
   it('unavailable intent does not add the unset classification sentence', () => {
     const { reasons } = derivePostureReasons(facts({
       exposedBlocker: 1,
-      exposedBlockerTargets: [{ imageRef: 'a:1', intentStatus: 'unavailable' }],
+      exposedBlockerTargets: [{ imageRef: 'a:1', stackName: 's', serviceName: 'a', intentStatus: 'unavailable' }],
     }));
     const blocker = reasons.find((r) => r.kind === 'public_exposure');
     expect(blocker?.description).not.toContain('not yet classified');
     expect(blocker?.description).toContain('beyond loopback');
+    expect(blocker?.description).not.toContain('intentionally classified in Networking');
+  });
+
+  it('does not claim absolute intentional when one context is unavailable', () => {
+    const { reasons } = derivePostureReasons(facts({
+      exposedBlocker: 1,
+      exposedBlockerTargets: [
+        { imageRef: 'a:1', stackName: 's', serviceName: 'a', intentStatus: 'set', exposureIntent: 'public' },
+        { imageRef: 'a:1', stackName: 's', serviceName: 'b', intentStatus: 'unavailable' },
+      ],
+    }));
+    const blocker = reasons.find((r) => r.kind === 'public_exposure');
+    expect(blocker?.description).not.toMatch(/Exposure is intentionally classified in Networking/);
+    expect(blocker?.description).toContain('could not be verified');
   });
 });

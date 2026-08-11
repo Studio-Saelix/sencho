@@ -124,6 +124,17 @@ export interface MisconfigAcknowledgement {
   active: boolean;
 }
 
+/** Triage decision states (mirrors the backend TriageStatus). */
+export type TriageStatus =
+  | 'needs_review' | 'affected' | 'not_affected' | 'accepted' | 'fixed' | 'false_positive' | 'ignored';
+
+/** OpenVEX-aligned justification codes (mirrors the backend TriageJustification). */
+export type TriageJustification =
+  | 'vulnerable_code_not_in_execute_path'
+  | 'vulnerable_code_not_present'
+  | 'component_not_present'
+  | 'inline_mitigations_already_exist';
+
 export interface VulnerabilityDetail {
   id: number;
   scan_id: number;
@@ -153,18 +164,10 @@ export interface VulnerabilityDetail {
   suppressed?: boolean;
   suppression_id?: number;
   suppression_reason?: string;
+  /** Finding-scoped triage decision when joined from suppressions. */
+  triage_status?: TriageStatus;
+  triage_justification?: TriageJustification | null;
 }
-
-/** Triage decision states (mirrors the backend TriageStatus). */
-export type TriageStatus =
-  | 'needs_review' | 'affected' | 'not_affected' | 'accepted' | 'fixed' | 'false_positive' | 'ignored';
-
-/** OpenVEX-aligned justification codes (mirrors the backend TriageJustification). */
-export type TriageJustification =
-  | 'vulnerable_code_not_in_execute_path'
-  | 'vulnerable_code_not_present'
-  | 'component_not_present'
-  | 'inline_mitigations_already_exist';
 
 export interface CveSuppression {
   id: number;
@@ -179,6 +182,24 @@ export interface CveSuppression {
   active: boolean;
   status?: TriageStatus;
   justification?: TriageJustification | null;
+}
+
+/** Per stack/service exposure + Networking intent for a standing image summary. */
+export interface ImageExposureContext {
+  stackName: string;
+  serviceName: string;
+  exposureReason: 'published-port' | 'host-network' | null;
+  exposureIntent?: 'internal' | 'same-node' | 'lan' | 'reverse-proxy' | 'public' | 'temporary' | 'unknown';
+  intentStatus: 'set' | 'unset' | 'unavailable';
+  intentConflict?: boolean;
+}
+
+/** Pre-cap aggregates for standing exposure conclusions (authoritative vs display slice). */
+export interface ImageExposureContextSummary {
+  hasConflict: boolean;
+  hasUnclassified: boolean;
+  hasUnavailable: boolean;
+  allKnownIntentional: boolean;
 }
 
 export interface ScanSummary {
@@ -197,6 +218,13 @@ export interface ScanSummary {
   misconfig_count: number;
   /** Tri-state Compose exposure from cached stack descriptors (route enrichment). */
   publicly_exposed?: boolean | null;
+  /** Capped display list of stack/service exposure contexts (when publicly exposed). */
+  exposure_contexts?: ImageExposureContext[];
+  /** Total contexts after dedupe, before display cap. */
+  exposure_context_count?: number;
+  exposure_contexts_truncated?: boolean;
+  /** Aggregates over the full list before cap; prefer for banner/row conclusions. */
+  exposure_context_summary?: ImageExposureContextSummary;
 }
 
 export interface ScanPolicy {

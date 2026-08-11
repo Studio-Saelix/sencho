@@ -149,8 +149,7 @@ it('filters to posture targets and shows a clearable banner', async () => {
         imageRefs: ['exp:1'],
         targets: [{
           imageRef: 'exp:1',
-          intentStatus: 'set',
-          exposureIntent: 'public',
+          intentStatus: 'unset',
         }],
         token: 1,
       }}
@@ -164,9 +163,117 @@ it('filters to posture targets and shows a clearable banner', async () => {
   expect(screen.getByText('exp:1')).toBeInTheDocument();
   expect(screen.queryByText('other:1')).not.toBeInTheDocument();
   expect(screen.getByText('Network exposed')).toBeInTheDocument();
-  expect(screen.getByText('Intent: public')).toBeInTheDocument();
+  expect(screen.getByText('Intent: not classified')).toBeInTheDocument();
   await userEvent.click(screen.getByRole('button', { name: 'Clear' }));
   expect(onClear).toHaveBeenCalled();
+});
+
+it('shows standing intent evidence without targeting', () => {
+  render(
+    <ImagesTab
+      {...base}
+      nodeId={7}
+      summaries={asMap(summary({
+        image_ref: 'exp:1',
+        scan_id: 1,
+        publicly_exposed: true,
+        exposure_contexts: [{
+          stackName: 'web',
+          serviceName: 'api',
+          exposureReason: 'published-port',
+          intentStatus: 'set',
+          exposureIntent: 'public',
+        }],
+        exposure_context_count: 1,
+        exposure_context_summary: {
+          hasConflict: false,
+          hasUnclassified: false,
+          hasUnavailable: false,
+          allKnownIntentional: true,
+        },
+      }))}
+    />,
+  );
+  expect(screen.getByText('Network exposed')).toBeInTheDocument();
+  expect(screen.getByText('Intent: public')).toBeInTheDocument();
+});
+
+it('shows Network exposed only for mixed-version payloads without contexts', () => {
+  render(
+    <ImagesTab
+      {...base}
+      summaries={asMap(summary({
+        image_ref: 'exp:1',
+        scan_id: 1,
+        publicly_exposed: true,
+      }))}
+    />,
+  );
+  expect(screen.getByText('Network exposed')).toBeInTheDocument();
+  expect(screen.queryByText(/Intent:/)).not.toBeInTheDocument();
+});
+
+it('shows absolute intentional targeting banner with View networking only', () => {
+  render(
+    <ImagesTab
+      {...base}
+      nodeId={3}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'public_exposure',
+        label: 'Network-exposed affected images',
+        imageRefs: ['exp:1'],
+        targets: [{
+          imageRef: 'exp:1',
+          stackName: 'web',
+          serviceName: 'api',
+          intentStatus: 'set',
+          exposureIntent: 'public',
+        }],
+        token: 1,
+      }}
+      summaries={asMap(summary({ image_ref: 'exp:1', scan_id: 1, publicly_exposed: true }))}
+    />,
+  );
+  expect(screen.getByText('Exposure is intentional')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Review findings/i })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Network-exposed affected images ·/)).not.toBeInTheDocument();
+});
+
+it('shows partial intentional targeting banner copy', () => {
+  render(
+    <ImagesTab
+      {...base}
+      nodeId={3}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'public_exposure',
+        label: 'Network-exposed affected images',
+        imageRefs: ['exp:1'],
+        targets: [
+          {
+            imageRef: 'exp:1',
+            stackName: 'web',
+            serviceName: 'api',
+            intentStatus: 'set',
+            exposureIntent: 'lan',
+          },
+          {
+            imageRef: 'exp:1',
+            stackName: 'web',
+            serviceName: 'worker',
+            intentStatus: 'unavailable',
+          },
+        ],
+        token: 1,
+      }}
+      summaries={asMap(summary({ image_ref: 'exp:1', scan_id: 1, publicly_exposed: true }))}
+    />,
+  );
+  expect(screen.getByText('Known exposure is intentional')).toBeInTheDocument();
+  expect(screen.getByText(/could not be verified for 1 service/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
 });
 
 it('shows matched of total when a target has no summary', () => {

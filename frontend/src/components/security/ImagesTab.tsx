@@ -14,10 +14,17 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { ImageScanRow, ImageFilterChips, type ImageFilterChip } from './SecurityMobile';
+import { NetworkExposedControl, ViewNetworkingAction } from './ExposureNetworking';
 import type { ImagesTargetingState } from './imagesTargeting';
-import { primaryExposureIntentEvidence } from './imagesTargeting';
-import type { ScanSummary, ScanDetailTab, ScannerKind } from '@/types/security';
-
+import {
+  intentionalBannerKind,
+  standingExposureContexts,
+  standingIntentEvidence,
+  targetingExposureContexts,
+  allTargetingExposureContexts,
+  primaryExposureIntentEvidence,
+} from './imagesTargeting';
+import type { ImageExposureContext, ScanSummary, ScanDetailTab, ScannerKind } from '@/types/security';
 // Mobile severity chips. 'FIXABLE' is a phone-only pseudo-filter (the desktop
 // Combobox never emits it), so the shared filter logic treats it specially.
 const MOBILE_FILTER_CHIPS: ImageFilterChip[] = [
@@ -68,34 +75,33 @@ const FILTER_OPTIONS: Array<{ value: ImageFilterValue; label: string }> = [
 
 const findingsCount = (s: ScanSummary) => s.total + (s.secret_count ?? 0) + (s.misconfig_count ?? 0);
 
-function NetworkExposedBadge() {
-  return (
-    <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-warning whitespace-nowrap">
-      Network exposed
-    </span>
-  );
-}
-
-/** Intent evidence line for a targeted image, or null when not applicable. */
+/** Intent evidence for standing summary, or targeting when active for this image. */
 function intentEvidenceFor(
+  summary: ScanSummary,
   targeting: ImagesTargetingState | null | undefined,
-  imageRef: string,
 ): string | null {
-  if (!targeting?.imageRefs.includes(imageRef)) return null;
-  return primaryExposureIntentEvidence(targeting.targets, imageRef);
+  if (targeting?.imageRefs.includes(summary.image_ref)) {
+    const fromTargets = primaryExposureIntentEvidence(targeting.targets, summary.image_ref);
+    if (fromTargets) return fromTargets;
+  }
+  return standingIntentEvidence(summary);
 }
 
-function IntentEvidenceLine({
-  targeting,
-  imageRef,
-}: {
-  targeting: ImagesTargetingState | null | undefined;
-  imageRef: string;
-}) {
-  const intentLine = intentEvidenceFor(targeting, imageRef);
-  if (!intentLine) return null;
+function contextsForImage(
+  summary: ScanSummary,
+  targeting: ImagesTargetingState | null | undefined,
+): ImageExposureContext[] {
+  if (targeting?.imageRefs.includes(summary.image_ref)) {
+    const fromTargets = targetingExposureContexts(targeting.targets, summary.image_ref);
+    if (fromTargets.length > 0) return fromTargets;
+  }
+  return standingExposureContexts(summary);
+}
+
+function IntentEvidenceLine({ line }: { line: string | null }) {
+  if (!line) return null;
   return (
-    <div className="mt-0.5 font-mono text-[10px] text-stat-icon truncate">{intentLine}</div>
+    <div className="mt-0.5 font-mono text-[10px] text-stat-icon truncate">{line}</div>
   );
 }
 
@@ -126,6 +132,42 @@ function formatTargetingTitle(label: string, matched: number, total: number): st
   return `${label} · ${matched} affected image${matched === 1 ? '' : 's'}`;
 }
 
+function IntentionalExposureBanner({
+  kind,
+  unavailableCount,
+  contexts,
+  nodeId,
+  onClear,
+}: {
+  kind: 'absolute' | 'partial';
+  unavailableCount: number;
+  contexts: ImageExposureContext[];
+  nodeId?: number;
+  onClear?: () => void;
+}) {
+  const title = kind === 'absolute'
+    ? 'Exposure is intentional'
+    : 'Known exposure is intentional';
+  const body = kind === 'absolute'
+    ? 'This workload is classified in Networking. Exposure still increases the security relevance of these findings. Open an affected image below to remediate or triage its findings.'
+    : `Known exposure contexts are intentionally classified. Intent could not be verified for ${unavailableCount} service${unavailableCount === 1 ? '' : 's'}. Open an affected image below to remediate or triage its findings.`;
+
+  return (
+    <TargetingBannerFrame>
+      <div className="flex items-start gap-3 justify-between">
+        <div className="min-w-0">
+          <p className="font-mono text-xs text-stat-value">{title}</p>
+          <p className="text-xs text-stat-subtitle mt-0.5">{body}</p>
+        </div>
+        <div className="flex items-center gap-3 shrink-0">
+          <ViewNetworkingAction contexts={contexts} nodeId={nodeId} />
+          <TargetingClearButton onClear={onClear} />
+        </div>
+      </div>
+    </TargetingBannerFrame>
+  );
+}
+
 interface ImagesTabProps {
   summaries: Record<string, ScanSummary>;
   loading: boolean;
@@ -147,6 +189,8 @@ interface ImagesTabProps {
   onClearTargeting?: () => void;
   /** When true, targeting banner discloses the overview pass may be incomplete. */
   posturePartial?: boolean;
+  /** Active node id for SENCHO_OPEN_STACK Networking navigation. */
+  nodeId?: number;
 }
 
 /** Latest-scan index for real images (stack/config scans live in Compose risks). */
@@ -163,6 +207,7 @@ export function ImagesTab({
   targeting = null,
   onClearTargeting,
   posturePartial = false,
+  nodeId,
 }: ImagesTabProps) {
   const isMobile = useIsMobile();
   const [search, setSearch] = useState('');
@@ -304,29 +349,45 @@ export function ImagesTab({
         </div>
       </TargetingBannerFrame>
     );
-  } else if (matchedTargetMeta.active && matchedTargetMeta.matched > 0) {
-    const partialMatch = matchedTargetMeta.matched < matchedTargetMeta.total;
-    targetingBanner = (
-      <TargetingBannerFrame>
-        <div className="flex items-start gap-3 justify-between">
-          <div className="min-w-0">
-            <p className="font-mono text-xs text-stat-value">
-              {formatTargetingTitle(
-                matchedTargetMeta.label,
-                matchedTargetMeta.matched,
-                matchedTargetMeta.total,
-              )}
-            </p>
-            <p className="text-xs text-stat-subtitle mt-0.5">
-              Showing images responsible for the current Security action.
-              {partialMatch ? ' An affected image has no scan summary on this node.' : ''}
-              {posturePartial ? ' The overview pass may be incomplete.' : ''}
-            </p>
+  } else if (matchedTargetMeta.active && matchedTargetMeta.matched > 0 && targeting) {
+    const intentional = targeting.kind === 'public_exposure'
+      ? intentionalBannerKind(targeting.targets, { truncated: posturePartial })
+      : { kind: 'none' as const, unavailableCount: 0 };
+
+    if (intentional.kind === 'absolute' || intentional.kind === 'partial') {
+      targetingBanner = (
+        <IntentionalExposureBanner
+          kind={intentional.kind}
+          unavailableCount={intentional.unavailableCount}
+          contexts={allTargetingExposureContexts(targeting.targets)}
+          nodeId={nodeId}
+          onClear={onClearTargeting}
+        />
+      );
+    } else {
+      const partialMatch = matchedTargetMeta.matched < matchedTargetMeta.total;
+      targetingBanner = (
+        <TargetingBannerFrame>
+          <div className="flex items-start gap-3 justify-between">
+            <div className="min-w-0">
+              <p className="font-mono text-xs text-stat-value">
+                {formatTargetingTitle(
+                  matchedTargetMeta.label,
+                  matchedTargetMeta.matched,
+                  matchedTargetMeta.total,
+                )}
+              </p>
+              <p className="text-xs text-stat-subtitle mt-0.5">
+                Showing images responsible for the current Security action.
+                {partialMatch ? ' An affected image has no scan summary on this node.' : ''}
+                {posturePartial ? ' The overview pass may be incomplete.' : ''}
+              </p>
+            </div>
+            <TargetingClearButton onClear={onClearTargeting} />
           </div>
-          <TargetingClearButton onClear={onClearTargeting} />
-        </div>
-      </TargetingBannerFrame>
-    );
+        </TargetingBannerFrame>
+      );
+    }
   }
 
   return (
@@ -371,7 +432,9 @@ export function ImagesTab({
                   key={s.image_ref}
                   summary={s}
                   onInspect={onInspect}
-                  intentEvidence={intentEvidenceFor(targeting, s.image_ref)}
+                  intentEvidence={intentEvidenceFor(s, targeting)}
+                  exposureContexts={contextsForImage(s, targeting)}
+                  nodeId={nodeId}
                 />
               ))}
             </div>
@@ -437,9 +500,14 @@ export function ImagesTab({
                       <button type="button" className="hover:text-brand truncate block text-left min-w-0" onClick={() => onInspect(s.scan_id, 'vulns')}>
                         {s.image_ref}
                       </button>
-                      {s.publicly_exposed === true ? <NetworkExposedBadge /> : null}
+                      {s.publicly_exposed === true ? (
+                        <NetworkExposedControl
+                          contexts={contextsForImage(s, targeting)}
+                          nodeId={nodeId}
+                        />
+                      ) : null}
                     </div>
-                    <IntentEvidenceLine targeting={targeting} imageRef={s.image_ref} />
+                    <IntentEvidenceLine line={intentEvidenceFor(s, targeting)} />
                   </TableCell>
                   <TableCell className="max-md:hidden">
                     <button

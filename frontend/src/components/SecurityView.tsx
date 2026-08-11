@@ -330,6 +330,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               targeting={imagesTargeting}
               onClearTargeting={clearImagesTargeting}
               posturePartial={overview?.posturePartial === true}
+              nodeId={activeNode?.id}
             />
           </CapabilityGate>
         </TabsContent>

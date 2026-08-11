@@ -25,6 +25,7 @@ import {
   allTargetsIntentionallyClassified,
   anyTargetIntentConflict,
   anyTargetIntentUnset,
+  partialTargetsIntentionalWithUnavailable,
 } from './securityExposureTargets';
 import type { ExposureIntent } from './network/types';
 
@@ -184,16 +185,24 @@ export function capPostureTargets(refs: string[] | undefined): {
   };
 }
 
-/** Cap enriched target rows (imageRef+stack+service). */
+/** Cap enriched target rows (imageRef+stack+service), preferring conflict/unset/unavailable first. */
 export function capPostureTargetRows(rows: PostureTarget[] | undefined): {
   targets: PostureTarget[] | undefined;
   truncated: boolean;
 } {
   if (!rows || rows.length === 0) return { targets: undefined, truncated: false };
+  const sorted = [...rows].sort((a, b) => postureTargetExposureRank(a) - postureTargetExposureRank(b));
   return {
-    targets: rows.slice(0, POSTURE_TARGET_CAP),
+    targets: sorted.slice(0, POSTURE_TARGET_CAP),
     truncated: rows.length > POSTURE_TARGET_CAP,
   };
+}
+
+function postureTargetExposureRank(t: PostureTarget): number {
+  if (t.intentConflict) return 0;
+  if (t.intentStatus === 'unset') return 1;
+  if (t.intentStatus === 'unavailable') return 2;
+  return 3;
 }
 
 function attachCappedTargets(
@@ -239,14 +248,23 @@ const REVIEW_AFFECTED_IMAGES_LABEL = 'Review affected images';
 function networkExposureDescription(
   mode: 'blocker' | 'review',
   targets: PostureTarget[] | undefined,
+  truncated = false,
 ): string {
   const parts = [
     mode === 'blocker'
       ? 'Images with fixable, known-exploited, or elevated-EPSS findings are configured beyond loopback or with host networking.'
       : 'Images configured beyond loopback or with host networking have no fix, no KEV, and no elevated EPSS.',
   ];
-  if (allTargetsIntentionallyClassified(targets)) {
+  if (allTargetsIntentionallyClassified(targets, truncated)) {
     parts.push('Exposure is intentionally classified in Networking; that does not remove the vulnerability risk.');
+  } else {
+    const partial = partialTargetsIntentionalWithUnavailable(targets, truncated);
+    if (partial.partial) {
+      const n = partial.unavailableCount;
+      parts.push(
+        `Known exposure contexts are intentionally classified. Intent could not be verified for ${n} service${n === 1 ? '' : 's'}.`,
+      );
+    }
   }
   if (anyTargetIntentConflict(targets)) {
     parts.push('At least one service intent conflicts with configured exposure (internal or same-node while published beyond loopback).');
@@ -335,29 +353,31 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
   }
 
   if (f.exposedBlocker > 0) {
-    pushRows({
+    const capped = capPostureTargetRows(f.exposedBlockerTargets);
+    pushCapped({
       kind: 'public_exposure',
       count: f.exposedBlocker,
       severity: 'blocker',
       label: 'Network-exposed affected images',
-      description: networkExposureDescription('blocker', f.exposedBlockerTargets),
+      description: networkExposureDescription('blocker', f.exposedBlockerTargets, capped.truncated),
       targetTab: 'images',
       actionLabel: REVIEW_AFFECTED_IMAGES_LABEL,
-    }, f.exposedBlockerTargets);
+    }, capped);
   }
 
   // Review items. These appear in-page but do not force a red masthead.
 
   if (f.exposedReview > 0) {
-    pushRows({
+    const capped = capPostureTargetRows(f.exposedReviewTargets);
+    pushCapped({
       kind: 'public_exposure',
       count: f.exposedReview,
       severity: 'review',
       label: 'Network-exposed images (monitoring)',
-      description: networkExposureDescription('review', f.exposedReviewTargets),
+      description: networkExposureDescription('review', f.exposedReviewTargets, capped.truncated),
       targetTab: 'images',
       actionLabel: VIEW_FINDINGS_LABEL,
-    }, f.exposedReviewTargets);
+    }, capped);
   }
 
   if (f.needsReview > 0) {

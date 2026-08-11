@@ -1,5 +1,6 @@
+
 /**
- * GET /api/security/image-summaries — route-level publicly_exposed enrichment.
+ * GET /api/security/image-summaries — route-level publicly_exposed + exposure context enrichment.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
@@ -30,6 +31,17 @@ function reset(): void {
   const raw = (db() as unknown as { db: { prepare: (s: string) => { run: () => void } } }).db;
   raw.prepare('DELETE FROM vulnerability_scans').run();
   raw.prepare('DELETE FROM stack_exposure').run();
+  raw.prepare('DELETE FROM stack_exposure_intent').run();
+}
+
+function seedScan(ref: string, now = Date.now()): void {
+  db().createVulnerabilityScan({
+    node_id: 1, image_ref: ref, image_digest: `sha256:${ref}`, scanned_at: now,
+    total_vulnerabilities: 0, critical_count: 0, high_count: 0, medium_count: 0, low_count: 0,
+    unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+    highest_severity: null, os_info: null, trivy_version: null, scan_duration_ms: null,
+    triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+  });
 }
 
 describe('GET /api/security/image-summaries', () => {
@@ -37,15 +49,7 @@ describe('GET /api/security/image-summaries', () => {
 
   it('attaches publicly_exposed true/false/null without changing existing fields', async () => {
     const now = Date.now();
-    for (const ref of ['pub:1', 'int:1', 'unknown:1']) {
-      db().createVulnerabilityScan({
-        node_id: 1, image_ref: ref, image_digest: `sha256:${ref}`, scanned_at: now,
-        total_vulnerabilities: 0, critical_count: 0, high_count: 0, medium_count: 0, low_count: 0,
-        unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
-        highest_severity: null, os_info: null, trivy_version: null, scan_duration_ms: null,
-        triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
-      });
-    }
+    for (const ref of ['pub:1', 'int:1', 'unknown:1']) seedScan(ref, now);
     db().upsertStackExposure(1, 'web', JSON.stringify({
       stack: 'web',
       computedAt: now,
@@ -59,18 +63,78 @@ describe('GET /api/security/image-summaries', () => {
     expect(res.status).toBe(200);
     expect(res.body['pub:1']).toMatchObject({ image_ref: 'pub:1', publicly_exposed: true, scan_id: expect.any(Number) });
     expect(res.body['int:1']).toMatchObject({ image_ref: 'int:1', publicly_exposed: false });
+    expect(res.body['int:1'].exposure_contexts).toBeUndefined();
     expect(res.body['unknown:1']).toMatchObject({ image_ref: 'unknown:1', publicly_exposed: null });
+  });
+
+  it('attaches exposure contexts and summary for publicly exposed images', async () => {
+    const now = Date.now();
+    seedScan('pub:1', now);
+    db().upsertStackExposure(1, 'web', JSON.stringify({
+      stack: 'web',
+      computedAt: now,
+      services: [
+        { service: 'api', image: 'pub:1', publiclyExposed: true, reason: 'published-port', bindings: ['0.0.0.0:80/tcp'] },
+      ],
+    }), now);
+    db().setStackExposureIntent(1, 'web', '', 'public', 'admin');
+
+    const res = await request(app).get('/api/security/image-summaries').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body['pub:1']).toMatchObject({
+      publicly_exposed: true,
+      exposure_context_count: 1,
+      exposure_contexts_truncated: false,
+      exposure_context_summary: {
+        hasConflict: false,
+        hasUnclassified: false,
+        hasUnavailable: false,
+        allKnownIntentional: true,
+      },
+    });
+    expect(res.body['pub:1'].exposure_contexts[0]).toMatchObject({
+      stackName: 'web',
+      serviceName: 'api',
+      intentStatus: 'set',
+      exposureIntent: 'public',
+    });
+  });
+
+  it('sets hasConflict from hidden truncated contexts', async () => {
+    const now = Date.now();
+    seedScan('many:1', now);
+    const services = [];
+    for (let i = 0; i < 20; i += 1) {
+      services.push({
+        service: `svc${i}`,
+        image: 'many:1',
+        publiclyExposed: true,
+        reason: 'published-port',
+        bindings: ['0.0.0.0:80/tcp'],
+      });
+    }
+    services.push({
+      service: 'bad',
+      image: 'many:1',
+      publiclyExposed: true,
+      reason: 'published-port',
+      bindings: ['0.0.0.0:81/tcp'],
+    });
+    db().upsertStackExposure(1, 'web', JSON.stringify({ stack: 'web', computedAt: now, services }), now);
+    db().setStackExposureIntent(1, 'web', '', 'public', 'admin');
+    db().setStackExposureIntent(1, 'web', 'bad', 'internal', 'admin');
+
+    const res = await request(app).get('/api/security/image-summaries').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body['many:1'].exposure_contexts_truncated).toBe(true);
+    expect(res.body['many:1'].exposure_context_count).toBe(21);
+    expect(res.body['many:1'].exposure_context_summary.hasConflict).toBe(true);
+    expect(res.body['many:1'].exposure_contexts[0].intentConflict).toBe(true);
   });
 
   it('does not 500 when a stack exposure descriptor is malformed', async () => {
     const now = Date.now();
-    db().createVulnerabilityScan({
-      node_id: 1, image_ref: 'ok:1', image_digest: 'sha256:ok', scanned_at: now,
-      total_vulnerabilities: 0, critical_count: 0, high_count: 0, medium_count: 0, low_count: 0,
-      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
-      highest_severity: null, os_info: null, trivy_version: null, scan_duration_ms: null,
-      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
-    });
+    seedScan('ok:1', now);
     db().upsertStackExposure(1, 'bad', 'not-json{{{', now);
 
     const res = await request(app).get('/api/security/image-summaries').set('Cookie', adminCookie);
