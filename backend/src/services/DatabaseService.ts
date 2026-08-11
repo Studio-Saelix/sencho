@@ -17,8 +17,10 @@ import {
 import { readSnapshotFileRow, type SnapshotFileReadResult, type SnapshotFileRow } from '../helpers/snapshotFileDecrypt';
 import { sanitizeForLog } from '../utils/safeLog';
 import type { GitSourceManifestState } from '../types/gitProjectManifest';
+import type { RollbackOperationKind } from '../types/rollbackGeneration';
 
 export type { SnapshotFileReadResult } from '../helpers/snapshotFileDecrypt';
+export type { RollbackOperationKind } from '../types/rollbackGeneration';
 
 function isPilotMode(): boolean {
     return process.env.SENCHO_MODE === 'pilot';
@@ -246,6 +248,10 @@ export interface StackUpdateRecoveryGenerationRow {
     phase: 'captured' | 'acquired' | 'handoff_committed' | 'reconciling' | 'immediate_verified';
     is_current: number;
     backup_slot_id: string | null;
+    /** Generation content key (often equal to backup_slot_id / generation id). */
+    content_path: string | null;
+    /** Capture trigger: update | deployment | git_apply | manual_backup | unknown. */
+    operation_kind: RollbackOperationKind | null;
     override_path: string | null;
     services_json: string;
     health_gate_id: string | null;
@@ -1917,6 +1923,9 @@ export class DatabaseService {
         // pattern used for health_gate_runs below.
         maybeAddCol('stack_update_recovery_generations', 'released_at', 'INTEGER');
         maybeAddCol('stack_update_recovery_generations', 'released_by', 'TEXT');
+        // Authored-project generation content key + capture trigger kind.
+        maybeAddCol('stack_update_recovery_generations', 'content_path', 'TEXT');
+        maybeAddCol('stack_update_recovery_generations', 'operation_kind', 'TEXT');
         maybeAddCol('stack_update_cleanup_pending', 'required_blueprint_id', 'INTEGER');
 
         // Distributed API model columns
@@ -4199,13 +4208,15 @@ export class DatabaseService {
     public insertStackUpdateRecoveryGeneration(row: StackUpdateRecoveryGenerationRow): void {
         this.db.prepare(
             `INSERT INTO stack_update_recovery_generations (
-                id, node_id, stack_name, status, phase, is_current, backup_slot_id, override_path,
-                services_json, health_gate_id, gate_retain_until, artifact_expires_at,
-                operation_lease_expires_at, created_at, updated_at, created_by, artifacts_retired
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                id, node_id, stack_name, status, phase, is_current, backup_slot_id, content_path,
+                operation_kind, override_path, services_json, health_gate_id, gate_retain_until,
+                artifact_expires_at, operation_lease_expires_at, created_at, updated_at,
+                created_by, artifacts_retired
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
             row.id, row.node_id, row.stack_name, row.status, row.phase, row.is_current,
-            row.backup_slot_id, row.override_path, row.services_json, row.health_gate_id,
+            row.backup_slot_id, row.content_path ?? null, row.operation_kind ?? null,
+            row.override_path, row.services_json, row.health_gate_id,
             row.gate_retain_until, row.artifact_expires_at, row.operation_lease_expires_at,
             row.created_at, row.updated_at, row.created_by, row.artifacts_retired ?? 0,
         );
@@ -4237,7 +4248,8 @@ export class DatabaseService {
         id: string,
         patch: Partial<Pick<StackUpdateRecoveryGenerationRow,
             'status' | 'phase' | 'is_current' | 'override_path' | 'health_gate_id' |
-            'gate_retain_until' | 'artifact_expires_at' | 'operation_lease_expires_at' | 'services_json'>>,
+            'gate_retain_until' | 'artifact_expires_at' | 'operation_lease_expires_at' | 'services_json' |
+            'content_path' | 'operation_kind'>>,
     ): void {
         const keys = Object.keys(patch) as Array<keyof typeof patch>;
         if (keys.length === 0) return;

@@ -41,9 +41,29 @@ vi.mock('../services/composeProjectContext', () => ({
   classifyReferenceKind: () => 'moving_tag',
   resolveComposeProjectContext: vi.fn().mockResolvedValue({
     validateForMutation: vi.fn().mockResolvedValue(undefined),
-    backupFromContext: vi.fn().mockResolvedValue('backup-1'),
+    backupFromContext: vi.fn().mockResolvedValue('11111111-1111-4111-8111-111111111111'),
     restoreFromContext: vi.fn().mockResolvedValue(undefined),
   }),
+  resolveComposeProjectContextForGeneration: vi.fn().mockResolvedValue({
+    validateForMutation: vi.fn().mockResolvedValue(undefined),
+    backupFromContext: vi.fn().mockResolvedValue('11111111-1111-4111-8111-111111111111'),
+    restoreFromContext: vi.fn().mockResolvedValue(undefined),
+    backupSlotId: '11111111-1111-4111-8111-111111111111',
+  }),
+}));
+
+vi.mock('../services/RollbackGenerationStore', () => ({
+  RollbackGenerationStore: {
+    retireGenerationContent: vi.fn().mockResolvedValue(undefined),
+    getGenerationDir: vi.fn(() => '/tmp/gen'),
+    verifyGenerationContent: vi.fn().mockResolvedValue(false),
+  },
+  getBackupBaseDir: () => '/tmp/backups',
+}));
+
+vi.mock('../services/rollbackEligibility', () => ({
+  assessGenerationEligibility: vi.fn().mockResolvedValue('eligible'),
+  evaluateRollbackEligibility: vi.fn(),
 }));
 
 vi.mock('../services/effectiveServiceModel', () => ({
@@ -71,15 +91,27 @@ vi.mock('../services/ComposeService', async () => {
 const mockUnlink = vi.fn().mockResolvedValue(undefined);
 const mockWriteFile = vi.fn().mockResolvedValue(undefined);
 const mockRealpath = vi.fn(async (p: string) => p);
+const mockAccess = vi.fn().mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+const mockReaddir = vi.fn().mockResolvedValue([]);
+const mockStat = vi.fn();
+const mockRm = vi.fn().mockResolvedValue(undefined);
 vi.mock('fs/promises', () => ({
   default: {
     unlink: (p: string) => mockUnlink(p),
     writeFile: (p: string, data: string, enc?: string) => mockWriteFile(p, data, enc),
     realpath: (p: string) => mockRealpath(p),
+    access: (p: string) => mockAccess(p),
+    readdir: (p: string) => mockReaddir(p),
+    stat: (p: string) => mockStat(p),
+    rm: (p: string, opts?: unknown) => mockRm(p, opts),
   },
   unlink: (p: string) => mockUnlink(p),
   writeFile: (p: string, data: string, enc?: string) => mockWriteFile(p, data, enc),
   realpath: (p: string) => mockRealpath(p),
+  access: (p: string) => mockAccess(p),
+  readdir: (p: string) => mockReaddir(p),
+  stat: (p: string) => mockStat(p),
+  rm: (p: string, opts?: unknown) => mockRm(p, opts),
 }));
 
 import { DatabaseService } from '../services/DatabaseService';
@@ -135,6 +167,8 @@ describe('StackUpdateRecoveryService', () => {
       phase: 'captured' as const,
       is_current: 0,
       backup_slot_id: null,
+      content_path: null,
+      operation_kind: null,
       override_path: '/test/compose/my-stack/.sencho-recovery-aaaaaaaaaaaa.yml',
       services_json: JSON.stringify([{
         serviceName: 'web',
@@ -185,6 +219,8 @@ describe('StackUpdateRecoveryService', () => {
       phase: 'reconciling' as const,
       is_current: 1,
       backup_slot_id: 'b1',
+      content_path: null,
+      operation_kind: null,
       override_path: '/test/compose/my-stack/.sencho-recovery-bbbbbbbbbbbb.yml',
       services_json: servicesJson,
       health_gate_id: null,
@@ -220,6 +256,70 @@ describe('StackUpdateRecoveryService', () => {
       'gen-2',
       expect.objectContaining({ status: 'restored_current' }),
     );
+  });
+
+  it('fails closed when content_path is set but generation dir is missing', async () => {
+    const genId = '11111111-1111-4111-8111-111111111111';
+    const restoreSpy = vi.fn().mockResolvedValue(undefined);
+    const { resolveComposeProjectContext, resolveComposeProjectContextForGeneration } =
+      await import('../services/composeProjectContext');
+    vi.mocked(resolveComposeProjectContext).mockResolvedValue({
+      validateForMutation: vi.fn().mockResolvedValue(undefined),
+      backupFromContext: vi.fn().mockResolvedValue(genId),
+      restoreFromContext: restoreSpy,
+      nodeId: 1,
+      stackName: 'my-stack',
+      stackDir: '/test/compose/my-stack',
+      backupSlotId: null,
+      toComposeArgs: vi.fn(),
+      resolveServiceImageMap: vi.fn(),
+    });
+    vi.mocked(resolveComposeProjectContextForGeneration).mockResolvedValue({
+      validateForMutation: vi.fn().mockResolvedValue(undefined),
+      backupFromContext: vi.fn().mockResolvedValue(genId),
+      restoreFromContext: restoreSpy,
+      nodeId: 1,
+      stackName: 'my-stack',
+      stackDir: '/test/compose/my-stack',
+      backupSlotId: genId,
+      toComposeArgs: vi.fn(),
+      resolveServiceImageMap: vi.fn(),
+    });
+
+    const row = {
+      id: genId,
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'active' as const,
+      phase: 'reconciling' as const,
+      is_current: 1,
+      backup_slot_id: genId,
+      content_path: genId,
+      operation_kind: 'update' as const,
+      override_path: '/test/compose/my-stack/.sencho-recovery-bbbbbbbbbbbb.yml',
+      services_json: '[]',
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    };
+    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue(row);
+    const update = vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
+      .mockImplementation(() => undefined);
+    mockAccess.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined),
+    ).rejects.toMatchObject({ code: 'GENERATION_CONTENT_MISSING' });
+
+    expect(restoreSpy).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'recovery_required' }));
   });
 
   const capturedWebReplica = {
@@ -344,6 +444,8 @@ describe('StackUpdateRecoveryService', () => {
       phase: 'captured' as const,
       is_current: 0,
       backup_slot_id: null,
+      content_path: null,
+      operation_kind: null,
       override_path: null,
       services_json: JSON.stringify([{
         serviceName: 'web', scale: 1, hasBuild: false, declaredImageRef: 'nginx:latest',

@@ -24,6 +24,7 @@ import { StackFileRootsService } from './StackFileRootsService';
 import { DatabaseService } from './DatabaseService';
 import { ComposeInputDiscoveryService, type ContextCopyPlan, type CopyEntry } from './ComposeInputDiscoveryService';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import { collectManifestFilePaths } from '../helpers/manifestFilePaths';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import type {
@@ -700,19 +701,7 @@ export class GitProjectManifestService {
 
     /** Exact file paths owned by one manifest, excluding directory inventory entries. */
     private manifestFilePaths(manifest: Pick<GitProjectManifest, 'inputs' | 'buildContexts'>): string[] {
-        const paths = new Map<string, string>();
-        for (const entry of manifest.inputs) {
-            if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
-            if (entry.dependencyKind === 'build-context' || entry.dependencyKind === 'build-additional-context') continue;
-            paths.set(entry.materializedPath.toLowerCase(), entry.materializedPath);
-        }
-        for (const context of manifest.buildContexts) {
-            for (const file of context.files) {
-                const rel = context.repoPath ? `${context.repoPath}/${file.path}` : file.path;
-                paths.set(rel.toLowerCase(), rel);
-            }
-        }
-        return [...paths.values()].sort((a, b) => a.localeCompare(b));
+        return collectManifestFilePaths(manifest);
     }
 
     /** Hash one snapshot file, preserving the distinction between missing and unreadable. */

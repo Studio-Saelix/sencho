@@ -2475,6 +2475,49 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
   if (!tryAcquireStackOpLock(req, res, stackName, 'rollback')) return;
   let revertRestore: (() => Promise<void>) | null = null;
   try {
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const recoverySvc = StackUpdateRecoveryService.getInstance();
+    const currentGen = recoverySvc.getCurrent(req.nodeId, stackName);
+    const hasGeneration = !!(currentGen && (currentGen.content_path || currentGen.backup_slot_id));
+
+    if (hasGeneration && currentGen) {
+      dlog(`[Stacks] Rollback initiated via recovery generation: ${sanitizeForLog(stackName)}`);
+      if (!(await runPolicyGate(req, res, stackName, req.nodeId))) {
+        return;
+      }
+      try {
+        const rolledBack = await recoverySvc.compensateWithCandidate(
+          currentGen.id,
+          async (overridePath) => {
+            await ComposeService.getInstance(req.nodeId).composeUpWithRecoveryOverride(
+              stackName,
+              overridePath,
+              getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+            );
+          },
+        );
+        if (!rolledBack) {
+          res.status(500).json({ error: 'Rollback restore completed but recovery probe failed.' });
+          notifyActionFailure('rollback', stackName, new Error('recovery probe failed'), req.user?.username ?? 'system');
+          return;
+        }
+      } catch (compError: unknown) {
+        if ((compError as { code?: string }).code === 'ROLLBACK_PROHIBITED') {
+          res.status(409).json({
+            error: (compError as Error).message || 'Rollback is prohibited for this generation',
+            code: 'ROLLBACK_PROHIBITED',
+          });
+          return;
+        }
+        throw compError;
+      }
+      invalidateNodeCaches(req.nodeId);
+      dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
+      res.json({ message: 'Stack rolled back from recovery generation.', recoveryId: currentGen.id });
+      notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
+      return;
+    }
+
     const fsSvc = FileSystemService.getInstance(req.nodeId);
     const backupInfo = await fsSvc.getBackupInfo(stackName);
     if (!backupInfo.exists) {

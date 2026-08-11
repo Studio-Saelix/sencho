@@ -19,6 +19,7 @@ import { isPathWithinBase, isValidRelativeStackPath } from '../utils/validation'
 import { gitSourceLocalComposeFiles, PRIMARY_COMPOSE_FILENAME } from '../utils/gitComposeFiles';
 import { ComposeInputDiscoveryService, type ContextCopyPlan } from './ComposeInputDiscoveryService';
 import { GitProjectManifestService } from './GitProjectManifestService';
+import { StackUpdateRecoveryService } from './StackUpdateRecoveryService';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import type { ComposeInputEntry, GitProjectManifest, GitSourceManifestState, InventoryResult, ManifestSummary, RefusalInfo } from '../types/gitProjectManifest';
 import type { GitHttpRequest, GitHttpResponse, HttpClient } from 'isomorphic-git/http/node';
@@ -1743,7 +1744,7 @@ export class GitSourceService {
         stackName: string,
         commitSha: string,
         opts: { deploy?: boolean; actor?: string; bypassPolicy?: boolean } = {},
-    ): Promise<{ applied: boolean; deployed: boolean; deployError?: string }> {
+    ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
         return this.withStackLock(stackName, () => this.applyLocked(stackName, commitSha, opts));
     }
 
@@ -1752,7 +1753,7 @@ export class GitSourceService {
         stackName: string,
         commitSha: string,
         opts: { deploy?: boolean; actor?: string; bypassPolicy?: boolean },
-    ): Promise<{ applied: boolean; deployed: boolean; deployError?: string }> {
+    ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
         const diag = isDebugEnabled();
         const db = DatabaseService.getInstance();
         const src = db.getGitSource(stackName);
@@ -1775,6 +1776,9 @@ export class GitSourceService {
             ? this.crypto.decrypt(src.pending_env_content)
             : null;
         const manifestSvc = GitProjectManifestService.getInstance();
+        const recoverySvc = StackUpdateRecoveryService.getInstance();
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        let recoveryId: string | undefined;
 
         let appliedSpec: GitSourceAppliedSpec | null;
         if (pending.candidateRelPath !== null && pending.inventory !== null) {
@@ -1797,7 +1801,7 @@ export class GitSourceService {
             // The staged candidate must still exist and be complete; a deleted
             // candidate (or a node restart that swept it) invalidates the pull.
             const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-            const candidateAbs = path.join(dataDir, 'git-managed', String(NodeRegistry.getInstance().getDefaultNodeId()), stackName, pending.candidateRelPath);
+            const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, pending.candidateRelPath);
             try {
                 await fsPromises.access(candidateAbs);
             } catch {
@@ -1872,8 +1876,8 @@ export class GitSourceService {
                     : null;
             const invocation: string[] = [];
             try {
-                invocation.push(...(await authoredComposeFileArgs(stackName, NodeRegistry.getInstance().getDefaultNodeId())));
-                invocation.push(...(await authoredComposeEnvFileArgs(stackName, NodeRegistry.getInstance().getDefaultNodeId())));
+                invocation.push(...(await authoredComposeFileArgs(stackName, nodeId)));
+                invocation.push(...(await authoredComposeEnvFileArgs(stackName, nodeId)));
             } catch (e) {
                 console.warn(`[GitSource] invocation build failed for ${stackName}:`, (e as Error).message);
             }
@@ -1904,6 +1908,20 @@ export class GitSourceService {
                       ...(src.sync_env ? ['.env'] : []),
                   ];
             try {
+                const candidate = await recoverySvc.captureCandidate({
+                    nodeId,
+                    stackName,
+                    createdBy: opts.actor ?? 'git-source',
+                    operationKind: 'git_apply',
+                });
+                recoveryId = candidate.id;
+            } catch (captureError) {
+                console.warn(
+                    `[GitSource] Recovery capture skipped for apply of ${sanitizeForLog(stackName)}:`,
+                    captureError instanceof Error ? captureError.message : String(captureError),
+                );
+            }
+            try {
                 await manifestSvc.promoteGeneration(stackName, {
                     sha: commitSha,
                     candidateRelPath: pending.candidateRelPath,
@@ -1917,6 +1935,16 @@ export class GitSourceService {
                 // The original error is logged with its stack for diagnosis,
                 // and the message is scrubbed of credentials and of the
                 // incoming manifest's high-sensitivity paths.
+                if (recoveryId) {
+                    try {
+                        await recoverySvc.abandon(recoveryId);
+                    } catch (abandonError) {
+                        console.warn(
+                            `[GitSource] Failed to abandon recovery after promote failure for ${sanitizeForLog(stackName)}:`,
+                            abandonError instanceof Error ? abandonError.message : String(abandonError),
+                        );
+                    }
+                }
                 if (e instanceof GitSourceError) throw e;
                 const raw = e instanceof Error ? e.message : String(e);
                 console.error(`[GitSource] promotion failed for ${sanitizeForLog(stackName)}:`, e instanceof Error ? e.stack ?? e.message : raw);
@@ -1958,9 +1986,45 @@ export class GitSourceService {
         const shouldDeploy = opts.deploy ?? src.auto_deploy_on_apply;
         if (diag) console.log('[GitSource:diag] apply wrote stack=%s sha=%s deploy=%s', sanitizeForLog(stackName), sanitizeForLog(commitSha.slice(0, 7)), sanitizeForLog(shouldDeploy));
 
+        // recoveryId is set on the complete-project path; legacy path captures below if needed.
+        if (!recoveryId) {
+            // Legacy apply path: capture after materialize is too late for exact
+            // pre-apply files, but still create a generation for image holds.
+            try {
+                const captured = await recoverySvc.captureCandidate({
+                    nodeId,
+                    stackName,
+                    createdBy: opts.actor ?? 'git-source',
+                    operationKind: 'git_apply',
+                });
+                recoveryId = captured.id;
+            } catch (captureError) {
+                console.warn(
+                    `[GitSource] Recovery capture skipped for legacy apply of ${sanitizeForLog(stackName)}:`,
+                    captureError instanceof Error ? captureError.message : String(captureError),
+                );
+            }
+        }
+
+        const finalizeRecoveryCurrent = async (id: string, immediateVerified: boolean): Promise<void> => {
+            if (!recoverySvc.markAcquired(id)) {
+                await recoverySvc.abandon(id);
+                throw new Error('Failed to mark recovery generation as acquired');
+            }
+            if (!recoverySvc.handoff(id, nodeId, stackName)) {
+                await recoverySvc.abandon(id);
+                throw new Error('Failed to hand off recovery generation');
+            }
+            if (!recoverySvc.markReconciling(id)) {
+                throw new Error('Failed to mark recovery generation as reconciling');
+            }
+            if (immediateVerified && !recoverySvc.markImmediateVerified(id)) {
+                console.warn(`[GitSource] Could not CAS immediate_verified for recovery ${sanitizeForLog(id)}`);
+            }
+        };
+
         if (shouldDeploy) {
             try {
-                const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
                 await assertPolicyGateAllows(
                     stackName,
                     nodeId,
@@ -1969,6 +2033,9 @@ export class GitSourceService {
                         auditPath: `/api/stacks/${stackName}/git-source/apply`,
                     }),
                 );
+                if (recoveryId) {
+                    await finalizeRecoveryCurrent(recoveryId, false);
+                }
                 const lock = await StackOpLockService.getInstance().runExclusive(
                     nodeId, stackName, 'deploy', 'system',
                     () => ComposeService.getInstance(nodeId).deployStack(
@@ -1981,22 +2048,50 @@ export class GitSourceService {
                 if (!lock.ran) {
                     const busy = `Auto-deploy skipped: another operation (${lock.existing.action}) is already in progress for ${stackName}.`;
                     console.warn(`[GitSource] ${busy}`);
-                    return { applied: true, deployed: false, deployError: busy };
+                    return { applied: true, deployed: false, deployError: busy, recoveryId };
+                }
+                if (recoveryId) {
+                    if (!recoverySvc.markImmediateVerified(recoveryId)) {
+                        console.warn(`[GitSource] Could not CAS immediate_verified for recovery ${sanitizeForLog(recoveryId)}`);
+                    }
                 }
                 HealthGateService.getInstance().beginStack(nodeId, stackName, 'deploy', 'system:git-source');
                 console.log(`[GitSource] Applied and deployed ${stackName} at ${commitSha.slice(0, 7)}`);
-                return { applied: true, deployed: true };
+                return { applied: true, deployed: true, recoveryId };
             } catch (e) {
-                // File is on disk, DB is marked applied. Returning the
-                // error separately lets the UI flag it as a partial
-                // success rather than rolling back the disk.
+                // R1: do not auto-compensate. Keep applied files and leave the
+                // pre-promote generation is_current for manual rollback.
+                if (recoveryId) {
+                    const row = recoverySvc.get(recoveryId);
+                    if (row && row.is_current !== 1) {
+                        try {
+                            await finalizeRecoveryCurrent(recoveryId, false);
+                        } catch (handoffError) {
+                            console.warn(
+                                `[GitSource] Failed to hand off recovery after deploy failure for ${sanitizeForLog(stackName)}:`,
+                                handoffError instanceof Error ? handoffError.message : String(handoffError),
+                            );
+                        }
+                    }
+                }
                 const scrubbed = scrubCredentials((e as Error).message || String(e));
                 console.error(`[GitSource] Auto-deploy failed for ${stackName}: ${scrubbed}`);
-                return { applied: true, deployed: false, deployError: scrubbed };
+                return { applied: true, deployed: false, deployError: scrubbed, recoveryId };
+            }
+        }
+
+        if (recoveryId) {
+            try {
+                await finalizeRecoveryCurrent(recoveryId, true);
+            } catch (finalizeError) {
+                console.warn(
+                    `[GitSource] Failed to finalize recovery for apply-only ${sanitizeForLog(stackName)}:`,
+                    finalizeError instanceof Error ? finalizeError.message : String(finalizeError),
+                );
             }
         }
         console.log(`[GitSource] Applied ${stackName} at ${commitSha.slice(0, 7)}`);
-        return { applied: true, deployed: false };
+        return { applied: true, deployed: false, recoveryId };
     }
 
     public dismissPending(stackName: string): void {

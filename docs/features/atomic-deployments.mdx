@@ -1,21 +1,21 @@
 ---
 title: Atomic Deployments
 sidebarTitle: Atomic deploys
-description: Wrap every deploy and update in a backup, a 3-second health probe, and an automatic rollback when a container crashes.
+description: Wrap every deploy and update in a managed authored-project backup, prior-image holds, a 3-second health probe, and automatic rollback when a container crashes.
 ---
 
-Sencho wraps every protected deploy in a four-step safety net: it backs up the current compose file, `.env`, and any configured project env files, runs the compose action, waits 3 seconds for containers to settle, then checks for a non-zero exit code. If any container crashed, Sencho restores the backup and re-deploys automatically.
+Sencho wraps every protected deploy in a four-step safety net: it backs up the complete managed authored project, captures a recovery generation with prior image identity (opaque holds), runs the compose action, waits 3 seconds for containers to settle, then checks for a non-zero exit code. If any container crashed after handoff, Sencho restores from that generation and re-deploys automatically.
 
-The same backup also powers the **Rollback** action in the stack editor, so you can roll a stack back to its last good configuration on demand. To see in advance whether that rollback would actually help, and to watch container health for longer than the 3-second probe, see [Health-Gated Updates](/features/health-gated-updates).
+The same recovery generation powers the **Rollback** action in the stack editor, so you can roll a stack back to its last good configuration on demand. To see in advance whether that rollback would actually help, and to watch container health for longer than the 3-second probe, see [Health-Gated Updates](/features/health-gated-updates).
 
 ## How it works
 
-1. **Backup.** Before the action runs, Sencho copies `compose.yaml` (or `compose.yml` / `docker-compose.yaml` / `docker-compose.yml`), `.env` if present, and any project env files configured for the stack (for example, `stack.env` or `.env.production`) into the backup directory. The deploy progress modal streams `=== Backup created for atomic deployment ===` once the copy completes, before any `docker compose` output.
+1. **Backup.** Before the action runs, Sencho captures the complete managed authored project into a recovery generation: ordered compose files, overrides, discoverable `include:` / `extends` inputs, and env, label, config, and secret files when they can be enumerated. It also records prior image identity as opaque holds. The deploy progress modal streams `=== Capturing rollback generation for atomic deploy ===` (or the matching update line) once capture completes, before any `docker compose` output.
 2. **Run the action.** Sencho executes the requested compose action: `up -d` for a deploy, or a pull-then-`up -d` recreate for an update.
 3. **Health probe.** Sencho waits 3 seconds, then lists every container with the `com.docker.compose.project=<stack>` label and checks each one for a non-zero exit code. Any container that has exited with a non-zero status counts as a crash.
-4. **Auto-rollback on failure.** When a crash is detected, Sencho streams `=== Deployment failed - restoring previous compose and env files ===`, restores the backed-up files, and re-runs `docker compose up -d` with the restored configuration. On success it streams `=== Restored previous compose and env files ===`. The restore reverts the compose and `.env` configuration. An image on a moving tag (such as `latest`) is not reverted, because the local tag still resolves to the newly pulled digest. The original deploy error is preserved as the deploy result, so a failed-then-rolled-back deploy still registers as a failure.
+4. **Auto-rollback on failure.** When a crash is detected after handoff, Sencho streams `=== Deployment failed - restoring previous runtime from recovery generation ===` (or the matching update line), restores the captured authored inventory, and re-runs `docker compose up -d` with the restored configuration. Where the generation holds a prior image ID, restore retargets that exact image for moving tags and for supported local builds. Named volumes and bind-mounted application data are not restored. The original deploy error is preserved as the deploy result, so a failed-then-rolled-back deploy still registers as a failure.
 
-If the rollback itself fails (for example, the re-deploy step cannot pull a previously available image, or the file restore is blocked by filesystem permissions), Sencho streams `=== Rollback failed. Manual intervention may be required ===`. The backup files remain at `<DATA_DIR>/backups/<nodeId>/<stack>/` so you can copy them back manually.
+If the rollback itself fails (for example, a held image is missing, or the file restore is blocked by filesystem permissions), Sencho streams `=== Rollback failed. Manual intervention may be required ===`. The recovery generation remains available so you can retry or recover manually.
 
 ## Which operations are protected
 
@@ -32,63 +32,63 @@ A scheduled image-update task uses the same atomic wrapper as a manual update, s
 
 ## Manual rollback
 
-The stack editor's action bar has a **More actions** overflow menu (the three-dot icon next to **Update**). **Rollback** sits at the top, with the most recent backup's timestamp beneath the label. Selecting it restores the backed-up files and re-runs `docker compose up -d` non-atomically, so the rollback does not nest inside another atomic wrapper and overwrite the good backup with the just-failed state.
+The stack editor's action bar has a **More actions** overflow menu (the three-dot icon next to **Update**). **Rollback** sits at the top, with the most recent recovery generation's timestamp beneath the label. Selecting it prefers the current recovery generation: it restores the captured authored inventory (and prior image IDs where held) and re-runs `docker compose up -d` non-atomically, so the rollback does not nest inside another atomic wrapper and overwrite the good generation with the just-failed state.
 
 <Frame>
   <img src="/images/atomic-deployments/rollback-menu.png" alt="Stack editor header for the plex stack, with the More actions overflow menu open. Rollback sits at the top with the backup timestamp beneath the label, followed by Scan config, a Mute submenu for the stack's notifications, and Delete." />
 </Frame>
 
-The menu entry is hidden when no backup exists for the stack, for example on a freshly created stack that has never been deployed. It is also hidden for users who lack the `stack:deploy` permission; the backend enforces that check as the authoritative guard. The **Mute** entry next to it controls notification suppression for the stack and is unrelated to atomic deployments; see [Alerts & Notifications](/features/alerts-notifications).
+The menu entry is hidden when no recovery generation (or fallback backup) exists for the stack, for example on a freshly created stack that has never been deployed. It is also hidden for users who lack the `stack:deploy` permission; the backend enforces that check as the authoritative guard. The **Mute** entry next to it controls notification suppression for the stack and is unrelated to atomic deployments; see [Alerts & Notifications](/features/alerts-notifications).
 
 After a failed deploy or update, the stack page also surfaces a **Roll back** button in the recovery panel alongside Retry, Restart, and Refresh. This is the same rollback action, triggered in response to a failure rather than invoked on demand. See [Deploy Progress](/features/deploy-progress#recovery-actions) for the full recovery actions reference.
 
 ## Where backups are stored
 
-Backups live under `<DATA_DIR>/backups/<nodeId>/<stack>/`, in the same writable volume Sencho uses for its database and other persisted state. They are intentionally kept outside the user's compose folder, so the operation works even when a container has chowned its bind-mounted stack directory to root.
+Recovery generations and file backups live under Sencho's writable data volume (outside the user's compose folder), so the operation works even when a container has chowned its bind-mounted stack directory to root. Generations are also listed in **Resources → Rollback**; see [Health-Gated Updates](/features/health-gated-updates#automatic-rollback-images).
 
-Each backup is a flat copy of the compose file Sencho found, plus `.env` and any configured project env files if they exist, plus two markers: a `.timestamp` recording when the backup was taken and a `.checksums` integrity manifest holding a SHA-256 for each backed-up file. There is one backup slot per stack: every protected deploy or update overwrites the previous backup, so the **Rollback** menu always reverts to the configuration that was on disk immediately before the most recent run.
+Each capture stores the managed authored inventory for the stack: ordered compose files, overrides, discoverable include/extends inputs, and env/label/config/secret inputs when discoverable, plus integrity metadata. Opaque image holds record prior image identity when containers were inspectable. A stack keeps a current generation for manual rollback; superseded generations follow the retention settings on that page.
 
-A restore is a faithful revert, not an overlay. Sencho replaces the compose file and `.env` with the backed-up copies and removes any compose variant or `.env` that was added after the backup was taken, so the stack returns to exactly the file set it had before the run. For example, if a deploy switched the stack from `compose.yaml` to `docker-compose.yml` or introduced a new `.env`, a rollback undoes both. Files Sencho does not manage are left untouched.
+A restore is a faithful revert of the managed inventory, not an overlay of unmanaged files. Sencho restores the captured authored set and, where held, retargets exact prior image IDs. Files Sencho does not manage are left untouched. Named volumes and bind-mounted application data are never part of the restore.
 
-Before a restore overwrites anything, Sencho re-hashes each backed-up file and compares it against the `.checksums` manifest. If a file no longer matches (for example, a backup truncated by an out-of-disk write), Sencho aborts the restore with a clear error and leaves the stack exactly as it was, rather than copying the corrupt content back over a working configuration.
+Before a restore overwrites anything, Sencho verifies generation integrity. If content no longer matches (for example, a truncated write), Sencho aborts the restore with a clear error and leaves the stack exactly as it was, rather than copying corrupt content back over a working configuration.
 
 ## Rollback readiness
 
-The **Stack Dossier** includes a **Rollback readiness** panel: a pre-flight read on whether rolling back will actually fix the problem. It carries an overall verdict (**Ready**, **Partial**, or **Not ready**) and evaluates five signals: whether a previous compose file exists and how old it is, whether a previous `.env` was captured, whether the previous image tag is pinned or moving (moving tags are not reverted), the age of the last successful deploy, and whether healthchecks are defined to verify recovery. A sixth, always-shown note covers application data: named volumes and bind-mounted data (database rows, uploaded files, anything outside the compose and env files) are outside the scope of any revert.
+The **Stack Dossier** includes a **Rollback readiness** panel: a pre-flight read on whether rolling back will actually fix the problem. It carries an overall verdict (**Ready**, **Partial**, or **Not ready**) and reports managed-input coverage, whether a current recovery generation exists, rollback policy eligibility, plus the existing disclosures for compose/env coverage, previous image identity, last successful deploy, and healthchecks. Application data is always marked not covered: named volumes and bind-mounted data (database rows, uploaded files, anything outside the managed authored files) stay outside the scope of any revert.
 
 <Frame>
-  <img src="/images/atomic-deployments/rollback-readiness.png" alt="Rollback readiness panel in the Stack Dossier for the plex stack, showing a Partial verdict badge and five signal rows: Previous compose file (ready), Previous env file (ready), Previous image tag (a moving tag warning naming the rollback target), Last successful deploy (ready), and Healthchecks (missing)." />
+  <img src="/images/atomic-deployments/rollback-readiness.png" alt="Rollback readiness panel in the Stack Dossier for the plex stack, showing a Partial verdict badge and signal rows for recovery generation, managed inputs, compose and env coverage, previous image identity, last successful deploy, healthchecks, policy eligibility, and application data marked not covered." />
 </Frame>
 
-Check this panel in the dossier before rolling back a stack that has been running for a while. A rollback reverts only the compose and env files; if the problem is in a volume or in a database migration that already ran, rolling back the compose file alone will not help. See [Stack Dossier](/features/stack-dossier) for the full readout.
+Check this panel in the dossier before rolling back a stack that has been running for a while. A rollback restores the managed authored inventory and held prior images where available; if the problem is in a volume or in a database migration that already ran, rolling back files alone will not help. See [Stack Dossier](/features/stack-dossier) for the full readout.
 
 ## Troubleshooting
 
 <AccordionGroup>
   <Accordion title="The Rollback option is not in the More actions menu">
-    Sencho hides the entry whenever a rollback is not possible. The most common reason is that the stack has never been deployed, so no backup file exists yet. Run **Deploy** or **Update** once and the entry will appear.
+    Sencho hides the entry whenever a rollback is not possible. The most common reason is that the stack has never been deployed, so no recovery generation exists yet. Run **Deploy** or **Update** once and the entry will appear.
 
     The entry is also hidden for users who lack the `stack:deploy` permission. Ask an admin to grant `stack:deploy` through **Settings · Access** if the entry does not appear.
   </Accordion>
   <Accordion title="The deploy succeeded but a service crashed seconds later">
-    The health probe is a 3-second window after `docker compose up -d` returns. Crashes after that window are out of scope for atomic rollback, because Sencho cannot tell a late exit apart from a normal restart. The [health gate](/features/health-gated-updates) covers exactly this period: it observes the stack for a configurable window after the update, records a verdict on the stack timeline, and offers a manual rollback when containers do not stay healthy. For ongoing health beyond that, use [Auto-Heal Policies](/features/auto-heal-policies) to restart unhealthy containers automatically and [per-stack alert rules](/features/alerts-notifications#per-stack-alert-rules) to page you when a container exits unexpectedly.
+    The health probe is a 3-second window after `docker compose up -d` returns. Crashes after that window are out of scope for atomic rollback, because Sencho cannot tell a late exit apart from a normal restart. The [health gate](/features/health-gated-updates) covers exactly this period: it observes the stack for a configurable window after the update, records a verdict on the stack timeline, and offers a manual rollback when containers do not stay healthy. The gate does not auto-compensate. For ongoing health beyond that, use [Auto-Heal Policies](/features/auto-heal-policies) to restart unhealthy containers automatically and [per-stack alert rules](/features/alerts-notifications#per-stack-alert-rules) to page you when a container exits unexpectedly.
   </Accordion>
   <Accordion title="The deploy progress modal showed 'Rollback failed. Manual intervention may be required'">
-    This message means the auto-rollback attempted to restore the backup and re-deploy, but the restore step or the re-deploy itself errored out. The backup files are still at `<DATA_DIR>/backups/<nodeId>/<stack>/`. To recover:
+    This message means the auto-rollback attempted to restore from the recovery generation and re-deploy, but the restore step or the re-deploy itself errored out. The generation remains listed under **Resources → Rollback**. To recover:
 
-    1. Copy `compose.yaml` (or the variant Sencho backed up), `.env`, and any project env files from `<DATA_DIR>/backups/<nodeId>/<stack>/` back into the stack directory.
-    2. Open the stack in the editor and click **Deploy** to re-run with the restored configuration.
+    1. Prefer **Rollback** from the stack editor (it uses the current recovery generation when one exists).
+    2. If that still fails, open the stack in the editor, restore the authored files you need, and click **Deploy**.
 
-    The most common causes are filesystem permissions on the stack directory and a missing image in a private registry that the original deploy could not pull.
+    The most common causes are filesystem permissions on the stack directory and a missing held image that the restore expected to retarget.
   </Accordion>
   <Accordion title="Rollback failed with a 'backup is corrupt (integrity check failed)' error">
-    The backup slot holds a file whose contents no longer match the checksum recorded when the backup was taken, usually because the disk filled up or the write was interrupted while the backup was being written. Sencho refuses to copy that file back, so your live stack is left untouched rather than overwritten with corrupt content.
+    The recovery generation holds content whose integrity no longer matches what was recorded at capture, usually because the disk filled up or the write was interrupted. Sencho refuses to copy that content back, so your live stack is left untouched rather than overwritten with corrupt content.
 
-    Edit the compose file or `.env` directly in the editor to the configuration you want, then click **Deploy**. The next protected deploy writes a fresh, verified backup, and **Rollback** works again from that point.
+    Edit the authored files directly in the editor to the configuration you want, then click **Deploy**. The next protected deploy writes a fresh, verified generation, and **Rollback** works again from that point.
   </Accordion>
   <Accordion title="Rollback ran but the stack still has the broken configuration">
-    Sencho keeps a single backup per stack. If you ran two atomic deploys back to back, the second deploy overwrote the first backup with the broken configuration before it failed. **Rollback** then restores that broken configuration, because as far as Sencho is concerned it is the most recent known state.
+    Manual rollback prefers the current recovery generation. If a later protected run already handed off a generation that captured the broken authored state, **Rollback** restores that state, because it is the generation Sencho treats as current.
 
-    To recover, edit the compose file or `.env` directly in the editor, fix the bad change, and click **Deploy**. The next protected deploy will write a fresh backup of the now-good configuration.
+    To recover, edit the authored files directly in the editor, fix the bad change, and click **Deploy**. The next protected deploy captures a fresh generation of the good configuration.
   </Accordion>
 </AccordionGroup>

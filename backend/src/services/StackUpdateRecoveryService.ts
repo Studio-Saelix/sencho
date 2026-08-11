@@ -11,7 +11,6 @@
  * - Services that were fully stopped at capture are kept at `scale: 0`.
  * - Authored replica counts are not used when they diverge from observed state.
  */
-import { randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import {
@@ -25,11 +24,70 @@ import {
   classifyReferenceKind,
   type ImageReferenceKind,
   resolveComposeProjectContext,
+  resolveComposeProjectContextForGeneration,
 } from './composeProjectContext';
 import { getComposeCommandTimeoutMs } from './ComposeService';
+import { assessGenerationEligibility } from './rollbackEligibility';
+import { getBackupBaseDir, RollbackGenerationStore } from './RollbackGenerationStore';
+import type { RollbackOperationKind } from '../types/rollbackGeneration';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
+
+const GENERATION_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const STAGING_MAX_AGE_MS = 60 * 60 * 1000;
+
+function looksLikeGenerationUuid(value: string): boolean {
+  return GENERATION_UUID_RE.test(value);
+}
+
+/** New captures set content_path and/or a UUID backup_slot_id; never legacy-restore those. */
+function expectsGenerationContent(row: StackUpdateRecoveryGenerationRow): boolean {
+  if (row.content_path) return true;
+  return row.backup_slot_id !== null && looksLikeGenerationUuid(row.backup_slot_id);
+}
+
+async function generationContentPresent(
+  nodeId: number,
+  stackName: string,
+  generationId: string,
+): Promise<boolean> {
+  try {
+    const genDir = RollbackGenerationStore.getGenerationDir(nodeId, stackName, generationId);
+    await fs.access(path.join(genDir, 'generation.json'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveRestoreContext(row: StackUpdateRecoveryGenerationRow) {
+  const contentKey = row.content_path || row.backup_slot_id;
+  if (expectsGenerationContent(row)) {
+    if (!contentKey || !looksLikeGenerationUuid(contentKey)) {
+      throw Object.assign(
+        new Error('Recovery generation content key is missing or invalid'),
+        { code: 'GENERATION_CONTENT_MISSING' },
+      );
+    }
+    const present = await generationContentPresent(row.node_id, row.stack_name, contentKey);
+    if (!present) {
+      throw Object.assign(
+        new Error('Recovery generation content is missing or incomplete'),
+        { code: 'GENERATION_CONTENT_MISSING' },
+      );
+    }
+    return resolveComposeProjectContextForGeneration(
+      row.node_id,
+      row.stack_name,
+      contentKey,
+    );
+  }
+  // Pre-migration rows: content_path null and no generation UUID slot.
+  return resolveComposeProjectContext(row.node_id, row.stack_name);
+}
 
 const SWEEP_INTERVAL_MS = 5 * 60_000;
 const INITIAL_SWEEP_DELAY_MS = 30_000;
@@ -60,6 +118,8 @@ export interface CaptureStackUpdateInput {
   nodeId: number;
   stackName: string;
   createdBy: string | null;
+  /** Capture trigger; defaults to 'update'. */
+  operationKind?: RollbackOperationKind;
 }
 
 function yamlQuote(value: string): string {
@@ -160,6 +220,7 @@ export class StackUpdateRecoveryService {
    */
   public async captureCandidate(input: CaptureStackUpdateInput): Promise<StackUpdateRecoveryGenerationRow> {
     const { nodeId, stackName, createdBy } = input;
+    const operationKind: RollbackOperationKind = input.operationKind ?? 'update';
     if (!isValidStackName(stackName)) {
       throw new Error('Invalid stack name');
     }
@@ -171,14 +232,13 @@ export class StackUpdateRecoveryService {
     const { ComposeService } = await import('./ComposeService');
     await ComposeService.getInstance(nodeId).validateExactComposeInvocation(stackName);
 
-    const backupSlotId = await context.backupFromContext('update');
+    // Content-store generation id becomes the row id, backup_slot_id, and content_path.
+    const generationId = await context.backupFromContext(operationKind);
 
     const model = await buildEffectiveServiceModel(nodeId, stackName);
     if (!model.renderable) {
       throw new Error(model.error || 'Effective Compose model failed to render');
     }
-
-    const generationId = randomUUID();
     const docker = DockerController.getInstance(nodeId).getDocker();
     const services: StackRecoveryServiceCapture[] = [];
     const createdTags: string[] = [];
@@ -277,7 +337,9 @@ export class StackUpdateRecoveryService {
         status: 'candidate',
         phase: 'captured',
         is_current: 0,
-        backup_slot_id: backupSlotId,
+        backup_slot_id: generationId,
+        content_path: generationId,
+        operation_kind: operationKind,
         override_path: overridePath,
         services_json: JSON.stringify(services),
         health_gate_id: null,
@@ -301,6 +363,14 @@ export class StackUpdateRecoveryService {
         } catch {
           // Best-effort mid-capture cleanup.
         }
+      }
+      try {
+        await RollbackGenerationStore.retireGenerationContent(nodeId, stackName, generationId);
+      } catch (retireError) {
+        console.warn(
+          '[StackUpdateRecovery] Failed to retire staged generation content after capture error: %s',
+          sanitizeForLog(getErrorMessage(retireError, 'unknown')),
+        );
       }
       throw error;
     }
@@ -545,7 +615,15 @@ export class StackUpdateRecoveryService {
     const row = this.get(generationId);
     if (!row) return false;
     try {
-      const context = await resolveComposeProjectContext(row.node_id, row.stack_name);
+      const verdict = await assessGenerationEligibility(row);
+      if (verdict === 'prohibited') {
+        throw Object.assign(
+          new Error('Rollback is prohibited for this generation'),
+          { code: 'ROLLBACK_PROHIBITED' },
+        );
+      }
+
+      const context = await resolveRestoreContext(row);
       await context.restoreFromContext();
       if (!row.override_path) {
         throw new Error('Recovery generation has no override path');
@@ -570,6 +648,10 @@ export class StackUpdateRecoveryService {
       });
       return true;
     } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (code === 'ROLLBACK_PROHIBITED') {
+        throw error;
+      }
       console.error(
         '[StackUpdateRecovery] Compensation failed for %s: %s',
         sanitizeForLog(generationId),
@@ -578,6 +660,9 @@ export class StackUpdateRecoveryService {
       DatabaseService.getInstance().updateStackUpdateRecoveryGeneration(generationId, {
         status: 'recovery_required',
       });
+      if (code === 'GENERATION_CONTENT_MISSING') {
+        throw error;
+      }
       return false;
     }
   }
@@ -712,7 +797,25 @@ export class StackUpdateRecoveryService {
         }
       }
     }
-    if (!tagsOk || !overrideOk) return false;
+    let contentOk = true;
+    const contentKey = row.content_path || row.backup_slot_id;
+    if (contentKey) {
+      try {
+        await RollbackGenerationStore.retireGenerationContent(
+          row.node_id,
+          row.stack_name,
+          contentKey,
+        );
+      } catch (error) {
+        contentOk = false;
+        console.warn(
+          '[StackUpdateRecovery] Failed to retire generation content %s: %s',
+          sanitizeForLog(contentKey),
+          sanitizeForLog(getErrorMessage(error, 'unknown')),
+        );
+      }
+    }
+    if (!tagsOk || !overrideOk || !contentOk) return false;
     try {
       DatabaseService.getInstance().markStackUpdateRecoveryArtifactsRetired(row.id);
     } catch (error) {
@@ -779,10 +882,30 @@ export class StackUpdateRecoveryService {
         if (row.is_current === 1 || row.status === 'recovery_required') continue;
         if (await this.retireGenerationArtifacts(row)) retired += 1;
       }
-      if (abandoned > 0 || flagged > 0 || capped > 0 || retired > 0) {
+
+      let orphansRetired = 0;
+      let incompleteFlagged = 0;
+      try {
+        ({ orphansRetired, incompleteFlagged } = await this.reconcileGenerationContentDirs(db));
+      } catch (contentError) {
+        console.warn(
+          '[StackUpdateRecovery] Generation content reconcile failed: %s',
+          sanitizeForLog(getErrorMessage(contentError, 'unknown')),
+        );
+      }
+
+      if (
+        abandoned > 0
+        || flagged > 0
+        || capped > 0
+        || retired > 0
+        || orphansRetired > 0
+        || incompleteFlagged > 0
+      ) {
         console.log(
           `[StackUpdateRecovery] Reconciled ${abandoned} stale candidate(s), `
-          + `${flagged} stuck generation(s), ${capped} generation(s) over cap, retired ${retired} artifact set(s)`,
+          + `${flagged} stuck generation(s), ${capped} generation(s) over cap, retired ${retired} artifact set(s), `
+          + `${orphansRetired} orphan dir(s), ${incompleteFlagged} incomplete generation(s)`,
         );
       }
     } catch (error) {
@@ -791,6 +914,106 @@ export class StackUpdateRecoveryService {
         sanitizeForLog(getErrorMessage(error, 'unknown')),
       );
     }
+  }
+
+  /**
+   * Retire orphan generation content dirs with no live row, and flag active rows
+   * whose content dir is missing or incomplete as recovery_required.
+   */
+  private async reconcileGenerationContentDirs(
+    db: DatabaseService,
+  ): Promise<{ orphansRetired: number; incompleteFlagged: number }> {
+    let orphansRetired = 0;
+    let incompleteFlagged = 0;
+    const backupsRoot = getBackupBaseDir();
+    let nodeEntries: string[] = [];
+    try {
+      nodeEntries = await fs.readdir(backupsRoot);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { orphansRetired, incompleteFlagged };
+      }
+      throw error;
+    }
+
+    const incompleteStatuses = new Set(['active', 'restored_current', 'candidate']);
+
+    for (const nodeEntry of nodeEntries) {
+      const nodeId = Number(nodeEntry);
+      if (!Number.isFinite(nodeId)) continue;
+      const nodeDir = path.join(backupsRoot, nodeEntry);
+      let stackEntries: string[] = [];
+      try {
+        stackEntries = await fs.readdir(nodeDir);
+      } catch {
+        continue;
+      }
+      for (const stackName of stackEntries) {
+        if (!isValidStackName(stackName)) continue;
+        const gensRoot = path.join(nodeDir, stackName, 'generations');
+        let genIds: string[] = [];
+        try {
+          genIds = await fs.readdir(gensRoot);
+        } catch {
+          continue;
+        }
+        const rows = db.listStackUpdateRecoveryForStack(nodeId, stackName);
+        const liveKeys = new Set<string>();
+        for (const row of rows) {
+          if (row.artifacts_retired !== 0) continue;
+          if (row.content_path) liveKeys.add(row.content_path);
+          if (row.backup_slot_id) liveKeys.add(row.backup_slot_id);
+          liveKeys.add(row.id);
+        }
+        const nowMs = Date.now();
+        for (const genId of genIds) {
+          if (genId.startsWith('staging-')) {
+            const stagingDir = path.join(gensRoot, genId);
+            try {
+              const st = await fs.stat(stagingDir);
+              if (nowMs - st.mtimeMs > STAGING_MAX_AGE_MS) {
+                await fs.rm(stagingDir, { recursive: true, force: true });
+                orphansRetired += 1;
+              }
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+              console.warn(
+                '[StackUpdateRecovery] Failed to retire stale staging dir %s/%s: %s',
+                sanitizeForLog(stackName),
+                sanitizeForLog(genId),
+                sanitizeForLog(getErrorMessage(error, 'unknown')),
+              );
+            }
+            continue;
+          }
+          if (!looksLikeGenerationUuid(genId) || liveKeys.has(genId)) continue;
+          try {
+            await RollbackGenerationStore.retireGenerationContent(nodeId, stackName, genId);
+            orphansRetired += 1;
+          } catch (error) {
+            console.warn(
+              '[StackUpdateRecovery] Failed to retire orphan generation %s/%s: %s',
+              sanitizeForLog(stackName),
+              sanitizeForLog(genId),
+              sanitizeForLog(getErrorMessage(error, 'unknown')),
+            );
+          }
+        }
+        for (const row of rows) {
+          if (row.artifacts_retired !== 0) continue;
+          if (row.status === 'abandoned' || row.status === 'superseded') continue;
+          if (!incompleteStatuses.has(row.status) && row.is_current !== 1) continue;
+          const contentKey = row.content_path || row.backup_slot_id;
+          if (!contentKey || !looksLikeGenerationUuid(contentKey)) continue;
+          const present = await generationContentPresent(row.node_id, row.stack_name, contentKey);
+          if (!present && row.status !== 'recovery_required') {
+            db.updateStackUpdateRecoveryGeneration(row.id, { status: 'recovery_required' });
+            incompleteFlagged += 1;
+          }
+        }
+      }
+    }
+    return { orphansRetired, incompleteFlagged };
   }
 
   /** Returns true when every tag is removed or already absent. */

@@ -26,6 +26,8 @@ function generation(overrides: Partial<RollbackGeneration> = {}): RollbackGenera
     phase: 'immediate_verified',
     createdAt: Date.now(),
     artifactExpiresAt: Date.now() + 3 * 24 * 60 * 60 * 1000,
+    createdBy: null,
+    operationKind: null,
     releasable: true,
     ...overrides,
   };
@@ -48,7 +50,8 @@ function shortIdsInOrder(): string[] {
 function stateLabelsInOrder(): string[] {
   return screen.getAllByRole('row').slice(1).map((row) => {
     const cells = within(row).getAllByRole('cell');
-    return cells[2]?.textContent ?? '';
+    // Stack, Generation, Trigger, State, Retention, Actions
+    return cells[3]?.textContent ?? '';
   });
 }
 

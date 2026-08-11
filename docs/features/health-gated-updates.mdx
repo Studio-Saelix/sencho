@@ -71,7 +71,7 @@ The live verifying and recovery view is part of the deploy progress panel. If yo
   <img src="/images/health-gated-updates/modal-gate-failed.png" alt="Deploy progress modal with the Health gate failed headline and the banner identifying the unhealthy container, with the hint that rollback options are available on the stack" />
 </Frame>
 
-When the gate fails, the stack page surfaces the same [recovery actions](/features/deploy-progress#recovery-actions) as a failed update: retry, restart, roll back when a backup exists, refresh the container state, or copy diagnostics. Rolling back is always your call; the gate never rolls anything back on its own.
+When the gate fails, the stack page surfaces the same [recovery actions](/features/deploy-progress#recovery-actions) as a failed update: retry, restart, roll back when a recovery generation exists, refresh the container state, or copy diagnostics. Rolling back is always your call; the gate never rolls anything back on its own.
 
 The gate also runs for updates you did not click: scheduled image updates, webhook-triggered deploys and pulls, bulk updates, and Git source applies all record gate verdicts on the stack timeline. Rollbacks, App Store installs, and Sencho's own automation loops are deliberately not gated.
 
@@ -90,24 +90,28 @@ Open **Settings > Infrastructure > Stacks > Deploy Guardrails** on the node you 
 
 The Stack Dossier carries a **Rollback readiness** section that answers one question honestly: if this update goes wrong, what can a rollback actually restore? It reports an overall state of Ready, Partial, or Not ready, built from:
 
-- **Previous compose file**: whether a backup slot exists and how old it is.
-- **Previous env file**: whether the backup contains the stack's env file. Sencho lists how many variable names are covered; the values themselves are restored with the file and never displayed.
-- **Previous image tag**: the known rollback target from the update preview. When the compose file uses a moving tag, restoring files alone does not revert the image, so the report names the exact tag you would pin to be precise.
-- **Last successful deploy**: whether the backup reflects a configuration that actually deployed successfully.
+- **Recovery generation**: whether a current generation exists for exact restore. Atomic deploy, full-stack update, and Git apply capture one.
+- **Managed inputs**: whether the managed authored inventory (ordered compose files, overrides, include/extends, and discoverable env/label/config/secret inputs) is covered exactly.
+- **Previous compose file** / **Previous env file**: compose and env coverage disclosures (driven by the current generation when one exists).
+- **Previous image tag**: the known rollback target. When a generation holds prior image IDs, restore can retarget moving tags and supported local builds to those exact images; when no prior ID was captured, restoring files alone may leave a moving tag on a newer digest.
+- **Last successful deploy**: whether recent activity shows a configuration that deployed successfully.
 - **Healthchecks**: whether a rollback can be verified beyond run state.
-- **Application data**: always reported as not covered. Named volumes and bind-mounted data are not included in file backups; a rollback restores compose and env files only, and your application data keeps its current state. This row exists so the limit is stated where you decide, not discovered during an incident.
+- **Rollback eligibility**: whether policy allows restore for the current generation (integrity and held-image posture).
+- **Application data**: always reported as not covered. Named volumes and bind-mounted data are not included; a rollback restores the managed authored inventory (and held images where available), and your application data keeps its current state. This row exists so the limit is stated where you decide, not discovered during an incident.
 
 <Frame>
-  <img src="/images/health-gated-updates/dossier-rollback-readiness.png" alt="Rollback readiness section in the Stack Dossier showing the overall state chip and the six rows: Previous compose file, Previous env file, Previous image tag, Last successful deploy, Healthchecks, and the Application data row marked not covered" />
+  <img src="/images/health-gated-updates/dossier-rollback-readiness.png" alt="Rollback readiness section in the Stack Dossier showing the overall state chip and rows for recovery generation, managed inputs, compose and env coverage, previous image identity, last successful deploy, healthchecks, rollback eligibility, and application data marked not covered" />
 </Frame>
 
 ## Automatic rollback images
 
-Before a full-stack update runs, Sencho captures the running image of every service as an opaque, uniquely named copy so it can automatically restore the prior state if the update or its health gate fails. These copies exist in Docker as `sencho-rb/<generation>/<service>:hold`, but they are Sencho-internal recovery state, not part of your image inventory: they are kept out of **Resources → Images** and listed instead in **Resources → Rollback**. If a captured image still carries its original registry tag alongside the hold tag (a compose file pinned to an immutable tag, for example), it stays visible in the Images tab too, badged **Rollback protected** instead of the usual unused label, since it is held on purpose rather than left behind by accident.
+Before an atomic deploy, a full-stack update, or a Git apply that will promote (including apply-with-deploy), Sencho captures the running image of every service as an opaque, uniquely named copy so it can restore the prior runtime when a failure after handoff requires it. These copies exist in Docker as `sencho-rb/<generation>/<service>:hold`, but they are Sencho-internal recovery state, not part of your image inventory: they are kept out of **Resources → Images** and listed instead in **Resources → Rollback**. If a captured image still carries its original registry tag alongside the hold tag (a compose file pinned to an immutable tag, for example), it stays visible in the Images tab too, badged **Rollback protected** instead of the usual unused label, since it is held on purpose rather than left behind by accident.
 
-Each capture is one **rollback generation**. The generation currently backing a stack's live deployment is retained for as long as it is current; once a newer update supersedes it, it is retained for a configurable window before Sencho cleans it up automatically. A stack updated repeatedly in a short span can have more than one superseded generation in that window at once.
+Each capture is one **rollback generation**. The generation currently backing a stack's live deployment is retained for as long as it is current; once a newer protected run supersedes it, it is retained for a configurable window before Sencho cleans it up automatically. A stack updated repeatedly in a short span can have more than one superseded generation in that window at once.
 
-**Resources → Rollback** lists every generation on the node: the stack it belongs to, a short generation id, whether it is the current protection or a superseded one awaiting cleanup, and roughly when it clears. Search by stack name or generation id, filter to Current or Superseded, and click a column header to sort. An admin can release a generation's protection early from that list, including the current one, which immediately frees its image but means Sencho cannot automatically roll that stack back until its next successful full-stack update; the confirmation dialog says so before you proceed. A generation that is mid-recovery or still being observed by a health gate cannot be released until that finishes.
+The health gate remains observational: it records a verdict and surfaces recovery actions, but it never rolls anything back on its own. Automatic restore after handoff belongs to the atomic deploy/update path when a crash is detected; manual **Rollback** prefers the current recovery generation.
+
+**Resources → Rollback** lists every generation on the node: the stack it belongs to, a short generation id, whether it is the current protection or a superseded one awaiting cleanup, and roughly when it clears. Search by stack name or generation id, filter to Current or Superseded, and click a column header to sort. An admin can release a generation's protection early from that list, including the current one, which immediately frees its image but means Sencho cannot automatically roll that stack back until its next successful atomic deploy, full-stack update, or Git apply capture; the confirmation dialog says so before you proceed. A generation that is mid-recovery or still being observed by a health gate cannot be released until that finishes.
 
 <Frame>
   <img src="/images/health-gated-updates/rollback-generations.png" alt="Resources Rollback tab showing search, All Current and Superseded filter buttons, an info icon for help, and sortable Stack, Generation, State, and Retention column headers above the generations table" />
@@ -140,15 +144,15 @@ When a deploy or update fails, Sencho classifies the failure from the compose ou
     The modal holds its auto-close while the gate observes so the verdict is not lost. You can close it at any time; the observation continues server-side and the verdict lands on the stack timeline. If the gate result repeatedly cannot be retrieved, the modal gives up with an unknown verdict instead of waiting forever.
   </Accordion>
   <Accordion title="Rollback readiness says my data is not covered">
-    That is by design and true for every stack: file backups cover compose and env files, never named volumes or bind-mounted data. For point-in-time copies of stack files across the fleet, use [fleet snapshots](/features/fleet-backups); for application data, use a backup tool appropriate to the workload (database dumps, volume backups) before risky updates.
+    That is by design and true for every stack: recovery generations cover the managed authored inventory and held prior images, never named volumes or bind-mounted data. For point-in-time copies of stack files across the fleet, use [fleet snapshots](/features/fleet-backups); for application data, use a backup tool appropriate to the workload (database dumps, volume backups) before risky updates.
   </Accordion>
   <Accordion title="Updates from the sidebar menu now show a dialog first">
     The sidebar's per-stack **Update** action runs the same path as the editor toolbar, so it shows the same readiness dialog and deploy progress. One click on **Update now** proceeds. On nodes that do not advertise the capability, updates run directly without the dialog.
   </Accordion>
   <Accordion title="Why do I see sencho-rb/... images in docker images on the host">
-    Those are automatic rollback images: an opaque copy of a service's prior image, held so Sencho can restore it if a full-stack update fails. They are not leftovers. Sencho keeps them out of **Resources → Images** on purpose (they are recovery state, not image inventory) and lists them in **Resources → Rollback** instead, showing which stack and generation each one belongs to and how soon it clears on its own. If one still carries a normal registry tag too, it also stays visible in the Images tab with a **Rollback protected** badge.
+    Those are automatic rollback images: an opaque copy of a service's prior image, held so Sencho can restore it if an atomic deploy, full-stack update, or Git apply-with-deploy path needs the prior runtime after handoff. They are not leftovers. Sencho keeps them out of **Resources → Images** on purpose (they are recovery state, not image inventory) and lists them in **Resources → Rollback** instead, showing which stack and generation each one belongs to and how soon it clears on its own. If one still carries a normal registry tag too, it also stays visible in the Images tab with a **Rollback protected** badge.
   </Accordion>
   <Accordion title="Deleting a rollback-protected image fails">
-    That failure is intentional: the image is protected by an active or recently superseded rollback generation. Open **Resources → Rollback**, find the matching generation, and use **Release** there if you are sure you do not need it. Releasing the current generation means Sencho cannot automatically roll that stack back until its next successful full-stack update.
+    That failure is intentional: the image is protected by an active or recently superseded rollback generation. Open **Resources → Rollback**, find the matching generation, and use **Release** there if you are sure you do not need it. Releasing the current generation means Sencho cannot automatically roll that stack back until its next successful atomic deploy, full-stack update, or Git apply capture.
   </Accordion>
 </AccordionGroup>

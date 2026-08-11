@@ -241,6 +241,35 @@ export class UpdateGuardService {
         withTimeout(this.probeContainers(nodeId, stackName), INPUT_TIMEOUT_MS, 'rollback readiness container probe')),
     ]);
 
+    const { StackUpdateRecoveryService, shortGenerationId } = await import('./StackUpdateRecoveryService');
+    const { assessGenerationEligibility } = await import('./rollbackEligibility');
+    const recoverySvc = StackUpdateRecoveryService.getInstance();
+    const currentGen = recoverySvc.getCurrent(nodeId, stackName);
+
+    const recoveryGeneration = currentGen
+      ? { exists: true as const, shortId: shortGenerationId(currentGen.id) }
+      : { exists: false as const };
+
+    const policyEligibility = currentGen
+      ? await this.collect('rollback eligibility', stackName, () => assessGenerationEligibility(currentGen))
+      : null;
+
+    const managedInputs = await this.collect('managed inputs', stackName, async () => {
+      const { resolveRollbackInventory } = await import('./rollbackInventory');
+      const inventory = await resolveRollbackInventory(nodeId, stackName);
+      if (inventory.exactCoverage) {
+        return {
+          covered: true,
+          detail: `Exact authored-project coverage includes ${inventory.entries.length} managed path(s).`,
+        };
+      }
+      return {
+        covered: false,
+        detail: inventory.coverageRefusal
+          || 'Exact authored-project coverage is incomplete for this stack.',
+      };
+    });
+
     const items = buildRollbackItems({
       backup,
       envSummary,
@@ -255,15 +284,18 @@ export class UpdateGuardService {
           },
       lastDeployAt,
       containers,
+      recoveryGeneration,
+      policyEligibility: policyEligibility === 'error' ? 'error' : policyEligibility,
+      managedInputs: managedInputs === 'error' ? 'error' : managedInputs,
     }, now);
 
-    // Partial-revert disclosure for Git-managed stacks: rollback restores only
-    // compose files and .env; the rest of the materialized project is not
-    // reverted by the backup slot. State the scope rather than imply a
-    // complete revert.
+    // Partial-revert disclosure for Git-managed stacks when exact generation
+    // coverage is not available. Prefer generation-backed wording when present.
     let note: string | undefined;
     const gitSource = db.getGitSource(stackName);
-    if (gitSource && (gitSource.manifest_state === 'active' || gitSource.manifest_state === 'partial' || gitSource.manifest_state === 'migrated')) {
+    if (currentGen) {
+      note = undefined;
+    } else if (gitSource && (gitSource.manifest_state === 'active' || gitSource.manifest_state === 'partial' || gitSource.manifest_state === 'migrated')) {
       note = 'This stack is Git-managed. Rollback restores compose files and .env; other materialized inputs are not reverted. Re-apply the previous revision from Git to restore them.';
     }
 

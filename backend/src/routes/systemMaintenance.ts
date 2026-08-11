@@ -513,6 +513,8 @@ systemMaintenanceRouter.get('/rollback/generations', async (req: Request, res: R
       phase: row.phase,
       createdAt: row.created_at,
       artifactExpiresAt: row.artifact_expires_at,
+      createdBy: row.created_by,
+      operationKind: row.operation_kind,
       releasable: service.isReleaseEligible(row),
     })));
   } catch (error) {

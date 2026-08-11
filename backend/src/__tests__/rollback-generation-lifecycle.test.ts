@@ -82,6 +82,8 @@ function makeRow(overrides: Partial<StackUpdateRecoveryGenerationRow> = {}): Sta
     phase: 'immediate_verified',
     is_current: 1,
     backup_slot_id: null,
+    content_path: null,
+    operation_kind: null,
     override_path: null,
     services_json: JSON.stringify([{
       serviceName: 'web',

@@ -331,13 +331,55 @@ export interface RollbackInputs {
   /** Timestamp of the most recent deploy_success activity event, if any. */
   lastDeployAt: number | null | Errored;
   containers: ContainerProbe[] | Errored;
+  /**
+   * Current recovery generation, when one exists. When present, compose_source
+   * readiness is driven by this generation rather than the legacy backup slot.
+   */
+  recoveryGeneration: { exists: boolean; shortId?: string } | Errored | null;
+  /** Eligibility verdict for the current generation, when assessed. */
+  policyEligibility: 'eligible' | 'eligible_with_warning' | 'prohibited' | 'unknown' | Errored | null;
+  /** Whether managed authored inputs are covered by exact inventory. */
+  managedInputs: { covered: boolean; detail: string } | Errored | null;
 }
 
 export function buildRollbackItems(inputs: RollbackInputs, now: number): RollbackReadinessItem[] {
   const items: RollbackReadinessItem[] = [];
 
+  const recoveryRaw = inputs.recoveryGeneration;
+  const recoveryInfo = recoveryRaw !== null && recoveryRaw !== 'error' ? recoveryRaw : null;
+  const recoveryExists = !!recoveryInfo?.exists;
   const backupExists = inputs.backup !== 'error' && inputs.backup.exists;
-  if (inputs.backup === 'error') {
+
+  if (recoveryRaw === 'error') {
+    items.push({ id: 'recovery_generation', state: 'unknown', label: 'Recovery generation', detail: 'The recovery generation could not be read.' });
+  } else if (recoveryInfo?.exists) {
+    const short = recoveryInfo.shortId;
+    items.push({
+      id: 'recovery_generation',
+      state: 'ready',
+      label: 'Recovery generation',
+      detail: short
+        ? `Current recovery generation ${short} is available for exact restore.`
+        : 'A current recovery generation is available for exact restore.',
+    });
+  } else {
+    items.push({
+      id: 'recovery_generation',
+      state: 'missing',
+      label: 'Recovery generation',
+      detail: 'No recovery generation is current yet. One is created by the next update, atomic deploy, or Git apply.',
+    });
+  }
+
+  // Supersede rule: when a recovery generation exists, compose_source tracks it.
+  if (recoveryExists) {
+    items.push({
+      id: 'compose_source',
+      state: 'ready',
+      label: 'Previous compose file',
+      detail: 'Authored project files are covered by the current recovery generation.',
+    });
+  } else if (inputs.backup === 'error') {
     items.push({ id: 'compose_source', state: 'unknown', label: 'Previous compose file', detail: 'The backup slot could not be read.' });
   } else if (backupExists) {
     const age = inputs.backup.timestamp ? ` from ${formatAge(inputs.backup.timestamp, now)}` : '';
@@ -385,6 +427,30 @@ export function buildRollbackItems(inputs: RollbackInputs, now: number): Rollbac
     items.push({ id: 'healthchecks', state: 'missing', label: 'Healthchecks', detail: 'No service defines a healthcheck; rollback verification relies on run state only.' });
   }
 
+  if (inputs.policyEligibility === 'error') {
+    items.push({ id: 'policy_eligibility', state: 'unknown', label: 'Rollback eligibility', detail: 'Eligibility could not be assessed.' });
+  } else if (inputs.policyEligibility === null) {
+    items.push({ id: 'policy_eligibility', state: 'ready', label: 'Rollback eligibility', detail: 'No recovery generation to assess yet.' });
+  } else if (inputs.policyEligibility === 'eligible') {
+    items.push({ id: 'policy_eligibility', state: 'ready', label: 'Rollback eligibility', detail: 'Restore is eligible with known-good generation integrity and held images.' });
+  } else if (inputs.policyEligibility === 'eligible_with_warning') {
+    items.push({ id: 'policy_eligibility', state: 'warning', label: 'Rollback eligibility', detail: 'Restore is possible but held images may be missing; moving-tag recoverability is weak.' });
+  } else if (inputs.policyEligibility === 'prohibited') {
+    items.push({ id: 'policy_eligibility', state: 'blocked', label: 'Rollback eligibility', detail: 'Restore is prohibited until generation integrity or security posture is repaired.' });
+  } else {
+    items.push({ id: 'policy_eligibility', state: 'unknown', label: 'Rollback eligibility', detail: 'Eligibility is not fully known yet.' });
+  }
+
+  if (inputs.managedInputs === 'error') {
+    items.push({ id: 'managed_inputs', state: 'unknown', label: 'Managed inputs', detail: 'Managed input coverage could not be read.' });
+  } else if (inputs.managedInputs === null) {
+    items.push({ id: 'managed_inputs', state: 'unknown', label: 'Managed inputs', detail: 'Managed input coverage has not been assessed.' });
+  } else if (inputs.managedInputs.covered) {
+    items.push({ id: 'managed_inputs', state: 'ready', label: 'Managed inputs', detail: inputs.managedInputs.detail });
+  } else {
+    items.push({ id: 'managed_inputs', state: 'warning', label: 'Managed inputs', detail: inputs.managedInputs.detail });
+  }
+
   const mounts = inputs.containers === 'error'
     ? []
     : [...new Set(inputs.containers.flatMap(c => c.mounts))];
@@ -406,8 +472,15 @@ export function buildRollbackItems(inputs: RollbackInputs, now: number): Rollbac
  */
 export function aggregateRollbackOverall(items: RollbackReadinessItem[]): RollbackOverall {
   const byId = new Map(items.map(i => [i.id, i.state]));
+  if (byId.get('policy_eligibility') === 'blocked') {
+    return 'not_ready';
+  }
   if (byId.get('compose_source') !== 'ready') {
     return byId.get('compose_source') === 'unknown' ? 'partial' : 'not_ready';
+  }
+  const policy = byId.get('policy_eligibility');
+  if (policy === 'unknown' || policy === 'warning') {
+    return 'partial';
   }
   if (byId.get('env_keys') === 'ready' && byId.get('previous_images') === 'ready') {
     return 'ready';

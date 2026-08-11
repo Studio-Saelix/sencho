@@ -1,9 +1,9 @@
 /**
- * Thin Compose project context for safe full-stack updates.
+ * Shared Compose project context for safe full-stack mutations.
  *
- * Wraps the current authored compose argument path and atomic file backup/restore.
- * When a richer shared Compose project context lands, migrate callers to that type;
- * this module must not become a competing full-manifest resolver.
+ * Resolves the authored inventory (Git managed-project manifest or live stack
+ * discovery), captures/restores generation content through RollbackGenerationStore,
+ * and builds the exact Compose invocation used for deploy/update/rollback.
  */
 import path from 'path';
 import { randomUUID } from 'crypto';
@@ -11,8 +11,13 @@ import { ComposeService } from './ComposeService';
 import { FileSystemService } from './FileSystemService';
 import { buildEffectiveServiceModel } from './effectiveServiceModel';
 import { getErrorMessage } from '../utils/errors';
+import { resolveRollbackInventory } from './rollbackInventory';
+import { RollbackGenerationStore } from './RollbackGenerationStore';
+import type { RollbackOperationKind } from '../types/rollbackGeneration';
 
 export type ImageReferenceKind = 'moving_tag' | 'digest_pinned' | 'none';
+
+export type BackupOperation = RollbackOperationKind;
 
 const DIGEST_PIN_PATTERN = /@sha256:[a-f0-9]{64}$/i;
 
@@ -34,10 +39,15 @@ export interface ComposeProjectContext {
   readonly nodeId: number;
   readonly stackName: string;
   readonly stackDir: string;
+  /** Generation id used as content-store key and backup_slot_id on the DB row. */
   backupSlotId: string | null;
   toComposeArgs(action: string[]): Promise<string[]>;
   validateForMutation(): Promise<void>;
-  backupFromContext(operation: 'update' | 'deployment'): Promise<string>;
+  /**
+   * Capture a staged generation. When exactCoverage is required and inventory
+   * refuses it, throws before writing any generation content.
+   */
+  backupFromContext(operation: BackupOperation): Promise<string>;
   restoreFromContext(): Promise<void>;
   resolveServiceImageMap(): Promise<Map<string, string | null>>;
 }
@@ -60,15 +70,67 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
     await requireRenderableModel(this.nodeId, this.stackName);
   }
 
-  async backupFromContext(_operation: 'update' | 'deployment'): Promise<string> {
-    await FileSystemService.getInstance(this.nodeId).backupStackFiles(this.stackName);
-    const slotId = randomUUID();
-    this.backupSlotId = slotId;
-    return slotId;
+  async backupFromContext(operation: BackupOperation): Promise<string> {
+    const inventory = await resolveRollbackInventory(this.nodeId, this.stackName);
+    if (!inventory.exactCoverage) {
+      throw Object.assign(
+        new Error(
+          inventory.coverageRefusal
+            || 'Exact authored-project rollback coverage is unavailable for this stack',
+        ),
+        { code: 'ROLLBACK_COVERAGE_UNAVAILABLE' },
+      );
+    }
+
+    // Also refresh the legacy single-slot backup for read-compat during migration.
+    try {
+      await FileSystemService.getInstance(this.nodeId).backupStackFiles(this.stackName);
+    } catch (e) {
+      console.warn(
+        `[ComposeProjectContext] Legacy backup slot refresh failed for ${this.stackName}:`,
+        getErrorMessage(e, 'unknown'),
+      );
+    }
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: this.nodeId,
+      stackName: this.stackName,
+      generationId,
+      inventory,
+      operationKind: operation,
+    });
+    this.backupSlotId = generationId;
+    return generationId;
   }
 
   async restoreFromContext(): Promise<void> {
-    await FileSystemService.getInstance(this.nodeId).restoreStackFiles(this.stackName);
+    const generationId = this.backupSlotId;
+    if (!generationId) {
+      // Legacy pre-migration restore: only when no generation id is bound.
+      await FileSystemService.getInstance(this.nodeId).restoreStackFiles(this.stackName);
+      return;
+    }
+
+    const present = await RollbackGenerationStore.verifyGenerationContent(
+      this.nodeId,
+      this.stackName,
+      generationId,
+    );
+    if (!present) {
+      throw Object.assign(
+        new Error('Recovery generation content is missing or incomplete'),
+        { code: 'GENERATION_CONTENT_MISSING' },
+      );
+    }
+
+    const inventory = await resolveRollbackInventory(this.nodeId, this.stackName);
+    await RollbackGenerationStore.restoreGeneration(
+      this.nodeId,
+      this.stackName,
+      generationId,
+      inventory.entries.map((e) => e.relativePath),
+    );
   }
 
   async resolveServiceImageMap(): Promise<Map<string, string | null>> {
@@ -87,6 +149,17 @@ export async function resolveComposeProjectContext(
 ): Promise<ComposeProjectContext> {
   const stackDir = path.join(FileSystemService.getInstance(nodeId).getBaseDir(), stackName);
   return new AuthoredComposeProjectContext(nodeId, stackName, stackDir);
+}
+
+/** Bind an existing generation id onto a fresh context for restore. */
+export async function resolveComposeProjectContextForGeneration(
+  nodeId: number,
+  stackName: string,
+  generationId: string,
+): Promise<ComposeProjectContext> {
+  const ctx = await resolveComposeProjectContext(nodeId, stackName);
+  ctx.backupSlotId = generationId;
+  return ctx;
 }
 
 export function describeContextError(error: unknown): string {

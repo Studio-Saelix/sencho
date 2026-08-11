@@ -655,8 +655,32 @@ export class ComposeService {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
     };
 
-    if (atomic) {
-      await this.createAtomicBackup(stackName, 'deployment', sendOutput);
+    const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+    const recoverySvc = atomic ? StackUpdateRecoveryService.getInstance() : null;
+    let recoveryId: string | null = null;
+    let handedOff = false;
+
+    if (atomic && recoverySvc) {
+      sendOutput('=== Capturing rollback generation for atomic deploy ===\n');
+      const candidate = await recoverySvc.captureCandidate({
+        nodeId: this.nodeId,
+        stackName,
+        createdBy: 'atomic-deploy',
+        operationKind: 'deployment',
+      });
+      recoveryId = candidate.id;
+      if (!recoverySvc.markAcquired(candidate.id)) {
+        await recoverySvc.abandon(candidate.id);
+        throw new Error('Failed to mark recovery generation as acquired');
+      }
+      if (!recoverySvc.handoff(candidate.id, this.nodeId, stackName)) {
+        await recoverySvc.abandon(candidate.id);
+        throw new Error('Failed to hand off recovery generation');
+      }
+      handedOff = true;
+      if (!recoverySvc.markReconciling(candidate.id)) {
+        throw new Error('Failed to mark recovery generation as reconciling after handoff');
+      }
     }
 
     try {
@@ -695,12 +719,27 @@ export class ComposeService {
           }
         }
       }
+
+      if (atomic && recoverySvc && recoveryId) {
+        if (!recoverySvc.markImmediateVerified(recoveryId)) {
+          console.warn(
+            '[ComposeService] Could not CAS immediate_verified for recovery %s',
+            sanitizeForLog(recoveryId),
+          );
+        }
+      }
       if (debug) console.debug(`[ComposeService:debug] deployStack completed in ${Date.now() - t0}ms`, { stackName });
     } catch (deployError) {
-      if (atomic) {
-        sendOutput('\n=== Deployment failed - restoring previous compose and env files ===\n');
-        const rolledBack = await this.restoreAtomicBackup(stackName, stackDir, ws, sendOutput);
+      if (atomic && recoverySvc && handedOff && recoveryId) {
+        sendOutput('\n=== Deployment failed - restoring previous runtime from recovery generation ===\n');
+        const rolledBack = await recoverySvc.compensateWithCandidate(
+          recoveryId,
+          (overridePath) => this.composeUpWithRecoveryOverride(stackName, overridePath, ws),
+        );
         throw new ComposeRollbackError(deployError, true, rolledBack);
+      }
+      if (atomic && recoverySvc && recoveryId && !handedOff) {
+        await recoverySvc.abandon(recoveryId);
       }
       throw deployError;
     }
@@ -840,8 +879,38 @@ export class ComposeService {
 
 
   /**
+   * Pinned compose-up with a recovery override layered last
+   * (`--pull never --no-build`). Used by manual rollback and deploy/update
+   * compensation.
+   */
+  async composeUpWithRecoveryOverride(
+    stackName: string,
+    overridePath: string,
+    ws?: WebSocket,
+  ): Promise<void> {
+    const stackDir = path.join(this.baseDir, stackName);
+    const sendOutput = (data: string) => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+    };
+    await this.withRegistryAuth(async (env) => {
+      await this.execute(
+        'docker',
+        await this.buildComposeArgsWithRecoveryOverride(
+          stackName,
+          ['up', '-d', '--remove-orphans', '--pull', 'never', '--no-build'],
+          overridePath,
+        ),
+        stackDir,
+        ws,
+        true,
+        env,
+        getComposeStallTimeoutMs(),
+      );
+    }, sendOutput);
+  }
+
+  /**
    * Authored (+ mesh) compose args with an optional recovery override layered LAST.
-   * Used for pinned lifecycle / compensation ups (`--pull never --no-build`).
    */
   public async buildComposeArgsWithRecoveryOverride(
     stackName: string,
@@ -905,6 +974,7 @@ export class ComposeService {
         nodeId: this.nodeId,
         stackName,
         createdBy: null,
+        operationKind: 'update',
       });
       recoveryId = candidate.id;
 
@@ -1047,23 +1117,7 @@ export class ComposeService {
         sendOutput('\n=== Update failed - restoring previous runtime from recovery generation ===\n');
         const rolledBack = await recoverySvc.compensateWithCandidate(
           recoveryId,
-          async (overridePath) => {
-            await this.withRegistryAuth(async (env) => {
-              await this.execute(
-                'docker',
-                await this.buildComposeArgsWithRecoveryOverride(
-                  stackName,
-                  ['up', '-d', '--remove-orphans', '--pull', 'never', '--no-build'],
-                  overridePath,
-                ),
-                stackDir,
-                ws,
-                true,
-                env,
-                getComposeStallTimeoutMs(),
-              );
-            }, sendOutput);
-          },
+          (overridePath) => this.composeUpWithRecoveryOverride(stackName, overridePath, ws),
         );
         throw new ComposeRollbackError(updateError, true, rolledBack);
       }
