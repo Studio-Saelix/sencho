@@ -72,6 +72,7 @@ function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
         closeComposeEditor: vi.fn(),
         requestSave: vi.fn(),
         requestSaveAndDeploy: vi.fn(),
+        actionsReady: true,
         discardChanges: vi.fn(),
         setContent: vi.fn(),
         setEnvContent: vi.fn(),

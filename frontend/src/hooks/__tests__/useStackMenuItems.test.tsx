@@ -8,6 +8,7 @@ function makeCtx(overrides: Partial<StackMenuCtx> = {}): StackMenuCtx {
   return {
     stackStatus: 'running',
     isSelfStack: false,
+    ready: true,
     canOpenApp: true,
     isBusy: false,
     isAdmin: true,

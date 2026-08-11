@@ -537,6 +537,17 @@ export function useStackActions(options: UseStackActionsOptions) {
   const isEnvDirty = () => editorState.envContent !== editorState.originalEnvContent;
 
   const getStackMenuVisibility = (file: string) => {
+    // Without authoritative status evidence every lifecycle action fails closed:
+    // undefined status must not read as "exited but deployable".
+    if (!hydrationReady()) {
+      return {
+        showDeploy: false,
+        showStop: false,
+        showRestart: false,
+        showUpdate: false,
+        showTakeDown: false,
+      };
+    }
     // A partial stack has running containers, so it shows the running-stack
     // lifecycle actions (stop/restart/update) rather than deploy.
     const raw = stackListState.stackStatuses[file];
@@ -554,13 +565,22 @@ export function useStackActions(options: UseStackActionsOptions) {
   const isSelfStackFile = (file: string | null | undefined): boolean =>
     !!file && stackListState.stackSelfFlags[file] === true;
 
+  // Ref-backed readiness: evaluates the CURRENT node/list/evidence at call
+  // time, so a dialog opened while ready cannot bypass a later readiness loss.
+  const hydrationReady = stackListState.hydrationReady;
+
   const openSelfStackProtectedIfNeeded = (file: string | null | undefined): boolean => {
+    // Without authoritative self identity the frontend must not guess: block
+    // without opening the self-stack modal (which would falsely identify an
+    // ordinary stack as Sencho). The backend 409 remains the last line.
+    if (!hydrationReady()) return true;
     if (!isSelfStackFile(file)) return false;
     overlayState.openSelfStackProtected();
     return true;
   };
 
   const openStackApp = (file: string) => {
+    if (!hydrationReady()) return;
     const port = stackListState.stackPorts[file];
     if (!port) return;
     const url = buildServiceUrl({ node: activeNode, publicPort: port });
@@ -1414,6 +1434,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   const deployStack = async (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
+    if (!hydrationReady()) return;
     if (
       !stackListState.selectedFile ||
       stackListState.isStackBusy(stackListState.selectedFile) ||
@@ -1518,6 +1539,9 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   const handleSaveAndDeploy = async (e: React.MouseEvent) => {
+    // Readiness is rechecked before the PUT so a readiness loss while the file
+    // was being edited cannot slip a mutation through.
+    if (!hydrationReady()) return;
     const saved = await saveFile();
     if (!saved) return;
     await deployStack(e);
@@ -1528,6 +1552,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   // update bypass still re-pulls images, matching the backend bypass on each
   // endpoint. The server ignores the flag unless the caller is an admin.
   const bypassPolicyAndRetry = async () => {
+    if (!hydrationReady()) return;
     const policyBlock = overlayState.policyBlock;
     if (!policyBlock) return;
     // Retry on the node the block was raised against, not the live active node,
@@ -1559,6 +1584,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   const rollbackStack = async (ignorePolicy = false, opNodeId: number | null = activeNode?.id ?? null) => {
+    if (!hydrationReady()) return;
     if (!stackListState.selectedFile || stackListState.isStackBusy(stackListState.selectedFile))
       return;
     const stackFile = stackListState.selectedFile;
@@ -1783,6 +1809,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   const stopStack = async (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
+    if (!hydrationReady()) return;
     if (!stackListState.selectedFile) return;
     if (openSelfStackProtectedIfNeeded(stackListState.selectedFile)) return;
     await runStackAction(stackListState.selectedFile, 'stop', 'stop', 'exited', 'Stack stopped successfully!');
@@ -1791,6 +1818,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   const restartStack = async (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
+    if (!hydrationReady()) return;
     if (!stackListState.selectedFile) return;
     await runStackAction(stackListState.selectedFile, 'restart', 'restart', 'running', 'Stack restarted successfully!');
   };
@@ -1799,6 +1827,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     action: 'start' | 'stop' | 'restart',
     serviceName: string,
   ) => {
+    if (!hydrationReady()) return;
     if (!stackListState.selectedFile) return;
     if (action === 'stop' && openSelfStackProtectedIfNeeded(stackListState.selectedFile)) return;
     const stackName = stackListState.selectedFile.replace(/\.(yml|yaml)$/, '');
@@ -1863,6 +1892,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     serviceName: string,
     mode: 'update' | 'rebuild' = 'update',
   ): Promise<void> => {
+    if (!hydrationReady()) return;
     if (stackListState.isStackBusy(stackFile) || editorState.serviceUpdateInProgress) return;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     const opNodeId = activeNode?.id ?? null;
@@ -1925,6 +1955,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     serviceName: string,
     recoveryId: string,
   ): Promise<void> => {
+    if (!hydrationReady()) return;
     if (stackListState.isStackBusy(stackFile) || editorState.serviceUpdateInProgress) return;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     const opNodeId = activeNode?.id ?? null;
@@ -1966,12 +1997,20 @@ export function useStackActions(options: UseStackActionsOptions) {
   const updateStack = async (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
+    if (!hydrationReady()) return;
     if (!stackListState.selectedFile) return;
     if (openSelfStackProtectedIfNeeded(stackListState.selectedFile)) return;
     await requestStackUpdate(stackListState.selectedFile);
   };
 
   const deleteStack = async (pruneVolumes: boolean) => {
+    // Final confirmation boundary: an already-open dialog cannot submit after
+    // readiness was lost (node switch, list change, failed refresh). The dialog
+    // stays open and the toast explains why nothing happened.
+    if (!hydrationReady()) {
+      toast.error('Status data unavailable. Refresh and try again.');
+      return;
+    }
     const stackToDelete = overlayState.stackToDelete;
     if (!stackToDelete) return;
     const deleteKey = resolveStackFileKey(stackListState.files, stackToDelete);
@@ -2020,6 +2059,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   const requestTakeDownStack = (stackName: string) => {
+    if (!hydrationReady()) return;
     if (openSelfStackProtectedIfNeeded(
       stackListState.files.find(f => f.replace(/\.(yml|yaml)$/, '') === stackName) ?? stackName,
     )) return;
@@ -2027,6 +2067,11 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   const takeDownStack = async (removeVolumes: boolean) => {
+    // Final confirmation boundary: recheck readiness at submit time.
+    if (!hydrationReady()) {
+      toast.error('Status data unavailable. Refresh and try again.');
+      return;
+    }
     const stackToTakeDown = overlayState.stackToTakeDown;
     if (!stackToTakeDown) return;
     if (removeVolumes && !canOfferVolumeRemoval) {
@@ -2192,6 +2237,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     action: StackAction,
     endpoint: string,
   ) => {
+    if (!hydrationReady()) return;
     if (stackListState.isStackBusy(stackFile)) return;
     if (
       (action === 'deploy' || action === 'update' || action === 'stop' || action === 'delete' || action === 'rollback') &&

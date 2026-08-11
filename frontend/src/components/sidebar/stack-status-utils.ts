@@ -64,6 +64,92 @@ export function isBulkStatusObjectFormat(raw: unknown): boolean {
   );
 }
 
+const STATUS_VALUES: ReadonlySet<string> = new Set(['running', 'exited', 'unknown', 'partial']);
+
+/** Whether a value is a recognized runtime status string. Guards both payload
+ *  validators so an arbitrary string (e.g. an error object) is never mistaken
+ *  for a legacy status map, which would otherwise fan out N per-stack fallback
+ *  requests for one malformed response. */
+function isStatusValue(value: unknown): value is StackRowStatus {
+  return typeof value === 'string' && STATUS_VALUES.has(value);
+}
+
+/** Per-stack entry shape of the current bulk status payload. */
+export interface BulkStatusPayloadEntry {
+  status: StackRowStatus;
+  mainPort?: number;
+  running?: number;
+  total?: number;
+  isSelf?: boolean;
+}
+
+/** Whether a bulk payload's entries all carry a recognized runtime status and
+ *  well-typed optional fields. Distinguishes the current object format with
+ *  valid values from a malformed payload that merely has a `status` property
+ *  with an unrecognized value, or carries a mistyped port/count field that
+ *  would flow into `buildServiceUrl` and the row counts. */
+export function isValidBulkPayload(
+  raw: unknown,
+): raw is Record<string, BulkStatusPayloadEntry> {
+  if (!isBulkStatusObjectFormat(raw)) return false;
+  return Object.values(raw as Record<string, unknown>).every((val) => {
+    const entry = val as {
+      status?: unknown;
+      mainPort?: unknown;
+      running?: unknown;
+      total?: unknown;
+      isSelf?: unknown;
+    };
+    return (
+      isStatusValue(entry.status) &&
+      (entry.mainPort === undefined || typeof entry.mainPort === 'number') &&
+      (entry.running === undefined || typeof entry.running === 'number') &&
+      (entry.total === undefined || typeof entry.total === 'number') &&
+      (entry.isSelf === undefined || typeof entry.isSelf === 'boolean')
+    );
+  });
+}
+
+/** Parse a validated bulk status payload into the row-facing maps plus the
+ *  count of current-list files it covers. Coverage counts exact filename
+ *  matches; unrelated keys never contribute. */
+export function parseBulkStatusPayload(
+  raw: Record<string, BulkStatusPayloadEntry>,
+  fileList: string[],
+): {
+  statuses: Record<string, StackRowStatus>;
+  ports: Record<string, number | undefined>;
+  self: Record<string, boolean>;
+  counts: Record<string, { running: number; total: number } | undefined>;
+  coveredFileCount: number;
+} {
+  const statuses: Record<string, StackRowStatus> = {};
+  const ports: Record<string, number | undefined> = {};
+  const self: Record<string, boolean> = {};
+  const counts: Record<string, { running: number; total: number } | undefined> = {};
+  let coveredFileCount = 0;
+  for (const [key, val] of Object.entries(raw)) {
+    statuses[key] = val.status;
+    if (val.mainPort) ports[key] = val.mainPort;
+    if (val.isSelf) self[key] = true;
+    if (val.running !== undefined && val.total !== undefined) {
+      counts[key] = { running: val.running, total: val.total };
+    }
+  }
+  for (const file of fileList) {
+    if (raw[file] !== undefined) coveredFileCount += 1;
+  }
+  return { statuses, ports, self, counts, coveredFileCount };
+}
+
+/** Whether a payload is a legacy string-value map whose values are recognized
+ *  runtime statuses (the pre-object-format response). A string map with other
+ *  values (e.g. `{ error: "failed" }`) is malformed, not legacy. */
+export function isValidLegacyPayload(raw: unknown): raw is Record<string, StackRowStatus> {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  return Object.values(raw as Record<string, unknown>).every(isStatusValue);
+}
+
 /** Derive a stack's row status from its container list, distinguishing a fully-up
  *  stack from one that is partially degraded (some running, some crashed). Used by
  *  the compatibility path for remote nodes whose bulk status endpoint is absent or

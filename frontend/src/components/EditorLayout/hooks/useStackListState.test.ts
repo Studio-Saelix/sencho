@@ -198,3 +198,337 @@ describe('useStackListState Updates chip confirmed-only', () => {
     expect(result.current.chipFilteredFiles).toEqual(['ok.yml']);
   });
 });
+
+describe('useStackListState.hydration concurrency and evidence', () => {
+  it('starts the statuses request before the list resolves (concurrent dispatch)', async () => {
+    let resolveList: (r: Response) => void;
+    const listGate = new Promise<Response>((r) => { resolveList = r; });
+    const statusCalls: string[] = [];
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return listGate;
+      if (endpoint === '/stacks/statuses') { statusCalls.push(endpoint); return Promise.resolve(okJson({})); }
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    let p: Promise<string[]> | undefined;
+    await act(async () => {
+      p = result.current.refreshStacks();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(statusCalls).toContain('/stacks/statuses');
+    await act(async () => {
+      resolveList!(okJson(['web.yml']));
+      await p;
+    });
+    expect(result.current.files).toEqual(['web.yml']);
+  });
+
+  it('clears isLoading at list commit while the status request is still pending', async () => {
+    let resolveStatus: (r: Response) => void;
+    const statusGate = new Promise<Response>((r) => { resolveStatus = r; });
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') return statusGate;
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      const p = result.current.refreshStacks();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(result.current.isLoading).toBe(false);
+      expect(result.current.hydrationStatus).toBe('pending');
+      resolveStatus!(okJson({ 'web.yml': { status: 'running' } }));
+      await p;
+    });
+    expect(result.current.hydrationStatus).toBe('ok');
+    expect(result.current.actionsReady).toBe(true);
+  });
+
+  it('holds a status-first result provisional until the list validates', async () => {
+    let resolveList: (r: Response) => void;
+    const listGate = new Promise<Response>((r) => { resolveList = r; });
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return listGate;
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'web.yml': { status: 'running' } }));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    let p: Promise<string[]> | undefined;
+    await act(async () => {
+      p = result.current.refreshStacks();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(result.current.hydrationStatus).toBe('pending');
+    });
+    await act(async () => {
+      resolveList!(okJson(['web.yml']));
+      await p;
+    });
+    expect(result.current.hydrationStatus).toBe('ok');
+  });
+
+  it('transfers loading ownership to a superseding background refresh', async () => {
+    let resolveList1: (r: Response) => void;
+    const gate1 = new Promise<Response>((r) => { resolveList1 = r; });
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return gate1;
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'web.yml': { status: 'running' } }));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    let fg: Promise<string[]> | undefined;
+    await act(async () => {
+      fg = result.current.refreshStacks();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(result.current.isLoading).toBe(true);
+
+    let resolveList2: (r: Response) => void;
+    const gate2 = new Promise<Response>((r) => { resolveList2 = r; });
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return gate2;
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'web.yml': { status: 'running' } }));
+      return Promise.resolve(notFound());
+    });
+    let bg: Promise<string[]> | undefined;
+    await act(async () => {
+      bg = result.current.refreshStacks(true);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      resolveList1!(okJson(['web.yml']));
+      await fg;
+    });
+    expect(result.current.isLoading).toBe(true);
+    await act(async () => {
+      resolveList2!(okJson(['web.yml']));
+      await bg;
+    });
+    expect(result.current.isLoading).toBe(false);
+  });
+
+  it('never commits a completed status result when the list fails', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(new Response('fail', { status: 500 }));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'web.yml': { status: 'running' } }));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.stacksLoadStatus).toBe('error');
+    expect(result.current.hydrationStatus).toBe('pending');
+    expect(result.current.actionsReady).toBe(false);
+  });
+
+  it('keeps the list visible with error evidence when the status promise rejects', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.reject(new Error('network down'));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.stacksLoadStatus).toBe('success');
+    expect(result.current.files).toEqual(['web.yml']);
+    expect(result.current.hydrationStatus).toBe('error');
+    expect(result.current.actionsReady).toBe(false);
+  });
+
+  it('blocks readiness when the status payload misses a list file even with extra keys', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml', 'db.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({
+        'web.yml': { status: 'running' },
+        'unrelated.yml': { status: 'exited' },
+      }));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.hydrationStatus).toBe('ok');
+    expect(result.current.actionsReady).toBe(false);
+    expect(result.current.hydrationDisplay).toBe('incomplete');
+  });
+
+  it('treats malformed status payloads as errors without per-stack fallback', async () => {
+    const calls: string[] = [];
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      calls.push(endpoint);
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'web.yml': { status: 'bogus' } }));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.hydrationStatus).toBe('error');
+    expect(result.current.actionsReady).toBe(false);
+    expect(calls.filter(c => c.includes('/containers'))).toEqual([]);
+  });
+
+  it('does not treat arbitrary string maps as legacy status payloads', async () => {
+    const calls: string[] = [];
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      calls.push(endpoint);
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ error: 'failed' }));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.hydrationStatus).toBe('error');
+    expect(calls.filter(c => c.includes('/containers'))).toEqual([]);
+  });
+
+  it('re-derives statuses from per-stack containers for a valid legacy payload', async () => {
+    const calls: string[] = [];
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      calls.push(endpoint);
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'web.yml': 'running' }));
+      if (endpoint === '/stacks/web.yml/containers') return Promise.resolve(okJson([{ State: 'running', Status: 'Up 2 hours' }]));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(calls).toContain('/stacks/web.yml/containers');
+    expect(result.current.hydrationStatus).toBe('ok');
+    expect(result.current.actionsReady).toBe(true);
+    expect(result.current.stackStatuses['web.yml']).toBe('running');
+  });
+
+  it('does not count failed per-stack derivations as coverage', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml', 'db.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'web.yml': 'running' }));
+      if (endpoint === '/stacks/web.yml/containers') return Promise.resolve(okJson([{ State: 'running', Status: 'Up 2 hours' }]));
+      if (endpoint === '/stacks/db.yml/containers') return Promise.resolve(new Response('boom', { status: 500 }));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.hydrationStatus).toBe('ok');
+    expect(result.current.actionsReady).toBe(false);
+    expect(result.current.hydrationDisplay).toBe('incomplete');
+  });
+
+  it('restores prior evidence as stale when a same-list foreground status fetch fails', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'web.yml': { status: 'running' } }));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.actionsReady).toBe(true);
+
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(new Response('boom', { status: 500 }));
+      return Promise.resolve(notFound());
+    });
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.hydrationStatus).toBe('ok');
+    expect(result.current.actionsReady).toBe(false);
+    expect(result.current.hydrationDisplay).toBe('stale');
+  });
+
+  it('marks prior evidence stale on a same-list background failure', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'web.yml': { status: 'running' } }));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.actionsReady).toBe(true);
+
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(new Response('boom', { status: 500 }));
+      return Promise.resolve(notFound());
+    });
+    await act(async () => {
+      await result.current.refreshStacks(true);
+    });
+    expect(result.current.hydrationDisplay).toBe('stale');
+    expect(result.current.actionsReady).toBe(false);
+  });
+
+  it('establishes ok evidence with zero coverage on an empty list', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({}));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.stacksLoadStatus).toBe('success');
+    expect(result.current.hydrationStatus).toBe('ok');
+    expect(result.current.actionsReady).toBe(true);
+  });
+
+  it('fails closed on the first render after a node switch', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'web.yml': { status: 'running' } }));
+      return Promise.resolve(notFound());
+    });
+    const { result, rerender } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.actionsReady).toBe(true);
+
+    useNodesMock.mockReturnValue({
+      activeNode: { id: 2, name: 'Other', type: 'remote' },
+      nodes: [{ id: 2, name: 'Other', type: 'remote' }],
+    });
+    rerender();
+    expect(result.current.actionsReady).toBe(false);
+    expect(result.current.hydrationDisplay).toBe('pending');
+  });
+
+  it('zeroes Up/Down filter counts while hydration is pending and restores them after', async () => {
+    let resolveStatus: (r: Response) => void;
+    const statusGate = new Promise<Response>((r) => { resolveStatus = r; });
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') return statusGate;
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      const p = result.current.refreshStacks();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(result.current.filterCounts.up).toBe(0);
+      expect(result.current.filterCounts.down).toBe(0);
+      resolveStatus!(okJson({ 'web.yml': { status: 'running' } }));
+      await p;
+    });
+    expect(result.current.filterCounts.up).toBe(1);
+    act(() => result.current.setFilterChip('up'));
+    expect(result.current.chipFilteredFiles).toEqual(['web.yml']);
+  });
+});
+

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { apiFetch } from '@/lib/api';
-import { fetchStackStatusesShared, type StackStatusesFetchResult } from '@/lib/stackStatusesFetch';
+import { fetchStackStatusesShared } from '@/lib/stackStatusesFetch';
 import {
   newAttemptId,
   abortAttempt,
@@ -25,31 +25,68 @@ import { isInputFocused, isPaletteOpen } from '@/lib/keyboard-guards';
 import type { StackAction, StackActionResult } from '../EditorView';
 import type { Label as StackLabel } from '../../label-types';
 import type { FilterChip } from '../../sidebar/sidebar-types';
-import { isDownStatus, classifyContainersStatus, isBulkStatusObjectFormat } from '../../sidebar/stack-status-utils';
+import { isDownStatus, classifyContainersStatus, isValidBulkPayload, isValidLegacyPayload, parseBulkStatusPayload } from '../../sidebar/stack-status-utils';
 import type { StackRowStatus } from '../../sidebar/stack-status-utils';
+
+/** Result of the legacy per-stack container derivation, with the number of
+ *  stacks whose status comes from a successful, valid container response.
+ *  Network or HTTP failures do not count as coverage, so a partially failing
+ *  fallback cannot authorize actions on the files it could not inspect. */
+interface DerivedStatuses {
+  statuses: Record<string, StackRowStatus>;
+  coveredFileCount: number;
+}
 
 /** Compatibility path for remote nodes whose `/stacks/statuses` is absent or
  *  returns the legacy plain-string format: query each stack's containers and
- *  classify them so a degraded (partial) stack is not reported as healthy. */
+ *  classify them so a degraded (partial) stack is not reported as healthy.
+ *  Requests target the captured node explicitly so a mid-switch fallback never
+ *  drifts to whatever node is active when the per-stack calls resolve.
+ *  Per-file failures are collected and logged so a total fallback failure is
+ *  diagnosable instead of being indistinguishable from "no statuses yet". */
 async function deriveStatusesFromContainers(
   fileList: string[],
-): Promise<Record<string, StackRowStatus>> {
+  nodeId: number | null,
+): Promise<DerivedStatuses> {
+  const failed: string[] = [];
   const results = await Promise.allSettled(
-    fileList.map(async (file) => {
-      const containersRes = await apiFetch(`/stacks/${file}/containers`);
-      if (!containersRes.ok) return { file, status: 'unknown' as StackRowStatus };
-      const containers = await containersRes.json();
-      return {
-        file,
-        status: Array.isArray(containers) ? classifyContainersStatus(containers) : 'unknown',
-      };
+    fileList.map(async (file): Promise<{ file: string; status: StackRowStatus; valid: boolean }> => {
+      let containersRes: Response;
+      try {
+        containersRes = await apiFetch(`/stacks/${file}/containers`, { nodeId });
+      } catch (err) {
+        failed.push(`${file} (${err instanceof Error ? err.message : 'network error'})`);
+        return { file, status: 'unknown', valid: false };
+      }
+      if (!containersRes.ok) {
+        failed.push(`${file} (HTTP ${containersRes.status})`);
+        return { file, status: 'unknown', valid: false };
+      }
+      try {
+        const containers = await containersRes.json();
+        return {
+          file,
+          status: Array.isArray(containers) ? classifyContainersStatus(containers) : 'unknown',
+          valid: true,
+        };
+      } catch (err) {
+        failed.push(`${file} (decode: ${err instanceof Error ? err.message : 'invalid body'})`);
+        return { file, status: 'unknown', valid: false };
+      }
     }),
   );
   const out: Record<string, StackRowStatus> = {};
+  let coveredFileCount = 0;
   for (const result of results) {
-    if (result.status === 'fulfilled') out[result.value.file] = result.value.status;
+    if (result.status === 'fulfilled') {
+      out[result.value.file] = result.value.status;
+      if (result.value.valid) coveredFileCount += 1;
+    }
   }
-  return out;
+  if (failed.length > 0) {
+    console.error(`Legacy status derivation failed for ${failed.length}/${fileList.length} stacks:`, failed.join('; '));
+  }
+  return { statuses: out, coveredFileCount };
 }
 
 interface StackStatus {
@@ -58,14 +95,6 @@ interface StackStatus {
 
 interface StackCounts {
   [key: string]: { running: number; total: number } | undefined;
-}
-
-interface StackStatusInfo {
-  status: StackRowStatus;
-  mainPort?: number;
-  running?: number;
-  total?: number;
-  isSelf?: boolean;
 }
 
 export interface RemoteResult {
@@ -77,6 +106,47 @@ export interface RemoteResult {
 const EMPTY_UPDATES: Record<string, StackUpdateInfo> = {};
 
 export type StacksLoadStatus = 'idle' | 'loading' | 'success' | 'error';
+
+/** The authoritative record of which status evidence the current list holds.
+ *  `null` means pending: no current-node status result has landed for the
+ *  committed list yet. Readiness and display are derived from this record at
+ *  render time (see `hydrationReadyRef`), so a node switch or list change
+ *  fails closed on the very first frame, before any effect runs.
+ *  Discriminated on `outcome`: an error record carries no source or stale
+ *  fields, so "error with stale identity" is unrepresentable. */
+export type HydrationSource = 'bulk' | 'legacy';
+
+export type HydrationEvidence =
+  | {
+      nodeId: number;
+      /** Content identity of the committed list: JSON of sorted filenames. */
+      listFingerprint: string;
+      outcome: 'ok';
+      /** `bulk` = current object format; `legacy` = per-stack container derivation. */
+      source: HydrationSource;
+      /** True when this is prior evidence preserved through a failed refresh
+       *  and is no longer authoritative. Always false on fresh success. */
+      stale: boolean;
+      /** Number of current-list files covered by a successful, valid status entry. */
+      coveredFileCount: number;
+    }
+  | {
+      nodeId: number;
+      /** Content identity of the committed list: JSON of sorted filenames. */
+      listFingerprint: string;
+      outcome: 'error';
+      /** Error evidence never covers any file. */
+      coveredFileCount: 0;
+    };
+
+/** Display projection of hydration state, derived once per render.
+ *  - pending: no status evidence for the current list yet
+ *  - error: the status fetch failed terminally
+ *  - stale: prior same-node evidence retained through a failed refresh, or the
+ *    evidence no longer matches the active node / committed list
+ *  - incomplete: evidence covers only part of the current list
+ *  - current: evidence is authoritative for the visible list */
+export type HydrationDisplayState = 'pending' | 'error' | 'current' | 'stale' | 'incomplete';
 
 export function useStackListState() {
   const { nodes, activeNode } = useNodes();
@@ -126,6 +196,61 @@ export function useStackListState() {
   const [stacksLoadNodeId, setStacksLoadNodeId] = useState<number | null>(null);
   const hadSuccessfulListRef = useRef(false);
 
+  // Hydration evidence: the single source of truth for whether the visible list
+  // has authoritative status data. The ref mirrors the state synchronously so
+  // readiness checks in async handlers read current values, and so the first
+  // render after a transition is already fail-closed (no effect needed).
+  const [hydrationEvidence, setHydrationEvidence] = useState<HydrationEvidence | null>(null);
+  const evidenceRef = useRef<HydrationEvidence | null>(null);
+  // Render-synchronous refs (updated inline during render, matching the
+  // NodeContext pattern) plus commit-synchronous fingerprint/count refs, so
+  // `hydrationReadyRef` always evaluates the CURRENT node/list/evidence.
+  const activeNodeIdRef = useRef<number | null>(activeNode?.id ?? null);
+  activeNodeIdRef.current = activeNode?.id ?? null;
+  const currentFingerprintRef = useRef<string>('');
+  const currentFileCountRef = useRef(0);
+  // The attempt id that owns the sidebar loading state. Background refreshes
+  // take over an in-flight foreground owner so the skeleton dissolves when the
+  // current attempt's list lands, never when a stale attempt finishes.
+  const loadingOwnerRef = useRef<string | null>(null);
+
+  const setHydrationEvidenceSync = (next: HydrationEvidence | null): void => {
+    evidenceRef.current = next;
+    setHydrationEvidence(next);
+  };
+
+  // Readiness is a function of the evidence record against the current node and
+  // list, evaluated at call time (ref-backed), never captured in a closure.
+  const hydrationReadyRef = useRef<() => boolean>(() => false);
+  // Render-synchronous mirror so the predicate also fails when the list itself
+  // errored: stale bulk selection must not dispatch against a failed-to-load
+  // list even though the evidence record still matches the last list.
+  const stacksLoadStatusRef = useRef<StacksLoadStatus>('idle');
+  stacksLoadStatusRef.current = stacksLoadStatus;
+  hydrationReadyRef.current = () => {
+    if (stacksLoadStatusRef.current === 'error') return false;
+    const e = evidenceRef.current;
+    if (!e || e.outcome !== 'ok' || e.stale) return false;
+    if (e.nodeId !== activeNodeIdRef.current) return false;
+    if (e.listFingerprint !== currentFingerprintRef.current) return false;
+    if (e.coveredFileCount !== currentFileCountRef.current) return false;
+    return true;
+  };
+
+  const hydrationStatus: 'pending' | 'ok' | 'error' = hydrationEvidence?.outcome ?? 'pending';
+  const actionsReady = hydrationReadyRef.current();
+  const hydrationDisplay: HydrationDisplayState = (() => {
+    const e = hydrationEvidence;
+    if (!e) return 'pending';
+    if (e.outcome === 'error') return 'error';
+    // A node mismatch means the evidence (and the maps) belong to a different
+    // node: show pending, never the prior node's data as current or stale.
+    if (e.nodeId !== activeNodeIdRef.current) return 'pending';
+    if (e.stale || e.listFingerprint !== currentFingerprintRef.current) return 'stale';
+    if (e.coveredFileCount !== currentFileCountRef.current) return 'incomplete';
+    return 'current';
+  })();
+
   const { stackUpdates, refresh: fetchImageUpdates, sidebarIndicators } = useImageUpdates(activeNode?.id);
   const sidebarStackUpdates = sidebarIndicators ? stackUpdates : EMPTY_UPDATES;
   const { pinned, pin, unpin, isPinned, evictedOldest } = usePinnedStacks(activeNode?.id);
@@ -146,6 +271,15 @@ export function useStackListState() {
     hadSuccessfulListRef.current = false;
     setStacksLoadStatus('idle');
     setStacksLoadError(null);
+    // Cross-node data must never render under a repeated filename: drop the
+    // prior node's status-derived maps and evidence. Render-time derivation
+    // (nodeId checks in hydrationDisplay/actionsReady) already fails closed on
+    // the first frame; this effect is the cleanup, not the guard.
+    setStackStatuses({});
+    setStackPorts({});
+    setStackSelfFlags({});
+    setStackCounts({});
+    setHydrationEvidenceSync(null);
   }, [activeNode?.id]);
 
   // Ref is updated synchronously alongside the state setter so any code that
@@ -223,13 +357,30 @@ export function useStackListState() {
 
     const attemptId = newAttemptId();
     listAttemptRef.current = attemptId;
-    // True once the list itself is committed, so the shared catch below can tell
-    // a list-fetch failure (nothing visible) from a status-path failure (list is
-    // visible, hydration errored).
+    // True once the list itself is committed, so the status-failure paths can
+    // tell a list-fetch failure (nothing visible) from a status-path failure
+    // (list is visible, hydration errored).
     let listSucceeded = false;
     let proxied = false;
 
-    if (!background) setIsLoading(true);
+    // List-loading ownership: the foreground attempt that set the skeleton owns
+    // clearing it, at the moment its list commits (progressive visibility). A
+    // background refresh that supersedes an in-flight foreground load takes over
+    // the owner so the displaced foreground can never clear loading for a newer
+    // attempt, and the skeleton dissolves when the current attempt's list lands.
+    if (!background) {
+      loadingOwnerRef.current = attemptId;
+      setIsLoading(true);
+    } else if (loadingOwnerRef.current !== null) {
+      loadingOwnerRef.current = attemptId;
+    }
+    const settleLoading = () => {
+      if (loadingOwnerRef.current === attemptId) {
+        loadingOwnerRef.current = null;
+        setIsLoading(false);
+      }
+    };
+
     setStacksLoadNodeId(fetchNodeId);
     if (!background || !hadSuccessfulListRef.current) {
       setStacksLoadStatus('loading');
@@ -239,8 +390,8 @@ export function useStackListState() {
     // Tracks the most recently committed list for this attempt: `files` (the
     // render-time closure) is stale once the list itself has just succeeded
     // within this same call, e.g. the list decodes fine but the follow-up
-    // /stacks/statuses decode then throws. Seeded from `files` so a failure
-    // that happens before the list ever loads still consults the prior state.
+    // status path then throws. Seeded from `files` so a failure that happens
+    // before the list ever loads still consults the prior state.
     let latestFileList = files;
 
     // Soft (background) failure keeps a non-empty list visible, matching the
@@ -260,10 +411,77 @@ export function useStackListState() {
       return [];
     };
 
+    // --- Concurrent dispatch -------------------------------------------------
+    // The list and status endpoints return independent data (each has its own
+    // keyset), so both requests start together. The list is still consumed and
+    // committed first, keeping list_visible progressive; the status outcome is
+    // observed at creation (never an unhandled rejection) and consumed after
+    // the list commits.
+    const stacksPromise = apiFetch('/stacks');
+    const statusPromise = fetchNodeId === null ? null : (() => {
+            const statusSpan = beginSpan('fetch_headers', { attemptId, background });
+            return fetchStackStatusesShared(fetchNodeId).then(
+              (result) => {
+                // Joined waiters mark network spans superseded so truncated
+                // join timings are not mistaken for fast fetches.
+                endSpan(statusSpan, {
+                  outcome: result.coalesced ? 'superseded' : undefined,
+                  proxied: result.proxied,
+                  detail: { status: result.status, coalesced: result.coalesced },
+                });
+                return {
+                  ok: result.ok,
+                  status: result.status,
+                  body: result.body,
+                  proxied: result.proxied,
+                  coalesced: result.coalesced,
+                  error: null,
+                };
+              },
+              (statusErr) => {
+                endSpan(statusSpan, { outcome: 'error', detail: { coalesced: false } });
+                return {
+                  ok: false,
+                  status: 0,
+                  body: null,
+                  proxied: false,
+                  coalesced: false,
+                  error: statusErr instanceof Error ? statusErr : new Error(String(statusErr)),
+                };
+              },
+            );
+          })();
+
     const headersSpan = beginSpan('fetch_headers', { attemptId, background });
     let bodySpan: SpanHandle | null = null;
+    // Evidence captured before this refresh, used to restore prior status data
+    // (marked stale) when a same-list foreground refresh's status fetch fails.
+    const priorEvidence = evidenceRef.current;
+    // 0 matches no real node, so an error record can never accidentally
+    // authorize one; the null-node path returns before any evidence is written.
+    const evidenceNodeId: number = fetchNodeId ?? 0;
+
+    // Shared error path: record error evidence for the current list and drop
+    // the status maps so nothing renders as current. Used by the hard-error
+    // branch of failHydration and by the catch path.
+    const clearStatusMaps = (): void => {
+      setStackStatuses({});
+      setStackPorts({});
+      setStackSelfFlags({});
+      setStackCounts({});
+    };
+    const recordHydrationError = (forFingerprint: string): void => {
+      setHydrationEvidenceSync({
+        nodeId: evidenceNodeId,
+        listFingerprint: forFingerprint,
+        outcome: 'error',
+        coveredFileCount: 0,
+      });
+      clearStatusMaps();
+    };
+
     try {
-      const res = await apiFetch('/stacks');
+      const res = await stacksPromise;
       proxied = res.headers.get('x-sencho-proxy') === '1';
       endSpan(headersSpan, { proxied, detail: { status: res.status } });
       if (stale()) { abortAttempt(attemptId); return []; }
@@ -274,6 +492,7 @@ export function useStackListState() {
       const data = await res.json();
       endSpan(bodySpan);
       bodySpan = null;
+      if (stale()) { abortAttempt(attemptId); return []; }
       if (!Array.isArray(data)) {
         return applyStacksFailure('Stack list response was invalid.');
       }
@@ -287,6 +506,12 @@ export function useStackListState() {
       setStacksLoadError(null);
       endSpan(listDispatch);
       listSucceeded = true;
+      // Commit-synchronous fingerprint refs: readiness derives from these, so a
+      // stale list can never carry an old list's evidence.
+      const fingerprint = JSON.stringify([...fileList].sort());
+      currentFingerprintRef.current = fingerprint;
+      currentFileCountRef.current = fileList.length;
+      settleLoading();
       // Token folds node + count so an empty->empty commit still fires once per
       // attempt even when the committed `files` is referentially equal.
       const listToken = `${fetchNodeId}:${fileList.length}`;
@@ -294,57 +519,105 @@ export function useStackListState() {
         listVisiblePendingRef.current = { attemptId, token: listToken, proxied };
       }
 
-      // Fetch all stack statuses in a single bulk call. Only the current object
-      // format can express `partial`; a node lacking the endpoint or returning
-      // the legacy plain-string format is re-derived from per-stack containers
-      // so a crashed container is not hidden behind a healthy sibling.
       // Skip statuses until activeNode resolves (null here means unresolved, not
-      // "local"); never pass an unknown target into the shared fetch.
-      if (fetchNodeId === null) {
+      // "local"); never pass an unknown target into the shared fetch. Guarding
+      // on statusPromise directly also narrows it for the await below.
+      if (statusPromise === null) {
         return fileList;
       }
-      const statusHeaders = beginSpan('fetch_headers', { attemptId, background, proxied });
-      let statusResult: StackStatusesFetchResult;
-      try {
-        statusResult = await fetchStackStatusesShared(fetchNodeId);
-      } catch (statusErr) {
-        endSpan(statusHeaders, { outcome: 'error', detail: { coalesced: false } });
-        throw statusErr;
+      // A foreground refresh blanks the evidence until its own status lands, so
+      // the new list cannot be authorized by a prior list's statuses. Background
+      // refreshes keep prior evidence (no flash) until the new result replaces it.
+      if (!background) {
+        setHydrationEvidenceSync(null);
       }
-      const statusProxied = statusResult.proxied || proxied;
-      // Joined waiters mark network spans superseded so truncated join timings
-      // are not mistaken for fast fetches.
-      endSpan(statusHeaders, {
-        outcome: statusResult.coalesced ? 'superseded' : undefined,
-        proxied: statusProxied,
-        detail: { status: statusResult.status, coalesced: statusResult.coalesced },
-      });
+
+      // Classify the status outcome. Coverage counts only successful, valid
+      // entries for current-list files; unrelated keys never contribute, so a
+      // missing file plus an extra key still blocks readiness.
+      const statusOutcome = await statusPromise;
       if (stale()) { abortAttempt(attemptId); return fileList; }
       let bulkStatuses: Record<string, StackRowStatus> = {};
-      const bulkPorts: Record<string, number | undefined> = {};
-      const bulkSelf: Record<string, boolean> = {};
-      const bulkCounts: StackCounts = {};
+      let bulkPorts: Record<string, number | undefined> = {};
+      let bulkSelf: Record<string, boolean> = {};
+      let bulkCounts: StackCounts = {};
+      let source: HydrationSource = 'bulk';
+      let coveredFileCount = 0;
+      const statusProxied = statusOutcome.proxied || proxied;
 
-      // Decode already happened inside the shared helper; do not emit a fake
-      // body_decode span that would look like near-zero network work.
-      const raw: unknown = statusResult.ok ? statusResult.body : null;
-      if (isBulkStatusObjectFormat(raw)) {
-        for (const [key, val] of Object.entries(raw as Record<string, StackStatusInfo>)) {
-          bulkStatuses[key] = val.status;
-          if (val.mainPort) bulkPorts[key] = val.mainPort;
-          if (val.isSelf) bulkSelf[key] = true;
-          if (val.running !== undefined && val.total !== undefined) {
-            bulkCounts[key] = { running: val.running, total: val.total };
-          }
+      const failHydration = (reason: string): string[] => {
+        console.error(`Failed to refresh stack statuses: ${reason}`);
+        if (listSucceeded && !background) {
+          markMilestone('list_hydrated', { attemptId, outcome: 'error', proxied });
+          // Foreground (user-initiated) failures get one explicit signal; the
+          // dashboard's background polls stay silent because they self-heal.
+          toast.error('Could not refresh stack statuses. Check the node connection and try again.');
         }
-      } else {
-        bulkStatuses = await deriveStatusesFromContainers(fileList);
+        // Same-list failure restores the attempt-start snapshot (stale) so the
+        // operator keeps last-known statuses with an explicit stale marker.
+        // The snapshot, not the live ref, is used for both foreground and
+        // background: a concurrent foreground refresh blanks the live evidence,
+        // so a background failure must not fall through to the hard-error path
+        // (and flash an error) while the foreground attempt is still in flight.
+        // Changed list or missing prior replaces with a hard error and clears
+        // the maps so nothing renders as current.
+        if (
+          priorEvidence &&
+          priorEvidence.nodeId === evidenceNodeId &&
+          priorEvidence.listFingerprint === fingerprint &&
+          priorEvidence.outcome === 'ok'
+        ) {
+          setHydrationEvidenceSync({ ...priorEvidence, stale: true });
+        } else {
+          recordHydrationError(fingerprint);
+        }
+        return latestFileList;
+      };
+
+      if (statusOutcome.error) {
+        return failHydration(statusOutcome.error.message);
       }
+      if (statusOutcome.ok && isValidBulkPayload(statusOutcome.body)) {
+        // Decode already happened inside the shared helper; do not emit a fake
+        // body_decode span that would look like near-zero network work.
+        const parsed = parseBulkStatusPayload(statusOutcome.body, fileList);
+        bulkStatuses = parsed.statuses;
+        bulkPorts = parsed.ports;
+        bulkSelf = parsed.self;
+        bulkCounts = parsed.counts;
+        coveredFileCount = parsed.coveredFileCount;
+      } else if (
+        (statusOutcome.ok && isValidLegacyPayload(statusOutcome.body)) ||
+        (!statusOutcome.ok &&
+          (statusOutcome.status === 404 || statusOutcome.status === 405 || statusOutcome.status === 501))
+      ) {
+        // A node returning the legacy plain-string format (partial already
+        // collapsed into running) or lacking the bulk endpoint entirely is
+        // re-derived from per-stack containers so a crashed container is not
+        // hidden behind a healthy sibling.
+        source = 'legacy';
+        const derived = await deriveStatusesFromContainers(fileList, evidenceNodeId);
+        bulkStatuses = derived.statuses;
+        coveredFileCount = derived.coveredFileCount;
+        if (stale()) { abortAttempt(attemptId); return fileList; }
+        // A total fallback failure (proxy down, node unreachable) must not
+        // masquerade as "ok with zero coverage": it is a hard error.
+        if (coveredFileCount === 0 && fileList.length > 0) {
+          return failHydration(`legacy derivation covered 0 of ${fileList.length} stacks`);
+        }
+      } else if (!statusOutcome.ok) {
+        // 400/403/408/409/429/5xx and malformed payloads are errors: they never
+        // trigger per-stack fallback requests (which would amplify proxy work).
+        return failHydration(`status ${statusOutcome.status}`);
+      } else {
+        return failHydration('unrecognized status payload');
+      }
+
       const statusDispatch = beginSpan('state_dispatch', {
         attemptId,
         background,
         proxied: statusProxied,
-        detail: { coalesced: statusResult.coalesced },
+        detail: { coalesced: statusOutcome.coalesced },
       });
       setStackStatuses(prev => {
         const next: StackStatus = {};
@@ -361,8 +634,16 @@ export function useStackListState() {
       });
       setStackSelfFlags(bulkSelf);
       setStackCounts(bulkCounts);
-      endSpan(statusDispatch, { detail: { coalesced: statusResult.coalesced } });
+      endSpan(statusDispatch, { detail: { coalesced: statusOutcome.coalesced } });
       refreshLabels();
+      setHydrationEvidenceSync({
+        nodeId: evidenceNodeId,
+        listFingerprint: fingerprint,
+        outcome: 'ok',
+        source,
+        stale: false,
+        coveredFileCount,
+      });
       if (!background) {
         listHydratedPendingRef.current = { attemptId, token: listToken, proxied: statusProxied };
       }
@@ -374,14 +655,19 @@ export function useStackListState() {
       if (stale()) { abortAttempt(attemptId); return []; }
       console.error('Failed to refresh stacks:', error);
       const message = error instanceof Error ? error.message : 'Failed to load stacks';
-      // The list committed but hydrating its statuses threw: record the list
-      // path as hydrated-with-error rather than leaving it hanging.
-      if (listSucceeded && !background) {
-        markMilestone('list_hydrated', { attemptId, outcome: 'error', proxied });
+      // The list committed but hydrating its statuses threw: keep the confirmed
+      // list visible with error evidence, rather than erasing it. A list that
+      // never loaded takes the existing failure path.
+      if (listSucceeded) {
+        if (!background) {
+          markMilestone('list_hydrated', { attemptId, outcome: 'error', proxied });
+        }
+        recordHydrationError(currentFingerprintRef.current);
+        return latestFileList;
       }
       return applyStacksFailure(message);
     } finally {
-      setIsLoading(false);
+      settleLoading();
     }
   };
 
@@ -452,20 +738,34 @@ export function useStackListState() {
     return info != null && isConfirmedImageUpdate(info);
   };
 
+  // Runtime filters (Up/Down) are driven by the same hydration display state
+  // that the rows use, so a zero count can never coexist with rows shown under
+  // that chip. Pending, error, and incomplete coverage produce no Up/Down
+  // matches; stale evidence keeps counts with a stale qualifier. The All chip
+  // always matches `files` and Updates uses its own data source. Deriving from
+  // `hydrationDisplay` (not from weaker re-derivations of the evidence) keeps
+  // node-switch fail-closed on the very first frame.
+  const showRuntimeFilters = hydrationDisplay === 'current' || hydrationDisplay === 'stale';
+  const filterStaleQualifier = hydrationDisplay === 'stale';
+
+  const runtimeVisibleFiles = showRuntimeFilters ? filteredFiles : [];
+  const upFiles = runtimeVisibleFiles.filter(f => stackStatuses[f] === 'running');
+  const downFiles = runtimeVisibleFiles.filter(f => isDownStatus(stackStatuses[f]));
+
   const filterCounts = useMemo(() => ({
     all: filteredFiles.length,
-    up: filteredFiles.filter(f => stackStatuses[f] === 'running').length,
-    down: filteredFiles.filter(f => isDownStatus(stackStatuses[f])).length,
+    up: upFiles.length,
+    down: downFiles.length,
     updates: filteredFiles.filter(hasConfirmedSidebarUpdate).length,
-  }), [filteredFiles, stackStatuses, sidebarStackUpdates]);
+  }), [filteredFiles, upFiles, downFiles, sidebarStackUpdates]);
 
   const chipFilteredFiles = useMemo(() => {
     if (filterChip === 'all') return filteredFiles;
-    if (filterChip === 'up') return filteredFiles.filter(f => stackStatuses[f] === 'running');
-    if (filterChip === 'down') return filteredFiles.filter(f => isDownStatus(stackStatuses[f]));
+    if (filterChip === 'up') return upFiles;
+    if (filterChip === 'down') return downFiles;
     if (filterChip === 'updates') return filteredFiles.filter(hasConfirmedSidebarUpdate);
     return filteredFiles;
-  }, [filteredFiles, filterChip, stackStatuses, sidebarStackUpdates]);
+  }, [filteredFiles, filterChip, upFiles, downFiles, sidebarStackUpdates]);
 
   const toggleBulkMode = useCallback(() => {
     setBulkMode(prev => {
@@ -488,6 +788,13 @@ export function useStackListState() {
   }, []);
 
   const handleBulkAction = useCallback((action: BulkAction) => {
+    // Bulk lifecycle mutations need authoritative status evidence just like
+    // single-stack actions; without it the batch would run against unknown
+    // runtime state.
+    if (!hydrationReadyRef.current()) {
+      toast.error('Status data unavailable. Refresh and try again.');
+      return;
+    }
     const filesToAction = Array.from(selectedFiles);
     runBulk(action, filesToAction, {
       onAfter: () => {
@@ -589,5 +896,10 @@ export function useStackListState() {
     stacksLoadStatus,
     stacksLoadError,
     stacksLoadNodeId,
+    hydrationStatus,
+    hydrationDisplay,
+    actionsReady,
+    hydrationReady: () => hydrationReadyRef.current(),
+    filterStaleQualifier,
   } as const;
 }

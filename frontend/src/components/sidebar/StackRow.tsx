@@ -18,6 +18,9 @@ interface StackRowProps {
   // Running/total container counts (set for any stack with containers); consumed only for the partial-stack pill tooltip.
   running?: number;
   total?: number;
+  /** Hydration display projection: pending/error force unknown indicators,
+   *  stale dims the pill, current/incomplete render normally. */
+  hydrationDisplay?: 'pending' | 'error' | 'current' | 'stale' | 'incomplete';
   isBusy: boolean;
   isActive: boolean;
   labels: Label[];
@@ -84,7 +87,10 @@ export function StackRow(props: StackRowProps) {
     file, displayName, status, running, total, isBusy, isActive,
     hasUpdate, outdatedServices, checkStatus, lastError, hasGitPending, onSelect, kebabSlot,
     bulkMode = false, isSelected = false, onToggleSelect,
+    hydrationDisplay = 'pending',
   } = props;
+
+  const staleEvidence = hydrationDisplay === 'stale';
 
   const confirmedUpdate = isConfirmedImageUpdate({ hasUpdate, checkStatus });
   const partialIncomplete = checkStatus === 'partial';
@@ -127,8 +133,18 @@ export function StackRow(props: StackRowProps) {
         )}
       </span>
 
-      {/* Status pill. Partial stacks add a hover tooltip with the running/total count. */}
-      <span className={cn('font-mono text-[10px] shrink-0 w-[22px] flex items-center', statusColor(status, isBusy))}>
+      {/* Status pill. Partial stacks add a hover tooltip with the running/total
+          count. Hydration state shapes the pill: pending stays muted, error
+          turns the unknown indicator warning-colored (distinct from pending),
+          stale dims the retained value so it is never read as current. */}
+      <span
+        title={staleEvidence ? 'Status data is stale' : undefined}
+        className={cn(
+          'font-mono text-[10px] shrink-0 w-[22px] flex items-center',
+          hydrationDisplay === 'error' ? 'text-warning' : statusColor(status, isBusy),
+          staleEvidence && 'opacity-50',
+        )}
+      >
         {isBusy ? (
           <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} />
         ) : status === 'partial' && running !== undefined && total !== undefined ? (

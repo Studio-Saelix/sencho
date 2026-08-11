@@ -44,6 +44,9 @@ interface ShellOverlaysProps {
   canOfferVolumeRemoval: boolean;
   deleteVolumePreservation: VolumePreservationOnDelete;
   onOpenFleetNodeUpdates: () => void;
+  /** Ref-backed readiness check, evaluated at confirmation time so a dialog
+   *  opened while ready cannot dispatch after a node switch or failed refresh. */
+  hydrationReady: () => boolean;
 }
 
 export function ShellOverlays({
@@ -65,6 +68,7 @@ export function ShellOverlays({
   canOfferVolumeRemoval,
   deleteVolumePreservation,
   onOpenFleetNodeUpdates,
+  hydrationReady,
 }: ShellOverlaysProps) {
   const {
     deleteDialogOpen, closeDeleteDialog, stackToDelete,
@@ -132,6 +136,9 @@ export function ShellOverlays({
           if (!open) setComposeReapplyCapture(null);
         }}
         onConfirm={() => {
+          // Readiness loss keeps the dialog open with the confirmation blocked;
+          // the capture is only cleared on an actual dispatch.
+          if (!hydrationReady()) return;
           const capture = composeReapplyCapture;
           setComposeReapplyCapture(null);
           if (!capture || composeReapply.dispatching) return;
@@ -272,6 +279,9 @@ export function ShellOverlays({
         confirming={diffPreviewConfirming}
         isDarkMode={isDarkMode}
         onConfirm={async () => {
+          // Recheck before the PUT: Save & Deploy from the diff preview must
+          // not write the file while status evidence is not authoritative.
+          if (!hydrationReady()) return;
           const snapshot = diffPreview;
           setDiffPreviewConfirming(true);
           try {

@@ -28,6 +28,9 @@ interface MobileComposeEditorProps {
     requestSave: () => void;
     requestSaveAndDeploy: (e: React.MouseEvent) => void;
     canSaveAndReapply?: boolean;
+    /** False while status evidence is not authoritative; disables Save & Deploy
+     *  (Save Only stays available). */
+    actionsReady?: boolean;
     onClose: () => void;
     hasUnsavedChanges: () => boolean;
 }
@@ -56,6 +59,7 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
         requestSave,
         requestSaveAndDeploy,
         canSaveAndReapply = false,
+        actionsReady = false,
         onClose,
         hasUnsavedChanges,
     } = props;
@@ -79,7 +83,7 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
     // while there are unsaved edits (matches the desktop selector being disabled
     // mid-edit). The compose <-> .env toggle stays free: both buffers persist.
     const envSwitchDisabled = hasUnsavedChanges() || isFileLoading;
-    const actionsDisabled = isFileLoading || loadingAction === 'deploy';
+    const actionsDisabled = isFileLoading || loadingAction === 'deploy' || !actionsReady;
     // Read-only while an env-file fetch is in flight: changeEnvFile overwrites the
     // buffer when it resolves, so edits typed during the load would be silently lost.
     const editorReadOnly = !canEdit || isFileLoading;

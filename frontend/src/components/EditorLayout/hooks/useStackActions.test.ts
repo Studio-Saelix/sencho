@@ -86,6 +86,7 @@ function makeStackListState(over: Partial<StackListState> = {}): StackListState 
     recordActionSuccess: vi.fn(),
     clearActionRecords: vi.fn(),
     dismissActionResult: vi.fn(),
+    hydrationReady: vi.fn().mockReturnValue(true),
   };
   return { ...base, ...over } as unknown as StackListState;
 }
@@ -2009,3 +2010,37 @@ describe('useStackActions.openInspectImage', () => {
   });
 });
 
+describe('useStackActions hydration readiness gates', () => {
+  it('fails all lifecycle actions closed while readiness is absent', () => {
+    const { result } = setup({ stackList: { hydrationReady: () => false } as never });
+    expect(result.current.getStackMenuVisibility('web.yml')).toEqual({
+      showDeploy: false, showStop: false, showRestart: false, showUpdate: false, showTakeDown: false,
+    });
+  });
+
+  it('blocks openStackApp without opening the self-stack modal while readiness is absent', () => {
+    const { result, overlayState } = setup({ stackList: { hydrationReady: () => false } as never });
+    result.current.openStackApp('web.yml');
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+  });
+
+  it('blocks restartStack while readiness is absent', async () => {
+    const { result } = setup({ stackList: { hydrationReady: () => false } as never });
+    await result.current.restartStack();
+    expect(result.current.getStackMenuVisibility('web.yml')).toEqual({
+      showDeploy: false, showStop: false, showRestart: false, showUpdate: false, showTakeDown: false,
+    });
+  });
+
+  it('keeps restart available for a confirmed self stack when ready', () => {
+    const { result } = setup({
+      stackList: {
+        stackStatuses: { 'sencho.yml': 'running' } as never,
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    const v = result.current.getStackMenuVisibility('sencho.yml');
+    expect(v.showRestart).toBe(true);
+    expect(v.showDeploy).toBe(false);
+  });
+});

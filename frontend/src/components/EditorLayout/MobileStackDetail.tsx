@@ -76,6 +76,7 @@ export function MobileStackDetail(props: EditorViewProps) {
         requestTakeDownStack,
         showTakeDown,
         isSelfStack = false,
+        actionsReady = false,
         canSaveAndReapply = false,
         onMobileBack,
         onCloseEditor,
@@ -117,6 +118,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                     canEdit={canEditStack}
                     requestSave={requestSave}
                     requestSaveAndDeploy={requestSaveAndDeploy}
+                    actionsReady={actionsReady}
                     canSaveAndReapply={canSaveAndReapply}
                     onClose={onCloseEditor}
                     hasUnsavedChanges={hasUnsavedChanges}
@@ -162,6 +164,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                         requestTakeDownStack={requestTakeDownStack}
                         showTakeDown={showTakeDown}
                         isSelfStack={isSelfStack}
+                        actionsReady={actionsReady}
                         stackMuteActions={stackMuteActions}
                         onOpenMonitor={onOpenMonitor}
                     />

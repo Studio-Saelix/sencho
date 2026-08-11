@@ -16,6 +16,9 @@ interface SidebarFilterChipsProps {
   visible: boolean;
   onToggle: () => void;
   showUpdatesChip?: boolean;
+  /** True when the Up/Down counts come from retained (stale) evidence; the
+   *  counts stay visible but are qualified so they are never read as current. */
+  stale?: boolean;
 }
 
 const chips: { id: FilterChip; label: string }[] = [
@@ -25,7 +28,7 @@ const chips: { id: FilterChip; label: string }[] = [
   { id: 'updates', label: 'Updates' },
 ];
 
-export function SidebarFilterChips({ active, counts, onChange, visible, onToggle, showUpdatesChip = true }: SidebarFilterChipsProps) {
+export function SidebarFilterChips({ active, counts, onChange, visible, onToggle, showUpdatesChip = true, stale = false }: SidebarFilterChipsProps) {
   const visibleChips = showUpdatesChip ? chips : chips.filter(c => c.id !== 'updates');
   return (
     <div className="flex items-center pb-1.5 pt-0.5 pl-2">
@@ -58,11 +61,15 @@ export function SidebarFilterChips({ active, counts, onChange, visible, onToggle
                 aria-pressed={isActive}
               >
                 {label}
-                <span className={cn(
-                  'tabular-nums',
-                  isActive ? 'text-brand/70' : hasUpdates ? 'text-update/70' : 'text-stat-icon',
-                )}>
+                <span
+                  title={stale && (id === 'up' || id === 'down') ? 'Status data is stale' : undefined}
+                  className={cn(
+                    'tabular-nums',
+                    isActive ? 'text-brand/70' : hasUpdates ? 'text-update/70' : 'text-stat-icon',
+                  )}
+                >
                   {displayCount}
+                  {stale && (id === 'up' || id === 'down') ? '*' : ''}
                 </span>
               </button>
             );

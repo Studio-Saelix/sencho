@@ -143,6 +143,9 @@ export interface StackIdentityHeaderProps {
     showTakeDown: boolean;
     /** True when this stack is the running Sencho instance on the active node. */
     isSelfStack?: boolean;
+    /** False while status evidence is not authoritative; disables lifecycle
+     *  buttons so the editor never mutates against unknown runtime state. */
+    actionsReady?: boolean;
     stackMuteActions?: ReturnType<typeof useStackMuteActions>;
     /** Opens the stack Monitor sheet on the Alerts tab. */
     onOpenMonitor?: () => void;
@@ -170,10 +173,14 @@ export function StackIdentityHeader({
     requestTakeDownStack,
     showTakeDown,
     isSelfStack = false,
+    actionsReady = false,
     stackMuteActions,
     onOpenMonitor,
 }: StackIdentityHeaderProps) {
+    // Distinct from the self-stack protection: readiness loss (pending/error/
+    // stale hydration) disables the same buttons without claiming self identity.
     const selfProtected = isSelfStack;
+    const actionsDisabled = loadingAction !== null || selfProtected || !actionsReady;
     return (
         <div className="flex flex-col gap-3">
             {/* Identity block */}
@@ -215,18 +222,18 @@ export function StackIdentityHeader({
                         {canDeploy && (
                             <>
                                 {isRunning ? (
-                                    <Button type="button" size="sm" data-testid="stack-deploy-button" className="rounded-lg max-md:h-11 bg-brand text-brand-foreground hover:bg-brand/90" onClick={restartStack} disabled={loadingAction !== null}>
+                                    <Button type="button" size="sm" data-testid="stack-deploy-button" className="rounded-lg max-md:h-11 bg-brand text-brand-foreground hover:bg-brand/90" onClick={restartStack} disabled={loadingAction !== null || !actionsReady}>
                                         <RotateCw className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                         {loadingAction === 'restart' ? 'Restarting...' : 'Restart'}
                                     </Button>
                                 ) : (
-                                    <Button type="button" size="sm" data-testid="stack-deploy-button" className="rounded-lg max-md:h-11 bg-brand text-brand-foreground hover:bg-brand/90" onClick={deployStack} disabled={loadingAction !== null || selfProtected}>
+                                    <Button type="button" size="sm" data-testid="stack-deploy-button" className="rounded-lg max-md:h-11 bg-brand text-brand-foreground hover:bg-brand/90" onClick={deployStack} disabled={actionsDisabled}>
                                         <Play className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                         {loadingAction === 'deploy' ? 'Starting...' : 'Start'}
                                     </Button>
                                 )}
                                 {isRunning && (
-                                    <Button type="button" size="sm" variant="outline" className="rounded-lg max-md:h-11" onClick={stopStack} disabled={loadingAction !== null || selfProtected}>
+                                    <Button type="button" size="sm" variant="outline" className="rounded-lg max-md:h-11" onClick={stopStack} disabled={actionsDisabled}>
                                         <Square className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                         {loadingAction === 'stop' ? 'Stopping...' : 'Stop'}
                                     </Button>
@@ -239,13 +246,13 @@ export function StackIdentityHeader({
                                         data-testid="stack-take-down-button"
                                         className="rounded-lg max-md:h-11 border-warning/40 text-warning hover:bg-warning/10"
                                         onClick={() => requestTakeDownStack(stackName)}
-                                        disabled={loadingAction !== null || selfProtected}
+                                        disabled={actionsDisabled}
                                     >
                                         <ArrowDownToLine className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                         {loadingAction === 'down' ? 'Taking down...' : 'Take down'}
                                     </Button>
                                 )}
-                                <Button type="button" size="sm" variant="outline" className="rounded-lg max-md:h-11" onClick={updateStack} disabled={loadingAction !== null || selfProtected}>
+                                <Button type="button" size="sm" variant="outline" className="rounded-lg max-md:h-11" onClick={updateStack} disabled={actionsDisabled}>
                                     <CloudDownload className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                     {loadingAction === 'update' ? 'Updating...' : 'Update'}
                                 </Button>
@@ -260,7 +267,7 @@ export function StackIdentityHeader({
                                 </DropdownMenuTrigger>
                                 <DropdownMenuContent align="end" className="w-48">
                                     {canRollback && (
-                                        <DropdownMenuItem onClick={rollbackStack} disabled={loadingAction !== null || selfProtected}>
+                                        <DropdownMenuItem onClick={rollbackStack} disabled={actionsDisabled}>
                                             <Undo2 className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                             <div className="flex flex-col gap-0.5">
                                                 <span>{loadingAction === 'rollback' ? 'Rolling back...' : 'Rollback'}</span>
@@ -291,7 +298,7 @@ export function StackIdentityHeader({
                                     {canDelete && (
                                         <DropdownMenuItem
                                             className="text-destructive focus:text-destructive focus:bg-destructive/10"
-                                            disabled={loadingAction !== null || selfProtected}
+                                            disabled={actionsDisabled}
                                             onClick={requestDeleteStack}
                                         >
                                             <Trash2 className="w-4 h-4 mr-2" strokeWidth={1.5} />

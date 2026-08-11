@@ -67,6 +67,10 @@ export interface StackListProps {
   stacksLoadStatus?: StacksLoadStatus;
   stacksLoadError?: string | null;
   onRetryStacksLoad?: () => void;
+  /** Hydration display projection, driving status/port/count truthfulness. */
+  hydrationDisplay?: 'pending' | 'error' | 'current' | 'stale' | 'incomplete';
+  /** Terminal hydration outcome; settles the data-stacks-loaded sentinel. */
+  hydrationStatus?: 'pending' | 'ok' | 'error';
 }
 
 interface BuiltGroup {
@@ -159,9 +163,13 @@ export function StackList(props: StackListProps & StackListBulkProps) {
     stacksLoadStatus,
     stacksLoadError,
     onRetryStacksLoad,
+    hydrationDisplay,
   } = props;
 
   const [failedNodesExpanded, setFailedNodesExpanded] = useState(false);
+
+  const showCounts = hydrationDisplay === 'current' || hydrationDisplay === 'stale';
+  const forcedUnknown = hydrationDisplay === 'pending' || hydrationDisplay === 'error';
 
   const groups = useMemo(
     () => buildGroups(files, pinnedFiles, stackLabelMap),
@@ -252,9 +260,10 @@ export function StackList(props: StackListProps & StackListBulkProps) {
                   <StackRow
                     file={file}
                     displayName={getDisplayName(file)}
-                    status={stackStatuses[file] ?? 'unknown'}
-                    running={stackCounts[file]?.running}
-                    total={stackCounts[file]?.total}
+                    status={forcedUnknown ? 'unknown' : (stackStatuses[file] ?? 'unknown')}
+                    running={showCounts ? stackCounts[file]?.running : undefined}
+                    total={showCounts ? stackCounts[file]?.total : undefined}
+                    hydrationDisplay={hydrationDisplay}
                     isBusy={isBusy(file)}
                     isActive={selectedFile === file}
                     labels={stackLabelMap[file] ?? []}
