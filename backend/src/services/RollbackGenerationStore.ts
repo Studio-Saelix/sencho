@@ -13,7 +13,7 @@ import { promises as fsPromises } from 'fs';
 import path from 'path';
 import { CryptoService } from './CryptoService';
 import { FileSystemService } from './FileSystemService';
-import { isPathWithinBase, isValidStackName } from '../utils/validation';
+import { isValidStackName } from '../utils/validation';
 import {
   ROLLBACK_GENERATION_SCHEMA_VERSION,
   type ResolvedRollbackInventory,
@@ -64,30 +64,6 @@ function sha256Of(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex');
 }
 
-async function chmodSecret(absPath: string): Promise<void> {
-  if (process.platform === 'win32') return;
-  try {
-    await fsPromises.chmod(absPath, 0o600);
-  } catch (e) {
-    console.warn(
-      `[RollbackGenerationStore] Could not set 0o600 on ${path.basename(absPath)}:`,
-      (e as Error).message,
-    );
-  }
-}
-
-async function rmDirSafe(dir: string): Promise<void> {
-  await fsPromises.rm(dir, { recursive: true, force: true });
-}
-
-function resolveUnder(root: string, ...parts: string[]): string {
-  const resolved = path.resolve(root, ...parts);
-  if (!isPathWithinBase(resolved, root)) {
-    throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
-  }
-  return resolved;
-}
-
 export interface CaptureGenerationOpts {
   nodeId: number;
   stackName: string;
@@ -103,9 +79,11 @@ export class RollbackGenerationStore {
   /** <DATA_DIR>/backups/<nodeId>/<stackName>/generations */
   static getGenerationsRoot(nodeId: number, stackName: string): string {
     assertSafeStackName(stackName);
+    // Canonical js/path-injection barrier: resolve against a known-safe root
+    // then check containment with startsWith. CodeQL does not credit helpers.
     const backupRoot = path.resolve(getBackupBaseDir());
     const root = path.resolve(backupRoot, String(nodeId), stackName, 'generations');
-    if (!isPathWithinBase(root, backupRoot)) {
+    if (!root.startsWith(backupRoot + path.sep)) {
       throw Object.assign(new Error('Path escapes backup directory'), { code: 'INVALID_PATH' });
     }
     return root;
@@ -114,8 +92,14 @@ export class RollbackGenerationStore {
   /** Final content directory for one generation id. */
   static getGenerationDir(nodeId: number, stackName: string, generationId: string): string {
     assertSafeGenerationId(generationId);
-    const gens = this.getGenerationsRoot(nodeId, stackName);
-    return resolveUnder(gens, generationId);
+    const gensRoot = this.getGenerationsRoot(nodeId, stackName);
+    // Inline barrier at the generation-id join (same form as FileSystemService).
+    const gensResolved = path.resolve(gensRoot);
+    const genDir = path.resolve(gensResolved, generationId);
+    if (!genDir.startsWith(gensResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
+    }
+    return genDir;
   }
 
   /**
@@ -139,10 +123,20 @@ export class RollbackGenerationStore {
     assertSafeGenerationId(generationId);
 
     const gensRoot = this.getGenerationsRoot(nodeId, stackName);
-    await fsPromises.mkdir(gensRoot, { recursive: true });
+    // Inline barrier at the mkdir sink for the generations root.
+    const gensResolved = path.resolve(gensRoot);
+    const backupRoot = path.resolve(getBackupBaseDir());
+    if (!gensResolved.startsWith(backupRoot + path.sep)) {
+      throw Object.assign(new Error('Path escapes backup directory'), { code: 'INVALID_PATH' });
+    }
+    await fsPromises.mkdir(gensResolved, { recursive: true });
 
-    const finalDir = this.getGenerationDir(nodeId, stackName, generationId);
-    const alreadyExists = await fsPromises.access(finalDir).then(
+    // Inline barrier at the access sink for the final generation directory.
+    const finalResolved = path.resolve(gensResolved, generationId);
+    if (!finalResolved.startsWith(gensResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
+    }
+    const alreadyExists = await fsPromises.access(finalResolved).then(
       () => true,
       (e: NodeJS.ErrnoException) => {
         if (e.code === 'ENOENT') return false;
@@ -155,10 +149,21 @@ export class RollbackGenerationStore {
       });
     }
 
-    const stackRoot = path.resolve(FileSystemService.getInstance(nodeId).getBaseDir(), stackName);
+    const composeBase = path.resolve(FileSystemService.getInstance(nodeId).getBaseDir());
+    const stackRoot = path.resolve(composeBase, stackName);
+    if (!stackRoot.startsWith(composeBase + path.sep)) {
+      throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+
     const stagingName = `staging-${randomUUID()}`;
-    const stagingDir = resolveUnder(gensRoot, stagingName);
-    const stagingFiles = resolveUnder(stagingDir, FILES_DIR);
+    const stagingDir = path.resolve(gensResolved, stagingName);
+    if (!stagingDir.startsWith(gensResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
+    }
+    const stagingFiles = path.resolve(stagingDir, FILES_DIR);
+    if (!stagingFiles.startsWith(stagingDir + path.sep)) {
+      throw Object.assign(new Error('Path escapes staging directory'), { code: 'INVALID_PATH' });
+    }
 
     try {
       await fsPromises.mkdir(stagingFiles, { recursive: true });
@@ -166,6 +171,7 @@ export class RollbackGenerationStore {
       const entries: RollbackGenerationEntry[] = [];
       const managedRelativePaths: string[] = [];
       const managedSeen = new Set<string>();
+      const filesRoot = path.resolve(stagingFiles);
 
       for (const inv of inventory.entries) {
         const relativePath = posixRel(inv.relativePath);
@@ -189,20 +195,22 @@ export class RollbackGenerationStore {
           continue;
         }
 
-        if (!isPathWithinBase(inv.absolutePath, stackRoot)) {
+        // Inline barrier at the realpath / readFile sinks for live stack sources.
+        const srcCandidate = path.resolve(stackRoot, relativePath);
+        if (!srcCandidate.startsWith(stackRoot + path.sep)) {
           throw new Error(`Inventory path escapes stack root: ${relativePath}`);
         }
 
         let realPath: string;
         try {
-          realPath = await fsPromises.realpath(inv.absolutePath);
+          realPath = await fsPromises.realpath(srcCandidate);
         } catch (e) {
           throw new Error(
             `Could not resolve ${relativePath} for generation capture: ${(e as Error).message}`,
             { cause: e },
           );
         }
-        if (!isPathWithinBase(realPath, stackRoot)) {
+        if (!realPath.startsWith(stackRoot + path.sep)) {
           throw Object.assign(
             new Error(`Inventory path escapes stack root via symlink: ${relativePath}`),
             { code: 'SYMLINK_ESCAPE' },
@@ -221,13 +229,34 @@ export class RollbackGenerationStore {
 
         const contentSha256 = sha256Of(plaintext);
         const encrypt = inv.sensitivity === 'high' || inv.sensitivity === 'medium';
-        const dest = resolveUnder(stagingFiles, ...relativePath.split('/'));
-        await fsPromises.mkdir(path.dirname(dest), { recursive: true });
+        // Inline barrier at the write / mkdir sinks under the staging files tree.
+        const dest = path.resolve(filesRoot, relativePath);
+        if (!dest.startsWith(filesRoot + path.sep)) {
+          throw Object.assign(new Error('Path escapes staging files directory'), { code: 'INVALID_PATH' });
+        }
+        const destParent = path.dirname(dest);
+        if (!destParent.startsWith(filesRoot + path.sep) && destParent !== filesRoot) {
+          throw Object.assign(new Error('Path escapes staging files directory'), { code: 'INVALID_PATH' });
+        }
+        await fsPromises.mkdir(destParent, { recursive: true });
 
         if (encrypt) {
           const cipher = CryptoService.getInstance().encrypt(plaintext.toString('base64'));
           await fsPromises.writeFile(dest, cipher, 'utf8');
-          await chmodSecret(dest);
+          if (process.platform !== 'win32') {
+            // Inline barrier at the chmod sink on the same dest just written.
+            if (!dest.startsWith(filesRoot + path.sep)) {
+              throw Object.assign(new Error('Path escapes staging files directory'), { code: 'INVALID_PATH' });
+            }
+            try {
+              await fsPromises.chmod(dest, 0o600);
+            } catch (e) {
+              console.warn(
+                `[RollbackGenerationStore] Could not set 0o600 on ${path.basename(relativePath)}:`,
+                (e as Error).message,
+              );
+            }
+          }
         } else {
           await fsPromises.writeFile(dest, plaintext);
         }
@@ -265,15 +294,32 @@ export class RollbackGenerationStore {
         images,
       };
 
-      const manifestPath = resolveUnder(stagingDir, GENERATION_JSON);
+      // Inline barrier at the manifest write sink.
+      const stagingResolved = path.resolve(stagingDir);
+      const manifestPath = path.resolve(stagingResolved, GENERATION_JSON);
+      if (!manifestPath.startsWith(stagingResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes staging directory'), { code: 'INVALID_PATH' });
+      }
       await fsPromises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
 
-      await this.verifyManifestContent(stagingDir, manifest);
+      await this.verifyManifestContent(stagingResolved, manifest);
 
-      await fsPromises.rename(stagingDir, finalDir);
+      // Inline barriers at both sides of the rename sink.
+      const renameFrom = path.resolve(gensResolved, stagingName);
+      const renameTo = path.resolve(gensResolved, generationId);
+      if (!renameFrom.startsWith(gensResolved + path.sep) || !renameTo.startsWith(gensResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
+      }
+      await fsPromises.rename(renameFrom, renameTo);
       return manifest;
     } catch (e) {
-      await rmDirSafe(stagingDir).catch((cleanupErr) => {
+      // Inline barrier at the cleanup rm sink.
+      const cleanupRoot = path.resolve(gensResolved);
+      const cleanupDir = path.resolve(cleanupRoot, stagingName);
+      if (!cleanupDir.startsWith(cleanupRoot + path.sep)) {
+        throw e;
+      }
+      await fsPromises.rm(cleanupDir, { recursive: true, force: true }).catch((cleanupErr) => {
         console.warn(
           '[RollbackGenerationStore] Failed to clean staging directory after capture error:',
           (cleanupErr as Error).message,
@@ -346,7 +392,7 @@ export class RollbackGenerationStore {
         await fsSvc.chmodStackPath(stackName, item.relativePath, 0o600, scope);
       } catch (e) {
         console.warn(
-          `[RollbackGenerationStore] Could not restrict mode on ${item.relativePath}:`,
+          '[RollbackGenerationStore] Could not restrict mode on restored entry:',
           (e as Error).message,
         );
       }
@@ -372,8 +418,14 @@ export class RollbackGenerationStore {
   ): Promise<void> {
     assertSafeStackName(stackName);
     assertSafeGenerationId(generationId);
-    const dir = this.getGenerationDir(nodeId, stackName, generationId);
-    await rmDirSafe(dir);
+    const gensRoot = this.getGenerationsRoot(nodeId, stackName);
+    // Inline barrier at the retire rm sink.
+    const gensResolved = path.resolve(gensRoot);
+    const dir = path.resolve(gensResolved, generationId);
+    if (!dir.startsWith(gensResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
+    }
+    await fsPromises.rm(dir, { recursive: true, force: true });
   }
 
   /**
@@ -402,7 +454,7 @@ export class RollbackGenerationStore {
         return false;
       }
       console.warn(
-        `[RollbackGenerationStore] verifyGenerationContent failed for ${stackName}/${generationId}:`,
+        '[RollbackGenerationStore] verifyGenerationContent failed:',
         (e as Error).message,
       );
       return false;
@@ -410,7 +462,12 @@ export class RollbackGenerationStore {
   }
 
   private static async readAndVerifyGeneration(genDir: string): Promise<RollbackGenerationManifest> {
-    const manifestPath = resolveUnder(genDir, GENERATION_JSON);
+    // Inline barrier at the manifest read sink.
+    const genResolved = path.resolve(genDir);
+    const manifestPath = path.resolve(genResolved, GENERATION_JSON);
+    if (!manifestPath.startsWith(genResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
+    }
     let raw: string;
     try {
       raw = await fsPromises.readFile(manifestPath, 'utf8');
@@ -433,7 +490,7 @@ export class RollbackGenerationStore {
     if (!Array.isArray(manifest.entries) || !Array.isArray(manifest.managedRelativePaths)) {
       throw new Error('Generation manifest is missing entries or managedRelativePaths');
     }
-    await this.verifyManifestContent(genDir, manifest);
+    await this.verifyManifestContent(genResolved, manifest);
     return manifest;
   }
 
@@ -465,8 +522,17 @@ export class RollbackGenerationStore {
     genDir: string,
     entry: RollbackGenerationEntry,
   ): Promise<Buffer> {
-    const filesRoot = resolveUnder(genDir, FILES_DIR);
-    const storedPath = resolveUnder(filesRoot, ...posixRel(entry.relativePath).split('/'));
+    // Inline barrier at the content readFile sink.
+    const genResolved = path.resolve(genDir);
+    const filesRoot = path.resolve(genResolved, FILES_DIR);
+    if (!filesRoot.startsWith(genResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
+    }
+    const relativePath = posixRel(entry.relativePath);
+    const storedPath = path.resolve(filesRoot, relativePath);
+    if (!storedPath.startsWith(filesRoot + path.sep)) {
+      throw Object.assign(new Error('Path escapes generation files directory'), { code: 'INVALID_PATH' });
+    }
     let stored: Buffer;
     try {
       stored = await fsPromises.readFile(storedPath);

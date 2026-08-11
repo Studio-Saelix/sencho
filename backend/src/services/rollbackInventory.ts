@@ -10,7 +10,7 @@ import { FileSystemService } from './FileSystemService';
 import { GitProjectManifestService } from './GitProjectManifestService';
 import { collectManifestFilePaths } from '../helpers/manifestFilePaths';
 import { isHostAbsolutePath, parseDeclaredInputs } from '../helpers/composeInputParse';
-import { isPathWithinBase, isValidRelativeStackPath, isValidStackName } from '../utils/validation';
+import { isValidRelativeStackPath, isValidStackName } from '../utils/validation';
 import { authoredComposeEnvFileArgs, authoredComposeFileArgs } from '../utils/authoredComposeArgs';
 import type {
   ComposeInputEntry,
@@ -87,9 +87,11 @@ function resolveStackRoot(fsSvc: FileSystemService, stackName: string): string {
   if (!isValidStackName(stackName)) {
     throw Object.assign(new Error('Invalid stack name'), { code: 'INVALID_STACK_NAME' });
   }
+  // Canonical js/path-injection barrier: resolve + startsWith.
+  // CodeQL does not credit isPathWithinBase helpers at later sinks.
   const base = path.resolve(fsSvc.getBaseDir());
   const stackRoot = path.resolve(base, stackName);
-  if (!isPathWithinBase(stackRoot, base)) {
+  if (!stackRoot.startsWith(base + path.sep)) {
     throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
   }
   return stackRoot;
@@ -101,12 +103,18 @@ function resolveStackRel(
 ): { relativePath: string; absolutePath: string } | null {
   const relativePath = posixRel(relRaw);
   if (!relativePath || !isValidRelativeStackPath(relativePath)) return null;
-  const absolutePath = path.resolve(stackRoot, relativePath);
-  if (!isPathWithinBase(absolutePath, stackRoot)) return null;
+  // Join-time containment; callers still re-check at each fs sink.
+  const baseResolved = path.resolve(stackRoot);
+  const absolutePath = path.resolve(baseResolved, relativePath);
+  if (!absolutePath.startsWith(baseResolved + path.sep)) return null;
   return { relativePath, absolutePath };
 }
 
-async function pathExistsAsFile(abs: string): Promise<boolean> {
+async function pathExistsAsFile(stackRoot: string, relativePath: string): Promise<boolean> {
+  // Inline barrier at the lstat sink.
+  const baseResolved = path.resolve(stackRoot);
+  const abs = path.resolve(baseResolved, relativePath);
+  if (!abs.startsWith(baseResolved + path.sep)) return false;
   try {
     const st = await fsPromises.lstat(abs);
     return st.isFile() || st.isSymbolicLink();
@@ -210,7 +218,7 @@ async function resolveGitInventory(
     const resolved = resolveStackRel(stackRoot, rel);
     if (!resolved) continue;
     const meta = sensitivityForManifestPath(read, resolved.relativePath);
-    const exists = await pathExistsAsFile(resolved.absolutePath);
+    const exists = await pathExistsAsFile(stackRoot, resolved.relativePath);
     upsertEntry(map, {
       relativePath: resolved.relativePath,
       dependencyKind: meta.kind,
@@ -264,7 +272,7 @@ async function resolveAuthoredInventory(
   for (const name of ROOT_COMPOSE_FILENAMES) {
     const resolved = resolveStackRel(stackRoot, name);
     if (!resolved) continue;
-    if (!(await pathExistsAsFile(resolved.absolutePath))) continue;
+    if (!(await pathExistsAsFile(stackRoot, resolved.relativePath))) continue;
     composePaths.push(resolved.relativePath);
     upsertEntry(map, {
       relativePath: resolved.relativePath,
@@ -278,7 +286,7 @@ async function resolveAuthoredInventory(
   const overrideName = await fsSvc.getOverrideFilename(stackName);
   if (overrideName) {
     const resolved = resolveStackRel(stackRoot, overrideName);
-    if (resolved && await pathExistsAsFile(resolved.absolutePath)) {
+    if (resolved && await pathExistsAsFile(stackRoot, resolved.relativePath)) {
       if (!composePaths.includes(resolved.relativePath)) {
         composePaths.push(resolved.relativePath);
       }
@@ -299,7 +307,7 @@ async function resolveAuthoredInventory(
   for (const envFile of envCandidates) {
     const resolved = resolveStackRel(stackRoot, envFile);
     if (!resolved) continue;
-    if (!(await pathExistsAsFile(resolved.absolutePath))) continue;
+    if (!(await pathExistsAsFile(stackRoot, resolved.relativePath))) continue;
     upsertEntry(map, {
       relativePath: resolved.relativePath,
       dependencyKind: envFile === DOT_ENV ? 'interpolation-env' : 'project-env',
@@ -310,10 +318,14 @@ async function resolveAuthoredInventory(
   }
 
   const readCallback = (repoPath: string): string | null => {
-    const resolved = resolveStackRel(stackRoot, repoPath);
-    if (!resolved) return null;
+    const relativePath = posixRel(repoPath);
+    if (!relativePath || !isValidRelativeStackPath(relativePath)) return null;
+    // Inline barrier at the readFileSync sink.
+    const baseResolved = path.resolve(stackRoot);
+    const abs = path.resolve(baseResolved, relativePath);
+    if (!abs.startsWith(baseResolved + path.sep)) return null;
     try {
-      return readFileSync(resolved.absolutePath, 'utf8');
+      return readFileSync(abs, 'utf8');
     } catch {
       return null;
     }
@@ -322,10 +334,13 @@ async function resolveAuthoredInventory(
   if (composePaths.length > 0) {
     const orderedContents: Array<{ path: string; content: string }> = [];
     for (const rel of composePaths) {
-      const resolved = resolveStackRel(stackRoot, rel);
-      if (!resolved) continue;
+      if (!isValidRelativeStackPath(rel)) continue;
+      // Inline barrier at the readFile sink (same form as readCallback).
+      const baseResolved = path.resolve(stackRoot);
+      const abs = path.resolve(baseResolved, rel);
+      if (!abs.startsWith(baseResolved + path.sep)) continue;
       try {
-        const content = await fsPromises.readFile(resolved.absolutePath, 'utf8');
+        const content = await fsPromises.readFile(abs, 'utf8');
         orderedContents.push({ path: rel, content });
       } catch (e) {
         coverageNotes.push(`Could not read compose file ${rel}: ${(e as Error).message}`);
@@ -365,7 +380,7 @@ async function resolveAuthoredInventory(
         if (!candidate) continue;
         const resolved = resolveStackRel(stackRoot, candidate);
         if (!resolved) continue;
-        if (!(await pathExistsAsFile(resolved.absolutePath))) continue;
+        if (!(await pathExistsAsFile(stackRoot, resolved.relativePath))) continue;
 
         const kind = input.kind;
         upsertEntry(map, {
@@ -436,7 +451,7 @@ export async function resolveRollbackInventory(
     return await resolveAuthoredInventory(nodeId, stackName, stackRoot, fsSvc);
   } catch (e) {
     console.error(
-      `[rollbackInventory] Failed to resolve inventory for ${stackName}:`,
+      '[rollbackInventory] Failed to resolve inventory:',
       (e as Error).message,
     );
     throw e;
