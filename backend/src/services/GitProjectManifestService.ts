@@ -414,7 +414,12 @@ export class GitProjectManifestService {
 
     /** Raw on-disk manifesto JSON, or null when the file is absent. */
     async readRawManifestText(stackName: string): Promise<string | null> {
-        const target = path.join(this.managedRoot(stackName), MANIFEST_FILENAME);
+        // Inline barrier at the readFile sink (CodeQL path-injection).
+        const root = path.resolve(this.managedRoot(stackName));
+        const target = path.resolve(root, MANIFEST_FILENAME);
+        if (!target.startsWith(root + path.sep)) {
+            throw Object.assign(new Error('Path escapes managed project directory'), { code: 'INVALID_PATH' });
+        }
         try {
             return await fs.promises.readFile(target, 'utf8');
         } catch (e) {
@@ -425,7 +430,12 @@ export class GitProjectManifestService {
 
     /** Remove the managed manifesto file (first-apply preimage restore). */
     async clearManifestFile(stackName: string): Promise<void> {
-        const target = path.join(this.managedRoot(stackName), MANIFEST_FILENAME);
+        // Inline barrier at the rm sink (CodeQL path-injection).
+        const root = path.resolve(this.managedRoot(stackName));
+        const target = path.resolve(root, MANIFEST_FILENAME);
+        if (!target.startsWith(root + path.sep)) {
+            throw Object.assign(new Error('Path escapes managed project directory'), { code: 'INVALID_PATH' });
+        }
         await fs.promises.rm(target, { force: true });
         StackFileRootsService.invalidate(NodeRegistry.getInstance().getDefaultNodeId(), stackName);
     }

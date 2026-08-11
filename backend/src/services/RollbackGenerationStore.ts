@@ -577,23 +577,29 @@ export class RollbackGenerationStore {
     const genResolved = path.resolve(generationDir);
     const snapPath = path.resolve(genResolved, GIT_MANIFEST_SNAPSHOT);
     const capturedFlag = generation.priorRecords?.gitManifestCaptured;
-    const snapExists = await fsPromises.access(snapPath).then(
-      () => true,
-      (e: NodeJS.ErrnoException) => {
-        if (e.code === 'ENOENT') return false;
-        throw e;
-      },
-    );
-
-    const shouldWrite = capturedFlag === true || (capturedFlag === undefined && snapExists);
     const svc = GitProjectManifestService.getInstance();
-    if (shouldWrite) {
-      if (!snapPath.startsWith(genResolved + path.sep)) {
-        throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
-      }
+
+    // Inline barrier immediately before the read sink (no access-then-read TOCTOU).
+    if (!snapPath.startsWith(genResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
+    }
+
+    if (capturedFlag === true) {
       const raw = await fsPromises.readFile(snapPath, 'utf8');
       const parsed = JSON.parse(raw) as GitProjectManifest;
       await svc.writeManifest(stackName, parsed);
+      return;
+    }
+
+    if (capturedFlag === undefined) {
+      // Legacy generations: restore only when a snapshot file is present.
+      try {
+        const raw = await fsPromises.readFile(snapPath, 'utf8');
+        const parsed = JSON.parse(raw) as GitProjectManifest;
+        await svc.writeManifest(stackName, parsed);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      }
       return;
     }
 
