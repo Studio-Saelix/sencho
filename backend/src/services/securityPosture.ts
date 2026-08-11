@@ -22,7 +22,6 @@
  */
 
 import {
-  allTargetsIntentionallyClassified,
   anyTargetIntentConflict,
   anyTargetIntentUnset,
   partialTargetsIntentionalWithUnavailable,
@@ -55,12 +54,19 @@ export type PostureReasonKind =
   | 'waiting_upstream'
   | 'update_check_uncertain'
   | 'known_exploited'
+  | 'elevated_exploit_risk'
   | 'secret'
   | 'dangerous_compose'
   | 'public_exposure'
   | 'stale_scan'
   | 'failed_scan'
   | 'needs_review';
+
+/** Bounded finding identities that drive a vulnerability-derived posture reason. */
+export interface PostureDriverFinding {
+  vulnerabilityId: string;
+  imageRef: string;
+}
 
 export type PostureReasonSeverity = 'blocker' | 'review' | 'info';
 
@@ -104,6 +110,11 @@ export interface PostureReason {
    * May repeat imageRef. Omitted when empty or unknown.
    */
   targets?: PostureTarget[];
+  /**
+   * Exact contributing findings for vulnerability-derived blockers (capped).
+   * Older remotes omit this field.
+   */
+  drivers?: PostureDriverFinding[];
 }
 
 export interface PostureAction {
@@ -114,6 +125,8 @@ export interface PostureAction {
   kind: PostureReasonKind;
   /** Same targets as the reason that produced this action, when available. */
   targets?: PostureTarget[];
+  /** Same drivers as the reason that produced this action, when available. */
+  drivers?: PostureDriverFinding[];
 }
 
 export interface SecurityPostureFacts {
@@ -146,13 +159,24 @@ export interface SecurityPostureFacts {
   dangerousCompose: number;
   /** Known-exploited (CISA KEV) findings among non-suppressed Critical/High. */
   knownExploited: number;
-  /** Total affected services published to a non-loopback address (legacy;
-   *  exposedBlocker + exposedReview is the authoritative split). */
+  /** Distinct Crit/High-index images with configured beyond-loopback exposure. */
   publiclyExposed: number;
-  /** Exposed images with KEV, fixable, or elevated-EPSS findings (blocker). */
-  exposedBlocker: number;
-  /** Exposed images without KEV, fix, or elevated EPSS (review only). */
-  exposedReview: number;
+  /**
+   * Exposed images whose Networking intent conflicts with configured exposure
+   * (internal/same-node while beyond loopback), with unsuppressed Crit/High.
+   * This is the only exposure-correctness blocker.
+   */
+  exposureIntentConflict: number;
+  /**
+   * Exposed images with unset/unavailable/non-intentional intent and
+   * unsuppressed Crit/High. Review-level: does not force Action needed alone.
+   */
+  exposedUnclassified: number;
+  /**
+   * Network-exposed images with unsuppressed Crit/High at EPSS >= threshold.
+   * Independent Security driver; intentional exposure is context, not the action.
+   */
+  elevatedExploitRisk: number;
   /** Raw Critical scanner detections (for the Monitoring fallback). */
   rawCritical: number;
   /** Raw High scanner detections (for the Monitoring fallback). */
@@ -168,9 +192,12 @@ export interface SecurityPostureFacts {
   fixableWaitingUpstreamTargets?: string[];
   fixableUpdateUnknownTargets?: string[];
   knownExploitedTargets?: string[];
+  knownExploitedDrivers?: PostureDriverFinding[];
   /** Per-service exposure targets (may repeat imageRef across stack/service). */
-  exposedBlockerTargets?: PostureTarget[];
-  exposedReviewTargets?: PostureTarget[];
+  exposureIntentConflictTargets?: PostureTarget[];
+  exposedUnclassifiedTargets?: PostureTarget[];
+  elevatedExploitRiskTargets?: PostureTarget[];
+  elevatedExploitRiskDrivers?: PostureDriverFinding[];
 }
 
 /** Cap and convert raw refs to PostureTarget[]. Returns truncated=true when capped. */
@@ -217,9 +244,10 @@ function attachCappedTargets(
 const DEFAULT_ACTION_LABEL: Partial<Record<PostureReasonKind, string>> = {
   fixable_cve: 'Review update',
   known_exploited: 'Review exploited findings',
+  elevated_exploit_risk: 'Review driving findings',
   secret: 'Review detected secrets',
   dangerous_compose: 'Review Compose risks',
-  public_exposure: 'Review affected images',
+  public_exposure: 'Review networking',
 };
 
 function actionFrom(reason: PostureReason): PostureAction {
@@ -229,6 +257,7 @@ function actionFrom(reason: PostureReason): PostureAction {
     kind: reason.kind,
   };
   if (reason.targets) action.targets = reason.targets;
+  if (reason.drivers) action.drivers = reason.drivers;
   return action;
 }
 
@@ -243,34 +272,31 @@ function actionFrom(reason: PostureReason): PostureAction {
  * state. The caller decides which subset to surface.
  */
 const VIEW_FINDINGS_LABEL = 'View findings';
-const REVIEW_AFFECTED_IMAGES_LABEL = 'Review affected images';
+const REVIEW_NETWORKING_LABEL = 'Review networking';
 
-function networkExposureDescription(
-  mode: 'blocker' | 'review',
-  targets: PostureTarget[] | undefined,
-  truncated = false,
-): string {
+function exposureConflictDescription(targets: PostureTarget[] | undefined): string {
   const parts = [
-    mode === 'blocker'
-      ? 'Images with fixable, known-exploited, or elevated-EPSS findings are configured beyond loopback or with host networking.'
-      : 'Images configured beyond loopback or with host networking have no fix, no KEV, and no elevated EPSS.',
+    'Configured exposure beyond loopback conflicts with declared Networking intent (internal or same-node).',
   ];
-  if (allTargetsIntentionallyClassified(targets, truncated)) {
-    parts.push('Exposure is intentionally classified in Networking; that does not remove the vulnerability risk.');
-  } else {
-    const partial = partialTargetsIntentionalWithUnavailable(targets, truncated);
-    if (partial.partial) {
-      const n = partial.unavailableCount;
-      parts.push(
-        `Known exposure contexts are intentionally classified. Intent could not be verified for ${n} service${n === 1 ? '' : 's'}.`,
-      );
-    }
-  }
   if (anyTargetIntentConflict(targets)) {
-    parts.push('At least one service intent conflicts with configured exposure (internal or same-node while published beyond loopback).');
+    parts.push('Review networking to align Compose publish settings with intent.');
   }
+  return parts.join(' ');
+}
+
+function exposureUnclassifiedDescription(targets: PostureTarget[] | undefined, truncated = false): string {
+  const parts = [
+    'Images are configured beyond loopback or with host networking and exposure intent is not yet classified.',
+  ];
   if (anyTargetIntentUnset(targets)) {
-    parts.push('Some services are not yet classified; set exposure intent in Networking.');
+    parts.push('Set exposure intent in Networking.');
+  }
+  const partial = partialTargetsIntentionalWithUnavailable(targets, truncated);
+  if (partial.partial) {
+    const n = partial.unavailableCount;
+    parts.push(
+      `Intent could not be verified for ${n} service${n === 1 ? '' : 's'}.`,
+    );
   }
   return parts.join(' ');
 }
@@ -323,7 +349,22 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
       label: 'Known-exploited findings',
       description: 'Findings in the CISA Known Exploited Vulnerabilities catalog.',
       targetTab: 'images',
+      drivers: f.knownExploitedDrivers,
     }, f.knownExploitedTargets);
+  }
+
+  if (f.elevatedExploitRisk > 0) {
+    const capped = capPostureTargetRows(f.elevatedExploitRiskTargets);
+    pushCapped({
+      kind: 'elevated_exploit_risk',
+      count: f.elevatedExploitRisk,
+      severity: 'blocker',
+      label: 'Elevated exploit risk on network-exposed workload',
+      description: 'Critical or High findings on network-exposed images have elevated EPSS. Exposure intent is context; review the driving findings.',
+      targetTab: 'images',
+      actionLabel: 'Review driving findings',
+      drivers: f.elevatedExploitRiskDrivers,
+    }, capped);
   }
 
   if (f.secrets > 0) {
@@ -348,29 +389,29 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
     });
   }
 
-  if (f.exposedBlocker > 0) {
-    const capped = capPostureTargetRows(f.exposedBlockerTargets);
+  if (f.exposureIntentConflict > 0) {
+    const capped = capPostureTargetRows(f.exposureIntentConflictTargets);
     pushCapped({
       kind: 'public_exposure',
-      count: f.exposedBlocker,
+      count: f.exposureIntentConflict,
       severity: 'blocker',
-      label: 'Network-exposed affected images',
-      description: networkExposureDescription('blocker', f.exposedBlockerTargets, capped.truncated),
+      label: 'Exposure conflicts with declared intent',
+      description: exposureConflictDescription(f.exposureIntentConflictTargets),
       targetTab: 'images',
-      actionLabel: REVIEW_AFFECTED_IMAGES_LABEL,
+      actionLabel: REVIEW_NETWORKING_LABEL,
     }, capped);
   }
 
   // Review items. These appear in-page but do not force a red masthead.
 
-  if (f.exposedReview > 0) {
-    const capped = capPostureTargetRows(f.exposedReviewTargets);
+  if (f.exposedUnclassified > 0) {
+    const capped = capPostureTargetRows(f.exposedUnclassifiedTargets);
     pushCapped({
       kind: 'public_exposure',
-      count: f.exposedReview,
+      count: f.exposedUnclassified,
       severity: 'review',
-      label: 'Network-exposed images (monitoring)',
-      description: networkExposureDescription('review', f.exposedReviewTargets, capped.truncated),
+      label: 'Network-exposed images not yet classified',
+      description: exposureUnclassifiedDescription(f.exposedUnclassifiedTargets, capped.truncated),
       targetTab: 'images',
       actionLabel: VIEW_FINDINGS_LABEL,
     }, capped);

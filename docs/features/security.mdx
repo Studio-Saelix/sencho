@@ -22,11 +22,13 @@ to "what can and should I do right now?":
 
 - **Action needed**: something concrete to act on that Sencho can support right now, such as a
   newer image available to review for Critical or High findings, a detected secret, a dangerous
-  Compose setting, a known-exploited (CISA KEV) CVE, or network-exposed affected images.
+  Compose setting, a known-exploited (CISA KEV) CVE, elevated exploit risk on a network-exposed
+  workload, or exposure that conflicts with declared Networking intent.
 - **Monitoring**: Critical or High findings exist, but none currently have a concrete operator
   action Sencho can drive. Package fixes may exist without an applicable container-image update,
-  or findings may already be triaged. Waiting for an upstream image and uncertain update
-  availability appear in the review queue without a red masthead.
+  findings may already be triaged, or workloads may be intentionally network-exposed without an
+  independent Security driver. Waiting for an upstream image and uncertain update availability
+  appear in the review queue without a red masthead.
 - **Secure**: nothing actionable right now. This is never a claim that no vulnerabilities exist.
 - **Unknown**: the scanner is not installed, or no scan has completed yet.
 
@@ -48,14 +50,17 @@ clean.
 Below the masthead, a **Review queue** card leads the overview when actions or review items exist.
 When the posture is Action needed the card is titled **Why Action needed** and lists each concrete
 action with a count and a tab-shortcut button: newer images available to review, known-exploited
-CVEs, detected secrets, unacknowledged Compose risks, and network-exposed affected images. When
-only monitoring items remain (waiting for an upstream image, update availability unknown, network-exposed
-images with no fix or known exploit, findings awaiting triage, stale or failed scans) the card is
-titled **Review queue** and lists them with View findings shortcuts (and Check again when image
-update availability could not be established and you can manage the node), so the operator can see
-what to keep an eye on without a permanent alarm. Shortcuts that carry affected image identities
-open Images already narrowed to those images, with a clearable banner so you can return to the full
-list.
+CVEs, elevated exploit risk on network-exposed workloads, detected secrets, unacknowledged Compose
+risks, and exposure that conflicts with declared Networking intent. Intentional network exposure is
+Security context, not an independent Action needed reason by itself. When only monitoring items
+remain (waiting for an upstream image, update availability unknown, network-exposed images not yet
+classified, findings awaiting triage, stale or failed scans) the card is titled **Review queue**
+and lists them with View findings shortcuts (and Check again when image update availability could
+not be established and you can manage the node), so the operator can see what to keep an eye on
+without a permanent alarm. Shortcuts that carry affected image identities open Images already
+narrowed to those images, with a clearable banner so you can return to the full list. When the
+reason includes exact driving findings, opening an image filters the scan report to that contributing
+set.
 
 The charts then lead with prioritization rather than raw severity: a **risk trend** for context,
 an **action posture** breakdown (fixable, known-exploited, needs-review, accepted, not-affected), a
@@ -83,10 +88,11 @@ not only after a posture drill-down. That label means Compose declares non-loopb
 is not a claim that the service is reachable from the Internet. When Networking exposure intent is
 available, the row also shows compact intent evidence (for example Intent: public, Intent mismatch,
 or Intent: not classified). Open Networking from that evidence to review or correct classification
-for the matching stack. Intentional public exposure still raises the security relevance of
-vulnerable findings: open the image, remediate, or triage individual findings (Accepted risk and
-related decisions). There is no image-level "accept residual risk" control. Compose Doctor
-acknowledgements are a separate triage surface and do not clear Security exposure posture. Selecting
+for the matching stack. Intentional exposure raises the security relevance of vulnerable findings
+but does not by itself keep the masthead on Action needed. Open the image, remediate, or triage
+individual findings (Accepted risk and related decisions). There is no image-level "accept residual
+risk" control. Compose Doctor acknowledgements are a separate triage surface and do not clear
+Security exposure context. Selecting
 an image opens the full scan report, where you can review vulnerabilities, triage a finding, compare
 against another scan, and export a CSV, a SARIF file, or an SBOM. Each finding carries evidence tags
 so you can tell scary from exploitable at a glance: known-exploited (KEV), EPSS exploitation

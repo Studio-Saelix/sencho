@@ -23,6 +23,7 @@ import {
   targetingExposureContexts,
   allTargetingExposureContexts,
   primaryExposureIntentEvidence,
+  driverIdsForImage,
 } from './imagesTargeting';
 import type { ImageExposureContext, ScanSummary, ScanDetailTab, ScannerKind } from '@/types/security';
 // Mobile severity chips. 'FIXABLE' is a phone-only pseudo-filter (the desktop
@@ -173,7 +174,7 @@ interface ImagesTabProps {
   loading: boolean;
   /** True when the summaries fetch failed; render an error state, never a false "clean". */
   error?: boolean;
-  onInspect: (scanId: number, initialTab?: ScanDetailTab) => void;
+  onInspect: (scanId: number, initialTab?: ScanDetailTab, driverVulnerabilityIds?: string[]) => void;
   /** Admin on a node with a ready scanner; gates the scan Actions column. */
   canScan: boolean;
   /** image_ref of the scan currently in flight, for the per-row spinner. */
@@ -350,11 +351,31 @@ export function ImagesTab({
       </TargetingBannerFrame>
     );
   } else if (matchedTargetMeta.active && matchedTargetMeta.matched > 0 && targeting) {
-    const intentional = targeting.kind === 'public_exposure'
+    const isExposure = targeting.kind === 'public_exposure';
+    const hasConflict = isExposure && targeting.targets.some((t) => t.intentConflict);
+    const driverCount = targeting.drivers?.length ?? 0;
+    const intentional = isExposure && !hasConflict
       ? intentionalBannerKind(targeting.targets, { truncated: posturePartial })
       : { kind: 'none' as const, unavailableCount: 0 };
 
-    if (intentional.kind === 'absolute' || intentional.kind === 'partial') {
+    if (hasConflict) {
+      targetingBanner = (
+        <TargetingBannerFrame>
+          <div className="flex items-start gap-3 justify-between">
+            <div className="min-w-0">
+              <p className="font-mono text-xs text-stat-value">Exposure conflicts with declared intent</p>
+              <p className="text-xs text-stat-subtitle mt-0.5">
+                Compose publishes beyond loopback while Networking intent is internal or same-node. Review networking to align configuration with intent.
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              <ViewNetworkingAction contexts={allTargetingExposureContexts(targeting.targets)} nodeId={nodeId} />
+              <TargetingClearButton onClear={onClearTargeting} />
+            </div>
+          </div>
+        </TargetingBannerFrame>
+      );
+    } else if (intentional.kind === 'absolute' || intentional.kind === 'partial') {
       targetingBanner = (
         <IntentionalExposureBanner
           kind={intentional.kind}
@@ -366,19 +387,24 @@ export function ImagesTab({
       );
     } else {
       const partialMatch = matchedTargetMeta.matched < matchedTargetMeta.total;
+      const drivingTitle = driverCount > 0;
       targetingBanner = (
         <TargetingBannerFrame>
           <div className="flex items-start gap-3 justify-between">
             <div className="min-w-0">
               <p className="font-mono text-xs text-stat-value">
-                {formatTargetingTitle(
-                  matchedTargetMeta.label,
-                  matchedTargetMeta.matched,
-                  matchedTargetMeta.total,
-                )}
+                {drivingTitle
+                  ? `Driving current Security action · ${driverCount} finding${driverCount === 1 ? '' : 's'}`
+                  : formatTargetingTitle(
+                    matchedTargetMeta.label,
+                    matchedTargetMeta.matched,
+                    matchedTargetMeta.total,
+                  )}
               </p>
               <p className="text-xs text-stat-subtitle mt-0.5">
-                Showing images responsible for the current Security action.
+                {drivingTitle
+                  ? 'Open an image to review the exact findings driving this Security action.'
+                  : 'Showing images responsible for the current Security action.'}
                 {partialMatch ? ' An affected image has no scan summary on this node.' : ''}
                 {posturePartial ? ' The overview pass may be incomplete.' : ''}
               </p>
@@ -389,6 +415,8 @@ export function ImagesTab({
       );
     }
   }
+
+  const inspectDriversFor = (imageRef: string) => driverIdsForImage(targeting?.drivers, imageRef);
 
   return (
     <div className="space-y-4">
@@ -432,6 +460,7 @@ export function ImagesTab({
                   key={s.image_ref}
                   summary={s}
                   onInspect={onInspect}
+                  driverVulnerabilityIds={inspectDriversFor(s.image_ref)}
                   intentEvidence={intentEvidenceFor(s, targeting)}
                   exposureContexts={contextsForImage(s, targeting)}
                   nodeId={nodeId}
@@ -497,7 +526,7 @@ export function ImagesTab({
                 <TableRow key={s.image_ref} className="hover:bg-muted/30 transition-colors">
                   <TableCell className="font-mono text-xs truncate max-w-[280px]">
                     <div className="flex items-center gap-2 min-w-0">
-                      <button type="button" className="hover:text-brand truncate block text-left min-w-0" onClick={() => onInspect(s.scan_id, 'vulns')}>
+                      <button type="button" className="hover:text-brand truncate block text-left min-w-0" onClick={() => onInspect(s.scan_id, 'vulns', inspectDriversFor(s.image_ref))}>
                         {s.image_ref}
                       </button>
                       {s.publicly_exposed === true ? (
@@ -512,7 +541,7 @@ export function ImagesTab({
                   <TableCell className="max-md:hidden">
                     <button
                       type="button"
-                      onClick={() => onInspect(s.scan_id, 'vulns')}
+                      onClick={() => onInspect(s.scan_id, 'vulns', inspectDriversFor(s.image_ref))}
                       className="font-mono tabular-nums text-xs text-stat-subtitle text-left hover:text-stat-value transition-colors"
                     >
                       {s.critical > 0 && <span className="text-destructive mr-2">{s.critical}C</span>}
@@ -527,7 +556,7 @@ export function ImagesTab({
                     {formatTimeAgo(s.scanned_at)}
                   </TableCell>
                   <TableCell>
-                    <SeverityBadge summary={s} tooltip={false} onClick={() => onInspect(s.scan_id, 'vulns')} />
+                    <SeverityBadge summary={s} tooltip={false} onClick={() => onInspect(s.scan_id, 'vulns', inspectDriversFor(s.image_ref))} />
                   </TableCell>
                   {canScan && (
                     <TableCell className="text-right">

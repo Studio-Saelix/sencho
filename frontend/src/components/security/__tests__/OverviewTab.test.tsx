@@ -110,18 +110,46 @@ describe('OverviewTab remediation affordances', () => {
     const { onNavigate } = renderOverview([
       reason({
         kind: 'public_exposure',
-        label: 'Network-exposed affected images',
-        severity: 'blocker',
-        actionLabel: 'Review affected images',
+        label: 'Network-exposed images not yet classified',
+        severity: 'review',
+        actionLabel: 'Review networking',
         targets: [{ imageRef: 'exp:1' }, { imageRef: 'exp:2' }],
       }),
     ]);
-    await user.click(screen.getByRole('button', { name: /review affected images/i }));
+    await user.click(screen.getByRole('button', { name: /review networking/i }));
     expect(onNavigate).toHaveBeenCalledWith('images', undefined, {
       kind: 'public_exposure',
-      label: 'Network-exposed affected images',
+      label: 'Network-exposed images not yet classified',
       imageRefs: ['exp:1', 'exp:2'],
       targets: [{ imageRef: 'exp:1' }, { imageRef: 'exp:2' }],
+    });
+  });
+
+  it('passes elevated_exploit_risk drivers into Images targeting', async () => {
+    const user = userEvent.setup();
+    const { onNavigate } = renderOverview([
+      reason({
+        kind: 'elevated_exploit_risk',
+        label: 'Elevated exploit risk on network-exposed workload',
+        severity: 'blocker',
+        actionLabel: 'Review driving findings',
+        targets: [{ imageRef: 'web:1', intentStatus: 'set', exposureIntent: 'public' }],
+        drivers: [
+          { vulnerabilityId: 'CVE-2024-1', imageRef: 'web:1' },
+          { vulnerabilityId: 'CVE-2024-2', imageRef: 'web:1' },
+        ],
+      }),
+    ]);
+    await user.click(screen.getByRole('button', { name: /review driving findings/i }));
+    expect(onNavigate).toHaveBeenCalledWith('images', undefined, {
+      kind: 'elevated_exploit_risk',
+      label: 'Elevated exploit risk on network-exposed workload',
+      imageRefs: ['web:1'],
+      targets: [{ imageRef: 'web:1', intentStatus: 'set', exposureIntent: 'public' }],
+      drivers: [
+        { vulnerabilityId: 'CVE-2024-1', imageRef: 'web:1' },
+        { vulnerabilityId: 'CVE-2024-2', imageRef: 'web:1' },
+      ],
     });
   });
 

@@ -40,9 +40,42 @@ describe('targetingFromTargets', () => {
       { imageRef: 'a:1', stackName: 's2', serviceName: 'api', intentStatus: 'unset' },
       { imageRef: 'b:1', intentStatus: 'set', exposureIntent: 'lan' },
     ];
-    const input = targetingFromTargets('public_exposure', 'Network-exposed affected images', targets);
+    const input = targetingFromTargets(
+      'public_exposure',
+      'Network-exposed images not yet classified',
+      targets,
+    );
     expect(input?.imageRefs).toEqual(['a:1', 'b:1']);
     expect(input?.targets).toHaveLength(3);
+    expect(input?.drivers).toBeUndefined();
+  });
+
+  it('copies drivers when present', () => {
+    const drivers = [
+      { vulnerabilityId: 'CVE-2024-1', imageRef: 'web:1' },
+      { vulnerabilityId: 'CVE-2024-1', imageRef: 'web:1' },
+      { vulnerabilityId: 'CVE-2024-2', imageRef: 'web:1' },
+    ];
+    const input = targetingFromTargets(
+      'elevated_exploit_risk',
+      'Elevated exploit risk on network-exposed workload',
+      [{ imageRef: 'web:1', intentStatus: 'set', exposureIntent: 'public' }],
+      drivers,
+    );
+    expect(input?.drivers).toEqual(drivers);
+  });
+
+  it('omits drivers when empty or absent', () => {
+    const noDrivers = targetingFromTargets(
+      'public_exposure',
+      'Exposure conflicts with declared intent',
+      [{ imageRef: 'a:1', intentConflict: true, intentStatus: 'set', exposureIntent: 'internal' }],
+    );
+    expect(noDrivers?.drivers).toBeUndefined();
+    expect(
+      targetingFromTargets('elevated_exploit_risk', 'x', [{ imageRef: 'a:1' }], [])
+        ?.drivers,
+    ).toBeUndefined();
   });
 
   it('returns undefined for empty targets', () => {

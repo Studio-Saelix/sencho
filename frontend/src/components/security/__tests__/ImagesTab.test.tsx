@@ -66,7 +66,7 @@ it('opens the scan sheet on the vulns tab from the image name', async () => {
     />,
   );
   await userEvent.click(screen.getByText('nginx:1'));
-  expect(onInspect).toHaveBeenCalledWith(7, 'vulns');
+  expect(onInspect).toHaveBeenCalledWith(7, 'vulns', undefined);
 });
 
 it('opens the scan sheet on the vulns tab from the Findings cell', async () => {
@@ -79,7 +79,7 @@ it('opens the scan sheet on the vulns tab from the Findings cell', async () => {
     />,
   );
   await userEvent.click(screen.getByText('clean'));
-  expect(onInspect).toHaveBeenCalledWith(9, 'vulns');
+  expect(onInspect).toHaveBeenCalledWith(9, 'vulns', undefined);
 });
 
 it('narrows the list with the search box', async () => {
@@ -145,7 +145,7 @@ it('filters to posture targets and shows a clearable banner', async () => {
       onClearTargeting={onClear}
       targeting={{
         kind: 'public_exposure',
-        label: 'Network-exposed affected images',
+        label: 'Network-exposed images not yet classified',
         imageRefs: ['exp:1'],
         targets: [{
           imageRef: 'exp:1',
@@ -159,7 +159,7 @@ it('filters to posture targets and shows a clearable banner', async () => {
       )}
     />,
   );
-  expect(screen.getByText(/Network-exposed affected images · 1 affected image/)).toBeInTheDocument();
+  expect(screen.getByText(/Network-exposed images not yet classified · 1 affected image/)).toBeInTheDocument();
   expect(screen.getByText('exp:1')).toBeInTheDocument();
   expect(screen.queryByText('other:1')).not.toBeInTheDocument();
   expect(screen.getByText('Network exposed')).toBeInTheDocument();
@@ -221,7 +221,7 @@ it('shows absolute intentional targeting banner with View networking only', () =
       onClearTargeting={vi.fn()}
       targeting={{
         kind: 'public_exposure',
-        label: 'Network-exposed affected images',
+        label: 'Network-exposed images not yet classified',
         imageRefs: ['exp:1'],
         targets: [{
           imageRef: 'exp:1',
@@ -238,7 +238,7 @@ it('shows absolute intentional targeting banner with View networking only', () =
   expect(screen.getByText('Exposure is intentional')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: /Review findings/i })).not.toBeInTheDocument();
-  expect(screen.queryByText(/Network-exposed affected images ·/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Network-exposed images not yet classified ·/)).not.toBeInTheDocument();
 });
 
 it('shows partial intentional targeting banner copy', () => {
@@ -249,7 +249,7 @@ it('shows partial intentional targeting banner copy', () => {
       onClearTargeting={vi.fn()}
       targeting={{
         kind: 'public_exposure',
-        label: 'Network-exposed affected images',
+        label: 'Network-exposed images not yet classified',
         imageRefs: ['exp:1'],
         targets: [
           {
@@ -276,6 +276,62 @@ it('shows partial intentional targeting banner copy', () => {
   expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
 });
 
+it('shows driver-focused banner for elevated_exploit_risk targeting', () => {
+  render(
+    <ImagesTab
+      {...base}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'elevated_exploit_risk',
+        label: 'Elevated exploit risk on network-exposed workload',
+        imageRefs: ['exp:1'],
+        targets: [{
+          imageRef: 'exp:1',
+          intentStatus: 'set',
+          exposureIntent: 'public',
+        }],
+        drivers: [
+          { vulnerabilityId: 'CVE-2024-1', imageRef: 'exp:1' },
+          { vulnerabilityId: 'CVE-2024-2', imageRef: 'exp:1' },
+        ],
+        token: 1,
+      }}
+      summaries={asMap(summary({ image_ref: 'exp:1', scan_id: 1, publicly_exposed: true }))}
+    />,
+  );
+  expect(screen.getByText(/Driving current Security action · 2 findings/)).toBeInTheDocument();
+  expect(screen.getByText(/exact findings driving this Security action/i)).toBeInTheDocument();
+  expect(screen.queryByText(/Elevated exploit risk on network-exposed workload ·/)).not.toBeInTheDocument();
+});
+
+it('shows conflict banner for public_exposure intent mismatch', () => {
+  render(
+    <ImagesTab
+      {...base}
+      nodeId={3}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'public_exposure',
+        label: 'Exposure conflicts with declared intent',
+        imageRefs: ['exp:1'],
+        targets: [{
+          imageRef: 'exp:1',
+          stackName: 'web',
+          serviceName: 'api',
+          intentStatus: 'set',
+          exposureIntent: 'internal',
+          intentConflict: true,
+        }],
+        token: 1,
+      }}
+      summaries={asMap(summary({ image_ref: 'exp:1', scan_id: 1, publicly_exposed: true }))}
+    />,
+  );
+  expect(screen.getByText('Exposure conflicts with declared intent')).toBeInTheDocument();
+  expect(screen.getByText(/Review networking to align configuration with intent/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
+});
+
 it('shows matched of total when a target has no summary', () => {
   render(
     <ImagesTab
@@ -283,7 +339,7 @@ it('shows matched of total when a target has no summary', () => {
       onClearTargeting={vi.fn()}
       targeting={{
         kind: 'public_exposure',
-        label: 'Publicly exposed affected images',
+        label: 'Network-exposed images not yet classified',
         imageRefs: ['a:1', 'b:1', 'missing:1'],
         targets: ['a:1', 'b:1', 'missing:1'].map((imageRef) => ({ imageRef })),
         token: 1,
@@ -305,7 +361,7 @@ it('does not change the banner count when searching within the targeted set', as
       onClearTargeting={vi.fn()}
       targeting={{
         kind: 'public_exposure',
-        label: 'Publicly exposed affected images',
+        label: 'Network-exposed images not yet classified',
         imageRefs: ['a:1', 'b:1'],
         targets: ['a:1', 'b:1'].map((imageRef) => ({ imageRef })),
         token: 1,
@@ -404,7 +460,7 @@ it('shows a clearable zero-match note and keeps the full list', () => {
       onClearTargeting={vi.fn()}
       targeting={{
         kind: 'public_exposure',
-        label: 'Publicly exposed affected images',
+        label: 'Network-exposed images not yet classified',
         imageRefs: ['missing:1'],
         targets: ['missing:1'].map((imageRef) => ({ imageRef })),
         token: 1,

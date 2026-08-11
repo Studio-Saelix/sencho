@@ -91,6 +91,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
 
   const [inspectScanId, setInspectScanId] = useState<number | null>(null);
   const [inspectInitialTab, setInspectInitialTab] = useState<ScanDetailTab | undefined>(undefined);
+  const [inspectDriverVulnerabilityIds, setInspectDriverVulnerabilityIds] = useState<string[] | undefined>(undefined);
   // Filter / targeting for the Images tab when arriving from an overview link.
   // SecurityView owns both; ImagesTab never clears targeting locally (R1).
   const [imagesFilter, setImagesFilter] = useState<ImageFilterValue | null>(null);
@@ -139,8 +140,13 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     setImagesFilterToken(0);
   }, [activeNode?.id]);
 
-  const onInspect = useCallback((scanId: number, initialTab?: ScanDetailTab) => {
+  const onInspect = useCallback((
+    scanId: number,
+    initialTab?: ScanDetailTab,
+    driverVulnerabilityIds?: string[],
+  ) => {
     setInspectInitialTab(initialTab);
+    setInspectDriverVulnerabilityIds(driverVulnerabilityIds);
     setInspectScanId(scanId);
   }, []);
 
@@ -386,7 +392,11 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     <VulnerabilityScanSheet
       scanId={inspectScanId}
       initialTab={inspectInitialTab}
-      onClose={() => setInspectScanId(null)}
+      driverVulnerabilityIds={inspectDriverVulnerabilityIds}
+      onClose={() => {
+        setInspectScanId(null);
+        setInspectDriverVulnerabilityIds(undefined);
+      }}
       canGenerateSbom={canReadSecurityExports}
       canExportSarif={canReadSecurityExports}
       canCompare
@@ -448,6 +458,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
                 action.kind as PostureReasonKind,
                 blockerLabel,
                 action.targets,
+                action.drivers,
               );
               const filter = targeting ? undefined : reasonImageFilter(action.kind);
               handleNavigate(action.targetTab, filter, targeting);

@@ -15,7 +15,7 @@ import { applySuppressions, isTriageStatus, isTriageJustification } from '../uti
 import { applyMisconfigAcknowledgements } from '../utils/misconfig-ack-filter';
 import { generateSarif } from '../services/SarifExporter';
 import { generateOpenVex } from '../services/OpenVexExporter';
-import { deriveSecurityPosture, derivePostureReasons, HIGH_EPSS_THRESHOLD, type SecurityPostureFacts, type SecurityPostureState, type PostureReason, type PostureAction } from '../services/securityPosture';
+import { deriveSecurityPosture, derivePostureReasons, type SecurityPostureFacts, type SecurityPostureState, type PostureReason, type PostureAction, type PostureTarget } from '../services/securityPosture';
 import { classifyImageRemediation, type RemediationFindingInput } from '../services/securityImageRemediation';
 import { ImageUpdateService } from '../services/ImageUpdateService';
 import { buildExposedImageMap, type StackExposure } from '../services/preflight/exposure';
@@ -25,6 +25,10 @@ import {
   packageExposureContextsByImage,
   type PackagedImageExposureContexts,
 } from '../services/securityExposureTargets';
+import {
+  classifyExposedImages,
+  collectKevDrivers,
+} from '../services/securityExposureClassification';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
@@ -873,16 +877,18 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
     }
     let knownExploited = 0;
     const knownExploitedTargets: string[] = [];
+    const kevDriverRows: Array<{ imageRef: string; vulnerability_id: string }> = [];
     for (const [imageRef, group] of kevByImage) {
       let imageHasKev = false;
       for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
-        if (!e.suppressed) {
-          knownExploited += 1;
-          imageHasKev = true;
-        }
+        if (e.suppressed) continue;
+        knownExploited += 1;
+        imageHasKev = true;
+        kevDriverRows.push({ imageRef, vulnerability_id: e.vulnerability_id });
       }
       if (imageHasKev) knownExploitedTargets.push(imageRef);
     }
+    const knownExploitedDrivers = collectKevDrivers(kevDriverRows);
 
     const acks = db.getMisconfigAcknowledgements();
     const highMisconfigs = db.getLatestHighMisconfigFindingsForNode(req.nodeId);
@@ -899,54 +905,54 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       }
     }
 
-    // Network-exposed image counts from cached Compose descriptors (O(stacks)+O(images)).
-    // publiclyExposed: network-exposed images in the Crit/High index (including fully suppressed).
-    // exposedBlocker / exposedReview: require at least one unsuppressed Crit/High finding.
+    // Network-exposed image classification from cached Compose descriptors.
+    // Intentional exposure is risk context, never an independent Action-needed
+    // blocker. Package fixed_version alone cannot manufacture exposed blockers.
     const exposures = db.getStackExposures(req.nodeId);
     const parsedExposures: StackExposure[] = exposures.map((r) => {
       try { return JSON.parse(r.descriptor) as StackExposure; } catch { return null; }
     }).filter((e): e is StackExposure => e !== null);
     const exposedMap = buildExposedImageMap(parsedExposures);
-    let publiclyExposed = 0;
-    let exposedBlocker = 0;
-    let exposedReview = 0;
-    const exposedBlockerImageRefs = new Set<string>();
-    const exposedReviewImageRefs = new Set<string>();
+
+    const unsuppressedByImage = new Map<string, Array<{ vulnerability_id: string }>>();
+    const exposedImageRefs = new Set<string>();
     for (const [imageRef, group] of critHighByImage) {
       if (exposedMap.get(imageRef) !== true) continue;
-      publiclyExposed += 1;
-      let hasUnsuppressedFinding = false;
-      let hasKevOrFixOrHighEpss = false;
+      exposedImageRefs.add(imageRef);
+      const kept: Array<{ vulnerability_id: string }> = [];
       for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
-        if (e.suppressed) continue;
-        hasUnsuppressedFinding = true;
-        if (
-          e.fixed_version
-          || intel.get(e.vulnerability_id)?.kev
-          || (intel.get(e.vulnerability_id)?.epssScore ?? 0) >= HIGH_EPSS_THRESHOLD
-        ) {
-          hasKevOrFixOrHighEpss = true;
-          break;
-        }
+        if (!e.suppressed) kept.push({ vulnerability_id: e.vulnerability_id });
       }
-      if (!hasUnsuppressedFinding) continue; // fully dismissed (still counted in publiclyExposed)
-      if (hasKevOrFixOrHighEpss) {
-        exposedBlocker += 1;
-        exposedBlockerImageRefs.add(imageRef);
-      } else {
-        exposedReview += 1;
-        exposedReviewImageRefs.add(imageRef);
-      }
+      unsuppressedByImage.set(imageRef, kept);
     }
-    const exposedBlockerTargets = buildSecurityExposureTargets({
+
+    const allExposedTargets = buildSecurityExposureTargets({
       nodeId: req.nodeId,
       exposures: parsedExposures,
-      qualifyingImageRefs: exposedBlockerImageRefs,
+      qualifyingImageRefs: exposedImageRefs,
     });
-    const exposedReviewTargets = buildSecurityExposureTargets({
-      nodeId: req.nodeId,
-      exposures: parsedExposures,
-      qualifyingImageRefs: exposedReviewImageRefs,
+    const targetsByImage = new Map<string, PostureTarget[]>();
+    for (const t of allExposedTargets) {
+      const group = targetsByImage.get(t.imageRef);
+      if (group) group.push(t);
+      else targetsByImage.set(t.imageRef, [t]);
+    }
+
+    const {
+      publiclyExposed,
+      exposureIntentConflict,
+      exposureIntentConflictTargets,
+      exposedUnclassified,
+      exposedUnclassifiedTargets,
+      elevatedExploitRisk,
+      elevatedExploitRiskTargets,
+      elevatedExploitRiskDrivers,
+    } = classifyExposedImages({
+      critHighByImage,
+      exposedMap,
+      targetsByImage,
+      unsuppressedByImage,
+      intel,
     });
 
     const failedScans = db.countScansByStatus(req.nodeId, 'failed');
@@ -963,8 +969,9 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       dangerousCompose,
       knownExploited,
       publiclyExposed,
-      exposedBlocker,
-      exposedReview,
+      exposureIntentConflict,
+      exposedUnclassified,
+      elevatedExploitRisk,
       rawCritical: critical,
       rawHigh: high,
       staleScans,
@@ -974,12 +981,22 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       fixableWaitingUpstreamTargets: remediation.imageRefsWaitingUpstream,
       fixableUpdateUnknownTargets: remediation.imageRefsUpdateUnknown,
       knownExploitedTargets,
-      exposedBlockerTargets,
-      exposedReviewTargets,
+      knownExploitedDrivers,
+      exposureIntentConflictTargets,
+      exposedUnclassifiedTargets,
+      elevatedExploitRiskTargets,
+      elevatedExploitRiskDrivers,
     };
     const posture = deriveSecurityPosture(postureFacts);
     const { reasons: postureReasons, primaryAction, targetsTruncated } = derivePostureReasons(postureFacts);
-    const actionable = remediation.fixableWithImageUpdate + secrets + dangerousCompose + knownExploited + publiclyExposed;
+    // Canonical actionable = unresolved Security/Networking decisions that can
+    // change posture. Intentional network exposure alone is not actionable.
+    const actionable = remediation.fixableWithImageUpdate
+      + secrets
+      + dangerousCompose
+      + knownExploited
+      + elevatedExploitRisk
+      + exposureIntentConflict;
 
     const overview: SecurityOverviewResponse = {
       scannedImages,

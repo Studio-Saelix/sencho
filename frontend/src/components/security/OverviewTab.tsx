@@ -90,7 +90,7 @@ function reasonNavLabel(r: PostureReason): string {
 }
 
 function navigateReason(onNavigate: NavigateFn, reason: PostureReason): void {
-  const targeting = targetingFromTargets(reason.kind, reason.label, reason.targets);
+  const targeting = targetingFromTargets(reason.kind, reason.label, reason.targets, reason.drivers);
   // Prefer precise targets; severity filter is only the older-node fallback.
   const filter = targeting ? undefined : reasonImageFilter(reason.kind);
   onNavigate(reason.targetTab, filter, targeting);

@@ -126,12 +126,15 @@ function CountTag({ tone, children }: { tone: keyof typeof COUNT_TAG_TONE; child
 export function ImageScanRow({
   summary,
   onInspect,
+  driverVulnerabilityIds,
   intentEvidence = null,
   exposureContexts = [],
   nodeId,
 }: {
   summary: ScanSummary;
-  onInspect: (scanId: number, initialTab?: ScanDetailTab) => void;
+  onInspect: (scanId: number, initialTab?: ScanDetailTab, driverVulnerabilityIds?: string[]) => void;
+  /** Per-image driving finding ids from posture targeting. */
+  driverVulnerabilityIds?: string[];
   /** Compact exposure-intent line (standing or while posture-targeting). */
   intentEvidence?: string | null;
   /** Stack/service contexts for Networking navigation from Network exposed. */
@@ -145,7 +148,7 @@ export function ImageScanRow({
   return (
     <button
       type="button"
-      onClick={() => onInspect(summary.scan_id, 'vulns')}
+      onClick={() => onInspect(summary.scan_id, 'vulns', driverVulnerabilityIds)}
       className="flex min-h-11 w-full items-center gap-[11px] border-b border-hairline py-[11px] text-left last:border-b-0"
     >
       <span className={cn('h-[7px] w-[7px] shrink-0 rounded-full', SEVERITY_DOT_CLASSES[severityKey])} aria-hidden />

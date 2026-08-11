@@ -114,7 +114,7 @@ describe('ImageScanRow', () => {
     const onInspect = vi.fn();
     render(<ImageScanRow summary={summary({ image_ref: 'redis:7', scan_id: 9 })} onInspect={onInspect} />);
     await userEvent.click(screen.getByText('redis:7'));
-    expect(onInspect).toHaveBeenCalledWith(9, 'vulns');
+    expect(onInspect).toHaveBeenCalledWith(9, 'vulns', undefined);
   });
 });
 
@@ -196,7 +196,7 @@ describe('ImagesTab (mobile)', () => {
         onClearTargeting={onClear}
         targeting={{
           kind: 'public_exposure',
-          label: 'Network-exposed affected images',
+          label: 'Network-exposed images not yet classified',
           imageRefs: ['exp:1'],
           targets: [{
             imageRef: 'exp:1',
@@ -210,7 +210,7 @@ describe('ImagesTab (mobile)', () => {
         )}
       />,
     );
-    expect(screen.getByText(/Network-exposed affected images · 1 affected image/)).toBeInTheDocument();
+    expect(screen.getByText(/Network-exposed images not yet classified · 1 affected image/)).toBeInTheDocument();
     expect(screen.getByText('exp:1')).toBeInTheDocument();
     expect(screen.getByText('Network exposed')).toBeInTheDocument();
     expect(screen.getByText('Intent: not classified')).toBeInTheDocument();

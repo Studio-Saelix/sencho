@@ -1,6 +1,7 @@
 import type {
   ImageExposureContext,
   ImageExposureContextSummary,
+  PostureDriverFinding,
   PostureReasonKind,
   PostureTarget,
   ScanSummary,
@@ -14,6 +15,11 @@ export interface ImagesTargetingState {
   imageRefs: string[];
   /** Full target rows (may repeat imageRef across stack/service). */
   targets: PostureTarget[];
+  /**
+   * Exact contributing findings when the reason carries drivers.
+   * Scoped per image when opening the scan sheet.
+   */
+  drivers?: PostureDriverFinding[];
   /** Monotonic token so re-navigating the same reason re-applies after Clear. */
   token: number;
 }
@@ -33,11 +39,24 @@ function uniqueImageRefs(targets: PostureTarget[]): string[] {
   return [...new Set(targets.map((t) => t.imageRef))];
 }
 
+/** Driver CVE/GHSA ids for one image (omit when none match so the sheet stays unfiltered). */
+export function driverIdsForImage(
+  drivers: PostureDriverFinding[] | undefined,
+  imageRef: string,
+): string[] | undefined {
+  if (!drivers || drivers.length === 0) return undefined;
+  const ids = [...new Set(
+    drivers.filter((d) => d.imageRef === imageRef).map((d) => d.vulnerabilityId),
+  )];
+  return ids.length > 0 ? ids : undefined;
+}
+
 /** Build Images targeting from a posture reason/action target list. */
 export function targetingFromTargets(
   kind: PostureReasonKind,
   label: string,
   targets: PostureTarget[] | undefined,
+  drivers?: PostureDriverFinding[],
 ): ImagesTargetingInput | undefined {
   if (!targets || targets.length === 0) return undefined;
   return {
@@ -45,6 +64,7 @@ export function targetingFromTargets(
     label,
     imageRefs: uniqueImageRefs(targets),
     targets,
+    ...(drivers && drivers.length > 0 ? { drivers } : {}),
   };
 }
 

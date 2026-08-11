@@ -290,12 +290,19 @@ export type PostureReasonKind =
   | 'waiting_upstream'
   | 'update_check_uncertain'
   | 'known_exploited'
+  | 'elevated_exploit_risk'
   | 'secret'
   | 'dangerous_compose'
   | 'public_exposure'
   | 'stale_scan'
   | 'failed_scan'
   | 'needs_review';
+
+/** Bounded finding identities that drive a vulnerability-derived posture reason. */
+export interface PostureDriverFinding {
+  vulnerabilityId: string;
+  imageRef: string;
+}
 
 /**
  * Image identity behind a posture reason (raw scan image_ref).
@@ -327,6 +334,11 @@ export interface PostureReason {
    * May repeat imageRef. Omitted when empty or unknown.
    */
   targets?: PostureTarget[];
+  /**
+   * Exact contributing findings for vulnerability-derived blockers (capped).
+   * Older remotes omit this field.
+   */
+  drivers?: PostureDriverFinding[];
 }
 
 /** Highest-priority action for the masthead CTA. */
@@ -338,6 +350,8 @@ export interface PostureAction {
   kind: PostureReasonKind;
   /** Same targets as the reason that produced this action, when available. */
   targets?: PostureTarget[];
+  /** Same drivers as the reason that produced this action, when available. */
+  drivers?: PostureDriverFinding[];
 }
 
 /** Node-scoped security posture rollup for the Security page Overview. */
@@ -374,7 +388,8 @@ export interface SecurityOverview {
   needsReview?: number;
   accepted?: number;
   notAffected?: number;
-  /** Total actionable items, for the "N actions" affordance. */
+  /** Total actionable items: unresolved Security/Networking decisions that can
+   *  change posture. Intentional network exposure alone is not counted. */
   actionable?: number;
   posture?: SecurityPostureState;
   /** True when the bounded posture pass hit its row cap on this node. */

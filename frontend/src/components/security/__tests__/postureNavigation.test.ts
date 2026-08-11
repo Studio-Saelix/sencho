@@ -12,6 +12,7 @@ describe('reasonImageFilter', () => {
       'waiting_upstream',
       'update_check_uncertain',
       'known_exploited',
+      'elevated_exploit_risk',
       'secret',
       'dangerous_compose',
       'public_exposure',

@@ -306,3 +306,44 @@ describe('buildExposedImageMap', () => {
     expect(map.get('backend:1')).toBe(false);
   });
 });
+
+/**
+ * Mirrors ComposeService.refreshExposureCache success path:
+ * deriveStackExposure → upsertStackExposure (replace row) → buildExposedImageMap.
+ * On refresh failure ComposeService returns without upserting, so the prior
+ * beyond-loopback descriptor is retained (best-effort; not asserted here).
+ */
+describe('exposure cache refresh success path', () => {
+  it('clears prior beyond-loopback exposure after Compose correction', () => {
+    const prior = deriveStackExposure(
+      model({
+        services: [
+          svc({
+            image: 'web:1',
+            ports: [{ startPort: 80, endPort: 80, hostIp: '0.0.0.0', protocol: 'tcp' }],
+          }),
+        ],
+      }),
+      'web',
+      NOW,
+    );
+    expect(prior.services[0].publiclyExposed).toBe(true);
+    expect(buildExposedImageMap([prior]).get('web:1')).toBe(true);
+
+    // Successful refresh replaces the cached descriptor for the stack.
+    const corrected = deriveStackExposure(
+      model({
+        services: [
+          svc({
+            image: 'web:1',
+            ports: [{ startPort: 80, endPort: 80, hostIp: '127.0.0.1', protocol: 'tcp' }],
+          }),
+        ],
+      }),
+      'web',
+      NOW + 1,
+    );
+    expect(corrected.services[0].publiclyExposed).toBe(false);
+    expect(buildExposedImageMap([corrected]).get('web:1')).toBe(false);
+  });
+});

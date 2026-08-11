@@ -90,6 +90,7 @@ function resetSecurity(): void {
   raw.prepare('DELETE FROM misconfig_acknowledgements').run();
   raw.prepare('DELETE FROM cve_intel').run();
   raw.prepare('DELETE FROM stack_exposure').run();
+  raw.prepare('DELETE FROM stack_exposure_intent').run();
 }
 
 describe('GET /api/security/overview', () => {
@@ -342,7 +343,7 @@ describe('GET /api/security/overview', () => {
     expect(res.status).toBe(401);
   });
 
-  it('attaches public_exposure blocker targets for distinct exposed images', async () => {
+  it('treats exposed + fixed_version without intent as review/monitoring, not public_exposure blocker', async () => {
     const now = Date.now();
     for (const ref of ['exp-a:1', 'exp-b:1', 'safe:1']) {
       const scanId = db().createVulnerabilityScan({
@@ -369,10 +370,190 @@ describe('GET /api/security/overview', () => {
 
     const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
-    const blocker = (res.body.postureReasons as Array<{ kind: string; severity: string; targets?: Array<{ imageRef: string }> }>)
-      .find((r) => r.kind === 'public_exposure' && r.severity === 'blocker');
-    expect(blocker?.targets?.map((t) => t.imageRef).sort()).toEqual(['exp-a:1', 'exp-b:1']);
-    expect(res.body.primaryAction.targets.map((t: { imageRef: string }) => t.imageRef).sort()).toEqual(['exp-a:1', 'exp-b:1']);
+    expect(res.body.posture).toBe('Monitoring');
+    const reasons = res.body.postureReasons as Array<{ kind: string; severity: string; targets?: Array<{ imageRef: string }> }>;
+    expect(reasons.find((r) => r.kind === 'public_exposure' && r.severity === 'blocker')).toBeUndefined();
+    expect(reasons.find((r) => r.kind === 'elevated_exploit_risk')).toBeUndefined();
+    const review = reasons.find((r) => r.kind === 'public_exposure' && r.severity === 'review');
+    const uncertain = reasons.find((r) => r.kind === 'update_check_uncertain' || r.kind === 'waiting_upstream');
+    expect(review || uncertain).toBeTruthy();
+    if (review) {
+      expect(review.targets?.map((t) => t.imageRef).sort()).toEqual(['exp-a:1', 'exp-b:1']);
+    }
+    expect(res.body.primaryAction).toBeNull();
+  });
+
+  it('intentional public + fixed_version without KEV/EPSS/image-update stays Monitoring', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'intent-fix:1', image_digest: 'sha256:intent-fix', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 1, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [{
+      vulnerability_id: 'CVE-2024-INTENT', pkg_name: 'x', installed_version: '1', fixed_version: '2',
+      severity: 'CRITICAL', title: null, description: null, primary_url: null,
+    }]);
+    db().upsertStackExposure(1, 'web', JSON.stringify({
+      stack: 'web',
+      computedAt: now,
+      services: [
+        { service: 'api', image: 'intent-fix:1', publiclyExposed: true, reason: 'published-port', bindings: ['0.0.0.0:80/tcp'] },
+      ],
+    }), now);
+    db().setStackExposureIntent(1, 'web', '', 'public', 'admin');
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.posture).toBe('Monitoring');
+    expect(res.body.publiclyExposed).toBe(1);
+    const reasons = res.body.postureReasons as Array<{ kind: string; severity: string }>;
+    expect(reasons.find((r) => r.kind === 'public_exposure' && r.severity === 'blocker')).toBeUndefined();
+    expect(reasons.find((r) => r.kind === 'elevated_exploit_risk')).toBeUndefined();
+    expect(res.body.actionable).toBe(0);
+  });
+
+  it('intentional exposure + KEV yields known_exploited blocker with drivers', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'intent-kev:1', image_digest: 'sha256:intent-kev', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [{
+      vulnerability_id: 'CVE-2024-IKEV', pkg_name: 'lib', installed_version: '1', fixed_version: null,
+      severity: 'CRITICAL', title: null, description: null, primary_url: null,
+    }]);
+    db().replaceKev([{ cve_id: 'CVE-2024-IKEV', date_added: '2024-01-01' }], now);
+    db().upsertStackExposure(1, 'web', JSON.stringify({
+      stack: 'web',
+      computedAt: now,
+      services: [
+        { service: 'api', image: 'intent-kev:1', publiclyExposed: true, reason: 'published-port', bindings: ['0.0.0.0:80/tcp'] },
+      ],
+    }), now);
+    db().setStackExposureIntent(1, 'web', '', 'public', 'admin');
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.posture).toBe('Action needed');
+    const kev = (res.body.postureReasons as Array<{
+      kind: string;
+      drivers?: Array<{ vulnerabilityId: string; imageRef: string }>;
+    }>).find((r) => r.kind === 'known_exploited');
+    expect(kev?.drivers).toEqual([{ vulnerabilityId: 'CVE-2024-IKEV', imageRef: 'intent-kev:1' }]);
+    expect((res.body.postureReasons as Array<{ kind: string; severity: string }>)
+      .find((r) => r.kind === 'public_exposure' && r.severity === 'blocker')).toBeUndefined();
+  });
+
+  it('intentional exposure + EPSS >= 0.1 yields elevated_exploit_risk blocker with drivers', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'intent-epss:1', image_digest: 'sha256:intent-epss', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 1, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [{
+      vulnerability_id: 'CVE-2024-IEPSS', pkg_name: 'x', installed_version: '1', fixed_version: '2',
+      severity: 'CRITICAL', title: null, description: null, primary_url: null,
+    }]);
+    db().upsertEpss([{ cve_id: 'CVE-2024-IEPSS', epss_score: 0.15, epss_percentile: 0.9 }], now);
+    db().upsertStackExposure(1, 'web', JSON.stringify({
+      stack: 'web',
+      computedAt: now,
+      services: [
+        { service: 'api', image: 'intent-epss:1', publiclyExposed: true, reason: 'published-port', bindings: ['0.0.0.0:80/tcp'] },
+      ],
+    }), now);
+    db().setStackExposureIntent(1, 'web', '', 'public', 'admin');
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.posture).toBe('Action needed');
+    const elevated = (res.body.postureReasons as Array<{
+      kind: string;
+      severity: string;
+      drivers?: Array<{ vulnerabilityId: string; imageRef: string }>;
+      targets?: Array<{ imageRef: string }>;
+    }>).find((r) => r.kind === 'elevated_exploit_risk');
+    expect(elevated?.severity).toBe('blocker');
+    expect(elevated?.drivers).toEqual([{ vulnerabilityId: 'CVE-2024-IEPSS', imageRef: 'intent-epss:1' }]);
+    expect(elevated?.targets?.map((t) => t.imageRef)).toEqual(['intent-epss:1']);
+    expect(res.body.primaryAction.kind).toBe('elevated_exploit_risk');
+  });
+
+  it('internal intent + exposed yields public_exposure blocker with Review networking CTA', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'conflict:1', image_digest: 'sha256:conflict', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 1, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [{
+      vulnerability_id: 'CVE-2024-CONFLICT', pkg_name: 'x', installed_version: '1', fixed_version: '2',
+      severity: 'CRITICAL', title: null, description: null, primary_url: null,
+    }]);
+    db().upsertStackExposure(1, 'web', JSON.stringify({
+      stack: 'web',
+      computedAt: now,
+      services: [
+        { service: 'api', image: 'conflict:1', publiclyExposed: true, reason: 'published-port', bindings: ['0.0.0.0:80/tcp'] },
+      ],
+    }), now);
+    db().setStackExposureIntent(1, 'web', '', 'internal', 'admin');
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.posture).toBe('Action needed');
+    const blocker = (res.body.postureReasons as Array<{
+      kind: string;
+      severity: string;
+      label: string;
+      targets?: Array<{ imageRef: string; intentConflict?: boolean }>;
+    }>).find((r) => r.kind === 'public_exposure' && r.severity === 'blocker');
+    expect(blocker?.label).toBe('Exposure conflicts with declared intent');
+    expect(blocker?.targets?.[0]).toMatchObject({ imageRef: 'conflict:1', intentConflict: true });
+    expect(res.body.primaryAction).toMatchObject({
+      kind: 'public_exposure',
+      label: 'Review networking',
+    });
+  });
+
+  it('actionable excludes publiclyExposed-only intentional images', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'pub-only:1', image_digest: 'sha256:pub-only', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [{
+      vulnerability_id: 'CVE-2024-PUBONLY', pkg_name: 'x', installed_version: '1', fixed_version: null,
+      severity: 'CRITICAL', title: null, description: null, primary_url: null,
+    }]);
+    db().upsertStackExposure(1, 'web', JSON.stringify({
+      stack: 'web',
+      computedAt: now,
+      services: [
+        { service: 'api', image: 'pub-only:1', publiclyExposed: true, reason: 'published-port', bindings: ['0.0.0.0:80/tcp'] },
+      ],
+    }), now);
+    db().setStackExposureIntent(1, 'web', '', 'public', 'admin');
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.publiclyExposed).toBe(1);
+    expect(res.body.actionable).toBe(0);
+    expect(res.body.posture).toBe('Monitoring');
   });
 
   it('excludes fully suppressed exposed images from blocker and review targets', async () => {
