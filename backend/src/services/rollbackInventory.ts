@@ -208,6 +208,9 @@ async function resolveGitInventory(
         manifestVersion: null,
       },
       appliedDeploySpec: appliedDeploySpecString(gitSource.applied_deploy_spec),
+      lastAppliedContentHash: gitSource.last_applied_content_hash,
+      manifestState: gitSource.manifest_state,
+      manifestGeneration: gitSource.manifest_generation,
       exactCoverage: false,
       coverageRefusal: reason,
     };
@@ -254,6 +257,9 @@ async function resolveGitInventory(
       manifestVersion: read.manifestVersion,
     },
     appliedDeploySpec: appliedDeploySpecString(gitSource.applied_deploy_spec),
+    lastAppliedContentHash: gitSource.last_applied_content_hash,
+    manifestState: gitSource.manifest_state,
+    manifestGeneration: gitSource.manifest_generation,
     exactCoverage: !refused,
     coverageRefusal,
   };
@@ -427,6 +433,9 @@ async function resolveAuthoredInventory(
     },
     git: null,
     appliedDeploySpec: null,
+    lastAppliedContentHash: null,
+    manifestState: null,
+    manifestGeneration: null,
     exactCoverage,
     coverageRefusal,
   };

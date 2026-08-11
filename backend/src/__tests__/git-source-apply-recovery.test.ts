@@ -241,11 +241,11 @@ describe('git-source apply recovery (R1)', () => {
     expect(mockAbandon).not.toHaveBeenCalled();
   });
 
-  it('still applies when recovery capture fails (soft-skip coverage)', async () => {
+  it('refuses to promote when recovery capture fails', async () => {
     mockCaptureCandidate.mockRejectedValue(new Error('Exact authored-project rollback coverage is unavailable'));
     mockDeployStack.mockResolvedValue(undefined);
 
-    const { GitSourceService } = await import('../services/GitSourceService');
+    const { GitSourceService, GitSourceError } = await import('../services/GitSourceService');
     const svc = GitSourceService.getInstance();
     vi.spyOn(
       svc as unknown as { withStackLock: (name: string, fn: () => Promise<unknown>) => Promise<unknown> },
@@ -273,14 +273,10 @@ describe('git-source apply recovery (R1)', () => {
       'hashContent',
     ).mockReturnValue('hash');
 
-    const result = await svc.apply('app', 'abc1234deadbeef', { deploy: true, actor: 'tester' });
-
-    expect(result.applied).toBe(true);
-    expect(result.deployed).toBe(true);
-    expect(result.recoveryId).toBeUndefined();
-    expect(mockPromoteGeneration).toHaveBeenCalled();
+    await expect(svc.apply('app', 'abc1234deadbeef', { deploy: true, actor: 'tester' })).rejects.toBeInstanceOf(GitSourceError);
+    expect(mockPromoteGeneration).not.toHaveBeenCalled();
     expect(mockCaptureCandidate).toHaveBeenCalled();
-    expect(mockMarkGitSourceApplied).toHaveBeenCalled();
+    expect(mockMarkGitSourceApplied).not.toHaveBeenCalled();
     expect(mockHandoff).not.toHaveBeenCalled();
     expect(mockAbandon).not.toHaveBeenCalled();
   });

@@ -25,6 +25,9 @@ import {
 
 const GENERATION_JSON = 'generation.json';
 const FILES_DIR = 'files';
+const PRE_RESTORE_DIR = 'pre-restore';
+const RESTORE_INTENT_FILE = 'restore-intent.json';
+const TOMBSTONE_MARKER = '.sencho-tombstone';
 
 function getDataDir(): string {
   return process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -290,6 +293,9 @@ export class RollbackGenerationStore {
         priorRecords: {
           appliedDeploySpec: inventory.appliedDeploySpec,
           lkgHint,
+          lastAppliedContentHash: inventory.lastAppliedContentHash,
+          manifestState: inventory.manifestState,
+          manifestGeneration: inventory.manifestGeneration,
         },
         images,
       };
@@ -330,22 +336,76 @@ export class RollbackGenerationStore {
   }
 
   /**
+   * If a prior restore left a durable intent + pre-restore snapshot, revert the
+   * live managed set to that snapshot. Used by startup reconciliation.
+   */
+  static async reconcileInterruptedRestore(
+    nodeId: number,
+    stackName: string,
+    generationId: string,
+  ): Promise<boolean> {
+    assertSafeStackName(stackName);
+    assertSafeGenerationId(generationId);
+    const genDir = this.getGenerationDir(nodeId, stackName, generationId);
+    const genResolved = path.resolve(genDir);
+    const intentPath = path.resolve(genResolved, RESTORE_INTENT_FILE);
+    if (!intentPath.startsWith(genResolved + path.sep)) return false;
+    try {
+      await fsPromises.access(intentPath);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw e;
+    }
+    await this.revertFromPreRestoreSnapshot(nodeId, stackName, genResolved);
+    await fsPromises.rm(intentPath, { force: true });
+    return true;
+  }
+
+  /**
+   * Drop the durable restore intent and pre-restore snapshot after a successful
+   * compensation (files restored, policy passed, compose up + probe ok).
+   */
+  static async commitRestoreTransaction(
+    nodeId: number,
+    stackName: string,
+    generationId: string,
+  ): Promise<void> {
+    assertSafeStackName(stackName);
+    assertSafeGenerationId(generationId);
+    const genDir = this.getGenerationDir(nodeId, stackName, generationId);
+    const genResolved = path.resolve(genDir);
+    const intentPath = path.resolve(genResolved, RESTORE_INTENT_FILE);
+    const preRoot = path.resolve(genResolved, PRE_RESTORE_DIR);
+    if (intentPath.startsWith(genResolved + path.sep)) {
+      await fsPromises.rm(intentPath, { force: true });
+    }
+    if (preRoot.startsWith(genResolved + path.sep)) {
+      await fsPromises.rm(preRoot, { recursive: true, force: true });
+    }
+  }
+
+  /**
    * Restore a generation into the live stack. Verifies generation.json and
    * content checksums before any live mutation. Writes present entries;
    * deletes live paths that are in managedRelativePaths or liveManagedPaths
    * but not present in the generation (tombstones and post-capture additions
    * inside the managed set). Paths outside both sets are left untouched.
+   *
+   * Durability: copies the affected live paths into pre-restore/ and writes
+   * restore-intent.json before mutation. Failure or restart reverts from that
+   * snapshot so a hybrid managed project cannot remain.
    */
   static async restoreGeneration(
     nodeId: number,
     stackName: string,
     generationId: string,
     liveManagedPaths: string[],
-  ): Promise<void> {
+  ): Promise<RollbackGenerationManifest> {
     assertSafeStackName(stackName);
     assertSafeGenerationId(generationId);
 
     const genDir = this.getGenerationDir(nodeId, stackName, generationId);
+    const genResolved = path.resolve(genDir);
     const manifest = await this.readAndVerifyGeneration(genDir);
 
     const presentByKey = new Map<string, RollbackGenerationEntry>();
@@ -367,8 +427,6 @@ export class RollbackGenerationStore {
     }
     for (const rel of liveManagedPaths) considerDelete(rel);
 
-    // Materialize plaintext for every present entry BEFORE mutating the live
-    // stack so a decrypt / read failure cannot leave a half-restored tree.
     const restores: Array<{
       relativePath: string;
       content: Buffer;
@@ -382,32 +440,166 @@ export class RollbackGenerationStore {
       });
     }
 
+    const affectedPaths = [
+      ...restores.map((r) => r.relativePath),
+      ...deleteRelByKey.values(),
+    ];
+
+    await this.capturePreRestoreSnapshot(nodeId, stackName, genResolved, affectedPaths);
+    const intentPath = path.resolve(genResolved, RESTORE_INTENT_FILE);
+    if (!intentPath.startsWith(genResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
+    }
+    await fsPromises.writeFile(
+      intentPath,
+      JSON.stringify({ generationId, stackName, nodeId, paths: affectedPaths, at: Date.now() }),
+      'utf8',
+    );
+
     const fsSvc = FileSystemService.getInstance(nodeId);
     const scope = { protectedEnabled: false as const };
 
-    for (const item of restores) {
-      await fsSvc.writeStackFile(stackName, item.relativePath, item.content);
-      if (item.sensitivity !== 'high' && item.sensitivity !== 'medium') continue;
+    try {
+      for (const item of restores) {
+        await fsSvc.writeStackFile(stackName, item.relativePath, item.content);
+        if (item.sensitivity !== 'high' && item.sensitivity !== 'medium') continue;
+        try {
+          await fsSvc.chmodStackPath(stackName, item.relativePath, 0o600, scope);
+        } catch (e) {
+          console.warn(
+            '[RollbackGenerationStore] Could not restrict mode on restored entry:',
+            (e as Error).message,
+          );
+        }
+      }
+
+      for (const rel of deleteRelByKey.values()) {
+        try {
+          const kind = await fsSvc.pathKind(stackName, rel, scope);
+          if (kind === null) continue;
+          await fsSvc.deleteStackPath(stackName, rel, kind === 'directory', scope);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          throw e;
+        }
+      }
+
+      // Leave restore-intent.json + pre-restore/ until commitRestoreTransaction
+      // so a later policy/compose failure can still revert the managed set.
+      return manifest;
+    } catch (e) {
       try {
-        await fsSvc.chmodStackPath(stackName, item.relativePath, 0o600, scope);
-      } catch (e) {
-        console.warn(
-          '[RollbackGenerationStore] Could not restrict mode on restored entry:',
-          (e as Error).message,
+        await this.revertFromPreRestoreSnapshot(nodeId, stackName, genResolved);
+        await fsPromises.rm(intentPath, { force: true });
+      } catch (revertErr) {
+        console.error(
+          '[RollbackGenerationStore] Failed to revert interrupted restore:',
+          (revertErr as Error).message,
         );
       }
+      throw e;
+    }
+  }
+
+  private static async capturePreRestoreSnapshot(
+    nodeId: number,
+    stackName: string,
+    genResolved: string,
+    relativePaths: string[],
+  ): Promise<void> {
+    const preRoot = path.resolve(genResolved, PRE_RESTORE_DIR);
+    if (!preRoot.startsWith(genResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
+    }
+    await fsPromises.rm(preRoot, { recursive: true, force: true });
+    await fsPromises.mkdir(preRoot, { recursive: true });
+
+    const fsSvc = FileSystemService.getInstance(nodeId);
+    const composeBase = path.resolve(fsSvc.getBaseDir());
+    const stackRoot = path.resolve(composeBase, stackName);
+    if (!stackRoot.startsWith(composeBase + path.sep)) {
+      throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
     }
 
-    for (const rel of deleteRelByKey.values()) {
+    const seen = new Set<string>();
+    for (const relRaw of relativePaths) {
+      const rel = posixRel(relRaw);
+      const key = caseKey(rel);
+      if (!rel || seen.has(key)) continue;
+      seen.add(key);
+      const dest = path.resolve(preRoot, rel);
+      if (!dest.startsWith(preRoot + path.sep)) continue;
+      const src = path.resolve(stackRoot, rel);
+      if (!src.startsWith(stackRoot + path.sep)) continue;
       try {
-        const kind = await fsSvc.pathKind(stackName, rel, scope);
-        if (kind === null) continue;
-        await fsSvc.deleteStackPath(stackName, rel, kind === 'directory', scope);
+        const st = await fsPromises.lstat(src);
+        if (!st.isFile()) {
+          await fsPromises.mkdir(path.dirname(dest), { recursive: true });
+          await fsPromises.writeFile(dest + TOMBSTONE_MARKER, '', 'utf8');
+          continue;
+        }
+        const bytes = await fsPromises.readFile(src);
+        await fsPromises.mkdir(path.dirname(dest), { recursive: true });
+        await fsPromises.writeFile(dest, bytes);
       } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+          await fsPromises.mkdir(path.dirname(dest), { recursive: true });
+          await fsPromises.writeFile(dest + TOMBSTONE_MARKER, '', 'utf8');
+          continue;
+        }
         throw e;
       }
     }
+  }
+
+  private static async revertFromPreRestoreSnapshot(
+    nodeId: number,
+    stackName: string,
+    genResolved: string,
+  ): Promise<void> {
+    const preRoot = path.resolve(genResolved, PRE_RESTORE_DIR);
+    if (!preRoot.startsWith(genResolved + path.sep)) return;
+    try {
+      await fsPromises.access(preRoot);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw e;
+    }
+
+    const fsSvc = FileSystemService.getInstance(nodeId);
+    const scope = { protectedEnabled: false as const };
+
+    const walk = async (dir: string, relBase: string): Promise<void> => {
+      const entries = await fsPromises.readdir(dir, { withFileTypes: true });
+      for (const ent of entries) {
+        const abs = path.resolve(dir, ent.name);
+        if (!abs.startsWith(preRoot + path.sep)) continue;
+        if (ent.isDirectory()) {
+          await walk(abs, relBase ? `${relBase}/${ent.name}` : ent.name);
+          continue;
+        }
+        if (ent.name.endsWith(TOMBSTONE_MARKER)) {
+          const rel = posixRel(
+            (relBase ? `${relBase}/` : '') + ent.name.slice(0, -TOMBSTONE_MARKER.length),
+          );
+          if (!rel) continue;
+          try {
+            const kind = await fsSvc.pathKind(stackName, rel, scope);
+            if (kind === null) continue;
+            await fsSvc.deleteStackPath(stackName, rel, kind === 'directory', scope);
+          } catch (e) {
+            if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+          }
+          continue;
+        }
+        const rel = posixRel(relBase ? `${relBase}/${ent.name}` : ent.name);
+        if (!rel) continue;
+        const buf = await fsPromises.readFile(abs);
+        await fsSvc.writeStackFile(stackName, rel, buf);
+      }
+    };
+    await walk(preRoot, '');
+    await fsPromises.rm(preRoot, { recursive: true, force: true });
   }
 
   /** Remove one generation content directory. Missing dirs are a no-op. */

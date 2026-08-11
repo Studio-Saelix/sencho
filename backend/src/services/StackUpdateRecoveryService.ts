@@ -28,6 +28,11 @@ import {
 } from './composeProjectContext';
 import { getComposeCommandTimeoutMs } from './ComposeService';
 import { assessGenerationEligibility } from './rollbackEligibility';
+import { enforcePolicyPreDeploy, type PolicyEnforcementOptions } from './PolicyEnforcement';
+import { describePolicyBlock } from '../helpers/policyGate';
+import type { GitSourceAppliedSpec } from './DatabaseService';
+import type { GitSourceManifestState } from '../types/gitProjectManifest';
+import type { RollbackGenerationManifest } from '../types/rollbackGeneration';
 import { getBackupBaseDir, RollbackGenerationStore } from './RollbackGenerationStore';
 import type { RollbackOperationKind } from '../types/rollbackGeneration';
 import { getErrorMessage } from '../utils/errors';
@@ -43,10 +48,9 @@ function looksLikeGenerationUuid(value: string): boolean {
   return GENERATION_UUID_RE.test(value);
 }
 
-/** New captures set content_path and/or a UUID backup_slot_id; never legacy-restore those. */
+/** New content-store generations always set content_path. Never infer from UUID shape. */
 function expectsGenerationContent(row: StackUpdateRecoveryGenerationRow): boolean {
-  if (row.content_path) return true;
-  return row.backup_slot_id !== null && looksLikeGenerationUuid(row.backup_slot_id);
+  return typeof row.content_path === 'string' && row.content_path.length > 0;
 }
 
 async function generationContentPresent(
@@ -64,9 +68,9 @@ async function generationContentPresent(
 }
 
 async function resolveRestoreContext(row: StackUpdateRecoveryGenerationRow) {
-  const contentKey = row.content_path || row.backup_slot_id;
   if (expectsGenerationContent(row)) {
-    if (!contentKey || !looksLikeGenerationUuid(contentKey)) {
+    const contentKey = row.content_path!;
+    if (!looksLikeGenerationUuid(contentKey)) {
       throw Object.assign(
         new Error('Recovery generation content key is missing or invalid'),
         { code: 'GENERATION_CONTENT_MISSING' },
@@ -85,8 +89,65 @@ async function resolveRestoreContext(row: StackUpdateRecoveryGenerationRow) {
       contentKey,
     );
   }
-  // Pre-migration rows: content_path null and no generation UUID slot.
+  // Pre-migration rows: content_path null (even when backup_slot_id is a UUID).
   return resolveComposeProjectContext(row.node_id, row.stack_name);
+}
+
+async function restoreCapturedGitDatabaseState(
+  stackName: string,
+  manifest: RollbackGenerationManifest,
+): Promise<void> {
+  const db = DatabaseService.getInstance();
+  const src = db.getGitSource(stackName);
+  if (!src) return;
+
+  const rawSpec = manifest.priorRecords?.appliedDeploySpec;
+  if (rawSpec === null) {
+    db.setGitSourceAppliedSpec(stackName, null);
+  } else if (typeof rawSpec === 'string' && rawSpec.length > 0) {
+    try {
+      const parsed = JSON.parse(rawSpec) as GitSourceAppliedSpec;
+      if (parsed && Array.isArray(parsed.files)) {
+        db.setGitSourceAppliedSpec(stackName, parsed);
+      }
+    } catch (e) {
+      throw new Error(
+        `Stored applied deploy specification is corrupt: ${(e as Error).message}`,
+        { cause: e },
+      );
+    }
+  }
+
+  const commitSha = manifest.git?.commitSha?.trim() || null;
+  const contentHash =
+    (typeof manifest.priorRecords?.lastAppliedContentHash === 'string'
+      ? manifest.priorRecords.lastAppliedContentHash
+      : null)
+    ?? src.last_applied_content_hash
+    ?? '';
+  if (commitSha) {
+    db.markGitSourceApplied(stackName, commitSha, contentHash);
+  }
+
+  const manifestVersion = manifest.git?.manifestVersion ?? src.manifest_version;
+  const manifestState =
+    (typeof manifest.priorRecords?.manifestState === 'string'
+      ? manifest.priorRecords.manifestState
+      : null)
+    ?? src.manifest_state
+    ?? 'active';
+  const capturedGeneration =
+    typeof manifest.priorRecords?.manifestGeneration === 'string'
+      ? manifest.priorRecords.manifestGeneration
+      : null;
+  if (manifestVersion != null || capturedGeneration != null) {
+    db.setGitSourceManifestState(
+      stackName,
+      manifestVersion,
+      manifestState as GitSourceManifestState,
+      capturedGeneration ?? src.manifest_generation ?? null,
+    );
+  }
 }
 
 const SWEEP_INTERVAL_MS = 5 * 60_000;
@@ -611,12 +672,24 @@ export class StackUpdateRecoveryService {
   public async compensateWithCandidate(
     generationId: string,
     composeUp: (overridePath: string) => Promise<void>,
+    policyOptions?: PolicyEnforcementOptions,
   ): Promise<boolean> {
     const row = this.get(generationId);
     if (!row) return false;
+
+    const db = DatabaseService.getInstance();
+    const priorGit = db.getGitSource(row.stack_name);
+    const priorSpec = priorGit?.applied_deploy_spec ?? null;
+    const priorSha = priorGit?.last_applied_commit_sha ?? null;
+    const priorManifestVersion = priorGit?.manifest_version ?? null;
+    const priorManifestState = priorGit?.manifest_state ?? null;
+    const priorManifestGeneration = priorGit?.manifest_generation ?? null;
+
+    let filesRestored = false;
     try {
-      const verdict = await assessGenerationEligibility(row);
-      if (verdict === 'prohibited') {
+      // Integrity-only eligibility before mutation (policy runs against the restored target).
+      const integrityVerdict = await assessGenerationEligibility(row);
+      if (integrityVerdict === 'prohibited') {
         throw Object.assign(
           new Error('Rollback is prohibited for this generation'),
           { code: 'ROLLBACK_PROHIBITED' },
@@ -624,7 +697,28 @@ export class StackUpdateRecoveryService {
       }
 
       const context = await resolveRestoreContext(row);
-      await context.restoreFromContext();
+      const restoredManifest = await context.restoreFromContext();
+      filesRestored = true;
+
+      if (restoredManifest) {
+        await restoreCapturedGitDatabaseState(row.stack_name, restoredManifest);
+      }
+
+      // Evaluate current policy against the restored target (fail closed).
+      const gate = await enforcePolicyPreDeploy(row.stack_name, row.node_id, {
+        bypass: policyOptions?.bypass ?? false,
+        actor: policyOptions?.actor ?? 'recovery-compensate',
+        ip: policyOptions?.ip,
+        auditMethod: policyOptions?.auditMethod ?? 'POST',
+        auditPath: policyOptions?.auditPath ?? '/api/stacks/rollback',
+      });
+      if (!gate.ok) {
+        throw Object.assign(
+          new Error(describePolicyBlock(gate.policy, gate.violations, 'rollback')),
+          { code: 'ROLLBACK_PROHIBITED', policy: gate.policy, violations: gate.violations },
+        );
+      }
+
       if (!row.override_path) {
         throw new Error('Recovery generation has no override path');
       }
@@ -634,13 +728,22 @@ export class StackUpdateRecoveryService {
         row.stack_name,
         row.services_json,
       );
+      if (expectsGenerationContent(row) && row.content_path) {
+        // Files (and Git DB) already match the generation. Commit the restore
+        // transaction even when the probe fails so reconcile cannot undo them.
+        await RollbackGenerationStore.commitRestoreTransaction(
+          row.node_id,
+          row.stack_name,
+          row.content_path,
+        );
+      }
       if (!probeOk) {
-        DatabaseService.getInstance().updateStackUpdateRecoveryGeneration(generationId, {
+        db.updateStackUpdateRecoveryGeneration(generationId, {
           status: 'recovery_required',
         });
         return false;
       }
-      DatabaseService.getInstance().updateStackUpdateRecoveryGeneration(generationId, {
+      db.updateStackUpdateRecoveryGeneration(generationId, {
         status: 'restored_current',
         phase: 'immediate_verified',
         is_current: 1,
@@ -649,6 +752,39 @@ export class StackUpdateRecoveryService {
       return true;
     } catch (error) {
       const code = (error as { code?: string }).code;
+      if (filesRestored && expectsGenerationContent(row) && row.content_path) {
+        try {
+          await RollbackGenerationStore.reconcileInterruptedRestore(
+            row.node_id,
+            row.stack_name,
+            row.content_path,
+          );
+        } catch (revertErr) {
+          console.error(
+            '[StackUpdateRecovery] Failed to revert files after compensation error: %s',
+            sanitizeForLog(getErrorMessage(revertErr, 'unknown')),
+          );
+        }
+        if (priorGit) {
+          try {
+            db.setGitSourceAppliedSpec(row.stack_name, priorSpec);
+            if (priorSha) {
+              db.markGitSourceApplied(row.stack_name, priorSha, priorGit.last_applied_content_hash || '');
+            }
+            db.setGitSourceManifestState(
+              row.stack_name,
+              priorManifestVersion,
+              priorManifestState,
+              priorManifestGeneration,
+            );
+          } catch (dbRevertErr) {
+            console.error(
+              '[StackUpdateRecovery] Failed to revert Git DB state after compensation error: %s',
+              sanitizeForLog(getErrorMessage(dbRevertErr, 'unknown')),
+            );
+          }
+        }
+      }
       if (code === 'ROLLBACK_PROHIBITED') {
         throw error;
       }
@@ -657,7 +793,7 @@ export class StackUpdateRecoveryService {
         sanitizeForLog(generationId),
         sanitizeForLog(getErrorMessage(error, 'unknown')),
       );
-      DatabaseService.getInstance().updateStackUpdateRecoveryGeneration(generationId, {
+      db.updateStackUpdateRecoveryGeneration(generationId, {
         status: 'recovery_required',
       });
       if (code === 'GENERATION_CONTENT_MISSING') {
@@ -667,11 +803,6 @@ export class StackUpdateRecoveryService {
     }
   }
 
-  /**
-   * Verify recovered runtime against the captured generation.
-   * Rejects absent, restarting, dead, exited, or unhealthy expected replicas,
-   * image-id mismatches vs capture, and any running replica of a scale-0 service.
-   */
   public async probeRecoveredStack(
     nodeId: number,
     stackName: string,
@@ -798,7 +929,7 @@ export class StackUpdateRecoveryService {
       }
     }
     let contentOk = true;
-    const contentKey = row.content_path || row.backup_slot_id;
+    const contentKey = row.content_path;
     if (contentKey) {
       try {
         await RollbackGenerationStore.retireGenerationContent(
@@ -842,6 +973,35 @@ export class StackUpdateRecoveryService {
     try {
       const db = DatabaseService.getInstance();
       const now = Date.now();
+      // Revert any crash-interrupted content-store restores (intent still present).
+      try {
+        for (const node of db.getNodes()) {
+          for (const row of db.listStackUpdateRecoveryGenerationsForNode(node.id)) {
+            if (!row.content_path) continue;
+            try {
+              const reverted = await RollbackGenerationStore.reconcileInterruptedRestore(
+                row.node_id,
+                row.stack_name,
+                row.content_path,
+              );
+              if (reverted) {
+                db.updateStackUpdateRecoveryGeneration(row.id, { status: 'recovery_required' });
+              }
+            } catch (e) {
+              console.warn(
+                '[StackUpdateRecovery] Interrupted restore reconcile failed for %s: %s',
+                sanitizeForLog(row.id),
+                sanitizeForLog(getErrorMessage(e, 'unknown')),
+              );
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(
+          '[StackUpdateRecovery] Interrupted restore sweep failed: %s',
+          sanitizeForLog(getErrorMessage(e, 'unknown')),
+        );
+      }
       let abandoned = 0;
       for (const row of db.listStaleStackUpdateRecoveryCandidates(now)) {
         if (await this.abandon(row.id)) abandoned += 1;
@@ -1003,7 +1163,7 @@ export class StackUpdateRecoveryService {
           if (row.artifacts_retired !== 0) continue;
           if (row.status === 'abandoned' || row.status === 'superseded') continue;
           if (!incompleteStatuses.has(row.status) && row.is_current !== 1) continue;
-          const contentKey = row.content_path || row.backup_slot_id;
+          const contentKey = row.content_path;
           if (!contentKey || !looksLikeGenerationUuid(contentKey)) continue;
           const present = await generationContentPresent(row.node_id, row.stack_name, contentKey);
           if (!present && row.status !== 'recovery_required') {

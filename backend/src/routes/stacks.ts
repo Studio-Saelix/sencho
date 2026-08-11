@@ -2478,13 +2478,10 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
     const recoverySvc = StackUpdateRecoveryService.getInstance();
     const currentGen = recoverySvc.getCurrent(req.nodeId, stackName);
-    const hasGeneration = !!(currentGen && (currentGen.content_path || currentGen.backup_slot_id));
-
-    if (hasGeneration && currentGen) {
+    // Any current recovery row uses compensateWithCandidate. Policy is evaluated
+    // against the restored target inside compensate, not the live pre-restore project.
+    if (currentGen) {
       dlog(`[Stacks] Rollback initiated via recovery generation: ${sanitizeForLog(stackName)}`);
-      if (!(await runPolicyGate(req, res, stackName, req.nodeId))) {
-        return;
-      }
       try {
         const rolledBack = await recoverySvc.compensateWithCandidate(
           currentGen.id,
@@ -2495,6 +2492,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
               getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
             );
           },
+          buildPolicyGateOptions(req, { actor: req.user?.username ?? 'system' }),
         );
         if (!rolledBack) {
           res.status(500).json({ error: 'Rollback restore completed but recovery probe failed.' });
@@ -2591,7 +2589,18 @@ stacksRouter.get('/:stackName/backup', async (req: Request, res: Response) => {
     const stackName = req.params.stackName as string;
     const fsSvc = FileSystemService.getInstance(req.nodeId);
     const info = await fsSvc.getBackupInfo(stackName);
-    res.json(info);
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const currentGen = StackUpdateRecoveryService.getInstance().getCurrent(req.nodeId, stackName);
+    const recoveryAvailable = !!currentGen;
+    const exists = info.exists || recoveryAvailable;
+    const timestamp = currentGen?.created_at ?? info.timestamp;
+    res.json({
+      exists,
+      timestamp,
+      recoveryAvailable,
+      recoveryId: currentGen?.id ?? null,
+      hasGenerationContent: !!(currentGen && currentGen.content_path),
+    });
   } catch (error: unknown) {
     console.error('Failed to get backup info:', error);
     const message = getErrorMessage(error, 'Failed to get backup info.');

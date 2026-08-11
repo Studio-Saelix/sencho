@@ -85,6 +85,10 @@ export interface RollbackGenerationManifest {
   priorRecords: {
     appliedDeploySpec: string | null;
     lkgHint: string | null;
+    /** Git DB snapshot at capture (restored with files so Compose args match). */
+    lastAppliedContentHash: string | null;
+    manifestState: string | null;
+    manifestGeneration: string | null;
   };
   images: RollbackImageIdentity[];
 }
@@ -101,6 +105,9 @@ export interface ResolvedRollbackInventory {
   invocation: RollbackInvocationRecord;
   git: RollbackGitIdentity | null;
   appliedDeploySpec: string | null;
+  lastAppliedContentHash: string | null;
+  manifestState: string | null;
+  manifestGeneration: string | null;
   /** True when inventory claims exact atomic coverage. */
   exactCoverage: boolean;
   coverageRefusal: string | null;

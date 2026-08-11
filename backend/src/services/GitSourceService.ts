@@ -1916,9 +1916,14 @@ export class GitSourceService {
                 });
                 recoveryId = candidate.id;
             } catch (captureError) {
-                console.warn(
-                    `[GitSource] Recovery capture skipped for apply of ${sanitizeForLog(stackName)}:`,
-                    captureError instanceof Error ? captureError.message : String(captureError),
+                const detail = captureError instanceof Error ? captureError.message : String(captureError);
+                console.error(
+                    `[GitSource] Recovery capture failed before apply of ${sanitizeForLog(stackName)}:`,
+                    detail,
+                );
+                throw new GitSourceError(
+                    'GIT_ERROR',
+                    `Rollback capture failed before apply; refusing to promote without recovery coverage: ${scrubCredentials(detail)}`,
                 );
             }
             try {
@@ -1965,6 +1970,26 @@ export class GitSourceService {
                 if (diag) console.log(`[GitSource:diag] apply validation fail stack=${stackName}`);
                 throw new GitSourceError('GIT_ERROR', `Compose validation failed: ${validation.error}`);
             }
+            // Capture the true pre-apply project BEFORE materialize writes new files.
+            try {
+                const captured = await recoverySvc.captureCandidate({
+                    nodeId,
+                    stackName,
+                    createdBy: opts.actor ?? 'git-source',
+                    operationKind: 'git_apply',
+                });
+                recoveryId = captured.id;
+            } catch (captureError) {
+                const detail = captureError instanceof Error ? captureError.message : String(captureError);
+                console.error(
+                    `[GitSource] Recovery capture failed before legacy apply of ${sanitizeForLog(stackName)}:`,
+                    detail,
+                );
+                throw new GitSourceError(
+                    'GIT_ERROR',
+                    `Rollback capture failed before apply; refusing to materialize without recovery coverage: ${scrubCredentials(detail)}`,
+                );
+            }
             appliedSpec = await this.materialize(
                 stackName, pending.files, pending.contextDir, src.sync_env, envContent, src.applied_deploy_spec,
             );
@@ -1985,26 +2010,6 @@ export class GitSourceService {
 
         const shouldDeploy = opts.deploy ?? src.auto_deploy_on_apply;
         if (diag) console.log('[GitSource:diag] apply wrote stack=%s sha=%s deploy=%s', sanitizeForLog(stackName), sanitizeForLog(commitSha.slice(0, 7)), sanitizeForLog(shouldDeploy));
-
-        // recoveryId is set on the complete-project path; legacy path captures below if needed.
-        if (!recoveryId) {
-            // Legacy apply path: capture after materialize is too late for exact
-            // pre-apply files, but still create a generation for image holds.
-            try {
-                const captured = await recoverySvc.captureCandidate({
-                    nodeId,
-                    stackName,
-                    createdBy: opts.actor ?? 'git-source',
-                    operationKind: 'git_apply',
-                });
-                recoveryId = captured.id;
-            } catch (captureError) {
-                console.warn(
-                    `[GitSource] Recovery capture skipped for legacy apply of ${sanitizeForLog(stackName)}:`,
-                    captureError instanceof Error ? captureError.message : String(captureError),
-                );
-            }
-        }
 
         const finalizeRecoveryCurrent = async (id: string, immediateVerified: boolean): Promise<void> => {
             if (!recoverySvc.markAcquired(id)) {

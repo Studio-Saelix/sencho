@@ -73,7 +73,8 @@ export function evaluateRollbackEligibility(
 async function checkGenerationIntegrity(
   row: StackUpdateRecoveryGenerationRow,
 ): Promise<boolean | null> {
-  const contentKey = row.content_path || row.backup_slot_id;
+  // Only explicit content_path generations use the content store.
+  const contentKey = row.content_path;
   if (!contentKey) return null;
   try {
     return await RollbackGenerationStore.verifyGenerationContent(

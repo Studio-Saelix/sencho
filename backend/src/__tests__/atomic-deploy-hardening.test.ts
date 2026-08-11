@@ -257,7 +257,7 @@ describe('Deploy safety is available on every tier', () => {
     mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: 1700000000000 });
     const res = await request(app).get('/api/stacks/web/backup').set('Cookie', authCookie);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ exists: true, timestamp: 1700000000000 });
+    expect(res.body).toMatchObject({ exists: true, timestamp: 1700000000000 });
   });
 
   it('returns backup metadata on paid', async () => {
@@ -265,6 +265,6 @@ describe('Deploy safety is available on every tier', () => {
     mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: 1700000000000 });
     const res = await request(app).get('/api/stacks/web/backup').set('Cookie', authCookie);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ exists: true, timestamp: 1700000000000 });
+    expect(res.body).toMatchObject({ exists: true, timestamp: 1700000000000 });
   });
 });

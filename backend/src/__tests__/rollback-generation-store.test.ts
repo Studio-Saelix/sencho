@@ -48,6 +48,9 @@ function inventoryFor(
     },
     git: null,
     appliedDeploySpec: null,
+    lastAppliedContentHash: null,
+    manifestState: null,
+    manifestGeneration: null,
     exactCoverage: true,
     coverageRefusal: null,
   };
@@ -300,4 +303,48 @@ describe('RollbackGenerationStore', () => {
     expect(envEntry?.encrypted).toBe(true);
     expect(envEntry?.state).toBe('present');
   });
+  it('reverts an interrupted multi-file restore from pre-restore snapshot', async () => {
+    const stackName = 'tx';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(path.join(stackDir, 'includes'), { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'OLD_BASE\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'includes/base.yaml'), 'OLD_INC\n', 'utf8');
+
+    const generationId = randomUUID();
+    const inv = inventoryFor(stackName, [
+      { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      { relativePath: 'includes/base.yaml', absolutePath: path.join(stackDir, 'includes/base.yaml'), kind: 'include' },
+    ]);
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inv,
+      operationKind: 'manual_backup',
+    });
+
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'NEW_BASE\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'includes/base.yaml'), 'NEW_INC\n', 'utf8');
+
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const originalWrite = FileSystemService.prototype.writeStackFile;
+    let n = 0;
+    vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(async function (this: InstanceType<typeof FileSystemService>, stack, rel, content) {
+      n += 1;
+      if (n === 2) throw new Error('injected write failure');
+      return originalWrite.call(this, stack, rel, content);
+    });
+
+    await expect(
+      RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'includes/base.yaml']),
+    ).rejects.toThrow(/injected write failure/);
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe('NEW_BASE\n');
+    expect(await fsPromises.readFile(path.join(stackDir, 'includes/base.yaml'), 'utf8')).toBe('NEW_INC\n');
+
+    const genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
+    await expect(fsPromises.access(path.join(genDir, 'restore-intent.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+
 });
