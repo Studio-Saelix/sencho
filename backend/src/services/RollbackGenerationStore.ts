@@ -527,24 +527,37 @@ export class RollbackGenerationStore {
       const key = caseKey(rel);
       if (!rel || seen.has(key)) continue;
       seen.add(key);
+      // Inline barriers at both the live source and pre-restore dest sinks.
       const dest = path.resolve(preRoot, rel);
       if (!dest.startsWith(preRoot + path.sep)) continue;
-      const src = path.resolve(stackRoot, rel);
-      if (!src.startsWith(stackRoot + path.sep)) continue;
+      const srcCandidate = path.resolve(stackRoot, rel);
+      if (!srcCandidate.startsWith(stackRoot + path.sep)) continue;
       try {
-        const st = await fsPromises.lstat(src);
+        const realSrc = await fsPromises.realpath(srcCandidate);
+        if (!realSrc.startsWith(stackRoot + path.sep)) continue;
+        const st = await fsPromises.lstat(realSrc);
         if (!st.isFile()) {
+          const marker = path.resolve(preRoot, rel + TOMBSTONE_MARKER);
+          if (!marker.startsWith(preRoot + path.sep)) continue;
           await fsPromises.mkdir(path.dirname(dest), { recursive: true });
-          await fsPromises.writeFile(dest + TOMBSTONE_MARKER, '', 'utf8');
+          await fsPromises.writeFile(marker, '', 'utf8');
           continue;
         }
-        const bytes = await fsPromises.readFile(src);
-        await fsPromises.mkdir(path.dirname(dest), { recursive: true });
+        // Re-resolve immediately before the read sink (CodeQL TOCTOU).
+        const realForRead = await fsPromises.realpath(srcCandidate);
+        if (!realForRead.startsWith(stackRoot + path.sep)) continue;
+        const bytes = await fsPromises.readFile(realForRead);
+        const destParent = path.dirname(dest);
+        if (!dest.startsWith(preRoot + path.sep)) continue;
+        if (!destParent.startsWith(preRoot + path.sep) && destParent !== preRoot) continue;
+        await fsPromises.mkdir(destParent, { recursive: true });
         await fsPromises.writeFile(dest, bytes);
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+          const marker = path.resolve(preRoot, rel + TOMBSTONE_MARKER);
+          if (!marker.startsWith(preRoot + path.sep)) continue;
           await fsPromises.mkdir(path.dirname(dest), { recursive: true });
-          await fsPromises.writeFile(dest + TOMBSTONE_MARKER, '', 'utf8');
+          await fsPromises.writeFile(marker, '', 'utf8');
           continue;
         }
         throw e;

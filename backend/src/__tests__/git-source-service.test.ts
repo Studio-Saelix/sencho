@@ -32,6 +32,41 @@ vi.mock('isomorphic-git', () => {
 
 vi.mock('isomorphic-git/http/node', () => ({ default: {} }));
 
+
+const {
+  mockCaptureCandidate,
+  mockRecoveryAbandon,
+  mockRecoveryMarkAcquired,
+  mockRecoveryHandoff,
+  mockRecoveryMarkReconciling,
+  mockRecoveryMarkImmediateVerified,
+  mockRecoveryGet,
+} = vi.hoisted(() => ({
+  mockCaptureCandidate: vi.fn(async () => ({ id: 'rec-test-1' })),
+  mockRecoveryAbandon: vi.fn(async () => true),
+  mockRecoveryMarkAcquired: vi.fn(() => true),
+  mockRecoveryHandoff: vi.fn(() => true),
+  mockRecoveryMarkReconciling: vi.fn(() => true),
+  mockRecoveryMarkImmediateVerified: vi.fn(() => true),
+  mockRecoveryGet: vi.fn(() => ({ id: 'rec-test-1', is_current: 1 })),
+}));
+
+vi.mock('../services/StackUpdateRecoveryService', () => ({
+  StackUpdateRecoveryService: {
+    getInstance: () => ({
+      captureCandidate: mockCaptureCandidate,
+      abandon: mockRecoveryAbandon,
+      markAcquired: mockRecoveryMarkAcquired,
+      handoff: mockRecoveryHandoff,
+      markReconciling: mockRecoveryMarkReconciling,
+      markImmediateVerified: mockRecoveryMarkImmediateVerified,
+      get: mockRecoveryGet,
+      compensateWithCandidate: vi.fn(async () => true),
+    }),
+  },
+}));
+
+
 let tmpDir: string;
 let GitSourceService: typeof import('../services/GitSourceService').GitSourceService;
 let GitSourceError: typeof import('../services/GitSourceService').GitSourceError;
@@ -50,6 +85,20 @@ afterAll(() => {
 beforeEach(() => {
     mockGitClone.mockReset();
     mockGitLog.mockReset();
+    mockCaptureCandidate.mockReset();
+    mockCaptureCandidate.mockImplementation(async () => ({ id: 'rec-test-1' }));
+    mockRecoveryAbandon.mockReset();
+    mockRecoveryAbandon.mockResolvedValue(true);
+    mockRecoveryMarkAcquired.mockReset();
+    mockRecoveryMarkAcquired.mockReturnValue(true);
+    mockRecoveryHandoff.mockReset();
+    mockRecoveryHandoff.mockReturnValue(true);
+    mockRecoveryMarkReconciling.mockReset();
+    mockRecoveryMarkReconciling.mockReturnValue(true);
+    mockRecoveryMarkImmediateVerified.mockReset();
+    mockRecoveryMarkImmediateVerified.mockReturnValue(true);
+    mockRecoveryGet.mockReset();
+    mockRecoveryGet.mockReturnValue({ id: 'rec-test-1', is_current: 1 });
 
     // Wipe persisted git sources between tests
     const db = DatabaseService.getInstance();
