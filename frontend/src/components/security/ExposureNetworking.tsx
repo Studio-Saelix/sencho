@@ -3,14 +3,14 @@ import { cn } from '@/lib/utils';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
 import type { ImageExposureContext } from '@/types/security';
 
-export function openNetworking(nodeId: number | undefined, stackName: string) {
+function openNetworking(nodeId: number | undefined, stackName: string) {
   if (nodeId === undefined) return;
   window.dispatchEvent(new CustomEvent<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, {
     detail: { nodeId, stackName, destination: 'anatomy-networking' },
   }));
 }
 
-export function networkingActionLabel(ctx: ImageExposureContext): string {
+function networkingActionLabel(ctx: ImageExposureContext): string {
   return ctx.intentConflict ? 'Review networking' : 'View networking';
 }
 

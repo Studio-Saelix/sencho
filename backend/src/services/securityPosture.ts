@@ -301,10 +301,6 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
     pushCapped(base, capPostureTargets(refs));
   };
 
-  const pushRows = (base: PostureReason, rows?: PostureTarget[]): void => {
-    pushCapped(base, capPostureTargetRows(rows));
-  };
-
   // Blockers. Each of these can keep the masthead red.
 
   if (f.fixableWithImageUpdate > 0) {
