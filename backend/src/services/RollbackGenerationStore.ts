@@ -285,16 +285,20 @@ export class RollbackGenerationStore {
 
       let gitManifestCaptured = false;
       if (inventory.git) {
-        const raw = await GitProjectManifestService.getInstance().readRawManifestText(stackName);
-        if (raw !== null) {
+        const read = await GitProjectManifestService.getInstance().readManifest(
+          stackName,
+          inventory.git.repoUrl,
+          inventory.git.branch,
+        );
+        // Never snapshot a corrupt or missing manifesto; restore must not
+        // reinstate unvalidated Git state as if it were authoritative.
+        if (read !== null && !('corrupt' in read)) {
           // Inline barrier at the manifesto snapshot write sink.
           const snapPath = path.resolve(stagingDir, GIT_MANIFEST_SNAPSHOT);
           if (!snapPath.startsWith(stagingDir + path.sep)) {
             throw Object.assign(new Error('Path escapes staging directory'), { code: 'INVALID_PATH' });
           }
-          // Validate JSON before storing so restore can writeManifest safely.
-          JSON.parse(raw) as GitProjectManifest;
-          await fsPromises.writeFile(snapPath, raw, 'utf8');
+          await fsPromises.writeFile(snapPath, JSON.stringify(read, null, 2), 'utf8');
           gitManifestCaptured = true;
         }
       }
@@ -564,6 +568,27 @@ export class RollbackGenerationStore {
           (revertErr as Error).message,
         );
       }
+      throw e;
+    }
+  }
+
+  /** True when restore-intent.json still exists for this generation. */
+  static async hasPendingRestoreIntent(
+    nodeId: number,
+    stackName: string,
+    generationId: string,
+  ): Promise<boolean> {
+    assertSafeStackName(stackName);
+    assertSafeGenerationId(generationId);
+    const genDir = this.getGenerationDir(nodeId, stackName, generationId);
+    const genResolved = path.resolve(genDir);
+    const intentPath = path.resolve(genResolved, RESTORE_INTENT_FILE);
+    if (!intentPath.startsWith(genResolved + path.sep)) return false;
+    try {
+      await fsPromises.access(intentPath);
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
       throw e;
     }
   }

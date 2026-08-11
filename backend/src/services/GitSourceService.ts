@@ -1619,11 +1619,7 @@ export class GitSourceService {
             for (const old of prevSpec.files) {
                 if (old === PRIMARY_COMPOSE_FILENAME || keep.has(old)) continue;
                 if (!isValidRelativeStackPath(old) || old === '') continue;
-                try {
-                    await fsSvc.deleteStackPath(stackName, old);
-                } catch (e) {
-                    console.warn(`[GitSource] stale file cleanup skipped ${sanitizeForLog(old)} for ${sanitizeForLog(stackName)}:`, (e as Error).message);
-                }
+                await fsSvc.deleteStackPath(stackName, old);
             }
         }
 

@@ -19,8 +19,9 @@ import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { normalizeContainerName } from '../utils/log-parsing';
 import { describeSpawnError } from '../utils/spawnErrors';
-import { isPathWithinBase, isValidStackName } from '../utils/validation';
+import { isPathWithinBase, isValidStackName, isValidRelativeStackPath } from '../utils/validation';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { pathsMatch, resolveHostBindPath } from '../utils/composePathMapping';
@@ -33,6 +34,15 @@ import {
 import { buildUnifiedHeldImagePredicate } from './recoveryHeldImages';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import type { NotificationCategory } from './NotificationService';
+
+/** True when a generation capture carries a usable Compose argv prefix. */
+function hasUsableCapturedInvocation(
+  invocation: RollbackInvocationRecord | null | undefined,
+): invocation is RollbackInvocationRecord {
+  // Prefer the captured argv. Rebuilding from explicitComposeFiles alone drops
+  // --env-file and other global flags, so that path is not treated as usable.
+  return Boolean(invocation && invocation.composeArgsPrefix.length > 0);
+}
 
 function recordNetworkAutoCreatedActivity(
   nodeId: number,
@@ -734,7 +744,12 @@ export class ComposeService {
         sendOutput('\n=== Deployment failed - restoring previous runtime from recovery generation ===\n');
         const rolledBack = await recoverySvc.compensateWithCandidate(
           recoveryId,
-          (overridePath) => this.composeUpWithRecoveryOverride(stackName, overridePath, ws),
+          (overridePath, invocation) => this.composeUpWithRecoveryOverride(
+            stackName,
+            overridePath,
+            ws,
+            invocation,
+          ),
         );
         throw new ComposeRollbackError(deployError, true, rolledBack);
       }
@@ -881,12 +896,14 @@ export class ComposeService {
   /**
    * Pinned compose-up with a recovery override layered last
    * (`--pull never --no-build`). Used by manual rollback and deploy/update
-   * compensation.
+   * compensation. When `invocation` is set, Compose args come from the
+   * generation capture instead of the live database-derived invocation.
    */
   async composeUpWithRecoveryOverride(
     stackName: string,
     overridePath: string,
     ws?: WebSocket,
+    invocation?: RollbackInvocationRecord | null,
   ): Promise<void> {
     const stackDir = path.join(this.baseDir, stackName);
     const sendOutput = (data: string) => {
@@ -899,6 +916,7 @@ export class ComposeService {
           stackName,
           ['up', '-d', '--remove-orphans', '--pull', 'never', '--no-build'],
           overridePath,
+          invocation ?? null,
         ),
         stackDir,
         ws,
@@ -911,24 +929,59 @@ export class ComposeService {
 
   /**
    * Authored (+ mesh) compose args with an optional recovery override layered LAST.
+   * When `invocation` is provided, use its validated captured prefix so recovery
+   * does not mix restored files with the live deploy-spec / project-env selection.
    */
   public async buildComposeArgsWithRecoveryOverride(
     stackName: string,
     action: string[],
     recoveryOverridePath: string | null,
+    invocation?: RollbackInvocationRecord | null,
   ): Promise<string[]> {
+    const useCaptured = hasUsableCapturedInvocation(invocation);
+    const out = useCaptured
+      ? ['compose', ...this.composePrefixFromCapturedInvocation(stackName, invocation)]
+      : await this.authoredComposeArgsPrefix(stackName);
+
+    if (recoveryOverridePath) {
+      // Captured invocations already encode their file set; live args may need
+      // an explicit base (+ user override) so docker compose accepts a trailing -f.
+      await this.appendRecoveryOverrideLayer(
+        stackName,
+        out,
+        recoveryOverridePath,
+        !useCaptured,
+      );
+    }
+    out.push(...action);
+    return out;
+  }
+
+  /** Slice the global-flag prefix from authoredComposeArgs (no action tokens). */
+  private async authoredComposeArgsPrefix(stackName: string): Promise<string[]> {
     const withSentinel = await this.authoredComposeArgs(stackName, ['__SENCHO_ACTION_SENTINEL__']);
     const idx = withSentinel.indexOf('__SENCHO_ACTION_SENTINEL__');
     const prefix = idx >= 0 ? withSentinel.slice(0, idx) : withSentinel;
-    const out = [...prefix];
-    if (recoveryOverridePath) {
-      if (!out.includes('-f')) {
-        const fsSvc = FileSystemService.getInstance(this.nodeId);
-        const baseFilename = await fsSvc.getComposeFilename(stackName);
-        out.push('-f', baseFilename);
+    return [...prefix];
+  }
+
+  /**
+   * Ensure an explicit `-f` base exists when needed, then append the recovery
+   * override last (highest compose file precedence).
+   */
+  private async appendRecoveryOverrideLayer(
+    stackName: string,
+    args: string[],
+    recoveryOverridePath: string,
+    includeUserOverrideWhenPinningBase: boolean,
+  ): Promise<void> {
+    if (!args.includes('-f')) {
+      const fsSvc = FileSystemService.getInstance(this.nodeId);
+      args.push('-f', await fsSvc.getComposeFilename(stackName));
+      if (includeUserOverrideWhenPinningBase) {
         try {
           const userOverride = await fsSvc.getOverrideFilename(stackName);
-          if (userOverride) out.push('-f', userOverride);
+          if (userOverride) args.push('-f', userOverride);
         } catch (err) {
           const code = (err as { code?: string }).code;
           if (code === 'INVALID_STACK_NAME' || code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE') {
@@ -940,9 +993,81 @@ export class ComposeService {
           );
         }
       }
-      out.push('-f', recoveryOverridePath);
     }
-    out.push(...action);
+    args.push('-f', recoveryOverridePath);
+  }
+
+  private resolveValidatedStackDir(stackName: string): string {
+    const stackDir = path.resolve(this.baseDir, stackName);
+    if (!isPathWithinBase(stackDir, this.baseDir) || path.resolve(this.baseDir) === stackDir) {
+      throw new Error('Invalid stack path');
+    }
+    return stackDir;
+  }
+
+  /**
+   * Rebuild a spawn-safe compose global-flag prefix from a generation's
+   * captured invocation. Relative -f / --project-directory paths and absolute
+   * --env-file paths must stay inside the stack directory.
+   */
+  private composePrefixFromCapturedInvocation(
+    stackName: string,
+    invocation: RollbackInvocationRecord,
+  ): string[] {
+    const stackDir = this.resolveValidatedStackDir(stackName);
+    if (invocation.composeArgsPrefix.length === 0) {
+      throw new Error(`Captured invocation has no compose args prefix for stack "${stackName}"`);
+    }
+    const raw = [...invocation.composeArgsPrefix];
+
+    const out: string[] = [];
+    for (let i = 0; i < raw.length; i++) {
+      const token = raw[i];
+      if (token === '-f' || token === '--file') {
+        const file = raw[++i];
+        if (!file || !isValidRelativeStackPath(file)) {
+          throw new Error(`Invalid captured compose file path for stack "${stackName}"`);
+        }
+        if (!isPathWithinBase(path.resolve(stackDir, file), stackDir)) {
+          throw new Error(`Captured compose file path escapes stack directory for "${stackName}"`);
+        }
+        out.push('-f', file);
+        continue;
+      }
+      if (token === '--env-file') {
+        const envPath = raw[++i];
+        if (!envPath) {
+          throw new Error(`Invalid captured --env-file for stack "${stackName}"`);
+        }
+        const abs = path.resolve(envPath);
+        if (!isPathWithinBase(abs, stackDir)) {
+          throw new Error(`Captured env-file path escapes stack directory for "${stackName}"`);
+        }
+        out.push('--env-file', abs);
+        continue;
+      }
+      if (token === '--project-directory') {
+        const dir = raw[++i];
+        if (!dir) {
+          throw new Error(`Invalid captured --project-directory for stack "${stackName}"`);
+        }
+        const abs = path.isAbsolute(dir) ? path.resolve(dir) : path.resolve(stackDir, dir);
+        if (!isPathWithinBase(abs, stackDir)) {
+          throw new Error(`Captured project-directory escapes stack directory for "${stackName}"`);
+        }
+        out.push('--project-directory', abs);
+        continue;
+      }
+      if (token === '-p' || token === '--project-name') {
+        const name = raw[++i];
+        if (!name || name !== (invocation.projectName || stackName)) {
+          throw new Error(`Captured project name mismatch for stack "${stackName}"`);
+        }
+        out.push('-p', stackName);
+        continue;
+      }
+      throw new Error(`Unsupported captured compose flag "${token}" for stack "${stackName}"`);
+    }
     return out;
   }
 
@@ -1117,7 +1242,12 @@ export class ComposeService {
         sendOutput('\n=== Update failed - restoring previous runtime from recovery generation ===\n');
         const rolledBack = await recoverySvc.compensateWithCandidate(
           recoveryId,
-          (overridePath) => this.composeUpWithRecoveryOverride(stackName, overridePath, ws),
+          (overridePath, invocation) => this.composeUpWithRecoveryOverride(
+            stackName,
+            overridePath,
+            ws,
+            invocation,
+          ),
         );
         throw new ComposeRollbackError(updateError, true, rolledBack);
       }
@@ -1207,19 +1337,23 @@ export class ComposeService {
    * interpolation failures surface as a rejected Promise so the gate can
    * block the deploy rather than silently allow it.
    */
-  public async listStackImages(stackName: string): Promise<string[]> {
+  public async listStackImages(
+    stackName: string,
+    invocation?: RollbackInvocationRecord | null,
+  ): Promise<string[]> {
     if (!isValidStackName(stackName)) {
       throw new Error('Invalid stack path');
     }
-    const stackDir = path.resolve(this.baseDir, stackName);
-    if (!isPathWithinBase(stackDir, this.baseDir) || path.resolve(this.baseDir) === stackDir) {
-      throw new Error('Invalid stack path');
-    }
-    // Use the authored multi-file model (no mesh override) so override-only image
-    // refs are scanned by the policy gate; single-file stacks get an empty prefix.
-    const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
-    const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
-    const stdout = await this.captureCompose([...filePrefix, ...envFileArgs, 'config', '--images'], stackDir);
+    const stackDir = this.resolveValidatedStackDir(stackName);
+    // Prefer a generation-captured invocation so restored-target policy does not
+    // scan with the live deploy-spec / project-env selection.
+    const fileAndEnvPrefix = hasUsableCapturedInvocation(invocation)
+      ? this.composePrefixFromCapturedInvocation(stackName, invocation)
+      : [
+        ...authoredComposeFileArgs(stackName, this.nodeId),
+        ...(await authoredComposeEnvFileArgs(stackName, this.nodeId)),
+      ];
+    const stdout = await this.captureCompose([...fileAndEnvPrefix, 'config', '--images'], stackDir);
     const seen = new Set<string>();
     const images: string[] = [];
     for (const raw of stdout.split(/\r?\n/)) {

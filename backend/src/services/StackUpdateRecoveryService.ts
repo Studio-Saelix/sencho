@@ -35,6 +35,7 @@ import type { GitSourceManifestState } from '../types/gitProjectManifest';
 import type {
   RollbackGenerationManifest,
   RollbackGitDbSnapshot,
+  RollbackInvocationRecord,
   RollbackOperationKind,
   RollbackRestoreTransactionMeta,
 } from '../types/rollbackGeneration';
@@ -315,6 +316,7 @@ export class StackUpdateRecoveryService {
   }
 
   private async sweepInterruptedRestores(db: DatabaseService): Promise<void> {
+    const failures: string[] = [];
     for (const node of db.getNodes()) {
       for (const row of db.listStackUpdateRecoveryGenerationsForNode(node.id)) {
         if (!row.content_path) continue;
@@ -327,14 +329,68 @@ export class StackUpdateRecoveryService {
           if (reverted) {
             db.updateStackUpdateRecoveryGeneration(row.id, { status: 'recovery_required' });
           }
+          if (await RollbackGenerationStore.hasPendingRestoreIntent(
+            row.node_id,
+            row.stack_name,
+            row.content_path,
+          )) {
+            failures.push(row.id);
+          }
         } catch (e) {
           console.warn(
             '[StackUpdateRecovery] Interrupted restore reconcile failed for %s: %s',
             sanitizeForLog(row.id),
             sanitizeForLog(getErrorMessage(e, 'unknown')),
           );
+          this.markGenerationRecoveryRequiredBestEffort(db, row.id);
+          failures.push(row.id);
         }
       }
+    }
+    if (failures.length > 0) {
+      throw new Error(
+        `Unresolved interrupted restore intent(s) remain for generation(s): ${failures.join(', ')}`,
+      );
+    }
+  }
+
+  private markGenerationRecoveryRequiredBestEffort(
+    db: DatabaseService,
+    generationId: string,
+  ): void {
+    try {
+      db.updateStackUpdateRecoveryGeneration(generationId, { status: 'recovery_required' });
+    } catch (updateErr) {
+      console.warn(
+        '[StackUpdateRecovery] Failed to mark recovery_required after reconcile error: %s',
+        sanitizeForLog(getErrorMessage(updateErr, 'unknown')),
+      );
+    }
+  }
+
+  /**
+   * Block mutations while a restore intent is still on disk for any generation
+   * of this stack (mirrors deletion-intent gating).
+   */
+  public async assertNoBlockingRestoreIntent(nodeId: number, stackName: string): Promise<void> {
+    if (!isValidStackName(stackName)) {
+      throw new Error('Invalid stack name');
+    }
+    const db = DatabaseService.getInstance();
+    for (const row of db.listStackUpdateRecoveryGenerationsForNode(nodeId)) {
+      if (row.stack_name !== stackName || !row.content_path) continue;
+      const pending = await RollbackGenerationStore.hasPendingRestoreIntent(
+        nodeId,
+        stackName,
+        row.content_path,
+      );
+      if (!pending) continue;
+      throw Object.assign(
+        new Error(
+          `Stack "${stackName}" has an interrupted restore in progress; resolve recovery before mutating`,
+        ),
+        { code: 'RESTORE_INTENT_BLOCKING' },
+      );
     }
   }
 
@@ -360,6 +416,7 @@ export class StackUpdateRecoveryService {
     if (!isValidStackName(stackName)) {
       throw new Error('Invalid stack name');
     }
+    await this.assertNoBlockingRestoreIntent(nodeId, stackName);
 
     const context = await resolveComposeProjectContext(nodeId, stackName);
     await context.validateForMutation();
@@ -746,14 +803,42 @@ export class StackUpdateRecoveryService {
    */
   public async compensateWithCandidate(
     generationId: string,
-    composeUp: (overridePath: string) => Promise<void>,
+    composeUp: (
+      overridePath: string,
+      invocation: RollbackInvocationRecord | null,
+    ) => Promise<void>,
     policyOptions?: PolicyEnforcementOptions,
   ): Promise<boolean> {
     const row = this.get(generationId);
     if (!row) return false;
+    // Finish any leftover restore transaction for this generation before a new
+    // restore can overwrite pre-restore/ with an already-restored tree.
+    if (row.content_path) {
+      try {
+        const reverted = await RollbackGenerationStore.reconcileInterruptedRestore(
+          row.node_id,
+          row.stack_name,
+          row.content_path,
+        );
+        if (reverted) {
+          DatabaseService.getInstance().updateStackUpdateRecoveryGeneration(generationId, {
+            status: 'recovery_required',
+          });
+        }
+      } catch (e) {
+        console.warn(
+          '[StackUpdateRecovery] Pre-compensate reconcile failed for %s: %s',
+          sanitizeForLog(generationId),
+          sanitizeForLog(getErrorMessage(e, 'unknown')),
+        );
+      }
+    }
+    await this.assertNoBlockingRestoreIntent(row.node_id, row.stack_name);
 
     const db = DatabaseService.getInstance();
     const transactionMeta = await captureGitSidePreimage(row.stack_name);
+    const generationContentPath =
+      expectsGenerationContent(row) && row.content_path ? row.content_path : null;
 
     let filesRestored = false;
     try {
@@ -771,11 +856,11 @@ export class StackUpdateRecoveryService {
       filesRestored = true;
 
       if (restoredManifest) {
-        if (expectsGenerationContent(row) && row.content_path) {
+        if (generationContentPath) {
           await applyRestoredGenerationGitSide(
             row.stack_name,
             row.node_id,
-            row.content_path,
+            generationContentPath,
             restoredManifest,
           );
         } else {
@@ -783,13 +868,16 @@ export class StackUpdateRecoveryService {
         }
       }
 
-      // Evaluate current policy against the restored target (fail closed).
+      // Evaluate current policy against the restored target (fail closed),
+      // using the generation's captured Compose invocation when present.
+      const restoredInvocation = restoredManifest?.invocation ?? null;
       const gate = await enforcePolicyPreDeploy(row.stack_name, row.node_id, {
         bypass: policyOptions?.bypass ?? false,
         actor: policyOptions?.actor ?? 'recovery-compensate',
         ip: policyOptions?.ip,
         auditMethod: policyOptions?.auditMethod ?? 'POST',
         auditPath: policyOptions?.auditPath ?? '/api/stacks/rollback',
+        composeInvocation: restoredInvocation,
       });
       if (!gate.ok) {
         throw Object.assign(
@@ -801,19 +889,19 @@ export class StackUpdateRecoveryService {
       if (!row.override_path) {
         throw new Error('Recovery generation has no override path');
       }
-      await composeUp(row.override_path);
+      await composeUp(row.override_path, restoredInvocation);
       const probeOk = await this.probeRecoveredStack(
         row.node_id,
         row.stack_name,
         row.services_json,
       );
-      if (expectsGenerationContent(row) && row.content_path) {
+      if (generationContentPath) {
         // Files (and Git DB) already match the generation. Commit the restore
         // transaction even when the probe fails so reconcile cannot undo them.
         await RollbackGenerationStore.commitRestoreTransaction(
           row.node_id,
           row.stack_name,
-          row.content_path,
+          generationContentPath,
         );
       }
       if (!probeOk) {
@@ -831,12 +919,12 @@ export class StackUpdateRecoveryService {
       return true;
     } catch (error) {
       const code = (error as { code?: string }).code;
-      if (filesRestored && expectsGenerationContent(row) && row.content_path) {
+      if (filesRestored && generationContentPath) {
         try {
           await RollbackGenerationStore.reconcileInterruptedRestore(
             row.node_id,
             row.stack_name,
-            row.content_path,
+            generationContentPath,
           );
         } catch (revertErr) {
           console.error(
@@ -871,6 +959,7 @@ export class StackUpdateRecoveryService {
   public async revertToGenerationContent(generationId: string): Promise<boolean> {
     const row = this.get(generationId);
     if (!row || !expectsGenerationContent(row) || !row.content_path) return false;
+    await this.assertNoBlockingRestoreIntent(row.node_id, row.stack_name);
 
     const transactionMeta = await captureGitSidePreimage(row.stack_name);
 

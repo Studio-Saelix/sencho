@@ -2227,6 +2227,50 @@ describe('GitSourceService legacy pending apply (migration path)', () => {
             await cleanupStackDir('legacy-apply');
         }
     });
+
+    it('rejects materialize when deleting a stale override fails', async () => {
+        const svc = GitSourceService.getInstance();
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const fsSvc = FileSystemService.getInstance();
+        const stackName = 'legacy-stale-del';
+        await fsSvc.createStack(stackName);
+        await fsSvc.saveStackContent(stackName, 'services:\n  web:\n    image: nginx\n');
+        await fsSvc.writeStackFile(stackName, 'compose.override.yaml', 'services:\n  web:\n    environment: [X=1]\n');
+
+        const deleteSpy = vi.spyOn(FileSystemService.prototype, 'deleteStackPath')
+            .mockRejectedValue(Object.assign(new Error('permission denied'), { code: 'EACCES' }));
+
+        const materialize = (svc as unknown as {
+            materialize: (
+                stackName: string,
+                files: Array<{ path: string; content: string }>,
+                contextDir: string | null,
+                syncEnv: boolean,
+                envContent: string | null,
+                prevSpec: { files: string[]; contextDir: string | null } | null,
+            ) => Promise<unknown>;
+        }).materialize.bind(svc);
+
+        try {
+            await expect(
+                materialize(
+                    stackName,
+                    [{ path: 'compose.yaml', content: 'services:\n  web:\n    image: alpine\n' }],
+                    null,
+                    false,
+                    null,
+                    { files: ['compose.yaml', 'compose.override.yaml'], contextDir: null },
+                ),
+            ).rejects.toThrow(/permission denied/);
+            expect(deleteSpy).toHaveBeenCalledWith(stackName, 'compose.override.yaml');
+            // Stale override must still be present; apply must not report success over a hybrid.
+            const override = await fsSvc.readStackFile(stackName, 'compose.override.yaml');
+            expect(override.content).toContain('X=1');
+        } finally {
+            deleteSpy.mockRestore();
+            await cleanupStackDir(stackName);
+        }
+    });
 });
 
 describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => {

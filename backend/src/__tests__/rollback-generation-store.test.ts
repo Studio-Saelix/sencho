@@ -388,17 +388,24 @@ describe('RollbackGenerationStore', () => {
       commitSha: 'abc1234',
       manifestVersion: 3,
     };
-    await RollbackGenerationStore.captureGeneration({
-      nodeId: NODE,
-      stackName,
-      generationId,
-      inventory: inv,
-    });
+    const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+    const readSpy = vi.spyOn(GitProjectManifestService.getInstance(), 'readManifest')
+      .mockResolvedValue(priorManifest as never);
+    let genDir = '';
+    try {
+      await RollbackGenerationStore.captureGeneration({
+        nodeId: NODE,
+        stackName,
+        generationId,
+        inventory: inv,
+      });
 
-    const genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
-    const snap = await fsPromises.readFile(path.join(genDir, 'git-manifest.v1.json'), 'utf8');
-    expect(JSON.parse(snap).resolvedRevision.commitSha).toBe('abc1234');
-
+      genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
+      const snap = await fsPromises.readFile(path.join(genDir, 'git-manifest.v1.json'), 'utf8');
+      expect(JSON.parse(snap).resolvedRevision.commitSha).toBe('abc1234');
+    } finally {
+      readSpy.mockRestore();
+    }
     const newer = { ...priorManifest, resolvedRevision: { commitSha: 'ffffff' } };
     await fsPromises.writeFile(path.join(managedDir, 'manifest.v1.json'), JSON.stringify(newer), 'utf8');
 
@@ -406,6 +413,43 @@ describe('RollbackGenerationStore', () => {
     await RollbackGenerationStore.restoreCapturedGitManifest(stackName, genDir, captured);
     const restored = JSON.parse(await fsPromises.readFile(path.join(managedDir, 'manifest.v1.json'), 'utf8'));
     expect(restored.resolvedRevision.commitSha).toBe('abc1234');
+  });
+
+  it('does not snapshot a corrupt Git manifesto into the generation', async () => {
+    const stackName = 'nocorrupt';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+
+    const generationId = randomUUID();
+    const inv = inventoryFor(stackName, [
+      { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+    ]);
+    inv.git = {
+      repoUrl: 'https://example.com/r.git',
+      branch: 'main',
+      commitSha: 'abc',
+      manifestVersion: 3,
+    };
+    const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+    const readSpy = vi.spyOn(GitProjectManifestService.getInstance(), 'readManifest')
+      .mockResolvedValue({ corrupt: 'identity mismatch' });
+    try {
+      await RollbackGenerationStore.captureGeneration({
+        nodeId: NODE,
+        stackName,
+        generationId,
+        inventory: inv,
+      });
+      const genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
+      await expect(fsPromises.access(path.join(genDir, 'git-manifest.v1.json'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      const captured = JSON.parse(await fsPromises.readFile(path.join(genDir, 'generation.json'), 'utf8'));
+      expect(captured.priorRecords.gitManifestCaptured).toBe(false);
+    } finally {
+      readSpy.mockRestore();
+    }
   });
 
   it('clears post-capture manifesto for first-apply preimage', async () => {

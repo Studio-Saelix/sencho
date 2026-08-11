@@ -60,6 +60,7 @@ vi.mock('../services/RollbackGenerationStore', () => ({
     commitRestoreTransaction: vi.fn().mockResolvedValue(undefined),
     reconcileInterruptedRestore: vi.fn().mockResolvedValue(false),
     restoreCapturedGitManifest: vi.fn().mockResolvedValue(undefined),
+    hasPendingRestoreIntent: vi.fn().mockResolvedValue(false),
   },
   getBackupBaseDir: () => '/tmp/backups',
 }));
@@ -141,6 +142,8 @@ describe('StackUpdateRecoveryService', () => {
     vi.clearAllMocks();
     StackUpdateRecoveryService.resetForTests();
     vi.spyOn(DatabaseService.prototype, 'getGitSource').mockReturnValue(undefined as never);
+    vi.spyOn(DatabaseService.prototype, 'listStackUpdateRecoveryGenerationsForNode')
+      .mockReturnValue([]);
     mockListContainers.mockResolvedValue([
       { Id: 'c1', State: 'running', Labels: {} },
     ]);
@@ -854,6 +857,69 @@ describe('StackUpdateRecoveryService', () => {
 
     expect(ok).toBe(false);
     expect(RollbackGenerationStore.commitRestoreTransaction).toHaveBeenCalledWith(1, 'my-stack', genId);
+  });
+
+  it('fails closed when interrupted restore reconcile leaves a pending intent', async () => {
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockResolvedValueOnce(false);
+    vi.mocked(RollbackGenerationStore.hasPendingRestoreIntent).mockResolvedValueOnce(true);
+
+    vi.spyOn(DatabaseService.prototype, 'getNodes').mockReturnValue([
+      { id: 1, name: 'local', type: 'local' } as never,
+    ]);
+    vi.spyOn(DatabaseService.prototype, 'listStackUpdateRecoveryGenerationsForNode').mockReturnValue([
+      {
+        id: 'gen-intent',
+        node_id: 1,
+        stack_name: 'my-stack',
+        status: 'recovery_required',
+        phase: 'reconciling',
+        is_current: 1,
+        backup_slot_id: 'gen-intent',
+        content_path: 'gen-intent',
+        operation_kind: 'update',
+        override_path: null,
+        services_json: '[]',
+        health_gate_id: null,
+        gate_retain_until: null,
+        artifact_expires_at: null,
+        operation_lease_expires_at: null,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+        created_by: null,
+        artifacts_retired: 0,
+        released_at: null,
+        released_by: null,
+      },
+    ] as never);
+    vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
+      .mockImplementation(() => undefined);
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().reconcileInterruptedRestoresAtStartup(),
+    ).rejects.toThrow(/Unresolved interrupted restore intent/);
+  });
+
+  it('blocks capture while a restore intent remains pending', async () => {
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    vi.mocked(RollbackGenerationStore.hasPendingRestoreIntent).mockResolvedValueOnce(true);
+    vi.spyOn(DatabaseService.prototype, 'listStackUpdateRecoveryGenerationsForNode').mockReturnValue([
+      {
+        id: 'gen-block',
+        node_id: 1,
+        stack_name: 'my-stack',
+        content_path: 'gen-block',
+      },
+    ] as never);
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().captureCandidate({
+        nodeId: 1,
+        stackName: 'my-stack',
+        createdBy: null,
+        operationKind: 'update',
+      }),
+    ).rejects.toThrow(/interrupted restore/);
   });
 
 

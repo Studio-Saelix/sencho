@@ -230,77 +230,9 @@ async function resolveGitInventory(
       || gitSource.last_applied_commit_sha,
     );
 
-    // Established missing/corrupt manifesto: rebuild exact coverage from
-    // applied_deploy_spec when every ordered file is still a regular file.
-    if (established && gitSource.applied_deploy_spec?.files?.length) {
-      const map = new Map<string, InventoryAccum>();
-      let incomplete = false;
-      for (const relRaw of gitSource.applied_deploy_spec.files) {
-        const resolved = resolveStackRel(stackRoot, relRaw);
-        if (!resolved) {
-          incomplete = true;
-          break;
-        }
-        const exists = await pathExistsAsFile(stackRoot, resolved.relativePath);
-        if (!exists) {
-          incomplete = true;
-          break;
-        }
-        upsertEntry(map, {
-          relativePath: resolved.relativePath,
-          dependencyKind: 'compose-root',
-          provenance: 'fetch',
-          sensitivity: 'low',
-          absolutePath: resolved.absolutePath,
-        });
-      }
-      if (!incomplete && gitSource.sync_env) {
-        const envResolved = resolveStackRel(stackRoot, DOT_ENV);
-        if (envResolved && await pathExistsAsFile(stackRoot, envResolved.relativePath)) {
-          upsertEntry(map, {
-            relativePath: envResolved.relativePath,
-            dependencyKind: 'project-env',
-            provenance: 'fetch',
-            sensitivity: 'medium',
-            absolutePath: envResolved.absolutePath,
-          });
-        } else {
-          incomplete = true;
-        }
-      }
-      if (!incomplete && map.size > 0) {
-        const composeFiles = gitSource.applied_deploy_spec.files.map((f) => posixRel(f));
-        return {
-          entries: [...map.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
-          invocation: {
-            composeArgsPrefix: composeFiles.flatMap((f) => ['-f', f]),
-            projectDirectory: gitSource.applied_deploy_spec.contextDir,
-            projectName: stackName,
-            explicitComposeFiles: composeFiles,
-          },
-          git: {
-            repoUrl: gitSource.repo_url,
-            branch: gitSource.branch,
-            commitSha: gitSource.last_applied_commit_sha || '',
-            manifestVersion: gitSource.manifest_version,
-          },
-          appliedDeploySpec: appliedDeploySpecString(gitSource.applied_deploy_spec),
-          lastAppliedContentHash: gitSource.last_applied_content_hash,
-          manifestState: gitSource.manifest_state,
-          manifestGeneration: gitSource.manifest_generation,
-          exactCoverage: true,
-          coverageRefusal: null,
-        };
-      }
-      return refusedGitInventory(
-        gitSource,
-        emptyInvocation,
-        corrupt
-          ? reason
-          : 'Managed-project manifest is missing and the applied deploy specification cannot be reconstructed exactly from disk.',
-      );
-    }
-
+    // Established missing/corrupt manifesto: fail closed. applied_deploy_spec
+    // alone cannot claim exact managed-input coverage (includes, extends, env,
+    // labels, configs, secrets, and build inputs are omitted).
     if (established || corrupt) {
       return refusedGitInventory(gitSource, emptyInvocation, reason);
     }

@@ -132,12 +132,13 @@ describe('resolveRollbackInventory', () => {
     expect(inventory.git?.commitSha).toBe('abc1234');
   });
 
-  it('rebuilds exact coverage from applied_deploy_spec when manifesto is missing', async () => {
+  it('fails closed for established missing manifesto instead of applied_deploy_spec exact coverage', async () => {
     const stackName = 'rebuild';
     const stackDir = path.join(composeDir, stackName);
     await fsPromises.mkdir(stackDir, { recursive: true });
     await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  a: {}\n', 'utf8');
     await fsPromises.writeFile(path.join(stackDir, 'compose.prod.yaml'), 'services:\n  b: {}\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'app.env'), 'FOO=1\n', 'utf8');
 
     mockGetGitSource.mockReturnValue({
       stack_name: stackName,
@@ -155,20 +156,17 @@ describe('resolveRollbackInventory', () => {
 
     const inventory = await resolveRollbackInventory(1, stackName);
 
-    expect(inventory.exactCoverage).toBe(true);
+    expect(inventory.exactCoverage).toBe(false);
+    expect(inventory.coverageRefusal).toMatch(/missing/i);
     expect(inventory.git?.commitSha).toBe('deadbeef');
-    expect(inventory.entries.map((e) => e.relativePath).sort()).toEqual([
-      'compose.prod.yaml',
-      'compose.yaml',
-    ]);
-    expect(inventory.invocation.explicitComposeFiles).toEqual(['compose.yaml', 'compose.prod.yaml']);
   });
 
-  it('rebuilds from applied_deploy_spec when the manifesto is corrupt but files remain exact', async () => {
+  it('fails closed when the manifesto is corrupt even if applied_deploy_spec files exist', async () => {
     const stackName = 'corruptgit';
     const stackDir = path.join(composeDir, stackName);
     await fsPromises.mkdir(stackDir, { recursive: true });
     await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'app.env'), 'PASS=x\n', 'utf8');
 
     mockGetGitSource.mockReturnValue({
       stack_name: stackName,
@@ -186,7 +184,8 @@ describe('resolveRollbackInventory', () => {
 
     const inventory = await resolveRollbackInventory(1, stackName);
 
-    expect(inventory.exactCoverage).toBe(true);
+    expect(inventory.exactCoverage).toBe(false);
+    expect(inventory.coverageRefusal).toMatch(/unreadable/i);
     expect(inventory.git?.commitSha).toBe('abc');
   });
 
@@ -214,6 +213,35 @@ describe('resolveRollbackInventory', () => {
 
     expect(inventory.exactCoverage).toBe(false);
     expect(inventory.coverageRefusal).toMatch(/unreadable/i);
+  });
+
+  it('fails closed for missing manifesto with include/env/config dependency files on disk', async () => {
+    const stackName = 'deps-matrix';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(path.join(stackDir, 'configs'), { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  a:\n    env_file: [app.env]\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'compose.prod.yaml'), 'include:\n  - path: compose.yaml\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'app.env'), 'A=1\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'configs/app.conf'), 'x=1\n', 'utf8');
+
+    mockGetGitSource.mockReturnValue({
+      stack_name: stackName,
+      repo_url: 'https://example.com/repo.git',
+      branch: 'main',
+      last_applied_commit_sha: 'cafebabe',
+      last_applied_content_hash: 'h2',
+      applied_deploy_spec: { files: ['compose.yaml', 'compose.prod.yaml'], contextDir: null },
+      sync_env: false,
+      manifest_version: 3,
+      manifest_state: 'active',
+      manifest_generation: 'generations/y',
+    });
+    mockReadManifest.mockResolvedValue(null);
+
+    const inventory = await resolveRollbackInventory(1, stackName);
+
+    expect(inventory.exactCoverage).toBe(false);
+    expect(inventory.coverageRefusal).toMatch(/missing/i);
   });
 
   it('fails closed when the Git manifesto is corrupt even before first apply', async () => {
