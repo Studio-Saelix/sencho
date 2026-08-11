@@ -3,7 +3,7 @@
  * save (omit redacted url/config when not dirty), and Test gating.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { MastheadMetadataItem } from '@/components/ui/PageMasthead';
 
@@ -41,6 +41,7 @@ vi.mock('../MastheadStatsContext', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 import { NotificationsSection } from '../NotificationsSection';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
@@ -708,5 +709,139 @@ describe('NotificationsSection', () => {
         expect(screen.getByText(/Stored delivery retries value is invalid/i)).toBeInTheDocument();
     });
 
+    describe('payload templates', () => {
+        const DISCORD_AGENT = {
+            type: 'discord',
+            url: 'https://discord.com/api/webhooks/1/token',
+            enabled: true,
+            payload_template: null,
+        };
 
+        function mockDiscordAgents(discord: unknown = DISCORD_AGENT) {
+            mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+                if (url === '/agents' && !opts?.method) return agentsResponse([discord]);
+                if (url === '/agents' && opts?.method === 'POST') {
+                    return { ok: true, json: async () => ({}) };
+                }
+                return { ok: true, json: async () => ([]) };
+            });
+        }
+
+        // Interact only after the agents GET settles: a successful load resets
+        // the template dirty flag by design, so typing before the load lands
+        // would be overwritten.
+        async function waitForLoadedUrl() {
+            await waitFor(() => expect(screen.getByLabelText(/Webhook URL/i))
+                .toHaveValue('https://discord.com/api/webhooks/1/token'));
+        }
+
+        it('opens the editor and sends the template on save', async () => {
+            mockDiscordAgents();
+            render(<NotificationsSection />);
+            await waitForLoadedUrl();
+
+            await userEvent.click(screen.getByRole('button', { name: 'Edit Payload' }));
+            const editor = screen.getByLabelText(/Payload template/i);
+            fireEvent.change(editor, { target: { value: '{"title": "{{level}}", "body": "{{message}}"}' } });
+
+            await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+            await waitFor(() => expect(findAgentsPost()).toBeTruthy());
+            const body = JSON.parse((findAgentsPost()![1] as { body: string }).body);
+            expect(body).toMatchObject({ type: 'discord', enabled: true });
+            expect(body.payload_template).toBe('{"title": "{{level}}", "body": "{{message}}"}');
+        });
+
+        it('omits payload_template from a clean save', async () => {
+            mockDiscordAgents();
+            render(<NotificationsSection />);
+            await waitForLoadedUrl();
+            await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+            await waitFor(() => expect(findAgentsPost()).toBeTruthy());
+            const body = JSON.parse((findAgentsPost()![1] as { body: string }).body);
+            expect(body).toEqual({
+                type: 'discord',
+                url: 'https://discord.com/api/webhooks/1/token',
+                enabled: true,
+            });
+            expect(body).not.toHaveProperty('payload_template');
+        });
+
+        it('clears a stored template with an empty editor', async () => {
+            mockDiscordAgents({
+                type: 'discord',
+                url: 'https://discord.com/api/webhooks/1/token',
+                enabled: true,
+                payload_template: '{"title": "{{level}}"}',
+            });
+            render(<NotificationsSection />);
+            await waitForLoadedUrl();
+
+            await userEvent.click(screen.getByRole('button', { name: 'Edit Payload' }));
+            const editor = screen.getByLabelText(/Payload template/i);
+            expect(editor).toHaveValue('{"title": "{{level}}"}');
+            await userEvent.clear(editor);
+
+            await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+            await waitFor(() => expect(findAgentsPost()).toBeTruthy());
+            const body = JSON.parse((findAgentsPost()![1] as { body: string }).body);
+            expect(body.payload_template).toBe('');
+        });
+
+        it('includes the current editor template in the test dispatch', async () => {
+            mockDiscordAgents();
+            render(<NotificationsSection />);
+            await waitForLoadedUrl();
+
+            await userEvent.click(screen.getByRole('button', { name: 'Edit Payload' }));
+            fireEvent.change(screen.getByLabelText(/Payload template/i), {
+                target: { value: '{"m": "{{message}}"}' },
+            });
+
+            await userEvent.click(screen.getByRole('button', { name: 'Test' }));
+
+            await waitFor(() => {
+                const testCall = mockedFetch.mock.calls.find(
+                    ([url, opts]) => url === '/notifications/test'
+                        && (opts as { method?: string } | undefined)?.method === 'POST',
+                );
+                expect(testCall).toBeTruthy();
+                const body = JSON.parse((testCall![1] as { body: string }).body);
+                expect(body).toMatchObject({
+                    type: 'discord',
+                    url: 'https://discord.com/api/webhooks/1/token',
+                    payload_template: '{"m": "{{message}}"}',
+                });
+            });
+        });
+
+        it('keeps the editor content when the server rejects the template', async () => {
+            mockDiscordAgents();
+            render(<NotificationsSection />);
+            await waitForLoadedUrl();
+
+            await userEvent.click(screen.getByRole('button', { name: 'Edit Payload' }));
+            const editor = screen.getByLabelText(/Payload template/i);
+            fireEvent.change(editor, { target: { value: '{"a": "{{nope}}"}' } });
+
+            mockedFetch.mockImplementationOnce(async (url: string, opts?: { method?: string }) => {
+                if (url === '/agents' && opts?.method === 'POST') {
+                    return {
+                        ok: false,
+                        status: 400,
+                        json: async () => ({ error: 'payload_template Unknown template variable: {{nope}}.' }),
+                    };
+                }
+                return { ok: true, json: async () => ({}) };
+            });
+
+            await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+            await waitFor(() => expect(toast.error)
+                .toHaveBeenCalledWith(expect.stringContaining('Unknown template variable')));
+            expect(editor).toHaveValue('{"a": "{{nope}}"}');
+        });
+    });
 });

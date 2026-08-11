@@ -207,4 +207,34 @@ describe('Apprise secrets at rest (downgrade-safe)', () => {
     expect(routes.find(r => r.name === 'discord-ok')!.channel_url).toContain('discord.com');
     expect(routes.find(r => r.name === 'apprise-broken')!.channel_url).toBe('');
   });
+
+  it('stores payload_template in plaintext while Apprise credentials stay encrypted', () => {
+    const db = DatabaseService.getInstance();
+    const keySecret = 'SuperSecretKey99';
+    const template = '{"title": "{{level}}", "body": "{{message}}"}';
+
+    db.upsertAgent(1, {
+      type: 'apprise',
+      url: `http://apprise.local/notify/${keySecret}`,
+      enabled: true,
+      config: '{}',
+      payload_template: template,
+    });
+
+    const raw = db.getDb().prepare('SELECT * FROM agents WHERE type = ?').get('apprise') as {
+      url: string;
+      config: string | null;
+      payload_template: string | null;
+    };
+    expect(raw.url).toMatch(/^enc:/);
+    expect(raw.url).not.toContain(keySecret);
+    expect(raw.config).toMatch(/^enc:/);
+    expect(raw.payload_template).toBe(template);
+
+    const apprise = db.getAgents(1).find(a => a.type === 'apprise')!;
+    expect(apprise.payload_template).toBe(template);
+    const pub = serializePublicAgent(apprise);
+    expect(pub.payload_template).toBe(template);
+    expect(JSON.stringify(pub)).not.toContain(keySecret);
+  });
 });
