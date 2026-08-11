@@ -1,6 +1,7 @@
 /**
- * Git-backed stacks must not fall back to authored rediscovery when the
- * managed-project manifest is missing or corrupt.
+ * When a Git managed-project manifesto is missing or corrupt, inventory falls
+ * back to authored rediscovery of the live stack so first apply can still
+ * capture a disk preimage before promote.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import path from 'path';
@@ -11,6 +12,9 @@ const mockGetGitSource = vi.fn();
 const mockReadManifest = vi.fn();
 const mockGetOverrideFilename = vi.fn().mockResolvedValue(null);
 const mockGetStackProjectEnvFiles = vi.fn().mockReturnValue([]);
+const mockBuildAuthoredComposeArgs = vi.fn().mockResolvedValue(['compose', '-f', 'compose.yaml', 'config', '--quiet']);
+const mockAuthoredComposeFileArgs = vi.fn().mockReturnValue(['-f', 'compose.yaml']);
+const mockAuthoredComposeEnvFileArgs = vi.fn().mockResolvedValue([]);
 
 vi.mock('../services/DatabaseService', () => ({
   DatabaseService: {
@@ -40,6 +44,16 @@ vi.mock('../services/FileSystemService', () => ({
   },
 }));
 
+vi.mock('../services/ComposeService', () => ({
+  ComposeService: {
+    getInstance: () => ({
+      buildAuthoredComposeArgs: mockBuildAuthoredComposeArgs,
+    }),
+  },
+  authoredComposeFileArgs: (...args: unknown[]) => mockAuthoredComposeFileArgs(...args),
+  authoredComposeEnvFileArgs: (...args: unknown[]) => mockAuthoredComposeEnvFileArgs(...args),
+}));
+
 import { resolveRollbackInventory } from '../services/rollbackInventory';
 
 describe('resolveRollbackInventory', () => {
@@ -51,9 +65,12 @@ describe('resolveRollbackInventory', () => {
     mockState.composeDir = composeDir;
     mockGetOverrideFilename.mockResolvedValue(null);
     mockGetStackProjectEnvFiles.mockReturnValue([]);
+    mockBuildAuthoredComposeArgs.mockResolvedValue(['compose', '-f', 'compose.yaml', 'config', '--quiet']);
+    mockAuthoredComposeFileArgs.mockReturnValue(['-f', 'compose.yaml']);
+    mockAuthoredComposeEnvFileArgs.mockResolvedValue([]);
   });
 
-  it('does not fall back to authored rediscovery when a Git source exists but manifest is missing', async () => {
+  it('falls back to authored rediscovery when a Git source exists but manifesto is missing', async () => {
     const stackName = 'gitapp';
     const stackDir = path.join(composeDir, stackName);
     await fsPromises.mkdir(stackDir, { recursive: true });
@@ -68,25 +85,19 @@ describe('resolveRollbackInventory', () => {
       repo_url: 'https://example.com/repo.git',
       branch: 'main',
       last_applied_commit_sha: 'abc1234',
-      applied_deploy_spec: { files: ['compose.yaml'], contextDir: null },
+      applied_deploy_spec: null,
     });
     mockReadManifest.mockResolvedValue(null);
 
     const inventory = await resolveRollbackInventory(1, stackName);
 
-    expect(inventory.exactCoverage).toBe(false);
-    expect(inventory.coverageRefusal).toMatch(/manifest is missing/i);
-    expect(inventory.entries).toEqual([]);
-    expect(inventory.git).toEqual(
-      expect.objectContaining({
-        repoUrl: 'https://example.com/repo.git',
-        branch: 'main',
-        commitSha: 'abc1234',
-      }),
-    );
+    expect(inventory.exactCoverage).toBe(true);
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.entries.map((e) => e.relativePath)).toContain('compose.yaml');
+    expect(inventory.git).toBeNull();
   });
 
-  it('does not fall back to authored rediscovery when the Git manifest is corrupt', async () => {
+  it('falls back to authored rediscovery when the Git manifesto is corrupt', async () => {
     const stackName = 'corruptgit';
     const stackDir = path.join(composeDir, stackName);
     await fsPromises.mkdir(stackDir, { recursive: true });
@@ -103,9 +114,8 @@ describe('resolveRollbackInventory', () => {
 
     const inventory = await resolveRollbackInventory(1, stackName);
 
-    expect(inventory.exactCoverage).toBe(false);
-    expect(inventory.coverageRefusal).toMatch(/unreadable/i);
-    expect(inventory.coverageRefusal).toMatch(/identity mismatch/);
-    expect(inventory.entries).toEqual([]);
+    expect(inventory.exactCoverage).toBe(true);
+    expect(inventory.coverageRefusal).toBeNull();
+    expect(inventory.entries.map((e) => e.relativePath)).toContain('compose.yaml');
   });
 });

@@ -443,9 +443,10 @@ async function resolveAuthoredInventory(
 
 /**
  * Build the rollback capture inventory for one stack on one node.
- * Prefers a valid Git managed-project manifest when the stack is Git-backed;
- * otherwise rediscovers against the live authored stack directory.
- * When a Git source exists, never falls back to authored rediscovery.
+ * Prefers a valid Git managed-project manifesto when it claims exact coverage;
+ * otherwise rediscovers against the live authored stack directory. This lets
+ * first Git apply (capture before promote, no manifesto yet) still snapshot
+ * the on-disk preimage instead of hard-failing coverage.
  */
 export async function resolveRollbackInventory(
   nodeId: number,
@@ -456,8 +457,11 @@ export async function resolveRollbackInventory(
 
   try {
     const gitInventory = await resolveGitInventory(stackName, stackRoot);
-    if (gitInventory) return gitInventory;
-    return await resolveAuthoredInventory(nodeId, stackName, stackRoot, fsSvc);
+    if (gitInventory?.exactCoverage) return gitInventory;
+    const authored = await resolveAuthoredInventory(nodeId, stackName, stackRoot, fsSvc);
+    if (authored.exactCoverage) return authored;
+    // Prefer the more specific refusal when both cannot claim coverage.
+    return gitInventory ?? authored;
   } catch (e) {
     console.error(
       '[rollbackInventory] Failed to resolve inventory:',
