@@ -106,6 +106,7 @@ describe.skipIf(!hasDocker)('exact prior-image rollback after post-handoff failu
       operationKind: 'update',
     });
     expect(candidate.override_path).toBeTruthy();
+    expect(recoverySvc.markAcquired(candidate.id)).toBe(true);
     expect(recoverySvc.handoff(candidate.id, nodeId, STACK)).toBe(true);
 
     // Simulate a post-handoff mutation that moves the tag / image identity.
