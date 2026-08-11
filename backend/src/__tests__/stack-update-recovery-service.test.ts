@@ -59,8 +59,20 @@ vi.mock('../services/RollbackGenerationStore', () => ({
     verifyGenerationContent: vi.fn().mockResolvedValue(false),
     commitRestoreTransaction: vi.fn().mockResolvedValue(undefined),
     reconcileInterruptedRestore: vi.fn().mockResolvedValue(false),
+    restoreCapturedGitManifest: vi.fn().mockResolvedValue(undefined),
   },
   getBackupBaseDir: () => '/tmp/backups',
+}));
+
+vi.mock('../services/GitProjectManifestService', () => ({
+  GitProjectManifestService: {
+    getInstance: () => ({
+      readRawManifestText: vi.fn().mockResolvedValue(null),
+      writeManifest: vi.fn().mockResolvedValue(undefined),
+      clearManifestFile: vi.fn().mockResolvedValue(undefined),
+    }),
+  },
+  MANIFEST_FILENAME: 'manifest.v1.json',
 }));
 
 
@@ -88,7 +100,7 @@ vi.mock('../services/ComposeService', async () => {
     ComposeService: {
       getInstance: () => ({
         validateExactComposeInvocation: mockValidateExact,
-        buildAuthoredComposeArgs: vi.fn(),
+        buildAuthoredComposeArgs: vi.fn().mockResolvedValue(['compose', '-f', 'compose.yaml', 'config', '--quiet']),
       }),
     },
     getComposeCommandTimeoutMs: () => 60_000,

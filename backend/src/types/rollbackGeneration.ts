@@ -5,7 +5,7 @@
  * lifecycle authority. Files under the generation content directory are the
  * referenced content store (paths, checksums, invocation, tombstones).
  */
-import type { InputDependencyKind, InputSensitivity, ManifestProvenance } from './gitProjectManifest';
+import type { GitSourceManifestState, InputDependencyKind, InputSensitivity, ManifestProvenance } from './gitProjectManifest';
 
 export const ROLLBACK_GENERATION_SCHEMA_VERSION = 1 as const;
 
@@ -89,8 +89,54 @@ export interface RollbackGenerationManifest {
     lastAppliedContentHash: string | null;
     manifestState: string | null;
     manifestGeneration: string | null;
+    /**
+     * True when git-manifest.v1.json was snapshotted into the generation.
+     * False means the capture-time managed manifesto was absent (first apply
+     * preimage); restore must clear any manifesto written after capture.
+     * Omitted on older generations: inferred from whether the snapshot file exists.
+     */
+    gitManifestCaptured?: boolean;
   };
   images: RollbackImageIdentity[];
+}
+
+/** Durable Git database projection stored in restore-intent.json. */
+export interface RollbackGitDbSnapshot {
+  appliedDeploySpec: { files: string[]; contextDir: string | null } | null;
+  lastAppliedCommitSha: string | null;
+  lastAppliedContentHash: string | null;
+  manifestVersion: number | null;
+  manifestState: GitSourceManifestState | null;
+  manifestGeneration: string | null;
+}
+
+/**
+ * Git DB + managed-manifesto preimage recorded before a restore mutates the
+ * live stack. Used as restoreGeneration transactionMeta and as
+ * RollbackRestoreIntent.gitSide.
+ */
+export interface RollbackRestoreTransactionMeta {
+  gitDbBefore: RollbackGitDbSnapshot | null;
+  /** Raw manifest.v1.json text before restore, or null when absent. */
+  managedManifestBefore: string | null;
+}
+
+/**
+ * Crash-safe restore intent: pre-restore filesystem snapshot plus the Git DB
+ * and managed-manifesto state that must be reinstated if the process dies
+ * before commitRestoreTransaction.
+ */
+export interface RollbackRestoreIntent {
+  generationId: string;
+  stackName: string;
+  nodeId: number;
+  paths: string[];
+  at: number;
+  /**
+   * Present when compensate recorded Git side-state. Absent on older intents
+   * (filesystem-only reversion).
+   */
+  gitSide?: RollbackRestoreTransactionMeta;
 }
 
 export interface ResolvedRollbackInventory {

@@ -6331,6 +6331,25 @@ export class DatabaseService {
         ).run(commitSha, contentHash, Date.now(), stackName);
     }
 
+    /**
+     * Clear the last-applied revision identity without removing the Git source
+     * row. Used when compensating to a capture that had a null commit SHA
+     * (first-apply preimage).
+     */
+    public clearGitSourceAppliedRevision(stackName: string): void {
+        this.db.prepare(
+            `UPDATE stack_git_sources SET
+                last_applied_commit_sha = NULL,
+                last_applied_content_hash = NULL,
+                pending_commit_sha = NULL,
+                pending_compose_content = NULL,
+                pending_env_content = NULL,
+                pending_fetched_at = NULL,
+                updated_at = ?
+             WHERE stack_name = ?`
+        ).run(Date.now(), stackName);
+    }
+
     public touchGitSourceDebounce(stackName: string): void {
         this.db.prepare('UPDATE stack_git_sources SET last_debounce_at = ? WHERE stack_name = ?')
             .run(Date.now(), stackName);

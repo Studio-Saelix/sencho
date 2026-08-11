@@ -412,6 +412,24 @@ export class GitProjectManifestService {
         await fs.promises.rename(tmp, target);
     }
 
+    /** Raw on-disk manifesto JSON, or null when the file is absent. */
+    async readRawManifestText(stackName: string): Promise<string | null> {
+        const target = path.join(this.managedRoot(stackName), MANIFEST_FILENAME);
+        try {
+            return await fs.promises.readFile(target, 'utf8');
+        } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+            throw e;
+        }
+    }
+
+    /** Remove the managed manifesto file (first-apply preimage restore). */
+    async clearManifestFile(stackName: string): Promise<void> {
+        const target = path.join(this.managedRoot(stackName), MANIFEST_FILENAME);
+        await fs.promises.rm(target, { force: true });
+        StackFileRootsService.invalidate(NodeRegistry.getInstance().getDefaultNodeId(), stackName);
+    }
+
     /**
      * Public projection for the manifest read endpoint: hashes, size metadata,
      * provenance, and deletion authority are internal-only, and for

@@ -21,12 +21,17 @@ import {
   type RollbackGenerationManifest,
   type RollbackImageIdentity,
   type RollbackOperationKind,
+  type RollbackRestoreIntent,
+  type RollbackRestoreTransactionMeta,
 } from '../types/rollbackGeneration';
+import { GitProjectManifestService } from './GitProjectManifestService';
+import type { GitProjectManifest } from '../types/gitProjectManifest';
 
 const GENERATION_JSON = 'generation.json';
 const FILES_DIR = 'files';
 const PRE_RESTORE_DIR = 'pre-restore';
 const RESTORE_INTENT_FILE = 'restore-intent.json';
+const GIT_MANIFEST_SNAPSHOT = 'git-manifest.v1.json';
 const TOMBSTONE_MARKER = '.sencho-tombstone';
 
 function getDataDir(): string {
@@ -278,6 +283,22 @@ export class RollbackGenerationStore {
 
       managedRelativePaths.sort((a, b) => a.localeCompare(b));
 
+      let gitManifestCaptured = false;
+      if (inventory.git) {
+        const raw = await GitProjectManifestService.getInstance().readRawManifestText(stackName);
+        if (raw !== null) {
+          // Inline barrier at the manifesto snapshot write sink.
+          const snapPath = path.resolve(stagingDir, GIT_MANIFEST_SNAPSHOT);
+          if (!snapPath.startsWith(stagingDir + path.sep)) {
+            throw Object.assign(new Error('Path escapes staging directory'), { code: 'INVALID_PATH' });
+          }
+          // Validate JSON before storing so restore can writeManifest safely.
+          JSON.parse(raw) as GitProjectManifest;
+          await fsPromises.writeFile(snapPath, raw, 'utf8');
+          gitManifestCaptured = true;
+        }
+      }
+
       const manifest: RollbackGenerationManifest = {
         schemaVersion: ROLLBACK_GENERATION_SCHEMA_VERSION,
         capabilityVersion: 1,
@@ -296,6 +317,7 @@ export class RollbackGenerationStore {
           lastAppliedContentHash: inventory.lastAppliedContentHash,
           manifestState: inventory.manifestState,
           manifestGeneration: inventory.manifestGeneration,
+          gitManifestCaptured,
         },
         images,
       };
@@ -337,7 +359,8 @@ export class RollbackGenerationStore {
 
   /**
    * If a prior restore left a durable intent + pre-restore snapshot, revert the
-   * live managed set to that snapshot. Used by startup reconciliation.
+   * live managed set, Git DB projection, and managed manifesto to the
+   * pre-restore state. Used by startup reconciliation and failed compensate.
    */
   static async reconcileInterruptedRestore(
     nodeId: number,
@@ -350,13 +373,26 @@ export class RollbackGenerationStore {
     const genResolved = path.resolve(genDir);
     const intentPath = path.resolve(genResolved, RESTORE_INTENT_FILE);
     if (!intentPath.startsWith(genResolved + path.sep)) return false;
+    let intentRaw: string;
     try {
-      await fsPromises.access(intentPath);
+      intentRaw = await fsPromises.readFile(intentPath, 'utf8');
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
       throw e;
     }
+
+    let intent: RollbackRestoreIntent;
+    try {
+      intent = JSON.parse(intentRaw) as RollbackRestoreIntent;
+    } catch (e) {
+      throw new Error(
+        `Corrupt restore-intent.json for generation ${generationId}: ${(e as Error).message}`,
+        { cause: e },
+      );
+    }
+
     await this.revertFromPreRestoreSnapshot(nodeId, stackName, genResolved);
+    await this.restoreGitSideStateFromIntent(stackName, intent);
     await fsPromises.rm(intentPath, { force: true });
     return true;
   }
@@ -392,14 +428,16 @@ export class RollbackGenerationStore {
    * inside the managed set). Paths outside both sets are left untouched.
    *
    * Durability: copies the affected live paths into pre-restore/ and writes
-   * restore-intent.json before mutation. Failure or restart reverts from that
-   * snapshot so a hybrid managed project cannot remain.
+   * restore-intent.json (including Git DB + manifesto preimage) before mutation.
+   * Failure or restart reverts from that snapshot so a hybrid managed project
+   * cannot remain.
    */
   static async restoreGeneration(
     nodeId: number,
     stackName: string,
     generationId: string,
     liveManagedPaths: string[],
+    transactionMeta?: RollbackRestoreTransactionMeta,
   ): Promise<RollbackGenerationManifest> {
     assertSafeStackName(stackName);
     assertSafeGenerationId(generationId);
@@ -445,19 +483,41 @@ export class RollbackGenerationStore {
       ...deleteRelByKey.values(),
     ];
 
+    const fsSvc = FileSystemService.getInstance(nodeId);
+    const scope = { protectedEnabled: false as const };
+
+    // Refuse directory-at-file-path collisions before any snapshot or mutation.
+    for (const rel of affectedPaths) {
+      const kind = await fsSvc.pathKind(stackName, rel, scope);
+      if (kind === 'directory') {
+        throw Object.assign(
+          new Error(
+            `Managed path "${rel}" is a directory; refusing restore that would replace or delete it as a file`,
+          ),
+          { code: 'DIRECTORY_COLLISION' },
+        );
+      }
+    }
+
     await this.capturePreRestoreSnapshot(nodeId, stackName, genResolved, affectedPaths);
     const intentPath = path.resolve(genResolved, RESTORE_INTENT_FILE);
     if (!intentPath.startsWith(genResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
     }
-    await fsPromises.writeFile(
-      intentPath,
-      JSON.stringify({ generationId, stackName, nodeId, paths: affectedPaths, at: Date.now() }),
-      'utf8',
-    );
-
-    const fsSvc = FileSystemService.getInstance(nodeId);
-    const scope = { protectedEnabled: false as const };
+    const intent: RollbackRestoreIntent = {
+      generationId,
+      stackName,
+      nodeId,
+      paths: affectedPaths,
+      at: Date.now(),
+    };
+    if (transactionMeta) {
+      intent.gitSide = {
+        gitDbBefore: transactionMeta.gitDbBefore,
+        managedManifestBefore: transactionMeta.managedManifestBefore,
+      };
+    }
+    await fsPromises.writeFile(intentPath, JSON.stringify(intent), 'utf8');
 
     try {
       for (const item of restores) {
@@ -477,7 +537,13 @@ export class RollbackGenerationStore {
         try {
           const kind = await fsSvc.pathKind(stackName, rel, scope);
           if (kind === null) continue;
-          await fsSvc.deleteStackPath(stackName, rel, kind === 'directory', scope);
+          if (kind === 'directory') {
+            throw Object.assign(
+              new Error(`Managed path "${rel}" is a directory; refusing delete during restore`),
+              { code: 'DIRECTORY_COLLISION' },
+            );
+          }
+          await fsSvc.deleteStackPath(stackName, rel, false, scope);
         } catch (e) {
           if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue;
           throw e;
@@ -490,6 +556,7 @@ export class RollbackGenerationStore {
     } catch (e) {
       try {
         await this.revertFromPreRestoreSnapshot(nodeId, stackName, genResolved);
+        await this.restoreGitSideStateFromIntent(stackName, intent);
         await fsPromises.rm(intentPath, { force: true });
       } catch (revertErr) {
         console.error(
@@ -498,6 +565,80 @@ export class RollbackGenerationStore {
         );
       }
       throw e;
+    }
+  }
+
+  /** Restore captured managed manifesto from a generation content directory. */
+  static async restoreCapturedGitManifest(
+    stackName: string,
+    generationDir: string,
+    generation: RollbackGenerationManifest,
+  ): Promise<void> {
+    const genResolved = path.resolve(generationDir);
+    const snapPath = path.resolve(genResolved, GIT_MANIFEST_SNAPSHOT);
+    const capturedFlag = generation.priorRecords?.gitManifestCaptured;
+    const snapExists = await fsPromises.access(snapPath).then(
+      () => true,
+      (e: NodeJS.ErrnoException) => {
+        if (e.code === 'ENOENT') return false;
+        throw e;
+      },
+    );
+
+    const shouldWrite = capturedFlag === true || (capturedFlag === undefined && snapExists);
+    const svc = GitProjectManifestService.getInstance();
+    if (shouldWrite) {
+      if (!snapPath.startsWith(genResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
+      }
+      const raw = await fsPromises.readFile(snapPath, 'utf8');
+      const parsed = JSON.parse(raw) as GitProjectManifest;
+      await svc.writeManifest(stackName, parsed);
+      return;
+    }
+
+    // Explicit first-apply preimage only. Legacy generations without the flag
+    // and without a snapshot must not wipe a live manifesto that was never
+    // part of the capture contract.
+    if (capturedFlag === false && generation.git) {
+      await svc.clearManifestFile(stackName);
+    }
+  }
+
+  private static async restoreGitSideStateFromIntent(
+    stackName: string,
+    intent: RollbackRestoreIntent,
+  ): Promise<void> {
+    if (!intent.gitSide) return;
+
+    const { DatabaseService } = await import('./DatabaseService');
+    const db = DatabaseService.getInstance();
+    const before = intent.gitSide.gitDbBefore;
+    if (before) {
+      db.setGitSourceAppliedSpec(stackName, before.appliedDeploySpec);
+      if (before.lastAppliedCommitSha) {
+        db.markGitSourceApplied(
+          stackName,
+          before.lastAppliedCommitSha,
+          before.lastAppliedContentHash || '',
+        );
+      } else {
+        db.clearGitSourceAppliedRevision(stackName);
+      }
+      db.setGitSourceManifestState(
+        stackName,
+        before.manifestVersion,
+        before.manifestState,
+        before.manifestGeneration,
+      );
+    }
+
+    const svc = GitProjectManifestService.getInstance();
+    if (intent.gitSide.managedManifestBefore === null) {
+      await svc.clearManifestFile(stackName);
+    } else {
+      const parsed = JSON.parse(intent.gitSide.managedManifestBefore) as GitProjectManifest;
+      await svc.writeManifest(stackName, parsed);
     }
   }
 
@@ -537,11 +678,12 @@ export class RollbackGenerationStore {
         if (!realSrc.startsWith(stackRoot + path.sep)) continue;
         const st = await fsPromises.lstat(realSrc);
         if (!st.isFile()) {
-          const marker = path.resolve(preRoot, rel + TOMBSTONE_MARKER);
-          if (!marker.startsWith(preRoot + path.sep)) continue;
-          await fsPromises.mkdir(path.dirname(dest), { recursive: true });
-          await fsPromises.writeFile(marker, '', 'utf8');
-          continue;
+          throw Object.assign(
+            new Error(
+              `Managed path "${rel}" is not a regular file; refusing to snapshot it as absent`,
+            ),
+            { code: 'DIRECTORY_COLLISION' },
+          );
         }
         // Re-resolve immediately before the read sink (CodeQL TOCTOU).
         const realForRead = await fsPromises.realpath(srcCandidate);

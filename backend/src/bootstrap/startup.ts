@@ -145,6 +145,13 @@ export async function startServer(server: Server): Promise<void> {
   } catch (err) {
     console.error('[Startup] Deployed stack deletion reconcile failed:', (err as Error).message);
   }
+  // Interrupted rollback restores must finish before mutation-capable services
+  // or HTTP accept traffic that could widen a hybrid Git/file state.
+  try {
+    await StackUpdateRecoveryService.getInstance().reconcileInterruptedRestoresAtStartup();
+  } catch (err) {
+    console.error('[Startup] Stack update recovery restore reconcile failed:', (err as Error).message);
+  }
   StackUpdateRecoveryService.getInstance().start();
 
   // Synchronous starts: schedule background timers and continue. None of

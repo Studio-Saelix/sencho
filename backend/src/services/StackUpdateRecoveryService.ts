@@ -32,9 +32,13 @@ import { enforcePolicyPreDeploy, type PolicyEnforcementOptions } from './PolicyE
 import { describePolicyBlock } from '../helpers/policyGate';
 import type { GitSourceAppliedSpec } from './DatabaseService';
 import type { GitSourceManifestState } from '../types/gitProjectManifest';
-import type { RollbackGenerationManifest } from '../types/rollbackGeneration';
+import type {
+  RollbackGenerationManifest,
+  RollbackGitDbSnapshot,
+  RollbackOperationKind,
+  RollbackRestoreTransactionMeta,
+} from '../types/rollbackGeneration';
 import { getBackupBaseDir, RollbackGenerationStore } from './RollbackGenerationStore';
-import type { RollbackOperationKind } from '../types/rollbackGeneration';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
@@ -118,36 +122,73 @@ async function restoreCapturedGitDatabaseState(
     }
   }
 
-  const commitSha = manifest.git?.commitSha?.trim() || null;
+  if (!manifest.git) return;
+
+  const commitSha = manifest.git.commitSha?.trim() || null;
   const contentHash =
-    (typeof manifest.priorRecords?.lastAppliedContentHash === 'string'
+    typeof manifest.priorRecords?.lastAppliedContentHash === 'string'
       ? manifest.priorRecords.lastAppliedContentHash
-      : null)
-    ?? src.last_applied_content_hash
-    ?? '';
+      : null;
+
   if (commitSha) {
-    db.markGitSourceApplied(stackName, commitSha, contentHash);
+    db.markGitSourceApplied(stackName, commitSha, contentHash ?? '');
+  } else {
+    // First-apply preimage: clear any SHA written after capture.
+    db.clearGitSourceAppliedRevision(stackName);
   }
 
-  const manifestVersion = manifest.git?.manifestVersion ?? src.manifest_version;
-  const manifestState =
-    (typeof manifest.priorRecords?.manifestState === 'string'
-      ? manifest.priorRecords.manifestState
-      : null)
-    ?? src.manifest_state
-    ?? 'active';
   const capturedGeneration =
     typeof manifest.priorRecords?.manifestGeneration === 'string'
       ? manifest.priorRecords.manifestGeneration
       : null;
-  if (manifestVersion != null || capturedGeneration != null) {
-    db.setGitSourceManifestState(
-      stackName,
-      manifestVersion,
-      manifestState as GitSourceManifestState,
-      capturedGeneration ?? src.manifest_generation ?? null,
-    );
+  const manifestStateRaw = manifest.priorRecords?.manifestState;
+  db.setGitSourceManifestState(
+    stackName,
+    manifest.git.manifestVersion ?? null,
+    (typeof manifestStateRaw === 'string'
+      ? manifestStateRaw
+      : null) as GitSourceManifestState | null,
+    capturedGeneration,
+  );
+}
+
+function snapshotGitDb(src: NonNullable<ReturnType<DatabaseService['getGitSource']>>): RollbackGitDbSnapshot {
+  return {
+    appliedDeploySpec: src.applied_deploy_spec
+      ? {
+          files: [...src.applied_deploy_spec.files],
+          contextDir: src.applied_deploy_spec.contextDir,
+        }
+      : null,
+    lastAppliedCommitSha: src.last_applied_commit_sha,
+    lastAppliedContentHash: src.last_applied_content_hash,
+    manifestVersion: src.manifest_version,
+    manifestState: src.manifest_state,
+    manifestGeneration: src.manifest_generation,
+  };
+}
+
+async function captureGitSidePreimage(stackName: string): Promise<RollbackRestoreTransactionMeta> {
+  const priorGit = DatabaseService.getInstance().getGitSource(stackName);
+  if (!priorGit) {
+    return { gitDbBefore: null, managedManifestBefore: null };
   }
+  const { GitProjectManifestService } = await import('./GitProjectManifestService');
+  return {
+    gitDbBefore: snapshotGitDb(priorGit),
+    managedManifestBefore: await GitProjectManifestService.getInstance().readRawManifestText(stackName),
+  };
+}
+
+async function applyRestoredGenerationGitSide(
+  stackName: string,
+  nodeId: number,
+  contentPath: string,
+  restoredManifest: RollbackGenerationManifest,
+): Promise<void> {
+  const genDir = RollbackGenerationStore.getGenerationDir(nodeId, stackName, contentPath);
+  await RollbackGenerationStore.restoreCapturedGitManifest(stackName, genDir, restoredManifest);
+  await restoreCapturedGitDatabaseState(stackName, restoredManifest);
 }
 
 const SWEEP_INTERVAL_MS = 5 * 60_000;
@@ -255,12 +296,46 @@ export class StackUpdateRecoveryService {
   public start(): void {
     this.started = true;
     if (this.initialTimer || this.intervalId) return;
+    // Startup already awaits reconcileInterruptedRestoresAtStartup before
+    // HTTP/mutators. Periodic full reconcile (abandon/TTL) starts after delay.
     this.initialTimer = setTimeout(() => {
       void this.reconcileIncomplete();
       this.intervalId = setInterval(() => {
         void this.reconcileIncomplete();
       }, SWEEP_INTERVAL_MS);
     }, INITIAL_SWEEP_DELAY_MS);
+  }
+
+  /**
+   * Revert any crash-interrupted generation restores (files + Git side state)
+   * before background mutators or HTTP accept traffic.
+   */
+  public async reconcileInterruptedRestoresAtStartup(): Promise<void> {
+    await this.sweepInterruptedRestores(DatabaseService.getInstance());
+  }
+
+  private async sweepInterruptedRestores(db: DatabaseService): Promise<void> {
+    for (const node of db.getNodes()) {
+      for (const row of db.listStackUpdateRecoveryGenerationsForNode(node.id)) {
+        if (!row.content_path) continue;
+        try {
+          const reverted = await RollbackGenerationStore.reconcileInterruptedRestore(
+            row.node_id,
+            row.stack_name,
+            row.content_path,
+          );
+          if (reverted) {
+            db.updateStackUpdateRecoveryGeneration(row.id, { status: 'recovery_required' });
+          }
+        } catch (e) {
+          console.warn(
+            '[StackUpdateRecovery] Interrupted restore reconcile failed for %s: %s',
+            sanitizeForLog(row.id),
+            sanitizeForLog(getErrorMessage(e, 'unknown')),
+          );
+        }
+      }
+    }
   }
 
   public stop(): void {
@@ -678,12 +753,7 @@ export class StackUpdateRecoveryService {
     if (!row) return false;
 
     const db = DatabaseService.getInstance();
-    const priorGit = db.getGitSource(row.stack_name);
-    const priorSpec = priorGit?.applied_deploy_spec ?? null;
-    const priorSha = priorGit?.last_applied_commit_sha ?? null;
-    const priorManifestVersion = priorGit?.manifest_version ?? null;
-    const priorManifestState = priorGit?.manifest_state ?? null;
-    const priorManifestGeneration = priorGit?.manifest_generation ?? null;
+    const transactionMeta = await captureGitSidePreimage(row.stack_name);
 
     let filesRestored = false;
     try {
@@ -697,11 +767,20 @@ export class StackUpdateRecoveryService {
       }
 
       const context = await resolveRestoreContext(row);
-      const restoredManifest = await context.restoreFromContext();
+      const restoredManifest = await context.restoreFromContext(transactionMeta);
       filesRestored = true;
 
       if (restoredManifest) {
-        await restoreCapturedGitDatabaseState(row.stack_name, restoredManifest);
+        if (expectsGenerationContent(row) && row.content_path) {
+          await applyRestoredGenerationGitSide(
+            row.stack_name,
+            row.node_id,
+            row.content_path,
+            restoredManifest,
+          );
+        } else {
+          await restoreCapturedGitDatabaseState(row.stack_name, restoredManifest);
+        }
       }
 
       // Evaluate current policy against the restored target (fail closed).
@@ -765,25 +844,6 @@ export class StackUpdateRecoveryService {
             sanitizeForLog(getErrorMessage(revertErr, 'unknown')),
           );
         }
-        if (priorGit) {
-          try {
-            db.setGitSourceAppliedSpec(row.stack_name, priorSpec);
-            if (priorSha) {
-              db.markGitSourceApplied(row.stack_name, priorSha, priorGit.last_applied_content_hash || '');
-            }
-            db.setGitSourceManifestState(
-              row.stack_name,
-              priorManifestVersion,
-              priorManifestState,
-              priorManifestGeneration,
-            );
-          } catch (dbRevertErr) {
-            console.error(
-              '[StackUpdateRecovery] Failed to revert Git DB state after compensation error: %s',
-              sanitizeForLog(getErrorMessage(dbRevertErr, 'unknown')),
-            );
-          }
-        }
       }
       if (code === 'ROLLBACK_PROHIBITED') {
         throw error;
@@ -799,6 +859,60 @@ export class StackUpdateRecoveryService {
       if (code === 'GENERATION_CONTENT_MISSING') {
         throw error;
       }
+      return false;
+    }
+  }
+
+  /**
+   * Restore generation project files + Git manifesto/DB without compose-up.
+   * Used when legacy Git materialize fails mid-write and must reinstate the
+   * pre-apply capture before abandoning the recovery candidate.
+   */
+  public async revertToGenerationContent(generationId: string): Promise<boolean> {
+    const row = this.get(generationId);
+    if (!row || !expectsGenerationContent(row) || !row.content_path) return false;
+
+    const transactionMeta = await captureGitSidePreimage(row.stack_name);
+
+    try {
+      const context = await resolveComposeProjectContextForGeneration(
+        row.node_id,
+        row.stack_name,
+        row.content_path,
+      );
+      const restoredManifest = await context.restoreFromContext(transactionMeta);
+      if (restoredManifest) {
+        await applyRestoredGenerationGitSide(
+          row.stack_name,
+          row.node_id,
+          row.content_path,
+          restoredManifest,
+        );
+      }
+      await RollbackGenerationStore.commitRestoreTransaction(
+        row.node_id,
+        row.stack_name,
+        row.content_path,
+      );
+      return true;
+    } catch (error) {
+      try {
+        await RollbackGenerationStore.reconcileInterruptedRestore(
+          row.node_id,
+          row.stack_name,
+          row.content_path,
+        );
+      } catch (revertErr) {
+        console.error(
+          '[StackUpdateRecovery] Failed to revert after revertToGenerationContent error: %s',
+          sanitizeForLog(getErrorMessage(revertErr, 'unknown')),
+        );
+      }
+      console.error(
+        '[StackUpdateRecovery] revertToGenerationContent failed for %s: %s',
+        sanitizeForLog(generationId),
+        sanitizeForLog(getErrorMessage(error, 'unknown')),
+      );
       return false;
     }
   }
@@ -975,27 +1089,7 @@ export class StackUpdateRecoveryService {
       const now = Date.now();
       // Revert any crash-interrupted content-store restores (intent still present).
       try {
-        for (const node of db.getNodes()) {
-          for (const row of db.listStackUpdateRecoveryGenerationsForNode(node.id)) {
-            if (!row.content_path) continue;
-            try {
-              const reverted = await RollbackGenerationStore.reconcileInterruptedRestore(
-                row.node_id,
-                row.stack_name,
-                row.content_path,
-              );
-              if (reverted) {
-                db.updateStackUpdateRecoveryGeneration(row.id, { status: 'recovery_required' });
-              }
-            } catch (e) {
-              console.warn(
-                '[StackUpdateRecovery] Interrupted restore reconcile failed for %s: %s',
-                sanitizeForLog(row.id),
-                sanitizeForLog(getErrorMessage(e, 'unknown')),
-              );
-            }
-          }
-        }
+        await this.sweepInterruptedRestores(db);
       } catch (e) {
         console.warn(
           '[StackUpdateRecovery] Interrupted restore sweep failed: %s',

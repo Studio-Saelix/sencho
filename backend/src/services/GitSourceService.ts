@@ -1992,7 +1992,29 @@ export class GitSourceService {
             }
             appliedSpec = await this.materialize(
                 stackName, pending.files, pending.contextDir, src.sync_env, envContent, src.applied_deploy_spec,
-            );
+            ).catch(async (materializeError: unknown) => {
+                if (recoveryId) {
+                    const reverted = await recoverySvc.revertToGenerationContent(recoveryId);
+                    if (!reverted) {
+                        throw new GitSourceError(
+                            'GIT_ERROR',
+                            `Legacy materialize failed and pre-apply generation restore also failed: ${scrubCredentials(
+                                materializeError instanceof Error ? materializeError.message : String(materializeError),
+                            )}`,
+                        );
+                    }
+                    try {
+                        await recoverySvc.abandon(recoveryId);
+                    } catch (abandonError) {
+                        console.warn(
+                            `[GitSource] Failed to abandon recovery after legacy materialize failure for ${sanitizeForLog(stackName)}:`,
+                            abandonError instanceof Error ? abandonError.message : String(abandonError),
+                        );
+                    }
+                    recoveryId = undefined;
+                }
+                throw materializeError;
+            });
             // Migration: build the conservative manifest from spec + disk.
             const migrated = await manifestSvc.buildMigratedManifest(stackName, {
                 repo_url: src.repo_url,

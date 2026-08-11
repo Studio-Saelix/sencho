@@ -346,5 +346,164 @@ describe('RollbackGenerationStore', () => {
     await expect(fsPromises.access(path.join(genDir, 'restore-intent.json'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('restores a snapshotted Git manifesto on compensate path helper', async () => {
+    const stackName = 'gitman';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+
+    const managedDir = path.join(dataDir, 'git-managed', '1', stackName);
+    await fsPromises.mkdir(managedDir, { recursive: true });
+    const priorManifest = {
+      manifestVersion: 3,
+      state: 'active',
+      repo: { url: 'https://example.com/r.git', branch: 'main' },
+      resolvedRevision: { commitSha: 'abc1234' },
+      project: {
+        root: '.',
+        composeFiles: ['compose.yaml'],
+        projectName: stackName,
+        effectiveProjectDir: null,
+        invocation: ['-f', 'compose.yaml'],
+      },
+      inputs: [],
+      buildContexts: [],
+      counts: { total: 0, refused: 0 },
+      refusals: [],
+      generation: { appliedDir: 'generations/prior', previousDir: null },
+    };
+    await fsPromises.writeFile(
+      path.join(managedDir, 'manifest.v1.json'),
+      JSON.stringify(priorManifest),
+      'utf8',
+    );
+
+    const generationId = randomUUID();
+    const inv = inventoryFor(stackName, [
+      { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+    ]);
+    inv.git = {
+      repoUrl: 'https://example.com/r.git',
+      branch: 'main',
+      commitSha: 'abc1234',
+      manifestVersion: 3,
+    };
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inv,
+    });
+
+    const genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
+    const snap = await fsPromises.readFile(path.join(genDir, 'git-manifest.v1.json'), 'utf8');
+    expect(JSON.parse(snap).resolvedRevision.commitSha).toBe('abc1234');
+
+    const newer = { ...priorManifest, resolvedRevision: { commitSha: 'ffffff' } };
+    await fsPromises.writeFile(path.join(managedDir, 'manifest.v1.json'), JSON.stringify(newer), 'utf8');
+
+    const captured = JSON.parse(await fsPromises.readFile(path.join(genDir, 'generation.json'), 'utf8'));
+    await RollbackGenerationStore.restoreCapturedGitManifest(stackName, genDir, captured);
+    const restored = JSON.parse(await fsPromises.readFile(path.join(managedDir, 'manifest.v1.json'), 'utf8'));
+    expect(restored.resolvedRevision.commitSha).toBe('abc1234');
+  });
+
+  it('clears post-capture manifesto for first-apply preimage', async () => {
+    const stackName = 'firstapply';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+
+    const generationId = randomUUID();
+    const inv = inventoryFor(stackName, [
+      { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+    ]);
+    inv.git = {
+      repoUrl: 'https://example.com/r.git',
+      branch: 'main',
+      commitSha: '',
+      manifestVersion: null,
+    };
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inv,
+    });
+
+    const genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
+    const captured = JSON.parse(await fsPromises.readFile(path.join(genDir, 'generation.json'), 'utf8'));
+    expect(captured.priorRecords.gitManifestCaptured).toBe(false);
+
+    const managedDir = path.join(dataDir, 'git-managed', '1', stackName);
+    await fsPromises.mkdir(managedDir, { recursive: true });
+    await fsPromises.writeFile(path.join(managedDir, 'manifest.v1.json'), '{"manifestVersion":3}\n', 'utf8');
+
+    await RollbackGenerationStore.restoreCapturedGitManifest(stackName, genDir, captured);
+    await expect(fsPromises.access(path.join(managedDir, 'manifest.v1.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('does not clear live manifesto for legacy generations without a snapshot', async () => {
+    const stackName = 'legacygen';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      ]),
+    });
+
+    const genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
+    const captured = JSON.parse(await fsPromises.readFile(path.join(genDir, 'generation.json'), 'utf8'));
+    delete captured.priorRecords.gitManifestCaptured;
+    captured.git = {
+      repoUrl: 'https://example.com/r.git',
+      branch: 'main',
+      commitSha: 'abc',
+      manifestVersion: 3,
+    };
+    await fsPromises.writeFile(path.join(genDir, 'generation.json'), JSON.stringify(captured), 'utf8');
+
+    const managedDir = path.join(dataDir, 'git-managed', '1', stackName);
+    await fsPromises.mkdir(managedDir, { recursive: true });
+    await fsPromises.writeFile(path.join(managedDir, 'manifest.v1.json'), '{"keep":true}\n', 'utf8');
+
+    await RollbackGenerationStore.restoreCapturedGitManifest(stackName, genDir, captured);
+    expect(await fsPromises.readFile(path.join(managedDir, 'manifest.v1.json'), 'utf8')).toBe('{"keep":true}\n');
+  });
+
+  it('refuses restore when a managed file path is currently a directory', async () => {
+    const stackName = 'dircollide';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'OLD\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      ]),
+    });
+
+    await fsPromises.rm(path.join(stackDir, 'compose.yaml'));
+    await fsPromises.mkdir(path.join(stackDir, 'compose.yaml'), { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml', 'sentinel.txt'), 'keep-me\n', 'utf8');
+
+    await expect(
+      RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml']),
+    ).rejects.toMatchObject({ code: 'DIRECTORY_COLLISION' });
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml', 'sentinel.txt'), 'utf8')).toBe('keep-me\n');
+  });
+
 
 });

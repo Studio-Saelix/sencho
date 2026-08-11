@@ -13,7 +13,11 @@ import { buildEffectiveServiceModel } from './effectiveServiceModel';
 import { getErrorMessage } from '../utils/errors';
 import { resolveRollbackInventory } from './rollbackInventory';
 import { RollbackGenerationStore } from './RollbackGenerationStore';
-import type { RollbackGenerationManifest, RollbackOperationKind } from '../types/rollbackGeneration';
+import type {
+  RollbackGenerationManifest,
+  RollbackOperationKind,
+  RollbackRestoreTransactionMeta,
+} from '../types/rollbackGeneration';
 
 export type ImageReferenceKind = 'moving_tag' | 'digest_pinned' | 'none';
 
@@ -48,7 +52,9 @@ export interface ComposeProjectContext {
    * refuses it, throws before writing any generation content.
    */
   backupFromContext(operation: BackupOperation): Promise<string>;
-  restoreFromContext(): Promise<RollbackGenerationManifest | void>;
+  restoreFromContext(
+    transactionMeta?: RollbackRestoreTransactionMeta,
+  ): Promise<RollbackGenerationManifest | void>;
   resolveServiceImageMap(): Promise<Map<string, string | null>>;
 }
 
@@ -104,7 +110,9 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
     return generationId;
   }
 
-  async restoreFromContext(): Promise<RollbackGenerationManifest | void> {
+  async restoreFromContext(
+    transactionMeta?: RollbackRestoreTransactionMeta,
+  ): Promise<RollbackGenerationManifest | void> {
     const generationId = this.backupSlotId;
     if (!generationId) {
       // Legacy pre-migration restore: only when no generation id is bound.
@@ -130,6 +138,7 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
       this.stackName,
       generationId,
       inventory.entries.map((e) => e.relativePath),
+      transactionMeta,
     );
   }
 
