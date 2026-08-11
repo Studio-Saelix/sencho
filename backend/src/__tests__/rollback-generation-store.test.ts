@@ -23,7 +23,6 @@ vi.mock('../utils/debug', () => ({
   isDebugEnabled: () => false,
 }));
 
-import { FileSystemService } from '../services/FileSystemService';
 import { RollbackGenerationStore } from '../services/RollbackGenerationStore';
 import type { ResolvedRollbackInventory } from '../types/rollbackGeneration';
 
