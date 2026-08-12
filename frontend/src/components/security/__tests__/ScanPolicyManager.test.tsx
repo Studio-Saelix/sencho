@@ -69,7 +69,7 @@ const riskPolicy = {
   replicated_from_control: 0, created_at: 1, updated_at: 1,
 };
 
-it('renders a per-input badge for each active input (KEV/Fixable, no severity)', async () => {
+it('renders a per-input badge for each active input (KEV/Package fix, no severity)', async () => {
   setup();
   mockedFetch.mockImplementation((url: string) =>
     Promise.resolve(url.startsWith('/fleet/role') ? jsonResponse(200, { role: 'control' }) : jsonResponse(200, [riskPolicy])),
@@ -77,7 +77,7 @@ it('renders a per-input badge for each active input (KEV/Fixable, no severity)',
   render(<ScanPolicyManager />);
   await waitFor(() => expect(screen.getByText('risk-gate')).toBeInTheDocument());
   expect(screen.getByText('KEV')).toBeInTheDocument();
-  expect(screen.getByText('Fixable')).toBeInTheDocument();
+  expect(screen.getByText('Package fix')).toBeInTheDocument();
   expect(screen.queryByText(/^max:/)).not.toBeInTheDocument();
 });
 

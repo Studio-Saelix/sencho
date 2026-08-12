@@ -374,7 +374,7 @@ export function ScanPolicyManager() {
                 )}
                 {policy.block_on_fixable === 1 && (
                   <Badge variant="outline" className="text-[10px] shrink-0">
-                    Fixable
+                    Package fix
                   </Badge>
                 )}
                 {policy.block_on_deploy === 1 && (

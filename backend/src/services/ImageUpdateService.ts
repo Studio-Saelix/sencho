@@ -1268,11 +1268,14 @@ export class ImageUpdateService {
      * - If memory generation advanced after observation, abort (stale).
      * - If memory generation still equals the observation watermark, advance
      *   (tombstone) so an equal-generation writer reserved before observation
-     *   cannot commit after the clear (SF-4).
+     *   cannot commit after the clear.
      * - If the persisted row generation advanced after observation, keep the row.
-     * - Otherwise delete partial, failed, and confirmed ok+true rows.
+     * - If the row is already ok with no update, keep it. Deleting that row
+     *   would make Security treat a confirmed no-update as unknown.
+     * - Otherwise delete partial, failed, and ok+true rows.
      *
-     * Returns cleared | stale | absent.
+     * Returns cleared (row deleted), stale (memory generation raced), or
+     * absent (no row, generation advanced, or the row is already ok+false).
      */
     public async commitPreviewClear(
         nodeId: number,
@@ -1308,6 +1311,7 @@ export class ImageUpdateService {
             // pre-preview snapshot). Memory peek resets on restart; SQLite does not.
             const rowGeneration = db.getStackUpdateWriteGeneration(nodeId, stackName);
             if (rowGeneration > observedRowGeneration) return;
+            if (detail.checkStatus === 'ok' && !detail.hasUpdate) return;
             deleted = db.clearStackUpdateStatus(nodeId, stackName);
         });
         if (!committed) return 'stale';
