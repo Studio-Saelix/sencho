@@ -1467,6 +1467,15 @@ export function useStackActions(options: UseStackActionsOptions) {
     // it without duplicating the action lifecycle. The stack action is set here
     // (not before the advisory) so cancelling the advisory leaves no stuck state.
     const runDeployFlow = async () => {
+      // Final boundary recheck: an advisory or external-network dialog opened
+      // while ready must not dispatch after readiness was lost (node switch,
+      // list change, failed refresh). Release the pending guard so the UI is
+      // not stuck when blocked.
+      if (!hydrationReady()) {
+        deployPendingRef.current = false;
+        toast.error('Status data unavailable. Refresh and try again.');
+        return;
+      }
       stackListState.setStackAction(stackFile, 'deploy');
       let deferredNetworks = false;
       try {
@@ -1867,7 +1876,15 @@ export function useStackActions(options: UseStackActionsOptions) {
     // Capture the node now so the readiness fetch and the update both target it
     // even if the active node changes while the readiness dialog is open.
     const opNodeId = activeNode?.id ?? null;
-    const run = () => runStackAction(stackFile, 'update', 'update', 'running', 'Stack updated successfully!', false, opNodeId);
+    const run = () => {
+      // Final boundary recheck: the readiness dialog's proceed must not dispatch
+      // to the captured node after readiness was lost.
+      if (!hydrationReady()) {
+        toast.error('Status data unavailable. Refresh and try again.');
+        return Promise.resolve();
+      }
+      return runStackAction(stackFile, 'update', 'update', 'running', 'Stack updated successfully!', false, opNodeId);
+    };
     if (hasUpdateGuard) {
       overlayState.setUpdateReadiness({
         stackName,
@@ -1897,6 +1914,12 @@ export function useStackActions(options: UseStackActionsOptions) {
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     const opNodeId = activeNode?.id ?? null;
     const run = async () => {
+      // Final boundary recheck: the readiness dialog's proceed must not dispatch
+      // to the captured node after readiness was lost.
+      if (!hydrationReady()) {
+        toast.error('Status data unavailable. Refresh and try again.');
+        return;
+      }
       editorState.setServiceUpdateInProgress({ service: serviceName, mode });
       try {
         await runWithLog({ stackName, action: 'update', nodeId: opNodeId, serviceName }, async (started, ds) => {

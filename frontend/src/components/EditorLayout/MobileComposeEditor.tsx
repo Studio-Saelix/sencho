@@ -83,7 +83,11 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
     // while there are unsaved edits (matches the desktop selector being disabled
     // mid-edit). The compose <-> .env toggle stays free: both buffers persist.
     const envSwitchDisabled = hasUnsavedChanges() || isFileLoading;
-    const actionsDisabled = isFileLoading || loadingAction === 'deploy' || !actionsReady;
+    // Plain Save is never gated by status readiness (it is not a lifecycle
+    // action); only Save & Deploy / Save & Reapply requires authoritative
+    // runtime evidence.
+    const saveDisabled = isFileLoading || loadingAction === 'deploy';
+    const saveAndDeployDisabled = saveDisabled || !actionsReady;
     // Read-only while an env-file fetch is in flight: changeEnvFile overwrites the
     // buffer when it resolves, so edits typed during the load would be silently lost.
     const editorReadOnly = !canEdit || isFileLoading;
@@ -185,7 +189,7 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
                             type="button"
                             variant="outline"
                             onClick={requestSave}
-                            disabled={actionsDisabled}
+                            disabled={saveDisabled}
                             data-testid="mobile-editor-save"
                             className="h-11 flex-1 rounded-lg"
                         >
@@ -196,7 +200,7 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
                             type="button"
                             variant="default"
                             onClick={requestSaveAndDeploy}
-                            disabled={actionsDisabled}
+                            disabled={saveAndDeployDisabled}
                             data-testid="mobile-editor-save-deploy"
                             className="h-11 flex-1 rounded-lg"
                         >

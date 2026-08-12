@@ -2024,12 +2024,15 @@ describe('useStackActions hydration readiness gates', () => {
     expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
   });
 
-  it('blocks restartStack while readiness is absent', async () => {
+  it('blocks restartStack while readiness is absent without starting an operation session', async () => {
+    lastRunWithLogParams = null;
     const { result } = setup({ stackList: { hydrationReady: () => false } as never });
     await result.current.restartStack();
     expect(result.current.getStackMenuVisibility('web.yml')).toEqual({
       showDeploy: false, showStop: false, showRestart: false, showUpdate: false, showTakeDown: false,
     });
+    // No deploy-feedback session may start while blocked.
+    expect(lastRunWithLogParams).toBeNull();
   });
 
   it('keeps restart available for a confirmed self stack when ready', () => {
@@ -2042,5 +2045,42 @@ describe('useStackActions hydration readiness gates', () => {
     const v = result.current.getStackMenuVisibility('sencho.yml');
     expect(v.showRestart).toBe(true);
     expect(v.showDeploy).toBe(false);
+  });
+});
+
+describe('useStackActions deferred readiness-loss guards', () => {
+  it('blocks the update-readiness proceed when readiness was lost after the dialog opened', async () => {
+    lastRunWithLogParams = null;
+    const { result, overlayState, stackListState } = setup({ hasUpdateGuard: true });
+    await act(async () => {
+      await result.current.updateStack();
+    });
+    // The mock was invoked with the object form (never the setter form).
+    const proceed = (
+      vi.mocked(overlayState.setUpdateReadiness).mock.calls[0][0] as { proceed: () => void }
+    ).proceed;
+    // Readiness lost while the dialog is open (node switch, failed refresh).
+    vi.mocked(stackListState.hydrationReady).mockReturnValue(false);
+    await act(async () => {
+      proceed();
+    });
+    // No operation session may start against either the current or captured node.
+    expect(lastRunWithLogParams).toBeNull();
+  });
+
+  it('blocks a deferred service update when readiness was lost after the dialog opened', async () => {
+    lastRunWithLogParams = null;
+    const { result, overlayState, stackListState } = setup({ hasUpdateGuard: true });
+    await act(async () => {
+      await result.current.requestServiceUpdate('web.yml', 'web');
+    });
+    const proceed = (
+      vi.mocked(overlayState.setUpdateReadiness).mock.calls[0][0] as { proceed: () => void }
+    ).proceed;
+    vi.mocked(stackListState.hydrationReady).mockReturnValue(false);
+    await act(async () => {
+      proceed();
+    });
+    expect(lastRunWithLogParams).toBeNull();
   });
 });

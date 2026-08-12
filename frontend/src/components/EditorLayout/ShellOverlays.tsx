@@ -1,4 +1,5 @@
 import BashExecModal from '../BashExecModal';
+import { toast } from '@/components/ui/toast-store';
 import { PolicyBlockDialog } from '../stack/PolicyBlockDialog';
 import { PreDeployScanDialog } from '../stack/PreDeployScanDialog';
 import { MissingExternalNetworksDialog } from '../stack/MissingExternalNetworksDialog';
@@ -279,16 +280,20 @@ export function ShellOverlays({
         confirming={diffPreviewConfirming}
         isDarkMode={isDarkMode}
         onConfirm={async () => {
-          // Recheck before the PUT: Save & Deploy from the diff preview must
-          // not write the file while status evidence is not authoritative.
-          if (!hydrationReady()) return;
           const snapshot = diffPreview;
           setDiffPreviewConfirming(true);
           try {
             if (snapshot?.mode === 'save-and-deploy') {
+              // Recheck before the PUT: Save & Deploy from the diff preview must
+              // not write the file while status evidence is not authoritative.
+              if (!hydrationReady()) {
+                toast.error('Status data unavailable. Refresh and try again.');
+                return;
+              }
               const saved = await stackActions.saveFile();
               if (saved) await stackActions.deployStack();
             } else {
+              // Plain Save is never gated by status readiness.
               await stackActions.saveFile();
             }
           } finally {

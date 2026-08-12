@@ -532,3 +532,95 @@ describe('useStackListState.hydration concurrency and evidence', () => {
   });
 });
 
+describe('useStackListState delayed prior-node arbitration', () => {
+  it('never lets a delayed prior-node list response replace the current node state', async () => {
+    let resolveListA: (r: Response) => void;
+    const gateA = new Promise<Response>((r) => { resolveListA = r; });
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return gateA;
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'a.yml': { status: 'running' } }));
+      return Promise.resolve(notFound());
+    });
+    const { result, rerender } = renderHook(() => useStackListState());
+    let fgA: Promise<string[]> | undefined;
+    await act(async () => {
+      fgA = result.current.refreshStacks();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Switch to node B and complete a full foreground refresh.
+    useNodesMock.mockReturnValue({
+      activeNode: { id: 2, name: 'B', type: 'remote' },
+      nodes: [{ id: 2, name: 'B', type: 'remote' }],
+    });
+    rerender();
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['b.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'b.yml': { status: 'running' } }));
+      return Promise.resolve(notFound());
+    });
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.files).toEqual(['b.yml']);
+    expect(result.current.filesNodeId).toBe(2);
+    expect(result.current.hydrationStatus).toBe('ok');
+    expect(result.current.actionsReady).toBe(true);
+
+    // Node A's delayed list finally resolves: it must not overwrite B.
+    await act(async () => {
+      resolveListA!(okJson(['a.yml']));
+      await fgA;
+    });
+    expect(result.current.files).toEqual(['b.yml']);
+    expect(result.current.filesNodeId).toBe(2);
+    expect(result.current.hydrationStatus).toBe('ok');
+    expect(result.current.actionsReady).toBe(true);
+    expect(result.current.isLoading).toBe(false);
+  });
+
+  it('never lets a delayed prior-node status response replace the current node state', async () => {
+    let resolveStatusA: (r: Response) => void;
+    const gateStatusA = new Promise<Response>((r) => { resolveStatusA = r; });
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['a.yml']));
+      if (endpoint === '/stacks/statuses') return gateStatusA;
+      return Promise.resolve(notFound());
+    });
+    const { result, rerender } = renderHook(() => useStackListState());
+    let fgA: Promise<string[]> | undefined;
+    await act(async () => {
+      fgA = result.current.refreshStacks();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Node B completes fully while A's statuses are still pending.
+    useNodesMock.mockReturnValue({
+      activeNode: { id: 2, name: 'B', type: 'remote' },
+      nodes: [{ id: 2, name: 'B', type: 'remote' }],
+    });
+    rerender();
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['b.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'b.yml': { status: 'running' } }));
+      return Promise.resolve(notFound());
+    });
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.files).toEqual(['b.yml']);
+    expect(result.current.hydrationStatus).toBe('ok');
+
+    // A's delayed statuses resolve: the stale check must discard them.
+    await act(async () => {
+      resolveStatusA!(okJson({ 'a.yml': { status: 'exited' } }));
+      await fgA;
+    });
+    expect(result.current.files).toEqual(['b.yml']);
+    expect(result.current.filesNodeId).toBe(2);
+    expect(result.current.hydrationStatus).toBe('ok');
+    expect(result.current.stackStatuses).toEqual({ 'b.yml': 'running' });
+    expect(result.current.actionsReady).toBe(true);
+  });
+});
+
