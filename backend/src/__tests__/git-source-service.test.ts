@@ -947,6 +947,47 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
         expect(result.message).toMatch(/validation failed/i);
         runSpy.mockRestore();
     });
+
+    it('routes webhook auto-apply through the shared stack-operation lock', async () => {
+        const sha = 'ffff666ffff666ffff666ffff666ffff666ffff6';
+        mockSuccessfulClone({ sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        await svc.upsert({
+            stackName: 'webhook-shared-lock',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: true,
+            autoDeployOnApply: false,
+        });
+        mockGitClone.mockClear();
+
+        const { StackOpLockService } = await import('../services/StackOpLockService');
+        const runExclusive = vi.spyOn(StackOpLockService.getInstance(), 'runExclusive')
+            .mockResolvedValue({
+                ran: false,
+                existing: { action: 'update', actor: 'user:admin', startedAt: Date.now() },
+            } as never);
+
+        const result = await svc.handleWebhookPull('webhook-shared-lock');
+        expect(result.status).toBe('error');
+        expect(result.message).toMatch(/already in progress/i);
+        expect(runExclusive).toHaveBeenCalledWith(
+            expect.any(Number),
+            'webhook-shared-lock',
+            'git_apply',
+            'system:webhook',
+            expect.any(Function),
+        );
+
+        runExclusive.mockRestore();
+        validateSpy.mockRestore();
+    });
 });
 
 describe('GitSourceService per-stack mutex', () => {

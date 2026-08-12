@@ -28,6 +28,7 @@ import {
   BLUEPRINT_MARKER_FILENAME,
   parseBlueprintMarker,
 } from '../helpers/blueprintMarker';
+import { scrapeRollbackTagsLenient } from './recoveryServicesJson';
 
 /**
  * Directory that may contain recovery override files for a tombstone sweep.
@@ -84,23 +85,7 @@ function collectArtifactsFromGenerations(
 
   for (const gen of generations) {
     if (gen.override_path) overridePaths.add(gen.override_path);
-    try {
-      const parsed: unknown = JSON.parse(gen.services_json);
-      if (!Array.isArray(parsed)) continue;
-      for (const svc of parsed) {
-        if (!svc || typeof svc !== 'object') continue;
-        const replicas = (svc as { replicas?: unknown }).replicas;
-        if (!Array.isArray(replicas)) continue;
-        for (const replica of replicas) {
-          const tag = replica && typeof replica === 'object'
-            ? (replica as { rollbackTag?: unknown }).rollbackTag
-            : null;
-          if (typeof tag === 'string' && tag.trim()) tags.add(tag);
-        }
-      }
-    } catch {
-      // Corrupt capture JSON: skip tags for this generation.
-    }
+    for (const tag of scrapeRollbackTagsLenient(gen.services_json)) tags.add(tag);
   }
 
   return { tags: [...tags], overridePaths: [...overridePaths] };

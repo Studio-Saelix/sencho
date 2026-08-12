@@ -22,10 +22,17 @@ import { FileSystemService } from './FileSystemService';
 import { buildEffectiveServiceModel } from './effectiveServiceModel';
 import {
   classifyReferenceKind,
-  type ImageReferenceKind,
   resolveComposeProjectContext,
   resolveComposeProjectContextForGeneration,
 } from './composeProjectContext';
+import {
+  collectImageIds,
+  collectRollbackTags,
+  parseServicesJsonStrict,
+  scrapeRollbackTagsLenient,
+  type StackRecoveryReplicaCapture,
+  type StackRecoveryServiceCapture,
+} from './recoveryServicesJson';
 import { getComposeCommandTimeoutMs } from './ComposeService';
 import { assessGenerationEligibility } from './rollbackEligibility';
 import { enforcePolicyForImageRefs, type PolicyEnforcementOptions } from './PolicyEnforcement';
@@ -43,6 +50,9 @@ import { getBackupBaseDir, RollbackGenerationStore } from './RollbackGenerationS
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
+
+export type { StackRecoveryReplicaCapture, StackRecoveryServiceCapture } from './recoveryServicesJson';
+export { parseServicesJsonStrict } from './recoveryServicesJson';
 
 const GENERATION_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -199,24 +209,6 @@ const RECOVERY_TTL_BUFFER_MS = 30 * 60_000;
 const GATE_RETAIN_DEFAULT_MS = 2 * 60 * 60_000;
 const RECOVERY_PROBE_DELAY_MS = 3_000;
 
-export interface StackRecoveryReplicaCapture {
-  containerId: string | null;
-  imageId: string | null;
-  repoDigest: string | null;
-  state: 'running' | 'stopped' | 'none';
-  rollbackTag: string | null;
-}
-
-export interface StackRecoveryServiceCapture {
-  serviceName: string;
-  /** Observed running replica count at capture (supported restore scale). */
-  scale: number;
-  hasBuild: boolean;
-  declaredImageRef: string | null;
-  referenceKind: ImageReferenceKind;
-  replicas: StackRecoveryReplicaCapture[];
-}
-
 export interface CaptureStackUpdateInput {
   nodeId: number;
   stackName: string;
@@ -240,46 +232,6 @@ export function shortGenerationId(generationId: string): string {
 
 function opaqueRollbackTag(generationId: string, serviceName: string): string {
   return `sencho-rb/${shortGenerationId(generationId)}/${sanitizeServiceSlug(serviceName)}:hold`;
-}
-
-type ParsedServicesJson =
-  | { ok: true; services: StackRecoveryServiceCapture[] }
-  | { ok: false };
-
-function parseServicesJsonStrict(raw: string): ParsedServicesJson {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return { ok: false };
-    return { ok: true, services: parsed as StackRecoveryServiceCapture[] };
-  } catch {
-    return { ok: false };
-  }
-}
-
-/** Lenient parse for callers that treat empty as no services (legacy). Prefer strict. */
-function parseServicesJson(raw: string): StackRecoveryServiceCapture[] {
-  const parsed = parseServicesJsonStrict(raw);
-  return parsed.ok ? parsed.services : [];
-}
-
-export function collectImageIdsFromServicesJson(servicesJson: string): string[] {
-  const ids = new Set<string>();
-  for (const svc of parseServicesJson(servicesJson)) {
-    for (const replica of svc.replicas ?? []) {
-      if (replica.imageId && replica.imageId.trim()) ids.add(replica.imageId);
-    }
-  }
-  return [...ids];
-}
-
-function collectRollbackTags(services: StackRecoveryServiceCapture[]): string[] {
-  const tags = new Set<string>();
-  for (const svc of services) {
-    for (const replica of svc.replicas ?? []) {
-      if (replica.rollbackTag) tags.add(replica.rollbackTag);
-    }
-  }
-  return [...tags];
 }
 
 export class StackUpdateRecoveryService {
@@ -508,6 +460,23 @@ export class StackUpdateRecoveryService {
           referenceKind,
           replicas,
         });
+      }
+
+      for (const svc of services) {
+        const imageIds = new Set<string>();
+        for (const replica of svc.replicas) {
+          if ((replica.state === 'running' || replica.state === 'stopped') && replica.imageId?.trim()) {
+            imageIds.add(replica.imageId);
+          }
+        }
+        if (imageIds.size > 1) {
+          throw Object.assign(
+            new Error(
+              `Service "${svc.serviceName}" has mixed replica images; refusing recovery capture that cannot restore exact prior identity`,
+            ),
+            { code: 'MIXED_REPLICA_IMAGES' },
+          );
+        }
       }
 
       const taggedIds = new Set<string>();
@@ -872,8 +841,8 @@ export class StackUpdateRecoveryService {
       const rollbackTags = collectRollbackTags(servicesParsed.services);
       const heldRefs = rollbackTags.length > 0
         ? rollbackTags
-        : collectImageIdsFromServicesJson(row.services_json);
-      if (heldRefs.length === 0 && servicesParsed.services.some((s) => (s.scale ?? 0) > 0)) {
+        : collectImageIds(servicesParsed.services);
+      if (heldRefs.length === 0 && servicesParsed.services.some((s) => s.scale > 0)) {
         throw Object.assign(
           new Error('Recovery generation has no held image references for running services'),
           { code: 'ROLLBACK_PROHIBITED' },
@@ -1050,7 +1019,7 @@ export class StackUpdateRecoveryService {
 
       for (const svc of expected) {
         const imageIds = new Set<string>();
-        for (const replica of svc.replicas ?? []) {
+        for (const replica of svc.replicas) {
           if (replica.imageId?.trim()) imageIds.add(replica.imageId);
         }
         if (svc.scale > 0) {
@@ -1122,9 +1091,13 @@ export class StackUpdateRecoveryService {
       }
 
       for (const [serviceName, need] of expectedRunning) {
-        if ((runningByService.get(serviceName) ?? 0) < need) {
+        if ((runningByService.get(serviceName) ?? 0) !== need) {
           return false;
         }
+      }
+      // Scale-zero services never enter runningByService (failed above if running).
+      for (const serviceName of runningByService.keys()) {
+        if (!expectedRunning.has(serviceName)) return false;
       }
       return true;
     } catch (error) {
@@ -1144,8 +1117,17 @@ export class StackUpdateRecoveryService {
    */
   public async retireGenerationArtifacts(row: StackUpdateRecoveryGenerationRow): Promise<boolean> {
     if (row.artifacts_retired === 1) return true;
-    const services = parseServicesJson(row.services_json);
-    const tagsOk = await this.removeRollbackTags(row.node_id, collectRollbackTags(services));
+    const servicesParsed = parseServicesJsonStrict(row.services_json);
+    const tags = servicesParsed.ok
+      ? collectRollbackTags(servicesParsed.services)
+      : scrapeRollbackTagsLenient(row.services_json);
+    if (!servicesParsed.ok) {
+      console.warn(
+        '[StackUpdateRecovery] Malformed services_json for %s; using best-effort tag scrape before override/content retirement',
+        sanitizeForLog(row.id),
+      );
+    }
+    const tagsOk = await this.removeRollbackTags(row.node_id, tags);
     let overrideOk = true;
     if (row.override_path) {
       try {

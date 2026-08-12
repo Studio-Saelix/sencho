@@ -22,7 +22,7 @@ const report = (overall: Overall) => ({
   overall,
   items: [
     { id: 'compose_source', state: 'ready', label: 'Previous compose file', detail: 'A backup is available to restore.' },
-    { id: 'volume_data', state: 'not_covered', label: 'Application data', detail: 'Named volumes and bind-mounted data are not included in file backups.' },
+    { id: 'volume_data', state: 'not_covered', label: 'Application data', detail: 'Named volumes and bind-mounted data are not included in recovery generations.' },
   ],
 });
 
@@ -42,7 +42,7 @@ describe('RollbackReadinessSection', () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify(report('ready')), { status: 200 }));
     render(<RollbackReadinessSection stackName="web" />);
     await waitFor(() => expect(screen.getByText('Application data')).toBeInTheDocument());
-    expect(screen.getByText(/not included in file backups/)).toBeInTheDocument();
+    expect(screen.getByText(/not included in recovery generations/)).toBeInTheDocument();
   });
 
   it('renders nothing without the update-guard capability and never fetches', () => {
@@ -65,7 +65,7 @@ describe('RollbackReadinessSection', () => {
       overall: 'not_ready',
       items: [
         { id: 'policy', state: 'blocked', label: 'Security policy', detail: 'Rollback target is prohibited by current policy.' },
-        { id: 'volume_data', state: 'not_covered', label: 'Application data', detail: 'Named volumes and bind-mounted data are not included in file backups.' },
+        { id: 'volume_data', state: 'not_covered', label: 'Application data', detail: 'Named volumes and bind-mounted data are not included in recovery generations.' },
       ],
     }), { status: 200 }));
     render(<RollbackReadinessSection stackName="web" />);
@@ -81,7 +81,7 @@ describe('RollbackReadinessSection', () => {
       overall: 'partial',
       items: [
         { id: 'held_images', state: 'warning', label: 'Held images', detail: 'Some held images could not be verified.' },
-        { id: 'volume_data', state: 'not_covered', label: 'Application data', detail: 'Named volumes and bind-mounted data are not included in file backups.' },
+        { id: 'volume_data', state: 'not_covered', label: 'Application data', detail: 'Named volumes and bind-mounted data are not included in recovery generations.' },
       ],
     }), { status: 200 }));
     render(<RollbackReadinessSection stackName="web" />);

@@ -18,6 +18,7 @@ import { readSnapshotFileRow, type SnapshotFileReadResult, type SnapshotFileRow 
 import { sanitizeForLog } from '../utils/safeLog';
 import type { GitSourceManifestState } from '../types/gitProjectManifest';
 import type { RollbackOperationKind } from '../types/rollbackGeneration';
+import { collectImageIds, parseServicesJsonStrict } from './recoveryServicesJson';
 
 export type { SnapshotFileReadResult } from '../helpers/snapshotFileDecrypt';
 export type { RollbackOperationKind } from '../types/rollbackGeneration';
@@ -4440,26 +4441,13 @@ export class DatabaseService {
         ).all(nodeId, now, now) as Array<{ services_json: string }>;
         const ids = new Set<string>();
         for (const row of rows) {
-            try {
-                const parsed: unknown = JSON.parse(row.services_json);
-                if (!Array.isArray(parsed)) continue;
-                for (const item of parsed) {
-                    if (!item || typeof item !== 'object') continue;
-                    const replicas = (item as { replicas?: unknown }).replicas;
-                    if (Array.isArray(replicas)) {
-                        for (const replica of replicas) {
-                            if (replica && typeof replica === 'object'
-                                && typeof (replica as { imageId?: unknown }).imageId === 'string'
-                                && (replica as { imageId: string }).imageId.trim()) {
-                                ids.add((replica as { imageId: string }).imageId);
-                            }
-                        }
-                    } else if (typeof (item as { imageId?: unknown }).imageId === 'string') {
-                        ids.add((item as { imageId: string }).imageId);
-                    }
-                }
-            } catch {
-                // Corrupt JSON: skip.
+            const parsed = parseServicesJsonStrict(row.services_json);
+            if (!parsed.ok) {
+                // Fail closed: corrupt hold metadata must not look like "nothing held".
+                throw new Error('Malformed stack recovery services_json while listing held images');
+            }
+            for (const id of collectImageIds(parsed.services)) {
+                ids.add(id);
             }
         }
         return [...ids];

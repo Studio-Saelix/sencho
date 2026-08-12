@@ -57,9 +57,9 @@ describe('buildRollbackItems', () => {
   it('marks the volume row not_covered unconditionally and names the mounts', () => {
     const item = itemById(baseInputs(), 'volume_data');
     expect(item.state).toBe('not_covered');
-    expect(item.detail).toContain('not included in file backups');
+    expect(item.detail).toContain('not included in recovery generations');
     expect(item.detail).toContain('volume app_data');
-
+    expect(item.detail).toMatch(/managed authored project/i);
     const noMounts = itemById(baseInputs({ containers: [] }), 'volume_data');
     expect(noMounts.state).toBe('not_covered');
 

@@ -1741,26 +1741,38 @@ export class GitSourceService {
         commitSha: string,
         opts: { deploy?: boolean; actor?: string; bypassPolicy?: boolean } = {},
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
-        return this.withStackLock(stackName, async () => {
-            const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
-            const lock = await StackOpLockService.getInstance().runExclusive(
-                nodeId,
-                stackName,
-                'git_apply',
-                opts.actor ?? 'system:git-source',
-                () => this.applyLocked(stackName, commitSha, opts),
-            );
-            if (!lock.ran) {
-                throw new GitSourceError(
-                    'GIT_ERROR',
-                    `Another operation (${lock.existing.action}) is already in progress for ${stackName}.`,
-                );
-            }
-            return lock.result;
-        });
+        return this.withStackLock(stackName, () => this.applyWithSharedLock(stackName, commitSha, opts));
     }
 
-    /** Body of apply(); assumes the caller already holds the per-stack lock. */
+    /**
+     * Acquire the shared stack-operation lock then run applyLocked.
+     * Callers that already hold the Git per-stack mutex (public apply, webhook
+     * auto-apply) use this so capture/promote/handoff/deploy cannot race other
+     * lifecycle ops. Do not nest withStackLock here.
+     */
+    private async applyWithSharedLock(
+        stackName: string,
+        commitSha: string,
+        opts: { deploy?: boolean; actor?: string; bypassPolicy?: boolean },
+    ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const lock = await StackOpLockService.getInstance().runExclusive(
+            nodeId,
+            stackName,
+            'git_apply',
+            opts.actor ?? 'system:git-source',
+            () => this.applyLocked(stackName, commitSha, opts),
+        );
+        if (!lock.ran) {
+            throw new GitSourceError(
+                'GIT_ERROR',
+                `Another operation (${lock.existing.action}) is already in progress for ${stackName}.`,
+            );
+        }
+        return lock.result;
+    }
+
+    /** Body of apply(); assumes the caller already holds Git mutex + shared stack lock. */
     private async applyLocked(
         stackName: string,
         commitSha: string,
@@ -2511,7 +2523,10 @@ export class GitSourceService {
                     return { status: 'success', message: `Pending update ready at ${pullResult.commitSha.slice(0, 7)}.` };
                 }
 
-                const applied = await this.applyLocked(stackName, pullResult.commitSha, { deploy: src.auto_deploy_on_apply });
+                const applied = await this.applyWithSharedLock(stackName, pullResult.commitSha, {
+                    deploy: src.auto_deploy_on_apply,
+                    actor: 'system:webhook',
+                });
                 if (applied.deployError) {
                     // Apply wrote to disk but deploy failed. Surface it so the
                     // webhook_executions row records a degraded outcome instead

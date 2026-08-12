@@ -7,6 +7,11 @@
 import type { StackUpdateRecoveryGenerationRow } from './DatabaseService';
 import DockerController from './DockerController';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
+import {
+  collectImageIds,
+  collectRollbackTags,
+  parseServicesJsonStrict,
+} from './recoveryServicesJson';
 import { RollbackGenerationStore } from './RollbackGenerationStore';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -16,27 +21,13 @@ type HeldImagesParse =
   | { ok: false };
 
 function parseHeldImageState(servicesJson: string): HeldImagesParse {
-  try {
-    const parsed: unknown = JSON.parse(servicesJson);
-    if (!Array.isArray(parsed)) return { ok: false };
-    const ids = new Set<string>();
-    const tags = new Set<string>();
-    for (const svc of parsed) {
-      if (!svc || typeof svc !== 'object') continue;
-      const replicas = (svc as { replicas?: unknown }).replicas;
-      if (!Array.isArray(replicas)) continue;
-      for (const replica of replicas) {
-        if (!replica || typeof replica !== 'object') continue;
-        const imageId = (replica as { imageId?: unknown }).imageId;
-        if (typeof imageId === 'string' && imageId.trim()) ids.add(imageId);
-        const rollbackTag = (replica as { rollbackTag?: unknown }).rollbackTag;
-        if (typeof rollbackTag === 'string' && rollbackTag.trim()) tags.add(rollbackTag);
-      }
-    }
-    return { ok: true, ids: [...ids], rollbackTags: [...tags] };
-  } catch {
-    return { ok: false };
-  }
+  const parsed = parseServicesJsonStrict(servicesJson);
+  if (!parsed.ok) return { ok: false };
+  return {
+    ok: true,
+    ids: collectImageIds(parsed.services),
+    rollbackTags: collectRollbackTags(parsed.services),
+  };
 }
 
 export type RollbackEligibilityVerdict =
@@ -100,25 +91,38 @@ async function checkGenerationIntegrity(
   }
 }
 
+async function inspectImagePresent(
+  docker: ReturnType<ReturnType<typeof DockerController.getInstance>['getDocker']>,
+  ref: string,
+): Promise<boolean> {
+  try {
+    await docker.getImage(ref).inspect();
+    return true;
+  } catch (error) {
+    const status = (error as { statusCode?: number }).statusCode;
+    const message = getErrorMessage(error, '').toLowerCase();
+    if (status === 404 || message.includes('no such image') || message.includes('not found')) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Held recovery launch requires both underlying image ids and opaque rollback
+ * tags used by the recovery override to still resolve locally.
+ */
 async function checkHeldImagesPresent(
   row: StackUpdateRecoveryGenerationRow,
   held: HeldImagesParse,
 ): Promise<boolean | null> {
   if (!held.ok) return null;
-  if (held.ids.length === 0) return true;
+  const refs = [...new Set([...held.ids, ...held.rollbackTags])];
+  if (refs.length === 0) return true;
   try {
     const docker = DockerController.getInstance(row.node_id).getDocker();
-    for (const imageId of held.ids) {
-      try {
-        await docker.getImage(imageId).inspect();
-      } catch (error) {
-        const status = (error as { statusCode?: number }).statusCode;
-        const message = getErrorMessage(error, '').toLowerCase();
-        if (status === 404 || message.includes('no such image') || message.includes('not found')) {
-          return false;
-        }
-        throw error;
-      }
+    for (const ref of refs) {
+      if (!(await inspectImagePresent(docker, ref))) return false;
     }
     return true;
   } catch (error) {
@@ -136,7 +140,7 @@ async function checkSecurityPostureBlocked(
   held: HeldImagesParse,
 ): Promise<boolean | null> {
   if (!held.ok) return null;
-  const refs = [...new Set([...held.rollbackTags, ...held.ids])];
+  const refs = [...new Set([...held.ids, ...held.rollbackTags])];
   if (refs.length === 0) return false;
   try {
     const gate = await enforcePolicyForImageRefs(row.stack_name, row.node_id, refs, {

@@ -459,7 +459,7 @@ export function buildRollbackItems(inputs: RollbackInputs, now: number): Rollbac
     id: 'volume_data',
     state: 'not_covered',
     label: 'Application data',
-    detail: `Named volumes and bind-mounted data are not included in file backups. Rolling back restores compose and env files only; application data keeps its current state.${mountDetail}`,
+    detail: `Named volumes and bind-mounted data are not included in recovery generations. Rolling back restores the managed authored project (compose files, overrides, includes/extends, env and related inputs), Git identity when captured, and prior image holds; application data keeps its current state.${mountDetail}`,
   });
 
   return items;
