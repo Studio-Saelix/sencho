@@ -112,6 +112,7 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
     setComposeReapplyCapture: vi.fn(),
     composeReapplyCapture: null,
     setDiffPreview: vi.fn(),
+    setMissingExternalNetworks: vi.fn(),
     stackToDelete: null,
     closeDeleteDialog: vi.fn(),
     ...over,
@@ -131,6 +132,7 @@ function setup(over: {
   navState?: Partial<NavState>;
   getLastDeployOutputLine?: (stackName: string) => string | undefined;
   hasUpdateGuard?: boolean;
+  hasGuidedExternalNetworkPreflight?: boolean;
   canEditStack?: (stackNameOrFilename: string) => boolean;
   activeNode?: Parameters<typeof useStackActions>[0]['activeNode'];
   setActiveNode?: Parameters<typeof useStackActions>[0]['setActiveNode'];
@@ -170,6 +172,7 @@ function setup(over: {
       getLastDeployOutputLine: over.getLastDeployOutputLine ?? (() => undefined),
       diffPreviewEnabled: false,
       hasUpdateGuard: over.hasUpdateGuard ?? false,
+      hasGuidedExternalNetworkPreflight: over.hasGuidedExternalNetworkPreflight ?? false,
       canEditStack: over.canEditStack ?? (() => true),
       onDeletedOpenStack,
       removeNotificationsForStack,
@@ -2153,6 +2156,109 @@ describe('useStackActions deferred readiness-loss guards', () => {
     await act(async () => {
       proceed();
     });
+    expect(lastRunWithLogParams).toBeNull();
+  });
+});
+
+describe('useStackActions external-network ownership guards', () => {
+  function okJson(payload: unknown): Response {
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  it('does not create networks on the captured node from the proactive dialog after a switch', async () => {
+    lastRunWithLogParams = null;
+    vi.mocked(apiFetch).mockReset();
+    const networkPosts: string[] = [];
+    vi.mocked(apiFetch).mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/security/stacks/web/pre-deploy-summary') {
+        return okJson({ enabled: false });
+      }
+      if (url === '/stacks/web/missing-external-networks') {
+        return okJson({
+          status: 'ok',
+          stackName: 'web',
+          networks: [{ name: 'ext-net', safe: false }],
+          autoCreateEnabled: false,
+          declaredExternalCount: 1,
+        });
+      }
+      if (url === '/system/networks' && init?.method === 'POST') {
+        networkPosts.push(url);
+        return new Response(null, { status: 201 });
+      }
+      return new Response(null, { status: 200 });
+    });
+    const { result, overlayState, stackListState, rerender, activeNodeHolder } = setup({
+      hasGuidedExternalNetworkPreflight: true,
+    });
+    await act(async () => {
+      await result.current.deployStack();
+    });
+    const dialog = (
+      vi.mocked(overlayState.setMissingExternalNetworks).mock.calls[0][0] as unknown as {
+        createAndContinue: () => Promise<void>;
+      }
+    );
+    // Switch to node B and let it finish hydrating: readiness is true for B,
+    // but the dialog was captured for node A.
+    activeNodeHolder.current = { id: 2, name: 'B', type: 'remote' } as ActiveNode;
+    rerender();
+    vi.mocked(stackListState.hydrationReady).mockReturnValue(true);
+    await act(async () => {
+      await dialog.createAndContinue();
+    });
+    expect(networkPosts).toEqual([]);
+    expect(lastRunWithLogParams).toBeNull();
+  });
+
+  it('does not create networks on the captured node from the reactive 409 dialog after a switch', async () => {
+    lastRunWithLogParams = null;
+    vi.mocked(apiFetch).mockReset();
+    const networkPosts: string[] = [];
+    vi.mocked(apiFetch).mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/security/stacks/web/pre-deploy-summary') {
+        return okJson({ enabled: false });
+      }
+      if (url === '/stacks/web/deploy') {
+        // Reactive 409: the backend reports missing external networks.
+        return new Response(JSON.stringify({ code: 'missing_external_networks' }), { status: 409 });
+      }
+      if (url === '/stacks/web/missing-external-networks') {
+        return okJson({
+          status: 'ok',
+          stackName: 'web',
+          networks: [{ name: 'ext-net', safe: false }],
+          autoCreateEnabled: false,
+          declaredExternalCount: 1,
+        });
+      }
+      if (url === '/system/networks' && init?.method === 'POST') {
+        networkPosts.push(url);
+        return new Response(null, { status: 201 });
+      }
+      return new Response(null, { status: 200 });
+    });
+    const { result, overlayState, stackListState, rerender, activeNodeHolder } = setup({
+      hasGuidedExternalNetworkPreflight: true,
+    });
+    await act(async () => {
+      await result.current.deployStack();
+    });
+    const dialog = (
+      vi.mocked(overlayState.setMissingExternalNetworks).mock.calls[0][0] as unknown as {
+        createAndContinue: () => Promise<void>;
+      }
+    );
+    activeNodeHolder.current = { id: 2, name: 'B', type: 'remote' } as ActiveNode;
+    rerender();
+    vi.mocked(stackListState.hydrationReady).mockReturnValue(true);
+    await act(async () => {
+      await dialog.createAndContinue();
+    });
+    expect(networkPosts).toEqual([]);
     expect(lastRunWithLogParams).toBeNull();
   });
 });

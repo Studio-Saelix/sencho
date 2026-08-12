@@ -1290,6 +1290,15 @@ export function useStackActions(options: UseStackActionsOptions) {
 
     async function createAndContinue(): Promise<void> {
       if (settled) return;
+      // Final boundary recheck before ANY mutation: creating Docker networks
+      // on the captured node must not proceed after ownership was lost.
+      if (!hydrationReadyForNode(opNodeId)) {
+        settled = true;
+        overlayState.setMissingExternalNetworks(null);
+        deployPendingRef.current = false;
+        toast.error('Status data unavailable. Refresh and try again.');
+        return;
+      }
       setCreating(true);
 
       const created = await createSafeExternalNetworks(payload.networks, opNodeId);
@@ -1411,6 +1420,13 @@ export function useStackActions(options: UseStackActionsOptions) {
               throw parseStackActionError(await retry.text(), 'Deploy failed', retry.status);
             }
             openMissingExternalNetworksDialog(envelope, opNodeId ?? null, () => {
+              // Final boundary recheck: the reactive retry must not start a
+              // deploy on the captured node after ownership was lost.
+              if (!hydrationReadyForNode(opNodeId ?? null)) {
+                deployPendingRef.current = false;
+                toast.error('Status data unavailable. Refresh and try again.');
+                return;
+              }
               stackListState.setStackAction(stackFile, 'deploy');
               void runWithLog({ stackName, action: 'deploy', nodeId: opNodeId ?? null }, (startedRetry, ds) =>
                 runDeploy(stackName, stackFile, ignorePolicy, startedRetry, ds, opNodeId),
