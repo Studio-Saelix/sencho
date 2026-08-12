@@ -2611,20 +2611,23 @@ stacksRouter.get('/:stackName/backup', async (req: Request, res: Response) => {
 });
 
 stacksRouter.post('/:stackName/backup', async (req: Request, res: Response) => {
-  // Triggers a server-side backup of the stack's managed files: the same
-  // rollback snapshot a deploy takes. Exposed so a scheduled backup can run on
-  // a remote node through the proxy path, and so an operator can capture an
-  // on-demand snapshot.
+  // Captures files, holds, and a recovery override, then hands off that
+  // generation as current without compose or a runtime probe. Exposed so a
+  // scheduled backup can run on a remote node through the proxy path, and so
+  // an operator can capture an on-demand snapshot.
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
-  // The backup slot is shared with the pre-deploy rollback snapshot, so hold the
-  // stack-op lock to keep a backup from interleaving with a concurrent
-  // deploy/update/rollback on the same stack. All early-returns stay inside the
-  // try so finally always releases.
+  // Handoff mutates the current generation, so hold the stack-op lock against
+  // a concurrent deploy/update/rollback. After a successful acquire, release
+  // in finally.
   if (!tryAcquireStackOpLock(req, res, stackName, 'backup')) return;
   try {
-    await FileSystemService.getInstance(req.nodeId).backupStackFiles(stackName);
+    await StackUpdateRecoveryService.getInstance().captureCurrentBackup({
+      nodeId: req.nodeId,
+      stackName,
+      createdBy: req.user?.username ?? null,
+    });
     dlog(`[Stacks] Backup completed: ${sanitizeForLog(stackName)}`);
     res.json({ success: true });
   } catch (error: unknown) {

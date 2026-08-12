@@ -88,15 +88,8 @@ class AuthoredComposeProjectContext implements ComposeProjectContext {
       );
     }
 
-    // Also refresh the legacy single-slot backup for read-compat during migration.
-    try {
-      await FileSystemService.getInstance(this.nodeId).backupStackFiles(this.stackName);
-    } catch (e) {
-      console.warn(
-        `[ComposeProjectContext] Legacy backup slot refresh failed for ${this.stackName}:`,
-        getErrorMessage(e, 'unknown'),
-      );
-    }
+    // Do not refresh the legacy single-slot backup. Clearing that reused slot
+    // would destroy a pre-migration recovery point if a later capture step fails.
 
     const generationId = randomUUID();
     await RollbackGenerationStore.captureGeneration({

@@ -659,4 +659,130 @@ describe('RollbackGenerationStore', () => {
     expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe('NEW\n');
     expect(await fsPromises.readFile(path.join(stackDir, 'extra.yml'), 'utf8')).toBe('EXTRA\n');
   });
+
+  it('encrypts sensitive pre-restore snapshots and restores them from ciphertext', async () => {
+    const stackName = 'presensitive';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, '.env'), 'CAPTURED=1\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+        {
+          relativePath: '.env',
+          absolutePath: path.join(stackDir, '.env'),
+          kind: 'interpolation-env',
+          sensitivity: 'medium',
+        },
+      ]),
+    });
+
+    await fsPromises.writeFile(path.join(stackDir, '.env'), 'SUPERSECRET=live\n', 'utf8');
+    await RollbackGenerationStore.restoreGeneration(
+      NODE,
+      stackName,
+      generationId,
+      ['compose.yaml', '.env'],
+    );
+
+    const genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
+    const blobsDir = path.join(genDir, 'pre-restore', 'blobs');
+    const blobNames = await fsPromises.readdir(blobsDir);
+    expect(blobNames.length).toBeGreaterThan(0);
+    for (const name of blobNames) {
+      const blob = await fsPromises.readFile(path.join(blobsDir, name));
+      expect(blob.toString('utf8')).not.toContain('SUPERSECRET');
+      expect(blob.toString('utf8')).not.toContain('CAPTURED=1');
+    }
+    const index = JSON.parse(
+      await fsPromises.readFile(path.join(genDir, 'pre-restore', 'index.json'), 'utf8'),
+    ) as { entries: Array<{ relativePath: string; encrypted?: boolean; blobId?: string }> };
+    const envEntry = index.entries.find((e) => e.relativePath === '.env');
+    expect(envEntry?.encrypted).toBe(true);
+    expect(envEntry?.blobId).toBeTruthy();
+    const envBlob = await fsPromises.readFile(path.join(blobsDir, envEntry!.blobId!), 'utf8');
+    expect(envBlob.startsWith('enc:')).toBe(true);
+    expect(envBlob).not.toContain('SUPERSECRET');
+
+    await RollbackGenerationStore.reconcileInterruptedRestore(NODE, stackName, generationId);
+    expect(await fsPromises.readFile(path.join(stackDir, '.env'), 'utf8')).toBe('SUPERSECRET=live\n');
+  });
+
+  it('persists runtime image identity on an existing generation', async () => {
+    const stackName = 'imgid';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      ]),
+    });
+
+    await RollbackGenerationStore.attachImages(NODE, stackName, generationId, [{
+      serviceName: 'web',
+      imageId: 'sha256:abc',
+      repoDigest: 'nginx@sha256:digest',
+      platform: 'linux/amd64',
+      declaredImageRef: 'nginx:latest',
+    }]);
+
+    const genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
+    const manifest = JSON.parse(
+      await fsPromises.readFile(path.join(genDir, 'generation.json'), 'utf8'),
+    ) as { images: Array<{ serviceName: string; imageId: string; repoDigest: string; platform: string }> };
+    expect(manifest.images).toEqual([{
+      serviceName: 'web',
+      imageId: 'sha256:abc',
+      repoDigest: 'nginx@sha256:digest',
+      platform: 'linux/amd64',
+      declaredImageRef: 'nginx:latest',
+    }]);
+  });
+
+  it('does not recursively delete a directory created after an absent-file snapshot', async () => {
+    const stackName = 'dirrace';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'OLD\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      ]),
+    });
+
+    await RollbackGenerationStore.restoreGeneration(
+      NODE,
+      stackName,
+      generationId,
+      ['compose.yaml', 'scratch'],
+    );
+
+    const scratchDir = path.join(stackDir, 'scratch');
+    await fsPromises.mkdir(scratchDir, { recursive: true });
+    await fsPromises.writeFile(path.join(scratchDir, 'keep.txt'), 'unrelated\n', 'utf8');
+
+    await expect(
+      RollbackGenerationStore.reconcileInterruptedRestore(NODE, stackName, generationId),
+    ).rejects.toMatchObject({ code: 'DIRECTORY_COLLISION' });
+
+    expect(await fsPromises.readFile(path.join(scratchDir, 'keep.txt'), 'utf8')).toBe('unrelated\n');
+    const genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
+    await expect(fsPromises.access(path.join(genDir, 'restore-intent.json'))).resolves.toBeUndefined();
+  });
 });

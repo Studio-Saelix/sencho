@@ -90,7 +90,7 @@ Open **Settings > Infrastructure > Stacks > Deploy Guardrails** on the node you 
 
 The Stack Dossier carries a **Rollback readiness** section that answers one question honestly: if this update goes wrong, what can a rollback actually restore? It reports an overall state of Ready, Partial, or Not ready, built from:
 
-- **Recovery generation**: whether a current generation exists for exact restore. Atomic deploy, full-stack update, and Git apply capture one.
+- **Recovery generation**: whether a current generation exists for exact restore. Atomic deploy, full-stack update, Git apply, and on-demand or scheduled stack backup capture one.
 - **Managed inputs**: whether the managed authored inventory (ordered compose files, overrides, include/extends, and discoverable env/label/config/secret inputs) is covered exactly.
 - **Previous compose file** / **Previous env file**: compose and env coverage disclosures (driven by the current generation when one exists).
 - **Previous image tag**: the known rollback target. When a generation holds prior image IDs, restore can retarget moving tags and supported local builds to those exact images; when no prior ID was captured, restoring files alone may leave a moving tag on a newer digest.
@@ -98,10 +98,6 @@ The Stack Dossier carries a **Rollback readiness** section that answers one ques
 - **Healthchecks**: whether a rollback can be verified beyond run state.
 - **Rollback eligibility**: whether policy allows restore for the current generation (integrity and held-image posture).
 - **Application data**: always reported as not covered. Named volumes and bind-mounted data are not included; a rollback restores the managed authored inventory (and held images where available), and your application data keeps its current state. This row exists so the limit is stated where you decide, not discovered during an incident.
-
-<Frame>
-  <img src="/images/health-gated-updates/dossier-rollback-readiness.png" alt="Rollback readiness section in the Stack Dossier showing the overall state chip and rows for recovery generation, managed inputs, compose and env coverage, previous image identity, last successful deploy, healthchecks, rollback eligibility, and application data marked not covered" />
-</Frame>
 
 ## Automatic rollback images
 
@@ -111,7 +107,7 @@ Each capture is one **rollback generation**. The generation currently backing a 
 
 The health gate remains observational: it records a verdict and surfaces recovery actions, but it never rolls anything back on its own. Automatic restore after handoff belongs to the atomic deploy/update path when a crash is detected; manual **Rollback** prefers the current recovery generation.
 
-**Resources → Rollback** lists every generation on the node: the stack it belongs to, a short generation id, whether it is the current protection or a superseded one awaiting cleanup, and roughly when it clears. Search by stack name or generation id, filter to Current or Superseded, and click a column header to sort. An admin can release a generation's protection early from that list, including the current one, which immediately frees its image but means Sencho cannot automatically roll that stack back until its next successful atomic deploy, full-stack update, or Git apply capture; the confirmation dialog says so before you proceed. A generation that is mid-recovery or still being observed by a health gate cannot be released until that finishes.
+**Resources → Rollback** lists every generation on the node: the stack it belongs to, a short generation id, whether it is the current protection or a superseded one awaiting cleanup, and roughly when it clears. Search by stack name or generation id, filter to Current or Superseded, and click a column header to sort. An admin can release a generation's protection early from that list, including the current one, which immediately frees its image but means Sencho cannot automatically roll that stack back until its next successful atomic deploy, full-stack update, Git apply, or stack backup capture; the confirmation dialog says so before you proceed. A generation that is mid-recovery or still being observed by a health gate cannot be released until that finishes.
 
 <Frame>
   <img src="/images/health-gated-updates/rollback-generations.png" alt="Resources Rollback tab showing search, All Current and Superseded filter buttons, an info icon for help, and sortable Stack, Generation, State, and Retention column headers above the generations table" />

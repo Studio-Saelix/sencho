@@ -25,7 +25,7 @@ import {
   type RollbackRestoreTransactionMeta,
 } from '../types/rollbackGeneration';
 import { GitProjectManifestService } from './GitProjectManifestService';
-import type { GitProjectManifest } from '../types/gitProjectManifest';
+import type { GitProjectManifest, InputSensitivity } from '../types/gitProjectManifest';
 
 const GENERATION_JSON = 'generation.json';
 const FILES_DIR = 'files';
@@ -40,6 +40,7 @@ interface PreRestoreIndexEntry {
   state: 'present' | 'absent';
   blobId?: string;
   mode?: number | null;
+  encrypted?: boolean;
 }
 
 interface PreRestoreIndex {
@@ -57,6 +58,26 @@ function getBackupBaseDir(): string {
 
 function posixRel(rel: string): string {
   return rel.replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+function shouldEncryptPreRestore(sensitivity: InputSensitivity | undefined): boolean {
+  // Unknown sensitivity is encrypted fail-closed; only explicit low stays plaintext.
+  return sensitivity !== 'low';
+}
+
+async function chmodPrivate(target: string, mode: number): Promise<void> {
+  if (process.platform === 'win32') return;
+  await fsPromises.chmod(target, mode);
+}
+
+async function mkdirPrivate(dir: string): Promise<void> {
+  await fsPromises.mkdir(dir, { recursive: true, mode: 0o700 });
+  await chmodPrivate(dir, 0o700);
+}
+
+async function writePrivate(target: string, data: string | Buffer): Promise<void> {
+  await fsPromises.writeFile(target, data);
+  await chmodPrivate(target, 0o600);
 }
 
 function assertSafeGenerationId(generationId: string): void {
@@ -383,6 +404,54 @@ export class RollbackGenerationStore {
   }
 
   /**
+   * Persist finalized runtime image identity on an already-captured generation.
+   * Capture writes files first; image inspect happens after, so the manifest
+   * images array is patched in place once IDs, digests, and platform are known.
+   */
+  static async attachImages(
+    nodeId: number,
+    stackName: string,
+    generationId: string,
+    images: RollbackImageIdentity[],
+  ): Promise<void> {
+    assertSafeStackName(stackName);
+    assertSafeGenerationId(generationId);
+    const genDir = this.getGenerationDir(nodeId, stackName, generationId);
+    const genResolved = path.resolve(genDir);
+    const manifest = await this.readAndVerifyGeneration(genResolved);
+    const seen = new Set<string>();
+    for (const image of images) {
+      const name = image.serviceName.trim();
+      if (!name) {
+        throw Object.assign(
+          new Error('Recovery image identity is missing a service name'),
+          { code: 'INVALID_IMAGE_IDENTITY' },
+        );
+      }
+      if (seen.has(name)) {
+        throw Object.assign(
+          new Error(`Duplicate recovery image identity for service "${name}"`),
+          { code: 'INVALID_IMAGE_IDENTITY' },
+        );
+      }
+      seen.add(name);
+      if (image.platform !== null && image.platform.trim() === '') {
+        throw Object.assign(
+          new Error(`Empty platform for service "${name}"`),
+          { code: 'INVALID_IMAGE_IDENTITY' },
+        );
+      }
+    }
+    manifest.images = images;
+    const manifestPath = path.resolve(genResolved, GENERATION_JSON);
+    if (!manifestPath.startsWith(genResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
+    }
+    await fsPromises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+    await this.readAndVerifyGeneration(genResolved);
+  }
+
+  /**
    * If a prior restore left a durable intent + pre-restore snapshot, revert the
    * live managed set, Git DB projection, and managed manifesto to the
    * pre-restore state. Used by startup reconciliation and failed compensate.
@@ -525,7 +594,16 @@ export class RollbackGenerationStore {
       }
     }
 
-    await this.capturePreRestoreSnapshot(nodeId, stackName, genResolved, affectedPaths);
+    const sensitivityByPath = new Map(
+      manifest.entries.map((entry) => [posixRel(entry.relativePath), entry.sensitivity]),
+    );
+    await this.capturePreRestoreSnapshot(
+      nodeId,
+      stackName,
+      genResolved,
+      affectedPaths,
+      sensitivityByPath,
+    );
     const intentPath = path.resolve(genResolved, RESTORE_INTENT_FILE);
     if (!intentPath.startsWith(genResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
@@ -706,26 +784,52 @@ export class RollbackGenerationStore {
     }
   }
 
+  private static async lstatManagedPath(
+    nodeId: number,
+    stackName: string,
+    rel: string,
+  ): Promise<'missing' | 'file' | 'directory' | 'symlink' | 'other'> {
+    const composeBase = path.resolve(FileSystemService.getInstance(nodeId).getBaseDir());
+    const stackRoot = path.resolve(composeBase, stackName);
+    if (!stackRoot.startsWith(composeBase + path.sep)) {
+      throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    const candidate = path.resolve(stackRoot, posixRel(rel));
+    if (!candidate.startsWith(stackRoot + path.sep)) {
+      throw Object.assign(new Error('Path escapes stack root'), { code: 'INVALID_PATH' });
+    }
+    try {
+      const st = await fsPromises.lstat(candidate);
+      if (st.isSymbolicLink()) return 'symlink';
+      if (st.isDirectory()) return 'directory';
+      if (st.isFile()) return 'file';
+      return 'other';
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+      throw e;
+    }
+  }
+
   private static async capturePreRestoreSnapshot(
     nodeId: number,
     stackName: string,
     genResolved: string,
     relativePaths: string[],
+    sensitivityByPath: Map<string, InputSensitivity>,
   ): Promise<void> {
     const preRoot = path.resolve(genResolved, PRE_RESTORE_DIR);
     if (!preRoot.startsWith(genResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
     }
     await fsPromises.rm(preRoot, { recursive: true, force: true });
-    await fsPromises.mkdir(preRoot, { recursive: true });
+    await mkdirPrivate(preRoot);
     const blobsRoot = path.resolve(preRoot, PRE_RESTORE_BLOBS);
     if (!blobsRoot.startsWith(preRoot + path.sep)) {
       throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
     }
-    await fsPromises.mkdir(blobsRoot, { recursive: true });
+    await mkdirPrivate(blobsRoot);
 
-    const fsSvc = FileSystemService.getInstance(nodeId);
-    const composeBase = path.resolve(fsSvc.getBaseDir());
+    const composeBase = path.resolve(FileSystemService.getInstance(nodeId).getBaseDir());
     const stackRoot = path.resolve(composeBase, stackName);
     if (!stackRoot.startsWith(composeBase + path.sep)) {
       throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
@@ -738,6 +842,7 @@ export class RollbackGenerationStore {
       const rel = posixRel(relRaw);
       if (!rel || seen.has(rel)) continue;
       seen.add(rel);
+      const sensitivity = sensitivityByPath.get(rel);
       const srcCandidate = path.resolve(stackRoot, rel);
       if (!srcCandidate.startsWith(stackRoot + path.sep)) continue;
       try {
@@ -758,12 +863,23 @@ export class RollbackGenerationStore {
         const blobId = randomUUID();
         const blobPath = path.resolve(blobsRoot, blobId);
         if (!blobPath.startsWith(blobsRoot + path.sep)) continue;
-        await fsPromises.writeFile(blobPath, bytes);
+        const encrypted = shouldEncryptPreRestore(sensitivity) && bytes.length > 0;
+        if (encrypted) {
+          const crypto = CryptoService.getInstance();
+          const cipher = crypto.encrypt(bytes.toString('base64'));
+          if (!crypto.isEncrypted(cipher)) {
+            throw new Error(`Could not encrypt pre-restore content for ${rel}`);
+          }
+          await writePrivate(blobPath, cipher);
+        } else {
+          await writePrivate(blobPath, bytes);
+        }
         index.entries.push({
           relativePath: rel,
           state: 'present',
           blobId,
           mode: st.mode & 0o777,
+          encrypted,
         });
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -778,7 +894,7 @@ export class RollbackGenerationStore {
     if (!indexPath.startsWith(preRoot + path.sep)) {
       throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
     }
-    await fsPromises.writeFile(indexPath, JSON.stringify(index), 'utf8');
+    await writePrivate(indexPath, JSON.stringify(index));
   }
 
   private static async revertFromPreRestoreSnapshot(
@@ -827,10 +943,18 @@ export class RollbackGenerationStore {
       const rel = posixRel(entry.relativePath);
       if (!rel) continue;
       if (entry.state === 'absent') {
+        const liveKind = await this.lstatManagedPath(nodeId, stackName, rel);
+        if (liveKind === 'missing') continue;
+        if (liveKind !== 'file') {
+          throw Object.assign(
+            new Error(
+              `Managed path "${rel}" is a ${liveKind}; refusing to delete it while reverting an absent-file preimage`,
+            ),
+            { code: 'DIRECTORY_COLLISION' },
+          );
+        }
         try {
-          const kind = await fsSvc.pathKind(stackName, rel, scope);
-          if (kind === null) continue;
-          await fsSvc.deleteStackPath(stackName, rel, kind === 'directory', scope);
+          await fsSvc.deleteStackPath(stackName, rel, false, scope);
         } catch (e) {
           if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
         }
@@ -843,7 +967,22 @@ export class RollbackGenerationStore {
         );
       }
       const blobPath = this.resolvePreRestoreBlobPath(blobsRoot, entry.blobId);
-      const buf = await fsPromises.readFile(blobPath);
+      let buf = await fsPromises.readFile(blobPath);
+      if (entry.encrypted === true) {
+        const cipherText = buf.toString('utf8');
+        const crypto = CryptoService.getInstance();
+        if (!crypto.isEncrypted(cipherText)) {
+          throw new Error(`Pre-restore content for ${rel} is marked encrypted but is not ciphertext`);
+        }
+        try {
+          buf = Buffer.from(crypto.decrypt(cipherText), 'base64');
+        } catch (e) {
+          throw new Error(
+            `Could not decrypt pre-restore content for ${rel}: ${(e as Error).message}`,
+            { cause: e },
+          );
+        }
+      }
       await fsSvc.writeStackFile(stackName, rel, buf);
       if (typeof entry.mode === 'number' && process.platform !== 'win32') {
         try {

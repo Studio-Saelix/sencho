@@ -8,6 +8,7 @@ import { ComposeService } from './ComposeService';
 import { StackUpdateOrchestrator } from './StackUpdateOrchestrator';
 import { StackOpLockService, stackOpSkipMessage as skipMessage } from './StackOpLockService';
 import { FileSystemService } from './FileSystemService';
+import { StackUpdateRecoveryService } from './StackUpdateRecoveryService';
 import { HealthGateService } from './HealthGateService';
 import { ServiceUpdateRecoveryService } from './ServiceUpdateRecoveryService';
 import {
@@ -559,17 +560,21 @@ export class SchedulerService {
         this.assertStackTarget(task, 'Auto-backup');
         if (this.isRemoteNode(task.node_id)) {
             await this.postToRemoteStack(task.node_id, `${encodeURIComponent(task.target_id)}/backup`);
-            return `Backed up stack "${task.target_id}" files on remote node`;
+            return `Captured a recovery generation for stack "${task.target_id}" on remote node`;
         }
         const localNodeId = task.node_id ?? NodeRegistry.getInstance().getDefaultNodeId();
         const lock = await StackOpLockService.getInstance().runExclusive(
             localNodeId, task.target_id, 'backup', 'system',
-            () => FileSystemService.getInstance(localNodeId).backupStackFiles(task.target_id),
+            () => StackUpdateRecoveryService.getInstance().captureCurrentBackup({
+                nodeId: localNodeId,
+                stackName: task.target_id,
+                createdBy: 'system:scheduler',
+            }),
         );
         // Throw (not return) so the skip records as a failed run instead of a
         // silent success; the next scheduled tick retries once the lock frees.
         if (!lock.ran) throw new Error(skipMessage(task.target_id, lock.existing.action));
-        return `Backed up stack "${task.target_id}" files`;
+        return `Captured a recovery generation for stack "${task.target_id}"`;
     }
 
     private async executeAutoStop(task: ScheduledTask): Promise<string> {

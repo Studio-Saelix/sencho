@@ -42,6 +42,7 @@ import type { GitSourceManifestState } from '../types/gitProjectManifest';
 import type {
   RollbackGenerationManifest,
   RollbackGitDbSnapshot,
+  RollbackImageIdentity,
   RollbackInvocationRecord,
   RollbackOperationKind,
   RollbackRestoreTransactionMeta,
@@ -61,6 +62,23 @@ const STAGING_MAX_AGE_MS = 60 * 60 * 1000;
 
 function looksLikeGenerationUuid(value: string): boolean {
   return GENERATION_UUID_RE.test(value);
+}
+
+function isComposeOneOff(labels: Record<string, string> | undefined): boolean {
+  const value = labels?.['com.docker.compose.oneoff'];
+  return typeof value === 'string' && value.toLowerCase() === 'true';
+}
+
+function formatImagePlatform(inspect: {
+  Os?: string;
+  Architecture?: string;
+  Variant?: string;
+}): string | null {
+  const os = typeof inspect.Os === 'string' ? inspect.Os.trim() : '';
+  const arch = typeof inspect.Architecture === 'string' ? inspect.Architecture.trim() : '';
+  if (!os || !arch) return null;
+  const variant = typeof inspect.Variant === 'string' ? inspect.Variant.trim() : '';
+  return variant ? `${os}/${arch}/${variant}` : `${os}/${arch}`;
 }
 
 /** New content-store generations always set content_path. Never infer from UUID shape. */
@@ -397,6 +415,7 @@ export class StackUpdateRecoveryService {
     const docker = DockerController.getInstance(nodeId).getDocker();
     const services: StackRecoveryServiceCapture[] = [];
     const createdTags: string[] = [];
+    const platformByImageId = new Map<string, string | null>();
     let overridePath: string | null = null;
 
     try {
@@ -415,6 +434,8 @@ export class StackUpdateRecoveryService {
 
         const replicas: StackRecoveryReplicaCapture[] = [];
         for (const info of listed) {
+          const labels = (info.Labels ?? {}) as Record<string, string>;
+          if (isComposeOneOff(labels)) continue;
           try {
             const inspect = await docker.getContainer(info.Id).inspect();
             const status = inspect.State?.Status;
@@ -434,6 +455,9 @@ export class StackUpdateRecoveryService {
                 const image = await docker.getImage(imageId).inspect();
                 const digests = (image.RepoDigests ?? []) as string[];
                 repoDigest = digests.length > 0 ? digests[0] : null;
+                if (!platformByImageId.has(imageId)) {
+                  platformByImageId.set(imageId, formatImagePlatform(image));
+                }
               } catch {
                 repoDigest = null;
               }
@@ -478,6 +502,19 @@ export class StackUpdateRecoveryService {
           );
         }
       }
+
+      const images: RollbackImageIdentity[] = services.map((svc) => {
+        const primary = svc.replicas.find((r) => r.imageId) ?? null;
+        const imageId = primary?.imageId ?? null;
+        return {
+          serviceName: svc.serviceName,
+          imageId,
+          repoDigest: primary?.repoDigest ?? null,
+          platform: imageId ? (platformByImageId.get(imageId) ?? null) : null,
+          declaredImageRef: svc.declaredImageRef,
+        };
+      });
+      await RollbackGenerationStore.attachImages(nodeId, stackName, generationId, images);
 
       const taggedIds = new Set<string>();
       for (const svc of services) {
@@ -546,6 +583,68 @@ export class StackUpdateRecoveryService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Capture the live authored project as the current recovery generation.
+   * Shares captureCandidate with deploy/update (files, holds, override), then
+   * hands off immediately without compose or a runtime probe.
+   */
+  public async captureCurrentBackup(input: Omit<CaptureStackUpdateInput, 'operationKind'>): Promise<StackUpdateRecoveryGenerationRow> {
+    const current = this.getCurrent(input.nodeId, input.stackName);
+    if (current?.health_gate_id) {
+      const gate = DatabaseService.getInstance().getHealthGateRun(
+        current.node_id,
+        current.stack_name,
+        current.health_gate_id,
+      );
+      if (gate?.status === 'observing') {
+        throw Object.assign(
+          new Error('Cannot replace the current recovery generation while a health gate is observing'),
+          { code: 'HEALTH_GATE_OBSERVING' },
+        );
+      }
+    }
+
+    const row = await this.captureCandidate({
+      ...input,
+      operationKind: 'manual_backup',
+    });
+    try {
+      if (!this.markAcquired(row.id)) {
+        throw new Error('Could not acquire the backup generation');
+      }
+      if (!this.handoff(row.id, row.node_id, row.stack_name)) {
+        throw new Error('Could not hand off the backup generation');
+      }
+    } catch (error) {
+      try {
+        await this.abandon(row.id);
+      } catch (abandonErr) {
+        console.warn(
+          '[StackUpdateRecovery] Failed to abandon backup generation after handoff error: %s',
+          sanitizeForLog(getErrorMessage(abandonErr, 'unknown')),
+        );
+      }
+      throw error;
+    }
+
+    if (!this.markReconciling(row.id)) {
+      console.warn(
+        '[StackUpdateRecovery] Backup generation handed off but reconciling CAS failed for %s',
+        sanitizeForLog(row.id),
+      );
+    } else if (!this.markImmediateVerified(row.id)) {
+      console.warn(
+        '[StackUpdateRecovery] Backup generation handed off but immediate_verified CAS failed for %s',
+        sanitizeForLog(row.id),
+      );
+    }
+    const verified = this.get(row.id);
+    if (!verified) {
+      throw new Error('Backup generation missing after handoff');
+    }
+    return verified;
   }
 
   private async writeRecoveryOverride(
@@ -853,19 +952,6 @@ export class StackUpdateRecoveryService {
       const restoredManifest = await context.restoreFromContext(transactionMeta);
       filesRestored = true;
 
-      if (restoredManifest) {
-        if (generationContentPath) {
-          await applyRestoredGenerationGitSide(
-            row.stack_name,
-            row.node_id,
-            generationContentPath,
-            restoredManifest,
-          );
-        } else {
-          await restoreCapturedGitDatabaseState(row.stack_name, restoredManifest);
-        }
-      }
-
       // Evaluate current policy against the exact held images rollback will launch
       // (opaque tags / image ids), not the restored authored moving tags.
       const restoredInvocation = restoredManifest?.invocation ?? null;
@@ -892,20 +978,31 @@ export class StackUpdateRecoveryService {
         row.stack_name,
         row.services_json,
       );
+      if (!probeOk) {
+        // Revert files via the existing catch path. Do not apply Git or commit
+        // the restore transaction; a leftover crash-intent would later undo
+        // files while recovered containers stay running.
+        throw Object.assign(new Error('Recovery health probe failed'), { code: 'RECOVERY_PROBE_FAILED' });
+      }
+
+      if (restoredManifest) {
+        if (generationContentPath) {
+          await applyRestoredGenerationGitSide(
+            row.stack_name,
+            row.node_id,
+            generationContentPath,
+            restoredManifest,
+          );
+        } else {
+          await restoreCapturedGitDatabaseState(row.stack_name, restoredManifest);
+        }
+      }
       if (generationContentPath) {
-        // Files (and Git DB) already match the generation. Commit the restore
-        // transaction even when the probe fails so reconcile cannot undo them.
         await RollbackGenerationStore.commitRestoreTransaction(
           row.node_id,
           row.stack_name,
           generationContentPath,
         );
-      }
-      if (!probeOk) {
-        db.updateStackUpdateRecoveryGeneration(generationId, {
-          status: 'recovery_required',
-        });
-        return false;
       }
       db.updateStackUpdateRecoveryGeneration(generationId, {
         status: 'restored_current',
@@ -1045,6 +1142,7 @@ export class StackUpdateRecoveryService {
       const runningByService = new Map<string, number>();
       for (const containerInfo of containers) {
         const labels = (containerInfo.Labels ?? {}) as Record<string, string>;
+        if (isComposeOneOff(labels)) continue;
         const serviceName = labels['com.docker.compose.service'];
         const state = (containerInfo.State || '').toLowerCase();
 

@@ -28,6 +28,7 @@ const {
   mockRunCommand,
   mockDeployStack,
   mockBackupStackFiles,
+  mockCaptureCurrentBackup,
   mockEnforcePolicyPreDeploy,
 } = vi.hoisted(() => ({
   mockGetDueScheduledTasks: vi.fn().mockReturnValue([]),
@@ -76,6 +77,7 @@ const {
   mockRunCommand: vi.fn().mockResolvedValue(undefined),
   mockDeployStack: vi.fn().mockResolvedValue(undefined),
   mockBackupStackFiles: vi.fn().mockResolvedValue(undefined),
+  mockCaptureCurrentBackup: vi.fn().mockResolvedValue({ id: 'gen-1' }),
   mockEnforcePolicyPreDeploy: vi.fn(),
 }));
 
@@ -161,6 +163,14 @@ vi.mock('../services/FileSystemService', () => ({
       getStackContent: mockGetStackContent,
       getEnvContent: mockGetEnvContent,
       backupStackFiles: mockBackupStackFiles,
+    }),
+  },
+}));
+
+vi.mock('../services/StackUpdateRecoveryService', () => ({
+  StackUpdateRecoveryService: {
+    getInstance: () => ({
+      captureCurrentBackup: mockCaptureCurrentBackup,
     }),
   },
 }));
@@ -1907,10 +1917,15 @@ describe('SchedulerService - lifecycle actions', () => {
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
   });
 
-  it('auto_backup calls backupStackFiles', async () => {
+  it('auto_backup captures a current recovery generation', async () => {
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_backup'));
     await SchedulerService.getInstance().triggerTask(300);
-    expect(mockBackupStackFiles).toHaveBeenCalledWith('my-stack');
+    expect(mockCaptureCurrentBackup).toHaveBeenCalledWith({
+      nodeId: 1,
+      stackName: 'my-stack',
+      createdBy: 'system:scheduler',
+    });
+    expect(mockBackupStackFiles).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
   });
 
@@ -1924,6 +1939,7 @@ describe('SchedulerService - lifecycle actions', () => {
   it('auto_backup records failure when node_id is missing', async () => {
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_backup', { node_id: null }));
     await SchedulerService.getInstance().triggerTask(300);
+    expect(mockCaptureCurrentBackup).not.toHaveBeenCalled();
     expect(mockBackupStackFiles).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'failure' }));
   });
@@ -2015,6 +2031,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
       'http://remote:1852/api/stacks/my-stack/backup',
       expect.objectContaining({ method: 'POST' }),
     );
+    expect(mockCaptureCurrentBackup).not.toHaveBeenCalled();
     expect(mockBackupStackFiles).not.toHaveBeenCalled();
   });
 
@@ -2246,7 +2263,7 @@ describe('SchedulerService - delete_after_run', () => {
   });
 
   it('does not delete task when run fails even if delete_after_run is 1', async () => {
-    mockBackupStackFiles.mockRejectedValueOnce(new Error('disk full'));
+    mockCaptureCurrentBackup.mockRejectedValueOnce(new Error('disk full'));
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_backup', { delete_after_run: 1 }));
     await SchedulerService.getInstance().triggerTask(300);
     expect(mockDeleteScheduledTask).not.toHaveBeenCalled();

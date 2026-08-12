@@ -11,7 +11,11 @@ const mockGetContainer = vi.fn((..._args: unknown[]) => ({ inspect: mockInspectC
 const mockGetImage = vi.fn((ref: string) => ({
   tag: mockTag,
   remove: mockRemove,
-  inspect: vi.fn().mockResolvedValue({ RepoDigests: [] }),
+  inspect: vi.fn().mockResolvedValue({
+    RepoDigests: ['nginx@sha256:digest'],
+    Os: 'linux',
+    Architecture: 'amd64',
+  }),
   _ref: ref,
 }));
 
@@ -61,6 +65,7 @@ vi.mock('../services/RollbackGenerationStore', () => ({
     reconcileInterruptedRestore: vi.fn().mockResolvedValue(false),
     restoreCapturedGitManifest: vi.fn().mockResolvedValue(undefined),
     hasPendingRestoreIntent: vi.fn().mockResolvedValue(false),
+    attachImages: vi.fn().mockResolvedValue(undefined),
   },
   getBackupBaseDir: () => '/tmp/backups',
 }));
@@ -996,7 +1001,7 @@ describe('StackUpdateRecoveryService', () => {
     expect(RollbackGenerationStore.commitRestoreTransaction).toHaveBeenCalled();
   });
 
-  it('commits restore transaction when probe fails after generation restore', async () => {
+  it('does not commit Git state or the restore transaction when probe fails after generation restore', async () => {
     const genId = '44444444-4444-4444-8444-444444444444';
     const restoreSpy = vi.fn().mockResolvedValue({
       priorRecords: { appliedDeploySpec: null, lkgHint: null, lastAppliedContentHash: null, manifestState: null, manifestGeneration: null },
@@ -1046,14 +1051,27 @@ describe('StackUpdateRecoveryService', () => {
       released_at: null,
       released_by: null,
     };
+    vi.spyOn(DatabaseService.prototype, 'getGitSource').mockReturnValue({
+      stack_name: 'my-stack',
+      applied_deploy_spec: { files: ['compose.yaml'], contextDir: null },
+      last_applied_commit_sha: 'newsha',
+      last_applied_content_hash: 'hash-new',
+      manifest_version: 3,
+      manifest_state: 'active',
+      manifest_generation: 'generations/new',
+    } as never);
+    const setSpec = vi.spyOn(DatabaseService.prototype, 'setGitSourceAppliedSpec').mockImplementation(() => undefined);
+    const updateGen = vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
+      .mockImplementation(() => undefined);
     vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue(row);
-    vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration').mockImplementation(() => undefined);
     mockAccess.mockResolvedValue(undefined);
     mockListContainers.mockResolvedValue([{ Id: 'c1', State: 'exited', Labels: { 'com.docker.compose.service': 'web' } }]);
     mockInspectContainer.mockResolvedValue({ State: { ExitCode: 1 } });
 
     const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
     vi.mocked(RollbackGenerationStore.commitRestoreTransaction).mockClear();
+    vi.mocked(RollbackGenerationStore.restoreCapturedGitManifest).mockClear();
+    vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockClear();
 
     vi.useFakeTimers();
     const promise = StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined);
@@ -1062,7 +1080,12 @@ describe('StackUpdateRecoveryService', () => {
     vi.useRealTimers();
 
     expect(ok).toBe(false);
-    expect(RollbackGenerationStore.commitRestoreTransaction).toHaveBeenCalledWith(1, 'my-stack', genId);
+    expect(restoreSpy).toHaveBeenCalled();
+    expect(setSpec).not.toHaveBeenCalled();
+    expect(RollbackGenerationStore.commitRestoreTransaction).not.toHaveBeenCalled();
+    expect(RollbackGenerationStore.restoreCapturedGitManifest).not.toHaveBeenCalled();
+    expect(RollbackGenerationStore.reconcileInterruptedRestore).toHaveBeenCalledWith(1, 'my-stack', genId);
+    expect(updateGen).toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'recovery_required' }));
   });
 
   it('fails closed when interrupted restore reconcile leaves a pending intent', async () => {
@@ -1128,5 +1151,192 @@ describe('StackUpdateRecoveryService', () => {
     ).rejects.toThrow(/interrupted restore/);
   });
 
+  it('excludes Compose one-off containers from replica capture and mixed-image checks', async () => {
+    mockListContainers.mockResolvedValue([
+      { Id: 'c1', State: 'running', Labels: { 'com.docker.compose.service': 'web' } },
+      {
+        Id: 'c-run',
+        State: 'running',
+        Labels: { 'com.docker.compose.service': 'web', 'com.docker.compose.oneoff': 'True' },
+      },
+      {
+        Id: 'c-stop',
+        State: 'exited',
+        Labels: { 'com.docker.compose.service': 'web', 'com.docker.compose.oneoff': 'True' },
+      },
+    ]);
+    mockGetContainer.mockImplementation((...args: unknown[]) => ({
+      inspect: vi.fn().mockResolvedValue({
+        Id: String(args[0] ?? 'c1'),
+        State: { Status: args[0] === 'c-stop' ? 'exited' : 'running', ExitCode: 0 },
+        Image: args[0] === 'c1' ? 'sha256:abc' : 'sha256:oneoff',
+      }),
+    }));
+    const spyInsert = vi.spyOn(DatabaseService.prototype, 'insertStackUpdateRecoveryGeneration')
+      .mockImplementation(() => undefined);
+    vi.spyOn(DatabaseService.prototype, 'getGlobalSettings').mockReturnValue({});
 
+    await StackUpdateRecoveryService.getInstance().captureCandidate({
+      nodeId: 1,
+      stackName: 'my-stack',
+      createdBy: 'test',
+    });
+
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    expect(RollbackGenerationStore.attachImages).toHaveBeenCalledWith(
+      1,
+      'my-stack',
+      '11111111-1111-4111-8111-111111111111',
+      [
+        expect.objectContaining({
+          serviceName: 'web',
+          imageId: 'sha256:abc',
+          repoDigest: 'nginx@sha256:digest',
+          platform: 'linux/amd64',
+          declaredImageRef: 'nginx:latest',
+        }),
+      ],
+    );
+    const inserted = spyInsert.mock.calls[0]?.[0] as { services_json: string };
+    const services = JSON.parse(inserted.services_json) as Array<{
+      scale: number;
+      replicas: Array<{ containerId: string }>;
+    }>;
+    expect(services[0].scale).toBe(1);
+    expect(services[0].replicas.map((r) => r.containerId)).toEqual(['c1']);
+  });
+
+  it('probeRecoveredStack ignores running and stopped one-off containers', async () => {
+    const servicesJson = JSON.stringify([{
+      serviceName: 'web',
+      scale: 1,
+      hasBuild: false,
+      declaredImageRef: 'nginx:latest',
+      referenceKind: 'moving_tag',
+      replicas: [{
+        containerId: 'c1',
+        imageId: 'sha256:abc',
+        repoDigest: null,
+        state: 'running',
+        rollbackTag: 'sencho-rb/x/web:hold',
+      }],
+    }]);
+    mockListContainers.mockResolvedValue([
+      { Id: 'c1', State: 'running', Labels: { 'com.docker.compose.service': 'web' } },
+      {
+        Id: 'c-run',
+        State: 'running',
+        Labels: { 'com.docker.compose.service': 'web', 'com.docker.compose.oneoff': 'True' },
+      },
+      {
+        Id: 'c-stop',
+        State: 'exited',
+        Labels: { 'com.docker.compose.service': 'web', 'com.docker.compose.oneoff': 'True' },
+      },
+    ]);
+    mockGetContainer.mockImplementation((...args: unknown[]) => ({
+      inspect: vi.fn().mockResolvedValue({
+        Image: args[0] === 'c1' ? 'sha256:abc' : 'sha256:oneoff',
+        State: { Status: args[0] === 'c-stop' ? 'exited' : 'running' },
+      }),
+    }));
+    vi.useFakeTimers();
+    const promise = StackUpdateRecoveryService.getInstance().probeRecoveredStack(1, 'my-stack', servicesJson);
+    await vi.advanceTimersByTimeAsync(3100);
+    await expect(promise).resolves.toBe(true);
+    vi.useRealTimers();
+  });
+
+  it('captureCurrentBackup hands off a candidate to immediate_verified', async () => {
+    const svc = StackUpdateRecoveryService.getInstance();
+    const genId = '55555555-5555-4555-8555-555555555555';
+    const row = { id: genId, node_id: 1, stack_name: 'my-stack' };
+    vi.spyOn(svc, 'getCurrent').mockReturnValue(undefined);
+    vi.spyOn(svc, 'captureCandidate').mockResolvedValue(row as never);
+    vi.spyOn(svc, 'markAcquired').mockReturnValue(true);
+    vi.spyOn(svc, 'handoff').mockReturnValue(true);
+    vi.spyOn(svc, 'markReconciling').mockReturnValue(true);
+    vi.spyOn(svc, 'markImmediateVerified').mockReturnValue(true);
+    vi.spyOn(svc, 'get').mockReturnValue({
+      ...row,
+      status: 'active',
+      phase: 'immediate_verified',
+      is_current: 1,
+    } as never);
+
+    const result = await svc.captureCurrentBackup({
+      nodeId: 1,
+      stackName: 'my-stack',
+      createdBy: 'admin',
+    });
+
+    expect(svc.captureCandidate).toHaveBeenCalledWith({
+      nodeId: 1,
+      stackName: 'my-stack',
+      createdBy: 'admin',
+      operationKind: 'manual_backup',
+    });
+    expect(svc.handoff).toHaveBeenCalledWith(genId, 1, 'my-stack');
+    expect(result.phase).toBe('immediate_verified');
+  });
+
+  it('captureCurrentBackup abandons the candidate when handoff fails', async () => {
+    const svc = StackUpdateRecoveryService.getInstance();
+    const genId = '66666666-6666-4666-8666-666666666666';
+    const row = { id: genId, node_id: 1, stack_name: 'my-stack' };
+    vi.spyOn(svc, 'getCurrent').mockReturnValue(undefined);
+    vi.spyOn(svc, 'captureCandidate').mockResolvedValue(row as never);
+    vi.spyOn(svc, 'markAcquired').mockReturnValue(true);
+    vi.spyOn(svc, 'handoff').mockReturnValue(false);
+    const abandon = vi.spyOn(svc, 'abandon').mockResolvedValue(true);
+
+    await expect(
+      svc.captureCurrentBackup({ nodeId: 1, stackName: 'my-stack', createdBy: 'admin' }),
+    ).rejects.toThrow(/hand off/);
+    expect(abandon).toHaveBeenCalledWith(genId);
+  });
+
+  it('captureCurrentBackup does not abandon after a successful handoff', async () => {
+    const svc = StackUpdateRecoveryService.getInstance();
+    const genId = '77777777-7777-4777-8777-777777777777';
+    const row = { id: genId, node_id: 1, stack_name: 'my-stack' };
+    vi.spyOn(svc, 'getCurrent').mockReturnValue(undefined);
+    vi.spyOn(svc, 'captureCandidate').mockResolvedValue(row as never);
+    vi.spyOn(svc, 'markAcquired').mockReturnValue(true);
+    vi.spyOn(svc, 'handoff').mockReturnValue(true);
+    vi.spyOn(svc, 'markReconciling').mockReturnValue(true);
+    vi.spyOn(svc, 'markImmediateVerified').mockReturnValue(false);
+    vi.spyOn(svc, 'get').mockReturnValue({
+      ...row,
+      status: 'active',
+      phase: 'reconciling',
+      is_current: 1,
+    } as never);
+    const abandon = vi.spyOn(svc, 'abandon').mockResolvedValue(true);
+
+    const result = await svc.captureCurrentBackup({
+      nodeId: 1,
+      stackName: 'my-stack',
+      createdBy: 'admin',
+    });
+    expect(abandon).not.toHaveBeenCalled();
+    expect(result.is_current).toBe(1);
+  });
+
+  it('captureCurrentBackup refuses to replace a generation while a health gate is observing', async () => {
+    const svc = StackUpdateRecoveryService.getInstance();
+    vi.spyOn(svc, 'getCurrent').mockReturnValue({
+      id: 'cur',
+      node_id: 1,
+      stack_name: 'my-stack',
+      health_gate_id: 'gate-1',
+    } as never);
+    vi.spyOn(DatabaseService.prototype, 'getHealthGateRun').mockReturnValue({ status: 'observing' } as never);
+    const capture = vi.spyOn(svc, 'captureCandidate');
+
+    await expect(
+      svc.captureCurrentBackup({ nodeId: 1, stackName: 'my-stack', createdBy: 'admin' }),
+    ).rejects.toMatchObject({ code: 'HEALTH_GATE_OBSERVING' });
+    expect(capture).not.toHaveBeenCalled();
+  });
 });

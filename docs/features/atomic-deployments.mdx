@@ -12,7 +12,7 @@ The same recovery generation powers the **Rollback** action in the stack editor,
 
 1. **Backup.** Before the action runs, Sencho captures the managed authored project into a recovery generation: ordered compose files, overrides, discoverable `include:` / `extends` inputs, and env, label, config, and secret files when they can be enumerated. For Git-linked stacks it also records the managed-project manifesto and Git revision identity so a later restore can converge with the next pull. It records prior image identity as opaque holds. The deploy progress modal streams `=== Capturing rollback generation for atomic deploy ===` (or the matching update line) once capture completes, before any `docker compose` output.
 2. **Run the action.** Sencho executes the requested compose action: `up -d` for a deploy, or a pull-then-`up -d` recreate for an update.
-3. **Health probe.** Sencho waits 3 seconds, then lists every container with the `com.docker.compose.project=<stack>` label and checks each one for a non-zero exit code. Any container that has exited with a non-zero status counts as a crash.
+3. **Health probe.** Sencho waits 3 seconds, then lists every container with the `com.docker.compose.project=<stack>` label and checks each one for a non-zero exit code. Any container that has exited with a non-zero status counts as a crash. Recovery capture and the post-rollback compensation probe skip Compose one-off (`docker compose run`) containers so they are not counted as service replicas.
 4. **Auto-rollback on failure.** When a crash is detected after handoff, Sencho streams `=== Deployment failed - restoring previous runtime from recovery generation ===` (or the matching update line), restores the captured authored inventory, and re-runs `docker compose up -d` with the restored configuration. Where the generation holds a prior image ID, restore retargets that exact image for moving tags and for supported local builds. Named volumes and bind-mounted application data are not restored. The original deploy error is preserved as the deploy result, so a failed-then-rolled-back deploy still registers as a failure.
 
 If the rollback itself fails (for example, a held image is missing, or the file restore is blocked by filesystem permissions), Sencho streams `=== Rollback failed. Manual intervention may be required ===`. The recovery generation remains available so you can retry or recover manually.
@@ -26,7 +26,7 @@ Atomic deployments wrap:
 - **Webhook** triggers for deploy and pull actions.
 - **Image auto-updates** triggered by an auto-update policy.
 
-A scheduled image-update task uses the same atomic wrapper as a manual update, so a recurring update still takes a backup and rolls back automatically when a container crashes. Scheduled lifecycle actions (start, stop, restart) change no stack configuration and run `docker compose` directly without a backup.
+A scheduled image-update task uses the same atomic wrapper as a manual update, so a recurring update still takes a backup and rolls back automatically when a container crashes. Scheduled lifecycle actions (start, stop, restart) change no stack configuration and run `docker compose` directly without a backup. On-demand **Backup** and scheduled stack backup capture a current recovery generation of the managed authored project.
 
 [Blueprint](/features/blueprint-model) deploys are a separate, fleet-wide desired-state path and do not use this atomic wrapper: a failed Blueprint apply is not backed up or rolled back automatically.
 
@@ -56,17 +56,13 @@ Before a restore overwrites anything, Sencho verifies generation integrity. If c
 
 The **Stack Dossier** includes a **Rollback readiness** panel: a pre-flight read on whether rolling back will actually fix the problem. It carries an overall verdict (**Ready**, **Partial**, or **Not ready**) and reports managed-input coverage, whether a current recovery generation exists, rollback policy eligibility, plus the existing disclosures for compose/env coverage, previous image identity, last successful deploy, and healthchecks. Application data is always marked not covered: named volumes and bind-mounted data (database rows, uploaded files, anything outside the managed authored files) stay outside the scope of any revert.
 
-<Frame>
-  <img src="/images/atomic-deployments/rollback-readiness.png" alt="Rollback readiness panel in the Stack Dossier for the plex stack, showing a Partial verdict badge and signal rows for recovery generation, managed inputs, compose and env coverage, previous image identity, last successful deploy, healthchecks, policy eligibility, and application data marked not covered." />
-</Frame>
-
 Check this panel in the dossier before rolling back a stack that has been running for a while. A rollback restores the managed authored inventory and held prior images where available; if the problem is in a volume or in a database migration that already ran, rolling back files alone will not help. See [Stack Dossier](/features/stack-dossier) for the full readout.
 
 ## Troubleshooting
 
 <AccordionGroup>
   <Accordion title="The Rollback option is not in the More actions menu">
-    Sencho hides the entry whenever a rollback is not possible. The most common reason is that the stack has never been deployed, so no recovery generation exists yet. Run **Deploy** or **Update** once and the entry will appear.
+    Sencho hides the entry whenever a rollback is not possible. The most common reason is that the stack has never been deployed, so no recovery generation exists yet. Run **Deploy**, **Update**, or **Backup** once and the entry will appear.
 
     The entry is also hidden for users who lack the `stack:deploy` permission. Ask an admin to grant `stack:deploy` through **Settings · Access** if the entry does not appear.
   </Accordion>
