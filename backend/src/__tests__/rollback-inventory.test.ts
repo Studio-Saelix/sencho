@@ -57,6 +57,9 @@ vi.mock('../services/ComposeService', () => ({
       buildAuthoredComposeArgs: mockBuildAuthoredComposeArgs,
     }),
   },
+}));
+
+vi.mock('../utils/authoredComposeArgs', () => ({
   authoredComposeFileArgs: (...args: unknown[]) => mockAuthoredComposeFileArgs(...args),
   authoredComposeEnvFileArgs: (...args: unknown[]) => mockAuthoredComposeEnvFileArgs(...args),
 }));

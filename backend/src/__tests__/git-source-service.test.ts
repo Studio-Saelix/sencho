@@ -41,6 +41,7 @@ const {
   mockRecoveryMarkReconciling,
   mockRecoveryMarkImmediateVerified,
   mockRecoveryGet,
+  mockRecoveryLinkGateOrRetain,
 } = vi.hoisted(() => ({
   mockCaptureCandidate: vi.fn(async () => ({ id: 'rec-test-1' })),
   mockRecoveryAbandon: vi.fn(async () => true),
@@ -49,6 +50,7 @@ const {
   mockRecoveryMarkReconciling: vi.fn(() => true),
   mockRecoveryMarkImmediateVerified: vi.fn(() => true),
   mockRecoveryGet: vi.fn(() => ({ id: 'rec-test-1', is_current: 1 })),
+  mockRecoveryLinkGateOrRetain: vi.fn(),
 }));
 
 vi.mock('../services/StackUpdateRecoveryService', () => ({
@@ -61,6 +63,7 @@ vi.mock('../services/StackUpdateRecoveryService', () => ({
       markReconciling: mockRecoveryMarkReconciling,
       markImmediateVerified: mockRecoveryMarkImmediateVerified,
       get: mockRecoveryGet,
+      linkGateOrRetain: mockRecoveryLinkGateOrRetain,
       compensateWithCandidate: vi.fn(async () => true),
     }),
   },
@@ -98,6 +101,7 @@ beforeEach(() => {
     mockRecoveryMarkImmediateVerified.mockReset();
     mockRecoveryMarkImmediateVerified.mockReturnValue(true);
     mockRecoveryGet.mockReset();
+    mockRecoveryLinkGateOrRetain.mockReset();
     mockRecoveryGet.mockReturnValue({ id: 'rec-test-1', is_current: 1 });
 
     // Wipe persisted git sources between tests
@@ -1420,6 +1424,7 @@ describe('GitSourceService.apply', () => {
                 actor: 'system:git-source',
             });
             expect(beginSpy).toHaveBeenCalledWith(nodeId, 'apply-deploy-gate', 'deploy', 'system:git-source');
+            expect(mockRecoveryLinkGateOrRetain).toHaveBeenCalledWith('rec-test-1', 'gate-git');
         } finally {
             validateSpy.mockRestore();
             saveSpy.mockRestore();
