@@ -118,6 +118,7 @@ const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   rollback: 'rolling back',
   backup: 'backing up',
   delete: 'deleting',
+  git_apply: 'applying Git changes',
 };
 
 function linkStackUpdateRecoveryGate(recoveryId: string | null | undefined, healthGateId: string | null): void {

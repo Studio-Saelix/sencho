@@ -45,10 +45,10 @@ vi.mock('../services/StackOpLockService', () => ({
         _s: string,
         _a: string,
         _who: string,
-        fn: () => Promise<void>,
+        fn: () => Promise<unknown>,
       ) => {
-        await fn();
-        return { ran: true };
+        const result = await fn();
+        return { ran: true, result };
       },
     }),
   },

@@ -78,6 +78,7 @@ vi.mock('../services/GitProjectManifestService', () => ({
 
 
 vi.mock('../services/PolicyEnforcement', () => ({
+  enforcePolicyForImageRefs: vi.fn().mockResolvedValue({ ok: true, bypassed: false, violations: [] }),
   enforcePolicyPreDeploy: vi.fn().mockResolvedValue({ ok: true, bypassed: false, violations: [] }),
 }));
 
@@ -553,18 +554,19 @@ describe('StackUpdateRecoveryService', () => {
     expect(restoreSpy).toHaveBeenCalled();
   });
 
-  it('refuses compensation when restored target fails policy (B4)', async () => {
-    const { enforcePolicyPreDeploy } = await import('../services/PolicyEnforcement');
-    vi.mocked(enforcePolicyPreDeploy).mockResolvedValueOnce({
+  it('refuses compensation when held recovery images fail policy (B4)', async () => {
+    const { enforcePolicyForImageRefs } = await import('../services/PolicyEnforcement');
+    vi.mocked(enforcePolicyForImageRefs).mockResolvedValueOnce({
       ok: false,
       bypassed: false,
-      violations: [{ imageRef: 'bad:latest', reasons: ['critical'] }] as never,
+      violations: [{ imageRef: 'sencho-rb/aaaaaaaaaaaa/web:hold', reasons: ['critical'] }] as never,
       policy: { name: 'block-crit' } as never,
     });
 
     const genId = '11111111-1111-4111-8111-111111111111';
     const restoreSpy = vi.fn().mockResolvedValue({
       priorRecords: { appliedDeploySpec: null, lkgHint: null },
+      invocation: { composeArgsPrefix: [], projectDirectory: null, projectName: 'my-stack', explicitComposeFiles: [] },
     });
     const { resolveComposeProjectContextForGeneration, resolveComposeProjectContext } =
       await import('../services/composeProjectContext');
@@ -602,7 +604,20 @@ describe('StackUpdateRecoveryService', () => {
       content_path: genId,
       operation_kind: 'update' as const,
       override_path: '/test/compose/my-stack/.sencho-recovery-bbbbbbbbbbbb.yml',
-      services_json: '[]',
+      services_json: JSON.stringify([{
+        serviceName: 'web',
+        scale: 1,
+        hasBuild: false,
+        declaredImageRef: 'nginx:latest',
+        referenceKind: 'named',
+        replicas: [{
+          containerId: 'c1',
+          imageId: 'sha256:held',
+          repoDigest: null,
+          state: 'running',
+          rollbackTag: 'sencho-rb/aaaaaaaaaaaa/web:hold',
+        }],
+      }]),
       health_gate_id: null,
       gate_retain_until: null,
       artifact_expires_at: null,
@@ -624,6 +639,62 @@ describe('StackUpdateRecoveryService', () => {
     ).rejects.toMatchObject({ code: 'ROLLBACK_PROHIBITED' });
     expect(restoreSpy).toHaveBeenCalled();
     expect(update).not.toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'restored_current' }));
+    expect(enforcePolicyForImageRefs).toHaveBeenCalledWith(
+      'my-stack',
+      1,
+      ['sencho-rb/aaaaaaaaaaaa/web:hold'],
+      expect.objectContaining({ actor: 'recovery-compensate' }),
+    );
+  });
+
+  it('refuses compensation when services_json is malformed', async () => {
+    const genId = '55555555-5555-4555-8555-555555555555';
+    const restoreSpy = vi.fn().mockResolvedValue({
+      priorRecords: { appliedDeploySpec: null, lkgHint: null },
+      invocation: { composeArgsPrefix: [], projectDirectory: null, projectName: 'my-stack', explicitComposeFiles: [] },
+    });
+    const { resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
+    vi.mocked(resolveComposeProjectContextForGeneration).mockResolvedValue({
+      validateForMutation: vi.fn().mockResolvedValue(undefined),
+      backupFromContext: vi.fn().mockResolvedValue(genId),
+      restoreFromContext: restoreSpy,
+      nodeId: 1,
+      stackName: 'my-stack',
+      stackDir: '/test/compose/my-stack',
+      backupSlotId: genId,
+      toComposeArgs: vi.fn(),
+      resolveServiceImageMap: vi.fn(),
+    } as never);
+
+    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue({
+      id: genId,
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'active',
+      phase: 'reconciling',
+      is_current: 1,
+      backup_slot_id: genId,
+      content_path: genId,
+      operation_kind: 'update',
+      override_path: '/test/compose/my-stack/.sencho-recovery-cccccccccccc.yml',
+      services_json: '{not-json',
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    } as never);
+    mockAccess.mockResolvedValue(undefined);
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined),
+    ).rejects.toMatchObject({ code: 'ROLLBACK_PROHIBITED' });
+    expect(restoreSpy).not.toHaveBeenCalled();
   });
 
 

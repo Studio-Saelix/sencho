@@ -6,15 +6,21 @@
  */
 import type { StackUpdateRecoveryGenerationRow } from './DatabaseService';
 import DockerController from './DockerController';
+import { enforcePolicyForImageRefs } from './PolicyEnforcement';
 import { RollbackGenerationStore } from './RollbackGenerationStore';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 
-function collectHeldImageIds(servicesJson: string): string[] {
+type HeldImagesParse =
+  | { ok: true; ids: string[]; rollbackTags: string[] }
+  | { ok: false };
+
+function parseHeldImageState(servicesJson: string): HeldImagesParse {
   try {
     const parsed: unknown = JSON.parse(servicesJson);
-    if (!Array.isArray(parsed)) return [];
+    if (!Array.isArray(parsed)) return { ok: false };
     const ids = new Set<string>();
+    const tags = new Set<string>();
     for (const svc of parsed) {
       if (!svc || typeof svc !== 'object') continue;
       const replicas = (svc as { replicas?: unknown }).replicas;
@@ -23,11 +29,13 @@ function collectHeldImageIds(servicesJson: string): string[] {
         if (!replica || typeof replica !== 'object') continue;
         const imageId = (replica as { imageId?: unknown }).imageId;
         if (typeof imageId === 'string' && imageId.trim()) ids.add(imageId);
+        const rollbackTag = (replica as { rollbackTag?: unknown }).rollbackTag;
+        if (typeof rollbackTag === 'string' && rollbackTag.trim()) tags.add(rollbackTag);
       }
     }
-    return [...ids];
+    return { ok: true, ids: [...ids], rollbackTags: [...tags] };
   } catch {
-    return [];
+    return { ok: false };
   }
 }
 
@@ -94,12 +102,13 @@ async function checkGenerationIntegrity(
 
 async function checkHeldImagesPresent(
   row: StackUpdateRecoveryGenerationRow,
+  held: HeldImagesParse,
 ): Promise<boolean | null> {
-  const ids = collectHeldImageIds(row.services_json);
-  if (ids.length === 0) return true;
+  if (!held.ok) return null;
+  if (held.ids.length === 0) return true;
   try {
     const docker = DockerController.getInstance(row.node_id).getDocker();
-    for (const imageId of ids) {
+    for (const imageId of held.ids) {
       try {
         await docker.getImage(imageId).inspect();
       } catch (error) {
@@ -122,14 +131,41 @@ async function checkHeldImagesPresent(
   }
 }
 
+async function checkSecurityPostureBlocked(
+  row: StackUpdateRecoveryGenerationRow,
+  held: HeldImagesParse,
+): Promise<boolean | null> {
+  if (!held.ok) return null;
+  const refs = [...new Set([...held.rollbackTags, ...held.ids])];
+  if (refs.length === 0) return false;
+  try {
+    const gate = await enforcePolicyForImageRefs(row.stack_name, row.node_id, refs, {
+      bypass: false,
+      actor: 'rollback-eligibility',
+      auditMethod: 'GET',
+      auditPath: '/api/stacks/rollback-eligibility',
+    });
+    return !gate.ok;
+  } catch (error) {
+    console.warn(
+      '[RollbackEligibility] Security posture check failed for %s: %s',
+      sanitizeForLog(row.id),
+      sanitizeForLog(getErrorMessage(error, 'unknown')),
+    );
+    return null;
+  }
+}
+
 /** Best-effort eligibility for a recovery generation row. */
 export async function assessGenerationEligibility(
   row: StackUpdateRecoveryGenerationRow,
 ): Promise<RollbackEligibilityVerdict> {
+  const held = parseHeldImageState(row.services_json);
+  // Malformed recovery state cannot be assessed safely; refuse restore.
+  if (!held.ok) return 'prohibited';
   const generationIntegrityOk = await checkGenerationIntegrity(row);
-  const heldImagesPresent = await checkHeldImagesPresent(row);
-  // Security posture hook reserved for later quarantine/signature work.
-  const securityPostureBlocked: boolean | null = null;
+  const heldImagesPresent = await checkHeldImagesPresent(row, held);
+  const securityPostureBlocked = await checkSecurityPostureBlocked(row, held);
   return evaluateRollbackEligibility({
     generationIntegrityOk,
     heldImagesPresent,

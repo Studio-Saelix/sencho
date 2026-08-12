@@ -53,34 +53,44 @@ function posixRel(rel: string): string {
   return rel.replace(/\\/g, '/').replace(/^\.\//, '');
 }
 
-function caseKey(rel: string): string {
+function foldedKey(rel: string): string {
   return posixRel(rel).toLowerCase();
 }
 
 /**
- * Authored discovery sensitivity. Secrets/configs are high; env-like inputs
- * are medium; compose and everything else are low. Git-managed inventories
- * keep the sensitivity already recorded on the manifest entry.
+ * Prefer exact POSIX paths as map keys so case-distinct Linux paths are kept.
+ * When two different paths collide under case-folding, record a refusal note
+ * instead of silently merging them.
  */
-function authoredSensitivity(kind: RollbackEntryKind): InputSensitivity {
-  if (kind === 'secret' || kind === 'config' || kind === 'build-secret') return 'high';
-  if (
-    kind === 'env_file'
-    || kind === 'include-env'
-    || kind === 'interpolation-env'
-    || kind === 'sync-env'
-    || kind === 'project-env'
-    || kind === 'label_file'
-  ) {
-    return 'medium';
+function upsertEntry(
+  map: Map<string, InventoryAccum>,
+  foldedOwners: Map<string, string>,
+  entry: InventoryAccum,
+  caseCollisions: string[],
+): void {
+  const exact = posixRel(entry.relativePath);
+  const folded = foldedKey(exact);
+  const owner = foldedOwners.get(folded);
+  if (owner !== undefined && owner !== exact) {
+    caseCollisions.push(`Case-colliding managed paths "${owner}" and "${exact}"`);
+    return;
   }
-  return 'low';
-}
-
-function higherSensitivity(a: InputSensitivity, b: InputSensitivity): InputSensitivity {
-  if (a === 'high' || b === 'high') return 'high';
-  if (a === 'medium' || b === 'medium') return 'medium';
-  return 'low';
+  const prev = map.get(exact);
+  if (!prev) {
+    map.set(exact, { ...entry, relativePath: exact });
+    foldedOwners.set(folded, exact);
+    return;
+  }
+  if (prev.absolutePath !== null && entry.absolutePath === null) return;
+  map.set(exact, {
+    ...entry,
+    relativePath: exact,
+    absolutePath: entry.absolutePath ?? prev.absolutePath,
+    dependencyKind: prev.dependencyKind === 'compose-root' && entry.dependencyKind !== 'compose-root'
+      ? entry.dependencyKind
+      : entry.dependencyKind,
+    sensitivity: higherSensitivity(entry.sensitivity, prev.sensitivity),
+  });
 }
 
 function resolveStackRoot(fsSvc: FileSystemService, stackName: string): string {
@@ -124,24 +134,25 @@ async function pathExistsAsFile(stackRoot: string, relativePath: string): Promis
   }
 }
 
-function upsertEntry(map: Map<string, InventoryAccum>, entry: InventoryAccum): void {
-  const key = caseKey(entry.relativePath);
-  const prev = map.get(key);
-  if (!prev) {
-    map.set(key, entry);
-    return;
+function authoredSensitivity(kind: RollbackEntryKind): InputSensitivity {
+  if (kind === 'secret' || kind === 'config' || kind === 'build-secret') return 'high';
+  if (
+    kind === 'env_file'
+    || kind === 'include-env'
+    || kind === 'interpolation-env'
+    || kind === 'sync-env'
+    || kind === 'project-env'
+    || kind === 'label_file'
+  ) {
+    return 'medium';
   }
-  // Prefer an existing absolute path; keep the more specific dependency kind
-  // when replacing a generic compose-root with a declared kind.
-  if (prev.absolutePath !== null && entry.absolutePath === null) return;
-  map.set(key, {
-    ...entry,
-    absolutePath: entry.absolutePath ?? prev.absolutePath,
-    dependencyKind: prev.dependencyKind === 'compose-root' && entry.dependencyKind !== 'compose-root'
-      ? entry.dependencyKind
-      : entry.dependencyKind,
-    sensitivity: higherSensitivity(entry.sensitivity, prev.sensitivity),
-  });
+  return 'low';
+}
+
+function higherSensitivity(a: InputSensitivity, b: InputSensitivity): InputSensitivity {
+  if (a === 'high' || b === 'high') return 'high';
+  if (a === 'medium' || b === 'medium') return 'medium';
+  return 'low';
 }
 
 function appliedDeploySpecString(
@@ -185,9 +196,9 @@ function sensitivityForManifestPath(
   manifest: GitProjectManifest,
   rel: string,
 ): { kind: RollbackEntryKind; sensitivity: InputSensitivity; provenance: RollbackEntryProvenance } {
-  const key = caseKey(rel);
+  const key = foldedKey(rel);
   const input = manifest.inputs.find(
-    (i: ComposeInputEntry) => i.materializedPath !== null && caseKey(i.materializedPath) === key,
+    (i: ComposeInputEntry) => i.materializedPath !== null && foldedKey(i.materializedPath) === key,
   );
   if (input) {
     return {
@@ -200,6 +211,7 @@ function sensitivityForManifestPath(
 }
 
 async function resolveGitInventory(
+  nodeId: number,
   stackName: string,
   stackRoot: string,
 ): Promise<ResolvedRollbackInventory | null> {
@@ -211,6 +223,8 @@ async function resolveGitInventory(
     projectDirectory: null,
     projectName: stackName,
     explicitComposeFiles: [],
+    meshOverrideRelativePath: null,
+    meshEnabled: false,
   };
 
   const read = await GitProjectManifestService.getInstance().readManifest(
@@ -243,36 +257,51 @@ async function resolveGitInventory(
   }
 
   const map = new Map<string, InventoryAccum>();
+  const foldedOwners = new Map<string, string>();
+  const caseCollisions: string[] = [];
   for (const rel of collectManifestFilePaths(read)) {
     const resolved = resolveStackRel(stackRoot, rel);
     if (!resolved) continue;
     const meta = sensitivityForManifestPath(read, resolved.relativePath);
     const exists = await pathExistsAsFile(stackRoot, resolved.relativePath);
-    upsertEntry(map, {
+    upsertEntry(map, foldedOwners, {
       relativePath: resolved.relativePath,
       dependencyKind: meta.kind,
       provenance: meta.provenance,
       sensitivity: meta.sensitivity,
       absolutePath: exists ? resolved.absolutePath : null,
-    });
+    }, caseCollisions);
   }
 
   const refused = read.refusals.length > 0
     || read.counts.refused > 0
     || read.state === 'unsupported'
-    || read.state === 'partial';
+    || read.state === 'partial'
+    || caseCollisions.length > 0;
   const coverageRefusal = refused
-    ? (read.refusals[0]?.reason
+    ? (caseCollisions[0]
+      ?? read.refusals[0]?.reason
       ?? `Managed-project manifest state "${read.state}" does not claim exact coverage`)
     : null;
+
+  let meshEnabled = false;
+  let meshReadFailed: string | null = null;
+  try {
+    meshEnabled = DatabaseService.getInstance().isMeshStackEnabled(nodeId, stackName);
+  } catch (e) {
+    meshReadFailed = `Could not read Mesh enablement: ${(e as Error).message}`;
+  }
 
   const invocation: RollbackInvocationRecord = {
     composeArgsPrefix: [...read.project.invocation],
     projectDirectory: read.project.effectiveProjectDir,
     projectName: read.project.projectName || stackName,
     explicitComposeFiles: [...read.project.composeFiles],
+    meshOverrideRelativePath: null,
+    meshEnabled,
   };
 
+  const meshRefused = meshReadFailed !== null;
   return {
     entries: [...map.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
     invocation,
@@ -286,8 +315,8 @@ async function resolveGitInventory(
     lastAppliedContentHash: gitSource.last_applied_content_hash,
     manifestState: gitSource.manifest_state,
     manifestGeneration: gitSource.manifest_generation,
-    exactCoverage: !refused,
-    coverageRefusal,
+    exactCoverage: !refused && !meshRefused,
+    coverageRefusal: coverageRefusal ?? meshReadFailed,
   };
 }
 
@@ -298,7 +327,9 @@ async function resolveAuthoredInventory(
   fsSvc: FileSystemService,
 ): Promise<ResolvedRollbackInventory> {
   const map = new Map<string, InventoryAccum>();
+  const foldedOwners = new Map<string, string>();
   const coverageNotes: string[] = [];
+  const caseCollisions: string[] = [];
 
   const composePaths: string[] = [];
   for (const name of ROOT_COMPOSE_FILENAMES) {
@@ -306,13 +337,13 @@ async function resolveAuthoredInventory(
     if (!resolved) continue;
     if (!(await pathExistsAsFile(stackRoot, resolved.relativePath))) continue;
     composePaths.push(resolved.relativePath);
-    upsertEntry(map, {
+    upsertEntry(map, foldedOwners, {
       relativePath: resolved.relativePath,
       dependencyKind: 'compose-root',
       provenance: 'authored',
       sensitivity: 'low',
       absolutePath: resolved.absolutePath,
-    });
+    }, caseCollisions);
   }
 
   const overrideName = await fsSvc.getOverrideFilename(stackName);
@@ -322,13 +353,13 @@ async function resolveAuthoredInventory(
       if (!composePaths.includes(resolved.relativePath)) {
         composePaths.push(resolved.relativePath);
       }
-      upsertEntry(map, {
+      upsertEntry(map, foldedOwners, {
         relativePath: resolved.relativePath,
         dependencyKind: 'implicit-override',
         provenance: 'authored',
         sensitivity: 'low',
         absolutePath: resolved.absolutePath,
-      });
+      }, caseCollisions);
     }
   }
 
@@ -340,13 +371,13 @@ async function resolveAuthoredInventory(
     const resolved = resolveStackRel(stackRoot, envFile);
     if (!resolved) continue;
     if (!(await pathExistsAsFile(stackRoot, resolved.relativePath))) continue;
-    upsertEntry(map, {
+    upsertEntry(map, foldedOwners, {
       relativePath: resolved.relativePath,
       dependencyKind: envFile === DOT_ENV ? 'interpolation-env' : 'project-env',
       provenance: 'authored',
       sensitivity: authoredSensitivity(envFile === DOT_ENV ? 'interpolation-env' : 'project-env'),
       absolutePath: resolved.absolutePath,
-    });
+    }, caseCollisions);
   }
 
   const readCallback = (repoPath: string): string | null => {
@@ -415,13 +446,13 @@ async function resolveAuthoredInventory(
         if (!(await pathExistsAsFile(stackRoot, resolved.relativePath))) continue;
 
         const kind = input.kind;
-        upsertEntry(map, {
+        upsertEntry(map, foldedOwners, {
           relativePath: resolved.relativePath,
           dependencyKind: kind,
           provenance: 'authored',
           sensitivity: authoredSensitivity(kind),
           absolutePath: resolved.absolutePath,
-        });
+        }, caseCollisions);
       }
     }
   }
@@ -441,6 +472,17 @@ async function resolveAuthoredInventory(
     .map((e) => e.relativePath)
     .sort((a, b) => a.localeCompare(b));
 
+  if (caseCollisions.length > 0) {
+    coverageNotes.push(caseCollisions[0]);
+  }
+
+  let meshEnabled = false;
+  try {
+    meshEnabled = DatabaseService.getInstance().isMeshStackEnabled(nodeId, stackName);
+  } catch (e) {
+    coverageNotes.push(`Could not read Mesh enablement: ${(e as Error).message}`);
+  }
+
   const exactCoverage = coverageNotes.length === 0 && composePaths.length > 0;
   const coverageRefusal = exactCoverage
     ? null
@@ -456,6 +498,8 @@ async function resolveAuthoredInventory(
       projectDirectory: null,
       projectName: stackName,
       explicitComposeFiles: explicitComposeFiles.length > 0 ? explicitComposeFiles : composePaths,
+      meshOverrideRelativePath: null,
+      meshEnabled,
     },
     git: null,
     appliedDeploySpec: null,
@@ -482,7 +526,7 @@ export async function resolveRollbackInventory(
   const stackRoot = resolveStackRoot(fsSvc, stackName);
 
   try {
-    const gitInventory = await resolveGitInventory(stackName, stackRoot);
+    const gitInventory = await resolveGitInventory(nodeId, stackName, stackRoot);
     if (gitInventory?.exactCoverage) return gitInventory;
 
     const authored = await resolveAuthoredInventory(nodeId, stackName, stackRoot, fsSvc);

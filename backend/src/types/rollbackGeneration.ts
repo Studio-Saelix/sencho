@@ -37,6 +37,11 @@ export interface RollbackGenerationEntry {
   sensitivity: InputSensitivity;
   /** When true, content is encrypted at rest in the generation store. */
   encrypted: boolean;
+  /**
+   * POSIX permission bits (mode & 0o777) at capture. Null on legacy generations
+   * or platforms where mode could not be read.
+   */
+  mode: number | null;
 }
 
 export interface RollbackInvocationRecord {
@@ -45,6 +50,10 @@ export interface RollbackInvocationRecord {
   projectDirectory: string | null;
   projectName: string | null;
   explicitComposeFiles: string[];
+  /** Stack-relative mesh override path when Mesh was part of the capture invocation. */
+  meshOverrideRelativePath?: string | null;
+  /** True when Mesh was enabled for the stack at capture time. */
+  meshEnabled?: boolean;
 }
 
 export interface RollbackGitIdentity {

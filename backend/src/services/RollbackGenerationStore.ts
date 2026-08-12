@@ -32,7 +32,20 @@ const FILES_DIR = 'files';
 const PRE_RESTORE_DIR = 'pre-restore';
 const RESTORE_INTENT_FILE = 'restore-intent.json';
 const GIT_MANIFEST_SNAPSHOT = 'git-manifest.v1.json';
-const TOMBSTONE_MARKER = '.sencho-tombstone';
+const PRE_RESTORE_INDEX = 'index.json';
+const PRE_RESTORE_BLOBS = 'blobs';
+
+interface PreRestoreIndexEntry {
+  relativePath: string;
+  state: 'present' | 'absent';
+  blobId?: string;
+  mode?: number | null;
+}
+
+interface PreRestoreIndex {
+  version: 1;
+  entries: PreRestoreIndexEntry[];
+}
 
 function getDataDir(): string {
   return process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -44,10 +57,6 @@ function getBackupBaseDir(): string {
 
 function posixRel(rel: string): string {
   return rel.replace(/\\/g, '/').replace(/^\.\//, '');
-}
-
-function caseKey(rel: string): string {
-  return posixRel(rel).toLowerCase();
 }
 
 function assertSafeGenerationId(generationId: string): void {
@@ -183,9 +192,8 @@ export class RollbackGenerationStore {
 
       for (const inv of inventory.entries) {
         const relativePath = posixRel(inv.relativePath);
-        const key = caseKey(relativePath);
-        if (!managedSeen.has(key)) {
-          managedSeen.add(key);
+        if (!managedSeen.has(relativePath)) {
+          managedSeen.add(relativePath);
           managedRelativePaths.push(relativePath);
         }
 
@@ -199,6 +207,7 @@ export class RollbackGenerationStore {
             sizeBytes: null,
             sensitivity: inv.sensitivity,
             encrypted: false,
+            mode: null,
           });
           continue;
         }
@@ -222,6 +231,17 @@ export class RollbackGenerationStore {
           throw Object.assign(
             new Error(`Inventory path escapes stack root via symlink: ${relativePath}`),
             { code: 'SYMLINK_ESCAPE' },
+          );
+        }
+
+        let fileMode: number | null = null;
+        try {
+          const st = await fsPromises.lstat(realPath);
+          if (st.isFile()) fileMode = st.mode & 0o777;
+        } catch (e) {
+          console.warn(
+            `[RollbackGenerationStore] Could not read mode for ${relativePath}:`,
+            (e as Error).message,
           );
         }
 
@@ -278,6 +298,7 @@ export class RollbackGenerationStore {
           sizeBytes: plaintext.length,
           sensitivity: inv.sensitivity,
           encrypted: encrypt,
+          mode: fileMode,
         });
       }
 
@@ -452,15 +473,14 @@ export class RollbackGenerationStore {
 
     const presentByKey = new Map<string, RollbackGenerationEntry>();
     for (const entry of manifest.entries) {
-      if (entry.state === 'present') presentByKey.set(caseKey(entry.relativePath), entry);
+      if (entry.state === 'present') presentByKey.set(posixRel(entry.relativePath), entry);
     }
 
     const deleteRelByKey = new Map<string, string>();
     const considerDelete = (relRaw: string): void => {
       const rel = posixRel(relRaw);
-      const key = caseKey(rel);
-      if (presentByKey.has(key) || deleteRelByKey.has(key)) return;
-      deleteRelByKey.set(key, rel);
+      if (presentByKey.has(rel) || deleteRelByKey.has(rel)) return;
+      deleteRelByKey.set(rel, rel);
     };
 
     for (const rel of manifest.managedRelativePaths) considerDelete(rel);
@@ -473,12 +493,14 @@ export class RollbackGenerationStore {
       relativePath: string;
       content: Buffer;
       sensitivity: RollbackGenerationEntry['sensitivity'];
+      mode: number | null;
     }> = [];
     for (const entry of presentByKey.values()) {
       restores.push({
         relativePath: entry.relativePath,
         content: await this.readPresentEntryBytes(genDir, entry),
         sensitivity: entry.sensitivity,
+        mode: entry.mode ?? null,
       });
     }
 
@@ -526,12 +548,23 @@ export class RollbackGenerationStore {
     try {
       for (const item of restores) {
         await fsSvc.writeStackFile(stackName, item.relativePath, item.content);
-        if (item.sensitivity !== 'high' && item.sensitivity !== 'medium') continue;
+        const sensitive = item.sensitivity === 'high' || item.sensitivity === 'medium';
+        // Sensitive content is always owner-only; other files restore captured mode.
+        const targetMode = sensitive ? 0o600 : (item.mode ?? null);
+        if (targetMode === null || process.platform === 'win32') continue;
         try {
-          await fsSvc.chmodStackPath(stackName, item.relativePath, 0o600, scope);
+          await fsSvc.chmodStackPath(stackName, item.relativePath, targetMode, scope);
         } catch (e) {
+          if (sensitive) {
+            throw Object.assign(
+              new Error(
+                `Could not apply permissions on sensitive restored path "${item.relativePath}": ${(e as Error).message}`,
+              ),
+              { code: 'RESTORE_CHMOD_FAILED', cause: e },
+            );
+          }
           console.warn(
-            '[RollbackGenerationStore] Could not restrict mode on restored entry:',
+            '[RollbackGenerationStore] Could not restore mode on entry:',
             (e as Error).message,
           );
         }
@@ -685,6 +718,11 @@ export class RollbackGenerationStore {
     }
     await fsPromises.rm(preRoot, { recursive: true, force: true });
     await fsPromises.mkdir(preRoot, { recursive: true });
+    const blobsRoot = path.resolve(preRoot, PRE_RESTORE_BLOBS);
+    if (!blobsRoot.startsWith(preRoot + path.sep)) {
+      throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
+    }
+    await fsPromises.mkdir(blobsRoot, { recursive: true });
 
     const fsSvc = FileSystemService.getInstance(nodeId);
     const composeBase = path.resolve(fsSvc.getBaseDir());
@@ -694,14 +732,12 @@ export class RollbackGenerationStore {
     }
 
     const seen = new Set<string>();
+    const index: PreRestoreIndex = { version: 1, entries: [] };
+
     for (const relRaw of relativePaths) {
       const rel = posixRel(relRaw);
-      const key = caseKey(rel);
-      if (!rel || seen.has(key)) continue;
-      seen.add(key);
-      // Inline barriers at both the live source and pre-restore dest sinks.
-      const dest = path.resolve(preRoot, rel);
-      if (!dest.startsWith(preRoot + path.sep)) continue;
+      if (!rel || seen.has(rel)) continue;
+      seen.add(rel);
       const srcCandidate = path.resolve(stackRoot, rel);
       if (!srcCandidate.startsWith(stackRoot + path.sep)) continue;
       try {
@@ -716,26 +752,33 @@ export class RollbackGenerationStore {
             { code: 'DIRECTORY_COLLISION' },
           );
         }
-        // Re-resolve immediately before the read sink (CodeQL TOCTOU).
         const realForRead = await fsPromises.realpath(srcCandidate);
         if (!realForRead.startsWith(stackRoot + path.sep)) continue;
         const bytes = await fsPromises.readFile(realForRead);
-        const destParent = path.dirname(dest);
-        if (!dest.startsWith(preRoot + path.sep)) continue;
-        if (!destParent.startsWith(preRoot + path.sep) && destParent !== preRoot) continue;
-        await fsPromises.mkdir(destParent, { recursive: true });
-        await fsPromises.writeFile(dest, bytes);
+        const blobId = randomUUID();
+        const blobPath = path.resolve(blobsRoot, blobId);
+        if (!blobPath.startsWith(blobsRoot + path.sep)) continue;
+        await fsPromises.writeFile(blobPath, bytes);
+        index.entries.push({
+          relativePath: rel,
+          state: 'present',
+          blobId,
+          mode: st.mode & 0o777,
+        });
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
-          const marker = path.resolve(preRoot, rel + TOMBSTONE_MARKER);
-          if (!marker.startsWith(preRoot + path.sep)) continue;
-          await fsPromises.mkdir(path.dirname(dest), { recursive: true });
-          await fsPromises.writeFile(marker, '', 'utf8');
+          index.entries.push({ relativePath: rel, state: 'absent' });
           continue;
         }
         throw e;
       }
     }
+
+    const indexPath = path.resolve(preRoot, PRE_RESTORE_INDEX);
+    if (!indexPath.startsWith(preRoot + path.sep)) {
+      throw Object.assign(new Error('Path escapes generation directory'), { code: 'INVALID_PATH' });
+    }
+    await fsPromises.writeFile(indexPath, JSON.stringify(index), 'utf8');
   }
 
   private static async revertFromPreRestoreSnapshot(
@@ -752,40 +795,82 @@ export class RollbackGenerationStore {
       throw e;
     }
 
+    const indexPath = path.resolve(preRoot, PRE_RESTORE_INDEX);
+    if (!indexPath.startsWith(preRoot + path.sep)) return;
+
+    let index: PreRestoreIndex;
+    try {
+      const raw = await fsPromises.readFile(indexPath, 'utf8');
+      index = JSON.parse(raw) as PreRestoreIndex;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        // Legacy suffix-tombstone snapshots are unsupported after this change.
+        throw Object.assign(
+          new Error('Pre-restore index missing; cannot safely revert interrupted restore'),
+          { code: 'PRE_RESTORE_INDEX_MISSING', cause: e },
+        );
+      }
+      throw e;
+    }
+    if (!index || index.version !== 1 || !Array.isArray(index.entries)) {
+      throw Object.assign(
+        new Error('Pre-restore index is malformed'),
+        { code: 'PRE_RESTORE_INDEX_INVALID' },
+      );
+    }
+
+    const blobsRoot = path.resolve(preRoot, PRE_RESTORE_BLOBS);
     const fsSvc = FileSystemService.getInstance(nodeId);
     const scope = { protectedEnabled: false as const };
 
-    const walk = async (dir: string, relBase: string): Promise<void> => {
-      const entries = await fsPromises.readdir(dir, { withFileTypes: true });
-      for (const ent of entries) {
-        const abs = path.resolve(dir, ent.name);
-        if (!abs.startsWith(preRoot + path.sep)) continue;
-        if (ent.isDirectory()) {
-          await walk(abs, relBase ? `${relBase}/${ent.name}` : ent.name);
-          continue;
+    for (const entry of index.entries) {
+      const rel = posixRel(entry.relativePath);
+      if (!rel) continue;
+      if (entry.state === 'absent') {
+        try {
+          const kind = await fsSvc.pathKind(stackName, rel, scope);
+          if (kind === null) continue;
+          await fsSvc.deleteStackPath(stackName, rel, kind === 'directory', scope);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
         }
-        if (ent.name.endsWith(TOMBSTONE_MARKER)) {
-          const rel = posixRel(
-            (relBase ? `${relBase}/` : '') + ent.name.slice(0, -TOMBSTONE_MARKER.length),
-          );
-          if (!rel) continue;
-          try {
-            const kind = await fsSvc.pathKind(stackName, rel, scope);
-            if (kind === null) continue;
-            await fsSvc.deleteStackPath(stackName, rel, kind === 'directory', scope);
-          } catch (e) {
-            if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-          }
-          continue;
-        }
-        const rel = posixRel(relBase ? `${relBase}/${ent.name}` : ent.name);
-        if (!rel) continue;
-        const buf = await fsPromises.readFile(abs);
-        await fsSvc.writeStackFile(stackName, rel, buf);
+        continue;
       }
-    };
-    await walk(preRoot, '');
+      if (entry.state !== 'present' || !entry.blobId) {
+        throw Object.assign(
+          new Error(`Pre-restore entry for "${rel}" is incomplete`),
+          { code: 'PRE_RESTORE_INDEX_INVALID' },
+        );
+      }
+      const blobPath = this.resolvePreRestoreBlobPath(blobsRoot, entry.blobId);
+      const buf = await fsPromises.readFile(blobPath);
+      await fsSvc.writeStackFile(stackName, rel, buf);
+      if (typeof entry.mode === 'number' && process.platform !== 'win32') {
+        try {
+          await fsSvc.chmodStackPath(stackName, rel, entry.mode & 0o777, scope);
+        } catch (e) {
+          throw Object.assign(
+            new Error(
+              `Could not restore pre-restore permissions on "${rel}": ${(e as Error).message}`,
+            ),
+            { code: 'RESTORE_CHMOD_FAILED', cause: e },
+          );
+        }
+      }
+    }
     await fsPromises.rm(preRoot, { recursive: true, force: true });
+  }
+
+  /** Resolve a pre-restore blob id under blobsRoot; rejects traversal. */
+  private static resolvePreRestoreBlobPath(blobsRoot: string, blobId: string): string {
+    if (blobId.includes('..') || blobId.includes('/') || blobId.includes('\\')) {
+      throw Object.assign(new Error('Invalid pre-restore blob id'), { code: 'INVALID_PATH' });
+    }
+    const blobPath = path.resolve(blobsRoot, blobId);
+    if (!blobPath.startsWith(blobsRoot + path.sep)) {
+      throw Object.assign(new Error('Path escapes pre-restore blobs'), { code: 'INVALID_PATH' });
+    }
+    return blobPath;
   }
 
   /** Remove one generation content directory. Missing dirs are a no-op. */

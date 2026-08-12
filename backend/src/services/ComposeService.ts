@@ -35,13 +35,11 @@ import { buildUnifiedHeldImagePredicate } from './recoveryHeldImages';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import type { NotificationCategory } from './NotificationService';
 
-/** True when a generation capture carries a usable Compose argv prefix. */
+/** True when a generation capture recorded an invocation object (prefix may be empty). */
 function hasUsableCapturedInvocation(
   invocation: RollbackInvocationRecord | null | undefined,
 ): invocation is RollbackInvocationRecord {
-  // Prefer the captured argv. Rebuilding from explicitComposeFiles alone drops
-  // --env-file and other global flags, so that path is not treated as usable.
-  return Boolean(invocation && invocation.composeArgsPrefix.length > 0);
+  return invocation != null;
 }
 
 function recordNetworkAutoCreatedActivity(
@@ -943,18 +941,33 @@ export class ComposeService {
       ? ['compose', ...this.composePrefixFromCapturedInvocation(stackName, invocation)]
       : await this.authoredComposeArgsPrefix(stackName);
 
+    if (useCaptured && invocation.meshEnabled) {
+      await this.appendCapturedMeshLayer(stackName, out);
+    }
+
     if (recoveryOverridePath) {
       // Captured invocations already encode their file set; live args may need
       // an explicit base (+ user override) so docker compose accepts a trailing -f.
-      await this.appendRecoveryOverrideLayer(
-        stackName,
-        out,
-        recoveryOverridePath,
-        !useCaptured,
-      );
+      await this.ensureExplicitComposeFiles(stackName, out, !useCaptured);
+      out.push('-f', recoveryOverridePath);
     }
     out.push(...action);
     return out;
+  }
+
+  /**
+   * Re-apply the Mesh override layer when the generation captured Mesh as enabled.
+   * Uses live ensureStackOverride (same absolute override path semantics as deploy).
+   */
+  private async appendCapturedMeshLayer(stackName: string, args: string[]): Promise<void> {
+    const overridePath = await MeshService.getInstance().ensureStackOverride(this.nodeId, stackName);
+    if (!overridePath) {
+      throw new Error(
+        `Captured Mesh-enabled invocation cannot regenerate mesh override for stack "${stackName}"`,
+      );
+    }
+    await this.ensureExplicitComposeFiles(stackName, args, true);
+    args.push('-f', overridePath);
   }
 
   /** Slice the global-flag prefix from authoredComposeArgs (no action tokens). */
@@ -966,35 +979,31 @@ export class ComposeService {
   }
 
   /**
-   * Ensure an explicit `-f` base exists when needed, then append the recovery
-   * override last (highest compose file precedence).
+   * When args lack `-f`, pin the stack compose file (and optionally the user
+   * override) so a trailing override layer is accepted by docker compose.
    */
-  private async appendRecoveryOverrideLayer(
+  private async ensureExplicitComposeFiles(
     stackName: string,
     args: string[],
-    recoveryOverridePath: string,
-    includeUserOverrideWhenPinningBase: boolean,
+    includeUserOverride: boolean,
   ): Promise<void> {
-    if (!args.includes('-f')) {
-      const fsSvc = FileSystemService.getInstance(this.nodeId);
-      args.push('-f', await fsSvc.getComposeFilename(stackName));
-      if (includeUserOverrideWhenPinningBase) {
-        try {
-          const userOverride = await fsSvc.getOverrideFilename(stackName);
-          if (userOverride) args.push('-f', userOverride);
-        } catch (err) {
-          const code = (err as { code?: string }).code;
-          if (code === 'INVALID_STACK_NAME' || code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE') {
-            throw err;
-          }
-          console.warn(
-            '[ComposeService] could not resolve user compose override for recovery args:',
-            sanitizeForLog((err as Error).message),
-          );
-        }
+    if (args.includes('-f')) return;
+    const fsSvc = FileSystemService.getInstance(this.nodeId);
+    args.push('-f', await fsSvc.getComposeFilename(stackName));
+    if (!includeUserOverride) return;
+    try {
+      const userOverride = await fsSvc.getOverrideFilename(stackName);
+      if (userOverride) args.push('-f', userOverride);
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === 'INVALID_STACK_NAME' || code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE') {
+        throw err;
       }
+      console.warn(
+        '[ComposeService] could not resolve user compose override while pinning compose files:',
+        sanitizeForLog((err as Error).message),
+      );
     }
-    args.push('-f', recoveryOverridePath);
   }
 
   private resolveValidatedStackDir(stackName: string): string {
@@ -1015,11 +1024,8 @@ export class ComposeService {
     invocation: RollbackInvocationRecord,
   ): string[] {
     const stackDir = this.resolveValidatedStackDir(stackName);
-    if (invocation.composeArgsPrefix.length === 0) {
-      throw new Error(`Captured invocation has no compose args prefix for stack "${stackName}"`);
-    }
+    // Empty prefix is valid (single-file auto-discovery at capture time).
     const raw = [...invocation.composeArgsPrefix];
-
     const out: string[] = [];
     for (let i = 0; i < raw.length; i++) {
       const token = raw[i];
@@ -1347,12 +1353,16 @@ export class ComposeService {
     const stackDir = this.resolveValidatedStackDir(stackName);
     // Prefer a generation-captured invocation so restored-target policy does not
     // scan with the live deploy-spec / project-env selection.
-    const fileAndEnvPrefix = hasUsableCapturedInvocation(invocation)
-      ? this.composePrefixFromCapturedInvocation(stackName, invocation)
+    const useCaptured = hasUsableCapturedInvocation(invocation);
+    const fileAndEnvPrefix = useCaptured
+      ? [...this.composePrefixFromCapturedInvocation(stackName, invocation)]
       : [
         ...authoredComposeFileArgs(stackName, this.nodeId),
         ...(await authoredComposeEnvFileArgs(stackName, this.nodeId)),
       ];
+    if (useCaptured && invocation.meshEnabled) {
+      await this.appendCapturedMeshLayer(stackName, fileAndEnvPrefix);
+    }
     const stdout = await this.captureCompose([...fileAndEnvPrefix, 'config', '--images'], stackDir);
     const seen = new Set<string>();
     const images: string[] = [];

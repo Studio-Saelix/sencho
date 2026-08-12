@@ -1741,7 +1741,23 @@ export class GitSourceService {
         commitSha: string,
         opts: { deploy?: boolean; actor?: string; bypassPolicy?: boolean } = {},
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
-        return this.withStackLock(stackName, () => this.applyLocked(stackName, commitSha, opts));
+        return this.withStackLock(stackName, async () => {
+            const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+            const lock = await StackOpLockService.getInstance().runExclusive(
+                nodeId,
+                stackName,
+                'git_apply',
+                opts.actor ?? 'system:git-source',
+                () => this.applyLocked(stackName, commitSha, opts),
+            );
+            if (!lock.ran) {
+                throw new GitSourceError(
+                    'GIT_ERROR',
+                    `Another operation (${lock.existing.action}) is already in progress for ${stackName}.`,
+                );
+            }
+            return lock.result;
+        });
     }
 
     /** Body of apply(); assumes the caller already holds the per-stack lock. */
@@ -2059,26 +2075,27 @@ export class GitSourceService {
                 if (recoveryId) {
                     await finalizeRecoveryCurrent(recoveryId, false);
                 }
-                const lock = await StackOpLockService.getInstance().runExclusive(
-                    nodeId, stackName, 'deploy', 'system',
-                    () => ComposeService.getInstance(nodeId).deployStack(
-                        stackName,
-                        undefined,
-                        undefined,
-                        { source: 'git_apply', actor: opts.actor ?? 'system:git-source' },
-                    ),
+                // Shared stack lock already held as git_apply for capture→deploy.
+                await ComposeService.getInstance(nodeId).deployStack(
+                    stackName,
+                    undefined,
+                    undefined,
+                    { source: 'git_apply', actor: opts.actor ?? 'system:git-source' },
                 );
-                if (!lock.ran) {
-                    const busy = `Auto-deploy skipped: another operation (${lock.existing.action}) is already in progress for ${stackName}.`;
-                    console.warn(`[GitSource] ${busy}`);
-                    return { applied: true, deployed: false, deployError: busy, recoveryId };
-                }
                 if (recoveryId) {
                     if (!recoverySvc.markImmediateVerified(recoveryId)) {
                         console.warn(`[GitSource] Could not CAS immediate_verified for recovery ${sanitizeForLog(recoveryId)}`);
                     }
                 }
-                HealthGateService.getInstance().beginStack(nodeId, stackName, 'deploy', 'system:git-source');
+                const healthGateId = HealthGateService.getInstance().beginStack(
+                    nodeId,
+                    stackName,
+                    'deploy',
+                    'system:git-source',
+                );
+                if (recoveryId) {
+                    recoverySvc.linkGateOrRetain(recoveryId, healthGateId);
+                }
                 console.log(`[GitSource] Applied and deployed ${stackName} at ${commitSha.slice(0, 7)}`);
                 return { applied: true, deployed: true, recoveryId };
             } catch (e) {
@@ -2107,10 +2124,17 @@ export class GitSourceService {
             try {
                 await finalizeRecoveryCurrent(recoveryId, true);
             } catch (finalizeError) {
-                console.warn(
+                const detail = finalizeError instanceof Error ? finalizeError.message : String(finalizeError);
+                console.error(
                     `[GitSource] Failed to finalize recovery for apply-only ${sanitizeForLog(stackName)}:`,
-                    finalizeError instanceof Error ? finalizeError.message : String(finalizeError),
+                    detail,
                 );
+                return {
+                    applied: true,
+                    deployed: false,
+                    deployError: `Recovery finalization failed after apply: ${scrubCredentials(detail)}`,
+                    recoveryId,
+                };
             }
         }
         console.log(`[GitSource] Applied ${stackName} at ${commitSha.slice(0, 7)}`);

@@ -19,6 +19,15 @@ vi.mock('../services/DatabaseService', () => ({
     getInstance: () => ({
       getGitSource: mockGetGitSource,
       getStackProjectEnvFiles: mockGetStackProjectEnvFiles,
+      isMeshStackEnabled: () => false,
+    }),
+  },
+}));
+
+vi.mock('../services/NodeRegistry', () => ({
+  NodeRegistry: {
+    getInstance: () => ({
+      getDefaultNodeId: () => 1,
     }),
   },
 }));
@@ -268,5 +277,32 @@ describe('resolveRollbackInventory', () => {
 
     expect(inventory.exactCoverage).toBe(false);
     expect(inventory.coverageRefusal).toMatch(/unreadable/i);
+  });
+
+  it('refuses exact coverage when case-colliding managed paths exist', async () => {
+    const stackName = 'casefold';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'App.conf'), 'A\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'app.conf'), 'B\n', 'utf8');
+
+    mockGetGitSource.mockReturnValue(undefined);
+
+    // Force discovery to see both via include parse would be heavy; instead seed
+    // by making them both compose roots is impossible. Use override + compose:
+    mockGetOverrideFilename.mockResolvedValue('App.conf');
+    // Also plant app.conf as project env so both enter the map.
+    mockGetStackProjectEnvFiles.mockReturnValue(['app.conf']);
+
+    const inventory = await resolveRollbackInventory(1, stackName);
+    // On case-sensitive FS both files exist; inventory should refuse collision.
+    // On Windows case-folding FS the second write may overwrite the first.
+    if (process.platform === 'win32') {
+      expect(inventory).toBeTruthy();
+      return;
+    }
+    expect(inventory.exactCoverage).toBe(false);
+    expect(inventory.coverageRefusal).toMatch(/Case-colliding/i);
   });
 });

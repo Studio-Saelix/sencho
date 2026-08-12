@@ -30,7 +30,12 @@ const NODE = 1;
 
 function inventoryFor(
   stackName: string,
-  files: Array<{ relativePath: string; absolutePath: string; kind?: ResolvedRollbackInventory['entries'][number]['dependencyKind']; sensitivity?: ResolvedRollbackInventory['entries'][number]['sensitivity'] }>,
+  files: Array<{
+    relativePath: string;
+    absolutePath: string | null;
+    kind?: ResolvedRollbackInventory['entries'][number]['dependencyKind'];
+    sensitivity?: ResolvedRollbackInventory['entries'][number]['sensitivity'];
+  }>,
 ): ResolvedRollbackInventory {
   return {
     entries: files.map((f) => ({
@@ -45,6 +50,8 @@ function inventoryFor(
       projectDirectory: null,
       projectName: stackName,
       explicitComposeFiles: files.map((f) => f.relativePath).filter((p) => !p.includes('/')),
+      meshEnabled: false,
+      meshOverrideRelativePath: null,
     },
     git: null,
     appliedDeploySpec: null,
@@ -549,5 +556,107 @@ describe('RollbackGenerationStore', () => {
     expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml', 'sentinel.txt'), 'utf8')).toBe('keep-me\n');
   });
 
+  it('restores a legitimate file whose name ends with .sencho-tombstone (index-based snapshot)', async () => {
+    const stackName = 'tombname';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+    const special = 'config.sencho-tombstone';
+    await fsPromises.writeFile(path.join(stackDir, special), 'KEEP_ME\n', 'utf8');
 
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+        { relativePath: special, absolutePath: path.join(stackDir, special), kind: 'other' },
+      ]),
+    });
+
+    await fsPromises.writeFile(path.join(stackDir, special), 'CHANGED\n', 'utf8');
+    await RollbackGenerationStore.restoreGeneration(
+      NODE,
+      stackName,
+      generationId,
+      ['compose.yaml', special],
+    );
+
+    expect(await fsPromises.readFile(path.join(stackDir, special), 'utf8')).toBe('KEEP_ME\n');
+  });
+
+  it('captures POSIX mode and restores it on generation restore', async () => {
+    if (process.platform === 'win32') return;
+
+    const stackName = 'modes';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    const scriptPath = path.join(stackDir, 'entrypoint.sh');
+    await fsPromises.writeFile(scriptPath, '#!/bin/sh\necho hi\n', 'utf8');
+    await fsPromises.chmod(scriptPath, 0o755);
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf8');
+
+    const generationId = randomUUID();
+    const manifest = await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+        { relativePath: 'entrypoint.sh', absolutePath: scriptPath, kind: 'other' },
+      ]),
+    });
+    const entry = manifest.entries.find((e) => e.relativePath === 'entrypoint.sh');
+    expect(entry?.mode).toBe(0o755);
+
+    await fsPromises.chmod(scriptPath, 0o644);
+    await RollbackGenerationStore.restoreGeneration(
+      NODE,
+      stackName,
+      generationId,
+      ['compose.yaml', 'entrypoint.sh'],
+    );
+    const st = await fsPromises.stat(scriptPath);
+    expect(st.mode & 0o777).toBe(0o755);
+  });
+
+  it('reverts an interrupted restore that deleted a post-capture file via index absent entries', async () => {
+    const stackName = 'absenttx';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'OLD\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+      ]),
+    });
+
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'NEW\n', 'utf8');
+    await fsPromises.writeFile(path.join(stackDir, 'extra.yml'), 'EXTRA\n', 'utf8');
+
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const originalWrite = FileSystemService.prototype.writeStackFile;
+    vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(async function (
+      this: InstanceType<typeof FileSystemService>,
+      stack,
+      rel,
+      content,
+    ) {
+      if (rel === 'compose.yaml') throw new Error('injected write failure');
+      return originalWrite.call(this, stack, rel, content);
+    });
+
+    await expect(
+      RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'extra.yml']),
+    ).rejects.toThrow(/injected write failure/);
+
+    expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe('NEW\n');
+    expect(await fsPromises.readFile(path.join(stackDir, 'extra.yml'), 'utf8')).toBe('EXTRA\n');
+  });
 });

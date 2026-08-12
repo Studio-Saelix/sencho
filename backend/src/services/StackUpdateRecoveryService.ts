@@ -28,7 +28,7 @@ import {
 } from './composeProjectContext';
 import { getComposeCommandTimeoutMs } from './ComposeService';
 import { assessGenerationEligibility } from './rollbackEligibility';
-import { enforcePolicyPreDeploy, type PolicyEnforcementOptions } from './PolicyEnforcement';
+import { enforcePolicyForImageRefs, type PolicyEnforcementOptions } from './PolicyEnforcement';
 import { describePolicyBlock } from '../helpers/policyGate';
 import type { GitSourceAppliedSpec } from './DatabaseService';
 import type { GitSourceManifestState } from '../types/gitProjectManifest';
@@ -242,14 +242,24 @@ function opaqueRollbackTag(generationId: string, serviceName: string): string {
   return `sencho-rb/${shortGenerationId(generationId)}/${sanitizeServiceSlug(serviceName)}:hold`;
 }
 
-function parseServicesJson(raw: string): StackRecoveryServiceCapture[] {
+type ParsedServicesJson =
+  | { ok: true; services: StackRecoveryServiceCapture[] }
+  | { ok: false };
+
+function parseServicesJsonStrict(raw: string): ParsedServicesJson {
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed as StackRecoveryServiceCapture[];
+    if (!Array.isArray(parsed)) return { ok: false };
+    return { ok: true, services: parsed as StackRecoveryServiceCapture[] };
   } catch {
-    return [];
+    return { ok: false };
   }
+}
+
+/** Lenient parse for callers that treat empty as no services (legacy). Prefer strict. */
+function parseServicesJson(raw: string): StackRecoveryServiceCapture[] {
+  const parsed = parseServicesJsonStrict(raw);
+  return parsed.ok ? parsed.services : [];
 }
 
 export function collectImageIdsFromServicesJson(servicesJson: string): string[] {
@@ -842,11 +852,30 @@ export class StackUpdateRecoveryService {
 
     let filesRestored = false;
     try {
-      // Integrity-only eligibility before mutation (policy runs against the restored target).
+      // Eligibility (integrity + held images + security posture) before mutation.
       const integrityVerdict = await assessGenerationEligibility(row);
       if (integrityVerdict === 'prohibited') {
         throw Object.assign(
           new Error('Rollback is prohibited for this generation'),
+          { code: 'ROLLBACK_PROHIBITED' },
+        );
+      }
+
+      // Validate recovery image state before mutating the live project.
+      const servicesParsed = parseServicesJsonStrict(row.services_json);
+      if (!servicesParsed.ok) {
+        throw Object.assign(
+          new Error('Recovery generation has malformed services state; refusing rollback'),
+          { code: 'ROLLBACK_PROHIBITED' },
+        );
+      }
+      const rollbackTags = collectRollbackTags(servicesParsed.services);
+      const heldRefs = rollbackTags.length > 0
+        ? rollbackTags
+        : collectImageIdsFromServicesJson(row.services_json);
+      if (heldRefs.length === 0 && servicesParsed.services.some((s) => (s.scale ?? 0) > 0)) {
+        throw Object.assign(
+          new Error('Recovery generation has no held image references for running services'),
           { code: 'ROLLBACK_PROHIBITED' },
         );
       }
@@ -868,16 +897,15 @@ export class StackUpdateRecoveryService {
         }
       }
 
-      // Evaluate current policy against the restored target (fail closed),
-      // using the generation's captured Compose invocation when present.
+      // Evaluate current policy against the exact held images rollback will launch
+      // (opaque tags / image ids), not the restored authored moving tags.
       const restoredInvocation = restoredManifest?.invocation ?? null;
-      const gate = await enforcePolicyPreDeploy(row.stack_name, row.node_id, {
+      const gate = await enforcePolicyForImageRefs(row.stack_name, row.node_id, heldRefs, {
         bypass: policyOptions?.bypass ?? false,
         actor: policyOptions?.actor ?? 'recovery-compensate',
         ip: policyOptions?.ip,
         auditMethod: policyOptions?.auditMethod ?? 'POST',
         auditPath: policyOptions?.auditPath ?? '/api/stacks/rollback',
-        composeInvocation: restoredInvocation,
       });
       if (!gate.ok) {
         throw Object.assign(
@@ -1013,7 +1041,9 @@ export class StackUpdateRecoveryService {
   ): Promise<boolean> {
     await new Promise((resolve) => setTimeout(resolve, RECOVERY_PROBE_DELAY_MS));
     try {
-      const expected = parseServicesJson(servicesJson);
+      const expectedParsed = parseServicesJsonStrict(servicesJson);
+      if (!expectedParsed.ok) return false;
+      const expected = expectedParsed.services;
       const expectedRunning = new Map<string, number>();
       const expectedImageIds = new Map<string, Set<string>>();
       const scaleZeroServices = new Set<string>();
