@@ -778,6 +778,44 @@ export class ImageUpdateService {
         };
     }
 
+    private static readonly MIN_REMEDIATION_FRESHNESS_MS = 30 * 60 * 1000;
+    private static readonly MAX_REMEDIATION_FRESHNESS_MS = 48 * 60 * 60 * 1000;
+    private static readonly CRON_CADENCE_FALLBACK_MS = 24 * 60 * 60 * 1000;
+
+    /**
+     * Freshness window for Security remediation classification: 2× the
+     * expected check cadence. Interval mode uses the live intervalMs. Cron
+     * mode uses the gap between two successive fire times (not the unused
+     * interval setting). Missing/unparseable cron falls back to 24h. Clamped
+     * to [30m, 48h].
+     */
+    public getRemediationFreshnessWindowMs(): number {
+        let cadenceMs = this.intervalMs;
+        if (this.mode === 'cron') {
+            // Default to 24h; override only when two successive fire times yield a positive gap.
+            cadenceMs = ImageUpdateService.CRON_CADENCE_FALLBACK_MS;
+            if (this.cronExpression) {
+                try {
+                    const expr = CronExpressionParser.parse(this.cronExpression);
+                    const first = expr.next().toDate().getTime();
+                    const second = expr.next().toDate().getTime();
+                    const gap = second - first;
+                    if (gap > 0) cadenceMs = gap;
+                } catch (e) {
+                    console.warn(
+                        '[ImageUpdateService] Could not derive cron cadence for remediation freshness; using 24h fallback:',
+                        getErrorMessage(e, String(e)),
+                    );
+                }
+            }
+        }
+        const windowMs = 2 * cadenceMs;
+        return Math.min(
+            ImageUpdateService.MAX_REMEDIATION_FRESHNESS_MS,
+            Math.max(ImageUpdateService.MIN_REMEDIATION_FRESHNESS_MS, windowMs),
+        );
+    }
+
     // ─── Core check ──────────────────────────────────────────────────────────
 
     private async check() {
@@ -1230,11 +1268,14 @@ export class ImageUpdateService {
      * - If memory generation advanced after observation, abort (stale).
      * - If memory generation still equals the observation watermark, advance
      *   (tombstone) so an equal-generation writer reserved before observation
-     *   cannot commit after the clear (SF-4).
+     *   cannot commit after the clear.
      * - If the persisted row generation advanced after observation, keep the row.
-     * - Otherwise delete partial, failed, and confirmed ok+true rows.
+     * - If the row is already ok with no update, keep it. Deleting that row
+     *   would make Security treat a confirmed no-update as unknown.
+     * - Otherwise delete partial, failed, and ok+true rows.
      *
-     * Returns cleared | stale | absent.
+     * Returns cleared (row deleted), stale (memory generation raced), or
+     * absent (no row, generation advanced, or the row is already ok+false).
      */
     public async commitPreviewClear(
         nodeId: number,
@@ -1270,6 +1311,7 @@ export class ImageUpdateService {
             // pre-preview snapshot). Memory peek resets on restart; SQLite does not.
             const rowGeneration = db.getStackUpdateWriteGeneration(nodeId, stackName);
             if (rowGeneration > observedRowGeneration) return;
+            if (detail.checkStatus === 'ok' && !detail.hasUpdate) return;
             deleted = db.clearStackUpdateStatus(nodeId, stackName);
         });
         if (!committed) return 'stale';

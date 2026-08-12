@@ -11,15 +11,36 @@
  * changes never require a schema migration, and the same verdict can be reused
  * by other surfaces (action queue, per-stack blast radius).
  *
- * Posture is deliberately NOT raw severity: a page is never "Secure" merely
- * because counts are zero-weighted, and never "Action needed" merely because a
- * Critical exists with nothing to do about it. "Secure" means nothing is
- * actionable right now, not a claim that no vulnerabilities exist.
+ * Posture is deliberately NOT raw severity: a page is never "Action needed"
+ * merely because a Critical exists with nothing to do about it.
+ *
+ * Action needed: a concrete blocker Sencho can drive now.
+ * Monitoring: no blocker, but residual Crit/High (including accepted/ignored),
+ * a review reason, or relevant uncertainty remains.
+ * Secure: no blocker and no residual Crit/High or review/info reason under
+ * current evidence (stricter than "nothing actionable").
+ * Unknown: scanner missing or no completed scan.
+ *
+ * Package fix availability (Trivy fixed_version) and container-image update
+ * availability (canonical ImageUpdateService) are distinct facts. A package
+ * fix alone never produces an "Update affected images" instruction.
  */
+
+import {
+  anyTargetIntentConflict,
+  anyTargetIntentUnset,
+  partialTargetsIntentionalWithUnavailable,
+} from './securityExposureTargets';
+import type { ExposureIntent } from './network/types';
 
 /** EPSS score at or above this is treated as an elevated exploitation
  *  likelihood, matching the frontend threshold in SecurityCharts.tsx. */
 export const HIGH_EPSS_THRESHOLD = 0.1;
+
+/** Max target rows attached to one posture reason (overview payload).
+ *  For exposure reasons rows are per stack/service and may repeat imageRef;
+ *  reason.count stays a distinct-image count and can diverge from targets.length. */
+export const POSTURE_TARGET_CAP = 200;
 
 export type SecurityPostureState = 'Action needed' | 'Monitoring' | 'Secure' | 'Unknown';
 
@@ -35,7 +56,10 @@ export type SecurityPostureTargetTab =
 
 export type PostureReasonKind =
   | 'fixable_cve'
+  | 'waiting_upstream'
+  | 'update_check_uncertain'
   | 'known_exploited'
+  | 'elevated_exploit_risk'
   | 'secret'
   | 'dangerous_compose'
   | 'public_exposure'
@@ -43,7 +67,36 @@ export type PostureReasonKind =
   | 'failed_scan'
   | 'needs_review';
 
+/** Bounded finding identities that drive a vulnerability-derived posture reason. */
+export interface PostureDriverFinding {
+  vulnerabilityId: string;
+  imageRef: string;
+}
+
 export type PostureReasonSeverity = 'blocker' | 'review' | 'info';
+
+/**
+ * Image identity behind a posture reason (raw scan image_ref).
+ * Exposure reasons may enrich with stack, service, and Networking intent;
+ * other reasons are typically imageRef-only.
+ */
+export interface PostureTarget {
+  imageRef: string;
+  /** Stack with configured beyond-loopback or host-network exposure. */
+  stackName?: string;
+  /** Service within that stack. */
+  serviceName?: string;
+  exposureReason?: 'published-port' | 'host-network' | null;
+  /** Effective intent when context is available and set; omit when unset. */
+  exposureIntent?: ExposureIntent;
+  /**
+   * Intent resolution for this service.
+   * unavailable is distinct from unset (DB/context failure vs no classification).
+   */
+  intentStatus?: 'set' | 'unset' | 'unavailable';
+  /** True when intent is internal/same-node but configured exposure is beyond loopback. */
+  intentConflict?: boolean;
+}
 
 export interface PostureReason {
   kind: PostureReasonKind;
@@ -55,6 +108,22 @@ export interface PostureReason {
   description: string;
   /** Which Security tab the CTA navigates to. */
   targetTab: SecurityPostureTargetTab;
+  /** Optional Open-button label; when omitted the UI derives from targetTab. */
+  actionLabel?: string;
+  /**
+   * Target rows for this reason (image-only, or per stack/service for exposure).
+   * May repeat imageRef. Omitted when empty or unknown.
+   */
+  targets?: PostureTarget[];
+  /**
+   * Exact contributing findings for vulnerability-derived reasons (capped).
+   * Older remotes omit this field.
+   */
+  drivers?: PostureDriverFinding[];
+  /** Full contributing driver count before cap; omit when drivers omitted. */
+  driverCount?: number;
+  /** True when driverCount exceeds the attached drivers array length. */
+  driversTruncated?: boolean;
 }
 
 export interface PostureAction {
@@ -63,6 +132,12 @@ export interface PostureAction {
   /** The reason kind that produced this action, so the UI can target the
    *  affected items precisely (e.g. filter Images to fixable findings). */
   kind: PostureReasonKind;
+  /** Same targets as the reason that produced this action, when available. */
+  targets?: PostureTarget[];
+  /** Same drivers as the reason that produced this action, when available. */
+  drivers?: PostureDriverFinding[];
+  driverCount?: number;
+  driversTruncated?: boolean;
 }
 
 export interface SecurityPostureFacts {
@@ -70,31 +145,167 @@ export interface SecurityPostureFacts {
   scannerAvailable: boolean;
   /** At least one scan has completed (a freshly installed node has none). */
   hasCompletedScan: boolean;
-  /** Critical/High findings with a fix available, net of suppressions. */
+  /** Critical/High findings with a package fix available, net of suppressions. */
   fixableCriticalHigh: number;
+  /**
+   * Subset of package-fix Crit/High findings whose managed image has a
+   * confirmed applicable image update (hasUpdate + checkStatus ok).
+   */
+  fixableWithImageUpdate: number;
+  /**
+   * Package-fix Crit/High on managed images where every checkable match is an
+   * authoritative negative (ok, no update, fresh).
+   */
+  fixableWaitingUpstream: number;
+  /**
+   * Package-fix Crit/High where update availability could not be established
+   * (partial, failed, stale, disabled, not_checkable, no stack match, etc.).
+   */
+  fixableUpdateUnknown: number;
+  /** When true, uncertain rows should explain disabled checks (no Check again). */
+  updateChecksDisabled: boolean;
   /** Detected secrets (not suppressible in the current model). */
   secrets: number;
   /** High-severity Compose misconfigurations, net of acknowledgements. */
   dangerousCompose: number;
   /** Known-exploited (CISA KEV) findings among non-suppressed Critical/High. */
   knownExploited: number;
-  /** Total affected services published to a non-loopback address (legacy;
-   *  exposedBlocker + exposedReview is the authoritative split). */
+  /** Distinct Crit/High-index images with configured beyond-loopback exposure. */
   publiclyExposed: number;
-  /** Exposed images with KEV, fixable, or elevated-EPSS findings (blocker). */
-  exposedBlocker: number;
-  /** Exposed images without KEV, fix, or elevated EPSS (review only). */
-  exposedReview: number;
-  /** Raw Critical scanner detections (for the Monitoring fallback). */
+  /**
+   * Exposed images whose Networking intent conflicts with configured exposure
+   * (internal/same-node while beyond loopback), with unsuppressed Crit/High.
+   * This is the only exposure-correctness blocker.
+   */
+  exposureIntentConflict: number;
+  /**
+   * Exposed images with unset/unavailable/non-intentional intent and
+   * unsuppressed Crit/High. Review-level: does not force Action needed alone.
+   */
+  exposedUnclassified: number;
+  /**
+   * Network-exposed images with unsuppressed Crit/High at EPSS >= threshold.
+   * Independent Security driver; intentional exposure is context, not the action.
+   */
+  elevatedExploitRisk: number;
+  /** Raw Critical scanner detections (UI tiles; triage-blind). */
   rawCritical: number;
-  /** Raw High scanner detections (for the Monitoring fallback). */
+  /** Raw High scanner detections (UI tiles; triage-blind). */
   rawHigh: number;
+  /**
+   * Crit/High that still block Secure after Secure-clearing triage.
+   * Unsuppressed, accepted, and ignored count; not_affected, false_positive,
+   * and fixed do not.
+   */
+  residualCriticalHigh: number;
   /** Images whose latest scan is older than the stale threshold. */
   staleScans: number;
   /** Scans that terminated with an error. */
   failedScans: number;
   /** Findings with triage_status = 'needs_review' (not dismissed, not accepted). */
   needsReview: number;
+  /** Raw image_refs for Images-bound reasons (optional; omit when unknown). */
+  fixableWithImageUpdateTargets?: string[];
+  fixableWaitingUpstreamTargets?: string[];
+  fixableUpdateUnknownTargets?: string[];
+  knownExploitedTargets?: string[];
+  knownExploitedDrivers?: PostureDriverFinding[];
+  knownExploitedDriverCount?: number;
+  knownExploitedDriversTruncated?: boolean;
+  /** Per-service exposure targets (may repeat imageRef across stack/service). */
+  exposureIntentConflictTargets?: PostureTarget[];
+  exposedUnclassifiedTargets?: PostureTarget[];
+  elevatedExploitRiskTargets?: PostureTarget[];
+  elevatedExploitRiskDrivers?: PostureDriverFinding[];
+  elevatedExploitRiskDriverCount?: number;
+  elevatedExploitRiskDriversTruncated?: boolean;
+  fixableWithImageUpdateDrivers?: PostureDriverFinding[];
+  fixableWithImageUpdateDriverCount?: number;
+  fixableWithImageUpdateDriversTruncated?: boolean;
+  fixableWaitingUpstreamDrivers?: PostureDriverFinding[];
+  fixableWaitingUpstreamDriverCount?: number;
+  fixableWaitingUpstreamDriversTruncated?: boolean;
+  fixableUpdateUnknownDrivers?: PostureDriverFinding[];
+  fixableUpdateUnknownDriverCount?: number;
+  fixableUpdateUnknownDriversTruncated?: boolean;
+}
+
+/** Cap and convert raw refs to PostureTarget[]. Returns truncated=true when capped. */
+export function capPostureTargets(refs: string[] | undefined): {
+  targets: PostureTarget[] | undefined;
+  truncated: boolean;
+} {
+  if (!refs || refs.length === 0) return { targets: undefined, truncated: false };
+  return {
+    targets: refs.slice(0, POSTURE_TARGET_CAP).map((imageRef) => ({ imageRef })),
+    truncated: refs.length > POSTURE_TARGET_CAP,
+  };
+}
+
+/** Cap enriched target rows (imageRef+stack+service), preferring conflict/unset/unavailable first. */
+export function capPostureTargetRows(rows: PostureTarget[] | undefined): {
+  targets: PostureTarget[] | undefined;
+  truncated: boolean;
+} {
+  if (!rows || rows.length === 0) return { targets: undefined, truncated: false };
+  const sorted = [...rows].sort((a, b) => postureTargetExposureRank(a) - postureTargetExposureRank(b));
+  return {
+    targets: sorted.slice(0, POSTURE_TARGET_CAP),
+    truncated: rows.length > POSTURE_TARGET_CAP,
+  };
+}
+
+function postureTargetExposureRank(t: PostureTarget): number {
+  if (t.intentConflict) return 0;
+  if (t.intentStatus === 'unset') return 1;
+  if (t.intentStatus === 'unavailable') return 2;
+  return 3;
+}
+
+function attachCappedTargets(
+  reason: PostureReason,
+  capped: { targets: PostureTarget[] | undefined; truncated: boolean },
+): { reason: PostureReason; truncated: boolean } {
+  if (!capped.targets) return { reason, truncated: false };
+  return { reason: { ...reason, targets: capped.targets }, truncated: capped.truncated };
+}
+
+/** Default CTA label when a reason omits actionLabel. */
+const DEFAULT_ACTION_LABEL: Partial<Record<PostureReasonKind, string>> = {
+  fixable_cve: 'Review update',
+  known_exploited: 'Review exploited findings',
+  elevated_exploit_risk: 'Review driving findings',
+  secret: 'Review detected secrets',
+  dangerous_compose: 'Review Compose risks',
+  public_exposure: 'Review networking',
+};
+
+function actionFrom(reason: PostureReason): PostureAction {
+  const action: PostureAction = {
+    label: reason.actionLabel ?? DEFAULT_ACTION_LABEL[reason.kind] ?? 'Open',
+    targetTab: reason.targetTab,
+    kind: reason.kind,
+  };
+  if (reason.targets) action.targets = reason.targets;
+  if (reason.drivers) action.drivers = reason.drivers;
+  if (reason.driverCount !== undefined) action.driverCount = reason.driverCount;
+  if (reason.driversTruncated !== undefined) action.driversTruncated = reason.driversTruncated;
+  return action;
+}
+
+function withDrivers(
+  base: PostureReason,
+  drivers: PostureDriverFinding[] | undefined,
+  driverCount?: number,
+  driversTruncated?: boolean,
+): PostureReason {
+  if (!drivers || drivers.length === 0) return base;
+  return {
+    ...base,
+    drivers,
+    driverCount: driverCount ?? drivers.length,
+    driversTruncated: driversTruncated ?? false,
+  };
 }
 
 /**
@@ -107,95 +318,152 @@ export interface SecurityPostureFacts {
  * All reasons (blocker, review, info) are returned regardless of posture
  * state. The caller decides which subset to surface.
  */
+const VIEW_FINDINGS_LABEL = 'View findings';
+const REVIEW_NETWORKING_LABEL = 'Review networking';
+
+function exposureConflictDescription(targets: PostureTarget[] | undefined): string {
+  const parts = [
+    'Configured exposure beyond loopback conflicts with declared Networking intent (internal or same-node).',
+  ];
+  if (anyTargetIntentConflict(targets)) {
+    parts.push('Review networking to align Compose publish settings with intent.');
+  }
+  return parts.join(' ');
+}
+
+function exposureUnclassifiedDescription(targets: PostureTarget[] | undefined, truncated = false): string {
+  const parts = [
+    'Images are configured beyond loopback or with host networking and exposure intent is not yet classified.',
+  ];
+  if (anyTargetIntentUnset(targets)) {
+    parts.push('Set exposure intent in Networking.');
+  }
+  const partial = partialTargetsIntentionalWithUnavailable(targets, truncated);
+  if (partial.partial) {
+    const n = partial.unavailableCount;
+    parts.push(
+      `Intent could not be verified for ${n} service${n === 1 ? '' : 's'}.`,
+    );
+  }
+  return parts.join(' ');
+}
+
 export function derivePostureReasons(f: SecurityPostureFacts): {
   reasons: PostureReason[];
   primaryAction: PostureAction | null;
+  /** True when any attached target list was capped at POSTURE_TARGET_CAP. */
+  targetsTruncated: boolean;
 } {
   const reasons: PostureReason[] = [];
   let primaryAction: PostureAction | null = null;
+  let targetsTruncated = false;
+
+  const pushCapped = (
+    base: PostureReason,
+    capped: { targets: PostureTarget[] | undefined; truncated: boolean },
+  ): void => {
+    const { reason, truncated } = attachCappedTargets(base, capped);
+    if (truncated) targetsTruncated = true;
+    reasons.push(reason);
+    if (!primaryAction && reason.severity === 'blocker') {
+      primaryAction = actionFrom(reason);
+    }
+  };
+
+  const push = (base: PostureReason, refs?: string[]): void => {
+    pushCapped(base, capPostureTargets(refs));
+  };
 
   // Blockers. Each of these can keep the masthead red.
 
-  if (f.fixableCriticalHigh > 0) {
-    const r: PostureReason = {
+  if (f.fixableWithImageUpdate > 0) {
+    push(withDrivers({
       kind: 'fixable_cve',
-      count: f.fixableCriticalHigh,
+      count: f.fixableWithImageUpdate,
       severity: 'blocker',
-      label: 'Fixable findings',
-      description: 'Critical or High findings with an available fix.',
+      label: 'Newer image available',
+      description: 'Critical or High findings have a newer image available to review. This does not prove the candidate removes the findings.',
       targetTab: 'images',
-    };
-    reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Update affected images', targetTab: r.targetTab, kind: r.kind };
+      actionLabel: 'Review update',
+    }, f.fixableWithImageUpdateDrivers, f.fixableWithImageUpdateDriverCount, f.fixableWithImageUpdateDriversTruncated), f.fixableWithImageUpdateTargets);
   }
 
   if (f.knownExploited > 0) {
-    const r: PostureReason = {
+    push(withDrivers({
       kind: 'known_exploited',
       count: f.knownExploited,
       severity: 'blocker',
       label: 'Known-exploited findings',
       description: 'Findings in the CISA Known Exploited Vulnerabilities catalog.',
       targetTab: 'images',
-    };
-    reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Review exploited findings', targetTab: r.targetTab, kind: r.kind };
+    }, f.knownExploitedDrivers, f.knownExploitedDriverCount, f.knownExploitedDriversTruncated), f.knownExploitedTargets);
+  }
+
+  if (f.elevatedExploitRisk > 0) {
+    const capped = capPostureTargetRows(f.elevatedExploitRiskTargets);
+    pushCapped(withDrivers({
+      kind: 'elevated_exploit_risk',
+      count: f.elevatedExploitRisk,
+      severity: 'blocker',
+      label: 'Elevated exploit risk on network-exposed workload',
+      description: 'Critical or High findings on network-exposed images have elevated EPSS. Exposure intent is context; review the driving findings.',
+      targetTab: 'images',
+      actionLabel: 'Review driving findings',
+    }, f.elevatedExploitRiskDrivers, f.elevatedExploitRiskDriverCount, f.elevatedExploitRiskDriversTruncated), capped);
   }
 
   if (f.secrets > 0) {
-    const r: PostureReason = {
+    push({
       kind: 'secret',
       count: f.secrets,
       severity: 'blocker',
       label: 'Detected secrets',
       description: 'Images with exposed credentials or keys. Review on the Secrets tab.',
       targetTab: 'secrets',
-    };
-    reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Review detected secrets', targetTab: r.targetTab, kind: r.kind };
+    });
   }
 
   if (f.dangerousCompose > 0) {
-    const r: PostureReason = {
+    push({
       kind: 'dangerous_compose',
       count: f.dangerousCompose,
       severity: 'blocker',
       label: 'Unacknowledged Compose risks',
       description: 'High-severity misconfigurations that have not been acknowledged.',
       targetTab: 'compose',
-    };
-    reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Review Compose risks', targetTab: r.targetTab, kind: r.kind };
+    });
   }
 
-  if (f.exposedBlocker > 0) {
-    const r: PostureReason = {
+  if (f.exposureIntentConflict > 0) {
+    const capped = capPostureTargetRows(f.exposureIntentConflictTargets);
+    pushCapped({
       kind: 'public_exposure',
-      count: f.exposedBlocker,
+      count: f.exposureIntentConflict,
       severity: 'blocker',
-      label: 'Publicly exposed affected images',
-      description: 'Images with fixable, known-exploited, or elevated-EPSS findings published on a public interface.',
+      label: 'Exposure conflicts with declared intent',
+      description: exposureConflictDescription(f.exposureIntentConflictTargets),
       targetTab: 'images',
-    };
-    reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Review public exposure', targetTab: r.targetTab, kind: r.kind };
+      actionLabel: REVIEW_NETWORKING_LABEL,
+    }, capped);
   }
 
   // Review items. These appear in-page but do not force a red masthead.
 
-  if (f.exposedReview > 0) {
-    reasons.push({
+  if (f.exposedUnclassified > 0) {
+    const capped = capPostureTargetRows(f.exposedUnclassifiedTargets);
+    pushCapped({
       kind: 'public_exposure',
-      count: f.exposedReview,
+      count: f.exposedUnclassified,
       severity: 'review',
-      label: 'Exposed images (monitoring)',
-      description: 'Images published on a public interface with no fix, no KEV, and no elevated EPSS.',
+      label: 'Network-exposed images not yet classified',
+      description: exposureUnclassifiedDescription(f.exposedUnclassifiedTargets, capped.truncated),
       targetTab: 'images',
-    });
+      actionLabel: VIEW_FINDINGS_LABEL,
+    }, capped);
   }
 
   if (f.needsReview > 0) {
-    reasons.push({
+    push({
       kind: 'needs_review',
       count: f.needsReview,
       severity: 'review',
@@ -205,10 +473,36 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
     });
   }
 
+  if (f.fixableWaitingUpstream > 0) {
+    push(withDrivers({
+      kind: 'waiting_upstream',
+      count: f.fixableWaitingUpstream,
+      severity: 'review',
+      label: 'Waiting for upstream image',
+      description: 'Package fixes exist for findings in this image, but Sencho cannot currently identify a newer image to apply under its latest authoritative check.',
+      targetTab: 'images',
+      actionLabel: VIEW_FINDINGS_LABEL,
+    }, f.fixableWaitingUpstreamDrivers, f.fixableWaitingUpstreamDriverCount, f.fixableWaitingUpstreamDriversTruncated), f.fixableWaitingUpstreamTargets);
+  }
+
+  if (f.fixableUpdateUnknown > 0) {
+    push(withDrivers({
+      kind: 'update_check_uncertain',
+      count: f.fixableUpdateUnknown,
+      severity: 'review',
+      label: 'Update availability unknown',
+      description: f.updateChecksDisabled
+        ? 'Package fixes exist, but image update checks are disabled on this node, so Sencho cannot tell whether a newer image is available.'
+        : 'Package fixes exist, but Sencho could not establish whether an applicable image update is available (partial, failed, stale, not checkable, or unmatched image).',
+      targetTab: 'images',
+      actionLabel: VIEW_FINDINGS_LABEL,
+    }, f.fixableUpdateUnknownDrivers, f.fixableUpdateUnknownDriverCount, f.fixableUpdateUnknownDriversTruncated), f.fixableUpdateUnknownTargets);
+  }
+
   // Info items. Context only, never red.
 
   if (f.staleScans > 0) {
-    reasons.push({
+    push({
       kind: 'stale_scan',
       count: f.staleScans,
       severity: 'info',
@@ -219,7 +513,7 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
   }
 
   if (f.failedScans > 0) {
-    reasons.push({
+    push({
       kind: 'failed_scan',
       count: f.failedScans,
       severity: 'info',
@@ -229,7 +523,7 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
     });
   }
 
-  return { reasons, primaryAction };
+  return { reasons, primaryAction, targetsTruncated };
 }
 
 /**
@@ -243,6 +537,6 @@ export function deriveSecurityPosture(f: SecurityPostureFacts): SecurityPostureS
   if (!f.scannerAvailable || !f.hasCompletedScan) return 'Unknown';
   const { reasons } = derivePostureReasons(f);
   if (reasons.some((r) => r.severity === 'blocker')) return 'Action needed';
-  if (f.rawCritical > 0 || f.rawHigh > 0 || reasons.length > 0) return 'Monitoring';
+  if (f.residualCriticalHigh > 0 || reasons.length > 0) return 'Monitoring';
   return 'Secure';
 }

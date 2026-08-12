@@ -2,7 +2,7 @@
  * Unit tests for the read-time CVE suppression filter.
  */
 import { describe, it, expect } from 'vitest';
-import { applySuppressions, findSuppression } from '../utils/suppression-filter';
+import { applySuppressions, countsTowardResidualCriticalHigh, findSuppression } from '../utils/suppression-filter';
 import type { CveSuppression } from '../services/DatabaseService';
 
 const NOW = 1_700_000_000_000;
@@ -225,5 +225,24 @@ describe('applySuppressions', () => {
     // regression where bucketing silently drops every match could pass.
     expect(result.some((r) => r.suppressed)).toBe(true);
     expect(elapsed).toBeLessThan(1500);
+  });
+});
+
+describe('countsTowardResidualCriticalHigh', () => {
+  it('counts unsuppressed findings as residual', () => {
+    expect(countsTowardResidualCriticalHigh({ suppressed: false })).toBe(true);
+    expect(countsTowardResidualCriticalHigh({ suppressed: false, triage_status: 'needs_review' })).toBe(true);
+    expect(countsTowardResidualCriticalHigh({ suppressed: false, triage_status: 'affected' })).toBe(true);
+  });
+
+  it('keeps accepted and ignored residual (do not turn Secure green)', () => {
+    expect(countsTowardResidualCriticalHigh({ suppressed: true, triage_status: 'accepted' })).toBe(true);
+    expect(countsTowardResidualCriticalHigh({ suppressed: true, triage_status: 'ignored' })).toBe(true);
+  });
+
+  it('clears not_affected, false_positive, and fixed from residual', () => {
+    expect(countsTowardResidualCriticalHigh({ suppressed: true, triage_status: 'not_affected' })).toBe(false);
+    expect(countsTowardResidualCriticalHigh({ suppressed: true, triage_status: 'false_positive' })).toBe(false);
+    expect(countsTowardResidualCriticalHigh({ suppressed: true, triage_status: 'fixed' })).toBe(false);
   });
 });

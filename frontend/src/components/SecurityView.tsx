@@ -18,12 +18,17 @@ import { Masthead, type Tone } from './mobile/mobile-ui';
 import { SecurityMobileTabs, type SecurityMobileTab } from './security/SecurityMobile';
 import type { SecurityTab } from '@/lib/events';
 import type { ImageFilterValue } from '@/lib/severityStyles';
-import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, ExploitIntelFinding, FleetRole } from '@/types/security';
+import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, ExploitIntelFinding, FleetRole, PostureReasonKind } from '@/types/security';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SuppressionsPanel } from './settings/SuppressionsPanel';
 import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
 import { OverviewTab } from './security/OverviewTab';
 import { reasonImageFilter } from './security/postureNavigation';
+import {
+  targetingFromTargets,
+  type ImagesTargetingInput,
+  type ImagesTargetingState,
+} from './security/imagesTargeting';
 import { ImagesTab } from './security/ImagesTab';
 import { FindingsTab } from './security/FindingsTab';
 import { ScanPolicyManager } from './security/ScanPolicyManager';
@@ -86,19 +91,67 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
 
   const [inspectScanId, setInspectScanId] = useState<number | null>(null);
   const [inspectInitialTab, setInspectInitialTab] = useState<ScanDetailTab | undefined>(undefined);
-  // Filter to preselect on the Images tab when arriving from an overview link
-  // (e.g. "fixable findings"). Null leaves the Images tab on its own default.
+  const [inspectDriverVulnerabilityIds, setInspectDriverVulnerabilityIds] = useState<string[] | undefined>(undefined);
+  // Filter / targeting for the Images tab when arriving from an overview link.
+  // SecurityView owns both; ImagesTab never clears targeting locally (R1).
   const [imagesFilter, setImagesFilter] = useState<ImageFilterValue | null>(null);
+  const [imagesFilterToken, setImagesFilterToken] = useState(0);
+  const [imagesTargeting, setImagesTargeting] = useState<ImagesTargetingState | null>(null);
 
-  // Navigate between security tabs, optionally preselecting an Images filter so
-  // an overview action link lands on exactly the affected images.
-  const handleNavigate = useCallback((tab: SecurityTab, filter?: ImageFilterValue) => {
-    if (tab === 'images' && filter) setImagesFilter(filter);
+  // Navigate between security tabs, optionally preselecting an Images filter
+  // and/or posture targeting so an overview action lands on the affected images.
+  const handleNavigate = useCallback((
+    tab: SecurityTab,
+    filter?: ImageFilterValue,
+    targeting?: ImagesTargetingInput,
+  ) => {
+    if (tab === 'images') {
+      if (targeting && targeting.imageRefs.length > 0) {
+        setImagesTargeting((prev) => ({
+          kind: targeting.kind,
+          label: targeting.label,
+          imageRefs: targeting.imageRefs,
+          targets: targeting.targets,
+          ...(targeting.drivers ? { drivers: targeting.drivers } : {}),
+          ...(targeting.driverCount !== undefined ? { driverCount: targeting.driverCount } : {}),
+          ...(targeting.driversTruncated !== undefined
+            ? { driversTruncated: targeting.driversTruncated }
+            : {}),
+          token: (prev?.token ?? 0) + 1,
+        }));
+        // R2: targeting navigation resets severity unless an explicit filter is supplied.
+        setImagesFilter(filter ?? null);
+        setImagesFilterToken((t) => t + 1);
+      } else {
+        setImagesTargeting(null);
+        if (filter) {
+          setImagesFilter(filter);
+          setImagesFilterToken((t) => t + 1);
+        }
+      }
+    }
     onTabChange(tab);
   }, [onTabChange]);
 
-  const onInspect = useCallback((scanId: number, initialTab?: ScanDetailTab) => {
+  const clearImagesTargeting = useCallback(() => {
+    setImagesTargeting(null);
+  }, []);
+
+  // Drop Images drill-down state when the active node changes so refs from
+  // node A never filter node B's summaries.
+  useEffect(() => {
+    setImagesTargeting(null);
+    setImagesFilter(null);
+    setImagesFilterToken(0);
+  }, [activeNode?.id]);
+
+  const onInspect = useCallback((
+    scanId: number,
+    initialTab?: ScanDetailTab,
+    driverVulnerabilityIds?: string[],
+  ) => {
     setInspectInitialTab(initialTab);
+    setInspectDriverVulnerabilityIds(driverVulnerabilityIds);
     setInspectScanId(scanId);
   }, []);
 
@@ -229,12 +282,23 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
 
   // The scanner-detections disclaimer rides as an info affordance next to the
   // scanned-images count rather than a standing caption below the masthead.
-  // When posture is Action needed, the subtitle leads with the action count and
-  // top blocker labels so the operator sees "why red" without opening the page.
+  // When posture is Action needed or Monitoring, the subtitle leads with the
+  // residual Crit/High count and top reason labels so the operator sees why
+  // without opening the review queue.
   const blockers = overview?.postureReasons?.filter((r) => r.severity === 'blocker') ?? [];
-  const actionSummary = overview?.posture === 'Action needed' && blockers.length > 0
-    ? `${blockers.length} action${blockers.length === 1 ? '' : 's'}: ${blockers.slice(0, 2).map((r) => r.label.toLowerCase()).join(', ')} · `
-    : null;
+  const reviewReasons = overview?.postureReasons?.filter((r) => r.severity === 'review') ?? [];
+  const residualCritHigh = (overview?.rawCritical ?? overview?.critical ?? 0)
+    + (overview?.rawHigh ?? overview?.high ?? 0);
+  let actionSummary: string | null = null;
+  if (overview?.posture === 'Action needed' && blockers.length > 0) {
+    actionSummary = `${blockers.length} action${blockers.length === 1 ? '' : 's'}: ${blockers.slice(0, 2).map((r) => r.label.toLowerCase()).join(', ')} · `;
+  } else if (overview?.posture === 'Monitoring' && residualCritHigh > 0) {
+    const labels = (reviewReasons.length > 0 ? reviewReasons : overview.postureReasons ?? [])
+      .slice(0, 2)
+      .map((r) => r.label.toLowerCase());
+    const labelPart = labels.length > 0 ? `: ${labels.join(', ')}` : '';
+    actionSummary = `${residualCritHigh} residual Crit/High${labelPart} · `;
+  }
   const subtitle = overview ? (
     <span className="inline-flex items-center gap-1.5">
       {actionSummary ? <span>{actionSummary}</span> : null}
@@ -268,6 +332,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
             onNavigate={handleNavigate}
             onInspect={onInspect}
             canScan={canScanNode}
+            canManageNode={!!activeNode?.id && can('node:manage', 'node', String(activeNode.id))}
             onScanComplete={() => setReloadToken((t) => t + 1)}
           />
         </TabsContent>
@@ -283,6 +348,11 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               scanningRef={scanningRef}
               onScan={scanImage}
               initialFilter={imagesFilter ?? undefined}
+              filterToken={imagesFilterToken}
+              targeting={imagesTargeting}
+              onClearTargeting={clearImagesTargeting}
+              posturePartial={overview?.posturePartial === true}
+              nodeId={activeNode?.id}
             />
           </CapabilityGate>
         </TabsContent>
@@ -338,7 +408,18 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     <VulnerabilityScanSheet
       scanId={inspectScanId}
       initialTab={inspectInitialTab}
-      onClose={() => setInspectScanId(null)}
+      driverVulnerabilityIds={inspectDriverVulnerabilityIds}
+      driverFilterMode={
+        imagesTargeting?.kind === 'waiting_upstream' || imagesTargeting?.kind === 'update_check_uncertain'
+          ? 'monitoring'
+          : 'action'
+      }
+      driverCount={imagesTargeting?.driverCount}
+      driversTruncated={imagesTargeting?.driversTruncated}
+      onClose={() => {
+        setInspectScanId(null);
+        setInspectDriverVulnerabilityIds(undefined);
+      }}
       canGenerateSbom={canReadSecurityExports}
       canExportSarif={canReadSecurityExports}
       canCompare
@@ -391,10 +472,21 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         {overview?.posture === 'Action needed' && overview.primaryAction ? (
           <button
             type="button"
-            onClick={() => handleNavigate(
-              overview.primaryAction!.targetTab,
-              reasonImageFilter(overview.primaryAction!.kind),
-            )}
+            onClick={() => {
+              const action = overview.primaryAction!;
+              const blockerLabel = overview.postureReasons?.find(
+                (r) => r.kind === action.kind && r.severity === 'blocker',
+              )?.label ?? action.label;
+              const targeting = targetingFromTargets(
+                action.kind as PostureReasonKind,
+                blockerLabel,
+                action.targets,
+                action.drivers,
+                { driverCount: action.driverCount, driversTruncated: action.driversTruncated },
+              );
+              const filter = targeting ? undefined : reasonImageFilter(action.kind);
+              handleNavigate(action.targetTab, filter, targeting);
+            }}
             className="text-xs font-medium text-brand hover:underline whitespace-nowrap"
           >
             {overview.primaryAction.label} →

@@ -114,7 +114,7 @@ describe('ImageScanRow', () => {
     const onInspect = vi.fn();
     render(<ImageScanRow summary={summary({ image_ref: 'redis:7', scan_id: 9 })} onInspect={onInspect} />);
     await userEvent.click(screen.getByText('redis:7'));
-    expect(onInspect).toHaveBeenCalledWith(9, 'vulns');
+    expect(onInspect).toHaveBeenCalledWith(9, 'vulns', undefined);
   });
 });
 
@@ -185,5 +185,86 @@ describe('ImagesTab (mobile)', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Fixable' }));
     expect(screen.getByText('fix:1')).toBeInTheDocument();
     expect(screen.queryByText('nofix:1')).not.toBeInTheDocument();
+  });
+
+  it('shows the targeting banner and Clear on the phone layout', async () => {
+    installMatchMedia(true);
+    const onClear = vi.fn();
+    render(
+      <ImagesTab
+        {...base}
+        onClearTargeting={onClear}
+        targeting={{
+          kind: 'public_exposure',
+          label: 'Network-exposed images not yet classified',
+          imageRefs: ['exp:1'],
+          targets: [{
+            imageRef: 'exp:1',
+            intentStatus: 'unset',
+          }],
+          token: 1,
+        }}
+        summaries={asMap(
+          summary({ image_ref: 'exp:1', scan_id: 1, publicly_exposed: true, critical: 2 }),
+          summary({ image_ref: 'other:1', scan_id: 2 }),
+        )}
+      />,
+    );
+    expect(screen.getByText(/Network-exposed images not yet classified · 1 affected image/)).toBeInTheDocument();
+    expect(screen.getByText('exp:1')).toBeInTheDocument();
+    expect(screen.getByText('Network exposed')).toBeInTheDocument();
+    expect(screen.getByText('Intent: not classified')).toBeInTheDocument();
+    expect(screen.queryByText('other:1')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(onClear).toHaveBeenCalled();
+  });
+
+  it('shows standing intent on the phone layout without targeting', () => {
+    installMatchMedia(true);
+    render(
+      <ImagesTab
+        {...base}
+        nodeId={2}
+        summaries={asMap(summary({
+          image_ref: 'exp:1',
+          scan_id: 1,
+          publicly_exposed: true,
+          critical: 1,
+          exposure_contexts: [{
+            stackName: 'web',
+            serviceName: 'api',
+            exposureReason: 'published-port',
+            intentStatus: 'set',
+            exposureIntent: 'lan',
+          }],
+          exposure_context_count: 1,
+          exposure_context_summary: {
+            hasConflict: false,
+            hasUnclassified: false,
+            hasUnavailable: false,
+            allKnownIntentional: true,
+          },
+        }))}
+      />,
+    );
+    expect(screen.getByText('Network exposed')).toBeInTheDocument();
+    expect(screen.getByText('Intent: LAN')).toBeInTheDocument();
+  });
+
+  it('keeps mixed-version Network exposed without inventing intent on phone', () => {
+    installMatchMedia(true);
+    render(
+      <ImagesTab
+        {...base}
+        summaries={asMap(summary({
+          image_ref: 'exp:1',
+          scan_id: 1,
+          publicly_exposed: true,
+          critical: 1,
+        }))}
+      />,
+    );
+    expect(screen.getByText('Network exposed')).toBeInTheDocument();
+    expect(screen.queryByText(/Intent:/)).not.toBeInTheDocument();
   });
 });

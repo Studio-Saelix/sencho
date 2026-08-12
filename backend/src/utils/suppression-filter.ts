@@ -26,6 +26,36 @@ export const DISMISSING_STATUSES: ReadonlySet<TriageStatus> = new Set([
     'not_affected', 'accepted', 'fixed', 'false_positive', 'ignored',
 ]);
 
+/**
+ * Dismissing statuses that clear Crit/High from residual Secure-gate risk.
+ * Accepted and ignored stay residual (operator is still carrying the risk).
+ * Fixed clears under the current Secure contract; re-verifying Fixed over time
+ * is a separate evidence-freshness concern.
+ */
+export const SECURE_CLEARING_STATUS_LIST = [
+    'not_affected', 'false_positive', 'fixed',
+] as const;
+export type SecureClearingStatus = typeof SECURE_CLEARING_STATUS_LIST[number];
+export const SECURE_CLEARING_STATUSES: ReadonlySet<SecureClearingStatus> = new Set(
+    SECURE_CLEARING_STATUS_LIST,
+);
+
+type _SecureClearingIsDismissing = SecureClearingStatus extends (
+    'not_affected' | 'accepted' | 'fixed' | 'false_positive' | 'ignored'
+) ? true : never;
+const _secureClearingIsDismissing: _SecureClearingIsDismissing = true;
+void _secureClearingIsDismissing;
+
+/** True when a Crit/High finding still blocks Secure (residual material risk). */
+export function countsTowardResidualCriticalHigh(
+    decision: { suppressed: boolean; triage_status?: TriageStatus },
+): boolean {
+    if (!decision.suppressed) return true;
+    const status = decision.triage_status;
+    if (status == null) return true;
+    return !(SECURE_CLEARING_STATUS_LIST as readonly string[]).includes(status);
+}
+
 /** Optional OpenVEX-aligned justification taxonomy (never required). */
 export const TRIAGE_JUSTIFICATIONS = [
     'vulnerable_code_not_in_execute_path', 'vulnerable_code_not_present',

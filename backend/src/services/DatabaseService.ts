@@ -5,6 +5,7 @@ import { CryptoService } from './CryptoService';
 import { isSeverityAtLeast } from '../utils/severity';
 import { evaluatePolicyRisk, policyInputs, type PolicyBlockReason } from '../utils/policy-risk';
 import { applySuppressions } from '../utils/suppression-filter';
+import { SENCHO_ROLLBACK_HOLD_SQL_LIKE } from '../utils/senchoRollbackHold';
 import type { AuditStatsInput } from './AuditAnomalyService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
 import { HIGH_EPSS_THRESHOLD } from './securityPosture';
@@ -7101,7 +7102,8 @@ export class DatabaseService {
                    ) lv ON lv.image_ref = v.image_ref AND lv.max_scanned = v.scanned_at
                    WHERE v.node_id = ? AND v.status = 'completed' AND v.scanners_used IN (${placeholders})
                  ) vuln ON vuln.image_ref = base.image_ref
-                 WHERE base.node_id = ? AND base.status = 'completed'`,
+                 WHERE base.node_id = ? AND base.status = 'completed'
+                   AND base.image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'`,
             )
             .all(nodeId, nodeId, ...VULN_BEARING_SCANNER_SETS, nodeId, ...VULN_BEARING_SCANNER_SETS, nodeId) as Array<{
                 image_ref: string;
@@ -7165,9 +7167,11 @@ export class DatabaseService {
                    SELECT image_ref, MAX(scanned_at) AS max_scanned
                    FROM vulnerability_scans
                    WHERE node_id = ? AND status = 'completed' AND scanners_used IN (${placeholders})
+                     AND image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'
                    GROUP BY image_ref
                  ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
                  WHERE vs.node_id = ? AND vs.status = 'completed' AND vs.scanners_used IN (${placeholders})
+                   AND vs.image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'
                    AND vd.severity IN ('CRITICAL', 'HIGH')
                  LIMIT ?`,
             )
@@ -7207,9 +7211,11 @@ export class DatabaseService {
                    SELECT image_ref, MAX(scanned_at) AS max_scanned
                    FROM vulnerability_scans
                    WHERE node_id = ? AND status = 'completed' AND scanners_used IN (${placeholders})
+                     AND image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'
                    GROUP BY image_ref
                  ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
                  WHERE vs.node_id = ? AND vs.status = 'completed' AND vs.scanners_used IN (${placeholders})
+                   AND vs.image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'
                  LIMIT ?`,
             )
             .all(nodeId, ...VULN_BEARING_SCANNER_SETS, nodeId, ...VULN_BEARING_SCANNER_SETS, limit + 1) as Array<{
@@ -7288,9 +7294,11 @@ export class DatabaseService {
                    SELECT image_ref, MAX(scanned_at) AS max_scanned
                    FROM vulnerability_scans
                    WHERE node_id = ? AND status = 'completed' AND scanners_used IN (${placeholders})
+                     AND image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'
                    GROUP BY image_ref
                  ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
                  WHERE vs.node_id = ? AND vs.status = 'completed' AND vs.scanners_used IN (${placeholders})
+                   AND vs.image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'
                    AND (vd.severity IN ('CRITICAL', 'HIGH') OR ci.kev = 1)
                  -- Rank by the same exploitation-risk tiers the overview list
                  -- displays (SecurityCharts exploitTier, "assume it's automatable"):
@@ -7450,6 +7458,7 @@ export class DatabaseService {
                      ) AS rn
                    FROM vulnerability_scans
                    WHERE node_id = ? AND status = 'completed' AND scanned_at >= ?
+                     AND image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'
                  )
                  SELECT day,
                         SUM(critical_count) AS critical,

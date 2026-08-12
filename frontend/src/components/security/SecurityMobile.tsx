@@ -10,7 +10,8 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { getSeverityKey, SEVERITY_DOT_CLASSES, type ImageFilterValue } from '@/lib/severityStyles';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import type { SecurityTab } from '@/lib/events';
-import type { ScanSummary, SecurityOverview, ScanDetailTab, VulnerabilityScan } from '@/types/security';
+import type { ImageExposureContext, ScanSummary, SecurityOverview, ScanDetailTab, VulnerabilityScan } from '@/types/security';
+import { NetworkExposedControl } from './ExposureNetworking';
 
 export interface SecurityMobileTab {
   value: SecurityTab;
@@ -122,9 +123,23 @@ function CountTag({ tone, children }: { tone: keyof typeof COUNT_TAG_TONE; child
 
 /** One image row in the mobile Images list: severity dot, truncated mono ref over
  *  a freshness meta line, trailing C/H count tags (or CLEAN), and a chevron. */
-export function ImageScanRow({ summary, onInspect }: {
+export function ImageScanRow({
+  summary,
+  onInspect,
+  driverVulnerabilityIds,
+  intentEvidence = null,
+  exposureContexts = [],
+  nodeId,
+}: {
   summary: ScanSummary;
-  onInspect: (scanId: number, initialTab?: ScanDetailTab) => void;
+  onInspect: (scanId: number, initialTab?: ScanDetailTab, driverVulnerabilityIds?: string[]) => void;
+  /** Per-image driving finding ids from posture targeting. */
+  driverVulnerabilityIds?: string[];
+  /** Compact exposure-intent line (standing or while posture-targeting). */
+  intentEvidence?: string | null;
+  /** Stack/service contexts for Networking navigation from Network exposed. */
+  exposureContexts?: ImageExposureContext[];
+  nodeId?: number;
 }) {
   // Use the shared classifier so the count tags agree with the leading dot: a
   // medium/low-only image is not "clean", it is its highest severity.
@@ -133,13 +148,19 @@ export function ImageScanRow({ summary, onInspect }: {
   return (
     <button
       type="button"
-      onClick={() => onInspect(summary.scan_id, 'vulns')}
+      onClick={() => onInspect(summary.scan_id, 'vulns', driverVulnerabilityIds)}
       className="flex min-h-11 w-full items-center gap-[11px] border-b border-hairline py-[11px] text-left last:border-b-0"
     >
       <span className={cn('h-[7px] w-[7px] shrink-0 rounded-full', SEVERITY_DOT_CLASSES[severityKey])} aria-hidden />
       <span className="min-w-0 flex-1">
         <span className="block truncate font-mono text-[13px] text-stat-value">{summary.image_ref}</span>
-        <span className="mt-px block font-mono text-[10px] text-stat-icon">scanned {formatTimeAgo(summary.scanned_at)}</span>
+        <span className="mt-px flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[10px] text-stat-icon">
+          <span>scanned {formatTimeAgo(summary.scanned_at)}</span>
+          {summary.publicly_exposed === true ? (
+            <NetworkExposedControl contexts={exposureContexts} nodeId={nodeId} />
+          ) : null}
+          {intentEvidence ? <span className="normal-case tracking-normal">{intentEvidence}</span> : null}
+        </span>
       </span>
       <span className="flex shrink-0 items-center gap-1">
         {summary.critical > 0 && <CountTag tone="destructive">{summary.critical}C</CountTag>}

@@ -66,7 +66,7 @@ it('opens the scan sheet on the vulns tab from the image name', async () => {
     />,
   );
   await userEvent.click(screen.getByText('nginx:1'));
-  expect(onInspect).toHaveBeenCalledWith(7, 'vulns');
+  expect(onInspect).toHaveBeenCalledWith(7, 'vulns', undefined);
 });
 
 it('opens the scan sheet on the vulns tab from the Findings cell', async () => {
@@ -79,7 +79,7 @@ it('opens the scan sheet on the vulns tab from the Findings cell', async () => {
     />,
   );
   await userEvent.click(screen.getByText('clean'));
-  expect(onInspect).toHaveBeenCalledWith(9, 'vulns');
+  expect(onInspect).toHaveBeenCalledWith(9, 'vulns', undefined);
 });
 
 it('narrows the list with the search box', async () => {
@@ -135,4 +135,368 @@ it('shows the scan action only when scanning is allowed', () => {
   expect(screen.queryByLabelText('Scan nginx:1')).not.toBeInTheDocument();
   rerender(<ImagesTab {...base} canScan={true} summaries={data} />);
   expect(screen.getByLabelText('Scan nginx:1')).toBeInTheDocument();
+});
+
+it('filters to posture targets and shows a clearable banner', async () => {
+  const onClear = vi.fn();
+  render(
+    <ImagesTab
+      {...base}
+      onClearTargeting={onClear}
+      targeting={{
+        kind: 'public_exposure',
+        label: 'Network-exposed images not yet classified',
+        imageRefs: ['exp:1'],
+        targets: [{
+          imageRef: 'exp:1',
+          intentStatus: 'unset',
+        }],
+        token: 1,
+      }}
+      summaries={asMap(
+        summary({ image_ref: 'exp:1', scan_id: 1, publicly_exposed: true }),
+        summary({ image_ref: 'other:1', scan_id: 2 }),
+      )}
+    />,
+  );
+  expect(screen.getByText(/Network-exposed images not yet classified · 1 affected image/)).toBeInTheDocument();
+  expect(screen.getByText('exp:1')).toBeInTheDocument();
+  expect(screen.queryByText('other:1')).not.toBeInTheDocument();
+  expect(screen.getByText('Network exposed')).toBeInTheDocument();
+  expect(screen.getByText('Intent: not classified')).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  expect(onClear).toHaveBeenCalled();
+});
+
+it('shows standing intent evidence without targeting', () => {
+  render(
+    <ImagesTab
+      {...base}
+      nodeId={7}
+      summaries={asMap(summary({
+        image_ref: 'exp:1',
+        scan_id: 1,
+        publicly_exposed: true,
+        exposure_contexts: [{
+          stackName: 'web',
+          serviceName: 'api',
+          exposureReason: 'published-port',
+          intentStatus: 'set',
+          exposureIntent: 'public',
+        }],
+        exposure_context_count: 1,
+        exposure_context_summary: {
+          hasConflict: false,
+          hasUnclassified: false,
+          hasUnavailable: false,
+          allKnownIntentional: true,
+        },
+      }))}
+    />,
+  );
+  expect(screen.getByText('Network exposed')).toBeInTheDocument();
+  expect(screen.getByText('Intent: public')).toBeInTheDocument();
+});
+
+it('shows Network exposed only for mixed-version payloads without contexts', () => {
+  render(
+    <ImagesTab
+      {...base}
+      summaries={asMap(summary({
+        image_ref: 'exp:1',
+        scan_id: 1,
+        publicly_exposed: true,
+      }))}
+    />,
+  );
+  expect(screen.getByText('Network exposed')).toBeInTheDocument();
+  expect(screen.queryByText(/Intent:/)).not.toBeInTheDocument();
+});
+
+it('shows absolute intentional targeting banner with View networking only', () => {
+  render(
+    <ImagesTab
+      {...base}
+      nodeId={3}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'public_exposure',
+        label: 'Network-exposed images not yet classified',
+        imageRefs: ['exp:1'],
+        targets: [{
+          imageRef: 'exp:1',
+          stackName: 'web',
+          serviceName: 'api',
+          intentStatus: 'set',
+          exposureIntent: 'public',
+        }],
+        token: 1,
+      }}
+      summaries={asMap(summary({ image_ref: 'exp:1', scan_id: 1, publicly_exposed: true }))}
+    />,
+  );
+  expect(screen.getByText('Exposure is intentional')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Review findings/i })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Network-exposed images not yet classified ·/)).not.toBeInTheDocument();
+});
+
+it('shows partial intentional targeting banner copy', () => {
+  render(
+    <ImagesTab
+      {...base}
+      nodeId={3}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'public_exposure',
+        label: 'Network-exposed images not yet classified',
+        imageRefs: ['exp:1'],
+        targets: [
+          {
+            imageRef: 'exp:1',
+            stackName: 'web',
+            serviceName: 'api',
+            intentStatus: 'set',
+            exposureIntent: 'lan',
+          },
+          {
+            imageRef: 'exp:1',
+            stackName: 'web',
+            serviceName: 'worker',
+            intentStatus: 'unavailable',
+          },
+        ],
+        token: 1,
+      }}
+      summaries={asMap(summary({ image_ref: 'exp:1', scan_id: 1, publicly_exposed: true }))}
+    />,
+  );
+  expect(screen.getByText('Known exposure is intentional')).toBeInTheDocument();
+  expect(screen.getByText(/could not be verified for 1 service/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
+});
+
+it('shows driver-focused banner for elevated_exploit_risk targeting', () => {
+  render(
+    <ImagesTab
+      {...base}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'elevated_exploit_risk',
+        label: 'Elevated exploit risk on network-exposed workload',
+        imageRefs: ['exp:1'],
+        targets: [{
+          imageRef: 'exp:1',
+          intentStatus: 'set',
+          exposureIntent: 'public',
+        }],
+        drivers: [
+          { vulnerabilityId: 'CVE-2024-1', imageRef: 'exp:1' },
+          { vulnerabilityId: 'CVE-2024-2', imageRef: 'exp:1' },
+        ],
+        token: 1,
+      }}
+      summaries={asMap(summary({ image_ref: 'exp:1', scan_id: 1, publicly_exposed: true }))}
+    />,
+  );
+  expect(screen.getByText(/Driving current Security action · 2 findings/)).toBeInTheDocument();
+  expect(screen.getByText(/exact findings driving this Security action/i)).toBeInTheDocument();
+  expect(screen.queryByText(/Elevated exploit risk on network-exposed workload ·/)).not.toBeInTheDocument();
+});
+
+it('shows Monitoring findings banner with truncation when waiting_upstream drivers are capped', () => {
+  render(
+    <ImagesTab
+      {...base}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'waiting_upstream',
+        label: 'Waiting for upstream image',
+        imageRefs: ['app:1'],
+        targets: [{ imageRef: 'app:1' }],
+        drivers: [
+          { vulnerabilityId: 'CVE-2024-1', imageRef: 'app:1' },
+          { vulnerabilityId: 'CVE-2024-2', imageRef: 'app:1' },
+        ],
+        driverCount: 9,
+        driversTruncated: true,
+        token: 1,
+      }}
+      summaries={asMap(summary({ image_ref: 'app:1', scan_id: 1 }))}
+    />,
+  );
+  expect(screen.getByText(/Findings under Monitoring · showing 2 of 9/)).toBeInTheDocument();
+});
+
+
+it('shows conflict banner for public_exposure intent mismatch', () => {
+  render(
+    <ImagesTab
+      {...base}
+      nodeId={3}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'public_exposure',
+        label: 'Exposure conflicts with declared intent',
+        imageRefs: ['exp:1'],
+        targets: [{
+          imageRef: 'exp:1',
+          stackName: 'web',
+          serviceName: 'api',
+          intentStatus: 'set',
+          exposureIntent: 'internal',
+          intentConflict: true,
+        }],
+        token: 1,
+      }}
+      summaries={asMap(summary({ image_ref: 'exp:1', scan_id: 1, publicly_exposed: true }))}
+    />,
+  );
+  expect(screen.getByText('Exposure conflicts with declared intent')).toBeInTheDocument();
+  expect(screen.getByText(/Review networking to align configuration with intent/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'View networking' })).toBeInTheDocument();
+});
+
+it('shows matched of total when a target has no summary', () => {
+  render(
+    <ImagesTab
+      {...base}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'public_exposure',
+        label: 'Network-exposed images not yet classified',
+        imageRefs: ['a:1', 'b:1', 'missing:1'],
+        targets: ['a:1', 'b:1', 'missing:1'].map((imageRef) => ({ imageRef })),
+        token: 1,
+      }}
+      summaries={asMap(
+        summary({ image_ref: 'a:1', scan_id: 1 }),
+        summary({ image_ref: 'b:1', scan_id: 2 }),
+      )}
+    />,
+  );
+  expect(screen.getByText(/2 of 3 affected images/)).toBeInTheDocument();
+  expect(screen.getByText(/no scan summary on this node/i)).toBeInTheDocument();
+});
+
+it('does not change the banner count when searching within the targeted set', async () => {
+  render(
+    <ImagesTab
+      {...base}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'public_exposure',
+        label: 'Network-exposed images not yet classified',
+        imageRefs: ['a:1', 'b:1'],
+        targets: ['a:1', 'b:1'].map((imageRef) => ({ imageRef })),
+        token: 1,
+      }}
+      summaries={asMap(
+        summary({ image_ref: 'a:1', scan_id: 1 }),
+        summary({ image_ref: 'b:1', scan_id: 2 }),
+      )}
+    />,
+  );
+  expect(screen.getByText(/· 2 affected images/)).toBeInTheDocument();
+  await userEvent.click(screen.getByLabelText('Search images'));
+  await userEvent.type(screen.getByPlaceholderText('Search images...'), 'a:');
+  expect(screen.getByText('a:1')).toBeInTheDocument();
+  expect(screen.queryByText('b:1')).not.toBeInTheDocument();
+  expect(screen.getByText(/· 2 affected images/)).toBeInTheDocument();
+});
+
+it('re-applies targeting when the token increments after Clear', () => {
+  const data = asMap(
+    summary({ image_ref: 'exp:1', scan_id: 1 }),
+    summary({ image_ref: 'other:1', scan_id: 2 }),
+  );
+  const { rerender } = render(
+    <ImagesTab
+      {...base}
+      targeting={{ kind: 'public_exposure', label: 'Public exposure', imageRefs: ['exp:1'], targets: [{ imageRef: 'exp:1' }], token: 1 }}
+      onClearTargeting={vi.fn()}
+      summaries={data}
+    />,
+  );
+  expect(screen.queryByText('other:1')).not.toBeInTheDocument();
+  rerender(
+    <ImagesTab
+      {...base}
+      targeting={null}
+      onClearTargeting={vi.fn()}
+      summaries={data}
+    />,
+  );
+  expect(screen.getByText('other:1')).toBeInTheDocument();
+  rerender(
+    <ImagesTab
+      {...base}
+      targeting={{ kind: 'public_exposure', label: 'Public exposure', imageRefs: ['exp:1'], targets: [{ imageRef: 'exp:1' }], token: 2 }}
+      onClearTargeting={vi.fn()}
+      summaries={data}
+    />,
+  );
+  expect(screen.queryByText('other:1')).not.toBeInTheDocument();
+  expect(screen.getByText('exp:1')).toBeInTheDocument();
+});
+
+it('resets a stale FIXABLE filter when targeting arrives without a filter', () => {
+  const data = asMap(
+    summary({ image_ref: 'exp:1', scan_id: 1, fixable: 0, highest_severity: 'HIGH', high: 1, total: 1 }),
+    summary({ image_ref: 'fix:1', scan_id: 2, fixable: 2, highest_severity: 'HIGH', high: 2, total: 2 }),
+  );
+  const { rerender } = render(
+    <ImagesTab {...base} initialFilter="FIXABLE" filterToken={1} summaries={data} />,
+  );
+  expect(screen.getByText('fix:1')).toBeInTheDocument();
+  expect(screen.queryByText('exp:1')).not.toBeInTheDocument();
+  rerender(
+    <ImagesTab
+      {...base}
+      initialFilter={undefined}
+      filterToken={2}
+      targeting={{ kind: 'public_exposure', label: 'Public exposure', imageRefs: ['exp:1'], targets: [{ imageRef: 'exp:1' }], token: 1 }}
+      onClearTargeting={vi.fn()}
+      summaries={data}
+    />,
+  );
+  expect(screen.getByText('exp:1')).toBeInTheDocument();
+});
+
+it('falls back without a banner when targets are missing', () => {
+  render(
+    <ImagesTab
+      {...base}
+      summaries={asMap(
+        summary({ image_ref: 'a:1', scan_id: 1 }),
+        summary({ image_ref: 'b:1', scan_id: 2 }),
+      )}
+    />,
+  );
+  expect(screen.queryByText(/affected image/)).not.toBeInTheDocument();
+  expect(screen.getByText('a:1')).toBeInTheDocument();
+  expect(screen.getByText('b:1')).toBeInTheDocument();
+});
+
+it('shows a clearable zero-match note and keeps the full list', () => {
+  render(
+    <ImagesTab
+      {...base}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'public_exposure',
+        label: 'Network-exposed images not yet classified',
+        imageRefs: ['missing:1'],
+        targets: ['missing:1'].map((imageRef) => ({ imageRef })),
+        token: 1,
+      }}
+      summaries={asMap(
+        summary({ image_ref: 'a:1', scan_id: 1 }),
+        summary({ image_ref: 'b:1', scan_id: 2 }),
+      )}
+    />,
+  );
+  expect(screen.getByText(/scan summary on this node/i)).toBeInTheDocument();
+  expect(screen.getByText('a:1')).toBeInTheDocument();
+  expect(screen.getByText('b:1')).toBeInTheDocument();
 });

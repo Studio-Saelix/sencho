@@ -124,6 +124,17 @@ export interface MisconfigAcknowledgement {
   active: boolean;
 }
 
+/** Triage decision states (mirrors the backend TriageStatus). */
+export type TriageStatus =
+  | 'needs_review' | 'affected' | 'not_affected' | 'accepted' | 'fixed' | 'false_positive' | 'ignored';
+
+/** OpenVEX-aligned justification codes (mirrors the backend TriageJustification). */
+export type TriageJustification =
+  | 'vulnerable_code_not_in_execute_path'
+  | 'vulnerable_code_not_present'
+  | 'component_not_present'
+  | 'inline_mitigations_already_exist';
+
 export interface VulnerabilityDetail {
   id: number;
   scan_id: number;
@@ -153,18 +164,10 @@ export interface VulnerabilityDetail {
   suppressed?: boolean;
   suppression_id?: number;
   suppression_reason?: string;
+  /** Finding-scoped triage decision when joined from suppressions. */
+  triage_status?: TriageStatus;
+  triage_justification?: TriageJustification | null;
 }
-
-/** Triage decision states (mirrors the backend TriageStatus). */
-export type TriageStatus =
-  | 'needs_review' | 'affected' | 'not_affected' | 'accepted' | 'fixed' | 'false_positive' | 'ignored';
-
-/** OpenVEX-aligned justification codes (mirrors the backend TriageJustification). */
-export type TriageJustification =
-  | 'vulnerable_code_not_in_execute_path'
-  | 'vulnerable_code_not_present'
-  | 'component_not_present'
-  | 'inline_mitigations_already_exist';
 
 export interface CveSuppression {
   id: number;
@@ -181,6 +184,24 @@ export interface CveSuppression {
   justification?: TriageJustification | null;
 }
 
+/** Per stack/service exposure + Networking intent for a standing image summary. */
+export interface ImageExposureContext {
+  stackName: string;
+  serviceName: string;
+  exposureReason: 'published-port' | 'host-network' | null;
+  exposureIntent?: 'internal' | 'same-node' | 'lan' | 'reverse-proxy' | 'public' | 'temporary' | 'unknown';
+  intentStatus: 'set' | 'unset' | 'unavailable';
+  intentConflict?: boolean;
+}
+
+/** Pre-cap aggregates for standing exposure conclusions (authoritative vs display slice). */
+export interface ImageExposureContextSummary {
+  hasConflict: boolean;
+  hasUnclassified: boolean;
+  hasUnavailable: boolean;
+  allKnownIntentional: boolean;
+}
+
 export interface ScanSummary {
   image_ref: string;
   highest_severity: VulnSeverity | null;
@@ -195,6 +216,15 @@ export interface ScanSummary {
   fixable: number;
   secret_count: number;
   misconfig_count: number;
+  /** Tri-state Compose exposure from cached stack descriptors (route enrichment). */
+  publicly_exposed?: boolean | null;
+  /** Capped display list of stack/service exposure contexts (when publicly exposed). */
+  exposure_contexts?: ImageExposureContext[];
+  /** Total contexts after dedupe, before display cap. */
+  exposure_context_count?: number;
+  exposure_contexts_truncated?: boolean;
+  /** Aggregates over the full list before cap; prefer for banner/row conclusions. */
+  exposure_context_summary?: ImageExposureContextSummary;
 }
 
 export interface ScanPolicy {
@@ -257,13 +287,37 @@ export type SecurityPostureState = 'Action needed' | 'Monitoring' | 'Secure' | '
 /** Kinds of posture reason the backend can report. */
 export type PostureReasonKind =
   | 'fixable_cve'
+  | 'waiting_upstream'
+  | 'update_check_uncertain'
   | 'known_exploited'
+  | 'elevated_exploit_risk'
   | 'secret'
   | 'dangerous_compose'
   | 'public_exposure'
   | 'stale_scan'
   | 'failed_scan'
   | 'needs_review';
+
+/** Bounded finding identities that drive a vulnerability-derived posture reason. */
+export interface PostureDriverFinding {
+  vulnerabilityId: string;
+  imageRef: string;
+}
+
+/**
+ * Image identity behind a posture reason (raw scan image_ref).
+ * Exposure reasons may enrich with stack, service, and Networking intent;
+ * other reasons are typically imageRef-only.
+ */
+export interface PostureTarget {
+  imageRef: string;
+  stackName?: string;
+  serviceName?: string;
+  exposureReason?: 'published-port' | 'host-network' | null;
+  exposureIntent?: 'internal' | 'same-node' | 'lan' | 'reverse-proxy' | 'public' | 'temporary' | 'unknown';
+  intentStatus?: 'set' | 'unset' | 'unavailable';
+  intentConflict?: boolean;
+}
 
 /** One structured reason explaining why the security posture is what it is. */
 export interface PostureReason {
@@ -273,6 +327,22 @@ export interface PostureReason {
   label: string;
   description: string;
   targetTab: SecurityTab;
+  /** Optional Open-button label; when omitted the UI derives from targetTab. */
+  actionLabel?: string;
+  /**
+   * Target rows for this reason (image-only, or per stack/service for exposure).
+   * May repeat imageRef. Omitted when empty or unknown.
+   */
+  targets?: PostureTarget[];
+  /**
+   * Exact contributing findings for vulnerability-derived reasons (capped).
+   * Older remotes omit this field.
+   */
+  drivers?: PostureDriverFinding[];
+  /** Full contributing driver count before cap; omit when drivers omitted. */
+  driverCount?: number;
+  /** True when driverCount exceeds the attached drivers array length. */
+  driversTruncated?: boolean;
 }
 
 /** Highest-priority action for the masthead CTA. */
@@ -282,6 +352,12 @@ export interface PostureAction {
   /** The reason kind behind this action, so the UI can target the affected
    *  items precisely (e.g. filter Images to fixable findings). */
   kind: PostureReasonKind;
+  /** Same targets as the reason that produced this action, when available. */
+  targets?: PostureTarget[];
+  /** Same drivers as the reason that produced this action, when available. */
+  drivers?: PostureDriverFinding[];
+  driverCount?: number;
+  driversTruncated?: boolean;
 }
 
 /** Node-scoped security posture rollup for the Security page Overview. */
@@ -318,7 +394,7 @@ export interface SecurityOverview {
   needsReview?: number;
   accepted?: number;
   notAffected?: number;
-  /** Total actionable items, for the "N actions" affordance. */
+  /** Legacy mixed-unit sum of blocker counts. Prefer posture / reasons. */
   actionable?: number;
   posture?: SecurityPostureState;
   /** True when the bounded posture pass hit its row cap on this node. */
@@ -328,6 +404,8 @@ export interface SecurityOverview {
   postureReasons?: PostureReason[];
   /** Highest-priority action for the masthead CTA, or null when no blockers. */
   primaryAction?: PostureAction | null;
+  /** True when image-update checks are disabled (gates Check again on uncertain rows). */
+  updateChecksDisabled?: boolean;
 }
 
 /** Which detail tab the scan sheet opens on. Matches VulnerabilityScanSheet's tabs. */
