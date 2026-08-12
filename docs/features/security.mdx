@@ -24,19 +24,21 @@ to "what can and should I do right now?":
   newer image available to review for Critical or High findings, a detected secret, a dangerous
   Compose setting, a known-exploited (CISA KEV) CVE, elevated exploit risk on a network-exposed
   workload, or exposure that conflicts with declared Networking intent.
-- **Monitoring**: Critical or High findings exist, but none currently have a concrete operator
-  action Sencho can drive. Package fixes may exist without an applicable container-image update,
-  findings may already be triaged, or workloads may be intentionally network-exposed without an
-  independent Security driver. Waiting for an upstream image and uncertain update availability
-  are review-level reasons (not Action needed), so they appear under **Why Monitoring** without a
-  red masthead.
-- **Secure**: nothing actionable right now. This is never a claim that no vulnerabilities exist.
+- **Monitoring**: no Action needed blocker, but material residual risk, a pending review, or
+  relevant uncertainty remains. Residual Critical/High include undecided findings and accepted or
+  ignored residual risk. Package fixes may exist without an applicable container-image update,
+  workloads may be intentionally network-exposed without an independent Security driver, and
+  waiting-upstream or update-check-uncertain rows appear under **Why Monitoring** without a red
+  masthead.
+- **Secure**: no Action needed blocker and no residual material Critical/High or pending
+  security-review condition under current evidence. Not affected, false positive, and fixed can
+  clear residual risk for those findings; accepting residual risk does not. This is never a claim
+  that no scanner detections exist.
 - **Unknown**: the scanner is not installed, or no scan has completed yet.
 
-**Monitoring** means residual Critical/High risk remains visible and reviewable, while Security has
-no confirmed operator action it can drive right now. That is not a claim of safety: raw detections,
-package-fix evidence without a confirmed image update, waiting-upstream and update-check-uncertain
-rows, and intentional exposure context stay on the page so residual risk is never silent.
+Monitoring keeps residual risk visible (raw detections, accepted risk, waiting-upstream rows,
+intentional exposure context). Secure is stricter: residual Critical/High and review reasons must
+be cleared, not merely the absence of an immediate action.
 
 Raw Critical and High counts stay visible next to the posture as **scanner detections**, not as the
 posture itself: a vulnerable component being present is not the same as a reachable, exploitable risk.
@@ -156,8 +158,9 @@ in Settings. These are governed by the local instance, so this tab is shown when
 node; switch to the local node to manage them.
 
 Suppressing a CVE records a **triage decision**: accepted risk, not affected, false positive, fixed,
-ignored, or needs review, with an optional OpenVEX justification. Decided findings stop driving the
-action posture; a "needs review" decision stays counted but keeps the finding actionable. You can
+ignored, or needs review, with an optional OpenVEX justification. Not affected, false positive, and
+fixed clear residual Crit/High for Secure. Accepted and ignored residual risk stay on Monitoring and
+do not turn the page green. Needs review and affected stay actionable. You can
 export the fleet's triage decisions as an OpenVEX document for use with other tooling.
 
 ## History

@@ -320,6 +320,118 @@ describe('GET /api/security/overview', () => {
     expect(res.body.knownExploited).toBe(1);
   });
 
+  it('stays Monitoring when Crit/High are accepted residual risk', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'accepted:1', image_digest: 'sha256:accepted', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [
+      { vulnerability_id: 'CVE-2024-ACCEPT', pkg_name: 'x', installed_version: '1', fixed_version: null, severity: 'CRITICAL', title: null, description: null, primary_url: null },
+    ]);
+    db().createCveSuppression({
+      cve_id: 'CVE-2024-ACCEPT', pkg_name: null, image_pattern: null, reason: 'accepted residual',
+      created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0, status: 'accepted',
+    });
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.rawCritical).toBe(1);
+    expect(res.body.accepted).toBe(1);
+    expect(res.body.posture).toBe('Monitoring');
+  });
+
+  it('reads Secure when Crit/High are not_affected (raw detections may remain)', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'na:1', image_digest: 'sha256:na', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [
+      { vulnerability_id: 'CVE-2024-NA', pkg_name: 'x', installed_version: '1', fixed_version: null, severity: 'CRITICAL', title: null, description: null, primary_url: null },
+    ]);
+    db().createCveSuppression({
+      cve_id: 'CVE-2024-NA', pkg_name: null, image_pattern: null, reason: 'not in execute path',
+      created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0, status: 'not_affected',
+    });
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.rawCritical).toBe(1);
+    expect(res.body.notAffected).toBe(1);
+    expect(res.body.posture).toBe('Secure');
+  });
+
+  it('stays Monitoring when Crit/High are ignored residual risk', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'ignored:1', image_digest: 'sha256:ignored', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [
+      { vulnerability_id: 'CVE-2024-IGN', pkg_name: 'x', installed_version: '1', fixed_version: null, severity: 'CRITICAL', title: null, description: null, primary_url: null },
+    ]);
+    db().createCveSuppression({
+      cve_id: 'CVE-2024-IGN', pkg_name: null, image_pattern: null, reason: 'ignored until patch',
+      created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0, status: 'ignored',
+    });
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.rawCritical).toBe(1);
+    expect(res.body.posture).toBe('Monitoring');
+  });
+
+  it('reads Secure when Crit/High are false_positive (raw detections may remain)', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'fp:1', image_digest: 'sha256:fp', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [
+      { vulnerability_id: 'CVE-2024-FP', pkg_name: 'x', installed_version: '1', fixed_version: null, severity: 'CRITICAL', title: null, description: null, primary_url: null },
+    ]);
+    db().createCveSuppression({
+      cve_id: 'CVE-2024-FP', pkg_name: null, image_pattern: null, reason: 'scanner false positive',
+      created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0, status: 'false_positive',
+    });
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.rawCritical).toBe(1);
+    expect(res.body.posture).toBe('Secure');
+  });
+
+  it('reads Secure when Crit/High are fixed (raw detections may remain)', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'fixed:1', image_digest: 'sha256:fixed', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [
+      { vulnerability_id: 'CVE-2024-FIX', pkg_name: 'x', installed_version: '1', fixed_version: null, severity: 'CRITICAL', title: null, description: null, primary_url: null },
+    ]);
+    db().createCveSuppression({
+      cve_id: 'CVE-2024-FIX', pkg_name: null, image_pattern: null, reason: 'patched in rebuild',
+      created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0, status: 'fixed',
+    });
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.rawCritical).toBe(1);
+    expect(res.body.posture).toBe('Secure');
+  });
+
   it('reads Secure when a scan completed with nothing actionable or severe', async () => {
     db().createVulnerabilityScan({
       node_id: 1, image_ref: 'clean:1', image_digest: 'sha256:clean', scanned_at: Date.now(),

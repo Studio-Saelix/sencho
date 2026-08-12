@@ -11,10 +11,15 @@
  * changes never require a schema migration, and the same verdict can be reused
  * by other surfaces (action queue, per-stack blast radius).
  *
- * Posture is deliberately NOT raw severity: a page is never "Secure" merely
- * because counts are zero-weighted, and never "Action needed" merely because a
- * Critical exists with nothing to do about it. "Secure" means nothing is
- * actionable right now, not a claim that no vulnerabilities exist.
+ * Posture is deliberately NOT raw severity: a page is never "Action needed"
+ * merely because a Critical exists with nothing to do about it.
+ *
+ * Action needed: a concrete blocker Sencho can drive now.
+ * Monitoring: no blocker, but residual Crit/High (including accepted/ignored),
+ * a review reason, or relevant uncertainty remains.
+ * Secure: no blocker and no residual Crit/High or review/info reason under
+ * current evidence (stricter than "nothing actionable").
+ * Unknown: scanner missing or no completed scan.
  *
  * Package fix availability (Trivy fixed_version) and container-image update
  * availability (canonical ImageUpdateService) are distinct facts. A package
@@ -183,10 +188,16 @@ export interface SecurityPostureFacts {
    * Independent Security driver; intentional exposure is context, not the action.
    */
   elevatedExploitRisk: number;
-  /** Raw Critical scanner detections (for the Monitoring fallback). */
+  /** Raw Critical scanner detections (UI tiles; triage-blind). */
   rawCritical: number;
-  /** Raw High scanner detections (for the Monitoring fallback). */
+  /** Raw High scanner detections (UI tiles; triage-blind). */
   rawHigh: number;
+  /**
+   * Crit/High that still block Secure after Secure-clearing triage.
+   * Unsuppressed, accepted, and ignored count; not_affected, false_positive,
+   * and fixed do not.
+   */
+  residualCriticalHigh: number;
   /** Images whose latest scan is older than the stale threshold. */
   staleScans: number;
   /** Scans that terminated with an error. */
@@ -526,6 +537,6 @@ export function deriveSecurityPosture(f: SecurityPostureFacts): SecurityPostureS
   if (!f.scannerAvailable || !f.hasCompletedScan) return 'Unknown';
   const { reasons } = derivePostureReasons(f);
   if (reasons.some((r) => r.severity === 'blocker')) return 'Action needed';
-  if (f.rawCritical > 0 || f.rawHigh > 0 || reasons.length > 0) return 'Monitoring';
+  if (f.residualCriticalHigh > 0 || reasons.length > 0) return 'Monitoring';
   return 'Secure';
 }

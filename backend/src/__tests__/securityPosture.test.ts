@@ -19,6 +19,7 @@ function facts(o: Partial<SecurityPostureFacts> = {}): SecurityPostureFacts {
     elevatedExploitRisk: 0,
     rawCritical: 0,
     rawHigh: 0,
+    residualCriticalHigh: 0,
     staleScans: 0,
     failedScans: 0,
     needsReview: 0,
@@ -105,15 +106,19 @@ describe('deriveSecurityPosture', () => {
     }))).toBe('Monitoring');
   });
 
-  it('is Monitoring when Critical/High exist but nothing is actionable', () => {
-    expect(deriveSecurityPosture(facts({ rawCritical: 3, rawHigh: 7 }))).toBe('Monitoring');
+  it('is Monitoring when residual Critical/High remain (including accepted risk)', () => {
+    expect(deriveSecurityPosture(facts({ residualCriticalHigh: 5 }))).toBe('Monitoring');
+  });
+
+  it('is Secure when raw Crit/High remain but residual is cleared', () => {
+    expect(deriveSecurityPosture(facts({ rawCritical: 5, rawHigh: 2, residualCriticalHigh: 0 }))).toBe('Secure');
   });
 
   it('is Monitoring when only review/info reasons exist', () => {
     expect(deriveSecurityPosture(facts({ exposedUnclassified: 1, needsReview: 2, staleScans: 1 }))).toBe('Monitoring');
   });
 
-  it('is Secure when a scan completed and nothing is actionable or severe', () => {
+  it('is Secure when a scan completed and nothing is actionable or residual', () => {
     expect(deriveSecurityPosture(facts())).toBe('Secure');
   });
 });

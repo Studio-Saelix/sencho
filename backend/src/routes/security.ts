@@ -11,7 +11,12 @@ import { isValidStackName } from '../utils/validation';
 import { FleetSyncService } from '../services/FleetSyncService';
 import { LicenseService } from '../services/LicenseService';
 import { validateImageRef } from '../utils/image-ref';
-import { applySuppressions, isTriageStatus, isTriageJustification } from '../utils/suppression-filter';
+import {
+  applySuppressions,
+  countsTowardResidualCriticalHigh,
+  isTriageStatus,
+  isTriageJustification,
+} from '../utils/suppression-filter';
 import { applyMisconfigAcknowledgements } from '../utils/misconfig-ack-filter';
 import { generateSarif } from '../services/SarifExporter';
 import { generateOpenVex } from '../services/OpenVexExporter';
@@ -834,6 +839,7 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       else critHighByImage.set(f.image_ref, [f]);
     }
     let fixableCriticalHigh = 0;
+    let residualCriticalHigh = 0;
     let accepted = 0;
     let notAffected = 0;
     let needsReview = 0;
@@ -842,6 +848,9 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
     for (const [imageRef, group] of critHighByImage) {
       for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
         if (e.triage_status === 'needs_review') needsReview += 1;
+        if (countsTowardResidualCriticalHigh(e)) {
+          residualCriticalHigh += 1;
+        }
         if (e.suppressed) {
           // A dismissing decision: not_affected is its own fact, the rest are "accepted".
           if (e.triage_status === 'not_affected') notAffected += 1;
@@ -996,6 +1005,7 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       elevatedExploitRisk,
       rawCritical: critical,
       rawHigh: high,
+      residualCriticalHigh,
       staleScans,
       failedScans,
       needsReview,
