@@ -21,9 +21,20 @@ export function isDownStatus(status: StackRowStatus | undefined): boolean {
 }
 
 /** Minimal container shape needed to classify a stack's status. */
-interface ContainerStateInfo {
+export interface ContainerStateInfo {
   State: string;
   Status?: string;
+}
+
+/** Whether a value satisfies the minimal container shape. The legacy
+ *  per-stack fallback must not count a successful-but-malformed response
+ *  (e.g. `{ error: "..." }` or an array of junk) as authoritative coverage. */
+export function isContainerStateInfo(value: unknown): value is ContainerStateInfo {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    typeof (value as { State?: unknown }).State === 'string'
+  );
 }
 
 /** Exit code parsed from a Docker status string like "Exited (1) 2 hours ago".

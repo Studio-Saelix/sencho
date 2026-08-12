@@ -25,7 +25,7 @@ import { isInputFocused, isPaletteOpen } from '@/lib/keyboard-guards';
 import type { StackAction, StackActionResult } from '../EditorView';
 import type { Label as StackLabel } from '../../label-types';
 import type { FilterChip } from '../../sidebar/sidebar-types';
-import { isDownStatus, classifyContainersStatus, isValidBulkPayload, isValidLegacyPayload, parseBulkStatusPayload } from '../../sidebar/stack-status-utils';
+import { isDownStatus, classifyContainersStatus, isContainerStateInfo, isValidBulkPayload, isValidLegacyPayload, parseBulkStatusPayload } from '../../sidebar/stack-status-utils';
 import type { StackRowStatus } from '../../sidebar/stack-status-utils';
 
 /** Result of the legacy per-stack container derivation, with the number of
@@ -63,12 +63,16 @@ async function deriveStatusesFromContainers(
         return { file, status: 'unknown', valid: false };
       }
       try {
-        const containers = await containersRes.json();
-        return {
-          file,
-          status: Array.isArray(containers) ? classifyContainersStatus(containers) : 'unknown',
-          valid: true,
-        };
+        const containers: unknown = await containersRes.json();
+        // Only a container ARRAY with well-shaped entries is authoritative
+        // evidence. A successful 200 carrying an error object or malformed
+        // entries must fail closed, not count as coverage.
+        const valid = Array.isArray(containers) && containers.every(isContainerStateInfo);
+        if (!valid) {
+          failed.push(`${file} (malformed container payload)`);
+          return { file, status: 'unknown', valid: false };
+        }
+        return { file, status: classifyContainersStatus(containers), valid: true };
       } catch (err) {
         failed.push(`${file} (decode: ${err instanceof Error ? err.message : 'invalid body'})`);
         return { file, status: 'unknown', valid: false };
@@ -345,7 +349,11 @@ export function useStackListState() {
   }, [refreshLabels]);
 
   const refreshStacks = async (background = false): Promise<string[]> => {
-    const fetchNodeId = activeNode?.id ?? null;
+    // Read the CURRENT active node from the render-synchronous ref, not the
+    // closure: a callback captured on node A and invoked after the operator
+    // switched to node B must refresh B, never mix A's statuses with a live
+    // list request.
+    const fetchNodeId = activeNodeIdRef.current;
     const mySeq = ++fetchSeqRef.current;
     const stale = () => fetchSeqRef.current !== mySeq;
 
@@ -417,7 +425,7 @@ export function useStackListState() {
     // committed first, keeping list_visible progressive; the status outcome is
     // observed at creation (never an unhandled rejection) and consumed after
     // the list commits.
-    const stacksPromise = apiFetch('/stacks');
+    const stacksPromise = apiFetch('/stacks', { nodeId: fetchNodeId });
     const statusPromise = fetchNodeId === null ? null : (() => {
             const statusSpan = beginSpan('fetch_headers', { attemptId, background });
             return fetchStackStatusesShared(fetchNodeId).then(

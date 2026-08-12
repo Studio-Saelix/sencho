@@ -624,3 +624,105 @@ describe('useStackListState delayed prior-node arbitration', () => {
   });
 });
 
+describe('useStackListState legacy fallback payload validation', () => {
+  it('fails closed when a legacy per-stack response is a 200 non-array body', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'web.yml': 'running' }));
+      if (endpoint === '/stacks/web.yml/containers') return Promise.resolve(okJson({ error: 'boom' }));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.hydrationStatus).toBe('error');
+    expect(result.current.actionsReady).toBe(false);
+  });
+
+  it('fails closed when a legacy per-stack response is a 200 malformed array', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'web.yml': 'running' }));
+      if (endpoint === '/stacks/web.yml/containers') return Promise.resolve(okJson([{ id: 'no-state-field' }]));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.hydrationStatus).toBe('error');
+    expect(result.current.actionsReady).toBe(false);
+  });
+
+  it('keeps partial coverage incomplete when one legacy per-stack response is malformed', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['web.yml', 'db.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'web.yml': 'running' }));
+      if (endpoint === '/stacks/web.yml/containers') return Promise.resolve(okJson([{ State: 'running', Status: 'Up 2 hours' }]));
+      if (endpoint === '/stacks/db.yml/containers') return Promise.resolve(okJson({ error: 'boom' }));
+      return Promise.resolve(notFound());
+    });
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.hydrationStatus).toBe('ok');
+    expect(result.current.actionsReady).toBe(false);
+    expect(result.current.hydrationDisplay).toBe('incomplete');
+  });
+});
+
+describe('useStackListState stale callback node targeting', () => {
+  it('refreshes the current node when a callback captured on another node is invoked late', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['a.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'a.yml': { status: 'running' } }));
+      return Promise.resolve(notFound());
+    });
+    const { result, rerender } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.files).toEqual(['a.yml']);
+    // The function from the node-A render, captured like an action's finally
+    // block would capture it.
+    const capturedRefresh = result.current.refreshStacks;
+
+    // Switch to node B and fully hydrate it.
+    useNodesMock.mockReturnValue({
+      activeNode: { id: 2, name: 'B', type: 'remote' },
+      nodes: [{ id: 2, name: 'B', type: 'remote' }],
+    });
+    rerender();
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') return Promise.resolve(okJson(['b.yml']));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({ 'b.yml': { status: 'running' } }));
+      return Promise.resolve(notFound());
+    });
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    expect(result.current.files).toEqual(['b.yml']);
+    expect(result.current.hydrationStatus).toBe('ok');
+    expect(result.current.actionsReady).toBe(true);
+
+    // Invoke the OLD callback: both requests must target node B (the current
+    // node), and B's state must remain authoritative.
+    await act(async () => {
+      await capturedRefresh();
+    });
+    const stacksTargets = apiFetchMock.mock.calls
+      .filter(c => c[0] === '/stacks')
+      .map(c => (c[1] as { nodeId?: number | null } | undefined)?.nodeId);
+    const statusTargets = apiFetchMock.mock.calls
+      .filter(c => c[0] === '/stacks/statuses')
+      .map(c => (c[1] as { nodeId?: number | null } | undefined)?.nodeId);
+    expect(stacksTargets.at(-1)).toBe(2);
+    expect(statusTargets.at(-1)).toBe(2);
+    expect(result.current.files).toEqual(['b.yml']);
+    expect(result.current.filesNodeId).toBe(2);
+    expect(result.current.hydrationStatus).toBe('ok');
+    expect(result.current.actionsReady).toBe(true);
+  });
+});
