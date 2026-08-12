@@ -10,7 +10,6 @@ import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
 import { STATS_CACHE_TTL_MS, SYSTEM_STATS_CACHE_TTL_MS } from '../helpers/constants';
 import { getHostMemory, memoryToWire } from '../helpers/hostMemory';
-import { readHostScopedCgroupCapacity } from '../helpers/hostCgroupCapacity';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { isManagedByComposeDir } from '../utils/managed-containers';
@@ -298,21 +297,21 @@ metricsRouter.get('/system/stats', authMiddleware, async (req: Request, res: Res
       async () => {
         // Remote-node requests are intercepted and proxied upstream before
         // reaching here; this fetcher only runs for local nodes.
-        const [currentLoad, capacity, fsSize] = await Promise.all([
+        const [currentLoad, hostMem, fsSize] = await Promise.all([
           si.currentLoad(),
-          readHostScopedCgroupCapacity(),
+          getHostMemory(),
           si.fsSize(),
         ]);
-        const hostMem = await getHostMemory({ capacity });
 
         const mainDisk = fsSize.find(fs => fs.mount === '/' || fs.mount === 'C:') || fsSize[0];
 
         return {
           cpu: {
             usage: currentLoad.currentLoad.toFixed(1),
-            cores: capacity?.cpuCores ?? currentLoad.cpus.length,
+            cores: currentLoad.cpus.length,
           },
-          // Cgroup working set when finite; else ARC/balloon-aware host mem.
+          // ARC/balloon aware: reclaimable ARC is added back into available,
+          // and ballooned memory is subtracted from used. See helpers/hostMemory.ts.
           memory: memoryToWire(hostMem),
           disk: mainDisk ? {
             fs: mainDisk.fs,

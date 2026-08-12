@@ -18,19 +18,10 @@ import {
 } from './helpers/arcstatsFsMock';
 
 const mockMem = vi.fn();
-const mockReadHostScopedCgroupCapacity = vi.fn();
 
 vi.mock('systeminformation', () => ({
   default: { mem: (...args: unknown[]) => mockMem(...args) },
 }));
-
-vi.mock('../helpers/hostCgroupCapacity', async () => {
-  const actual = await vi.importActual<typeof import('../helpers/hostCgroupCapacity')>('../helpers/hostCgroupCapacity');
-  return {
-    ...actual,
-    readHostScopedCgroupCapacity: (...args: unknown[]) => mockReadHostScopedCgroupCapacity(...args),
-  };
-});
 
 import { getHostMemory, adjustForArc, adjustForBalloon, memoryToWire } from '../helpers/hostMemory';
 
@@ -54,8 +45,6 @@ beforeAll(() => {
 beforeEach(() => {
   arcFs.clear();
   mockMem.mockReset();
-  mockReadHostScopedCgroupCapacity.mockReset();
-  mockReadHostScopedCgroupCapacity.mockResolvedValue(null);
   delete process.env.SENCHO_ZFS_ARCSTATS_PATH;
   delete process.env.SENCHO_PROC_MEMINFO_PATH;
 });
@@ -446,28 +435,6 @@ describe('getHostMemory ARC surfacing end-to-end', () => {
     expect(wire.arcReclaimable).toBe(4000);
     expect(wire.ballooned).toBeGreaterThan(0);
     expect(wire.effectiveUsed).toBeDefined();
-  });
-});
-
-
-describe('getHostMemory cgroup capacity', () => {
-  it('uses injected cgroup memory and skips ARC/balloon', async () => {
-    mockMem.mockResolvedValue(memSample(1000, 600));
-    arcFs.setRead(DEFAULT_ARC_PATH, arcstatsBody(300, 100));
-    const result = await getHostMemory({
-      capacity: {
-        memory: { total: 4096, used: 1024, free: 3072, usagePercent: 25 },
-        cpuCores: 2,
-      },
-    });
-    expect(result).toEqual({ total: 4096, used: 1024, free: 3072, usagePercent: 25 });
-    expect(mockMem).not.toHaveBeenCalled();
-  });
-
-  it('falls through to ARC/balloon when capacity memory is null', async () => {
-    mockMem.mockResolvedValue(memSample(1000, 600));
-    const result = await getHostMemory({ capacity: { memory: null, cpuCores: 2 } });
-    expect(result).toEqual({ total: 1000, used: 400, free: 600, usagePercent: 40 });
   });
 });
 

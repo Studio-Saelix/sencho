@@ -4,10 +4,6 @@ services:
     build: .
     container_name: sencho
     restart: unless-stopped
-    # Join the host cgroup namespace so nested LXC / Docker-in-LXC capacity
-    # (memory.max, cpu.max) is visible. Without this, private cgroupns hides
-    # outer limits and host gauges fall back to /proc (often the hypervisor).
-    cgroup: host
     # Publish only the Sencho UI / API port. Sencho Mesh runs on an internal
     # `sencho_mesh` Docker network that Sencho creates and joins on boot,
     # so cross-stack mesh routing does not require any extra host ports or

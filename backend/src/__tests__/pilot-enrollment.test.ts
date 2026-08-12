@@ -23,7 +23,6 @@ interface ComposeService {
   image: string;
   container_name: string;
   restart: string;
-  cgroup?: string;
   volumes: Array<string | {
     type: string;
     source: string;
@@ -108,7 +107,6 @@ describe('POST /api/nodes (pilot_agent mode)', () => {
     expect(parsed.services.agent.container_name).toBe('sencho-agent');
     expect(parsed.services.agent.image).toBe('saelix/sencho:latest');
     expect(parsed.services.agent.restart).toBe('unless-stopped');
-    expect(parsed.services.agent.cgroup).toBe('host');
   });
 
   it('composeYaml carries the three required volume mounts', async () => {

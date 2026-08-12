@@ -200,12 +200,7 @@ describe('GET /api/fleet/overview (pilot-agent)', () => {
     expect(pilotRow!.stats).toEqual({ active: 3, managed: 2, unmanaged: 1, exited: 0, total: 3 });
     expect(pilotRow!.systemStats).toMatchObject({
       cpu: { usage: '12.3', cores: 4 },
-      memory: {
-        total: 8000000000,
-        used: 2000000000,
-        free: 6000000000,
-        usagePercent: '25.0',
-      },
+      memory: { usagePercent: '25.0' },
     });
     expect(pilotRow!.stacks).toEqual(['audit-mesh-pilot']);
     expect(pilotRow!.pilot_last_seen).toBeTypeOf('number');

@@ -62,16 +62,17 @@ These tune optional subsystems. Most deployments never set them; the defaults ar
 
 Running a remote host as a pilot agent uses four more variables (`SENCHO_MODE`, `SENCHO_PRIMARY_URL`, `SENCHO_ENROLL_TOKEN`, and `SENCHO_PILOT_CA_FILE`), set only on the remote agent container. Sencho bakes them into the enrollment Compose file it generates, so you rarely write them by hand. See [Pilot Agent](/features/pilot-agent) for the full enrollment walkthrough.
 
+## Nested LXC and Docker-in-LXC host metrics
 
-## Host cgroup capacity (LXC and nested Docker)
+Sencho reads host CPU and memory totals from the operating system view inside the container (`/proc` and related counters). On a correctly configured LXC, that view is the container's own capacity (for example 2 vCPU and 4 GiB). On a Proxmox or similar LXC **without** a virtualized `/proc` (typically provided by **lxcfs**), those same files can expose the hypervisor host instead, so Dashboard and Fleet gauges may show the outer host's core count and RAM.
 
-When Sencho runs inside Docker on an LXC (or any host where `/proc` MemTotal and CPU lists do not match the node's cgroup limits), join the host cgroup namespace so Dashboard and Fleet can read finite `memory.max` / `cpu.max` values for that node.
+Agent and primary Compose files stay unchanged for this case. Fix the host environment so `/proc` reflects the LXC:
 
-In Compose, set `cgroup: host` on the Sencho (or pilot agent) service. For `docker run`, pass `--cgroupns=host`. The running service definition must include this setting; updating the image alone, including Pilot self-update against an existing Compose file, does not add it.
+1. Ensure **lxcfs** is installed and running on the Proxmox (or other) host that provides the LXC.
+2. Confirm the LXC mounts lxcfs-backed `/proc` files (Proxmox does this when lxcfs is healthy).
+3. Inside the LXC (and inside the Sencho or Pilot container), check that `/proc/meminfo` `MemTotal` and the visible CPU count match the LXC's configured limits, not the hypervisor.
 
-With host cgroup visibility, Sencho reports the strictest finite host-scoped memory and CPU limits above its own container leaf (so a Sencho `mem_limit` is not mistaken for node capacity). Memory used is a cache-aware working set (`memory.current` minus reclaimable inactive file cache). When the host cgroup namespace is not joined, or no finite host-scoped limit is visible, Sencho keeps the previous `/proc`-based totals with ZFS ARC and VM balloon adjustments.
-
-CPU usage percentage and CPU host alerts continue to use the live load sample; only the core count and memory capacity path are cgroup-aware.
+When those checks pass, Sencho's existing host gauges and RAM alerts report the LXC capacity with no Compose or image special-casing.
 
 ## ZFS ARC-aware host memory
 
@@ -225,7 +226,6 @@ services:
   sencho:
     image: saelix/sencho:latest
     restart: unless-stopped
-    cgroup: host
     ports:
       - "1852:1852"
     volumes:

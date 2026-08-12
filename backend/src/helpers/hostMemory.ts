@@ -1,9 +1,5 @@
 import si from 'systeminformation';
 import { promises as fs } from 'fs';
-import {
-  readHostScopedCgroupCapacity,
-  type HostCgroupCapacitySnapshot,
-} from './hostCgroupCapacity';
 
 /**
  * Shared host-memory computation, ZFS ARC and VM-balloon aware.
@@ -288,23 +284,8 @@ export function memoryToWire(hostMem: HostMemory): MemoryWire {
   };
 }
 
-export interface GetHostMemoryOptions {
-  /**
-   * Pre-fetched capacity snapshot from the caller (metrics / fleet sample).
-   * When omitted, this helper reads its own snapshot (MonitorService path).
-   * Pass `null` to skip the cgroup path entirely (tests).
-   */
-  capacity?: HostCgroupCapacitySnapshot | null;
-}
-
 /** Fetch host memory, reclaimable ARC, and ballooned memory concurrently. */
-export async function getHostMemory(options: GetHostMemoryOptions = {}): Promise<HostMemory> {
-  const capacity = options.capacity !== undefined
-    ? options.capacity
-    : await readHostScopedCgroupCapacity();
-  // Prefer host-scoped cgroup working set when a finite limit exists.
-  if (capacity?.memory) return { ...capacity.memory };
-
+export async function getHostMemory(): Promise<HostMemory> {
   const [mem, arcReclaimable, ballooned] = await Promise.all([
     si.mem(),
     readReclaimableArc(),

@@ -32,7 +32,6 @@ const {
   mockCurrentLoad,
   mockMem,
   mockFsSize,
-  mockReadHostScopedCgroupCapacity,
 } = vi.hoisted(() => ({
   mockGetAllContainers: vi.fn(),
   mockGetBulkStackStatuses: vi.fn(),
@@ -40,7 +39,6 @@ const {
   mockCurrentLoad: vi.fn(),
   mockMem: vi.fn(),
   mockFsSize: vi.fn(),
-  mockReadHostScopedCgroupCapacity: vi.fn(),
 }));
 
 vi.mock('../services/DockerController', async () => {
@@ -79,14 +77,6 @@ vi.mock('systeminformation', () => ({
   fsSize: (...args: unknown[]) => mockFsSize(...args),
 }));
 
-vi.mock('../helpers/hostCgroupCapacity', async () => {
-  const actual = await vi.importActual<typeof import('../helpers/hostCgroupCapacity')>('../helpers/hostCgroupCapacity');
-  return {
-    ...actual,
-    readHostScopedCgroupCapacity: (...args: unknown[]) => mockReadHostScopedCgroupCapacity(...args),
-  };
-});
-
 // ── Setup ──────────────────────────────────────────────────────────────
 
 let tmpDir: string;
@@ -123,8 +113,6 @@ beforeEach(() => {
   mockCurrentLoad.mockReset();
   mockMem.mockReset();
   mockFsSize.mockReset();
-  mockReadHostScopedCgroupCapacity.mockReset();
-  mockReadHostScopedCgroupCapacity.mockResolvedValue(null);
 
   mockGetAllContainers.mockResolvedValue([
     { State: 'running', Labels: { 'com.docker.compose.project.working_dir': '/tmp/compose/a' } },
@@ -237,57 +225,6 @@ describe('GET /api/fleet/overview local-node memory', () => {
       free: 800,
       usagePercent: '20.0',
     });
-  });
-});
-
-
-describe("GET /api/system/stats and fleet overview cgroup capacity", () => {
-  it("applies independent cgroup memory and CPU cores on /system/stats", async () => {
-    mockReadHostScopedCgroupCapacity.mockResolvedValue({
-      memory: { total: 4096, used: 1024, free: 3072, usagePercent: 25 },
-      cpuCores: 2,
-    });
-    const res = await request(app).get("/api/system/stats").set("Cookie", authCookie);
-    expect(res.status).toBe(200);
-    expect(res.body.cpu.cores).toBe(2);
-    expect(res.body.memory).toMatchObject({
-      total: 4096,
-      used: 1024,
-      free: 3072,
-      usagePercent: "25.0",
-    });
-    expect(mockReadHostScopedCgroupCapacity).toHaveBeenCalledTimes(1);
-    expect(mockMem).not.toHaveBeenCalled();
-  });
-
-  it("keeps si.mem when only CPU cores are finite", async () => {
-    mockReadHostScopedCgroupCapacity.mockResolvedValue({
-      memory: null,
-      cpuCores: 3,
-    });
-    const res = await request(app).get("/api/system/stats").set("Cookie", authCookie);
-    expect(res.status).toBe(200);
-    expect(res.body.cpu.cores).toBe(3);
-    expect(res.body.memory.total).toBe(1000);
-    expect(mockMem).toHaveBeenCalled();
-  });
-
-  it("applies the same snapshot on local fleet overview", async () => {
-    mockReadHostScopedCgroupCapacity.mockResolvedValue({
-      memory: { total: 8192, used: 2048, free: 6144, usagePercent: 25 },
-      cpuCores: 2,
-    });
-    const res = await request(app).get("/api/fleet/overview").set("Cookie", authCookie);
-    expect(res.status).toBe(200);
-    const local = res.body.find((n: { type: string }) => n.type === "local");
-    expect(local?.systemStats?.cpu?.cores).toBe(2);
-    expect(local?.systemStats?.memory).toMatchObject({
-      total: 8192,
-      used: 2048,
-      free: 6144,
-      usagePercent: "25.0",
-    });
-    expect(mockReadHostScopedCgroupCapacity).toHaveBeenCalledTimes(1);
   });
 });
 
