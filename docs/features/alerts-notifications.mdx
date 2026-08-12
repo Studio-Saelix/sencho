@@ -57,6 +57,55 @@ The **Test** button on each tab dispatches the literal message `🔌 Test Notifi
 
 Each delivery attempt is an HTTP POST with a 10-second `AbortSignal.timeout`. By default (`Delivery retries` = 0) Sencho makes one attempt. You can allow up to three extra in-process attempts with a fixed one-second delay between them. Retries apply only to classified transient failures (for example HTTP 5xx or network timeouts). Client errors such as HTTP 4xx and Apprise HTTP 204 are not retried. There is no durable retry queue: if the process exits mid-dispatch, remaining attempts are not persisted. Delivery is at-least-once under ambiguous timeouts or connection resets, so a receiver that accepted a request whose response was lost can receive a duplicate. If every attempt fails, the alert remains in the bell with `dispatch_error` set.
 
+### Payload templates
+
+Each channel tab carries an **Edit Payload** toggle below the **Enabled** switch. Opening it reveals a JSON editor. When you save a template, it replaces Sencho's built-in body for that channel: every alert is posted as your JSON with the variables below substituted in. Leaving the editor blank restores the built-in payload.
+
+The following variables are available:
+
+| Variable | Content |
+|----------|---------|
+| `{{level}}` | `info`, `warning`, or `error` |
+| `{{message}}` | The alert message text |
+| `{{category}}` | The notification category (for example `deploy_failure` or `monitor_alert`) |
+| `{{timestamp}}` | ISO-8601 timestamp of the alert |
+| `{{stack_name}}` | The stack the alert concerns, empty when none |
+| `{{actor}}` | The user who triggered the action, empty for automated alerts |
+
+Variables are replaced with JSON-escaped values, so quotes or newlines inside a value cannot break the document. A variable can stand alone as a whole string (`"{{message}}"`) or appear inside a string (`"status: {{level}}"`). A variable with no context (for example `{{stack_name}}` on a node-level alert) becomes an empty string. `container_name` is not available.
+
+Sencho validates the template on save: it must be valid JSON after variable substitution, it may only use the variables above, and it may be at most 8000 characters. Unknown variables and malformed JSON are rejected before anything is saved.
+
+Two channel-specific behaviors:
+
+- **ntfy**: with a template, Sencho publishes JSON instead of the usual plain-text message. The Title, Priority, and Tags headers are not sent.
+- **Apprise**: destination URLs (stateless endpoints) and tags (keyed endpoints) stay managed by the channel fields. They are merged into your rendered body automatically, and a template cannot set `urls` or `tag` itself. The template must be a JSON object.
+
+The **Test** button uses the template currently in the editor, so you can validate a payload before saving it. Notification routes always use the built-in payload for their channel; templates apply to the global channels in this section.
+
+For example, a webhook receiver that wants a flat structure:
+
+```json
+{
+  "title": "{{level}}",
+  "body": "{{message}}",
+  "category": "{{category}}",
+  "timestamp": "{{timestamp}}",
+  "stack": "{{stack_name}}",
+  "actor": "{{actor}}"
+}
+```
+
+An ntfy topic that publishes JSON:
+
+```json
+{
+  "topic": "sencho-alerts",
+  "message": "[{{level}}] {{message}}",
+  "tags": ["warning"]
+}
+```
+
 ## Notification Routing
 
 <Note>

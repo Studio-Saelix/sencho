@@ -537,6 +537,17 @@ export function useStackActions(options: UseStackActionsOptions) {
   const isEnvDirty = () => editorState.envContent !== editorState.originalEnvContent;
 
   const getStackMenuVisibility = (file: string) => {
+    // Without authoritative status evidence every lifecycle action fails closed:
+    // undefined status must not read as "exited but deployable".
+    if (!hydrationReady()) {
+      return {
+        showDeploy: false,
+        showStop: false,
+        showRestart: false,
+        showUpdate: false,
+        showTakeDown: false,
+      };
+    }
     // A partial stack has running containers, so it shows the running-stack
     // lifecycle actions (stop/restart/update) rather than deploy.
     const raw = stackListState.stackStatuses[file];
@@ -554,13 +565,34 @@ export function useStackActions(options: UseStackActionsOptions) {
   const isSelfStackFile = (file: string | null | undefined): boolean =>
     !!file && stackListState.stackSelfFlags[file] === true;
 
+  // Ref-backed readiness: evaluates the CURRENT node/list/evidence at call
+  // time, so a dialog opened while ready cannot bypass a later readiness loss.
+  const hydrationReady = stackListState.hydrationReady;
+
+  // Executor-boundary readiness: the evidence must be authoritative for the
+  // active node AND that node must still be the node the deferred operation
+  // was captured for. A dialog opened on node A cannot dispatch after the
+  // operator switched to node B, even once B finishes hydrating. Compares
+  // against the existing effect-updated activeNodeIdRef (see above): by the
+  // time a dialog is confirmed, the switch effect has long run.
+  const hydrationReadyForNode = (opNodeId: number | null): boolean => {
+    if (!hydrationReady()) return false;
+    if (opNodeId !== (activeNodeIdRef.current ?? null)) return false;
+    return true;
+  };
+
   const openSelfStackProtectedIfNeeded = (file: string | null | undefined): boolean => {
+    // Without authoritative self identity the frontend must not guess: block
+    // without opening the self-stack modal (which would falsely identify an
+    // ordinary stack as Sencho). The backend 409 remains the last line.
+    if (!hydrationReady()) return true;
     if (!isSelfStackFile(file)) return false;
     overlayState.openSelfStackProtected();
     return true;
   };
 
   const openStackApp = (file: string) => {
+    if (!hydrationReady()) return;
     const port = stackListState.stackPorts[file];
     if (!port) return;
     const url = buildServiceUrl({ node: activeNode, publicPort: port });
@@ -1258,6 +1290,15 @@ export function useStackActions(options: UseStackActionsOptions) {
 
     async function createAndContinue(): Promise<void> {
       if (settled) return;
+      // Final boundary recheck before ANY mutation: creating Docker networks
+      // on the captured node must not proceed after ownership was lost.
+      if (!hydrationReadyForNode(opNodeId)) {
+        settled = true;
+        overlayState.setMissingExternalNetworks(null);
+        deployPendingRef.current = false;
+        toast.error('Status data unavailable. Refresh and try again.');
+        return;
+      }
       setCreating(true);
 
       const created = await createSafeExternalNetworks(payload.networks, opNodeId);
@@ -1379,6 +1420,13 @@ export function useStackActions(options: UseStackActionsOptions) {
               throw parseStackActionError(await retry.text(), 'Deploy failed', retry.status);
             }
             openMissingExternalNetworksDialog(envelope, opNodeId ?? null, () => {
+              // Final boundary recheck: the reactive retry must not start a
+              // deploy on the captured node after ownership was lost.
+              if (!hydrationReadyForNode(opNodeId ?? null)) {
+                deployPendingRef.current = false;
+                toast.error('Status data unavailable. Refresh and try again.');
+                return;
+              }
               stackListState.setStackAction(stackFile, 'deploy');
               void runWithLog({ stackName, action: 'deploy', nodeId: opNodeId ?? null }, (startedRetry, ds) =>
                 runDeploy(stackName, stackFile, ignorePolicy, startedRetry, ds, opNodeId),
@@ -1414,6 +1462,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   const deployStack = async (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
+    if (!hydrationReady()) return;
     if (
       !stackListState.selectedFile ||
       stackListState.isStackBusy(stackListState.selectedFile) ||
@@ -1446,6 +1495,15 @@ export function useStackActions(options: UseStackActionsOptions) {
     // it without duplicating the action lifecycle. The stack action is set here
     // (not before the advisory) so cancelling the advisory leaves no stuck state.
     const runDeployFlow = async () => {
+      // Final boundary recheck: an advisory or external-network dialog opened
+      // while ready must not dispatch after readiness was lost or the active
+      // node changed (the operation would target the captured node). Release
+      // the pending guard so the UI is not stuck when blocked.
+      if (!hydrationReadyForNode(opNodeId)) {
+        deployPendingRef.current = false;
+        toast.error('Status data unavailable. Refresh and try again.');
+        return;
+      }
       stackListState.setStackAction(stackFile, 'deploy');
       let deferredNetworks = false;
       try {
@@ -1518,6 +1576,9 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   const handleSaveAndDeploy = async (e: React.MouseEvent) => {
+    // Readiness is rechecked before the PUT so a readiness loss while the file
+    // was being edited cannot slip a mutation through.
+    if (!hydrationReady()) return;
     const saved = await saveFile();
     if (!saved) return;
     await deployStack(e);
@@ -1530,9 +1591,14 @@ export function useStackActions(options: UseStackActionsOptions) {
   const bypassPolicyAndRetry = async () => {
     const policyBlock = overlayState.policyBlock;
     if (!policyBlock) return;
-    // Retry on the node the block was raised against, not the live active node,
-    // which may have changed while the dialog was open.
+    // The block is bound to the node it was raised against; the bypass may only
+    // dispatch if that node is still the active node with authoritative
+    // evidence. A switch to another fully-hydrated node must block the retry.
     const { stackName, stackFile, action, nodeId: opNodeId } = policyBlock;
+    if (!hydrationReadyForNode(opNodeId)) {
+      toast.error('Status data unavailable. Refresh and try again.');
+      return;
+    }
     const existingFile = stackListState.files.includes(stackFile)
       ? stackFile
       : (stackListState.files.find(f => f.replace(/\.(yml|yaml)$/, '') === stackName) ?? stackFile);
@@ -1559,6 +1625,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   const rollbackStack = async (ignorePolicy = false, opNodeId: number | null = activeNode?.id ?? null) => {
+    if (!hydrationReady()) return;
     if (!stackListState.selectedFile || stackListState.isStackBusy(stackListState.selectedFile))
       return;
     const stackFile = stackListState.selectedFile;
@@ -1783,6 +1850,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   const stopStack = async (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
+    if (!hydrationReady()) return;
     if (!stackListState.selectedFile) return;
     if (openSelfStackProtectedIfNeeded(stackListState.selectedFile)) return;
     await runStackAction(stackListState.selectedFile, 'stop', 'stop', 'exited', 'Stack stopped successfully!');
@@ -1791,6 +1859,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   const restartStack = async (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
+    if (!hydrationReady()) return;
     if (!stackListState.selectedFile) return;
     await runStackAction(stackListState.selectedFile, 'restart', 'restart', 'running', 'Stack restarted successfully!');
   };
@@ -1799,6 +1868,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     action: 'start' | 'stop' | 'restart',
     serviceName: string,
   ) => {
+    if (!hydrationReady()) return;
     if (!stackListState.selectedFile) return;
     if (action === 'stop' && openSelfStackProtectedIfNeeded(stackListState.selectedFile)) return;
     const stackName = stackListState.selectedFile.replace(/\.(yml|yaml)$/, '');
@@ -1838,7 +1908,15 @@ export function useStackActions(options: UseStackActionsOptions) {
     // Capture the node now so the readiness fetch and the update both target it
     // even if the active node changes while the readiness dialog is open.
     const opNodeId = activeNode?.id ?? null;
-    const run = () => runStackAction(stackFile, 'update', 'update', 'running', 'Stack updated successfully!', false, opNodeId);
+    const run = () => {
+      // Final boundary recheck: the readiness dialog's proceed must not dispatch
+      // to the captured node after readiness was lost or the active node changed.
+      if (!hydrationReadyForNode(opNodeId)) {
+        toast.error('Status data unavailable. Refresh and try again.');
+        return Promise.resolve();
+      }
+      return runStackAction(stackFile, 'update', 'update', 'running', 'Stack updated successfully!', false, opNodeId);
+    };
     if (hasUpdateGuard) {
       overlayState.setUpdateReadiness({
         stackName,
@@ -1863,10 +1941,17 @@ export function useStackActions(options: UseStackActionsOptions) {
     serviceName: string,
     mode: 'update' | 'rebuild' = 'update',
   ): Promise<void> => {
+    if (!hydrationReady()) return;
     if (stackListState.isStackBusy(stackFile) || editorState.serviceUpdateInProgress) return;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     const opNodeId = activeNode?.id ?? null;
     const run = async () => {
+      // Final boundary recheck: the readiness dialog's proceed must not dispatch
+      // to the captured node after readiness was lost or the active node changed.
+      if (!hydrationReadyForNode(opNodeId)) {
+        toast.error('Status data unavailable. Refresh and try again.');
+        return;
+      }
       editorState.setServiceUpdateInProgress({ service: serviceName, mode });
       try {
         await runWithLog({ stackName, action: 'update', nodeId: opNodeId, serviceName }, async (started, ds) => {
@@ -1925,6 +2010,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     serviceName: string,
     recoveryId: string,
   ): Promise<void> => {
+    if (!hydrationReady()) return;
     if (stackListState.isStackBusy(stackFile) || editorState.serviceUpdateInProgress) return;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     const opNodeId = activeNode?.id ?? null;
@@ -1966,18 +2052,28 @@ export function useStackActions(options: UseStackActionsOptions) {
   const updateStack = async (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
+    if (!hydrationReady()) return;
     if (!stackListState.selectedFile) return;
     if (openSelfStackProtectedIfNeeded(stackListState.selectedFile)) return;
     await requestStackUpdate(stackListState.selectedFile);
   };
 
   const deleteStack = async (pruneVolumes: boolean) => {
-    const stackToDelete = overlayState.stackToDelete;
-    if (!stackToDelete) return;
+    // Final confirmation boundary: the dialog is bound to the node it opened
+    // on. A switch to another node (even once it fully hydrates) must block the
+    // delete rather than mutating the new node with the old dialog's stack name.
+    // The dialog stays open and the toast explains why nothing happened.
+    const deleteTarget = overlayState.deleteTarget;
+    if (!deleteTarget) return;
+    if (!hydrationReadyForNode(deleteTarget.nodeId)) {
+      toast.error('Status data unavailable. Refresh and try again.');
+      return;
+    }
+    const stackToDelete = deleteTarget.name;
     const deleteKey = resolveStackFileKey(stackListState.files, stackToDelete);
     const canonicalName = deleteKey.replace(/\.(yml|yaml)$/, '');
     if (stackListState.isStackBusy(deleteKey)) return;
-    const opNodeId = activeNode?.id ?? null;
+    const opNodeId = deleteTarget.nodeId;
     stackListState.setStackAction(deleteKey, 'delete');
     try {
       const url = pruneVolumes
@@ -2020,15 +2116,23 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   const requestTakeDownStack = (stackName: string) => {
+    if (!hydrationReady()) return;
     if (openSelfStackProtectedIfNeeded(
       stackListState.files.find(f => f.replace(/\.(yml|yaml)$/, '') === stackName) ?? stackName,
     )) return;
-    overlayState.openTakeDownDialog(stackName);
+    overlayState.openTakeDownDialog({ name: stackName, nodeId: activeNode?.id ?? null });
   };
 
   const takeDownStack = async (removeVolumes: boolean) => {
-    const stackToTakeDown = overlayState.stackToTakeDown;
-    if (!stackToTakeDown) return;
+    // Final confirmation boundary: the dialog is bound to the node it opened
+    // on; a switch must block the take down rather than mutating the new node.
+    const takeDownTarget = overlayState.takeDownTarget;
+    if (!takeDownTarget) return;
+    if (!hydrationReadyForNode(takeDownTarget.nodeId)) {
+      toast.error('Status data unavailable. Refresh and try again.');
+      return;
+    }
+    const stackToTakeDown = takeDownTarget.name;
     if (removeVolumes && !canOfferVolumeRemoval) {
       toast.error('Volume removal is not supported on this node');
       overlayState.closeTakeDownDialog();
@@ -2184,7 +2288,10 @@ export function useStackActions(options: UseStackActionsOptions) {
 
   const requestDeleteStack = () => {
     if (openSelfStackProtectedIfNeeded(stackListState.selectedFile)) return;
-    overlayState.openDeleteDialog(stackListState.selectedFile ?? '');
+    overlayState.openDeleteDialog({
+      name: stackListState.selectedFile ?? '',
+      nodeId: activeNode?.id ?? null,
+    });
   };
 
   const executeStackActionByFile = async (
@@ -2192,6 +2299,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     action: StackAction,
     endpoint: string,
   ) => {
+    if (!hydrationReady()) return;
     if (stackListState.isStackBusy(stackFile)) return;
     if (
       (action === 'deploy' || action === 'update' || action === 'stop' || action === 'delete' || action === 'rollback') &&

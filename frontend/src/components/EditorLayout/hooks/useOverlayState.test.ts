@@ -14,7 +14,7 @@ describe('useOverlayState', () => {
     const { result } = renderHook(() => useOverlayState());
     expect(result.current.createDialogOpen).toBe(false);
     expect(result.current.deleteDialogOpen).toBe(false);
-    expect(result.current.stackToDelete).toBeNull();
+    expect(result.current.deleteTarget).toBeNull();
     expect(result.current.pendingUnsavedLoad).toBeNull();
     expect(result.current.pendingLoadOptions).toBeNull();
     expect(result.current.pendingUnsavedNode).toBeNull();
@@ -48,17 +48,17 @@ describe('useOverlayState', () => {
 
   it('openDeleteDialog sets open flag and stack name', () => {
     const { result } = renderHook(() => useOverlayState());
-    act(() => result.current.openDeleteDialog('my-stack'));
+    act(() => result.current.openDeleteDialog({ name: 'my-stack', nodeId: 1 }));
     expect(result.current.deleteDialogOpen).toBe(true);
-    expect(result.current.stackToDelete).toBe('my-stack');
+    expect(result.current.deleteTarget).toEqual({ name: 'my-stack', nodeId: 1 });
   });
 
   it('closeDeleteDialog resets delete state', () => {
     const { result } = renderHook(() => useOverlayState());
-    act(() => result.current.openDeleteDialog('my-stack'));
+    act(() => result.current.openDeleteDialog({ name: 'my-stack', nodeId: 1 }));
     act(() => result.current.closeDeleteDialog());
     expect(result.current.deleteDialogOpen).toBe(false);
-    expect(result.current.stackToDelete).toBeNull();
+    expect(result.current.deleteTarget).toBeNull();
   });
 
   it('openLogViewer sets open flag and container object', () => {

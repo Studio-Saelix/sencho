@@ -23,6 +23,9 @@ export type StackLifecycleStatus = 'running' | 'exited' | 'unknown';
 
 export interface StackMenuCtx {
   stackStatus: StackLifecycleStatus;
+  /** False while status evidence is not authoritative for the active node/list;
+   *  gates schedule/delete items that permissions alone would expose. */
+  ready: boolean;
   /** True when this stack is the running Sencho instance on the active node. */
   isSelfStack: boolean;
   canOpenApp: boolean;

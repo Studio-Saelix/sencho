@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Boxes, AlertTriangle, Search, ArrowUp, ArrowDown, ChevronLeft, ChevronRight, ShieldCheck, Loader2 } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
@@ -14,8 +14,18 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { ImageScanRow, ImageFilterChips, type ImageFilterChip } from './SecurityMobile';
-import type { ScanSummary, ScanDetailTab, ScannerKind } from '@/types/security';
-
+import { NetworkExposedControl, ViewNetworkingAction } from './ExposureNetworking';
+import type { ImagesTargetingState } from './imagesTargeting';
+import {
+  intentionalBannerKind,
+  standingExposureContexts,
+  standingIntentEvidence,
+  targetingExposureContexts,
+  allTargetingExposureContexts,
+  primaryExposureIntentEvidence,
+  driverIdsForImage,
+} from './imagesTargeting';
+import type { ImageExposureContext, ScanSummary, ScanDetailTab, ScannerKind } from '@/types/security';
 // Mobile severity chips. 'FIXABLE' is a phone-only pseudo-filter (the desktop
 // Combobox never emits it), so the shared filter logic treats it specially.
 const MOBILE_FILTER_CHIPS: ImageFilterChip[] = [
@@ -66,24 +76,140 @@ const FILTER_OPTIONS: Array<{ value: ImageFilterValue; label: string }> = [
 
 const findingsCount = (s: ScanSummary) => s.total + (s.secret_count ?? 0) + (s.misconfig_count ?? 0);
 
+/** Intent evidence for standing summary, or targeting when active for this image. */
+function intentEvidenceFor(
+  summary: ScanSummary,
+  targeting: ImagesTargetingState | null | undefined,
+): string | null {
+  if (targeting?.imageRefs.includes(summary.image_ref)) {
+    const fromTargets = primaryExposureIntentEvidence(targeting.targets, summary.image_ref);
+    if (fromTargets) return fromTargets;
+  }
+  return standingIntentEvidence(summary);
+}
+
+function contextsForImage(
+  summary: ScanSummary,
+  targeting: ImagesTargetingState | null | undefined,
+): ImageExposureContext[] {
+  if (targeting?.imageRefs.includes(summary.image_ref)) {
+    const fromTargets = targetingExposureContexts(targeting.targets, summary.image_ref);
+    if (fromTargets.length > 0) return fromTargets;
+  }
+  return standingExposureContexts(summary);
+}
+
+function IntentEvidenceLine({ line }: { line: string | null }) {
+  if (!line) return null;
+  return (
+    <div className="mt-0.5 font-mono text-[10px] text-stat-icon truncate">{line}</div>
+  );
+}
+
+const CLEAR_BTN_CLASS =
+  'text-xs font-medium text-brand hover:underline whitespace-nowrap shrink-0';
+
+function TargetingClearButton({ onClear }: { onClear?: () => void }) {
+  if (!onClear) return null;
+  return (
+    <button type="button" onClick={onClear} className={CLEAR_BTN_CLASS}>
+      Clear
+    </button>
+  );
+}
+
+function TargetingBannerFrame({ children }: { children: ReactNode }) {
+  return (
+    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card/60 px-3 py-2.5 max-md:px-3">
+      {children}
+    </div>
+  );
+}
+
+function formatTargetingTitle(label: string, matched: number, total: number): string {
+  if (matched < total) {
+    return `${label} · ${matched} of ${total} affected images`;
+  }
+  return `${label} · ${matched} affected image${matched === 1 ? '' : 's'}`;
+}
+
+function IntentionalExposureBanner({
+  kind,
+  unavailableCount,
+  contexts,
+  nodeId,
+  onClear,
+}: {
+  kind: 'absolute' | 'partial';
+  unavailableCount: number;
+  contexts: ImageExposureContext[];
+  nodeId?: number;
+  onClear?: () => void;
+}) {
+  const title = kind === 'absolute'
+    ? 'Exposure is intentional'
+    : 'Known exposure is intentional';
+  const body = kind === 'absolute'
+    ? 'This workload is classified in Networking. Exposure still increases the security relevance of these findings. Open an affected image below to remediate or triage its findings.'
+    : `Known exposure contexts are intentionally classified. Intent could not be verified for ${unavailableCount} service${unavailableCount === 1 ? '' : 's'}. Open an affected image below to remediate or triage its findings.`;
+
+  return (
+    <TargetingBannerFrame>
+      <div className="flex items-start gap-3 justify-between">
+        <div className="min-w-0">
+          <p className="font-mono text-xs text-stat-value">{title}</p>
+          <p className="text-xs text-stat-subtitle mt-0.5">{body}</p>
+        </div>
+        <div className="flex items-center gap-3 shrink-0">
+          <ViewNetworkingAction contexts={contexts} nodeId={nodeId} />
+          <TargetingClearButton onClear={onClear} />
+        </div>
+      </div>
+    </TargetingBannerFrame>
+  );
+}
+
 interface ImagesTabProps {
   summaries: Record<string, ScanSummary>;
   loading: boolean;
   /** True when the summaries fetch failed; render an error state, never a false "clean". */
   error?: boolean;
-  onInspect: (scanId: number, initialTab?: ScanDetailTab) => void;
+  onInspect: (scanId: number, initialTab?: ScanDetailTab, driverVulnerabilityIds?: string[]) => void;
   /** Admin on a node with a ready scanner; gates the scan Actions column. */
   canScan: boolean;
   /** image_ref of the scan currently in flight, for the per-row spinner. */
   scanningRef: string | null;
   onScan: (imageRef: string, scanners: ScannerKind[]) => void;
   /** Preselects the severity/fixable filter, e.g. when arriving from an
-   *  overview "fixable findings" link. Applied whenever the value changes. */
+   *  overview "fixable findings" link. */
   initialFilter?: ImageFilterValue;
+  /** Bumped by SecurityView on each filter/targeting navigation so re-apply works. */
+  filterToken?: number;
+  /** Parent-owned posture targeting (R1). */
+  targeting?: ImagesTargetingState | null;
+  onClearTargeting?: () => void;
+  /** When true, targeting banner discloses the overview pass may be incomplete. */
+  posturePartial?: boolean;
+  /** Active node id for SENCHO_OPEN_STACK Networking navigation. */
+  nodeId?: number;
 }
 
 /** Latest-scan index for real images (stack/config scans live in Compose risks). */
-export function ImagesTab({ summaries, loading, error, onInspect, canScan, scanningRef, onScan, initialFilter }: ImagesTabProps) {
+export function ImagesTab({
+  summaries,
+  loading,
+  error,
+  onInspect,
+  canScan,
+  scanningRef,
+  onScan,
+  initialFilter,
+  filterToken = 0,
+  targeting = null,
+  onClearTargeting,
+  posturePartial = false,
+  nodeId,
+}: ImagesTabProps) {
   const isMobile = useIsMobile();
   const [search, setSearch] = useState('');
   const [severity, setSeverity] = useState<ImageFilterValue>(initialFilter ?? 'all');
@@ -95,23 +221,57 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
 
   useEffect(() => { if (searchExpanded) searchInputRef.current?.focus(); }, [searchExpanded]);
 
-  // Apply an externally-driven filter (e.g. an overview "fixable" deep link).
-  // Keyed on the incoming value so re-navigating to the same filter re-applies.
+  // Apply externally-driven filter / targeting. Keyed on tokens so repeating the
+  // same navigation re-applies after Clear (R1) and resets severity (R2).
   useEffect(() => {
-    if (initialFilter) { setSeverity(initialFilter); setPage(0); }
-  }, [initialFilter]);
+    if (targeting) {
+      setSeverity(initialFilter ?? 'all');
+      setPage(0);
+      return;
+    }
+    if (initialFilter) {
+      setSeverity(initialFilter);
+      setPage(0);
+    }
+  }, [targeting?.token, filterToken, targeting, initialFilter]);
+
+  const imageSummaries = useMemo(
+    () => Object.values(summaries).filter((s) => !s.image_ref.startsWith('stack:')),
+    [summaries],
+  );
+
+  const matchedTargetMeta = useMemo(() => {
+    if (!targeting || targeting.imageRefs.length === 0) {
+      return { active: false as const, matched: 0, total: 0, refs: null as Set<string> | null };
+    }
+    const wanted = new Set(targeting.imageRefs);
+    const refs = new Set(
+      imageSummaries.filter((s) => wanted.has(s.image_ref)).map((s) => s.image_ref),
+    );
+    return {
+      active: true as const,
+      matched: refs.size,
+      total: targeting.imageRefs.length,
+      refs,
+      label: targeting.label,
+    };
+  }, [targeting, imageSummaries]);
+
+  // R3: never filter the list at zero matches; fall back to the full list.
+  const targetingActive = matchedTargetMeta.active && matchedTargetMeta.matched > 0;
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
-    return Object.values(summaries)
-      .filter((s) => !s.image_ref.startsWith('stack:'))
+    const targetRefs = targetingActive ? matchedTargetMeta.refs : null;
+    return imageSummaries
+      .filter((s) => (targetRefs ? targetRefs.has(s.image_ref) : true))
       .filter((s) => (term ? s.image_ref.toLowerCase().includes(term) : true))
       .filter((s) => {
         if (severity === 'all') return true;
         if (severity === 'FIXABLE') return s.fixable > 0;
         return getSeverityKey(s) === severity;
       });
-  }, [summaries, search, severity]);
+  }, [imageSummaries, search, severity, targetingActive, matchedTargetMeta.refs]);
 
   const sorted = useMemo(() => {
     const dir = sortDir === 'asc' ? 1 : -1;
@@ -155,19 +315,128 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
     );
   }
 
-  const noImagesAtAll = Object.values(summaries).every((s) => s.image_ref.startsWith('stack:'));
+  const noImagesAtAll = imageSummaries.length === 0;
   if (noImagesAtAll) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-center">
-        <Boxes className="w-12 h-12 text-muted-foreground/50 mb-4" strokeWidth={1.5} />
-        <h3 className="text-lg font-medium mb-1">No scanned images</h3>
-        <p className="text-sm text-muted-foreground">Scan an image from Resources to see its findings here.</p>
+      <div className="space-y-4">
+        {targeting && onClearTargeting ? (
+          <TargetingBannerFrame>
+            <div className="flex items-start gap-3 justify-between">
+              <p className="text-xs text-stat-subtitle">
+                None of the images for this Security action have a scan summary on this node.
+              </p>
+              <TargetingClearButton onClear={onClearTargeting} />
+            </div>
+          </TargetingBannerFrame>
+        ) : null}
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <Boxes className="w-12 h-12 text-muted-foreground/50 mb-4" strokeWidth={1.5} />
+          <h3 className="text-lg font-medium mb-1">No scanned images</h3>
+          <p className="text-sm text-muted-foreground">Scan an image from Resources to see its findings here.</p>
+        </div>
       </div>
     );
   }
 
+  let targetingBanner: ReactNode = null;
+  if (matchedTargetMeta.active && matchedTargetMeta.matched === 0) {
+    targetingBanner = (
+      <TargetingBannerFrame>
+        <div className="flex items-start gap-3 justify-between">
+          <p className="text-xs text-stat-subtitle">
+            None of the images for this Security action have a scan summary on this node. Showing all images.
+          </p>
+          <TargetingClearButton onClear={onClearTargeting} />
+        </div>
+      </TargetingBannerFrame>
+    );
+  } else if (matchedTargetMeta.active && matchedTargetMeta.matched > 0 && targeting) {
+    const isExposure = targeting.kind === 'public_exposure';
+    const hasConflict = isExposure && targeting.targets.some((t) => t.intentConflict);
+    const driverCount = targeting.drivers?.length ?? 0;
+    const intentional = isExposure && !hasConflict
+      ? intentionalBannerKind(targeting.targets, { truncated: posturePartial })
+      : { kind: 'none' as const, unavailableCount: 0 };
+
+    if (hasConflict) {
+      targetingBanner = (
+        <TargetingBannerFrame>
+          <div className="flex items-start gap-3 justify-between">
+            <div className="min-w-0">
+              <p className="font-mono text-xs text-stat-value">Exposure conflicts with declared intent</p>
+              <p className="text-xs text-stat-subtitle mt-0.5">
+                Compose publishes beyond loopback while Networking intent is internal or same-node. Review networking to align configuration with intent.
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              <ViewNetworkingAction contexts={allTargetingExposureContexts(targeting.targets)} nodeId={nodeId} />
+              <TargetingClearButton onClear={onClearTargeting} />
+            </div>
+          </div>
+        </TargetingBannerFrame>
+      );
+    } else if (intentional.kind === 'absolute' || intentional.kind === 'partial') {
+      targetingBanner = (
+        <IntentionalExposureBanner
+          kind={intentional.kind}
+          unavailableCount={intentional.unavailableCount}
+          contexts={allTargetingExposureContexts(targeting.targets)}
+          nodeId={nodeId}
+          onClear={onClearTargeting}
+        />
+      );
+    } else {
+      const partialMatch = matchedTargetMeta.matched < matchedTargetMeta.total;
+      const fullDriverCount = targeting.driverCount ?? driverCount;
+      const drivingTitle = driverCount > 0;
+      const monitoringKinds = new Set(['waiting_upstream', 'update_check_uncertain']);
+      const monitoringMode = monitoringKinds.has(targeting.kind);
+      const truncated = targeting.driversTruncated === true
+        && fullDriverCount > driverCount
+        && driverCount > 0;
+      const driverTitle = monitoringMode
+        ? (truncated
+          ? `Findings under Monitoring · showing ${driverCount} of ${fullDriverCount}`
+          : `Findings under Monitoring · ${fullDriverCount} finding${fullDriverCount === 1 ? '' : 's'}`)
+        : (truncated
+          ? `Driving current Security action · showing ${driverCount} of ${fullDriverCount}`
+          : `Driving current Security action · ${fullDriverCount} finding${fullDriverCount === 1 ? '' : 's'}`);
+      targetingBanner = (
+        <TargetingBannerFrame>
+          <div className="flex items-start gap-3 justify-between">
+            <div className="min-w-0">
+              <p className="font-mono text-xs text-stat-value">
+                {drivingTitle
+                  ? driverTitle
+                  : formatTargetingTitle(
+                    matchedTargetMeta.label,
+                    matchedTargetMeta.matched,
+                    matchedTargetMeta.total,
+                  )}
+              </p>
+              <p className="text-xs text-stat-subtitle mt-0.5">
+                {drivingTitle
+                  ? (monitoringMode
+                    ? 'Open an image to review findings under Monitoring for this reason.'
+                    : 'Open an image to review the exact findings driving this Security action.')
+                  : 'Showing images responsible for the current Security action.'}
+                {partialMatch ? ' An affected image has no scan summary on this node.' : ''}
+                {posturePartial ? ' The overview pass may be incomplete.' : ''}
+              </p>
+            </div>
+            <TargetingClearButton onClear={onClearTargeting} />
+          </div>
+        </TargetingBannerFrame>
+      );
+    }
+  }
+
+  const inspectDriversFor = (imageRef: string) => driverIdsForImage(targeting?.drivers, imageRef);
+
   return (
     <div className="space-y-4">
+      {targetingBanner}
+
       {isMobile ? (
         <>
           {search !== '' || searchExpanded ? (
@@ -202,7 +471,15 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
           <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
             <div className="px-4">
               {pageItems.map((s) => (
-                <ImageScanRow key={s.image_ref} summary={s} onInspect={onInspect} />
+                <ImageScanRow
+                  key={s.image_ref}
+                  summary={s}
+                  onInspect={onInspect}
+                  driverVulnerabilityIds={inspectDriversFor(s.image_ref)}
+                  intentEvidence={intentEvidenceFor(s, targeting)}
+                  exposureContexts={contextsForImage(s, targeting)}
+                  nodeId={nodeId}
+                />
               ))}
             </div>
             {pageItems.length === 0 && (
@@ -263,14 +540,23 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
               {pageItems.map((s) => (
                 <TableRow key={s.image_ref} className="hover:bg-muted/30 transition-colors">
                   <TableCell className="font-mono text-xs truncate max-w-[280px]">
-                    <button type="button" className="hover:text-brand truncate block w-full text-left" onClick={() => onInspect(s.scan_id, 'vulns')}>
-                      {s.image_ref}
-                    </button>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <button type="button" className="hover:text-brand truncate block text-left min-w-0" onClick={() => onInspect(s.scan_id, 'vulns', inspectDriversFor(s.image_ref))}>
+                        {s.image_ref}
+                      </button>
+                      {s.publicly_exposed === true ? (
+                        <NetworkExposedControl
+                          contexts={contextsForImage(s, targeting)}
+                          nodeId={nodeId}
+                        />
+                      ) : null}
+                    </div>
+                    <IntentEvidenceLine line={intentEvidenceFor(s, targeting)} />
                   </TableCell>
                   <TableCell className="max-md:hidden">
                     <button
                       type="button"
-                      onClick={() => onInspect(s.scan_id, 'vulns')}
+                      onClick={() => onInspect(s.scan_id, 'vulns', inspectDriversFor(s.image_ref))}
                       className="font-mono tabular-nums text-xs text-stat-subtitle text-left hover:text-stat-value transition-colors"
                     >
                       {s.critical > 0 && <span className="text-destructive mr-2">{s.critical}C</span>}
@@ -285,7 +571,7 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
                     {formatTimeAgo(s.scanned_at)}
                   </TableCell>
                   <TableCell>
-                    <SeverityBadge summary={s} tooltip={false} onClick={() => onInspect(s.scan_id, 'vulns')} />
+                    <SeverityBadge summary={s} tooltip={false} onClick={() => onInspect(s.scan_id, 'vulns', inspectDriversFor(s.image_ref))} />
                   </TableCell>
                   {canScan && (
                     <TableCell className="text-right">

@@ -29,6 +29,7 @@ function makeOptions(
     pin: vi.fn(),
     unpin: vi.fn(),
     refreshLabels: vi.fn(),
+    hydrationReady: () => true,
   };
   const stackActions = {
     getStackMenuVisibility: () => ({ showDeploy: false, showStop: true, showRestart: true, showUpdate: false }),

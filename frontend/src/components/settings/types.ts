@@ -91,4 +91,6 @@ export interface Agent {
     url: string;
     enabled: boolean;
     config?: { mode?: 'keyed' | 'stateless'; tags?: string; urls?: string; has_urls?: boolean; providers?: string[]; url_count?: number } | null;
+    /** Optional user-authored JSON payload template; null/blank = built-in payload. */
+    payload_template?: string | null;
 }

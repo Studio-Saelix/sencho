@@ -412,8 +412,9 @@ For each agent:
 | **Enabled** toggle | Activates or deactivates this agent. Disabled agents receive no messages even if a URL is saved. |
 | **Webhook URL** | The endpoint Sencho will POST to when an alert fires. |
 | **Apprise** | Use a keyed `/notify/<key>` endpoint with optional tags, or a stateless `/notify` endpoint with destination URLs. Apprise accepts HTTP or HTTPS. |
+| **Payload template** | Optional JSON body that replaces the built-in payload for this channel. Blank restores the built-in. Apprise destinations stay managed by the channel fields. See [Payload templates](/features/alerts-notifications#payload-templates). |
 
-Click **Save** to persist changes. Click **Test** to send a test payload immediately and verify delivery.
+Click **Save** to persist changes. Click **Test** to send a test payload immediately and verify delivery; the test uses the template currently in the editor when one is set.
 
 At least one agent must be enabled for stack alerts to deliver notifications. See [Alerts & Notifications](/features/alerts-notifications) for how to create alert rules.
 

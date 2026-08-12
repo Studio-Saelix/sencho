@@ -6,6 +6,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 import request from 'supertest';
 import bcrypt from 'bcrypt';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import { PAYLOAD_TEMPLATE_MAX_LENGTH } from '../helpers/notificationPayloadTemplate';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -241,5 +242,152 @@ describe('Apprise agents - redaction and preserve-on-write', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/invalid/i);
     expect(JSON.stringify(res.body)).not.toContain('key-secret-value');
+  });
+});
+
+describe('payload templates', () => {
+  it('stores and returns a valid payload template', async () => {
+    const template = '{"title": "{{level}}", "body": "{{message}}"}';
+    const res = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      type: 'discord',
+      url: 'https://discord.com/api/webhooks/1/token',
+      enabled: true,
+      payload_template: template,
+    });
+    expect(res.status).toBe(200);
+
+    const get = await request(app).get('/api/agents').set('Cookie', adminCookie);
+    expect(get.status).toBe(200);
+    expect(get.body[0].payload_template).toBe(template);
+  });
+
+  it('rejects unknown template variables with a named error', async () => {
+    const res = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      type: 'discord',
+      url: 'https://discord.com/api/webhooks/1/token',
+      enabled: true,
+      payload_template: '{"a": "{{foo}}"}',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Unknown template variable: \{\{foo\}\}/);
+  });
+
+  it('rejects invalid JSON, non-strings, and over-length templates', async () => {
+    const base = {
+      type: 'discord',
+      url: 'https://discord.com/api/webhooks/1/token',
+      enabled: true,
+    };
+    const malformed = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      ...base, payload_template: '{',
+    });
+    expect(malformed.status).toBe(400);
+    expect(malformed.body.error).toContain('valid JSON');
+
+    const nonString = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      ...base, payload_template: 42,
+    });
+    expect(nonString.status).toBe(400);
+    expect(nonString.body.error).toContain('must be a string');
+
+    const over = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      ...base, payload_template: `{"msg":"${'x'.repeat(PAYLOAD_TEMPLATE_MAX_LENGTH - 9)}"}`,
+    });
+    expect(over.status).toBe(400);
+    expect(over.body.error).toContain('8000 characters or fewer');
+
+    const atLimit = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      ...base, payload_template: `{"msg":"${'x'.repeat(PAYLOAD_TEMPLATE_MAX_LENGTH - 10)}"}`,
+    });
+    expect(atLimit.status).toBe(200);
+  });
+
+  it('preserves the stored template when payload_template is omitted', async () => {
+    const db = DatabaseService.getInstance();
+    db.upsertAgent(1, {
+      type: 'slack',
+      url: 'https://hooks.slack.com/services/T/B/X',
+      enabled: true,
+      payload_template: '{"text": "{{message}}"}',
+    });
+
+    const res = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      type: 'slack',
+      url: 'https://hooks.slack.com/services/T/B/X',
+      enabled: true,
+    });
+    expect(res.status).toBe(200);
+    expect(db.getAgents(1).find(a => a.type === 'slack')?.payload_template).toBe('{"text": "{{message}}"}');
+  });
+
+  it('clears the stored template with an empty string or null', async () => {
+    const db = DatabaseService.getInstance();
+    db.upsertAgent(1, {
+      type: 'slack',
+      url: 'https://hooks.slack.com/services/T/B/X',
+      enabled: true,
+      payload_template: '{"text": "{{message}}"}',
+    });
+
+    const cleared = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      type: 'slack',
+      url: 'https://hooks.slack.com/services/T/B/X',
+      enabled: true,
+      payload_template: '',
+    });
+    expect(cleared.status).toBe(200);
+    expect(db.getAgents(1).find(a => a.type === 'slack')?.payload_template).toBeNull();
+  });
+
+  it('rejects a template write from a user without node:manage', async () => {
+    const res = await request(app).post('/api/agents').set('Cookie', viewerCookie).send({
+      type: 'discord',
+      url: 'https://discord.com/api/webhooks/1/token',
+      enabled: true,
+      payload_template: '{"a": "{{level}}"}',
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects Apprise templates that carry urls, tag, or a non-object body', async () => {
+    const base = {
+      type: 'apprise',
+      url: 'http://apprise.local/notify',
+      enabled: true,
+    };
+    const withUrls = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      ...base, config: { urls: 'discord://token@id' }, payload_template: '{"urls": "discord://token@id"}',
+    });
+    expect(withUrls.status).toBe(400);
+    expect(withUrls.body.error).toContain('urls');
+
+    const withTag = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      ...base, config: { tags: 'ops' }, payload_template: '{"tag": "ops"}',
+    });
+    expect(withTag.status).toBe(400);
+
+    const scalar = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      ...base, config: { urls: 'discord://token@id' }, payload_template: '"{{message}}"',
+    });
+    expect(scalar.status).toBe(400);
+    expect(scalar.body.error).toContain('render a JSON object');
+  });
+
+  it('never exposes Apprise destination credentials through a templated agent', async () => {
+    const db = DatabaseService.getInstance();
+    const serviceUrl = 'discord://webhook-id/webhook-token?token=query-secret';
+    db.upsertAgent(1, {
+      type: 'apprise',
+      url: 'http://apprise.local/notify',
+      enabled: true,
+      config: JSON.stringify({ urls: serviceUrl }),
+      payload_template: '{"title": "{{level}}"}',
+    });
+
+    const res = await request(app).get('/api/agents').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body[0].payload_template).toBe('{"title": "{{level}}"}');
+    expect(JSON.stringify(res.body)).not.toContain('webhook-token');
+    expect(JSON.stringify(res.body)).not.toContain('query-secret');
   });
 });

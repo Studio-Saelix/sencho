@@ -1890,9 +1890,10 @@ paths:
       description: |
         Computes the same preview as GET. When every image reports
         `check_status: ok` and `has_update` is false (mixed `ok` +
-        `not_checkable` does not clear), clears sticky confirmed update rows
-        for the stack and sets `reconciled: true`. Requires `stack:read`
-        permission.
+        `not_checkable` does not clear), deletes sticky partial, failed,
+        and ok+true rows and sets `reconciled: true` only when a row was
+        deleted. Existing ok+false rows are kept (`reconciled` stays false).
+        Requires `stack:read` permission.
       parameters:
         - $ref: "#/components/parameters/stackName"
         - $ref: "#/components/parameters/nodeId"

@@ -118,6 +118,43 @@ describe('ImageUpdateService.commitPreviewClear', () => {
     expect(db.getStackUpdateDetail(nodeId)['restart-web']).toBeUndefined();
   });
 
+  it('keeps an ok+false row', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    db.upsertStackUpdateStatus(nodeId, 'web', false, 1000, 'ok', null, [
+      { service: 'web', image: 'nginx:1.2.3', hasUpdate: false, checkStatus: 'ok', lastError: null },
+    ]);
+    const svc = ImageUpdateService.getInstance();
+    const observedMem = svc.peekStackWriteGeneration(nodeId, 'web');
+    const observedRow = db.getStackUpdateWriteGeneration(nodeId, 'web');
+    expect(await svc.commitPreviewClear(nodeId, 'web', observedMem, observedRow)).toBe('absent');
+    expect(db.getStackUpdateDetail(nodeId).web).toMatchObject({
+      hasUpdate: false,
+      checkStatus: 'ok',
+      services: [
+        expect.objectContaining({
+          service: 'web',
+          image: 'nginx:1.2.3',
+          hasUpdate: false,
+          checkStatus: 'ok',
+        }),
+      ],
+    });
+  });
+
+  it('clears a failed row even when hasUpdate is false', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    db.upsertStackUpdateStatus(nodeId, 'web', false, 1000, 'failed', 'timeout', [
+      { service: 'web', image: 'nginx:1.2.3', hasUpdate: false, checkStatus: 'failed', lastError: 'timeout' },
+    ]);
+    const svc = ImageUpdateService.getInstance();
+    const observedMem = svc.peekStackWriteGeneration(nodeId, 'web');
+    const observedRow = db.getStackUpdateWriteGeneration(nodeId, 'web');
+    expect(await svc.commitPreviewClear(nodeId, 'web', observedMem, observedRow)).toBe('cleared');
+    expect(db.getStackUpdateDetail(nodeId).web).toBeUndefined();
+  });
+
   it('returns absent when no row exists', async () => {
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;
@@ -301,6 +338,39 @@ describe('GET/POST /api/stacks/:stackName/update-preview reconcile', () => {
       action: 'update-status-reconciled',
       stackName: 'web',
     }));
+  });
+
+  it('POST keeps an ok+false scanner row', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    db.upsertStackUpdateStatus(nodeId, 'web', false, 1000, 'ok', null, [
+      { service: 'web', image: 'nginx:1.2.3', hasUpdate: false, checkStatus: 'ok', lastError: null },
+    ]);
+
+    vi.spyOn(UpdatePreviewService.getInstance(), 'getPreview').mockResolvedValue(negativeOkPreview('web'));
+    const broadcast = vi.spyOn(NotificationService.getInstance(), 'broadcastEvent').mockImplementation(() => undefined);
+    const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate').mockImplementation(() => undefined);
+
+    const res = await request(app)
+      .post('/api/stacks/web/update-preview')
+      .set('Cookie', adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBe(false);
+    expect(db.getStackUpdateDetail(nodeId).web).toMatchObject({
+      hasUpdate: false,
+      checkStatus: 'ok',
+      services: [
+        expect.objectContaining({
+          service: 'web',
+          image: 'nginx:1.2.3',
+          hasUpdate: false,
+          checkStatus: 'ok',
+        }),
+      ],
+    });
+    expect(broadcast).not.toHaveBeenCalled();
+    expect(invalidate).not.toHaveBeenCalled();
   });
 
   it('POST does not mutate on partial negative preview', async () => {

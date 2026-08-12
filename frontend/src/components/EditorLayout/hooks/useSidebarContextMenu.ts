@@ -53,12 +53,20 @@ export function useSidebarContextMenu({
     const stackStatus = rawStatus === 'partial' ? 'running' : rawStatus;
     const nodeId = activeNode?.id ?? null;
     const canMuteNotifications = isAdmin && hasCapability('notification-suppression');
+    // Fail closed without authoritative status evidence: missing self identity
+    // must not read as "ordinary stack", and an unverified port must not offer
+    // Open App.
+    const ready = stackListState.hydrationReady();
     return {
       stackStatus,
+      ready,
+      // Identity stays factual: missing evidence must not mislabel an ordinary
+      // stack as the Sencho instance. The `ready` gate plus the handler-boundary
+      // rechecks are what block actions, not a falsified identity field.
       isSelfStack: stackListState.stackSelfFlags[file] === true,
       // Only offer "Open App" when a browser-reachable URL can actually be built
       // (a remote node with no API host, e.g. a pilot agent, yields none).
-      canOpenApp: mainPort !== undefined && buildServiceUrl({ node: activeNode, publicPort: mainPort }) !== null,
+      canOpenApp: ready && mainPort !== undefined && buildServiceUrl({ node: activeNode, publicPort: mainPort }) !== null,
       isBusy: stackListState.isStackBusy(file),
       isAdmin,
       canDelete: can('stack:delete', 'stack', sName, nodeId),
@@ -84,11 +92,14 @@ export function useSidebarContextMenu({
       update: () => stackActions.executeStackActionByFile(file, 'update', 'update'),
       takeDown: () => stackActions.requestTakeDownStack(sName),
       remove: () => {
+        // Readiness recheck at the handler boundary: a menu built while ready
+        // must not delete after a node switch or failed refresh.
+        if (!stackListState.hydrationReady()) return;
         if (stackListState.stackSelfFlags[file]) {
           overlayState.openSelfStackProtected();
           return;
         }
-        overlayState.openDeleteDialog(sName);
+        overlayState.openDeleteDialog({ name: sName, nodeId: activeNode?.id ?? null });
       },
       pin: () => stackListState.pin(file),
       unpin: () => stackListState.unpin(file),
@@ -146,6 +157,9 @@ export function useSidebarContextMenu({
       },
       openLabelManager: () => navState.handleOpenSettings('labels'),
       openScheduleTask: () => {
+        // Scheduling a lifecycle task needs the same authoritative runtime
+        // evidence as running it directly.
+        if (!stackListState.hydrationReady()) return;
         navState.setSchedulePrefill({ stackName: sName, nodeId: activeNode?.id ?? null });
         navState.setActiveView('scheduled-ops');
       },

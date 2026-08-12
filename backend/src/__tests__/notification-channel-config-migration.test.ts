@@ -105,4 +105,45 @@ describe('notification channel config column migration', () => {
     expect(agent2.url).toBe('https://discord.example/webhook/legacy');
     expect(agent2.config).toBeNull();
   });
+
+  it('adds the payload_template column to an existing config-era agents schema', () => {
+    scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-tpl-mig-'));
+    const dbPath = path.join(scratchDir, 'sencho.db');
+    const seed = new Database(dbPath);
+    try {
+      seed.exec(`
+        CREATE TABLE agents (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          node_id INTEGER NOT NULL DEFAULT 0,
+          type TEXT NOT NULL,
+          url TEXT NOT NULL,
+          enabled INTEGER DEFAULT 0,
+          config TEXT NULL
+        );
+        INSERT INTO agents (node_id, type, url, enabled, config)
+          VALUES (1, 'discord', 'https://discord.example/webhook/legacy', 1, NULL);
+      `);
+    } finally {
+      seed.close();
+    }
+
+    process.env.DATA_DIR = scratchDir;
+    resetDatabaseSingleton();
+    const db = DatabaseService.getInstance();
+
+    const agentCols = db.getDb().prepare('PRAGMA table_info(agents)').all() as Array<{ name: string }>;
+    expect(agentCols.filter(c => c.name === 'payload_template')).toHaveLength(1);
+
+    const legacy = db.getAgents(1).find(a => a.type === 'discord')!;
+    expect(legacy.url).toBe('https://discord.example/webhook/legacy');
+    expect(legacy.payload_template).toBeNull();
+
+    db.upsertAgent(1, {
+      type: 'discord',
+      url: 'https://discord.example/webhook/legacy',
+      enabled: true,
+      payload_template: '{"title": "{{level}}"}',
+    });
+    expect(db.getAgents(1).find(a => a.type === 'discord')!.payload_template).toBe('{"title": "{{level}}"}');
+  });
 });

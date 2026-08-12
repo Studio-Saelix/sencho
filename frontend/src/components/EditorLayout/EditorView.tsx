@@ -208,6 +208,8 @@ export interface EditorViewProps {
     showTakeDown: boolean;
     /** True when this stack is the running Sencho instance on the active node. */
     isSelfStack?: boolean;
+    /** False while status evidence is not authoritative for the active node. */
+    actionsReady?: boolean;
     /** Admin + node reapply eligibility + self-stack: show Save & Reapply instead of Save & Deploy. */
     canSaveAndReapply?: boolean;
 
@@ -304,6 +306,7 @@ export function EditorView(props: EditorViewProps) {
         requestTakeDownStack,
         showTakeDown,
         isSelfStack,
+        actionsReady,
         canSaveAndReapply = false,
         recoveryResult,
         onRefreshState,
@@ -459,6 +462,7 @@ export function EditorView(props: EditorViewProps) {
                                         requestTakeDownStack={requestTakeDownStack}
                                         showTakeDown={showTakeDown}
                                         isSelfStack={isSelfStack}
+                                        actionsReady={actionsReady}
                                         stackMuteActions={stackMuteActions}
                                         onOpenMonitor={onOpenMonitor}
                                     />
@@ -613,7 +617,7 @@ export function EditorView(props: EditorViewProps) {
                                             )}
                                         </Button>
                                         <div className="flex items-center">
-                                            <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={loadingAction === 'deploy'}>
+                                            <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={loadingAction === 'deploy' || !actionsReady}>
                                                 <Rocket className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                                 {canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy'}
                                             </Button>

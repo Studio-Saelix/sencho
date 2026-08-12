@@ -76,6 +76,29 @@ describe('TrivyService.scanNode', () => {
     expect(result.severity).toMatchObject({ critical: 1, high: 2 });
   });
 
+  it('skips Sencho rollback-hold tags while still scanning dual-tagged images via the registry tag', async () => {
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getImages: async () => [
+        { RepoTags: ['sencho-rb/aaaaaaaaaaaa/web:hold'] },
+        { RepoTags: ['myregistry/app:1.4', 'sencho-rb/bbbbbbbbbbbb/app:hold'] },
+      ],
+    } as never);
+    const run = vi.spyOn(svc(), 'runScanAndPersist').mockResolvedValue(fakeRow({ image_ref: 'myregistry/app:1.4' }));
+
+    await svc().scanNode(1, { vulns: true, secrets: false, misconfig: false });
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledWith('myregistry/app:1.4', 1, 'manual', null, { scanners: ['vuln'] });
+  });
+
+  it('rejects scanImage for Sencho rollback-hold refs before touching Docker or Trivy', async () => {
+    const digest = vi.spyOn(svc() as unknown as { getImageDigest: (r: string, n: number) => Promise<string | null> }, 'getImageDigest');
+    await expect(svc().scanImage('sencho-rb/aaaaaaaaaaaa/web:hold', 1)).rejects.toThrow(
+      /rollback-hold images are recovery state/i,
+    );
+    expect(digest).not.toHaveBeenCalled();
+  });
+
   it('scans secrets only and keys the digest cache on the scanner set', async () => {
     vi.spyOn(DockerController, 'getInstance').mockReturnValue({ getImages: async () => [{ RepoTags: ['a:1'] }] } as never);
     // Force a digest so the cache lookup runs; return null so the scan proceeds.

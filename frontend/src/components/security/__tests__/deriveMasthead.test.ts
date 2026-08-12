@@ -64,7 +64,7 @@ it('reads Monitoring/warn when criticals/highs exist but nothing is actionable',
   });
 });
 
-it('reads Secure/live when a scan completed and nothing is actionable or severe', () => {
+it('reads Secure/live when a scan completed and nothing is residual or actionable', () => {
   expect(deriveMasthead(overview({}), false)).toEqual({ state: 'Secure', tone: 'live' });
 });
 
@@ -74,6 +74,11 @@ it('prefers the backend posture over the local bootstrap when present', () => {
   expect(deriveMasthead(overview({ fixable: 5, posture: 'Monitoring' }), false)).toEqual({
     state: 'Monitoring',
     tone: 'warn',
+  });
+  // Bootstrap would read Monitoring from raw Crit/High; cleared-residual Secure wins.
+  expect(deriveMasthead(overview({ critical: 5, high: 2, posture: 'Secure' }), false)).toEqual({
+    state: 'Secure',
+    tone: 'live',
   });
 });
 

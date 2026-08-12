@@ -2,6 +2,7 @@ import type React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { StackList } from '../StackList';
+import { Command } from '@/components/ui/command';
 import { isStacksListSettled, isStacksListLoading } from '../stacksLoadUi';
 
 type StackListRenderProps = React.ComponentProps<typeof StackList>;
@@ -102,5 +103,100 @@ describe('StackList load gating', () => {
     );
     expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
     expect(screen.queryByTestId('discovery-empty')).toBeNull();
+  });
+});
+
+describe('stacksLoadUi hydration sentinel', () => {
+  it('settles a completed list error regardless of hydration state', () => {
+    expect(isStacksListSettled(false, 'error', 'pending')).toBe(true);
+  });
+
+  it('does not settle a successful list while hydration is pending', () => {
+    expect(isStacksListSettled(false, 'success', 'pending')).toBe(false);
+  });
+
+  it('settles a successful list once hydration is terminal', () => {
+    expect(isStacksListSettled(false, 'success', 'ok')).toBe(true);
+    expect(isStacksListSettled(false, 'success', 'error')).toBe(true);
+  });
+});
+
+describe('StackList hydration display', () => {
+    const minimalCtx = {
+      stackStatus: 'running',
+      ready: true,
+      isSelfStack: false,
+      canOpenApp: false,
+      isBusy: false,
+      isAdmin: false,
+      canDelete: false,
+      canDeploy: true,
+      canEditLabels: false,
+      canCreateLabels: false,
+      isPinned: false,
+      labels: [],
+      assignedLabelIds: [],
+      menuVisibility: { showDeploy: false, showStop: false, showRestart: false, showUpdate: false, showTakeDown: false },
+      openAlertSheet: () => {},
+      openAutoHeal: () => {},
+      canViewMonitor: false,
+      canCheckUpdates: false,
+      checkUpdates: () => {},
+      openStackApp: () => {},
+      deploy: () => {},
+      stop: () => {},
+      restart: () => {},
+      update: () => {},
+      takeDown: () => {},
+      remove: () => {},
+      pin: () => {},
+      unpin: () => {},
+      toggleLabel: async () => {},
+      openLabelManager: () => {},
+      openScheduleTask: () => {},
+      canMuteNotifications: false,
+      muteStackAll: () => {},
+      muteStackDeploySuccess: () => {},
+      muteStackMonitor: () => {},
+      openStackMuteRules: () => {},
+    };
+
+  it('renders rows with unknown indicators while hydration is pending', () => {
+    render(
+      <Command shouldFilter={false}>
+        <StackList
+          {...baseProps({
+            stacksLoadStatus: 'success',
+            isLoading: false,
+            files: ['web.yml'],
+            stackStatuses: { 'web.yml': 'running' },
+            hydrationDisplay: 'pending',
+            buildMenuCtx: () => minimalCtx as never,
+          })}
+        />
+      </Command>,
+    );
+    const row = screen.getByTestId('stack-row');
+    expect(row.textContent).toContain('--');
+    expect(row.textContent).not.toContain('UP');
+  });
+
+  it('renders rows normally when hydration is current', () => {
+    render(
+      <Command shouldFilter={false}>
+        <StackList
+          {...baseProps({
+            stacksLoadStatus: 'success',
+            isLoading: false,
+            files: ['web.yml'],
+            stackStatuses: { 'web.yml': 'running' },
+            hydrationDisplay: 'current',
+            buildMenuCtx: () => minimalCtx as never,
+          })}
+        />
+      </Command>,
+    );
+    const row = screen.getByTestId('stack-row');
+    expect(row.textContent).toContain('UP');
   });
 });

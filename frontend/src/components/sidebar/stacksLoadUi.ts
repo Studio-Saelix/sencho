@@ -1,11 +1,18 @@
 import type { StacksLoadStatus } from '@/components/EditorLayout/hooks/useStackListState';
 
-/** True when the sidebar stack list request has finished for the active node. */
+/** True when the sidebar stack list request has finished for the active node.
+ *  A completed list error settles regardless of status hydration; a successful
+ *  list is fully settled only once status hydration is no longer pending, so
+ *  readiness sentinels (E2E `data-stacks-loaded`) stay truthful. */
 export function isStacksListSettled(
   isLoading: boolean,
   stacksLoadStatus: StacksLoadStatus | undefined,
+  hydrationStatus?: 'pending' | 'ok' | 'error',
 ): boolean {
-  return !isLoading && (stacksLoadStatus === 'success' || stacksLoadStatus === 'error');
+  if (isLoading) return false;
+  if (stacksLoadStatus === 'error') return true;
+  if (stacksLoadStatus !== 'success') return false;
+  return hydrationStatus !== 'pending';
 }
 
 /** True while the sidebar should show the stack-list skeleton. */

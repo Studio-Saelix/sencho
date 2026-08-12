@@ -5,6 +5,7 @@ import { CryptoService } from './CryptoService';
 import { isSeverityAtLeast } from '../utils/severity';
 import { evaluatePolicyRisk, policyInputs, type PolicyBlockReason } from '../utils/policy-risk';
 import { applySuppressions } from '../utils/suppression-filter';
+import { SENCHO_ROLLBACK_HOLD_SQL_LIKE } from '../utils/senchoRollbackHold';
 import type { AuditStatsInput } from './AuditAnomalyService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
 import { HIGH_EPSS_THRESHOLD } from './securityPosture';
@@ -33,6 +34,8 @@ export interface Agent {
     url: string;
     enabled: boolean;
     config?: string | null;
+    /** Optional user-authored JSON payload template; null = built-in payload. */
+    payload_template?: string | null;
 }
 
 export interface GlobalSetting {
@@ -2446,6 +2449,7 @@ export class DatabaseService {
 
     private migrateNotificationChannelConfig(): void {
         this.tryAddColumn('agents', 'config', 'TEXT NULL');
+        this.tryAddColumn('agents', 'payload_template', 'TEXT NULL');
         this.tryAddColumn('notification_routes', 'config', 'TEXT NULL');
     }
 
@@ -3005,11 +3009,11 @@ export class DatabaseService {
         const stored = this.storeAppriseFields(agent.type === 'apprise', agent.url, agent.config);
         const existing = this.db.prepare('SELECT id FROM agents WHERE node_id = ? AND type = ?').get(nodeId, agent.type) as any;
         if (existing) {
-            const stmt = this.db.prepare('UPDATE agents SET url = ?, enabled = ?, config = ? WHERE node_id = ? AND type = ?');
-            stmt.run(stored.url, agent.enabled ? 1 : 0, stored.config, nodeId, agent.type);
+            const stmt = this.db.prepare('UPDATE agents SET url = ?, enabled = ?, config = ?, payload_template = ? WHERE node_id = ? AND type = ?');
+            stmt.run(stored.url, agent.enabled ? 1 : 0, stored.config, agent.payload_template ?? null, nodeId, agent.type);
         } else {
-            const stmt = this.db.prepare('INSERT INTO agents (node_id, type, url, enabled, config) VALUES (?, ?, ?, ?, ?)');
-            stmt.run(nodeId, agent.type, stored.url, agent.enabled ? 1 : 0, stored.config);
+            const stmt = this.db.prepare('INSERT INTO agents (node_id, type, url, enabled, config, payload_template) VALUES (?, ?, ?, ?, ?, ?)');
+            stmt.run(nodeId, agent.type, stored.url, agent.enabled ? 1 : 0, stored.config, agent.payload_template ?? null);
         }
     }
 
@@ -7117,7 +7121,8 @@ export class DatabaseService {
                    ) lv ON lv.image_ref = v.image_ref AND lv.max_scanned = v.scanned_at
                    WHERE v.node_id = ? AND v.status = 'completed' AND v.scanners_used IN (${placeholders})
                  ) vuln ON vuln.image_ref = base.image_ref
-                 WHERE base.node_id = ? AND base.status = 'completed'`,
+                 WHERE base.node_id = ? AND base.status = 'completed'
+                   AND base.image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'`,
             )
             .all(nodeId, nodeId, ...VULN_BEARING_SCANNER_SETS, nodeId, ...VULN_BEARING_SCANNER_SETS, nodeId) as Array<{
                 image_ref: string;
@@ -7181,9 +7186,11 @@ export class DatabaseService {
                    SELECT image_ref, MAX(scanned_at) AS max_scanned
                    FROM vulnerability_scans
                    WHERE node_id = ? AND status = 'completed' AND scanners_used IN (${placeholders})
+                     AND image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'
                    GROUP BY image_ref
                  ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
                  WHERE vs.node_id = ? AND vs.status = 'completed' AND vs.scanners_used IN (${placeholders})
+                   AND vs.image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'
                    AND vd.severity IN ('CRITICAL', 'HIGH')
                  LIMIT ?`,
             )
@@ -7223,9 +7230,11 @@ export class DatabaseService {
                    SELECT image_ref, MAX(scanned_at) AS max_scanned
                    FROM vulnerability_scans
                    WHERE node_id = ? AND status = 'completed' AND scanners_used IN (${placeholders})
+                     AND image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'
                    GROUP BY image_ref
                  ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
                  WHERE vs.node_id = ? AND vs.status = 'completed' AND vs.scanners_used IN (${placeholders})
+                   AND vs.image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'
                  LIMIT ?`,
             )
             .all(nodeId, ...VULN_BEARING_SCANNER_SETS, nodeId, ...VULN_BEARING_SCANNER_SETS, limit + 1) as Array<{
@@ -7304,9 +7313,11 @@ export class DatabaseService {
                    SELECT image_ref, MAX(scanned_at) AS max_scanned
                    FROM vulnerability_scans
                    WHERE node_id = ? AND status = 'completed' AND scanners_used IN (${placeholders})
+                     AND image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'
                    GROUP BY image_ref
                  ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
                  WHERE vs.node_id = ? AND vs.status = 'completed' AND vs.scanners_used IN (${placeholders})
+                   AND vs.image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'
                    AND (vd.severity IN ('CRITICAL', 'HIGH') OR ci.kev = 1)
                  -- Rank by the same exploitation-risk tiers the overview list
                  -- displays (SecurityCharts exploitTier, "assume it's automatable"):
@@ -7466,6 +7477,7 @@ export class DatabaseService {
                      ) AS rn
                    FROM vulnerability_scans
                    WHERE node_id = ? AND status = 'completed' AND scanned_at >= ?
+                     AND image_ref NOT LIKE '${SENCHO_ROLLBACK_HOLD_SQL_LIKE}'
                  )
                  SELECT day,
                         SUM(critical_count) AS critical,

@@ -30,6 +30,7 @@ import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import { isFullySyntheticHoldImage } from '../utils/senchoRollbackHold';
 import { isValidDockerNetworkName } from './network/dockerNetworkName';
 
 export type {
@@ -619,13 +620,9 @@ class DockerController {
       return undefined;
     };
 
-    // Only hide an image from the generic inventory when every visible tag is
-    // a synthetic sencho-rb hold tag; an image that also carries a normal
-    // registry tag stays visible here (with the badge below) so the generic
-    // inventory stays complete. Its generation still surfaces in the Rollback tab.
-    const isFullySyntheticHoldImage = (repoTags: string[]): boolean =>
-      repoTags.length > 0 && repoTags.every((tag) => tag.startsWith('sencho-rb/'));
-
+    // Hide hold-only images from generic inventory. Dual-tagged images (registry
+    // tag + hold) stay visible here with the badge below; generations still
+    // surface in the Rollback tab.
     const images: ClassifiedImage[] = this.validateApiData<any[]>(rawImages)
       .map((img: any) => {
         const usedByStacks = [...(imageToStacks.get(img.Id) ?? [])].sort((a, b) => a.localeCompare(b));

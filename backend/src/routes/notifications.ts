@@ -26,6 +26,7 @@ import {
   parseNotificationSchedule,
   type NotificationSchedule,
 } from '../helpers/notificationSchedule';
+import { resolvePayloadTemplate } from '../helpers/notificationPayloadTemplate';
 import {
   deleteSuppressionRuleFromFleet,
   syncSuppressionRuleToFleet,
@@ -341,14 +342,19 @@ notificationsRouter.delete('/', authMiddleware, async (req: Request, res: Respon
 notificationsRouter.post('/test', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
-    const { type, url, config } = req.body;
+    const { type, url, config, payload_template } = req.body;
     if (!type || !(NOTIFICATION_CHANNEL_TYPES as readonly string[]).includes(type)) {
       res.status(400).json({ error: `type must be ${NOTIFICATION_CHANNEL_TYPES.join(', ')}` });
       return;
     }
     const channelErr = validateNotificationChannel(type, url, config);
     if (channelErr) { res.status(400).json({ error: `url ${channelErr}` }); return; }
-    await NotificationService.getInstance().testDispatch(type, url, config);
+    const resolvedTemplate = resolvePayloadTemplate(payload_template, null, type);
+    if (!resolvedTemplate.ok) {
+      res.status(400).json({ error: `payload_template ${resolvedTemplate.error}` });
+      return;
+    }
+    await NotificationService.getInstance().testDispatch(type, url, config, resolvedTemplate.value);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Test failed', details: getErrorMessage(error, String(error)) });

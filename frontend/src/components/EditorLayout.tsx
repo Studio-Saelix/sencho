@@ -14,7 +14,7 @@ import { ShellOverlays } from './EditorLayout/ShellOverlays';
 import type { VolumePreservationOnDelete } from './EditorLayout/DeleteStackDialog';
 import { classifyFailedGate } from './EditorLayout/failed-gate-recovery';
 import { useEditorViewState } from './EditorLayout/hooks/useEditorViewState';
-import { useStackListState } from './EditorLayout/hooks/useStackListState';
+import { useStackListState, type HydrationDisplayState } from './EditorLayout/hooks/useStackListState';
 import { useViewNavigationState } from './EditorLayout/hooks/useViewNavigationState';
 import { useUrlSync } from './EditorLayout/hooks/useUrlSync';
 import { shouldClearPendingDetailStack } from './EditorLayout/mobile-pending-detail';
@@ -92,6 +92,15 @@ const GlobalObservabilityView = lazy(() => import('./GlobalObservabilityView').t
  * Reporting that as 'unsupported' would force the destructive delete default onto a node
  * that may well preserve volumes, so it maps to 'unknown' instead.
  */
+/** Masthead labels for non-current hydration states. Keyed by the display
+ *  projection so the copy can never drift from the state machine. */
+const HYDRATION_MASTHEAD_LABEL: Record<Exclude<HydrationDisplayState, 'current'>, string> = {
+  pending: 'Status loading',
+  error: 'Status unavailable',
+  stale: 'Status stale',
+  incomplete: 'Partial status',
+};
+
 function resolveDeleteVolumePreservation(capabilities: string[] | undefined): VolumePreservationOnDelete {
   if (capabilities == null || capabilities.length === 0) return 'unknown';
   return capabilities.includes(STACK_DELETE_PRUNE_VOLUMES_CAPABILITY) ? 'supported' : 'unsupported';
@@ -175,6 +184,11 @@ export default function EditorLayout() {
     stacksLoadStatus,
     stacksLoadError,
     stacksLoadNodeId,
+    hydrationStatus,
+    hydrationDisplay,
+    actionsReady,
+    hydrationReady,
+    filterStaleQualifier,
   } = stackListState;
 
   const { nodes, activeNode, setActiveNode, hasCapability, activeNodeMeta, isLoading: nodesLoading } = useNodes();
@@ -207,8 +221,11 @@ export default function EditorLayout() {
   const { canReapply: canReapplyCompose } = useActiveNodeReapplyEligibility(activeNode?.id);
   const composeReapply = useComposeReapplyAction();
   const isSelfStackSelected = selectedFile ? stackSelfFlags[selectedFile] === true : false;
-  // Ordinary stacks keep Save & Deploy even when the node supports compose reapply.
-  const canSaveAndReapply = resolveCanSaveAndReapply(isAdmin, canReapplyCompose, isSelfStackSelected);
+  // Save & Reapply needs both the self identity AND current status evidence:
+  // without authoritative evidence the reapply would run against unknown state.
+  // Save Only stays available regardless.
+  const canSaveAndReapply =
+    actionsReady && resolveCanSaveAndReapply(isAdmin, canReapplyCompose, isSelfStackSelected);
 
   // Which mode the create dialog opens on (always empty after import tab removal).
   const [createDialogInitialMode, setCreateDialogInitialMode] = useState<CreateMode>('empty');
@@ -721,6 +738,7 @@ export default function EditorLayout() {
       requestTakeDownStack={stackActions.requestTakeDownStack}
       showTakeDown={selectedFile ? stackActions.getStackMenuVisibility(selectedFile).showTakeDown : false}
       isSelfStack={isSelfStackSelected}
+      actionsReady={actionsReady}
       canSaveAndReapply={canSaveAndReapply}
       recoveryResult={selectedFile ? lastActionResult[selectedFile] : undefined}
       onRefreshState={async () => {
@@ -976,7 +994,11 @@ export default function EditorLayout() {
             stacksLoadStatus,
             stacksLoadError,
             onRetryStacksLoad: () => { void retryFrozenRoute(); },
+            hydrationDisplay,
+            hydrationStatus,
           }}
+          filterStale={filterStaleQualifier}
+          actionsReady={actionsReady}
           activitySummary={activitySummary}
           onActivityAction={handleActivityAction}
           bulkMode={bulkMode}
@@ -1110,6 +1132,7 @@ export default function EditorLayout() {
               handleNavigate('fleet');
             }
           }}
+          hydrationReady={hydrationReady}
         />
       );
 
@@ -1241,7 +1264,14 @@ export default function EditorLayout() {
       const { all: stacksAll, up: stacksUp, down: stacksDown, updates: stacksUpdates } = filterCounts;
       let stacksState = 'All running';
       let stacksTone: Tone = 'success';
-      if (stacksAll === 0) {
+      if (hydrationDisplay !== 'current' && stacksAll > 0) {
+        // Without authoritative status evidence the masthead must never claim
+        // current health: pending shows a neutral summary, a terminal error is
+        // not "loading" (it needs a refresh), and stale/incomplete evidence is
+        // qualified rather than presented as live.
+        stacksState = HYDRATION_MASTHEAD_LABEL[hydrationDisplay];
+        stacksTone = 'brand';
+      } else if (stacksAll === 0) {
         stacksState = 'No stacks';
       } else if (stacksDown > 0) {
         stacksState = `${stacksDown} down`;
@@ -1258,7 +1288,7 @@ export default function EditorLayout() {
           kickerSlot={<NodeSwitcher compact onManageNodes={() => openSettings('nodes')} />}
           state={stacksState}
           stateTone={stacksTone}
-          live={stacksDown > 0}
+          live={hydrationDisplay === 'current' && stacksDown > 0}
           meta={`${stacksAll} ${stacksAll === 1 ? 'stack' : 'stacks'} · ${stacksUp} up · ${stacksDown} down`}
           right={mobileMastheadActions}
         />

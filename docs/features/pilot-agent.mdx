@@ -147,7 +147,7 @@ Deploying through Compose also lets the control instance push over-the-air updat
 
 The agent boots, reads its configuration, and dials `wss://<control-instance>/api/pilot/tunnel` carrying the enrollment token in an `Authorization: Bearer` header.
 
-The control instance verifies the token, marks the enrollment slot consumed, and replies with a `hello` frame followed by a control frame that carries a **long-lived tunnel JWT** (365-day expiry). The agent writes that token to its data volume at `/app/data/pilot.jwt`. The control instance will not accept the same enrollment token again, but leave `SENCHO_ENROLL_TOKEN` in the compose file: the agent uses it as a fallback if the persisted tunnel JWT is ever rejected at upgrade (for example after a secret rotation), clearing the stale file and re-enrolling automatically.
+The control instance verifies the token, marks the enrollment slot consumed, and replies with a `hello` frame followed by a control frame that carries a **long-lived tunnel JWT** (365-day expiry). The agent writes that token to its data volume at `/app/data/pilot.jwt`. The control instance will not accept the same enrollment token again. Leave `SENCHO_ENROLL_TOKEN` in the compose file only as a recovery hook: if the control instance later rejects the persisted tunnel JWT at upgrade (for example after a secret rotation) **and** you have already put a **fresh, unexpired** enrollment token in the container environment, the agent retries with that enroll token and overwrites `pilot.jwt` only after a successful re-enroll. The original, already-consumed enroll token cannot recover the agent on its own.
 
 The tunnel is now active. The Endpoint column in the Nodes table flips from `tunnel (waiting)` to `tunnel (seen Xs ago)` and the node's status badge turns Online.
 
@@ -201,7 +201,7 @@ The agent dials `wss://`. Certificate validation is on by default against the sy
 
 ### What rotating the JWT secret does
 
-The tunnel JWTs are signed with the control instance's `auth_jwt_secret`. If that secret rotates (because the control instance was rebuilt from scratch, restored into a different environment, or manually rotated), every existing tunnel JWT stops verifying. Regenerate enrollment for each affected node, update the agent compose file with the fresh token, and restart the agent containers. When `SENCHO_ENROLL_TOKEN` is present in the running container, the agent clears the stale `pilot.jwt` and re-enrolls on its own; you do not need to delete the data volume by hand.
+The tunnel JWTs are signed with the control instance's `auth_jwt_secret`. If that secret rotates (because the control instance was rebuilt from scratch, restored into a different environment, or manually rotated), every existing tunnel JWT stops verifying. Regenerate enrollment for each affected node, update the agent compose file with the fresh token, and restart the agent containers. When a **fresh** `SENCHO_ENROLL_TOKEN` is present in the running container, the agent retries enrollment and overwrites `pilot.jwt` only after a successful `enroll_ack`; you do not need to delete the data volume by hand.
 
 ## Self-signed control-instance TLS certificates
 
@@ -257,7 +257,7 @@ These environment variables are read by the **agent** container at boot.
 |---|---|---|---|
 | `SENCHO_MODE` | Yes | none | Must be `pilot`. Putting any other value here causes the container to start as a normal Sencho instance, not as an agent. |
 | `SENCHO_PRIMARY_URL` | Yes | none | The base URL of your control instance (e.g. `https://sencho.example.com`). The agent appends `/api/pilot/tunnel` and dials `wss://`. |
-| `SENCHO_ENROLL_TOKEN` | First boot; keep for recovery | none | The 15-minute enrollment token issued by the control instance. During normal operation the agent dials with `pilot.jwt` instead. If that persisted token is rejected at upgrade (for example after a secret rotation or node re-registration), the agent falls back to this value automatically when it is still present in the container environment, clears the stale file, and re-enrolls. Update it in compose after regenerating enrollment on the control instance. |
+| `SENCHO_ENROLL_TOKEN` | First boot; keep for recovery | none | The 15-minute enrollment token issued by the control instance. During normal operation the agent dials with `pilot.jwt` instead. If that persisted token is rejected at upgrade (for example after a secret rotation), the agent falls back to this value only when it is still unexpired and unused; `pilot.jwt` is overwritten after a successful re-enroll, not deleted on the failed attempt. The original token left in compose after first enrollment cannot recover the agent. Update it in compose after regenerating enrollment on the control instance. |
 | `SENCHO_PILOT_CA_FILE` | Optional | unset | Absolute path inside the container to a PEM bundle. Use when your control instance's TLS chain is rooted in a private CA. |
 | `DATA_DIR` | Optional | `/app/data` | Where the persisted `pilot.jwt` is stored. Override only if you are mounting a different volume layout. |
 | `COMPOSE_DIR` | Optional | `/app/compose` | Root directory where compose stack folders live. Enrollment sets it to the absolute path selected for the node and mounts that path identically on the host and in the agent. |
@@ -277,7 +277,7 @@ These are the boundaries operators should know about before designing a fleet ar
 - **No mode conversion.** The Edit dialog shows a Mode field for an enrolled node, but switching a node between Pilot Agent and Distributed API Proxy after enrollment leaves the credentials and connection state inconsistent. To change modes, delete the node and re-create it in the desired mode.
 - **No audit log entries for enrollment lifecycle.** Node creation, enrollment regeneration, and node deletion do not write to the audit log today. This is on the roadmap.
 - **`pilot.jwt` is not cleaned up on node deletion.** When you delete a node from the control instance, the agent's persisted token stays on the remote's data volume. The agent will fail to reconnect on next restart, but the file persists. If you are repurposing the host, tear the agent down with `docker compose down -v` to remove the `sencho-agent-data` volume.
-- **JWT-secret rotation invalidates existing tunnel JWTs.** Rebuilding the control instance from scratch or rotating `auth_jwt_secret` requires a fresh enrollment token on each agent. When that token is still in the container environment, the agent re-enrolls automatically without manual deletion of `pilot.jwt`.
+- **JWT-secret rotation invalidates existing tunnel JWTs.** Rebuilding the control instance from scratch or rotating `auth_jwt_secret` requires a fresh enrollment token on each agent. When that fresh token is in the container environment, the agent re-enrolls automatically and overwrites `pilot.jwt` on success without requiring manual deletion of the file.
 - **One tunnel per node.** Splitting a node's load across multiple control instances or running multiple agent containers against the same control instance for the same node is not supported.
 - **Mesh and pilot share the per-tunnel stream pool.** A node that runs heavy Sencho Mesh traffic counts those streams against the same 1024-stream cap as HTTP and WebSocket traffic.
 - **The agent has no UI of its own.** All operation flows through the control instance. The agent's container logs (`docker logs sencho-agent`) are the only direct visibility into agent-side behaviour.
@@ -316,7 +316,11 @@ The generic node-connectivity issues (a node showing Offline, a pilot agent stuc
   </Accordion>
 
   <Accordion title="Control instance was restored from backup and the agent will not reconnect">
-    The persisted tunnel credential is signed with the control instance's `auth_jwt_secret`. If that secret was not part of the backup (or has been rotated for any other reason), existing tunnels stop verifying. Regenerate enrollment for each affected node from Settings → Nodes, update the agent compose file with the fresh `SENCHO_ENROLL_TOKEN`, and restart the agent containers. The agent removes the stale `pilot.jwt` and completes enrollment automatically when the new token is in the container environment.
+    The persisted tunnel credential is signed with the control instance's `auth_jwt_secret`. If that secret was not part of the backup (or has been rotated for any other reason), existing tunnels stop verifying. Regenerate enrollment for each affected node from Settings → Nodes, update the agent compose file with the fresh `SENCHO_ENROLL_TOKEN`, and restart the agent containers. The agent completes enrollment and overwrites `pilot.jwt` when the new token is in the container environment.
+  </Accordion>
+
+  <Accordion title="Agent logs show Unexpected server response: 401 in a reconnect loop">
+    An authenticating reverse proxy or IdP in front of the control instance often returns its own HTTP 401 on `/api/pilot/tunnel` (for example after a session cookie expires). That status never reaches Sencho's own auth, and the agent cannot re-enroll with the already-consumed token left in compose. Bypass or allow the agent Bearer upgrade for `/api/pilot/tunnel` (and the WebSocket upgrade headers) at the proxy. If the control instance's JWT secret truly rotated, regenerate enrollment, update `SENCHO_ENROLL_TOKEN`, and restart the agent; check the agent logs for the "re-enrollment required" message that names those steps.
   </Accordion>
 
   <Accordion title="I deleted the node on the control instance but the agent keeps trying to reconnect">

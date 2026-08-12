@@ -374,7 +374,7 @@ export function ScanPolicyManager() {
                 )}
                 {policy.block_on_fixable === 1 && (
                   <Badge variant="outline" className="text-[10px] shrink-0">
-                    Fixable
+                    Package fix
                   </Badge>
                 )}
                 {policy.block_on_deploy === 1 && (
@@ -501,11 +501,11 @@ export function ScanPolicyManager() {
             </div>
             <div className="flex items-center justify-between gap-3 rounded-lg border border-glass-border px-3 py-2.5">
               <div>
-                <Label className="text-sm">Fixable Critical/High</Label>
-                <p className="text-xs text-muted-foreground">Flag an image with a Critical or High finding that has a fix available.</p>
+                <Label className="text-sm">Package fix available (Critical/High)</Label>
+                <p className="text-xs text-muted-foreground">Uses the scanner fixed_version for Critical or High findings. This is not a confirmed container-image update.</p>
               </div>
               <TogglePill
-                aria-label="Fixable Critical/High"
+                aria-label="Package fix available (Critical/High)"
                 checked={form.block_on_fixable}
                 onChange={(c) => setForm({ ...form, block_on_fixable: c })}
               />

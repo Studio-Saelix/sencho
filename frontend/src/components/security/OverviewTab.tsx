@@ -1,14 +1,18 @@
+import { useState } from 'react';
 import { ShieldOff } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SignalRail, type SignalTile } from '@/components/ui/SignalRail';
 import { cn } from '@/lib/utils';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useIsMobile } from '@/hooks/use-is-mobile';
+import { toast } from '@/components/ui/toast-store';
 import { SecuritySevStrip, SecurityTotalsGrid, SecurityFooterBand } from './SecurityMobile';
 import type { SecurityOverview, SecurityRiskTrendPoint, ExploitIntelFinding, PostureReason } from '@/types/security';
 import type { SecurityTab } from '@/lib/events';
 import type { ImageFilterValue } from '@/lib/severityStyles';
-import { reasonImageFilter } from './postureNavigation';
+import { reasonImageFilter, defaultReasonActionLabel } from './postureNavigation';
+import { triggerNodeImageUpdateCheck } from './imageUpdateRecheck';
+import { targetingFromTargets, type ImagesTargetingInput } from './imagesTargeting';
 import {
   RiskTrendChart,
   ActionPostureChart,
@@ -17,8 +21,13 @@ import {
 } from './SecurityCharts';
 import { ScanNodeLauncher } from './ScanNodeLauncher';
 
-/** Navigate to a security tab, optionally preselecting an Images filter. */
-type NavigateFn = (tab: SecurityTab, filter?: ImageFilterValue) => void;
+/** Navigate to a security tab, optionally with an Images severity filter and/or
+ *  posture targeting (image refs). */
+type NavigateFn = (
+  tab: SecurityTab,
+  filter?: ImageFilterValue,
+  targeting?: ImagesTargetingInput,
+) => void;
 
 interface OverviewTabProps {
   overview: SecurityOverview | null;
@@ -35,6 +44,8 @@ interface OverviewTabProps {
   canScan: boolean;
   /** Refresh the overview after a node-wide scan completes. */
   onScanComplete: () => void;
+  /** Whether the operator may trigger node-scoped image-update refresh. */
+  canManageNode?: boolean;
 }
 
 const STATUS_ROW_TONE: Record<'value' | 'warn' | 'subtitle', string> = {
@@ -74,62 +85,144 @@ const SEVERITY_LABEL: Record<PostureReason['severity'], string> = {
   info: 'text-stat-subtitle',
 };
 
+function reasonNavLabel(r: PostureReason): string {
+  return `${r.actionLabel ?? defaultReasonActionLabel(r.targetTab)} →`;
+}
+
+function navigateReason(onNavigate: NavigateFn, reason: PostureReason): void {
+  const targeting = targetingFromTargets(
+    reason.kind,
+    reason.label,
+    reason.targets,
+    reason.drivers,
+    { driverCount: reason.driverCount, driversTruncated: reason.driversTruncated },
+  );
+  // Prefer precise targets; severity filter is only the older-node fallback.
+  const filter = targeting ? undefined : reasonImageFilter(reason.kind);
+  onNavigate(reason.targetTab, filter, targeting);
+}
+
+function ReasonRow({
+  reason,
+  onNavigate,
+  showCheckAgain = false,
+  checkAgainBusy = false,
+  onCheckAgain,
+}: {
+  reason: PostureReason;
+  onNavigate: NavigateFn;
+  showCheckAgain?: boolean;
+  checkAgainBusy?: boolean;
+  onCheckAgain?: () => void;
+}) {
+  return (
+    <div className="flex items-start gap-3">
+      <span className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', SEVERITY_DOT[reason.severity])} aria-hidden />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className={cn('font-mono text-sm', SEVERITY_LABEL[reason.severity])}>{reason.label}</span>
+          <span className="font-mono tabular-nums text-xs text-stat-subtitle">{reason.count}</span>
+          <div className="ml-auto flex items-center gap-3">
+            {showCheckAgain && onCheckAgain ? (
+              <button
+                type="button"
+                disabled={checkAgainBusy}
+                onClick={onCheckAgain}
+                className="text-xs font-medium text-brand hover:underline whitespace-nowrap disabled:opacity-50"
+              >
+                {checkAgainBusy ? 'Starting…' : 'Check again'}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => navigateReason(onNavigate, reason)}
+              className="text-xs font-medium text-brand hover:underline whitespace-nowrap"
+            >
+              {reasonNavLabel(reason)}
+            </button>
+          </div>
+        </div>
+        <p className="text-xs text-stat-subtitle mt-0.5">{reason.description}</p>
+      </div>
+    </div>
+  );
+}
+
 function ReviewQueueCard({
   reasons,
   onNavigate,
+  canManageNode,
+  updateChecksDisabled,
+  posture,
 }: {
   reasons: PostureReason[];
   onNavigate: NavigateFn;
+  canManageNode: boolean;
+  updateChecksDisabled: boolean;
+  posture?: SecurityOverview['posture'];
 }) {
+  const [checkAgainBusy, setCheckAgainBusy] = useState(false);
   const blockers = reasons.filter((r) => r.severity === 'blocker');
   const nonBlockers = reasons.filter((r) => r.severity !== 'blocker');
   const hasBlockers = blockers.length > 0;
-  const title = hasBlockers ? 'Why Action needed' : 'Review queue';
+  const title = hasBlockers
+    ? 'Why Action needed'
+    : posture === 'Monitoring'
+      ? 'Why Monitoring'
+      : 'Review queue';
+
+  const handleCheckAgain = async () => {
+    if (checkAgainBusy) return;
+    setCheckAgainBusy(true);
+    try {
+      await triggerNodeImageUpdateCheck();
+    } catch (err) {
+      toast.error((err as Error)?.message || 'Failed to start image update check');
+    } finally {
+      setCheckAgainBusy(false);
+    }
+  };
+
+  const showCheckAgainFor = (r: PostureReason): boolean =>
+    r.kind === 'update_check_uncertain' && canManageNode && !updateChecksDisabled;
 
   return (
     <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4">
       <h3 className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle mb-3">{title}</h3>
       <div className="space-y-3">
         {blockers.map((r, i) => (
-          <div key={`${r.kind}-${i}`} className="flex items-start gap-3">
-            <span className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', SEVERITY_DOT[r.severity])} aria-hidden />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className={cn('font-mono text-sm', SEVERITY_LABEL[r.severity])}>{r.label}</span>
-                <span className="font-mono tabular-nums text-xs text-stat-subtitle">{r.count}</span>
-                <button
-                  type="button"
-                  onClick={() => onNavigate(r.targetTab, reasonImageFilter(r.kind))}
-                  className="text-xs font-medium text-brand hover:underline whitespace-nowrap ml-auto"
-                >
-                  Open {r.targetTab === 'compose' ? 'Compose risks' : r.targetTab === 'suppressions' ? 'Suppressions' : r.targetTab === 'secrets' ? 'Secrets' : r.targetTab === 'history' ? 'History' : r.targetTab === 'scanner' ? 'Scanner setup' : 'Images'} →
-                </button>
-              </div>
-              <p className="text-xs text-stat-subtitle mt-0.5">{r.description}</p>
-            </div>
-          </div>
+          <ReasonRow key={`${r.kind}-${i}`} reason={r} onNavigate={onNavigate} />
         ))}
         {nonBlockers.length > 0 && hasBlockers && (
           <div className="border-t border-hairline pt-3 mt-1" />
         )}
         {nonBlockers.map((r, i) => (
-          <div key={`${r.kind}-${i}`} className="flex items-start gap-3">
-            <span className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', SEVERITY_DOT[r.severity])} aria-hidden />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <span className={cn('font-mono text-sm', SEVERITY_LABEL[r.severity])}>{r.label}</span>
-                <span className="font-mono tabular-nums text-xs text-stat-subtitle">{r.count}</span>
-              </div>
-              <p className="text-xs text-stat-subtitle mt-0.5">{r.description}</p>
-            </div>
-          </div>
+          <ReasonRow
+            key={`${r.kind}-${i}`}
+            reason={r}
+            onNavigate={onNavigate}
+            showCheckAgain={showCheckAgainFor(r)}
+            checkAgainBusy={checkAgainBusy}
+            onCheckAgain={handleCheckAgain}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-export function OverviewTab({ overview, loadError, trend, exploitIntel, exploitTruncated, onNavigate, onInspect, canScan, onScanComplete }: OverviewTabProps) {
+export function OverviewTab({
+  overview,
+  loadError,
+  trend,
+  exploitIntel,
+  exploitTruncated,
+  onNavigate,
+  onInspect,
+  canScan,
+  onScanComplete,
+  canManageNode = false,
+}: OverviewTabProps) {
   const isMobile = useIsMobile();
 
   if (loadError === 'unsupported') {
@@ -220,6 +313,9 @@ export function OverviewTab({ overview, loadError, trend, exploitIntel, exploitT
         <ReviewQueueCard
           reasons={overview.postureReasons}
           onNavigate={onNavigate}
+          canManageNode={canManageNode}
+          updateChecksDisabled={overview.updateChecksDisabled === true}
+          posture={overview.posture}
         />
       )}
 
@@ -288,7 +384,7 @@ export function OverviewTab({ overview, loadError, trend, exploitIntel, exploitT
             tone="subtitle"
           />
           <p className="mt-2 text-xs text-muted-foreground">
-            Manage enforcement policies on the Policies tab. This is a read-only posture for the active node.
+            Security posture describes current operational actionability. Explicit deploy policies may enforce stricter admission rules (package fix available ≠ confirmed image update). Manage enforcement policies on the Policies tab. This is a read-only posture for the active node.
           </p>
         </div>
       </div>

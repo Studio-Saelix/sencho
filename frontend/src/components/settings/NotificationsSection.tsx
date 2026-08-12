@@ -24,13 +24,24 @@ type ChannelType = 'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy';
 
 function emptyAgents(): Record<ChannelType, Agent> {
     return {
-        discord: { type: 'discord', url: '', enabled: false },
-        slack: { type: 'slack', url: '', enabled: false },
-        webhook: { type: 'webhook', url: '', enabled: false },
-        apprise: { type: 'apprise', url: '', enabled: false, config: null },
-        ntfy: { type: 'ntfy', url: '', enabled: false },
+        discord: { type: 'discord', url: '', enabled: false, payload_template: null },
+        slack: { type: 'slack', url: '', enabled: false, payload_template: null },
+        webhook: { type: 'webhook', url: '', enabled: false, payload_template: null },
+        apprise: { type: 'apprise', url: '', enabled: false, config: null, payload_template: null },
+        ntfy: { type: 'ntfy', url: '', enabled: false, payload_template: null },
     };
 }
+
+const EMPTY_TEMPLATE_STATE: Record<ChannelType, boolean> = {
+    discord: false,
+    slack: false,
+    webhook: false,
+    apprise: false,
+    ntfy: false,
+};
+
+// Mirrors PAYLOAD_TEMPLATE_VARS in backend/src/helpers/notificationPayloadTemplate.ts.
+const PAYLOAD_TEMPLATE_VARS = '{{level}} {{message}} {{category}} {{timestamp}} {{stack_name}} {{actor}}';
 
 function appriseWriteConfig(agent: Agent): { urls: string } | { tags: string } {
     if (isStatelessAppriseEndpoint(agent.url)) {
@@ -70,6 +81,8 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
     const [isTestingAgent, setIsTestingAgent] = useState<Record<string, boolean>>({});
     const [appriseUrlDirty, setAppriseUrlDirty] = useState(false);
     const [appriseConfigDirty, setAppriseConfigDirty] = useState(false);
+    const [payloadOpen, setPayloadOpen] = useState<Record<string, boolean>>(EMPTY_TEMPLATE_STATE);
+    const [templateDirty, setTemplateDirty] = useState<Record<string, boolean>>(EMPTY_TEMPLATE_STATE);
 
     const [retries, setRetries] = useState(DEFAULT_SETTINGS.notification_dispatch_retries!);
     const [savedRetries, setSavedRetries] = useState(DEFAULT_SETTINGS.notification_dispatch_retries!);
@@ -105,6 +118,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
             setAgents(next);
             setAppriseUrlDirty(false);
             setAppriseConfigDirty(false);
+            setTemplateDirty(EMPTY_TEMPLATE_STATE);
         } catch (e) {
             console.error('Failed to fetch agents', e);
         }
@@ -194,6 +208,8 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
         setAgents(emptyAgents());
         setAppriseUrlDirty(false);
         setAppriseConfigDirty(false);
+        setPayloadOpen(EMPTY_TEMPLATE_STATE);
+        setTemplateDirty(EMPTY_TEMPLATE_STATE);
         setRetries(DEFAULT_SETTINGS.notification_dispatch_retries!);
         setSavedRetries(DEFAULT_SETTINGS.notification_dispatch_retries!);
         setRetriesLoadState('idle');
@@ -292,6 +308,12 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
                 enabled: agent.enabled,
             };
 
+            // Include the template only when the editor was touched so a clean
+            // save (including enable toggles) preserves the stored value.
+            if (templateDirty[type]) {
+                body.payload_template = agents[type].payload_template ?? '';
+            }
+
             if (type !== 'apprise') {
                 body.url = agent.url;
             } else {
@@ -351,6 +373,8 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
             if (type === 'apprise') {
                 body.config = appriseWriteConfig(agents.apprise);
             }
+            // The test uses the current editor template; blank falls back to the built-in body.
+            body.payload_template = agents[type].payload_template ?? '';
             const res = await apiFetch('/notifications/test', {
                 method: 'POST',
                 body: JSON.stringify(body),
@@ -380,6 +404,40 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
                     onChange={(c) => handleAgentChange(type, 'enabled', c)}
                 />
             </SettingsField>
+            <SettingsField label="Edit Payload" helper="Optionally replace the built-in body with your own JSON.">
+                <Button
+                    variant="outline"
+                    onClick={() => setPayloadOpen(prev => ({ ...prev, [type]: !prev[type] }))}
+                >
+                    {payloadOpen[type] ? 'Hide payload template' : 'Edit Payload'}
+                </Button>
+            </SettingsField>
+            {payloadOpen[type] && (
+                <SettingsField
+                    label="Payload template"
+                    align="start"
+                    htmlFor={`${type}-payload-template`}
+                    helper={
+                        `Optional JSON posted instead of Sencho's built-in body. Variables: ${PAYLOAD_TEMPLATE_VARS}. `
+                        + 'Values are JSON-escaped; missing context becomes an empty string.'
+                        + (type === 'apprise'
+                            ? ' Apprise destinations (urls/tag) stay managed by the channel fields and are merged automatically.'
+                            : '')
+                        + ' Leave blank to restore the built-in payload.'
+                    }
+                >
+                    <textarea
+                        id={`${type}-payload-template`}
+                        className="flex min-h-[120px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                        placeholder={'{"title": "{{level}}", "body": "{{message}}"}'}
+                        value={agents[type].payload_template ?? ''}
+                        onChange={(e) => {
+                            setTemplateDirty(prev => ({ ...prev, [type]: true }));
+                            handleAgentChange(type, 'payload_template', e.target.value);
+                        }}
+                    />
+                </SettingsField>
+            )}
             <SettingsField
                 label={type === 'apprise' ? 'Apprise endpoint' : type === 'ntfy' ? 'ntfy server and topic URL' : 'Webhook URL'}
                 helper={type === 'apprise' ? 'Use /notify/{key} for keyed delivery or /notify with destination URLs below.' : type === 'ntfy' ? 'Sencho posts a plain-text message. The URL must include the topic path.' : 'Sencho posts JSON payloads here. Use a private channel.'}

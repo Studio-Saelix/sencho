@@ -9,7 +9,7 @@ center, so you can answer "what should I look at first?" without hunting through
 scoped to the active node: the findings and scanner status you see reflect whichever node is selected.
 
 <Frame>
-  <img src="/images/security/overview.png" alt="Security page Overview tab with an Action needed masthead reading '3 actions: fixable findings, detected secrets' and CRITICAL/HIGH/LAST SCAN stat tiles, a Why Action needed review-queue card, a 30-day risk trend chart, an Action posture breakdown, and a Scan this node button." />
+  <img src="/images/security/overview.png" alt="Security page Overview tab with an Action needed masthead, CRITICAL/HIGH/LAST SCAN stat tiles, a Why Action needed review-queue card, a 30-day risk trend chart, an Action posture breakdown, and a Scan this node button." />
 </Frame>
 
 The page is organized into tabs: Overview, Images, Compose risks, Secrets, Policies, Suppressions,
@@ -20,17 +20,35 @@ History, and Scanner setup.
 The overview opens with a status masthead that reads your **action posture** at a glance, the answer
 to "what can and should I do right now?":
 
-- **Action needed**: something concrete to act on, such as a fixable Critical or High finding, a
-  detected secret, a dangerous Compose setting, or a known-exploited (CISA KEV) CVE.
-- **Monitoring**: Critical or High findings exist, but none are currently actionable (no fix
-  available, or already triaged).
-- **Secure**: nothing actionable right now. This is never a claim that no vulnerabilities exist.
+- **Action needed**: something concrete to act on that Sencho can support right now, such as a
+  newer image available to review for Critical or High findings, a detected secret, a dangerous
+  Compose setting, a known-exploited (CISA KEV) CVE, elevated exploit risk on a network-exposed
+  workload, or exposure that conflicts with declared Networking intent.
+- **Monitoring**: no Action needed blocker, but material residual risk, a pending review, or
+  relevant uncertainty remains. Residual Critical/High include undecided findings and accepted or
+  ignored residual risk. Package fixes may exist without an applicable container-image update,
+  workloads may be intentionally network-exposed without an independent Security driver, and
+  waiting-upstream or update-check-uncertain rows appear under **Why Monitoring** without a red
+  masthead.
+- **Secure**: no Action needed blocker and no residual material Critical/High or pending
+  security-review condition under current evidence. Not affected, false positive, and fixed can
+  clear residual risk for those findings; accepting residual risk does not. This is never a claim
+  that no scanner detections exist.
 - **Unknown**: the scanner is not installed, or no scan has completed yet.
+
+Monitoring keeps residual risk visible (raw detections, accepted risk, waiting-upstream rows,
+intentional exposure context). Secure is stricter: residual Critical/High and review reasons must
+be cleared, not merely the absence of an immediate action.
 
 Raw Critical and High counts stay visible next to the posture as **scanner detections**, not as the
 posture itself: a vulnerable component being present is not the same as a reachable, exploitable risk.
-The masthead carries a standing note to that effect, and posture weighs fix availability, exploit
-intelligence, and triage decisions rather than raw severity alone.
+The masthead carries a standing note to that effect, and posture weighs package-fix evidence,
+image-update availability, exploit intelligence, exposure, and triage decisions rather than raw
+severity alone. A Trivy package fix does not by itself mean Sencho can update the image; when a
+newer image is confirmed available the review queue offers **Review update**, and when no applicable
+update is identified it surfaces **Waiting for upstream image** instead of an impossible update
+instruction. Deploy policies remain orthogonal: they may still block admission on package-fix
+Critical/High even when Security posture is Monitoring.
 
 An admin on a node with a ready scanner sees a **Scan this node** button above the review queue. It
 opens a popover to pick any combination of image vulnerabilities, image secrets, and Compose
@@ -40,11 +58,18 @@ clean.
 
 Below the masthead, a **Review queue** card leads the overview when actions or review items exist.
 When the posture is Action needed the card is titled **Why Action needed** and lists each concrete
-action with a count and a tab-shortcut button: fixable findings, known-exploited CVEs, detected
-secrets, unacknowledged Compose risks, and publicly exposed affected images. When only monitoring
-items remain (exposed images with no fix or known exploit, findings awaiting triage, stale or failed
-scans) the card is titled **Review queue** and lists them without the red masthead, so the operator
-can see what to keep an eye on without a permanent alarm.
+action with a count and a tab-shortcut button: newer images available to review, known-exploited
+CVEs, elevated exploit risk on network-exposed workloads, detected secrets, unacknowledged Compose
+risks, and exposure that conflicts with declared Networking intent. Intentional network exposure is
+Security context, not an independent Action needed reason by itself. When only monitoring items
+remain (waiting for an upstream image, update availability unknown, network-exposed images not yet
+classified, findings awaiting triage, stale or failed scans) the card is titled **Why Monitoring**
+and lists them with View findings shortcuts (and Check again when image update availability could
+not be established and you can manage the node), so the operator can see what to keep an eye on
+without a permanent alarm. Shortcuts that carry affected image identities open Images already
+narrowed to those images, with a clearable banner so you can return to the full list. When the
+reason includes exact driving findings, opening an image filters the scan report to that contributing
+set.
 
 The charts then lead with prioritization rather than raw severity: a **risk trend** for context,
 an **action posture** breakdown (fixable, known-exploited, needs-review, accepted, not-affected), a
@@ -64,11 +89,26 @@ clear "overview unavailable" state and the other tabs keep working.
   <img src="/images/security/images-tab.png" alt="Security page Images tab listing scanned images with Image, Findings, Last scan, Severity, and Actions columns; findings show critical/high counts and fixable totals, and one row shows a Clean badge." />
 </Frame>
 
-Image findings list every scanned image on the active node with its highest severity. Selecting an
-image opens the full scan report, where you can review vulnerabilities, triage a CVE, compare against
-another scan, and export a CSV, a SARIF file, or an SBOM. Each finding carries evidence tags so you can
-tell scary from exploitable at a glance: known-exploited (KEV), EPSS exploitation probability, the
-CVSS score, and vendor "will not fix" status, alongside whether a fix is available.
+Image findings list every scanned image on the active node with its highest severity. Sencho
+rollback-hold tags (`sencho-rb/...:hold`) are recovery state, not Security inventory: node-wide
+scans skip them, and existing hold-only scan rows stay out of this list and the Overview posture.
+When you arrive
+from a Security posture action that named specific images, the list opens already filtered to those
+images and shows a clearable banner with the reason and count. Images configured beyond loopback (or
+with host networking) carry a **Network exposed** evidence label on the row during ordinary browsing,
+not only after a posture drill-down. That label means Compose declares non-loopback reachability; it
+is not a claim that the service is reachable from the Internet. When Networking exposure intent is
+available, the row also shows compact intent evidence (for example Intent: public, Intent mismatch,
+or Intent: not classified). Open Networking from that evidence to review or correct classification
+for the matching stack. Intentional exposure raises the security relevance of vulnerable findings
+but does not by itself keep the masthead on Action needed. Open the image, remediate, or triage
+individual findings (Accepted risk and related decisions). There is no image-level "accept residual
+risk" control. Compose Doctor acknowledgements are a separate triage surface and do not clear
+Security exposure context. Selecting
+an image opens the full scan report, where you can review vulnerabilities, triage a finding, compare
+against another scan, and export a CSV, a SARIF file, or an SBOM. Each finding carries evidence tags
+so you can tell scary from exploitable at a glance: known-exploited (KEV), EPSS exploitation
+probability, the CVSS score, and vendor "will not fix" status, alongside whether a fix is available.
 
 <Frame>
   <img src="/images/security/scan-report.png" alt="Vulnerability scan report sheet for nginx:latest showing 340 vulnerabilities, a Critical/High/Medium/Low summary, Compare/CSV/SARIF/SBOM export buttons, and a findings table with CVE, package, severity, installed version, and per-row EPSS and CVSS evidence tags." />
@@ -99,7 +139,7 @@ the secret findings for a scan.
 ## Policies
 
 <Frame>
-  <img src="/images/security/add-policy.png" alt="New policy dialog with a Name field, an optional glob-style Stack pattern field, Block conditions toggles for Severity threshold, Known-exploited (KEV), and Fixable Critical/High, a Block on deploy toggle, and an Enabled toggle." />
+  <img src="/images/security/add-policy.png" alt="New policy dialog with a Name field, an optional glob-style Stack pattern field, Block conditions toggles for Severity threshold, Known-exploited (KEV), and Package fix available (Critical/High), a Block on deploy toggle, and an Enabled toggle." />
 </Frame>
 
 The Policies tab manages deploy-enforcement scan policies: a policy names one or more block
@@ -121,8 +161,9 @@ in Settings. These are governed by the local instance, so this tab is shown when
 node; switch to the local node to manage them.
 
 Suppressing a CVE records a **triage decision**: accepted risk, not affected, false positive, fixed,
-ignored, or needs review, with an optional OpenVEX justification. Decided findings stop driving the
-action posture; a "needs review" decision stays counted but keeps the finding actionable. You can
+ignored, or needs review, with an optional OpenVEX justification. Not affected, false positive, and
+fixed clear residual Crit/High for Secure. Accepted and ignored residual risk stay on Monitoring and
+do not turn the page green. Needs review and affected stay actionable. You can
 export the fleet's triage decisions as an OpenVEX document for use with other tooling.
 
 ## History

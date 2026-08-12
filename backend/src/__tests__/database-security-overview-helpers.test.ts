@@ -220,6 +220,109 @@ describe('getImageScanSummaries', () => {
     // No vuln-bearing scan exists, so scan_id falls back to the latest scan overall.
     expect(summary.scan_id).toBe(secretScan);
   });
+
+  it('excludes Sencho rollback-hold image refs from Security summaries', () => {
+    seedScan({
+      imageRef: 'sencho-rb/aaaaaaaaaaaa/web:hold',
+      scannersUsed: 'vuln',
+      scannedAt: 1000,
+      critical: 9,
+      high: 9,
+    });
+    seedScan({ imageRef: 'app:1', scannersUsed: 'vuln', scannedAt: 1000, critical: 1 });
+    const summaries = db().getImageScanSummaries(1);
+    expect(summaries['sencho-rb/aaaaaaaaaaaa/web:hold']).toBeUndefined();
+    expect(summaries['app:1']?.critical).toBe(1);
+  });
+});
+
+describe('rollback-hold exclusion from posture helpers', () => {
+  function rawDbHold() {
+    return (db() as unknown as { db: { prepare: (s: string) => { run: () => void } } }).db;
+  }
+  beforeEach(() => {
+    rawDbHold().prepare('DELETE FROM vulnerability_details').run();
+    rawDbHold().prepare('DELETE FROM cve_intel').run();
+    rawDbHold().prepare('DELETE FROM vulnerability_scans').run();
+  });
+
+  it('omits hold Crit/High, KEV, and risk-trend contributions while keeping registry-tag findings', () => {
+    const now = Date.now();
+    const holdScan = db().createVulnerabilityScan({
+      node_id: 1,
+      image_ref: 'sencho-rb/aaaaaaaaaaaa/web:hold',
+      image_digest: 'sha256:hold',
+      scanned_at: now,
+      total_vulnerabilities: 2,
+      critical_count: 1,
+      high_count: 1,
+      medium_count: 0,
+      low_count: 0,
+      unknown_count: 0,
+      fixable_count: 0,
+      secret_count: 0,
+      misconfig_count: 0,
+      scanners_used: 'vuln',
+      highest_severity: 'CRITICAL',
+      os_info: null,
+      trivy_version: null,
+      scan_duration_ms: null,
+      triggered_by: 'manual',
+      status: 'completed',
+      error: null,
+      stack_context: null,
+    });
+    const appScan = db().createVulnerabilityScan({
+      node_id: 1,
+      image_ref: 'app:1',
+      image_digest: 'sha256:app',
+      scanned_at: now,
+      total_vulnerabilities: 1,
+      critical_count: 0,
+      high_count: 1,
+      medium_count: 0,
+      low_count: 0,
+      unknown_count: 0,
+      fixable_count: 0,
+      secret_count: 0,
+      misconfig_count: 0,
+      scanners_used: 'vuln',
+      highest_severity: 'HIGH',
+      os_info: null,
+      trivy_version: null,
+      scan_duration_ms: null,
+      triggered_by: 'manual',
+      status: 'completed',
+      error: null,
+      stack_context: null,
+    });
+    const detail = (id: string, severity: 'CRITICAL' | 'HIGH') => ({
+      vulnerability_id: id,
+      pkg_name: `p-${id}`,
+      installed_version: '1',
+      fixed_version: null,
+      severity,
+      title: null,
+      description: null,
+      primary_url: null,
+      cvss_score: 9.0,
+    });
+    db().insertVulnerabilityDetails(holdScan, [detail('CVE-HOLD-CRIT', 'CRITICAL'), detail('CVE-HOLD-KEV', 'HIGH')]);
+    db().insertVulnerabilityDetails(appScan, [detail('CVE-APP-HIGH', 'HIGH')]);
+    db().replaceKev([{ cve_id: 'CVE-HOLD-KEV', date_added: '2024-01-01' }], now);
+
+    const critIds = db().getLatestCritHighVulnFindingsForNode(1).items.map((i) => i.vulnerability_id);
+    expect(critIds).toContain('CVE-APP-HIGH');
+    expect(critIds).not.toContain('CVE-HOLD-CRIT');
+    expect(critIds).not.toContain('CVE-HOLD-KEV');
+    expect(db().getLatestKevFindingsForNode(1).items).toHaveLength(0);
+    const cvssIds = db().getLatestCritHighFindingsWithCvssForNode(1).items.map((i) => i.vulnerability_id);
+    expect(cvssIds).toContain('CVE-APP-HIGH');
+    expect(cvssIds).not.toContain('CVE-HOLD-CRIT');
+    const trend = db().getDailyRiskTrend(1, 30);
+    expect(trend).toHaveLength(1);
+    expect(trend[0]).toMatchObject({ critical: 0, high: 1 });
+  });
 });
 
 describe('getLatestKevFindingsForNode', () => {

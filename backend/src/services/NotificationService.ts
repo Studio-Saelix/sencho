@@ -21,6 +21,7 @@ import {
     validateNotificationChannel,
 } from '../helpers/notificationChannels';
 import { parseNotificationDispatchRetries } from '../helpers/notificationDispatchRetries';
+import { renderPayloadTemplate } from '../helpers/notificationPayloadTemplate';
 
 export type NotificationCategory =
     | 'deploy_success'
@@ -90,6 +91,22 @@ export class NotificationDeliveryError extends Error {
     public constructor(message: string, public readonly status: number | null, public readonly retryable: boolean) {
         super(message);
     }
+}
+
+/**
+ * Per-dispatch extras for templated payloads. The template replaces the
+ * built-in body; all variable values are fixed at dispatch time (level and
+ * message come from the dispatch arguments, the rest from this object), so
+ * retries of the same dispatch send an identical body.
+ */
+export interface NotificationDispatchOptions {
+    category?: string;
+    stackName?: string;
+    actor?: string;
+    /** Dispatch timestamp (epoch ms); rendered as ISO-8601. Resolved once per dispatch by callers. */
+    timestampMs: number;
+    /** User-authored payload template; null/blank keeps the built-in body. */
+    template?: string | null;
 }
 
 export class NotificationService {
@@ -317,7 +334,13 @@ export class NotificationService {
             if (isDebugEnabled()) console.log(`[Notify:diag] Falling back to ${agents.length} global agent(s)`);
             await Promise.allSettled(
                 agents.map(agent =>
-                    this.sendWithRetries(agent.type, agent.url, level, sanitized, agent.config, retries)
+                    this.sendWithRetries(agent.type, agent.url, level, sanitized, agent.config, retries, {
+                        category,
+                        stackName,
+                        actor,
+                        timestampMs: notification.timestamp,
+                        template: agent.payload_template ?? null,
+                    })
                         .then(() => {
                             if (isDebugEnabled()) console.log(`[Notify:diag] Dispatched ${level} via global agent (${agent.type})`);
                         })
@@ -377,12 +400,13 @@ export class NotificationService {
         message: string,
         config: string | null | undefined,
         retries: number,
+        options?: NotificationDispatchOptions,
     ): Promise<void> {
         const totalAttempts = 1 + retries;
         let lastError: NotificationDeliveryError | undefined;
         for (let attempt = 0; attempt < totalAttempts; attempt++) {
             try {
-                await this.sendToChannel(type, url, level, message, config);
+                await this.sendToChannel(type, url, level, message, config, options);
                 return;
             } catch (error) {
                 const deliveryError = error instanceof NotificationDeliveryError
@@ -403,7 +427,13 @@ export class NotificationService {
         throw lastError ?? new NotificationDeliveryError('Notification delivery failed', null, false);
     }
 
-    private async sendToChannel(type: string, url: string, level: 'info' | 'warning' | 'error', message: string, config?: string | null): Promise<void> {
+    private async sendToChannel(type: string, url: string, level: 'info' | 'warning' | 'error', message: string, config?: string | null, options?: NotificationDispatchOptions): Promise<void> {
+        // A stored template replaces the built-in body for every channel
+        // type; a whitespace-only stored template counts as no template.
+        if (options?.template && options.template.trim()) {
+            await this.sendTemplatedPayload(type, url, level, message, config, options);
+            return;
+        }
         if (type === 'discord') {
             await this.sendDiscordWebhook(url, level, message);
         } else if (type === 'slack') {
@@ -423,13 +453,104 @@ export class NotificationService {
         }
     }
 
-    public async testDispatch(type: NotificationChannelType, url: string, config?: unknown) {
+    public async testDispatch(type: NotificationChannelType, url: string, config?: unknown, template?: string | null) {
         if (!ALLOWED_CHANNEL_TYPES.has(type)) throw new Error(`Invalid notification type: ${type}`);
         const validation = validateNotificationChannel(type, url, config);
         if (validation) throw new Error(`URL ${validation}`);
         const stored = type === 'apprise' ? normalizeAppriseStoredJson(url, config) : (config == null ? null : JSON.stringify(config));
         const retries = this.resolveDispatchRetries();
-        await this.sendWithRetries(type, url, 'info', '🔌 Test Notification from Sencho!', stored, retries);
+        // Single timestamp for the whole test dispatch so every retry renders the same body.
+        await this.sendWithRetries(type, url, 'info', '🔌 Test Notification from Sencho!', stored, retries, {
+            category: 'system',
+            stackName: '',
+            actor: '',
+            timestampMs: Date.now(),
+            template: template ?? null,
+        });
+    }
+
+    /**
+     * Deliver a user-authored payload template for any channel type. The
+     * rendered document fully replaces the built-in body. Apprise keeps its
+     * destinations authoritative: the stored `urls` (stateless) or `tag`
+     * (keyed) are merged in after rendering, and the template may not carry
+     * those keys (rejected at write time). Render failures are non-retryable:
+     * a template that survived save-time validation cannot fail here, so a
+     * failure means hand-edited storage.
+     */
+    private async sendTemplatedPayload(
+        type: string,
+        url: string,
+        level: 'info' | 'warning' | 'error',
+        message: string,
+        config: string | null | undefined,
+        options: NotificationDispatchOptions,
+    ): Promise<void> {
+        let payload: unknown;
+        try {
+            payload = renderPayloadTemplate(options.template!, {
+                level,
+                message,
+                category: options.category ?? '',
+                timestamp: new Date(options.timestampMs).toISOString(),
+                stack_name: options.stackName ?? '',
+                actor: options.actor ?? '',
+            });
+        } catch (error) {
+            console.error('[Notify] Failed to render payload template:', error);
+            throw new NotificationDeliveryError('Templated payload could not be rendered', null, false);
+        }
+
+        let body = payload;
+        if (type === 'apprise') {
+            if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+                throw new NotificationDeliveryError('Apprise payload template must render a JSON object', null, false);
+            }
+            const parsed = parseStoredAppriseConfig(url, config);
+            if (!parsed.ok) {
+                throw new NotificationDeliveryError('Stored Apprise configuration is invalid for this endpoint', null, false);
+            }
+            const merged: Record<string, unknown> = { ...(body as Record<string, unknown>) };
+            if (parsed.mode === 'stateless') merged.urls = parsed.urlsJoined;
+            else if (parsed.tags) merged.tag = parsed.tags;
+            body = merged;
+        }
+
+        let targetUrl = url;
+        let authorization: string | undefined;
+        if (type === 'ntfy') {
+            const normalized = this.normalizeNtfyEndpoint(url);
+            targetUrl = normalized.effectiveUrl;
+            authorization = normalized.authorization;
+        }
+
+        try {
+            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (authorization) headers['Authorization'] = authorization;
+            const response = await fetch(targetUrl, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify(body),
+                signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+            });
+            if (type === 'apprise' && response.status === 204) {
+                throw new NotificationDeliveryError('Apprise returned no delivery (HTTP 204)', 204, false);
+            }
+            if (response.status >= 400 && response.status < 500) {
+                throw new NotificationDeliveryError(`${type} rejected templated payload with HTTP ${response.status}`, response.status, false);
+            }
+            if (!response.ok) {
+                throw new NotificationDeliveryError(`${type} responded with HTTP ${response.status}`, response.status, true);
+            }
+        } catch (error) {
+            if (error instanceof NotificationDeliveryError) throw error;
+            const aborted = error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
+            throw new NotificationDeliveryError(
+                aborted ? `${type} request timed out` : `${type} request failed`,
+                null,
+                true,
+            );
+        }
     }
 
     private async sendAppriseNotify(
@@ -578,6 +699,30 @@ export class NotificationService {
         }
     }
 
+    /**
+     * Normalize an ntfy URL for delivery: strip URL userinfo into a Basic
+     * Authorization header (defensive; validateNtfyUrl rejects userinfo on
+     * the write path) and strip a trailing slash so URLs like
+     * https://ntfy.sh/mytopic/ reach the correct topic path. Returns the raw
+     * URL unchanged on parse failure.
+     */
+    private normalizeNtfyEndpoint(url: string): { effectiveUrl: string; authorization?: string } {
+        try {
+            const parsed = new URL(url);
+            let authorization: string | undefined;
+            if (parsed.username || parsed.password) {
+                const encoded = btoa(`${decodeURIComponent(parsed.username)}:${decodeURIComponent(parsed.password)}`);
+                authorization = `Basic ${encoded}`;
+                parsed.username = '';
+                parsed.password = '';
+            }
+            parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+            return { effectiveUrl: parsed.toString(), authorization };
+        } catch {
+            return { effectiveUrl: url };
+        }
+    }
+
     private async sendNtfy(url: string, level: 'info' | 'warning' | 'error', message: string) {
         const priorityMap = {
             info: 'default',
@@ -594,21 +739,8 @@ export class NotificationService {
         };
         if (tags) headers['Tags'] = tags;
 
-        // Normalize the URL: strip userinfo (defensive; validateNtfyUrl rejects it
-        // on the write path) and strip a trailing slash so that URLs like
-        // https://ntfy.sh/mytopic/ reach the correct topic path.
-        let effectiveUrl = url;
-        try {
-            const parsed = new URL(url);
-            if (parsed.username || parsed.password) {
-                const encoded = btoa(`${decodeURIComponent(parsed.username)}:${decodeURIComponent(parsed.password)}`);
-                headers['Authorization'] = `Basic ${encoded}`;
-                parsed.username = '';
-                parsed.password = '';
-            }
-            parsed.pathname = parsed.pathname.replace(/\/+$/, '');
-            effectiveUrl = parsed.toString();
-        } catch { /* use the raw url on parse failure */ }
+        const { effectiveUrl, authorization } = this.normalizeNtfyEndpoint(url);
+        if (authorization) headers['Authorization'] = authorization;
 
         try {
             const response = await fetch(effectiveUrl, {

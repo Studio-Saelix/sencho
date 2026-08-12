@@ -18,15 +18,13 @@ export const SCANNER_DETECTIONS_NOTE =
 /**
  * Derives the Security masthead from action posture, not raw severity. Raw
  * Critical/High counts are scanner detections shown separately; they no longer
- * decide the headline. "Secure" means nothing is actionable right now, never a
- * claim that no vulnerabilities exist.
+ * decide the headline alone.
  *
- * The backend computes the authoritative `posture` (one bucketing function), so
- * this prefers `overview.posture` when present. The local bootstrap below is the
- * fallback for an older remote node reached through the proxy that does not
- * report posture: "actionable" is approximated from the overview facts that
- * already exist (fixable findings, secrets, misconfigs); Unknown covers a
- * missing scanner or a node that has never completed a scan.
+ * Prefer backend `overview.posture` (Secure requires cleared residual Crit/High
+ * and review conditions; accepting residual risk stays Monitoring). The local
+ * bootstrap below is only for older remotes that omit posture: actionable is
+ * approximated from fixable/secrets/misconfigs; Unknown covers a missing
+ * scanner or never-scanned node.
  */
 export function deriveMasthead(
   overview: SecurityOverview | null,
