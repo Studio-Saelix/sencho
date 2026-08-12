@@ -72,8 +72,8 @@ export function ShellOverlays({
   hydrationReady,
 }: ShellOverlaysProps) {
   const {
-    deleteDialogOpen, closeDeleteDialog, stackToDelete,
-    takeDownDialogOpen, closeTakeDownDialog, stackToTakeDown,
+    deleteDialogOpen, closeDeleteDialog, deleteTarget,
+    takeDownDialogOpen, closeTakeDownDialog, takeDownTarget,
     pendingUnsavedLoad, pendingLeaveAction,
     bashModalOpen, selectedContainer,
     logViewerOpen, logContainer,
@@ -90,11 +90,11 @@ export function ShellOverlays({
   } = overlayState;
 
   const isDeleteConfirming =
-    stackToDelete != null &&
-    stackActionMap[resolveStackFileKey(stackFiles, stackToDelete)] === 'delete';
+    deleteTarget != null &&
+    stackActionMap[resolveStackFileKey(stackFiles, deleteTarget.name)] === 'delete';
   const isTakeDownConfirming =
-    stackToTakeDown != null &&
-    stackActionMap[resolveStackFileKey(stackFiles, stackToTakeDown)] === 'down';
+    takeDownTarget != null &&
+    stackActionMap[resolveStackFileKey(stackFiles, takeDownTarget.name)] === 'down';
   const sheetImage = inspectImage && inspectImage.nodeId === activeNodeId
     ? inspectImage
     : null;
@@ -107,7 +107,7 @@ export function ShellOverlays({
       <DeleteStackDialog
         open={deleteDialogOpen}
         onOpenChange={(open) => { if (!open) closeDeleteDialog(); }}
-        stackName={stackToDelete}
+        stackName={deleteTarget?.name ?? null}
         volumePreservation={deleteVolumePreservation}
         onConfirm={stackActions.deleteStack}
         confirming={isDeleteConfirming}
@@ -116,7 +116,7 @@ export function ShellOverlays({
       <TakeDownStackDialog
         open={takeDownDialogOpen}
         onOpenChange={(open) => { if (!open) closeTakeDownDialog(); }}
-        stackName={stackToTakeDown}
+        stackName={takeDownTarget?.name ?? null}
         showVolumeOption={canOfferVolumeRemoval}
         onConfirm={stackActions.takeDownStack}
         confirming={isTakeDownConfirming}

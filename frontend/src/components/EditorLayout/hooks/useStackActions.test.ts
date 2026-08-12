@@ -27,6 +27,13 @@ type NavState = ReturnType<typeof useViewNavigationState>;
 type ActiveNode = Parameters<typeof useStackActions>[0]['activeNode'];
 const DEFAULT_ACTIVE_NODE = { id: 1, name: 'Local', type: 'local' } as ActiveNode;
 
+function okJson(payload: unknown): Response {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
 function makeEditorState(over: Partial<EditorState> = {}): EditorState {
   const base = {
     content: 'services: {}',
@@ -113,7 +120,7 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
     composeReapplyCapture: null,
     setDiffPreview: vi.fn(),
     setMissingExternalNetworks: vi.fn(),
-    stackToDelete: null,
+    deleteTarget: null,
     closeDeleteDialog: vi.fn(),
     ...over,
   } as unknown as OverlayState;
@@ -631,7 +638,7 @@ describe('useStackActions.bypassPolicyAndRetry', () => {
     vi.mocked(apiFetch).mockResolvedValueOnce(new Response(null, { status: 200 })); // update OK
     vi.mocked(apiFetch).mockResolvedValueOnce(new Response('[]', { status: 200 })); // containers refresh
     const { result } = setup({
-      overlay: { policyBlock: { stackName: 'web', stackFile: 'web.yml', action: 'update', payload } as never },
+      overlay: { policyBlock: { stackName: 'web', stackFile: 'web.yml', action: 'update', payload, nodeId: 1 } as never },
     });
     await result.current.bypassPolicyAndRetry();
     const urls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0]));
@@ -643,7 +650,7 @@ describe('useStackActions.bypassPolicyAndRetry', () => {
     vi.mocked(apiFetch).mockResolvedValueOnce(new Response(null, { status: 200 })); // deploy OK
     vi.mocked(apiFetch).mockResolvedValueOnce(new Response('[]', { status: 200 })); // containers refresh
     const { result } = setup({
-      overlay: { policyBlock: { stackName: 'web', stackFile: 'web.yml', action: 'deploy', payload } as never },
+      overlay: { policyBlock: { stackName: 'web', stackFile: 'web.yml', action: 'deploy', payload, nodeId: 1 } as never },
     });
     await result.current.bypassPolicyAndRetry();
     const urls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0]));
@@ -656,24 +663,37 @@ describe('useStackActions.bypassPolicyAndRetry', () => {
     vi.mocked(apiFetch).mockResolvedValueOnce(new Response('content', { status: 200 })); // content reload
     vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify({ exists: true }), { status: 200 })); // backup info
     const { result } = setup({
-      overlay: { policyBlock: { stackName: 'web', stackFile: 'web.yml', action: 'rollback', payload } as never },
+      overlay: { policyBlock: { stackName: 'web', stackFile: 'web.yml', action: 'rollback', payload, nodeId: 1 } as never },
     });
     await result.current.bypassPolicyAndRetry();
     const urls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0]));
     expect(urls).toContain('/stacks/web.yml/rollback?ignorePolicy=true');
   });
 
-  it('retries on the node captured in the policy block, not the live active node', async () => {
+  it('blocks the bypass when the policy block was captured for another node, even once it is fully hydrated', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const { result, stackListState, rerender, activeNodeHolder } = setup({
+      overlay: { policyBlock: { stackName: 'web', stackFile: 'web.yml', action: 'update', payload, nodeId: 1 } as never },
+    });
+    // The block was raised on node 1; the operator switches to node 2, which
+    // finishes hydrating (readiness true for node 2).
+    activeNodeHolder.current = { id: 2, type: 'remote' } as ActiveNode;
+    rerender();
+    vi.mocked(stackListState.hydrationReady).mockReturnValue(true);
+    await result.current.bypassPolicyAndRetry();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('retries on the policy block node when it is still the active node', async () => {
     vi.mocked(apiFetch).mockResolvedValueOnce(new Response(null, { status: 200 })); // update OK
     vi.mocked(apiFetch).mockResolvedValueOnce(new Response('[]', { status: 200 })); // containers refresh
     const { result } = setup({
-      activeNode: { id: 1, type: 'local' } as never, // active node has since moved to 1
-      overlay: { policyBlock: { stackName: 'web', stackFile: 'web.yml', action: 'update', payload, nodeId: 9 } as never },
+      overlay: { policyBlock: { stackName: 'web', stackFile: 'web.yml', action: 'update', payload, nodeId: 1 } as never },
     });
     await result.current.bypassPolicyAndRetry();
     const updateCall = vi.mocked(apiFetch).mock.calls.find(c => String(c[0]).includes('/update?ignorePolicy=true'));
     expect(updateCall).toBeDefined();
-    expect((updateCall![1] as { nodeId?: number | null }).nodeId).toBe(9);
+    expect((updateCall![1] as { nodeId?: number | null }).nodeId).toBe(1);
   });
 
   it('does nothing when no policy block is stored', async () => {
@@ -1741,7 +1761,7 @@ describe('useStackActions.deleteStack', () => {
   it('leaves the editor for dashboard when deleting the open stack by filename', async () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
     const { result, stackListState, overlayState, navState, onDeletedOpenStack } = setup({
-      overlay: { stackToDelete: 'web.yml' },
+      overlay: { deleteTarget: { name: 'web.yml', nodeId: 1 } },
       stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
       navState: { activeView: 'editor' },
     });
@@ -1762,7 +1782,7 @@ describe('useStackActions.deleteStack', () => {
   it('passes pruneVolumes=true through unconditionally, including on nodes without the capability', async () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
     const { result } = setup({
-      overlay: { stackToDelete: 'web.yml' },
+      overlay: { deleteTarget: { name: 'web.yml', nodeId: 1 } },
       stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
       navState: { activeView: 'editor' },
     });
@@ -1777,7 +1797,7 @@ describe('useStackActions.deleteStack', () => {
   it('clears isFileLoading on delete-leave so the URL writer is not blocked', async () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
     const { result, editorState } = setup({
-      overlay: { stackToDelete: 'web.yml' },
+      overlay: { deleteTarget: { name: 'web.yml', nodeId: 1 } },
       stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
       editorState: { isFileLoading: true },
       navState: { activeView: 'editor' },
@@ -1793,7 +1813,7 @@ describe('useStackActions.deleteStack', () => {
   it('leaves the editor when sidebar delete passes a basename', async () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
     const { result, stackListState, navState, onDeletedOpenStack } = setup({
-      overlay: { stackToDelete: 'web' },
+      overlay: { deleteTarget: { name: 'web', nodeId: 1 } },
       stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
       navState: { activeView: 'editor' },
     });
@@ -1811,7 +1831,7 @@ describe('useStackActions.deleteStack', () => {
   it('does not navigate when deleting a different stack', async () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
     const { result, stackListState, navState, onDeletedOpenStack } = setup({
-      overlay: { stackToDelete: 'other.yml' },
+      overlay: { deleteTarget: { name: 'other.yml', nodeId: 1 } },
       stackList: {
         selectedFile: 'web.yml',
         files: ['web.yml', 'other.yml'],
@@ -1832,7 +1852,7 @@ describe('useStackActions.deleteStack', () => {
   it('clears selection without navigating when the matching stack is hidden behind another view', async () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
     const { result, stackListState, navState, onDeletedOpenStack } = setup({
-      overlay: { stackToDelete: 'web.yml' },
+      overlay: { deleteTarget: { name: 'web.yml', nodeId: 1 } },
       stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
       navState: { activeView: 'resources' },
     });
@@ -1851,7 +1871,7 @@ describe('useStackActions.deleteStack', () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response('boom', { status: 500 }));
     const { toast } = await import('@/components/ui/toast-store');
     const { result, stackListState, overlayState, navState, onDeletedOpenStack } = setup({
-      overlay: { stackToDelete: 'web.yml' },
+      overlay: { deleteTarget: { name: 'web.yml', nodeId: 1 } },
       stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
       navState: { activeView: 'editor' },
     });
@@ -1880,7 +1900,7 @@ describe('useStackActions.deleteStack', () => {
     );
     const { toast } = await import('@/components/ui/toast-store');
     const { result } = setup({
-      overlay: { stackToDelete: 'web.yml' },
+      overlay: { deleteTarget: { name: 'web.yml', nodeId: 1 } },
       stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
       navState: { activeView: 'editor' },
     });
@@ -1897,7 +1917,7 @@ describe('useStackActions.deleteStack', () => {
       new Response(JSON.stringify({ code: 'self_stack_protected' }), { status: 409 }),
     );
     const { result, stackListState, overlayState, navState, onDeletedOpenStack } = setup({
-      overlay: { stackToDelete: 'web.yml' },
+      overlay: { deleteTarget: { name: 'web.yml', nodeId: 1 } },
       stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
       navState: { activeView: 'editor' },
     });
@@ -1918,7 +1938,7 @@ describe('useStackActions.deleteStack', () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
     const removeNotificationsForStack = vi.fn();
     const { result } = setup({
-      overlay: { stackToDelete: 'web.yml' },
+      overlay: { deleteTarget: { name: 'web.yml', nodeId: 7 } },
       stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
       navState: { activeView: 'editor' },
       activeNode: { id: 7, type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode'],
@@ -1937,7 +1957,7 @@ describe('useStackActions.deleteStack', () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response('boom', { status: 500 }));
     const removeNotificationsForStack = vi.fn();
     const { result } = setup({
-      overlay: { stackToDelete: 'web.yml' },
+      overlay: { deleteTarget: { name: 'web.yml', nodeId: 1 } },
       stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
       navState: { activeView: 'editor' },
       removeNotificationsForStack,
@@ -2260,6 +2280,112 @@ describe('useStackActions external-network ownership guards', () => {
     });
     expect(networkPosts).toEqual([]);
     expect(lastRunWithLogParams).toBeNull();
+  });
+});
+
+describe('useStackActions delete/take-down node-bound confirmations', () => {
+  it('blocks delete confirmed for node A after the switch to node B is fully hydrated', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const { result, stackListState, rerender, activeNodeHolder } = setup({
+      overlay: { deleteTarget: { name: 'web.yml', nodeId: 1 } },
+      stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
+    });
+    // The dialog opened on node 1; the operator switched to node 2, which
+    // finished hydrating (readiness true for node 2).
+    activeNodeHolder.current = { id: 2, type: 'remote' } as ActiveNode;
+    rerender();
+    vi.mocked(stackListState.hydrationReady).mockReturnValue(true);
+    await act(async () => {
+      await result.current.deleteStack(false);
+    });
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('blocks take down confirmed for node A after the switch to node B is fully hydrated', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const { result, stackListState, rerender, activeNodeHolder } = setup({
+      overlay: { takeDownTarget: { name: 'web.yml', nodeId: 1 } },
+      stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
+    });
+    activeNodeHolder.current = { id: 2, type: 'remote' } as ActiveNode;
+    rerender();
+    vi.mocked(stackListState.hydrationReady).mockReturnValue(true);
+    await act(async () => {
+      await result.current.takeDownStack(false);
+    });
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('useStackActions reactive external-network retry ownership', () => {
+  it('prevents the reactive retry from starting after ownership changes during creation', async () => {
+    lastRunWithLogParams = null;
+    vi.mocked(apiFetch).mockReset();
+    let resolveNetworkCreate: (r: Response) => void;
+    const networkCreateGate = new Promise<Response>((r) => { resolveNetworkCreate = r; });
+    let missingNetworksCalls = 0;
+    const deployCalls: string[] = [];
+    vi.mocked(apiFetch).mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/security/stacks/web/pre-deploy-summary') {
+        return okJson({ enabled: false });
+      }
+      if (url === '/stacks/web/missing-external-networks') {
+        missingNetworksCalls += 1;
+        if (missingNetworksCalls === 1) {
+          // Proactive preflight: nothing missing, deploy proceeds.
+          return okJson({ status: 'ok', stackName: 'web', networks: [], autoCreateEnabled: true, declaredExternalCount: 0 });
+        }
+        if (missingNetworksCalls === 2) {
+          // Reactive refetch after the 409: networks are missing.
+          return okJson({ status: 'ok', stackName: 'web', networks: [{ name: 'ext-net', safe: false }], autoCreateEnabled: false, declaredExternalCount: 1 });
+        }
+        // Post-create verification: everything present.
+        return okJson({ status: 'ok', stackName: 'web', networks: [{ name: 'ext-net', safe: true }], autoCreateEnabled: true, declaredExternalCount: 1 });
+      }
+      if (url === '/stacks/web/deploy') {
+        deployCalls.push(url);
+        if (deployCalls.length === 1) {
+          // The original deploy hits the reactive 409.
+          return new Response(JSON.stringify({ code: 'missing_external_networks' }), { status: 409 });
+        }
+        return new Response(null, { status: 200 });
+      }
+      if (url === '/system/networks' && init?.method === 'POST') {
+        return networkCreateGate;
+      }
+      return new Response(null, { status: 200 });
+    });
+    const { result, overlayState, stackListState, rerender, activeNodeHolder } = setup({
+      hasGuidedExternalNetworkPreflight: true,
+    });
+    await act(async () => {
+      await result.current.deployStack();
+    });
+    // The reactive 409 opened the dialog (second missing-networks call).
+    expect(missingNetworksCalls).toBe(2);
+    const dialog = (
+      vi.mocked(overlayState.setMissingExternalNetworks).mock.calls[0][0] as unknown as {
+        createAndContinue: () => Promise<void>;
+      }
+    );
+    // Start create-and-continue; the network creation is pending when the
+    // operator switches to node B and node B finishes hydrating.
+    let createPromise: Promise<void> | undefined;
+    await act(async () => {
+      createPromise = dialog.createAndContinue();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    activeNodeHolder.current = { id: 2, type: 'remote' } as ActiveNode;
+    rerender();
+    vi.mocked(stackListState.hydrationReady).mockReturnValue(true);
+    await act(async () => {
+      resolveNetworkCreate!(new Response(null, { status: 201 }));
+      await createPromise;
+    });
+    // The create succeeded and reached the guarded retry callback: the retry
+    // (a second deploy POST) must NOT start. The single deploy call is the
+    // original attempt that hit the 409.
+    expect(deployCalls).toHaveLength(1);
   });
 });
 

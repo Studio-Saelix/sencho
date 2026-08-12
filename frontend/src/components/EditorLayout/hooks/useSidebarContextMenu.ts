@@ -99,7 +99,7 @@ export function useSidebarContextMenu({
           overlayState.openSelfStackProtected();
           return;
         }
-        overlayState.openDeleteDialog(sName);
+        overlayState.openDeleteDialog({ name: sName, nodeId: activeNode?.id ?? null });
       },
       pin: () => stackListState.pin(file),
       unpin: () => stackListState.unpin(file),

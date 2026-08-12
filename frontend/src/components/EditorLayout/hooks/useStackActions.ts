@@ -1589,12 +1589,16 @@ export function useStackActions(options: UseStackActionsOptions) {
   // update bypass still re-pulls images, matching the backend bypass on each
   // endpoint. The server ignores the flag unless the caller is an admin.
   const bypassPolicyAndRetry = async () => {
-    if (!hydrationReady()) return;
     const policyBlock = overlayState.policyBlock;
     if (!policyBlock) return;
-    // Retry on the node the block was raised against, not the live active node,
-    // which may have changed while the dialog was open.
+    // The block is bound to the node it was raised against; the bypass may only
+    // dispatch if that node is still the active node with authoritative
+    // evidence. A switch to another fully-hydrated node must block the retry.
     const { stackName, stackFile, action, nodeId: opNodeId } = policyBlock;
+    if (!hydrationReadyForNode(opNodeId)) {
+      toast.error('Status data unavailable. Refresh and try again.');
+      return;
+    }
     const existingFile = stackListState.files.includes(stackFile)
       ? stackFile
       : (stackListState.files.find(f => f.replace(/\.(yml|yaml)$/, '') === stackName) ?? stackFile);
@@ -2055,19 +2059,21 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   const deleteStack = async (pruneVolumes: boolean) => {
-    // Final confirmation boundary: an already-open dialog cannot submit after
-    // readiness was lost (node switch, list change, failed refresh). The dialog
-    // stays open and the toast explains why nothing happened.
-    if (!hydrationReady()) {
+    // Final confirmation boundary: the dialog is bound to the node it opened
+    // on. A switch to another node (even once it fully hydrates) must block the
+    // delete rather than mutating the new node with the old dialog's stack name.
+    // The dialog stays open and the toast explains why nothing happened.
+    const deleteTarget = overlayState.deleteTarget;
+    if (!deleteTarget) return;
+    if (!hydrationReadyForNode(deleteTarget.nodeId)) {
       toast.error('Status data unavailable. Refresh and try again.');
       return;
     }
-    const stackToDelete = overlayState.stackToDelete;
-    if (!stackToDelete) return;
+    const stackToDelete = deleteTarget.name;
     const deleteKey = resolveStackFileKey(stackListState.files, stackToDelete);
     const canonicalName = deleteKey.replace(/\.(yml|yaml)$/, '');
     if (stackListState.isStackBusy(deleteKey)) return;
-    const opNodeId = activeNode?.id ?? null;
+    const opNodeId = deleteTarget.nodeId;
     stackListState.setStackAction(deleteKey, 'delete');
     try {
       const url = pruneVolumes
@@ -2114,17 +2120,19 @@ export function useStackActions(options: UseStackActionsOptions) {
     if (openSelfStackProtectedIfNeeded(
       stackListState.files.find(f => f.replace(/\.(yml|yaml)$/, '') === stackName) ?? stackName,
     )) return;
-    overlayState.openTakeDownDialog(stackName);
+    overlayState.openTakeDownDialog({ name: stackName, nodeId: activeNode?.id ?? null });
   };
 
   const takeDownStack = async (removeVolumes: boolean) => {
-    // Final confirmation boundary: recheck readiness at submit time.
-    if (!hydrationReady()) {
+    // Final confirmation boundary: the dialog is bound to the node it opened
+    // on; a switch must block the take down rather than mutating the new node.
+    const takeDownTarget = overlayState.takeDownTarget;
+    if (!takeDownTarget) return;
+    if (!hydrationReadyForNode(takeDownTarget.nodeId)) {
       toast.error('Status data unavailable. Refresh and try again.');
       return;
     }
-    const stackToTakeDown = overlayState.stackToTakeDown;
-    if (!stackToTakeDown) return;
+    const stackToTakeDown = takeDownTarget.name;
     if (removeVolumes && !canOfferVolumeRemoval) {
       toast.error('Volume removal is not supported on this node');
       overlayState.closeTakeDownDialog();
@@ -2280,7 +2288,10 @@ export function useStackActions(options: UseStackActionsOptions) {
 
   const requestDeleteStack = () => {
     if (openSelfStackProtectedIfNeeded(stackListState.selectedFile)) return;
-    overlayState.openDeleteDialog(stackListState.selectedFile ?? '');
+    overlayState.openDeleteDialog({
+      name: stackListState.selectedFile ?? '',
+      nodeId: activeNode?.id ?? null,
+    });
   };
 
   const executeStackActionByFile = async (
