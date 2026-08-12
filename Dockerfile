@@ -102,11 +102,12 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # The fetch pulls only the v29.4.1 commit, minimising transfer size.
 # docker/cli uses CalVer and ships vendor.mod instead of go.mod to avoid SemVer
 # compliance requirements. We copy vendor.mod -> go.mod, drop the committed vendor
-# tree, bump golang.org/x/net to v0.55.0, golang.org/x/text to v0.39.0, and
+# tree, bump golang.org/x/net to v0.56.0, golang.org/x/text to v0.39.0, and
 # google.golang.org/grpc to v1.82.1, and build with -mod=mod so the patched
 # modules are resolved from the module proxy. x/net v0.53.0 is flagged for six
 # HIGH advisories (CVE-2026-25680, -25681, -27136, -39821, -42502, -42506;
-# x/net/html parsing and x/net/idna). x/text v0.37.0 is flagged for
+# x/net/html parsing and x/net/idna). x/net v0.55.0 is flagged for
+# CVE-2026-46600 (dnsmessage denial of service). x/text v0.37.0 is flagged for
 # CVE-2026-56852 (norm.Iter infinite loop on crafted input). grpc v1.80.0 is
 # flagged for GHSA-hrxh-6v49-42gf (xDS RBAC / HTTP/2). Removing vendor/ keeps
 # -mod=mod from reading the stale copy, and avoids `go mod tidy` (which does
@@ -135,7 +136,7 @@ RUN mkdir -p /build
 
 RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
     rm -rf vendor && \
-    go get golang.org/x/net@v0.55.0 \
+    go get golang.org/x/net@v0.56.0 \
            golang.org/x/text@v0.39.0 \
            google.golang.org/grpc@v1.82.1 && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
@@ -176,10 +177,11 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 #
 # The same go get also bumps google.golang.org/grpc from v1.80.0 to v1.82.1 to
 # clear GHSA-hrxh-6v49-42gf (xDS RBAC fail-open and HTTP/2 transport issues),
-# and golang.org/x/text from v0.38.0 to v0.39.0 to clear CVE-2026-56852
-# (norm.Iter infinite loop on crafted input). Base image pinned by digest
-# (same image as cli-builder above) so both source builds share an
-# identical, immutable Go toolchain.
+# golang.org/x/text from v0.38.0 to v0.39.0 to clear CVE-2026-56852
+# (norm.Iter infinite loop on crafted input), and golang.org/x/net from
+# v0.55.0 to v0.56.0 to clear CVE-2026-46600 (dnsmessage denial of service).
+# Base image pinned by digest (same image as cli-builder above) so both
+# source builds share an identical, immutable Go toolchain.
 FROM --platform=$BUILDPLATFORM golang:1.27rc2-alpine@sha256:dcbb18cc5fa1082364dc6aa95224b6b55429d09cbb9631a053d8064c1c367300 AS compose-builder
 
 ARG TARGETARCH
@@ -201,9 +203,10 @@ RUN mkdir -p /build
 
 # Patch otel/sdk and exporters from v1.42.0 → v1.43.0 to clear CVE-2026-39883
 # and CVE-2026-39882, bump containerd/v2 from v2.2.3 → v2.2.5 to clear
-# CVE-2026-46680 plus the CVE-2026-53488 / 53489 / 53492 cluster, and bump
-# google.golang.org/grpc to v1.82.1 to clear GHSA-hrxh-6v49-42gf. The otel and
-# containerd bumps are patch-level; the grpc bump is a minor security release.
+# CVE-2026-46680 plus the CVE-2026-53488 / 53489 / 53492 cluster, bump
+# google.golang.org/grpc to v1.82.1 to clear GHSA-hrxh-6v49-42gf, and bump
+# golang.org/x/net to v0.56.0 to clear CVE-2026-46600. The containerd bump is
+# patch-level; the otel, grpc, and x/net bumps are minor security releases.
 # None introduce breaking API changes.
 RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
     go get go.opentelemetry.io/otel@v1.43.0 \
@@ -218,7 +221,8 @@ RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
            go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp@v1.43.0 \
            github.com/containerd/containerd/v2@v2.2.5 \
            google.golang.org/grpc@v1.82.1 \
-           golang.org/x/text@v0.39.0 && \
+           golang.org/x/text@v0.39.0 \
+           golang.org/x/net@v0.56.0 && \
     go mod tidy
 
 # Build target is ./cmd (the package main with plugin.Run), per docker/compose's
