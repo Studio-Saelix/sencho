@@ -28,6 +28,7 @@ services:
     image: saelix/sencho:latest
     container_name: sencho
     restart: unless-stopped
+    cgroup: host
     ports:
       - "1852:1852"
     volumes:
@@ -50,6 +51,7 @@ docker compose up -d
 ```bash
 docker run -d \
   --name sencho \
+  --cgroupns=host \
   --restart unless-stopped \
   -p 1852:1852 \
   -v /var/run/docker.sock:/var/run/docker.sock \

@@ -95,6 +95,7 @@ function mintPilotEnrollment(nodeId: number, req: Request): { token: string; exp
     `    image: saelix/sencho:latest`,
     `    container_name: sencho-agent`,
     `    restart: unless-stopped`,
+    `    cgroup: host`,
     `    volumes:`,
     `      - /var/run/docker.sock:/var/run/docker.sock`,
     `      - sencho-agent-data:/app/data`,

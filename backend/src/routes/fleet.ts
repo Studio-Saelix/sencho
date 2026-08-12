@@ -11,6 +11,7 @@ import { NodeRegistry } from '../services/NodeRegistry';
 import { computeNodeNetworkingSummary, type NodeNetworkingSummary } from '../services/network/networkingSummary';
 import DockerController from '../services/DockerController';
 import { getHostMemory, memoryToWire, type MemoryWire } from '../helpers/hostMemory';
+import { readHostScopedCgroupCapacity } from '../helpers/hostCgroupCapacity';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { StackOpLockService } from '../services/StackOpLockService';
@@ -270,13 +271,14 @@ async function resolveUpdateTarget(requested?: string): Promise<string | undefin
 async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
   try {
     const composeDir = path.resolve(NodeRegistry.getInstance().getComposeDir(node.id));
-    const [allContainers, stacks, currentLoad, hostMem, fsSize] = await Promise.all([
+    const [allContainers, stacks, currentLoad, capacity, fsSize] = await Promise.all([
       DockerController.getInstance(node.id).getAllContainers(),
       FileSystemService.getInstance(node.id).getStacks(),
       si.currentLoad(),
-      getHostMemory(),
+      readHostScopedCgroupCapacity(),
       si.fsSize(),
     ]);
+    const hostMem = await getHostMemory({ capacity });
 
     const isManagedByComposeDir = (c: Dockerode.ContainerInfo): boolean => {
       const workingDir: string | undefined = c.Labels?.['com.docker.compose.project.working_dir'];
@@ -301,9 +303,8 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
       status: 'online',
       stats: { active, managed, unmanaged, exited, total },
       systemStats: {
-        cpu: { usage: currentLoad.currentLoad.toFixed(1), cores: currentLoad.cpus.length },
-        // ARC/balloon aware: reclaimable ARC is added back into available,
-        // and ballooned memory is subtracted from used. See helpers/hostMemory.ts.
+        cpu: { usage: currentLoad.currentLoad.toFixed(1), cores: capacity?.cpuCores ?? currentLoad.cpus.length },
+        // Cgroup working set when finite; else ARC/balloon-aware host mem.
         memory: memoryToWire(hostMem),
         disk: mainDisk ? {
           total: mainDisk.size,

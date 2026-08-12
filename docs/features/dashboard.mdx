@@ -50,6 +50,9 @@ While the dashboard is loading the CPU tile reads `--` and the caption shows `co
 <Note>
   **ZFS hosts:** the memory tile and host RAM alerts are ZFS ARC-aware. Reclaimable ARC cache is treated as available memory rather than used, so a large ARC does not inflate the gauge or trigger false low-memory alerts. The memory tile shows the reclaimable amount as a context line when ARC stats are readable and the reclaimable amount is nonzero. See [ZFS ARC-aware host memory](/getting-started/configuration#zfs-arc-aware-host-memory) for how to expose ARC stats to a Docker install.
 
+
+  **Nested hosts (LXC / Docker-in-LXC):** when the Sencho service joins the host cgroup namespace (`cgroup: host` in Compose, or `--cgroupns=host` for `docker run`), the CPU core count and memory total use the node's host-scoped cgroup limits, and host RAM alerts use the cache-aware cgroup working set. Without that setting, gauges keep the previous `/proc`-based behavior. See [Host cgroup capacity](/getting-started/configuration#host-cgroup-capacity-lxc-and-nested-docker).
+
   **Virtual machines:** the memory tile shows hypervisor-ballooned memory (TrueNAS/KVM, Proxmox) as informational context. Unlike ARC, ballooned pages are host-reclaimed and the guest cannot get them back on demand, so the gauge, health verdict, and alerts continue to use the standard working-set percentage. See [VM memory ballooning](/getting-started/configuration#vm-memory-ballooning) for details.
 </Note>
 

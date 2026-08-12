@@ -119,6 +119,7 @@ services:
     image: saelix/sencho:latest
     container_name: sencho-agent
     restart: unless-stopped
+    cgroup: host
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - sencho-agent-data:/app/data
@@ -140,6 +141,8 @@ Save it as `compose.yaml` on the remote host and bring the agent up from the sam
 ```bash
 docker compose up -d
 ```
+
+The enrollment Compose file includes `cgroup: host` so host resource gauges on nested LXC hosts can read the node's cgroup limits. The running service definition must keep that key; updating the agent image alone cannot add it to an older Compose file.
 
 Deploying through Compose also lets the control instance push over-the-air updates to the agent later from the Fleet view ([Remote Updates](/features/remote-updates)), without manual intervention on the remote host. Compose-managed containers carry the labels Sencho needs to recreate them in place.
 
@@ -214,6 +217,7 @@ services:
     image: saelix/sencho:latest
     container_name: sencho-agent
     restart: unless-stopped
+    cgroup: host
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - sencho-agent-data:/app/data

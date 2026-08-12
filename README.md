@@ -127,6 +127,7 @@ services:
     image: saelix/sencho:latest
     container_name: sencho
     restart: unless-stopped
+    cgroup: host
     ports:
       - "1852:1852"
     volumes:
@@ -152,6 +153,7 @@ Always front Sencho with a TLS-terminating reverse proxy in production. See the 
 
 ```bash
 docker run -d --name sencho \
+  --cgroupns=host \
   -p 1852:1852 \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v sencho_data:/app/data \

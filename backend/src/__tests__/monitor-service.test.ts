@@ -16,7 +16,7 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   mockGetRunningContainers, mockGetAllContainers, mockGetContainerStatsStream,
   mockGetContainerRestartCount, mockGetDiskUsage, mockGetImages, mockGetStacks,
   mockDispatchAlert,
-  mockCurrentLoad, mockMem, mockFsSize,
+  mockCurrentLoad, mockMem, mockFsSize, mockReadHostScopedCgroupCapacity,
   mockExecAsync,
   mockFetchLatestSenchoVersion,
   mockGetLatestVersion,
@@ -52,6 +52,7 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   mockCurrentLoad: vi.fn().mockResolvedValue({ currentLoad: 10 }),
   mockMem: vi.fn().mockResolvedValue({ total: 16e9, used: 4e9, active: 4e9, available: 12e9, free: 12e9, buffcache: 0 }),
   mockFsSize: vi.fn().mockResolvedValue([{ mount: '/', use: 30 }]),
+  mockReadHostScopedCgroupCapacity: vi.fn().mockResolvedValue(null),
   mockExecAsync: vi.fn().mockResolvedValue({ stdout: '' }),
   mockFetchLatestSenchoVersion: vi.fn().mockRejectedValue(new Error('not configured')),
   mockGetLatestVersion: vi.fn().mockResolvedValue(null),
@@ -142,6 +143,14 @@ vi.mock('systeminformation', () => ({
   },
 }));
 
+vi.mock('../helpers/hostCgroupCapacity', async () => {
+  const actual = await vi.importActual<typeof import('../helpers/hostCgroupCapacity')>('../helpers/hostCgroupCapacity');
+  return {
+    ...actual,
+    readHostScopedCgroupCapacity: (...args: unknown[]) => mockReadHostScopedCgroupCapacity(...args),
+  };
+});
+
 vi.mock('child_process', () => ({
   exec: vi.fn(),
 }));
@@ -165,6 +174,7 @@ beforeEach(() => {
   (MonitorService as any).instance = undefined;
   _resetHostAlertSuppressionStateForTests();
   mockGetSystemState.mockReturnValue(null);
+  mockReadHostScopedCgroupCapacity.mockResolvedValue(null);
 });
 
 // si.mem() returns active/available alongside used (used counts reclaimable page
@@ -362,6 +372,31 @@ describe('MonitorService - evaluateGlobalSettings', () => {
     // 80% threshold; the active/total figure is 10% and must stay silent.
     mockMem.mockResolvedValue({
       total: 16e9, used: 15.8e9, active: 1.6e9, available: 14.4e9, free: 14.4e9, buffcache: 14.2e9,
+    });
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Memory'));
+  });
+
+  it('alerts from cgroup working-set usage when host-scoped memory is present', async () => {
+    mockReadHostScopedCgroupCapacity.mockResolvedValue({
+      memory: { total: 1000, used: 900, free: 100, usagePercent: 90 },
+      cpuCores: null,
+    });
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+
+    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Memory'));
+    expect(mockMem).not.toHaveBeenCalled();
+  });
+
+  it('stays quiet when cgroup working-set usage is below threshold', async () => {
+    mockReadHostScopedCgroupCapacity.mockResolvedValue({
+      memory: { total: 1000, used: 200, free: 800, usagePercent: 20 },
+      cpuCores: 2,
     });
 
     const svc = MonitorService.getInstance();
