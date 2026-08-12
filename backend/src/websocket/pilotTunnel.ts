@@ -10,6 +10,32 @@ import { encodeJsonFrame as encodePilotJsonFrame, PROTOCOL_VERSION as PILOT_PROT
 import { getErrorMessage } from '../utils/errors';
 import { rejectUpgrade as rejectSocket } from './reject';
 
+/** Diagnostic reject reason for Pilot agents (never required for enroll fallback). */
+type PilotRejectReason =
+  | 'missing_token'
+  | 'invalid_token'
+  | 'bad_scope'
+  | 'bad_node'
+  | 'unknown_node'
+  | 'enrollment_used'
+  | 'server_error';
+
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function rejectPilot(
+  socket: Duplex,
+  status: number,
+  message: string,
+  reason: PilotRejectReason,
+): void {
+  rejectSocket(socket, status, message, {
+    'X-Sencho-Pilot-Reject': reason,
+    Connection: 'close',
+  });
+}
+
 /**
  * Handle an inbound pilot-agent tunnel upgrade. Accepts either:
  *   - pilot_enroll (15m, one-time): consume the enrollment row, mint a
@@ -26,30 +52,29 @@ export async function handlePilotTunnel(
   head: Buffer,
   pilotTunnelWss: WebSocketServer,
 ): Promise<void> {
-  const authHeader = req.headers['authorization'];
-  const header = Array.isArray(authHeader) ? authHeader[0] : authHeader;
-  const token = header?.startsWith('Bearer ') ? header.slice(7) : null;
-  if (!token) return rejectSocket(socket, 401, 'Unauthorized');
+  const authHeader = firstHeader(req.headers['authorization']);
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!token) return rejectPilot(socket, 401, 'Unauthorized', 'missing_token');
 
   const db = DatabaseService.getInstance();
   const jwtSecret = db.getGlobalSettings().auth_jwt_secret;
-  if (!jwtSecret) return rejectSocket(socket, 500, 'Internal Server Error');
+  if (!jwtSecret) return rejectPilot(socket, 500, 'Internal Server Error', 'server_error');
 
   let decoded: { scope?: string; nodeId?: number; enrollNonce?: string };
   try {
     decoded = jwt.verify(token, jwtSecret) as typeof decoded;
   } catch {
-    return rejectSocket(socket, 401, 'Unauthorized');
+    return rejectPilot(socket, 401, 'Unauthorized', 'invalid_token');
   }
 
   if (decoded.scope !== 'pilot_enroll' && decoded.scope !== 'pilot_tunnel') {
-    return rejectSocket(socket, 403, 'Forbidden');
+    return rejectPilot(socket, 403, 'Forbidden', 'bad_scope');
   }
-  if (typeof decoded.nodeId !== 'number') return rejectSocket(socket, 400, 'Bad Request');
+  if (typeof decoded.nodeId !== 'number') return rejectPilot(socket, 400, 'Bad Request', 'bad_node');
 
   const node = db.getNode(decoded.nodeId);
   if (!node || node.type !== 'remote' || node.mode !== 'pilot_agent') {
-    return rejectSocket(socket, 404, 'Not Found');
+    return rejectPilot(socket, 404, 'Not Found', 'unknown_node');
   }
 
   let mintedTunnelToken: string | null = null;
@@ -57,7 +82,7 @@ export async function handlePilotTunnel(
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
     const row = db.consumePilotEnrollment(tokenHash);
     if (!row || row.node_id !== decoded.nodeId) {
-      return rejectSocket(socket, 401, 'Unauthorized');
+      return rejectPilot(socket, 401, 'Unauthorized', 'enrollment_used');
     }
     mintedTunnelToken = jwt.sign(
       { scope: 'pilot_tunnel', nodeId: decoded.nodeId },
@@ -67,8 +92,7 @@ export async function handlePilotTunnel(
     PilotMetrics.increment('enroll_acks');
   }
 
-  const agentVersionHeader = req.headers['x-sencho-agent-version'];
-  const agentVersion = Array.isArray(agentVersionHeader) ? agentVersionHeader[0] : agentVersionHeader;
+  const agentVersion = firstHeader(req.headers['x-sencho-agent-version']);
 
   pilotTunnelWss.handleUpgrade(req, socket, head, async (ws) => {
     try {
