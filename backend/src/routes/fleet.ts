@@ -24,7 +24,7 @@ import { ImageOperationService } from '../services/ImageOperationService';
 import { classifyImageChannel } from '../helpers/imageChannel';
 import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions } from '../helpers/policyGate';
 import { remoteSupportsCrossNodeRbac } from '../helpers/remoteCapabilities';
-import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
+import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, FLEET_SNAPSHOT_APPLY_TIMEOUT_MS, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
 import { getLatestVersion, getLatestRelease } from '../utils/version-check';
 import { isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
@@ -45,6 +45,11 @@ import { POLICY_SEVERITIES } from '../utils/severity';
 import { isNoOpBlockingPolicy } from '../utils/policy-risk';
 import { sanitizeForLog, redactSensitiveText } from '../utils/safeLog';
 import { formatNoTargetError } from '../utils/remoteTarget';
+import {
+  applyFleetSnapshotFiles,
+  fleetSnapshotApplyConflictCode,
+  selectFleetSnapshotApplyFiles,
+} from '../helpers/applyFleetSnapshotFiles';
 import { CloudBackupService } from '../services/CloudBackupService';
 import { NotificationService } from '../services/NotificationService';
 import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
@@ -2721,12 +2726,21 @@ interface RemoteProxyContext {
 // of a generic string. The body is truncated to keep the recorded message bounded.
 async function remoteStackError(action: string, res: Awaited<ReturnType<typeof fetch>>): Promise<Error> {
   let detail = '';
+  let code: string | undefined;
   try {
-    detail = (await res.text()).slice(0, 300).trim();
+    const raw = (await res.text()).trim();
+    detail = raw.slice(0, 300);
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === 'object' && parsed !== null && 'code' in parsed && typeof parsed.code === 'string') {
+      code = parsed.code;
+    }
   } catch {
-    // Remote body unavailable; the status code alone still names the failure.
+    // Body missing or not JSON; status (and any truncated text) still name the failure.
   }
-  return new Error(`${action} on remote node (${res.status})${detail ? `: ${detail}` : ''}`);
+  return Object.assign(
+    new Error(`${action} on remote node (${res.status})${detail ? `: ${detail}` : ''}`),
+    { code, httpStatus: res.status },
+  );
 }
 
 // Builds the base URL + proxy headers for a remote node, or null when the node
@@ -2745,54 +2759,37 @@ function buildRemoteProxyContext(node: Node): RemoteProxyContext | null {
   return { baseUrl: proxyTarget.apiUrl.replace(/\/$/, ''), headers };
 }
 
-// Writes a snapshot stack's files back to its node: local nodes write to disk
-// (backing up any current files first), remote nodes receive them over the
-// proxy. Throws SnapshotProxyTargetError when a remote node is unreachable, and
-// an Error carrying the remote node's status and reason on a failed remote write.
+// Writes a snapshot stack's files back to its node. Existing stacks capture a
+// recovery generation before the first write; capture failure aborts with no
+// mutation. A later write failure can leave live files changed; the captured
+// generation remains. Throws SnapshotProxyTargetError when the remote has no
+// proxy target. A non-OK apply response becomes an Error with the remote
+// status and body (capture, lock, or write).
 async function applySnapshotStackFiles(
   node: Node,
   stackName: string,
   files: Array<{ filename: string; content: string }>,
 ): Promise<void> {
+  const applyFiles = selectFleetSnapshotApplyFiles(files);
   if (node.type === 'local') {
-    const fsService = FileSystemService.getInstance(node.id);
-    try {
-      await fsService.backupStackFiles(stackName);
-    } catch (e) {
-      // Stack may not exist yet before first restore; that is ok.
-      console.warn(`[Fleet Snapshot] Pre-restore backup failed for stack "${stackName}" (may not exist yet):`, getErrorMessage(e, 'unknown'));
-    }
-    for (const file of files) {
-      if (file.filename === 'compose.yaml') {
-        await fsService.saveStackContent(stackName, file.content);
-      } else if (file.filename === '.env') {
-        await fsService.saveEnvContent(stackName, file.content);
-      }
-    }
+    await applyFleetSnapshotFiles({
+      nodeId: node.id,
+      stackName,
+      files: applyFiles,
+      actor: 'system:fleet-snapshot',
+    });
     return;
   }
 
   const ctx = buildRemoteProxyContext(node);
   if (!ctx) throw new SnapshotProxyTargetError(formatNoTargetError(node));
-  for (const file of files) {
-    if (file.filename === 'compose.yaml') {
-      const putRes = await fetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}`, {
-        method: 'PUT',
-        headers: ctx.headers,
-        body: JSON.stringify({ content: file.content }),
-        signal: AbortSignal.timeout(15000),
-      });
-      if (!putRes.ok) throw await remoteStackError('Failed to restore compose file', putRes);
-    } else if (file.filename === '.env') {
-      const putRes = await fetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/env`, {
-        method: 'PUT',
-        headers: ctx.headers,
-        body: JSON.stringify({ content: file.content }),
-        signal: AbortSignal.timeout(15000),
-      });
-      if (!putRes.ok) throw await remoteStackError('Failed to restore env file', putRes);
-    }
-  }
+  const applyRes = await fetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/fleet-snapshot-apply`, {
+    method: 'POST',
+    headers: ctx.headers,
+    body: JSON.stringify({ files: applyFiles }),
+    signal: AbortSignal.timeout(FLEET_SNAPSHOT_APPLY_TIMEOUT_MS),
+  });
+  if (!applyRes.ok) throw await remoteStackError('Failed to restore stack files', applyRes);
 }
 
 // Redeploys a stack after its files are restored. The deploy policy gate stays
@@ -2956,6 +2953,11 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
   } catch (error) {
     if (error instanceof SnapshotProxyTargetError) {
       res.status(503).json({ error: error.message });
+      return;
+    }
+    const conflict = fleetSnapshotApplyConflictCode(error);
+    if (conflict) {
+      res.status(409).json({ error: getErrorMessage(error, 'Restore conflict'), code: conflict });
       return;
     }
     console.error('[Fleet Snapshot] Restore error:', error);

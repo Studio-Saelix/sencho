@@ -8,8 +8,11 @@ import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest
 import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
+import { createHash, randomUUID } from 'crypto';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 import * as policyGate from '../helpers/policyGate';
+import { RollbackGenerationStore } from '../services/RollbackGenerationStore';
+import type { ResolvedRollbackInventory, RollbackGenerationManifest } from '../types/rollbackGeneration';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -18,6 +21,9 @@ let CryptoService: typeof import('../services/CryptoService').CryptoService;
 let ComposeService: typeof import('../services/ComposeService').ComposeService;
 let LicenseService: typeof import('../services/LicenseService').LicenseService;
 let NodeRegistry: typeof import('../services/NodeRegistry').NodeRegistry;
+let FileSystemService: typeof import('../services/FileSystemService').FileSystemService;
+let StackUpdateRecoveryService: typeof import('../services/StackUpdateRecoveryService').StackUpdateRecoveryService;
+let StackOpLockService: typeof import('../services/StackOpLockService').StackOpLockService;
 let adminCookie: string;
 let viewerCookie: string;
 let snapshotId: number;
@@ -39,6 +45,9 @@ beforeAll(async () => {
     ({ ComposeService } = await import('../services/ComposeService'));
     ({ LicenseService } = await import('../services/LicenseService'));
     ({ NodeRegistry } = await import('../services/NodeRegistry'));
+    ({ FileSystemService } = await import('../services/FileSystemService'));
+    ({ StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService'));
+    ({ StackOpLockService } = await import('../services/StackOpLockService'));
     ({ app } = await import('../index'));
     adminCookie = await loginAsTestAdmin(app);
 
@@ -801,13 +810,13 @@ describe('Restore-all', () => {
         const damaged = `enc:${iv} ${tag}:${ct}`;
         db.getDb().prepare(
             'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
-        ).run(id, LOCAL_NODE_ID, 'local', 'healthy', 'compose.yaml', good);
+        ).run(id, LOCAL_NODE_ID, 'local', 'delim-healthy', 'compose.yaml', good);
         db.getDb().prepare(
             'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
-        ).run(id, LOCAL_NODE_ID, 'local', 'corrupt', 'compose.yaml', damaged);
-        seedStackDir('healthy');
-        seedStackDir('corrupt');
-        fs.writeFileSync(composePath('corrupt'), 'services:\n  keep: {}\n');
+        ).run(id, LOCAL_NODE_ID, 'local', 'delim-corrupt', 'compose.yaml', damaged);
+        seedStackDir('delim-healthy');
+        seedStackDir('delim-corrupt');
+        fs.writeFileSync(composePath('delim-corrupt'), 'services:\n  keep: {}\n');
 
         const res = await request(app)
             .post(`/api/fleet/snapshots/${id}/restore-all`)
@@ -817,11 +826,11 @@ describe('Restore-all', () => {
         expect(res.body.restored).toBe(1);
         expect(res.body.failed).toBe(1);
         const corrupt = (res.body.results as Array<{ stackName: string; success: boolean; error?: string }>)
-            .find(r => r.stackName === 'corrupt');
+            .find(r => r.stackName === 'delim-corrupt');
         expect(corrupt?.success).toBe(false);
-        expect(fs.readFileSync(composePath('corrupt'), 'utf-8')).toContain('keep: {}');
+        expect(fs.readFileSync(composePath('delim-corrupt'), 'utf-8')).toContain('keep: {}');
         expect(deploySpy).toHaveBeenCalledTimes(1);
-        expect(deploySpy.mock.calls.every(call => call[0] !== 'corrupt')).toBe(true);
+        expect(deploySpy.mock.calls.every(call => call[0] !== 'delim-corrupt')).toBe(true);
     });
 
     it('redeploys each restored stack when requested', async () => {
@@ -874,5 +883,458 @@ describe('Restore-all', () => {
             actor: 'system:fleet-snapshot',
         });
         expect(deploySpy.mock.calls.map((c) => c[0])).not.toContain('blocked-web');
+    });
+});
+
+describe('Snapshot restore: recovery generation contract', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+        StackOpLockService.resetForTests();
+        DatabaseService.getInstance().getDb().prepare('DELETE FROM stack_update_recovery_generations').run();
+    });
+
+    function seedExistingStack(stack: string, compose: string, extraName?: string, extraContent?: string): void {
+        seedStackDir(stack);
+        fs.writeFileSync(composePath(stack), compose);
+        if (extraName && extraContent !== undefined) {
+            fs.writeFileSync(path.join(process.env.COMPOSE_DIR as string, stack, extraName), extraContent);
+        }
+    }
+
+    function insertSnapshot(
+        label: string,
+        files: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string; content: string }>,
+        stackCount = 1,
+    ): number {
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot(label, 'admin', 1, stackCount, '[]', '[]');
+        db.insertSnapshotFiles(id, files);
+        return id;
+    }
+
+    function addRemoteNode(name: string): number {
+        return DatabaseService.getInstance().addNode({
+            name,
+            type: 'remote',
+            api_url: 'http://remote:1852',
+            api_token: 'tok',
+            compose_dir: '/app/compose',
+            is_default: false,
+        });
+    }
+
+    function stubRemoteProxy(): void {
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
+            apiUrl: 'http://remote:1852',
+            apiToken: 'tok',
+        });
+    }
+
+    function sha256Text(text: string): string {
+        return createHash('sha256').update(text, 'utf8').digest('hex');
+    }
+
+    function liveInventory(stack: string): ResolvedRollbackInventory {
+        const stackDir = path.join(process.env.COMPOSE_DIR as string, stack);
+        const entries: ResolvedRollbackInventory['entries'] = [{
+            relativePath: 'compose.yaml',
+            dependencyKind: 'compose-root',
+            provenance: 'authored',
+            sensitivity: 'low',
+            absolutePath: path.join(stackDir, 'compose.yaml'),
+        }];
+        if (fs.existsSync(envPath(stack))) {
+            entries.push({
+                relativePath: '.env',
+                dependencyKind: 'project-env',
+                provenance: 'authored',
+                sensitivity: 'low',
+                absolutePath: envPath(stack),
+            });
+        }
+        return {
+            entries,
+            invocation: {
+                composeArgsPrefix: [],
+                projectDirectory: null,
+                projectName: stack,
+                explicitComposeFiles: ['compose.yaml'],
+                meshEnabled: false,
+                meshOverrideRelativePath: null,
+            },
+            git: null,
+            appliedDeploySpec: null,
+            lastAppliedContentHash: null,
+            manifestState: null,
+            manifestGeneration: null,
+            exactCoverage: true,
+            coverageRefusal: null,
+        };
+    }
+
+    async function persistPreRestoreGeneration(stack: string): Promise<string> {
+        const id = randomUUID();
+        await RollbackGenerationStore.captureGeneration({
+            nodeId: LOCAL_NODE_ID,
+            stackName: stack,
+            generationId: id,
+            inventory: liveInventory(stack),
+            operationKind: 'manual_backup',
+        });
+        const now = Date.now();
+        DatabaseService.getInstance().insertStackUpdateRecoveryGeneration({
+            id,
+            node_id: LOCAL_NODE_ID,
+            stack_name: stack,
+            status: 'active',
+            phase: 'immediate_verified',
+            is_current: 1,
+            backup_slot_id: id,
+            content_path: id,
+            operation_kind: 'manual_backup',
+            override_path: null,
+            services_json: '[]',
+            health_gate_id: null,
+            gate_retain_until: null,
+            artifact_expires_at: null,
+            operation_lease_expires_at: null,
+            created_at: now,
+            updated_at: now,
+            created_by: 'system:fleet-snapshot',
+            artifacts_retired: 0,
+            released_at: null,
+            released_by: null,
+        });
+        return id;
+    }
+
+    function spyCaptureRecordingLive(stack: string): { composeAtCapture: string; envAtCapture: string } {
+        const captured = { composeAtCapture: '', envAtCapture: '' };
+        vi.spyOn(StackUpdateRecoveryService.getInstance(), 'captureCurrentBackup').mockImplementation(async () => {
+            captured.composeAtCapture = fs.readFileSync(composePath(stack), 'utf-8');
+            captured.envAtCapture = fs.existsSync(envPath(stack)) ? fs.readFileSync(envPath(stack), 'utf-8') : '';
+            const id = await persistPreRestoreGeneration(stack);
+            return { id } as never;
+        });
+        return captured;
+    }
+
+    function expectCurrentGenerationMatches(stack: string, compose: string, env: string): void {
+        const current = StackUpdateRecoveryService.getInstance().getCurrent(LOCAL_NODE_ID, stack);
+        expect(current?.id).toBeTruthy();
+        const genDir = RollbackGenerationStore.getGenerationDir(LOCAL_NODE_ID, stack, current!.id);
+        const manifest = JSON.parse(
+            fs.readFileSync(path.join(genDir, 'generation.json'), 'utf-8'),
+        ) as RollbackGenerationManifest;
+        expect(manifest.entries.find((e) => e.relativePath === 'compose.yaml')?.contentSha256).toBe(sha256Text(compose));
+        expect(manifest.entries.find((e) => e.relativePath === '.env')?.contentSha256).toBe(sha256Text(env));
+    }
+
+    it('captures the pre-restore multi-file project before overwriting compose.yaml', async () => {
+        const id = insertSnapshot('restore-gen-local', [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'preimage-web', filename: 'compose.yaml', content: 'services:\n  snap: {}\n' },
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'preimage-web', filename: '.env', content: 'SNAP=1\n' },
+        ]);
+        const preCompose = 'services:\n  old: {}\n';
+        const preEnv = 'OLD=1\n';
+        seedExistingStack('preimage-web', preCompose, 'extra.yml', 'x: 1\n');
+        fs.writeFileSync(envPath('preimage-web'), preEnv);
+        const captured = spyCaptureRecordingLive('preimage-web');
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'preimage-web' });
+
+        expect(res.status).toBe(200);
+        expect(captured.composeAtCapture).toBe(preCompose);
+        expect(captured.envAtCapture).toBe(preEnv);
+        expect(fs.readFileSync(composePath('preimage-web'), 'utf-8')).toContain('snap: {}');
+        expect(fs.readFileSync(envPath('preimage-web'), 'utf-8')).toContain('SNAP=1');
+        expect(fs.readFileSync(path.join(process.env.COMPOSE_DIR as string, 'preimage-web', 'extra.yml'), 'utf-8')).toBe('x: 1\n');
+        expectCurrentGenerationMatches('preimage-web', preCompose, preEnv);
+    });
+
+    it('does not mutate live files when capture fails', async () => {
+        const id = insertSnapshot('restore-gen-fail', [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'fail-web', filename: 'compose.yaml', content: 'services:\n  snap: {}\n' },
+        ]);
+        const preCompose = 'services:\n  keep: {}\n';
+        seedExistingStack('fail-web', preCompose);
+        vi.spyOn(StackUpdateRecoveryService.getInstance(), 'captureCurrentBackup')
+            .mockRejectedValue(new Error('generation capture failed'));
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'fail-web' });
+
+        expect(res.status).toBe(500);
+        expect(fs.readFileSync(composePath('fail-web'), 'utf-8')).toBe(preCompose);
+    });
+
+    it('returns 409 and does not write when the stack operation lock is held', async () => {
+        const id = insertSnapshot('restore-gen-lock', [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'lock-web', filename: 'compose.yaml', content: 'services:\n  snap: {}\n' },
+        ]);
+        const preCompose = 'services:\n  keep: {}\n';
+        seedExistingStack('lock-web', preCompose);
+        const captureSpy = vi.spyOn(StackUpdateRecoveryService.getInstance(), 'captureCurrentBackup')
+            .mockResolvedValue({ id: 'gen-lock-web' } as never);
+        StackOpLockService.getInstance().tryAcquire(LOCAL_NODE_ID, 'lock-web', 'deploy', 'other');
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'lock-web' });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('stack_op_in_progress');
+        expect(captureSpy).not.toHaveBeenCalled();
+        expect(fs.readFileSync(composePath('lock-web'), 'utf-8')).toBe(preCompose);
+    });
+
+    it('keeps the captured generation when a later snapshot file write fails', async () => {
+        const id = insertSnapshot('restore-gen-partial', [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'partial-web', filename: 'compose.yaml', content: 'services:\n  snap: {}\n' },
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'partial-web', filename: '.env', content: 'SNAP=1\n' },
+        ]);
+        const preCompose = 'services:\n  old: {}\n';
+        const preEnv = 'OLD=1\n';
+        seedExistingStack('partial-web', preCompose);
+        fs.writeFileSync(envPath('partial-web'), preEnv);
+        const captured = spyCaptureRecordingLive('partial-web');
+        vi.spyOn(FileSystemService.prototype, 'saveEnvContent').mockRejectedValue(new Error('disk full'));
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'partial-web' });
+
+        expect(res.status).toBe(500);
+        expect(captured.composeAtCapture).toBe(preCompose);
+        expect(captured.envAtCapture).toBe(preEnv);
+        expect(fs.readFileSync(composePath('partial-web'), 'utf-8')).toContain('snap: {}');
+        expect(fs.readFileSync(envPath('partial-web'), 'utf-8')).toBe(preEnv);
+        expectCurrentGenerationMatches('partial-web', preCompose, preEnv);
+    });
+
+    it('does not capture a generation when restoring a stack that does not exist yet', async () => {
+        const id = insertSnapshot('restore-gen-new', [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'brand-new', filename: 'compose.yaml', content: 'services:\n  snap: {}\n' },
+        ]);
+        seedStackDir('brand-new');
+        const captureSpy = vi.spyOn(StackUpdateRecoveryService.getInstance(), 'captureCurrentBackup')
+            .mockResolvedValue({ id: 'should-not-run' } as never);
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'brand-new' });
+
+        expect(res.status).toBe(200);
+        expect(captureSpy).not.toHaveBeenCalled();
+        expect(fs.readFileSync(composePath('brand-new'), 'utf-8')).toContain('snap: {}');
+    });
+
+    it('restore-all captures existing stacks and still restores siblings when one capture fails', async () => {
+        const id = insertSnapshot('restore-all-gen', [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'all-keep', filename: 'compose.yaml', content: 'services:\n  keep: {}\n' },
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'all-fail', filename: 'compose.yaml', content: 'services:\n  fail: {}\n' },
+        ], 2);
+        seedExistingStack('all-keep', 'services:\n  old-keep: {}\n');
+        fs.writeFileSync(envPath('all-keep'), 'KEEP=1\n');
+        seedExistingStack('all-fail', 'services:\n  old-fail: {}\n');
+        fs.writeFileSync(envPath('all-fail'), 'FAIL=1\n');
+        vi.spyOn(StackUpdateRecoveryService.getInstance(), 'captureCurrentBackup')
+            .mockImplementation(async (input) => {
+                if (input.stackName === 'all-fail') throw new Error('generation capture failed');
+                const id = await persistPreRestoreGeneration(input.stackName);
+                return { id } as never;
+            });
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore-all`)
+            .set('Cookie', adminCookie)
+            .send({});
+
+        expect(res.status).toBe(200);
+        expect(res.body.restored).toBe(1);
+        expect(res.body.failed).toBe(1);
+        const failed = (res.body.results as Array<{ stackName: string; success: boolean }>).find(r => r.stackName === 'all-fail');
+        expect(failed?.success).toBe(false);
+        expect(fs.readFileSync(composePath('all-keep'), 'utf-8')).toContain('keep: {}');
+        expect(fs.readFileSync(composePath('all-fail'), 'utf-8')).toContain('old-fail: {}');
+        expect(fs.readFileSync(envPath('all-fail'), 'utf-8')).toBe('FAIL=1\n');
+        expectCurrentGenerationMatches('all-keep', 'services:\n  old-keep: {}\n', 'KEEP=1\n');
+        expect(StackUpdateRecoveryService.getInstance().getCurrent(LOCAL_NODE_ID, 'all-fail')).toBeUndefined();
+    });
+
+    it('restores a remote stack through one node-local apply request', async () => {
+        const remoteId = addRemoteNode('remote-gen');
+        const id = insertSnapshot('restore-gen-remote', [
+            { nodeId: remoteId, nodeName: 'remote-gen', stackName: 'rweb', filename: 'compose.yaml', content: 'services: {}\n' },
+            { nodeId: remoteId, nodeName: 'remote-gen', stackName: 'rweb', filename: '.env', content: 'SNAP=1\n' },
+        ]);
+        stubRemoteProxy();
+        const calls: Array<{ url: string; method?: string; body?: string }> = [];
+        vi.stubGlobal('fetch', vi.fn(async (url: string, opts?: { method?: string; body?: string }) => {
+            calls.push({ url, method: opts?.method, body: opts?.body });
+            return { ok: true, status: 200, text: async () => '' } as unknown as Response;
+        }));
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: remoteId, stackName: 'rweb' });
+
+        expect(res.status).toBe(200);
+        const applyCalls = calls.filter(c => c.url.includes('/fleet-snapshot-apply'));
+        expect(applyCalls).toHaveLength(1);
+        expect(applyCalls[0].method).toBe('POST');
+        expect(applyCalls[0].body).toContain('compose.yaml');
+        expect(applyCalls[0].body).toContain('.env');
+        expect(calls.some(c => c.method === 'PUT' && /\/api\/stacks\/[^/]+$/.test(c.url))).toBe(false);
+        expect(calls.some(c => c.method === 'PUT' && /\/env$/.test(c.url))).toBe(false);
+    });
+
+    it('fails a remote restore without writing when the node-local apply returns 409', async () => {
+        const remoteId = addRemoteNode('remote-lock');
+        const id = insertSnapshot('restore-gen-remote-lock', [
+            { nodeId: remoteId, nodeName: 'remote-lock', stackName: 'rlock', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        stubRemoteProxy();
+        vi.stubGlobal('fetch', vi.fn(async () => ({
+            ok: false,
+            status: 409,
+            text: async () => JSON.stringify({ error: 'locked', code: 'stack_op_in_progress' }),
+        } as unknown as Response)));
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: remoteId, stackName: 'rlock' });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('stack_op_in_progress');
+    });
+
+    it('does not invent stack_op_in_progress from a bare remote 409', async () => {
+        const remoteId = addRemoteNode('remote-bare-409');
+        const id = insertSnapshot('restore-gen-remote-bare-409', [
+            { nodeId: remoteId, nodeName: 'remote-bare-409', stackName: 'rbare', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        stubRemoteProxy();
+        vi.stubGlobal('fetch', vi.fn(async () => ({
+            ok: false,
+            status: 409,
+            text: async () => JSON.stringify({ error: 'conflict' }),
+        } as unknown as Response)));
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: remoteId, stackName: 'rbare' });
+
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBeUndefined();
+    });
+
+    it('restore-all sends one node-local apply per remote stack', async () => {
+        const remoteId = addRemoteNode('remote-all');
+        const id = insertSnapshot('restore-all-gen-remote', [
+            { nodeId: remoteId, nodeName: 'remote-all', stackName: 'ra', filename: 'compose.yaml', content: 'services:\n  a: {}\n' },
+            { nodeId: remoteId, nodeName: 'remote-all', stackName: 'rb', filename: 'compose.yaml', content: 'services:\n  b: {}\n' },
+        ], 2);
+        stubRemoteProxy();
+        const urls: string[] = [];
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+            urls.push(url);
+            return { ok: true, status: 200, text: async () => '' } as unknown as Response;
+        }));
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore-all`)
+            .set('Cookie', adminCookie)
+            .send({});
+
+        expect(res.status).toBe(200);
+        expect(res.body.restored).toBe(2);
+        expect(urls.filter(u => u.includes('/fleet-snapshot-apply'))).toHaveLength(2);
+        expect(urls.some(u => /\/api\/stacks\/[^/]+$/.test(u))).toBe(false);
+    });
+
+    it('POST /api/stacks/:stackName/fleet-snapshot-apply returns 403 for a viewer', async () => {
+        const res = await request(app)
+            .post('/api/stacks/preimage-web/fleet-snapshot-apply')
+            .set('Cookie', viewerCookie)
+            .send({ files: [{ filename: 'compose.yaml', content: 'services: {}\n' }] });
+        expect(res.status).toBe(403);
+    });
+
+    it('POST /api/stacks/:stackName/fleet-snapshot-apply captures an existing stack before writing', async () => {
+        const preCompose = 'services:\n  old: {}\n';
+        const preEnv = 'OLD=1\n';
+        seedExistingStack('apply-existing', preCompose);
+        fs.writeFileSync(envPath('apply-existing'), preEnv);
+        spyCaptureRecordingLive('apply-existing');
+
+        const res = await request(app)
+            .post('/api/stacks/apply-existing/fleet-snapshot-apply')
+            .set('Cookie', adminCookie)
+            .send({
+                files: [
+                    { filename: 'compose.yaml', content: 'services:\n  snap: {}\n' },
+                    { filename: '.env', content: 'SNAP=1\n' },
+                ],
+            });
+
+        expect(res.status).toBe(200);
+        expect(res.body.capturedGenerationId).toBe(
+            StackUpdateRecoveryService.getInstance().getCurrent(LOCAL_NODE_ID, 'apply-existing')?.id,
+        );
+        expect(fs.readFileSync(composePath('apply-existing'), 'utf-8')).toContain('snap: {}');
+        expect(fs.readFileSync(envPath('apply-existing'), 'utf-8')).toBe('SNAP=1\n');
+        expectCurrentGenerationMatches('apply-existing', preCompose, preEnv);
+    });
+
+    it('POST /api/stacks/:stackName/fleet-snapshot-apply returns 400 when no restoreable files remain', async () => {
+        seedStackDir('apply-empty');
+        const res = await request(app)
+            .post('/api/stacks/apply-empty/fleet-snapshot-apply')
+            .set('Cookie', adminCookie)
+            .send({ files: [{ filename: 'notes.txt', content: 'nope\n' }] });
+        expect(res.status).toBe(400);
+        expect(fs.existsSync(composePath('apply-empty'))).toBe(false);
+    });
+
+    it('POST /api/stacks/:stackName/fleet-snapshot-apply ignores extra filenames', async () => {
+        seedStackDir('apply-extra');
+        const res = await request(app)
+            .post('/api/stacks/apply-extra/fleet-snapshot-apply')
+            .set('Cookie', adminCookie)
+            .send({
+                files: [
+                    { filename: 'compose.yaml', content: 'services:\n  snap: {}\n' },
+                    { filename: 'notes.txt', content: 'should-not-write\n' },
+                    { filename: '.env', content: 'SNAP=1\n' },
+                ],
+            });
+        expect(res.status).toBe(200);
+        expect(fs.readFileSync(composePath('apply-extra'), 'utf-8')).toContain('snap: {}');
+        expect(fs.readFileSync(envPath('apply-extra'), 'utf-8')).toBe('SNAP=1\n');
+        expect(fs.existsSync(path.join(process.env.COMPOSE_DIR as string, 'apply-extra', 'notes.txt'))).toBe(false);
+    });
+
+    it('POST /api/stacks/:stackName/fleet-snapshot-apply accepts a combined body over 100 KB', async () => {
+        seedStackDir('apply-large');
+        const compose = `services:\n  snap:\n    image: nginx\n    labels:\n      note: "${'x'.repeat(150 * 1024)}"\n`;
+        const res = await request(app)
+            .post('/api/stacks/apply-large/fleet-snapshot-apply')
+            .set('Cookie', adminCookie)
+            .send({ files: [{ filename: 'compose.yaml', content: compose }] });
+        expect(res.status).toBe(200);
+        expect(fs.readFileSync(composePath('apply-large'), 'utf-8')).toBe(compose);
     });
 });

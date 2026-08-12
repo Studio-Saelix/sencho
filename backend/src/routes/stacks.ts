@@ -66,6 +66,12 @@ import {
   UPDATE_VERIFICATION_INCOMPLETE_WARNING,
 } from '../services/ImageUpdateService';
 import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
+import {
+  applyFleetSnapshotFiles,
+  fleetSnapshotApplyConflictCode,
+  getCodedError,
+  selectFleetSnapshotApplyFiles,
+} from '../helpers/applyFleetSnapshotFiles';
 import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/envFileResolution';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
@@ -2635,6 +2641,51 @@ stacksRouter.post('/:stackName/backup', async (req: Request, res: Response) => {
     res.status(500).json({ error: getErrorMessage(error, 'Failed to back up stack files') });
   } finally {
     releaseStackOpLock(req, stackName);
+  }
+});
+
+function isFleetSnapshotFile(value: unknown): value is { filename: string; content: string } {
+  return typeof value === 'object' && value !== null
+    && 'filename' in value && 'content' in value
+    && typeof value.filename === 'string'
+    && typeof value.content === 'string';
+}
+
+stacksRouter.post('/:stackName/fleet-snapshot-apply', async (req: Request, res: Response) => {
+  // Node-local capture-then-write used by hub Fleet snapshot restore.
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const rawFiles = req.body?.files;
+  if (!Array.isArray(rawFiles) || !rawFiles.every(isFleetSnapshotFile)) {
+    res.status(400).json({ error: 'files must be an array of { filename, content }' });
+    return;
+  }
+  const files = selectFleetSnapshotApplyFiles(rawFiles);
+  if (files.length === 0) {
+    res.status(400).json({ error: 'files must include compose.yaml or .env' });
+    return;
+  }
+  try {
+    const result = await applyFleetSnapshotFiles({
+      nodeId: req.nodeId,
+      stackName,
+      files,
+      actor: req.user?.username ?? 'system',
+    });
+    res.json({ success: true, capturedGenerationId: result.capturedGenerationId });
+  } catch (error: unknown) {
+    const code = getCodedError(error)?.code;
+    if (code === 'INVALID_STACK_NAME' || code === 'INVALID_SNAPSHOT_FILES') {
+      res.status(400).json({ error: getErrorMessage(error, 'Invalid restore request'), code });
+      return;
+    }
+    const conflict = fleetSnapshotApplyConflictCode(error);
+    if (conflict) {
+      res.status(409).json({ error: getErrorMessage(error, 'Restore conflict'), code: conflict });
+      return;
+    }
+    console.error('[Stacks] Fleet snapshot apply failed: %s', sanitizeForLog(stackName), error);
+    res.status(500).json({ error: getErrorMessage(error, 'Failed to restore snapshot files') });
   }
 });
 
