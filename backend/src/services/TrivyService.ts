@@ -20,6 +20,7 @@ import { FleetSyncService } from './FleetSyncService';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { SEVERITY_ORDER } from '../utils/severity';
+import { isSenchoRollbackHoldRef } from '../utils/senchoRollbackHold';
 import type { PolicyBlockReason } from '../utils/policy-risk';
 
 const execFileAsync = promisify(execFile);
@@ -621,6 +622,9 @@ class TrivyService {
             scanners?: readonly TrivyScanner[];
         } = {},
     ): Promise<TrivyScanResult> {
+        if (isSenchoRollbackHoldRef(imageRef)) {
+            throw new Error('Sencho rollback-hold images are recovery state and cannot be scanned');
+        }
         const binary = this.binaryPath;
         if (!binary) {
             throw new Error('Trivy is not available on this host');
@@ -1171,7 +1175,9 @@ class TrivyService {
         const imageRefs = new Set<string>();
         for (const img of images as Array<{ RepoTags?: string[] }>) {
             for (const tag of img.RepoTags ?? []) {
-                if (tag && tag !== '<none>:<none>') imageRefs.add(tag);
+                // Skip hold tags; dual-tagged images are scanned via the registry tag.
+                if (!tag || tag === '<none>:<none>' || isSenchoRollbackHoldRef(tag)) continue;
+                imageRefs.add(tag);
             }
         }
         const refs = Array.from(imageRefs);

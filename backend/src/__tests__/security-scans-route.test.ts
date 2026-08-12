@@ -141,3 +141,20 @@ describe('GET /api/security/scans query wiring', () => {
     ]);
   });
 });
+
+describe('POST /api/security/scan hold refs', () => {
+  it('rejects Sencho rollback-hold image refs with 400 before starting a scan', async () => {
+    const { default: TrivyService } = await import('../services/TrivyService');
+    vi.spyOn(TrivyService.getInstance(), 'isTrivyAvailable').mockReturnValue(true);
+    const begin = vi.spyOn(TrivyService.getInstance(), 'beginScan');
+
+    const res = await request(app)
+      .post('/api/security/scan')
+      .set('Cookie', adminCookie)
+      .send({ imageRef: 'sencho-rb/aaaaaaaaaaaa/web:hold' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/rollback-hold/i);
+    expect(begin).not.toHaveBeenCalled();
+  });
+});

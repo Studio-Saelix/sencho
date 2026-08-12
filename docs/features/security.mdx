@@ -89,7 +89,10 @@ clear "overview unavailable" state and the other tabs keep working.
   <img src="/images/security/images-tab.png" alt="Security page Images tab listing scanned images with Image, Findings, Last scan, Severity, and Actions columns; findings show critical/high counts and fixable totals, and one row shows a Clean badge." />
 </Frame>
 
-Image findings list every scanned image on the active node with its highest severity. When you arrive
+Image findings list every scanned image on the active node with its highest severity. Sencho
+rollback-hold tags (`sencho-rb/...:hold`) are recovery state, not Security inventory: node-wide
+scans skip them, and existing hold-only scan rows stay out of this list and the Overview posture.
+When you arrive
 from a Security posture action that named specific images, the list opens already filtered to those
 images and shows a clearable banner with the reason and count. Images configured beyond loopback (or
 with host networking) carry a **Network exposed** evidence label on the row during ordinary browsing,

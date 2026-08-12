@@ -11,6 +11,7 @@ import { isValidStackName } from '../utils/validation';
 import { FleetSyncService } from '../services/FleetSyncService';
 import { LicenseService } from '../services/LicenseService';
 import { validateImageRef } from '../utils/image-ref';
+import { isSenchoRollbackHoldRef } from '../utils/senchoRollbackHold';
 import {
   applySuppressions,
   countsTowardResidualCriticalHigh,
@@ -463,6 +464,10 @@ securityRouter.post('/scan', authMiddleware, (req: Request, res: Response): void
   }
   if (!validateImageRef(rawImageRef)) {
     res.status(400).json({ error: 'Invalid imageRef format' });
+    return;
+  }
+  if (isSenchoRollbackHoldRef(rawImageRef)) {
+    res.status(400).json({ error: 'Sencho rollback-hold images are recovery state and cannot be scanned' });
     return;
   }
   const imageRef = rawImageRef;
