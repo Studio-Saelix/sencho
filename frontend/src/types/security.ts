@@ -335,10 +335,14 @@ export interface PostureReason {
    */
   targets?: PostureTarget[];
   /**
-   * Exact contributing findings for vulnerability-derived blockers (capped).
+   * Exact contributing findings for vulnerability-derived reasons (capped).
    * Older remotes omit this field.
    */
   drivers?: PostureDriverFinding[];
+  /** Full contributing driver count before cap; omit when drivers omitted. */
+  driverCount?: number;
+  /** True when driverCount exceeds the attached drivers array length. */
+  driversTruncated?: boolean;
 }
 
 /** Highest-priority action for the masthead CTA. */
@@ -352,6 +356,8 @@ export interface PostureAction {
   targets?: PostureTarget[];
   /** Same drivers as the reason that produced this action, when available. */
   drivers?: PostureDriverFinding[];
+  driverCount?: number;
+  driversTruncated?: boolean;
 }
 
 /** Node-scoped security posture rollup for the Security page Overview. */
@@ -388,8 +394,7 @@ export interface SecurityOverview {
   needsReview?: number;
   accepted?: number;
   notAffected?: number;
-  /** Total actionable items: unresolved Security/Networking decisions that can
-   *  change posture. Intentional network exposure alone is not counted. */
+  /** Legacy mixed-unit sum of blocker counts. Prefer posture / reasons. */
   actionable?: number;
   posture?: SecurityPostureState;
   /** True when the bounded posture pass hit its row cap on this node. */

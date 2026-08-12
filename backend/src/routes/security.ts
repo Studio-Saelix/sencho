@@ -28,6 +28,7 @@ import {
 import {
   classifyExposedImages,
   collectKevDrivers,
+  collectPackageFixDrivers,
 } from '../services/securityExposureClassification';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
@@ -199,7 +200,10 @@ interface SecurityOverviewResponse {
   needsReview: number;
   accepted: number;
   notAffected: number;
-  /** Total actionable items, for the "N actions" affordance. */
+  /**
+   * Legacy mixed-unit sum of canonical blocker counts (image updates, secrets,
+   * Compose, KEV, elevated EPSS, intent conflict). Prefer posture / reasons.
+   */
   actionable: number;
   posture: SecurityPostureState;
   /** True when the bounded posture pass hit its row cap on this node. */
@@ -834,6 +838,7 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
     let notAffected = 0;
     let needsReview = 0;
     const remediationByImage = new Map<string, number>();
+    const packageFixByImage = new Map<string, string[]>();
     for (const [imageRef, group] of critHighByImage) {
       for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
         if (e.triage_status === 'needs_review') needsReview += 1;
@@ -847,6 +852,9 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
         if (e.fixed_version) {
           fixableCriticalHigh += 1;
           remediationByImage.set(imageRef, (remediationByImage.get(imageRef) ?? 0) + 1);
+          const vids = packageFixByImage.get(imageRef);
+          if (vids) vids.push(e.vulnerability_id);
+          else packageFixByImage.set(imageRef, [e.vulnerability_id]);
         }
       }
     }
@@ -863,6 +871,18 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       freshnessWindowMs: imageUpdateSvc.getRemediationFreshnessWindowMs(),
       now: Date.now(),
     });
+    const updateAvailableDrivers = collectPackageFixDrivers(
+      packageFixByImage,
+      remediation.imageRefsUpdateAvailable,
+    );
+    const waitingUpstreamDrivers = collectPackageFixDrivers(
+      packageFixByImage,
+      remediation.imageRefsWaitingUpstream,
+    );
+    const updateUnknownDrivers = collectPackageFixDrivers(
+      packageFixByImage,
+      remediation.imageRefsUpdateUnknown,
+    );
 
     // A known-exploited (KEV) finding gates a deploy at ANY severity, so the
     // posture fact counts non-suppressed KEV findings across all severities, not
@@ -947,6 +967,8 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       elevatedExploitRisk,
       elevatedExploitRiskTargets,
       elevatedExploitRiskDrivers,
+      elevatedExploitRiskDriverCount,
+      elevatedExploitRiskDriversTruncated,
     } = classifyExposedImages({
       critHighByImage,
       exposedMap,
@@ -981,16 +1003,29 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       fixableWaitingUpstreamTargets: remediation.imageRefsWaitingUpstream,
       fixableUpdateUnknownTargets: remediation.imageRefsUpdateUnknown,
       knownExploitedTargets,
-      knownExploitedDrivers,
+      knownExploitedDrivers: knownExploitedDrivers.drivers,
+      knownExploitedDriverCount: knownExploitedDrivers.driverCount,
+      knownExploitedDriversTruncated: knownExploitedDrivers.driversTruncated,
       exposureIntentConflictTargets,
       exposedUnclassifiedTargets,
       elevatedExploitRiskTargets,
       elevatedExploitRiskDrivers,
+      elevatedExploitRiskDriverCount,
+      elevatedExploitRiskDriversTruncated,
+      fixableWithImageUpdateDrivers: updateAvailableDrivers.drivers,
+      fixableWithImageUpdateDriverCount: updateAvailableDrivers.driverCount,
+      fixableWithImageUpdateDriversTruncated: updateAvailableDrivers.driversTruncated,
+      fixableWaitingUpstreamDrivers: waitingUpstreamDrivers.drivers,
+      fixableWaitingUpstreamDriverCount: waitingUpstreamDrivers.driverCount,
+      fixableWaitingUpstreamDriversTruncated: waitingUpstreamDrivers.driversTruncated,
+      fixableUpdateUnknownDrivers: updateUnknownDrivers.drivers,
+      fixableUpdateUnknownDriverCount: updateUnknownDrivers.driverCount,
+      fixableUpdateUnknownDriversTruncated: updateUnknownDrivers.driversTruncated,
     };
     const posture = deriveSecurityPosture(postureFacts);
     const { reasons: postureReasons, primaryAction, targetsTruncated } = derivePostureReasons(postureFacts);
-    // Canonical actionable = unresolved Security/Networking decisions that can
-    // change posture. Intentional network exposure alone is not actionable.
+    // Legacy mixed-unit sum of blocker counts (not a distinct product metric).
+    // Prefer posture / postureReasons. Intentional exposure alone is excluded.
     const actionable = remediation.fixableWithImageUpdate
       + secrets
       + dangerousCompose

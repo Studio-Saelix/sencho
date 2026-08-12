@@ -12,6 +12,21 @@ import { HIGH_EPSS_THRESHOLD, type PostureDriverFinding, type PostureTarget } fr
 /** Bounded driver findings attached to vulnerability-derived posture reasons. */
 export const POSTURE_DRIVER_CAP = 50;
 
+export interface CappedDrivers {
+  drivers: PostureDriverFinding[];
+  /** Full contributing count before the display cap. */
+  driverCount: number;
+  driversTruncated: boolean;
+}
+
+export function capDriverFindings(drivers: PostureDriverFinding[]): CappedDrivers {
+  return {
+    drivers: drivers.slice(0, POSTURE_DRIVER_CAP),
+    driverCount: drivers.length,
+    driversTruncated: drivers.length > POSTURE_DRIVER_CAP,
+  };
+}
+
 export type CveIntelLookup = Map<string, { kev?: boolean; epssScore?: number | null }>;
 
 export interface ExposedFindingRow {
@@ -48,6 +63,8 @@ export interface ClassifyExposedImagesResult {
   elevatedExploitRisk: number;
   elevatedExploitRiskTargets: PostureTarget[];
   elevatedExploitRiskDrivers: PostureDriverFinding[];
+  elevatedExploitRiskDriverCount: number;
+  elevatedExploitRiskDriversTruncated: boolean;
 }
 
 function isIntentionalTarget(t: PostureTarget): boolean {
@@ -77,10 +94,6 @@ export function classifyImageExposureBucket(
   if (complete.length === 0) return 'unclassified';
   if (complete.every(isIntentionalTarget)) return 'intentional';
   return 'unclassified';
-}
-
-function capDrivers(drivers: PostureDriverFinding[]): PostureDriverFinding[] {
-  return drivers.slice(0, POSTURE_DRIVER_CAP);
 }
 
 function targetKey(t: PostureTarget): string {
@@ -151,6 +164,7 @@ export function classifyExposedImages(input: ClassifyExposedImagesInput): Classi
     }
   }
 
+  const elevated = capDriverFindings(elevatedDrivers);
   return {
     publiclyExposed,
     exposureIntentConflict: conflictImages.size,
@@ -159,18 +173,34 @@ export function classifyExposedImages(input: ClassifyExposedImagesInput): Classi
     exposedUnclassifiedTargets: unclassifiedTargets,
     elevatedExploitRisk: elevatedImages.size,
     elevatedExploitRiskTargets: elevatedTargets,
-    elevatedExploitRiskDrivers: capDrivers(elevatedDrivers),
+    elevatedExploitRiskDrivers: elevated.drivers,
+    elevatedExploitRiskDriverCount: elevated.driverCount,
+    elevatedExploitRiskDriversTruncated: elevated.driversTruncated,
   };
 }
 
 /** Cap unsuppressed KEV driver rows for posture attachment. */
 export function collectKevDrivers(
   drivers: Array<{ imageRef: string; vulnerability_id: string; suppressed?: boolean }>,
-): PostureDriverFinding[] {
+): CappedDrivers {
   const out: PostureDriverFinding[] = [];
   for (const e of drivers) {
     if (e.suppressed) continue;
     out.push({ vulnerabilityId: e.vulnerability_id, imageRef: e.imageRef });
   }
-  return capDrivers(out);
+  return capDriverFindings(out);
+}
+
+/** Package-fix finding drivers for the given image refs (order preserved per image list). */
+export function collectPackageFixDrivers(
+  packageFixByImage: Map<string, string[]>,
+  imageRefs: string[],
+): CappedDrivers {
+  const out: PostureDriverFinding[] = [];
+  for (const imageRef of imageRefs) {
+    for (const vulnerabilityId of packageFixByImage.get(imageRef) ?? []) {
+      out.push({ vulnerabilityId, imageRef });
+    }
+  }
+  return capDriverFindings(out);
 }

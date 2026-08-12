@@ -65,6 +65,18 @@ describe('targetingFromTargets', () => {
     expect(input?.drivers).toEqual(drivers);
   });
 
+  it('copies driverCount and driversTruncated when provided', () => {
+    const input = targetingFromTargets(
+      'waiting_upstream',
+      'Waiting for upstream image',
+      [{ imageRef: 'app:1' }],
+      [{ vulnerabilityId: 'CVE-1', imageRef: 'app:1' }],
+      { driverCount: 12, driversTruncated: true },
+    );
+    expect(input?.driverCount).toBe(12);
+    expect(input?.driversTruncated).toBe(true);
+  });
+
   it('omits drivers when empty or absent', () => {
     const noDrivers = targetingFromTargets(
       'public_exposure',

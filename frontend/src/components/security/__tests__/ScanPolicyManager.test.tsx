@@ -106,7 +106,7 @@ it('blocks a save that turns on block-on-deploy with no active input', async () 
 
   const dialog = screen.getByRole('dialog');
   fireEvent.click(within(dialog).getByRole('switch', { name: 'Known-exploited (KEV)' })); // KEV off
-  fireEvent.click(within(dialog).getByRole('switch', { name: 'Fixable Critical/High' })); // fixable off
+  fireEvent.click(within(dialog).getByRole('switch', { name: 'Package fix available (Critical/High)' })); // fixable off
   fireEvent.click(within(dialog).getByRole('switch', { name: 'Block on deploy' })); // block-on-deploy on
   fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 

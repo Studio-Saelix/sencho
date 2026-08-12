@@ -20,6 +20,10 @@ export interface ImagesTargetingState {
    * Scoped per image when opening the scan sheet.
    */
   drivers?: PostureDriverFinding[];
+  /** Full contributing driver count before cap; omit when drivers omitted. */
+  driverCount?: number;
+  /** True when driverCount exceeds the attached drivers array length. */
+  driversTruncated?: boolean;
   /** Monotonic token so re-navigating the same reason re-applies after Clear. */
   token: number;
 }
@@ -57,6 +61,7 @@ export function targetingFromTargets(
   label: string,
   targets: PostureTarget[] | undefined,
   drivers?: PostureDriverFinding[],
+  driverMeta?: { driverCount?: number; driversTruncated?: boolean },
 ): ImagesTargetingInput | undefined {
   if (!targets || targets.length === 0) return undefined;
   return {
@@ -65,6 +70,10 @@ export function targetingFromTargets(
     imageRefs: uniqueImageRefs(targets),
     targets,
     ...(drivers && drivers.length > 0 ? { drivers } : {}),
+    ...(driverMeta?.driverCount !== undefined ? { driverCount: driverMeta.driverCount } : {}),
+    ...(driverMeta?.driversTruncated !== undefined
+      ? { driversTruncated: driverMeta.driversTruncated }
+      : {}),
   };
 }
 

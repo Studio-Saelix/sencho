@@ -131,7 +131,7 @@ describe('derivePostureReasons', () => {
       fixableWaitingUpstream: 4,
     }));
     expect(reasons.find((r) => r.kind === 'fixable_cve')).toBeUndefined();
-    expect(reasons).toContainEqual(expect.objectContaining({ kind: 'waiting_upstream', count: 4, severity: 'info' }));
+    expect(reasons).toContainEqual(expect.objectContaining({ kind: 'waiting_upstream', count: 4, severity: 'review' }));
     expect(primaryAction).toBeNull();
   });
 
@@ -202,12 +202,12 @@ describe('derivePostureReasons', () => {
     expect(reasons).toContainEqual(expect.objectContaining({ kind: 'failed_scan', count: 1, severity: 'info' }));
   });
 
-  it('returns uncertain info reason for unknown remediation', () => {
+  it('returns uncertain review reason for unknown remediation', () => {
     const { reasons } = derivePostureReasons(facts({
       fixableCriticalHigh: 2,
       fixableUpdateUnknown: 2,
     }));
-    expect(reasons).toContainEqual(expect.objectContaining({ kind: 'update_check_uncertain', count: 2, severity: 'info' }));
+    expect(reasons).toContainEqual(expect.objectContaining({ kind: 'update_check_uncertain', count: 2, severity: 'review' }));
   });
 
   it('explains disabled checks in uncertain description', () => {
@@ -335,12 +335,16 @@ describe('derivePostureReasons', () => {
     const elevated = reasons.find((r) => r.kind === 'elevated_exploit_risk');
     expect(elevated?.targets).toEqual([{ imageRef: 'exp:1', intentStatus: 'set', exposureIntent: 'public' }]);
     expect(elevated?.drivers).toEqual([{ vulnerabilityId: 'CVE-1', imageRef: 'exp:1' }]);
+    expect(elevated?.driverCount).toBe(1);
+    expect(elevated?.driversTruncated).toBe(false);
     expect(primaryAction).toEqual({
       label: 'Review driving findings',
       targetTab: 'images',
       kind: 'elevated_exploit_risk',
       targets: [{ imageRef: 'exp:1', intentStatus: 'set', exposureIntent: 'public' }],
       drivers: [{ vulnerabilityId: 'CVE-1', imageRef: 'exp:1' }],
+      driverCount: 1,
+      driversTruncated: false,
     });
   });
 

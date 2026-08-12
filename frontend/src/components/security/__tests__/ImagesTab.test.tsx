@@ -304,6 +304,31 @@ it('shows driver-focused banner for elevated_exploit_risk targeting', () => {
   expect(screen.queryByText(/Elevated exploit risk on network-exposed workload ·/)).not.toBeInTheDocument();
 });
 
+it('shows Monitoring findings banner with truncation when waiting_upstream drivers are capped', () => {
+  render(
+    <ImagesTab
+      {...base}
+      onClearTargeting={vi.fn()}
+      targeting={{
+        kind: 'waiting_upstream',
+        label: 'Waiting for upstream image',
+        imageRefs: ['app:1'],
+        targets: [{ imageRef: 'app:1' }],
+        drivers: [
+          { vulnerabilityId: 'CVE-2024-1', imageRef: 'app:1' },
+          { vulnerabilityId: 'CVE-2024-2', imageRef: 'app:1' },
+        ],
+        driverCount: 9,
+        driversTruncated: true,
+        token: 1,
+      }}
+      summaries={asMap(summary({ image_ref: 'app:1', scan_id: 1 }))}
+    />,
+  );
+  expect(screen.getByText(/Findings under Monitoring · showing 2 of 9/)).toBeInTheDocument();
+});
+
+
 it('shows conflict banner for public_exposure intent mismatch', () => {
   render(
     <ImagesTab

@@ -95,6 +95,38 @@ describe('OverviewTab remediation affordances', () => {
     vi.clearAllMocks();
   });
 
+  it('titles the review queue Why Monitoring when posture is Monitoring without blockers', () => {
+    renderOverview([
+      reason({ kind: 'waiting_upstream', label: 'Waiting for upstream image', severity: 'review' }),
+    ]);
+    expect(screen.getByRole('heading', { name: /why monitoring/i })).toBeInTheDocument();
+  });
+
+  it('passes waiting_upstream driver meta into Images targeting', async () => {
+    const user = userEvent.setup();
+    const { onNavigate } = renderOverview([
+      reason({
+        kind: 'waiting_upstream',
+        label: 'Waiting for upstream image',
+        severity: 'review',
+        targets: [{ imageRef: 'app:1' }],
+        drivers: [{ vulnerabilityId: 'CVE-1', imageRef: 'app:1' }],
+        driverCount: 5,
+        driversTruncated: true,
+      }),
+    ]);
+    await user.click(screen.getByRole('button', { name: /view findings/i }));
+    expect(onNavigate).toHaveBeenCalledWith('images', undefined, {
+      kind: 'waiting_upstream',
+      label: 'Waiting for upstream image',
+      imageRefs: ['app:1'],
+      targets: [{ imageRef: 'app:1' }],
+      drivers: [{ vulnerabilityId: 'CVE-1', imageRef: 'app:1' }],
+      driverCount: 5,
+      driversTruncated: true,
+    });
+  });
+
   it('renders View findings on a waiting_upstream non-blocker row', async () => {
     const user = userEvent.setup();
     const { onNavigate } = renderOverview([

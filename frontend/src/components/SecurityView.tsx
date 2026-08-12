@@ -112,6 +112,11 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           label: targeting.label,
           imageRefs: targeting.imageRefs,
           targets: targeting.targets,
+          ...(targeting.drivers ? { drivers: targeting.drivers } : {}),
+          ...(targeting.driverCount !== undefined ? { driverCount: targeting.driverCount } : {}),
+          ...(targeting.driversTruncated !== undefined
+            ? { driversTruncated: targeting.driversTruncated }
+            : {}),
           token: (prev?.token ?? 0) + 1,
         }));
         // R2: targeting navigation resets severity unless an explicit filter is supplied.
@@ -277,12 +282,23 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
 
   // The scanner-detections disclaimer rides as an info affordance next to the
   // scanned-images count rather than a standing caption below the masthead.
-  // When posture is Action needed, the subtitle leads with the action count and
-  // top blocker labels so the operator sees "why red" without opening the page.
+  // When posture is Action needed or Monitoring, the subtitle leads with the
+  // residual Crit/High count and top reason labels so the operator sees why
+  // without opening the review queue.
   const blockers = overview?.postureReasons?.filter((r) => r.severity === 'blocker') ?? [];
-  const actionSummary = overview?.posture === 'Action needed' && blockers.length > 0
-    ? `${blockers.length} action${blockers.length === 1 ? '' : 's'}: ${blockers.slice(0, 2).map((r) => r.label.toLowerCase()).join(', ')} · `
-    : null;
+  const reviewReasons = overview?.postureReasons?.filter((r) => r.severity === 'review') ?? [];
+  const residualCritHigh = (overview?.rawCritical ?? overview?.critical ?? 0)
+    + (overview?.rawHigh ?? overview?.high ?? 0);
+  let actionSummary: string | null = null;
+  if (overview?.posture === 'Action needed' && blockers.length > 0) {
+    actionSummary = `${blockers.length} action${blockers.length === 1 ? '' : 's'}: ${blockers.slice(0, 2).map((r) => r.label.toLowerCase()).join(', ')} · `;
+  } else if (overview?.posture === 'Monitoring' && residualCritHigh > 0) {
+    const labels = (reviewReasons.length > 0 ? reviewReasons : overview.postureReasons ?? [])
+      .slice(0, 2)
+      .map((r) => r.label.toLowerCase());
+    const labelPart = labels.length > 0 ? `: ${labels.join(', ')}` : '';
+    actionSummary = `${residualCritHigh} residual Crit/High${labelPart} · `;
+  }
   const subtitle = overview ? (
     <span className="inline-flex items-center gap-1.5">
       {actionSummary ? <span>{actionSummary}</span> : null}
@@ -393,6 +409,13 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
       scanId={inspectScanId}
       initialTab={inspectInitialTab}
       driverVulnerabilityIds={inspectDriverVulnerabilityIds}
+      driverFilterMode={
+        imagesTargeting?.kind === 'waiting_upstream' || imagesTargeting?.kind === 'update_check_uncertain'
+          ? 'monitoring'
+          : 'action'
+      }
+      driverCount={imagesTargeting?.driverCount}
+      driversTruncated={imagesTargeting?.driversTruncated}
       onClose={() => {
         setInspectScanId(null);
         setInspectDriverVulnerabilityIds(undefined);
@@ -459,6 +482,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
                 blockerLabel,
                 action.targets,
                 action.drivers,
+                { driverCount: action.driverCount, driversTruncated: action.driversTruncated },
               );
               const filter = targeting ? undefined : reasonImageFilter(action.kind);
               handleNavigate(action.targetTab, filter, targeting);

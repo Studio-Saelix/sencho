@@ -168,15 +168,19 @@ describe('classifyExposedImages', () => {
 
 describe('collectKevDrivers', () => {
   it('collects unsuppressed KEV drivers and skips suppressed', () => {
-    const drivers = collectKevDrivers([
+    const capped = collectKevDrivers([
       { imageRef: 'a:1', vulnerability_id: 'CVE-A', suppressed: false },
       { imageRef: 'a:1', vulnerability_id: 'CVE-B', suppressed: true },
       { imageRef: 'b:1', vulnerability_id: 'CVE-C' },
     ]);
-    expect(drivers).toEqual([
-      { vulnerabilityId: 'CVE-A', imageRef: 'a:1' },
-      { vulnerabilityId: 'CVE-C', imageRef: 'b:1' },
-    ]);
+    expect(capped).toEqual({
+      drivers: [
+        { vulnerabilityId: 'CVE-A', imageRef: 'a:1' },
+        { vulnerabilityId: 'CVE-C', imageRef: 'b:1' },
+      ],
+      driverCount: 2,
+      driversTruncated: false,
+    });
   });
 
   it('caps KEV drivers at POSTURE_DRIVER_CAP', () => {
@@ -184,6 +188,9 @@ describe('collectKevDrivers', () => {
     for (let i = 0; i < POSTURE_DRIVER_CAP + 3; i += 1) {
       rows.push({ imageRef: 'img:1', vulnerability_id: `CVE-K${i}` });
     }
-    expect(collectKevDrivers(rows)).toHaveLength(POSTURE_DRIVER_CAP);
+    const capped = collectKevDrivers(rows);
+    expect(capped.drivers).toHaveLength(POSTURE_DRIVER_CAP);
+    expect(capped.driverCount).toBe(POSTURE_DRIVER_CAP + 3);
+    expect(capped.driversTruncated).toBe(true);
   });
 });

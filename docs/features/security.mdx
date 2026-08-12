@@ -28,9 +28,15 @@ to "what can and should I do right now?":
   action Sencho can drive. Package fixes may exist without an applicable container-image update,
   findings may already be triaged, or workloads may be intentionally network-exposed without an
   independent Security driver. Waiting for an upstream image and uncertain update availability
-  appear in the review queue without a red masthead.
+  are review-level reasons (not Action needed), so they appear under **Why Monitoring** without a
+  red masthead.
 - **Secure**: nothing actionable right now. This is never a claim that no vulnerabilities exist.
 - **Unknown**: the scanner is not installed, or no scan has completed yet.
+
+**Monitoring** means residual Critical/High risk remains visible and reviewable, while Security has
+no confirmed operator action it can drive right now. That is not a claim of safety: raw detections,
+package-fix evidence without a confirmed image update, waiting-upstream and update-check-uncertain
+rows, and intentional exposure context stay on the page so residual risk is never silent.
 
 Raw Critical and High counts stay visible next to the posture as **scanner detections**, not as the
 posture itself: a vulnerable component being present is not the same as a reachable, exploitable risk.
@@ -39,7 +45,8 @@ image-update availability, exploit intelligence, exposure, and triage decisions 
 severity alone. A Trivy package fix does not by itself mean Sencho can update the image; when a
 newer image is confirmed available the review queue offers **Review update**, and when no applicable
 update is identified it surfaces **Waiting for upstream image** instead of an impossible update
-instruction.
+instruction. Deploy policies remain orthogonal: they may still block admission on package-fix
+Critical/High even when Security posture is Monitoring.
 
 An admin on a node with a ready scanner sees a **Scan this node** button above the review queue. It
 opens a popover to pick any combination of image vulnerabilities, image secrets, and Compose
@@ -54,7 +61,7 @@ CVEs, elevated exploit risk on network-exposed workloads, detected secrets, unac
 risks, and exposure that conflicts with declared Networking intent. Intentional network exposure is
 Security context, not an independent Action needed reason by itself. When only monitoring items
 remain (waiting for an upstream image, update availability unknown, network-exposed images not yet
-classified, findings awaiting triage, stale or failed scans) the card is titled **Review queue**
+classified, findings awaiting triage, stale or failed scans) the card is titled **Why Monitoring**
 and lists them with View findings shortcuts (and Check again when image update availability could
 not be established and you can manage the node), so the operator can see what to keep an eye on
 without a permanent alarm. Shortcuts that carry affected image identities open Images already
@@ -127,7 +134,7 @@ the secret findings for a scan.
 ## Policies
 
 <Frame>
-  <img src="/images/security/add-policy.png" alt="New policy dialog with a Name field, an optional glob-style Stack pattern field, Block conditions toggles for Severity threshold, Known-exploited (KEV), and Fixable Critical/High, a Block on deploy toggle, and an Enabled toggle." />
+  <img src="/images/security/add-policy.png" alt="New policy dialog with a Name field, an optional glob-style Stack pattern field, Block conditions toggles for Severity threshold, Known-exploited (KEV), and Package fix available (Critical/High), a Block on deploy toggle, and an Enabled toggle." />
 </Frame>
 
 The Policies tab manages deploy-enforcement scan policies: a policy names one or more block

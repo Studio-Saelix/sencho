@@ -111,10 +111,14 @@ export interface PostureReason {
    */
   targets?: PostureTarget[];
   /**
-   * Exact contributing findings for vulnerability-derived blockers (capped).
+   * Exact contributing findings for vulnerability-derived reasons (capped).
    * Older remotes omit this field.
    */
   drivers?: PostureDriverFinding[];
+  /** Full contributing driver count before cap; omit when drivers omitted. */
+  driverCount?: number;
+  /** True when driverCount exceeds the attached drivers array length. */
+  driversTruncated?: boolean;
 }
 
 export interface PostureAction {
@@ -127,6 +131,8 @@ export interface PostureAction {
   targets?: PostureTarget[];
   /** Same drivers as the reason that produced this action, when available. */
   drivers?: PostureDriverFinding[];
+  driverCount?: number;
+  driversTruncated?: boolean;
 }
 
 export interface SecurityPostureFacts {
@@ -193,11 +199,24 @@ export interface SecurityPostureFacts {
   fixableUpdateUnknownTargets?: string[];
   knownExploitedTargets?: string[];
   knownExploitedDrivers?: PostureDriverFinding[];
+  knownExploitedDriverCount?: number;
+  knownExploitedDriversTruncated?: boolean;
   /** Per-service exposure targets (may repeat imageRef across stack/service). */
   exposureIntentConflictTargets?: PostureTarget[];
   exposedUnclassifiedTargets?: PostureTarget[];
   elevatedExploitRiskTargets?: PostureTarget[];
   elevatedExploitRiskDrivers?: PostureDriverFinding[];
+  elevatedExploitRiskDriverCount?: number;
+  elevatedExploitRiskDriversTruncated?: boolean;
+  fixableWithImageUpdateDrivers?: PostureDriverFinding[];
+  fixableWithImageUpdateDriverCount?: number;
+  fixableWithImageUpdateDriversTruncated?: boolean;
+  fixableWaitingUpstreamDrivers?: PostureDriverFinding[];
+  fixableWaitingUpstreamDriverCount?: number;
+  fixableWaitingUpstreamDriversTruncated?: boolean;
+  fixableUpdateUnknownDrivers?: PostureDriverFinding[];
+  fixableUpdateUnknownDriverCount?: number;
+  fixableUpdateUnknownDriversTruncated?: boolean;
 }
 
 /** Cap and convert raw refs to PostureTarget[]. Returns truncated=true when capped. */
@@ -258,7 +277,24 @@ function actionFrom(reason: PostureReason): PostureAction {
   };
   if (reason.targets) action.targets = reason.targets;
   if (reason.drivers) action.drivers = reason.drivers;
+  if (reason.driverCount !== undefined) action.driverCount = reason.driverCount;
+  if (reason.driversTruncated !== undefined) action.driversTruncated = reason.driversTruncated;
   return action;
+}
+
+function withDrivers(
+  base: PostureReason,
+  drivers: PostureDriverFinding[] | undefined,
+  driverCount?: number,
+  driversTruncated?: boolean,
+): PostureReason {
+  if (!drivers || drivers.length === 0) return base;
+  return {
+    ...base,
+    drivers,
+    driverCount: driverCount ?? drivers.length,
+    driversTruncated: driversTruncated ?? false,
+  };
 }
 
 /**
@@ -330,7 +366,7 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
   // Blockers. Each of these can keep the masthead red.
 
   if (f.fixableWithImageUpdate > 0) {
-    push({
+    push(withDrivers({
       kind: 'fixable_cve',
       count: f.fixableWithImageUpdate,
       severity: 'blocker',
@@ -338,24 +374,23 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
       description: 'Critical or High findings have a newer image available to review. This does not prove the candidate removes the findings.',
       targetTab: 'images',
       actionLabel: 'Review update',
-    }, f.fixableWithImageUpdateTargets);
+    }, f.fixableWithImageUpdateDrivers, f.fixableWithImageUpdateDriverCount, f.fixableWithImageUpdateDriversTruncated), f.fixableWithImageUpdateTargets);
   }
 
   if (f.knownExploited > 0) {
-    push({
+    push(withDrivers({
       kind: 'known_exploited',
       count: f.knownExploited,
       severity: 'blocker',
       label: 'Known-exploited findings',
       description: 'Findings in the CISA Known Exploited Vulnerabilities catalog.',
       targetTab: 'images',
-      drivers: f.knownExploitedDrivers,
-    }, f.knownExploitedTargets);
+    }, f.knownExploitedDrivers, f.knownExploitedDriverCount, f.knownExploitedDriversTruncated), f.knownExploitedTargets);
   }
 
   if (f.elevatedExploitRisk > 0) {
     const capped = capPostureTargetRows(f.elevatedExploitRiskTargets);
-    pushCapped({
+    pushCapped(withDrivers({
       kind: 'elevated_exploit_risk',
       count: f.elevatedExploitRisk,
       severity: 'blocker',
@@ -363,8 +398,7 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
       description: 'Critical or High findings on network-exposed images have elevated EPSS. Exposure intent is context; review the driving findings.',
       targetTab: 'images',
       actionLabel: 'Review driving findings',
-      drivers: f.elevatedExploitRiskDrivers,
-    }, capped);
+    }, f.elevatedExploitRiskDrivers, f.elevatedExploitRiskDriverCount, f.elevatedExploitRiskDriversTruncated), capped);
   }
 
   if (f.secrets > 0) {
@@ -428,33 +462,33 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
     });
   }
 
-  // Info items. Context only, never red.
-
   if (f.fixableWaitingUpstream > 0) {
-    push({
+    push(withDrivers({
       kind: 'waiting_upstream',
       count: f.fixableWaitingUpstream,
-      severity: 'info',
+      severity: 'review',
       label: 'Waiting for upstream image',
       description: 'Package fixes exist for findings in this image, but Sencho cannot currently identify a newer image to apply under its latest authoritative check.',
       targetTab: 'images',
       actionLabel: VIEW_FINDINGS_LABEL,
-    }, f.fixableWaitingUpstreamTargets);
+    }, f.fixableWaitingUpstreamDrivers, f.fixableWaitingUpstreamDriverCount, f.fixableWaitingUpstreamDriversTruncated), f.fixableWaitingUpstreamTargets);
   }
 
   if (f.fixableUpdateUnknown > 0) {
-    push({
+    push(withDrivers({
       kind: 'update_check_uncertain',
       count: f.fixableUpdateUnknown,
-      severity: 'info',
+      severity: 'review',
       label: 'Update availability unknown',
       description: f.updateChecksDisabled
         ? 'Package fixes exist, but image update checks are disabled on this node, so Sencho cannot tell whether a newer image is available.'
         : 'Package fixes exist, but Sencho could not establish whether an applicable image update is available (partial, failed, stale, not checkable, or unmatched image).',
       targetTab: 'images',
       actionLabel: VIEW_FINDINGS_LABEL,
-    }, f.fixableUpdateUnknownTargets);
+    }, f.fixableUpdateUnknownDrivers, f.fixableUpdateUnknownDriverCount, f.fixableUpdateUnknownDriversTruncated), f.fixableUpdateUnknownTargets);
   }
+
+  // Info items. Context only, never red.
 
   if (f.staleScans > 0) {
     push({

@@ -387,14 +387,27 @@ export function ImagesTab({
       );
     } else {
       const partialMatch = matchedTargetMeta.matched < matchedTargetMeta.total;
+      const fullDriverCount = targeting.driverCount ?? driverCount;
       const drivingTitle = driverCount > 0;
+      const monitoringKinds = new Set(['waiting_upstream', 'update_check_uncertain']);
+      const monitoringMode = monitoringKinds.has(targeting.kind);
+      const truncated = targeting.driversTruncated === true
+        && fullDriverCount > driverCount
+        && driverCount > 0;
+      const driverTitle = monitoringMode
+        ? (truncated
+          ? `Findings under Monitoring · showing ${driverCount} of ${fullDriverCount}`
+          : `Findings under Monitoring · ${fullDriverCount} finding${fullDriverCount === 1 ? '' : 's'}`)
+        : (truncated
+          ? `Driving current Security action · showing ${driverCount} of ${fullDriverCount}`
+          : `Driving current Security action · ${fullDriverCount} finding${fullDriverCount === 1 ? '' : 's'}`);
       targetingBanner = (
         <TargetingBannerFrame>
           <div className="flex items-start gap-3 justify-between">
             <div className="min-w-0">
               <p className="font-mono text-xs text-stat-value">
                 {drivingTitle
-                  ? `Driving current Security action · ${driverCount} finding${driverCount === 1 ? '' : 's'}`
+                  ? driverTitle
                   : formatTargetingTitle(
                     matchedTargetMeta.label,
                     matchedTargetMeta.matched,
@@ -403,7 +416,9 @@ export function ImagesTab({
               </p>
               <p className="text-xs text-stat-subtitle mt-0.5">
                 {drivingTitle
-                  ? 'Open an image to review the exact findings driving this Security action.'
+                  ? (monitoringMode
+                    ? 'Open an image to review findings under Monitoring for this reason.'
+                    : 'Open an image to review the exact findings driving this Security action.')
                   : 'Showing images responsible for the current Security action.'}
                 {partialMatch ? ' An affected image has no scan summary on this node.' : ''}
                 {posturePartial ? ' The overview pass may be incomplete.' : ''}

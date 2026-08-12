@@ -90,7 +90,13 @@ function reasonNavLabel(r: PostureReason): string {
 }
 
 function navigateReason(onNavigate: NavigateFn, reason: PostureReason): void {
-  const targeting = targetingFromTargets(reason.kind, reason.label, reason.targets, reason.drivers);
+  const targeting = targetingFromTargets(
+    reason.kind,
+    reason.label,
+    reason.targets,
+    reason.drivers,
+    { driverCount: reason.driverCount, driversTruncated: reason.driversTruncated },
+  );
   // Prefer precise targets; severity filter is only the older-node fallback.
   const filter = targeting ? undefined : reasonImageFilter(reason.kind);
   onNavigate(reason.targetTab, filter, targeting);
@@ -147,17 +153,23 @@ function ReviewQueueCard({
   onNavigate,
   canManageNode,
   updateChecksDisabled,
+  posture,
 }: {
   reasons: PostureReason[];
   onNavigate: NavigateFn;
   canManageNode: boolean;
   updateChecksDisabled: boolean;
+  posture?: SecurityOverview['posture'];
 }) {
   const [checkAgainBusy, setCheckAgainBusy] = useState(false);
   const blockers = reasons.filter((r) => r.severity === 'blocker');
   const nonBlockers = reasons.filter((r) => r.severity !== 'blocker');
   const hasBlockers = blockers.length > 0;
-  const title = hasBlockers ? 'Why Action needed' : 'Review queue';
+  const title = hasBlockers
+    ? 'Why Action needed'
+    : posture === 'Monitoring'
+      ? 'Why Monitoring'
+      : 'Review queue';
 
   const handleCheckAgain = async () => {
     if (checkAgainBusy) return;
@@ -303,6 +315,7 @@ export function OverviewTab({
           onNavigate={onNavigate}
           canManageNode={canManageNode}
           updateChecksDisabled={overview.updateChecksDisabled === true}
+          posture={overview.posture}
         />
       )}
 
@@ -371,7 +384,7 @@ export function OverviewTab({
             tone="subtitle"
           />
           <p className="mt-2 text-xs text-muted-foreground">
-            Manage enforcement policies on the Policies tab. This is a read-only posture for the active node.
+            Security posture describes current operational actionability. Explicit deploy policies may enforce stricter admission rules (package fix available ≠ confirmed image update). Manage enforcement policies on the Policies tab. This is a read-only posture for the active node.
           </p>
         </div>
       </div>
