@@ -267,6 +267,13 @@ describe('MobileStackDetail mobile editing', () => {
         expect(requestSaveAndDeploy).toHaveBeenCalledTimes(1);
     });
 
+
+    it('keeps plain Save available while Save & Deploy is blocked when readiness is absent', () => {
+        render(<MobileStackDetail {...makeProps({ editingCompose: true, actionsReady: false })} />);
+        expect(screen.getByTestId('mobile-editor-save')).toBeEnabled();
+        expect(screen.getByTestId('mobile-editor-save-deploy')).toBeDisabled();
+    });
+
     it('normalizes a files tab to compose so the visible edit saves to the visible file', () => {
         // Desktop can hand off activeTab='files' when it crosses into the mobile
         // breakpoint; the editor shows compose, so the shared tab must follow or

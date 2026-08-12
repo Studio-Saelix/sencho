@@ -569,6 +569,18 @@ export function useStackActions(options: UseStackActionsOptions) {
   // time, so a dialog opened while ready cannot bypass a later readiness loss.
   const hydrationReady = stackListState.hydrationReady;
 
+  // Executor-boundary readiness: the evidence must be authoritative for the
+  // active node AND that node must still be the node the deferred operation
+  // was captured for. A dialog opened on node A cannot dispatch after the
+  // operator switched to node B, even once B finishes hydrating. Compares
+  // against the existing effect-updated activeNodeIdRef (see above): by the
+  // time a dialog is confirmed, the switch effect has long run.
+  const hydrationReadyForNode = (opNodeId: number | null): boolean => {
+    if (!hydrationReady()) return false;
+    if (opNodeId !== (activeNodeIdRef.current ?? null)) return false;
+    return true;
+  };
+
   const openSelfStackProtectedIfNeeded = (file: string | null | undefined): boolean => {
     // Without authoritative self identity the frontend must not guess: block
     // without opening the self-stack modal (which would falsely identify an
@@ -1468,10 +1480,10 @@ export function useStackActions(options: UseStackActionsOptions) {
     // (not before the advisory) so cancelling the advisory leaves no stuck state.
     const runDeployFlow = async () => {
       // Final boundary recheck: an advisory or external-network dialog opened
-      // while ready must not dispatch after readiness was lost (node switch,
-      // list change, failed refresh). Release the pending guard so the UI is
-      // not stuck when blocked.
-      if (!hydrationReady()) {
+      // while ready must not dispatch after readiness was lost or the active
+      // node changed (the operation would target the captured node). Release
+      // the pending guard so the UI is not stuck when blocked.
+      if (!hydrationReadyForNode(opNodeId)) {
         deployPendingRef.current = false;
         toast.error('Status data unavailable. Refresh and try again.');
         return;
@@ -1878,8 +1890,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     const opNodeId = activeNode?.id ?? null;
     const run = () => {
       // Final boundary recheck: the readiness dialog's proceed must not dispatch
-      // to the captured node after readiness was lost.
-      if (!hydrationReady()) {
+      // to the captured node after readiness was lost or the active node changed.
+      if (!hydrationReadyForNode(opNodeId)) {
         toast.error('Status data unavailable. Refresh and try again.');
         return Promise.resolve();
       }
@@ -1915,8 +1927,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     const opNodeId = activeNode?.id ?? null;
     const run = async () => {
       // Final boundary recheck: the readiness dialog's proceed must not dispatch
-      // to the captured node after readiness was lost.
-      if (!hydrationReady()) {
+      // to the captured node after readiness was lost or the active node changed.
+      if (!hydrationReadyForNode(opNodeId)) {
         toast.error('Status data unavailable. Refresh and try again.');
         return;
       }

@@ -151,13 +151,19 @@ function setup(over: {
   const onDeletedOpenStack = over.onDeletedOpenStack ?? vi.fn();
   const removeNotificationsForStack = over.removeNotificationsForStack ?? vi.fn();
 
-  const { result } = renderHook(() =>
+  // Live node holder so a test can re-render the hook with a different active
+  // node (e.g. to prove a deferred continuation captured for node A is blocked
+  // after the operator switches to node B).
+  const activeNodeHolder: { current: ActiveNode | null } = {
+    current: over.activeNode === undefined ? DEFAULT_ACTIVE_NODE : over.activeNode,
+  };
+  const { result, rerender } = renderHook(() =>
     useStackActions({
       editorState,
       stackListState,
       navState,
       overlayState,
-      activeNode: over.activeNode === undefined ? DEFAULT_ACTIVE_NODE : over.activeNode,
+      activeNode: activeNodeHolder.current,
       setActiveNode,
       nodes: [],
       runWithLog,
@@ -171,7 +177,7 @@ function setup(over: {
       canReapplyCompose: over.canReapplyCompose ?? false,
     }),
   );
-  return { result, editorState, stackListState, overlayState, navState, setActiveNode, onDeletedOpenStack, removeNotificationsForStack };
+  return { result, rerender, activeNodeHolder, editorState, stackListState, overlayState, navState, setActiveNode, onDeletedOpenStack, removeNotificationsForStack };
 }
 
 describe('useStackActions.saveFile', () => {
@@ -2083,4 +2089,71 @@ describe('useStackActions deferred readiness-loss guards', () => {
     });
     expect(lastRunWithLogParams).toBeNull();
   });
+
+  it('blocks a deferred stack update captured for node A after the switch to node B is fully hydrated', async () => {
+    lastRunWithLogParams = null;
+    const { result, overlayState, stackListState, rerender, activeNodeHolder } = setup({ hasUpdateGuard: true });
+    await act(async () => {
+      await result.current.updateStack();
+    });
+    const proceed = (
+      vi.mocked(overlayState.setUpdateReadiness).mock.calls[0][0] as { proceed: () => void }
+    ).proceed;
+    // Switch to node B and let it finish hydrating: readiness is true for B,
+    // but the captured operation node is still A.
+    activeNodeHolder.current = { id: 2, name: 'B', type: 'remote' } as ActiveNode;
+    rerender();
+    vi.mocked(stackListState.hydrationReady).mockReturnValue(true);
+    await act(async () => {
+      proceed();
+    });
+    expect(lastRunWithLogParams).toBeNull();
+  });
+
+  it('blocks a deferred service update captured for node A after the switch to node B is fully hydrated', async () => {
+    lastRunWithLogParams = null;
+    const { result, overlayState, stackListState, rerender, activeNodeHolder } = setup({ hasUpdateGuard: true });
+    await act(async () => {
+      await result.current.requestServiceUpdate('web.yml', 'web');
+    });
+    const proceed = (
+      vi.mocked(overlayState.setUpdateReadiness).mock.calls[0][0] as { proceed: () => void }
+    ).proceed;
+    activeNodeHolder.current = { id: 2, name: 'B', type: 'remote' } as ActiveNode;
+    rerender();
+    vi.mocked(stackListState.hydrationReady).mockReturnValue(true);
+    await act(async () => {
+      proceed();
+    });
+    expect(lastRunWithLogParams).toBeNull();
+  });
+
+  it('blocks a deferred deploy captured for node A after the switch to node B is fully hydrated', async () => {
+    lastRunWithLogParams = null;
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(JSON.stringify({ enabled: true, images: [{}] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const { result, overlayState, stackListState, rerender, activeNodeHolder } = setup();
+    await act(async () => {
+      await result.current.deployStack();
+    });
+    // The advisory dialog opened; its proceed is the deferred continuation.
+    const proceed = (
+      vi.mocked(overlayState.setPreDeployAdvisory).mock.calls[0][0] as { proceed: () => void }
+    ).proceed;
+    // Switch to node B and let it finish hydrating: readiness is true for B,
+    // but the captured operation node is still A.
+    activeNodeHolder.current = { id: 2, name: 'B', type: 'remote' } as ActiveNode;
+    rerender();
+    vi.mocked(stackListState.hydrationReady).mockReturnValue(true);
+    await act(async () => {
+      proceed();
+    });
+    expect(lastRunWithLogParams).toBeNull();
+  });
 });
+
