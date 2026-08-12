@@ -52,25 +52,25 @@ export function useOverlayState() {
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [stackToDelete, setStackToDelete] = useState<string | null>(null);
-  const openDeleteDialog = useCallback((stackName: string) => {
-    setStackToDelete(stackName);
+  const [deleteTarget, setDeleteTarget] = useState<{ name: string; nodeId: number | null } | null>(null);
+  const openDeleteDialog = useCallback((target: { name: string; nodeId: number | null }) => {
+    setDeleteTarget(target);
     setDeleteDialogOpen(true);
   }, []);
   const closeDeleteDialog = useCallback(() => {
     setDeleteDialogOpen(false);
-    setStackToDelete(null);
+    setDeleteTarget(null);
   }, []);
 
   const [takeDownDialogOpen, setTakeDownDialogOpen] = useState(false);
-  const [stackToTakeDown, setStackToTakeDown] = useState<string | null>(null);
-  const openTakeDownDialog = useCallback((stackName: string) => {
-    setStackToTakeDown(stackName);
+  const [takeDownTarget, setTakeDownTarget] = useState<{ name: string; nodeId: number | null } | null>(null);
+  const openTakeDownDialog = useCallback((target: { name: string; nodeId: number | null }) => {
+    setTakeDownTarget(target);
     setTakeDownDialogOpen(true);
   }, []);
   const closeTakeDownDialog = useCallback(() => {
     setTakeDownDialogOpen(false);
-    setStackToTakeDown(null);
+    setTakeDownTarget(null);
   }, []);
 
   const [pendingUnsavedLoad, setPendingUnsavedLoad] = useState<string | null>(null);
@@ -192,8 +192,8 @@ export function useOverlayState() {
 
   return {
     createDialogOpen, setCreateDialogOpen,
-    deleteDialogOpen, stackToDelete, openDeleteDialog, closeDeleteDialog,
-    takeDownDialogOpen, stackToTakeDown, openTakeDownDialog, closeTakeDownDialog,
+    deleteDialogOpen, deleteTarget, openDeleteDialog, closeDeleteDialog,
+    takeDownDialogOpen, takeDownTarget, openTakeDownDialog, closeTakeDownDialog,
     pendingUnsavedLoad, setPendingUnsavedLoad,
     pendingLoadOptions, setPendingLoadOptions,
     pendingUnsavedNode, setPendingUnsavedNode,

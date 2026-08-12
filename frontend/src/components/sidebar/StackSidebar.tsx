@@ -35,6 +35,10 @@ export interface StackSidebarProps {
   onClearSelection: () => void;
   onBulkAction: (action: BulkAction) => void;
   showUpdatesChip?: boolean;
+  /** True when Up/Down filter counts derive from retained stale evidence. */
+  filterStale?: boolean;
+  /** False while status evidence is not authoritative; disables bulk buttons. */
+  actionsReady?: boolean;
 }
 
 export function StackSidebar(props: StackSidebarProps) {
@@ -44,6 +48,8 @@ export function StackSidebar(props: StackSidebarProps) {
     list, activitySummary, onActivityAction,
     bulkMode, selectedFiles, onToggleBulkMode, onToggleSelect, onClearSelection, onBulkAction,
     showUpdatesChip = true,
+    filterStale = false,
+    actionsReady = false,
   } = props;
 
   const [filtersVisible, setFiltersVisible] = useState(() => {
@@ -91,18 +97,20 @@ export function StackSidebar(props: StackSidebarProps) {
           visible={filtersVisible}
           onToggle={handleToggleFilters}
           showUpdatesChip={showUpdatesChip}
+          stale={filterStale}
         />
         {selectedFiles.size > 0 && (
           <SidebarBulkBar
             selectedCount={selectedFiles.size}
             onAction={onBulkAction}
             onClear={onClearSelection}
+            actionsReady={actionsReady}
           />
         )}
         <ScrollArea block className="flex-1 px-2 pb-2">
           <div
             data-stacks-loaded={
-              isStacksListSettled(list.isLoading, list.stacksLoadStatus) ? 'true' : 'false'
+              isStacksListSettled(list.isLoading, list.stacksLoadStatus, list.hydrationStatus) ? 'true' : 'false'
             }
           >
             <StackList {...list} bulkMode={bulkMode} selectedFiles={selectedFiles} onToggleSelect={onToggleSelect} />

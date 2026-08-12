@@ -1,4 +1,5 @@
 import BashExecModal from '../BashExecModal';
+import { toast } from '@/components/ui/toast-store';
 import { PolicyBlockDialog } from '../stack/PolicyBlockDialog';
 import { PreDeployScanDialog } from '../stack/PreDeployScanDialog';
 import { MissingExternalNetworksDialog } from '../stack/MissingExternalNetworksDialog';
@@ -44,6 +45,9 @@ interface ShellOverlaysProps {
   canOfferVolumeRemoval: boolean;
   deleteVolumePreservation: VolumePreservationOnDelete;
   onOpenFleetNodeUpdates: () => void;
+  /** Ref-backed readiness check, evaluated at confirmation time so a dialog
+   *  opened while ready cannot dispatch after a node switch or failed refresh. */
+  hydrationReady: () => boolean;
 }
 
 export function ShellOverlays({
@@ -65,10 +69,11 @@ export function ShellOverlays({
   canOfferVolumeRemoval,
   deleteVolumePreservation,
   onOpenFleetNodeUpdates,
+  hydrationReady,
 }: ShellOverlaysProps) {
   const {
-    deleteDialogOpen, closeDeleteDialog, stackToDelete,
-    takeDownDialogOpen, closeTakeDownDialog, stackToTakeDown,
+    deleteDialogOpen, closeDeleteDialog, deleteTarget,
+    takeDownDialogOpen, closeTakeDownDialog, takeDownTarget,
     pendingUnsavedLoad, pendingLeaveAction,
     bashModalOpen, selectedContainer,
     logViewerOpen, logContainer,
@@ -85,11 +90,11 @@ export function ShellOverlays({
   } = overlayState;
 
   const isDeleteConfirming =
-    stackToDelete != null &&
-    stackActionMap[resolveStackFileKey(stackFiles, stackToDelete)] === 'delete';
+    deleteTarget != null &&
+    stackActionMap[resolveStackFileKey(stackFiles, deleteTarget.name)] === 'delete';
   const isTakeDownConfirming =
-    stackToTakeDown != null &&
-    stackActionMap[resolveStackFileKey(stackFiles, stackToTakeDown)] === 'down';
+    takeDownTarget != null &&
+    stackActionMap[resolveStackFileKey(stackFiles, takeDownTarget.name)] === 'down';
   const sheetImage = inspectImage && inspectImage.nodeId === activeNodeId
     ? inspectImage
     : null;
@@ -102,7 +107,7 @@ export function ShellOverlays({
       <DeleteStackDialog
         open={deleteDialogOpen}
         onOpenChange={(open) => { if (!open) closeDeleteDialog(); }}
-        stackName={stackToDelete}
+        stackName={deleteTarget?.name ?? null}
         volumePreservation={deleteVolumePreservation}
         onConfirm={stackActions.deleteStack}
         confirming={isDeleteConfirming}
@@ -111,7 +116,7 @@ export function ShellOverlays({
       <TakeDownStackDialog
         open={takeDownDialogOpen}
         onOpenChange={(open) => { if (!open) closeTakeDownDialog(); }}
-        stackName={stackToTakeDown}
+        stackName={takeDownTarget?.name ?? null}
         showVolumeOption={canOfferVolumeRemoval}
         onConfirm={stackActions.takeDownStack}
         confirming={isTakeDownConfirming}
@@ -132,6 +137,9 @@ export function ShellOverlays({
           if (!open) setComposeReapplyCapture(null);
         }}
         onConfirm={() => {
+          // Readiness loss keeps the dialog open with the confirmation blocked;
+          // the capture is only cleared on an actual dispatch.
+          if (!hydrationReady()) return;
           const capture = composeReapplyCapture;
           setComposeReapplyCapture(null);
           if (!capture || composeReapply.dispatching) return;
@@ -276,9 +284,16 @@ export function ShellOverlays({
           setDiffPreviewConfirming(true);
           try {
             if (snapshot?.mode === 'save-and-deploy') {
+              // Recheck before the PUT: Save & Deploy from the diff preview must
+              // not write the file while status evidence is not authoritative.
+              if (!hydrationReady()) {
+                toast.error('Status data unavailable. Refresh and try again.');
+                return;
+              }
               const saved = await stackActions.saveFile();
               if (saved) await stackActions.deployStack();
             } else {
+              // Plain Save is never gated by status readiness.
               await stackActions.saveFile();
             }
           } finally {

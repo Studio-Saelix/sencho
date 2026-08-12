@@ -72,6 +72,7 @@ function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
         closeComposeEditor: vi.fn(),
         requestSave: vi.fn(),
         requestSaveAndDeploy: vi.fn(),
+        actionsReady: true,
         discardChanges: vi.fn(),
         setContent: vi.fn(),
         setEnvContent: vi.fn(),
@@ -264,6 +265,13 @@ describe('MobileStackDetail mobile editing', () => {
         render(<MobileStackDetail {...makeProps({ editingCompose: true, requestSaveAndDeploy })} />);
         fireEvent.click(screen.getByTestId('mobile-editor-save-deploy'));
         expect(requestSaveAndDeploy).toHaveBeenCalledTimes(1);
+    });
+
+
+    it('keeps plain Save available while Save & Deploy is blocked when readiness is absent', () => {
+        render(<MobileStackDetail {...makeProps({ editingCompose: true, actionsReady: false })} />);
+        expect(screen.getByTestId('mobile-editor-save')).toBeEnabled();
+        expect(screen.getByTestId('mobile-editor-save-deploy')).toBeDisabled();
     });
 
     it('normalizes a files tab to compose so the visible edit saves to the visible file', () => {

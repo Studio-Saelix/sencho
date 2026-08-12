@@ -25,6 +25,7 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
     deploy, stop, restart, update, takeDown, remove, pin, unpin, toggleLabel,
     menuVisibility, openScheduleTask,
     canMuteNotifications, muteStackAll, muteStackDeploySuccess, muteStackMonitor, openStackMuteRules,
+    ready,
   } = ctx;
   const { showDeploy, showStop, showRestart, showUpdate, showTakeDown } = menuVisibility;
 
@@ -89,10 +90,10 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
       if (showUpdate) lifecycle.push({ id: 'update', label: 'Update', icon: Download, shortcut: '⌘↑', onSelect: update, disabled: isBusy });
       if (showTakeDown) lifecycle.push({ id: 'take-down', label: 'Take down', icon: ArrowDownToLine, shortcut: '⌘↓', onSelect: takeDown, disabled: isBusy || isSelfStack });
     }
-    if (canDeploy) lifecycle.push({ id: 'schedule', label: 'Schedule task', icon: CalendarClock, onSelect: openScheduleTask });
+    if (canDeploy && ready) lifecycle.push({ id: 'schedule', label: 'Schedule task', icon: CalendarClock, onSelect: openScheduleTask });
     if (lifecycle.length > 0) groups.push({ id: 'lifecycle', items: lifecycle });
 
-    if (canDelete) {
+    if (canDelete && ready) {
       groups.push({
         id: 'destructive',
         items: [{
@@ -110,7 +111,7 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
     return groups;
   }, [
     stackStatus, isSelfStack, canOpenApp, isBusy, canDelete, canDeploy, canEditLabels, isPinned, labels,
-    showDeploy, showStop, showRestart, showUpdate, showTakeDown,
+    ready, showDeploy, showStop, showRestart, showUpdate, showTakeDown,
     openAlertSheet, openAutoHeal, canViewMonitor, canCheckUpdates, checkUpdates, openStackApp,
     deploy, stop, restart, update, takeDown, remove, pin, unpin, toggleLabel, openScheduleTask,
     canMuteNotifications, muteStackAll, muteStackDeploySuccess, muteStackMonitor, openStackMuteRules,
