@@ -2786,8 +2786,15 @@ export class GitSourceService {
 
     private candidateInvocationArgs(stackName: string, src: StackGitSource, envContentPresent: boolean): string[] {
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
-        const stackDir = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId), stackName);
-        const rootEnvPath = path.join(stackDir, '.env');
+        // Canonical js/path-injection barrier inline with the existsSync sink.
+        // CodeQL does not credit a wrapped helper or a check separated from the sink.
+        const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId));
+        const stackDir = path.resolve(baseResolved, stackName);
+        let rootEnvFilePresent = src.sync_env && envContentPresent;
+        const envPath = path.resolve(stackDir, '.env');
+        if (envPath.startsWith(baseResolved + path.sep) && existsSync(envPath)) {
+            rootEnvFilePresent = true;
+        }
         return buildCandidateComposeInvocation({
             stackName,
             composePaths: src.compose_paths,
@@ -2796,7 +2803,7 @@ export class GitSourceService {
             syncEnv: src.sync_env,
             envContentPresent,
             projectEnvFiles: DatabaseService.getInstance().getStackProjectEnvFiles(nodeId, stackName),
-            rootEnvFilePresent: existsSync(rootEnvPath) || (src.sync_env && envContentPresent),
+            rootEnvFilePresent,
         });
     }
 

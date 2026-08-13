@@ -1877,17 +1877,17 @@ export class FileSystemService {
     relPath: string,
     scope?: FileRootScope,
   ): Promise<'file' | 'directory' | 'symlink' | null> {
-    if (scope?.rootAbsDir === undefined) {
-      const stackDir = path.join(this.baseDir, stackName);
-      try {
-        await fsPromises.lstat(stackDir);
-      } catch (err: unknown) {
-        const e = err as NodeJS.ErrnoException;
-        if (e.code === 'ENOENT') return null;
-        throw err;
-      }
-    }
     try {
+      if (scope?.rootAbsDir === undefined) {
+        // Canonical js/path-injection barrier inline with the lstat sink. A missing
+        // stack dir must return null (leaf resolve would throw path-escape). CodeQL
+        // only credits containment when it sits at the sink.
+        const baseResolved = path.resolve(this.baseDir);
+        const stackDir = path.resolve(baseResolved, stackName);
+        if (stackDir.startsWith(baseResolved + path.sep)) {
+          await fsPromises.lstat(stackDir);
+        }
+      }
       const safePath = await this.resolveScopedLeafPath(stackName, relPath, scope);
       const stat = await fsPromises.lstat(safePath);
       if (stat.isSymbolicLink()) return 'symlink';
