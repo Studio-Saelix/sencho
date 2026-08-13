@@ -27,6 +27,17 @@ describe('gitSourceStatus', () => {
         expect(gitSourceStatus('NETWORK_TIMEOUT')).toBe(504);
     });
 
+    it('maps PLAN_FINGERPRINT_REQUIRED to 400', () => {
+        expect(gitSourceStatus('PLAN_FINGERPRINT_REQUIRED')).toBe(400);
+    });
+
+    it('maps stale, blocked, legacy, and unavailable plans to 409', () => {
+        expect(gitSourceStatus('STALE_PLAN')).toBe(409);
+        expect(gitSourceStatus('PLAN_BLOCKED')).toBe(409);
+        expect(gitSourceStatus('LEGACY_PENDING')).toBe(409);
+        expect(gitSourceStatus('PLAN_UNAVAILABLE')).toBe(409);
+    });
+
     it('maps unknown codes to 400', () => {
         expect(gitSourceStatus('GIT_ERROR')).toBe(400);
     });
@@ -69,5 +80,40 @@ describe('sendGitSourceError', () => {
         sendGitSourceError(res, new Error('unrelated crash'));
         expect(res.status).toHaveBeenCalledWith(500);
         expect(res.json).toHaveBeenCalledWith({ error: 'Git source operation failed' });
+    });
+
+    it('attaches plan extras on STALE_PLAN and PLAN_BLOCKED', () => {
+        const plan = { blocked: true, counts: {}, operations: [], invocation: { candidateChanged: false, liveDiverged: false } };
+        const stale = mockRes();
+        sendGitSourceError(stale, new GitSourceError('STALE_PLAN', 'stale', { plan: plan as never, planFingerprint: 'fp-new' }));
+        expect(stale.status).toHaveBeenCalledWith(409);
+        expect(stale.json).toHaveBeenCalledWith({
+            error: 'stale',
+            code: 'STALE_PLAN',
+            plan,
+            planFingerprint: 'fp-new',
+        });
+
+        const blocked = mockRes();
+        sendGitSourceError(blocked, new GitSourceError('PLAN_BLOCKED', 'blocked', { plan: plan as never, planFingerprint: 'fp-b' }));
+        expect(blocked.status).toHaveBeenCalledWith(409);
+        expect(blocked.json).toHaveBeenCalledWith({
+            error: 'blocked',
+            code: 'PLAN_BLOCKED',
+            plan,
+            planFingerprint: 'fp-b',
+        });
+    });
+
+    it('maps LEGACY_PENDING and PLAN_UNAVAILABLE to 409 without extras', () => {
+        const legacy = mockRes();
+        sendGitSourceError(legacy, new GitSourceError('LEGACY_PENDING', 'legacy'));
+        expect(legacy.status).toHaveBeenCalledWith(409);
+        expect(legacy.json).toHaveBeenCalledWith({ error: 'legacy', code: 'LEGACY_PENDING' });
+
+        const missing = mockRes();
+        sendGitSourceError(missing, new GitSourceError('PLAN_UNAVAILABLE', 'unavailable'));
+        expect(missing.status).toHaveBeenCalledWith(409);
+        expect(missing.json).toHaveBeenCalledWith({ error: 'unavailable', code: 'PLAN_UNAVAILABLE' });
     });
 });

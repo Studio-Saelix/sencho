@@ -460,6 +460,11 @@ export interface StackGitSource {
     manifest_version: number | null;                   // cache of the managed-project manifest's manifestVersion (file is the source of truth)
     manifest_state: GitSourceManifestState | null;     // DB-only enum, wider than the file state; see types/gitProjectManifest.ts
     manifest_generation: string | null;                // stack-relative path of the applied generation dir
+    pending_plan_fingerprint: string | null;
+    pending_plan_blocked: boolean | null;
+    pending_plan_summary: string | null;
+    last_plan_fingerprint: string | null;
+    last_plan_outcome: string | null;
     created_at: number;
     updated_at: number;
 }
@@ -1155,6 +1160,7 @@ export class DatabaseService {
         this.migrateStackDossierHashes();
         this.migrateGitSourceMultiFile();
         this.migrateGitSourceManifest();
+        this.migrateGitSourceChangePlan();
         this.migrateNodeUpdateSkips();
         this.migrateStackAlertServiceScope();
 
@@ -2536,6 +2542,14 @@ export class DatabaseService {
         this.tryAddColumn('stack_git_sources', 'manifest_generation', 'TEXT');
     }
 
+    private migrateGitSourceChangePlan(): void {
+        this.tryAddColumn('stack_git_sources', 'pending_plan_fingerprint', 'TEXT');
+        this.tryAddColumn('stack_git_sources', 'pending_plan_blocked', 'INTEGER');
+        this.tryAddColumn('stack_git_sources', 'pending_plan_summary', 'TEXT');
+        this.tryAddColumn('stack_git_sources', 'last_plan_fingerprint', 'TEXT');
+        this.tryAddColumn('stack_git_sources', 'last_plan_outcome', 'TEXT');
+    }
+
     private migrateGitSourceMultiFile(): void {
         this.tryAddColumn('stack_git_sources', 'compose_paths', 'TEXT');
         this.tryAddColumn('stack_git_sources', 'context_dir', 'TEXT');
@@ -3852,6 +3866,10 @@ export class DatabaseService {
 
     public resolveDriftFinding(id: number, resolvedAt: number): void {
         this.db.prepare('UPDATE stack_drift_findings SET resolved_at = ? WHERE id = ? AND resolved_at IS NULL').run(resolvedAt, id);
+    }
+
+    public updateDriftFindingMessage(id: number, message: string): void {
+        this.db.prepare('UPDATE stack_drift_findings SET message = ? WHERE id = ? AND resolved_at IS NULL').run(message, id);
     }
 
     /** Open (unresolved) findings for a stack, oldest first. */
@@ -6204,6 +6222,13 @@ export class DatabaseService {
             pending_env_content: (row.pending_env_content as string | null) ?? null,
             pending_fetched_at: (row.pending_fetched_at as number | null) ?? null,
             last_debounce_at: (row.last_debounce_at as number | null) ?? null,
+            pending_plan_fingerprint: (row.pending_plan_fingerprint as string | null) ?? null,
+            pending_plan_blocked: row.pending_plan_blocked === undefined || row.pending_plan_blocked === null
+                ? null
+                : Number(row.pending_plan_blocked) === 1,
+            pending_plan_summary: (row.pending_plan_summary as string | null) ?? null,
+            last_plan_fingerprint: (row.last_plan_fingerprint as string | null) ?? null,
+            last_plan_outcome: (row.last_plan_outcome as string | null) ?? null,
             created_at: row.created_at as number,
             updated_at: row.updated_at as number,
         };
@@ -6219,7 +6244,7 @@ export class DatabaseService {
         return rows.map(r => this.parseGitSource(r)!);
     }
 
-    public upsertGitSource(source: Omit<StackGitSource, 'id' | 'created_at' | 'updated_at' | 'applied_deploy_spec' | 'manifest_version' | 'manifest_state' | 'manifest_generation'>): number {
+    public upsertGitSource(source: Omit<StackGitSource, 'id' | 'created_at' | 'updated_at' | 'applied_deploy_spec' | 'manifest_version' | 'manifest_state' | 'manifest_generation' | 'pending_plan_fingerprint' | 'pending_plan_blocked' | 'pending_plan_summary' | 'last_plan_fingerprint' | 'last_plan_outcome'>): number {
         const now = Date.now();
         const existing = this.getGitSource(source.stack_name);
         const composePathsJson = JSON.stringify(source.compose_paths ?? [source.compose_path]);
@@ -6285,16 +6310,57 @@ export class DatabaseService {
         ).run(version, state, generation, Date.now(), stackName);
     }
 
-    public setGitSourcePending(stackName: string, commitSha: string, composeContent: string, envContent: string | null): void {
+    public setGitSourcePending(
+        stackName: string,
+        commitSha: string,
+        composeContent: string,
+        envContent: string | null,
+        plan?: { fingerprint: string; blocked: boolean; summary: string },
+    ): void {
         this.db.prepare(
             `UPDATE stack_git_sources SET
                 pending_commit_sha = ?,
                 pending_compose_content = ?,
                 pending_env_content = ?,
                 pending_fetched_at = ?,
+                pending_plan_fingerprint = ?,
+                pending_plan_blocked = ?,
+                pending_plan_summary = ?,
                 updated_at = ?
              WHERE stack_name = ?`
-        ).run(commitSha, composeContent, envContent, Date.now(), Date.now(), stackName);
+        ).run(
+            commitSha,
+            composeContent,
+            envContent,
+            Date.now(),
+            plan?.fingerprint ?? null,
+            plan ? (plan.blocked ? 1 : 0) : null,
+            plan?.summary ?? null,
+            Date.now(),
+            stackName,
+        );
+    }
+
+    public updateGitSourcePendingPlan(
+        stackName: string,
+        composeContent: string,
+        plan: { fingerprint: string; blocked: boolean; summary: string },
+    ): void {
+        this.db.prepare(
+            `UPDATE stack_git_sources SET
+                pending_compose_content = ?,
+                pending_plan_fingerprint = ?,
+                pending_plan_blocked = ?,
+                pending_plan_summary = ?,
+                updated_at = ?
+             WHERE stack_name = ?`
+        ).run(composeContent, plan.fingerprint, plan.blocked ? 1 : 0, plan.summary, Date.now(), stackName);
+    }
+
+    public setGitSourceLastPlan(stackName: string, fingerprint: string | null, outcome: string | null): void {
+        this.db.prepare(
+            `UPDATE stack_git_sources SET last_plan_fingerprint = ?, last_plan_outcome = ?, updated_at = ? WHERE stack_name = ?`
+        ).run(fingerprint, outcome, Date.now(), stackName);
     }
 
     public clearGitSourcePending(stackName: string): void {
@@ -6304,6 +6370,9 @@ export class DatabaseService {
                 pending_compose_content = NULL,
                 pending_env_content = NULL,
                 pending_fetched_at = NULL,
+                pending_plan_fingerprint = NULL,
+                pending_plan_blocked = NULL,
+                pending_plan_summary = NULL,
                 updated_at = ?
              WHERE stack_name = ?`
         ).run(Date.now(), stackName);
@@ -6318,6 +6387,9 @@ export class DatabaseService {
                 pending_compose_content = NULL,
                 pending_env_content = NULL,
                 pending_fetched_at = NULL,
+                pending_plan_fingerprint = NULL,
+                pending_plan_blocked = NULL,
+                pending_plan_summary = NULL,
                 updated_at = ?
              WHERE stack_name = ?`
         ).run(commitSha, contentHash, Date.now(), stackName);

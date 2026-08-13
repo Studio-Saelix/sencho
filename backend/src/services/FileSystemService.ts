@@ -1868,6 +1868,39 @@ export class FileSystemService {
   }
 
   /**
+   * Like pathKind, but distinguishes a symlink leaf from a regular file.
+   * Used by the Git change planner so a swapped symlink is type-changed,
+   * not hashed as if it were the target's content.
+   */
+  async observeStackPath(
+    stackName: string,
+    relPath: string,
+    scope?: FileRootScope,
+  ): Promise<'file' | 'directory' | 'symlink' | null> {
+    if (scope?.rootAbsDir === undefined) {
+      const stackDir = path.join(this.baseDir, stackName);
+      try {
+        await fsPromises.lstat(stackDir);
+      } catch (err: unknown) {
+        const e = err as NodeJS.ErrnoException;
+        if (e.code === 'ENOENT') return null;
+        throw err;
+      }
+    }
+    try {
+      const safePath = await this.resolveScopedLeafPath(stackName, relPath, scope);
+      const stat = await fsPromises.lstat(safePath);
+      if (stat.isSymbolicLink()) return 'symlink';
+      if (stat.isDirectory()) return 'directory';
+      return 'file';
+    } catch (err: unknown) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === 'ENOENT') return null;
+      throw err;
+    }
+  }
+
+  /**
    * Optimistic-concurrency write for arbitrary stack files (file-explorer
    * editor save path). If `expectedMtimeMs` is provided, opens the target,
    * stats it, and refuses the write (returning current content + mtime) when

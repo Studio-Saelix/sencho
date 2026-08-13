@@ -176,6 +176,8 @@ async function cleanupStackDir(name: string) {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
+const SKIP_PLAN_FINGERPRINT = { requirePlanFingerprint: false as const };
+
 describe('GitSourceService.hashContent', () => {
     it('produces stable hashes for identical inputs', () => {
         const svc = GitSourceService.getInstance();
@@ -566,7 +568,7 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
             expect(row?.compose_paths).toEqual(['compose.yaml', 'override.yaml']);
         });
 
-        it('apply refuses a stale-identity manifest with a detach-first instruction', async () => {
+        it('refuses a stale-identity manifest with a detach-first instruction', async () => {
             const sha = 'abc1234567890abc1234567890abc1234567890a';
             await seedSource('id-change-apply');
             // Manifest stamped for a different repository than the source row.
@@ -574,14 +576,8 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
             const svc = GitSourceService.getInstance();
 
             mockSuccessfulClone({ sha });
-            await svc.pull('id-change-apply');
-            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
-            try {
-                await expect(svc.apply('id-change-apply', sha))
-                    .rejects.toMatchObject({ code: 'GIT_ERROR', message: expect.stringMatching(/Detach the Git source/) });
-            } finally {
-                validateSpy.mockRestore();
-            }
+            await expect(svc.pull('id-change-apply'))
+                .rejects.toMatchObject({ code: 'GIT_ERROR', message: expect.stringMatching(/Detach the Git source/) });
         });
     });
 });
@@ -1204,6 +1200,8 @@ describe('GitSourceService.createStackFromGit', () => {
         expect(result.envWritten).toBe(false);
         expect(result.source.last_applied_commit_sha).toBe(sha);
         expect(result.source.pending_commit_sha).toBeNull();
+        expect(result.source.last_plan_outcome).toBe('applied');
+        expect(result.source.last_plan_fingerprint).toBeTruthy();
 
         // The manifest cache is persisted after the row insert (audit S-2):
         // the immediate response and the DB row report the real state, not
@@ -1258,7 +1256,11 @@ describe('GitSourceService.createStackFromGit', () => {
         // stored hash was computed from repo paths while the disk read uses the
         // materialized paths (primary -> compose.yaml). This was the regression.
         const pull = await svc.pull('mf-clean-pull');
-        expect(pull.hasLocalChanges).toBe(false);
+        expect(pull.plan).toBeTruthy();
+        expect(pull.plan?.blocked).toBe(false);
+        expect(pull.plan?.counts.localModified).toBe(0);
+        expect(pull).not.toHaveProperty('hasLocalChanges');
+        expect(pull).not.toHaveProperty('incomingCompose');
 
         await cleanupStackDir('mf-clean-pull');
     });
@@ -1413,6 +1415,8 @@ describe('GitSourceService.createStackFromGit', () => {
 });
 
 describe('GitSourceService.apply', () => {
+    const skipFingerprint = SKIP_PLAN_FINGERPRINT;
+
     async function seedPending(stackName: string, composeContent: string, commitSha: string) {
         mockSuccessfulClone({ compose: composeContent, sha: commitSha });
         const svc = GitSourceService.getInstance();
@@ -1458,7 +1462,7 @@ describe('GitSourceService.apply', () => {
         const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
 
         try {
-            const result = await svc.apply('apply-deploy-gate', sha, { deploy: true });
+            const result = await svc.apply('apply-deploy-gate', sha, { deploy: true, ...skipFingerprint });
             expect(result.deployed).toBe(true);
             expect(deploySpy).toHaveBeenCalledWith('apply-deploy-gate', undefined, undefined, {
                 source: 'git_apply',
@@ -1492,7 +1496,7 @@ describe('GitSourceService.apply', () => {
         try {
             // Assert the return SHAPE: apply must not throw, deployError must
             // carry the failure detail so the UI can surface "applied but not deployed".
-            const result = await svc.apply('apply-deploy-fail', sha, { deploy: true });
+            const result = await svc.apply('apply-deploy-fail', sha, { deploy: true, ...skipFingerprint });
             expect(result.applied).toBe(true);
             expect(result.deployed).toBe(false);
             expect(result.deployError).toBeTruthy();
@@ -1542,9 +1546,8 @@ describe('GitSourceService.apply', () => {
         await svc.pull(stackName);
         const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
         try {
-            await expect(svc.apply(stackName, sha)).rejects.toMatchObject({
-                code: 'GIT_ERROR',
-                message: expect.stringMatching(/does not manage/),
+            await expect(svc.apply(stackName, sha, skipFingerprint)).rejects.toMatchObject({
+                code: 'PLAN_BLOCKED',
             });
             // The local file is preserved byte-for-byte.
             const onDisk = await fsSvc.readStackFile(stackName, 'configs/app.json');
@@ -1607,7 +1610,7 @@ describe('GitSourceService.apply', () => {
         });
 
         try {
-            const result = await svc.apply('apply-policy-block', sha, { deploy: true });
+            const result = await svc.apply('apply-policy-block', sha, { deploy: true, ...skipFingerprint });
 
             expect(result.applied).toBe(true);
             expect(result.deployed).toBe(false);
@@ -1838,7 +1841,7 @@ describe('GitSourceService multi-file create + apply flow', () => {
         const row = DatabaseService.getInstance().getGitSource('multi-pull');
         expect(row?.pending_commit_sha).toBe(sha);
 
-        const applied = await svc.apply('multi-pull', pull.commitSha);
+        const applied = await svc.apply('multi-pull', pull.commitSha, SKIP_PLAN_FINGERPRINT);
         expect(applied.applied).toBe(true);
 
         const after = DatabaseService.getInstance().getGitSource('multi-pull');
@@ -1908,7 +1911,13 @@ describe('GitSourceService pending blob decode branches', () => {
 
     it('round-trips the v3 blob with candidate path and inventory', () => {
         const s = svc() as unknown as DecodeApi;
-        const encoded = s.encodePendingCompose([{ path: 'compose.yaml', content: 'x' }], null, 'generations/candidate-abc', { inputs: [], refusals: [], buildContexts: [] });
+        const encoded = s.crypto.encrypt(JSON.stringify({
+            v: 3,
+            files: [{ path: 'compose.yaml', content: 'x' }],
+            contextDir: null,
+            candidateRelPath: 'generations/candidate-abc',
+            inventory: { inputs: [], refusals: [], buildContexts: [] },
+        }));
         const decoded = s.decodePendingCompose(encoded);
         expect(decoded.candidateRelPath).toBe('generations/candidate-abc');
         expect(decoded.files[0].content).toBe('x');
@@ -1933,7 +1942,7 @@ describe('GitSourceService pending blob decode branches', () => {
     it('rejects a corrupt v3 blob as corrupt state instead of falling back to legacy', () => {
         const s = svc() as unknown as DecodeApi;
         const encoded = s.crypto.encrypt('{"v":3 not json');
-        expect(() => s.decodePendingCompose(encoded)).toThrow(/corrupt/);
+        expect(() => s.decodePendingCompose(encoded)).toThrow(/cannot be reviewed/);
     });
 });
 
@@ -2263,11 +2272,12 @@ describe('GitSourceService legacy pending apply (migration path)', () => {
         const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
 
         try {
-            const applied = await svc.apply('legacy-apply', sha, { deploy: false });
-            expect(applied.applied).toBe(true);
-            expect(await fsSvc.getStackContent('legacy-apply')).toContain('image: nginx');
-            const row = db.getGitSource('legacy-apply');
-            expect(row?.manifest_state).toBe('migrated');
+            await expect(svc.apply('legacy-apply', sha, { deploy: false })).rejects.toMatchObject({
+                code: 'LEGACY_PENDING',
+            });
+            const disk = await fsSvc.getStackContent('legacy-apply').catch(() => '');
+            expect(disk).toContain('nginx:latest');
+            expect(disk).not.toContain('services:\n  web:');
         } finally {
             validateSpy.mockRestore();
             await cleanupStackDir('legacy-apply');
@@ -2352,7 +2362,7 @@ describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => 
                 autoDeployOnApply: false,
             });
             const pull1 = await svc.pull('sync-env-double');
-            const apply1 = await svc.apply('sync-env-double', pull1.commitSha, { deploy: false });
+            const apply1 = await svc.apply('sync-env-double', pull1.commitSha, { deploy: false, ...SKIP_PLAN_FINGERPRINT });
             expect(apply1.applied).toBe(true);
             // The manifest has exactly one .env entry.
             const manifest = await svc.getManifest('sync-env-double');
@@ -2362,12 +2372,154 @@ describe('GitSourceService sync-env stacks with a repo .env (audit C-2)', () => 
 
             // Second cycle must not raise the divergence refusal.
             const pull2 = await svc.pull('sync-env-double');
-            const apply2 = await svc.apply('sync-env-double', pull2.commitSha, { deploy: false });
+            const apply2 = await svc.apply('sync-env-double', pull2.commitSha, { deploy: false, ...SKIP_PLAN_FINGERPRINT });
             expect(apply2.applied).toBe(true);
             void db;
         } finally {
             runSpy.mockRestore();
             await cleanupStackDir('sync-env-double');
+        }
+    });
+});
+
+describe('GitSourceService classified plan fingerprint', () => {
+    it('refuses public apply without a fingerprint and binds the pulled fingerprint', async () => {
+        const sha = 'ffff0000ffff0000ffff0000ffff0000ffff0000';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await FileSystemService.getInstance().createStack('fp-bind');
+        await svc.upsert({
+            stackName: 'fp-bind',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        try {
+            const pull = await svc.pull('fp-bind', { actor: 'alice' });
+            expect(pull.planFingerprint).toMatch(/^[a-f0-9]{64}$/);
+            expect(pull.plan?.blocked).toBe(false);
+
+            const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+            const acts = DatabaseService.getInstance().getStackActivity(nodeId, 'fp-bind', { limit: 20 });
+            expect(acts.some((a: { category?: string; actor_username?: string | null }) =>
+                a.category === 'git_pull_ready' && a.actor_username === 'alice',
+            )).toBe(true);
+
+            await expect(svc.apply('fp-bind', sha)).rejects.toMatchObject({ code: 'PLAN_FINGERPRINT_REQUIRED' });
+            await expect(svc.apply('fp-bind', sha, { planFingerprint: 'deadbeef' })).rejects.toMatchObject({
+                code: 'STALE_PLAN',
+            });
+
+            const applied = await svc.apply('fp-bind', sha, { planFingerprint: pull.planFingerprint! });
+            expect(applied.applied).toBe(true);
+        } finally {
+            validateSpy.mockRestore();
+            await cleanupStackDir('fp-bind');
+        }
+    });
+
+    it('keeps operationId across a live-file recompute and flips GET pending to blocked', async () => {
+        const sha = 'eeee1111eeee1111eeee1111eeee1111eeee1111';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const fsSvc = FileSystemService.getInstance();
+        await fsSvc.createStack('fp-stale-live');
+        await svc.upsert({
+            stackName: 'fp-stale-live',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        try {
+            const pull = await svc.pull('fp-stale-live');
+            const row = DatabaseService.getInstance().getGitSource('fp-stale-live');
+            const decoded = (svc as unknown as {
+                decodePendingCompose: (raw: string) => { operationId: string | null };
+            }).decodePendingCompose(row!.pending_compose_content!);
+            expect(decoded.operationId).toBeTruthy();
+
+            await fsSvc.saveStackContent('fp-stale-live', 'services:\n  web:\n    image: nginx:local\n');
+
+            await expect(svc.apply('fp-stale-live', sha, { planFingerprint: pull.planFingerprint! }))
+                .rejects.toMatchObject({ code: 'STALE_PLAN' });
+
+            const after = DatabaseService.getInstance().getGitSource('fp-stale-live');
+            const decodedAfter = (svc as unknown as {
+                decodePendingCompose: (raw: string) => { operationId: string | null };
+            }).decodePendingCompose(after!.pending_compose_content!);
+            expect(decodedAfter.operationId).toBe(decoded.operationId);
+
+            const publicSrc = svc.get('fp-stale-live');
+            expect(publicSrc?.pending_plan?.blocked).toBe(true);
+            expect(publicSrc?.pending_plan?.fingerprint).not.toBe(pull.planFingerprint);
+        } finally {
+            validateSpy.mockRestore();
+            await cleanupStackDir('fp-stale-live');
+        }
+    });
+
+    it('refuses an incomplete v4 pending blob as PLAN_UNAVAILABLE', async () => {
+        const sha = 'bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222';
+        const svc = GitSourceService.getInstance();
+        const db = DatabaseService.getInstance();
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await FileSystemService.getInstance().createStack('plan-unavail');
+        db.upsertGitSource({
+            stack_name: 'plan-unavail',
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'none',
+            encrypted_token: null,
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: sha,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+        const svcPriv = svc as unknown as { crypto: { encrypt(s: string): string } };
+        db.setGitSourcePending(
+            'plan-unavail',
+            sha,
+            svcPriv.crypto.encrypt(JSON.stringify({
+                v: 4,
+                files: [{ path: 'compose.yaml', content: 'services:\n  web:\n    image: nginx\n' }],
+                contextDir: null,
+                candidateRelPath: 'generations/cand',
+                inventory: { inputs: [], refusals: [], buildContexts: [] },
+            })),
+            null,
+        );
+        try {
+            await expect(svc.apply('plan-unavail', sha, SKIP_PLAN_FINGERPRINT)).rejects.toMatchObject({
+                code: 'PLAN_UNAVAILABLE',
+            });
+        } finally {
+            await cleanupStackDir('plan-unavail');
         }
     });
 });

@@ -3,7 +3,7 @@ title: Git Sources
 description: Link a stack to a Git repository and keep one or more compose files in sync via manual pulls or webhook triggers.
 ---
 
-Git Sources turn any stack into a GitOps target. Point Sencho at a repository and branch, choose one or more compose files to merge in order, pull updates on demand or from CI, and review a diff before applying changes to disk. Optional sibling `.env` sync keeps configuration consistent too.
+Git Sources turn any stack into a GitOps target. Point Sencho at a repository and branch, choose one or more compose files to merge in order, pull updates on demand or from CI, and review a classified change plan before applying files to disk. Optional sibling `.env` sync keeps configuration consistent too.
 
 <Note>
   Git Sources are available on every tier, including Community.
@@ -13,8 +13,8 @@ Git Sources turn any stack into a GitOps target. Point Sencho at a repository an
 
 1. Open a stack and click the **Git Source** button in the editor toolbar.
 2. Fill in the repository URL and branch, then choose the compose files. Use **Browse** to pick them from the repository tree, or type a path and press Enter. Add a token if the repo is private.
-3. Click **Pull now** to fetch the latest commit. Sencho opens a side-by-side diff between the on-disk files and the incoming version.
-4. Click **Apply** to write the incoming content to disk. Tick **Deploy after apply** in the same dialog to redeploy in one step.
+3. Click **Pull now** to fetch the latest commit. Sencho opens a classified change plan: adds, modifications, removals, and any local conflicts.
+4. Click **Apply** to write the incoming files to disk. Apply stays disabled while local conflicts are present. Tick **Deploy after apply** in the same dialog to redeploy in one step.
 
 Writes land in the stack's existing directory using the same storage Sencho uses for the in-browser editor.
 
@@ -26,7 +26,7 @@ Writes land in the stack's existing directory using the same storage Sencho uses
 
 The panel groups four regions:
 
-- **Pending update banner.** Appears at the top when a webhook in **Review only** mode has fetched a new commit. Click **Review** to re-fetch the incoming commit and open the diff dialog.
+- **Pending update banner.** Appears at the top when a webhook in **Review only** mode has fetched a new commit. Click **Review** to re-fetch the incoming commit and open the change plan. If local files conflict with the incoming commit, the banner says the update is blocked.
 - **Form fields.** Repository URL, branch, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication toggle, and the apply behavior radio group.
 - **Last applied stat strip.** Shows the short SHA of the last commit Sencho applied to disk, plus the timestamp of the most recent successful save or pull.
 - **Footer actions.** **Remove** disconnects the source by exporting the effective compose model into a single `compose.yaml` and removing auto-discovered override files; the remaining materialized files are kept. **Pull now** fetches the configured branch's HEAD; **Save** or **Update** persists form changes after a reachability check passes.
@@ -39,7 +39,7 @@ Skip the "empty stack then link later" detour and point at a repo from the start
   <img src="/images/git-sources/create-from-git-tab.png" alt="New stack dialog with the From Git tab selected, showing stack name, repository URL, branch, compose path, sibling .env toggle, authentication toggle, apply behavior radio group, a Deploy after create checkbox, and an HTTPS REPOS ONLY footer hint" />
 </Frame>
 
-Sencho fetches the compose files, validates the merged result with `docker compose config`, writes them to a fresh stack directory, and links the Git source in one step. The last-applied commit SHA is seeded from the fetch so the first manual pull produces a clean diff rather than a "local edits detected" warning.
+Sencho fetches the compose files, validates the merged result with `docker compose config`, writes them to a fresh stack directory, and links the Git source in one step. The last-applied commit SHA is seeded from the fetch so the first manual pull starts from a clean classified plan.
 
 Tick **Deploy after create** to run `docker compose up -d` immediately after the files land. If the deploy fails, the stack and Git source are kept on disk so you can fix the underlying issue (missing image, port conflict, host resources) and retry the deploy from the editor.
 
@@ -76,33 +76,34 @@ On disk, the primary file lands as the stack's `compose.yaml` and each additiona
 
 | Mode | What happens when a webhook fires |
 |------|-----------------------------------|
-| **Review only** | Sencho fetches and validates the incoming commit and marks the stack as having a pending update. You review the diff and apply manually. |
+| **Review only** | Sencho fetches and validates the incoming commit and marks the stack as having a pending update. You review the change plan and apply manually. |
 | **Auto-write files** | Sencho writes the new compose and env to disk automatically but does not redeploy. Use this when another process handles rollout. |
 | **Auto-deploy** | Sencho writes the files and immediately runs `docker compose up -d` so the stack picks up the new configuration. |
 
 Auto-deploy implies Auto-write: you cannot deploy automatically without also writing the new files first.
 
-You can always override on the spot: when you click **Apply** in the diff dialog, a **Deploy after apply** checkbox lets you deploy regardless of the configured mode.
+You can always override on the spot: when you click **Apply** in the change plan, a **Deploy after apply** checkbox lets you deploy regardless of the configured mode.
 
 ## Pulling and reviewing changes
 
 Click **Pull now** on the Git Source panel to fetch the latest commit on the configured branch.
 
 <Frame>
-  <img src="/images/git-sources/diff-dialog.png" alt="GIT · PULL PREVIEW dialog for the demo-app stack, showing a Local edits detected on disk warning above a Monaco side-by-side diff between the on-disk compose.yaml and the incoming commit, with a Deploy after apply checkbox and an Apply button in the footer" />
+  <img src="/images/git-sources/diff-dialog.png" alt="GIT · CHANGE PLAN dialog for the demo-app stack, listing classified file operations (add, modify, remove) with a Deploy after apply checkbox and an Apply button in the footer" />
 </Frame>
 
-The diff dialog shows:
+The change plan shows:
 
-- The `GIT · PULL PREVIEW` kicker and the short SHA of the incoming commit at the top.
-- A side-by-side compare of the on-disk compose file and the incoming version.
-- A `.env` tab when the source is configured to sync `.env`.
+- The `GIT · CHANGE PLAN` kicker and the short SHA of the incoming commit at the top.
+- One row per classified operation: add, modify, remove, rename, or a local conflict. Unchanged files collapse to a count.
 - An **Incoming compose failed validation** banner when the incoming compose fails `docker compose config`. The Apply button stays disabled until validation passes.
-- A **Local edits detected on disk** banner when the on-disk content differs from the last applied commit. Applying in this state opens an **Overwrite local edits?** confirmation modal whose primary button is **Overwrite and apply**.
+- A **Local conflicts block apply** banner when a managed file was edited or removed on disk, or an unmanaged file sits in the way. Apply stays disabled until those conflicts are resolved. Sencho does not overwrite them.
+
+High-sensitivity paths (secret-bearing files) appear as "secret-bearing managed path" rather than as a filename.
 
 ### Pending updates
 
-When a webhook fires in **Review only** mode, the stack gets a pending GitBranch icon next to its row in the sidebar and a pulsing dot on the **Git Source** button in the editor. Clicking either re-fetches the commit and opens the diff dialog; the panel also shows a **Pending update** banner with a **Review** button.
+When a webhook fires in **Review only** mode, the stack gets a pending GitBranch icon next to its row in the sidebar and a pulsing dot on the **Git Source** button in the editor. Clicking either re-fetches the commit and opens the change plan; the panel also shows a **Pending update** banner with a **Review** button.
 
 If the same stack also has an image update available, the image-update dot in the sidebar takes priority over the Git source icon, so only the update dot renders. The pending Git source is still surfaced inside the editor on the **Git Source** button.
 
@@ -110,7 +111,7 @@ If the same stack also has an image update available, the image-update dot in th
   <img src="/images/git-sources/sidebar-badge.png" alt="Sidebar stack list with a small GitBranch icon next to the demo-app entry indicating a pending Git source update" />
 </Frame>
 
-Click **Dismiss** in the diff dialog to discard a pending update without applying.
+Click **Dismiss** in the change plan to discard a pending update without applying.
 
 ## Trigger from CI with a webhook
 
@@ -153,16 +154,16 @@ For private repositories, use a Personal Access Token scoped to read access on t
 
 Paste the token into the **Token** field and save. Sencho stores it encrypted at rest and never returns it in API responses or UI. When editing the source later, the token field shows a masked placeholder; leave it blank to keep the stored value, or type a new token to replace it. Switching the auth type back to **Public (no auth)** clears the stored token.
 
-The encryption boundary covers the pending update payload too: every pull caches the fetched compose and env content in the database so the diff dialog can reopen without a refetch, and that cached content is encrypted at rest in the same way as the token, since compose files routinely embed secrets via env interpolation.
+The encryption boundary covers the pending update payload too: every pull caches the fetched compose and env content in the database so the change plan can reopen without a refetch, and that cached content is encrypted at rest in the same way as the token, since compose files routinely embed secrets via env interpolation.
 
 ## Local edits vs Git
 
-Sencho tracks a hash of the compose and env contents at the moment of the last apply. When you pull, it compares that hash against the current on-disk content.
+Sencho classifies every managed path against the incoming commit and the live disk.
 
-- Matching hash: applying overwrites content that Sencho itself last wrote.
-- Differing hash: someone edited the files outside Git. The diff dialog shows the **Local edits detected on disk** banner, and Apply requires the **Overwrite local edits?** confirmation.
+- Matching content: applying writes files Sencho itself last wrote.
+- Locally modified, missing, type-changed, or colliding unmanaged files: the plan is blocked. Resolve those files on disk (or commit them back to the repository), then pull again. Sencho will not overwrite them.
 
-The in-browser editor and the Git Source panel both write to the same files, so you can always fall back to editing locally. The next pull will just flag the divergence rather than silently clobbering your edits.
+The in-browser editor and the Git Source panel both write to the same files, so you can always fall back to editing locally. The next pull will flag the divergence rather than silently clobbering your edits.
 
 Pulls, applies, and create-from-git operations on the same stack are serialized by a per-stack lock, so a webhook that fires in the middle of a manual apply waits for the apply to finish rather than racing it.
 
@@ -192,8 +193,8 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
     Sencho runs `docker compose config` against the incoming content before letting you apply. The error banner shows the exact message. Common causes: unresolved `${VAR}` interpolation (commit a `.env` file next to the compose file and enable sibling `.env` sync), invalid `include:` paths, or schema issues introduced by a recent compose change. Validation has a 10-second budget; an unusually large compose with many services may need to be split.
   </Accordion>
 
-  <Accordion title="Local edits detected">
-    The on-disk files diverge from the last applied Git commit. Either confirm **Overwrite and apply** to take the incoming content, or discard local work with a redeploy from the stack editor, or commit your local changes back to the repo so the diff becomes clean.
+  <Accordion title="Local conflicts block apply">
+    A managed file was edited or removed on disk, or an unmanaged file sits on a path the incoming commit wants to add. Sencho will not overwrite those files. Restore or relocate the local copy, or commit the local change back to the repository so the next pull is clean, then pull again.
   </Accordion>
 
   <Accordion title="Webhook skipped (rate limited)">
@@ -209,7 +210,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
   </Accordion>
 
   <Accordion title="Pending commit has changed since this pull was fetched">
-    You opened a diff dialog, then a webhook fired and replaced the pending commit before you clicked **Apply**. Close the dialog and reopen the panel to load the latest pending commit; the **Review** button will fetch the newer one.
+    You opened a change plan, then a webhook fired and replaced the pending commit before you clicked **Apply**. Close the dialog and reopen the panel to load the latest pending commit; the **Review** button will fetch the newer one.
   </Accordion>
 
   <Accordion title="Applied but deploy failed">

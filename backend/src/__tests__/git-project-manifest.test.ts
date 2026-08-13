@@ -5,7 +5,7 @@ import path from 'path';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import { FileSystemService } from '../services/FileSystemService';
-import { GitProjectManifestService, PROMOTION_MARKER, CANDIDATE_COMPLETE_MARKER } from '../services/GitProjectManifestService';
+import { GitProjectManifestService, PROMOTION_MARKER, CANDIDATE_COMPLETE_MARKER, PromoteGenerationError } from '../services/GitProjectManifestService';
 import type { ComposeInputEntry, GitProjectManifest, ManifestBounds } from '../types/gitProjectManifest';
 
 const BOUNDS: ManifestBounds = {
@@ -434,7 +434,11 @@ describe('promoteGeneration', () => {
             candidateRelPath: candidateRel,
             manifest: incoming,
             priorManifest: prior,
-        })).rejects.toThrow(/Case-only managed path changes/);
+        })).rejects.toSatisfy((err: unknown) =>
+            err instanceof PromoteGenerationError
+            && err.phase === 'pre_mutation'
+            && /Case-only managed path changes/.test(err.message),
+        );
         expect(readStackFile(stackName, 'Config.yml')).toBe('PRIOR\n');
         expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
     });

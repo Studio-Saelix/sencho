@@ -19,7 +19,7 @@ import path from 'path';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import { ComposeService } from '../services/ComposeService';
-import { GitSourceService } from '../services/GitSourceService';
+import { GitSourceService, GitSourceError } from '../services/GitSourceService';
 
 // ── Hoisted mocks (must come before importing the app) ─────────────────
 
@@ -1033,6 +1033,16 @@ describe('stack_git_sources manifest cache columns', () => {
         expect(row.manifest_generation).toBe('generations/applied-x');
     });
 
+    it('migrateGitSourceChangePlan is idempotent', () => {
+        const db = DatabaseService.getInstance() as unknown as { migrateGitSourceChangePlan: () => void };
+        expect(() => {
+            db.migrateGitSourceChangePlan();
+            db.migrateGitSourceChangePlan();
+        }).not.toThrow();
+        const row = DatabaseService.getInstance().getGitSource('existing-stack');
+        expect(row === undefined || row.pending_plan_fingerprint === null || typeof row.pending_plan_fingerprint === 'string').toBe(true);
+    });
+
     it('GET keeps flat manifest_state aligned with the healed summary', async () => {
         const composeDir = process.env.COMPOSE_DIR!;
         fs.mkdirSync(path.join(composeDir, 'stale-manifest-get'), { recursive: true });
@@ -1118,5 +1128,88 @@ describe('git-source routes: statuses-cache invalidation', () => {
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(res.status).toBe(200);
         expect(mockInvalidateNodeCaches).not.toHaveBeenCalled();
+    });
+});
+
+describe('POST /api/stacks/:stackName/git-source/apply fingerprint', () => {
+    it('returns 400 PLAN_FINGERPRINT_REQUIRED when the body omits planFingerprint', async () => {
+        seedGitSource('existing-stack');
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/apply')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ commitSha: 'abc123', deploy: false });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('PLAN_FINGERPRINT_REQUIRED');
+    });
+
+    it('returns 409 STALE_PLAN with the replacement plan attached', async () => {
+        seedGitSource('existing-stack');
+        const plan = {
+            blocked: false,
+            counts: {
+                add: 0, modify: 1, delete: 0, rename: 0, unchanged: 0,
+                localModified: 0, localMissing: 0, typeChanged: 0, unmanagedCollision: 0, invocation: 0,
+            },
+            operations: [{ path: 'compose.yaml', op: 'modify' as const, role: 'compose-primary' as const }],
+            invocation: { candidateChanged: false, liveDiverged: false },
+        };
+        const applySpy = vi.spyOn(GitSourceService.getInstance(), 'apply')
+            .mockRejectedValue(new GitSourceError('STALE_PLAN', 'stale', { plan, planFingerprint: 'fp-new' }));
+        try {
+            const res = await request(app)
+                .post('/api/stacks/existing-stack/git-source/apply')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ commitSha: 'abc123', planFingerprint: 'fp-old', deploy: false });
+            expect(res.status).toBe(409);
+            expect(res.body.code).toBe('STALE_PLAN');
+            expect(res.body.planFingerprint).toBe('fp-new');
+            expect(res.body.plan).toEqual(plan);
+            expect(JSON.stringify(res.body)).not.toContain('SUPER-SECRET');
+        } finally {
+            applySpy.mockRestore();
+        }
+    });
+});
+
+describe('POST /api/stacks/:stackName/git-source/pull permissions and actor', () => {
+    it('denies pull without stack:edit', async () => {
+        seedGitSource('existing-stack');
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/pull')
+            .set('Authorization', `Bearer ${jwt.sign({ username: 'viewer', role: 'viewer' }, TEST_JWT_SECRET, { expiresIn: '1m' })}`);
+        expect([401, 403]).toContain(res.status);
+    });
+
+    it('passes the authenticated username as the pull actor', async () => {
+        seedGitSource('existing-stack');
+        const pullSpy = vi.spyOn(GitSourceService.getInstance(), 'pull').mockResolvedValue({
+            commitSha: 'abc',
+            validation: { ok: true },
+            refusals: [],
+            manifestSummary: null,
+            candidateReady: true,
+            warnings: [],
+            plan: {
+                blocked: false,
+                counts: {
+                    add: 0, modify: 0, delete: 0, rename: 0, unchanged: 1,
+                    localModified: 0, localMissing: 0, typeChanged: 0, unmanagedCollision: 0, invocation: 0,
+                },
+                operations: [],
+                invocation: { candidateChanged: false, liveDiverged: false },
+            },
+            planFingerprint: 'fp',
+        });
+        try {
+            const res = await request(app)
+                .post('/api/stacks/existing-stack/git-source/pull')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            expect(pullSpy).toHaveBeenCalledWith('existing-stack', { actor: TEST_USERNAME });
+            expect(JSON.stringify(res.body)).not.toContain('incomingCompose');
+            expect(JSON.stringify(res.body)).not.toContain('hasLocalChanges');
+        } finally {
+            pullSpy.mockRestore();
+        }
     });
 });

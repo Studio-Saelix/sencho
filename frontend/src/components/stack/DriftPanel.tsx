@@ -13,7 +13,7 @@ import { useNodes } from '@/context/NodeContext';
 type StackDriftStatus = 'in-sync' | 'drifted' | 'missing-runtime' | 'unreachable';
 type DriftFindingKind =
   | 'service-missing' | 'service-undeclared' | 'image-mismatch' | 'ports-mismatch'
-  | 'network-undeclared' | 'network-missing';
+  | 'network-undeclared' | 'network-missing' | 'managed-path-conflict';
 
 interface StackDriftFinding {
   kind: DriftFindingKind;
@@ -91,6 +91,7 @@ const FINDING_LABEL: Record<DriftFindingKind, string> = {
   'ports-mismatch': 'ports',
   'network-undeclared': 'network',
   'network-missing': 'network missing',
+  'managed-path-conflict': 'managed path',
 };
 
 /** The temporal overlay: how the on-disk compose compares to the last deploy baseline. */
@@ -125,10 +126,13 @@ function temporalMeta(temporal: DriftTemporal): { label: string; icon: LucideIco
 }
 
 function Finding({ finding }: { finding: StackDriftFinding }) {
+  const gitPath = finding.kind === 'managed-path-conflict';
   return (
     <div className="border-t border-muted py-2 first:border-t-0">
       <div className="flex items-center gap-2">
-        <span className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">{finding.service}</span>
+        {!gitPath && (
+          <span className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">{finding.service}</span>
+        )}
         <span className="font-mono text-[10px] uppercase tracking-wide text-stat-subtitle">{FINDING_LABEL[finding.kind]}</span>
       </div>
       <div className="mt-1 text-[12px] text-foreground/90">{finding.detail}</div>
@@ -146,10 +150,13 @@ function Finding({ finding }: { finding: StackDriftFinding }) {
 
 function LedgerRow({ entry }: { entry: DriftLedgerEntry }) {
   const resolved = entry.resolvedAt != null;
+  const gitPath = entry.kind === 'managed-path-conflict';
   return (
     <div className="border-t border-muted py-2 first:border-t-0">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">{entry.service}</span>
+        {!gitPath && (
+          <span className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">{entry.service}</span>
+        )}
         <span className="font-mono text-[10px] uppercase tracking-wide text-stat-subtitle">{FINDING_LABEL[entry.kind] ?? entry.kind}</span>
         <span className={cn('font-mono text-[10px] uppercase tracking-wide', resolved ? 'text-success' : 'text-warning')}>
           {resolved ? 'resolved' : 'open'}

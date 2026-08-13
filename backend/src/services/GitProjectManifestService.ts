@@ -97,6 +97,22 @@ type RecoveryIncoming =
     | { inputs: ComposeInputEntry[]; buildContexts: BuildContextPlan[] }
     | { introducedPaths: string[] };
 
+export type PromoteFailurePhase = 'pre_mutation' | 'restored' | 'recovery_required';
+
+/** Typed promotion failure so apply can record restore vs pre-mutation vs recovery-required. */
+export class PromoteGenerationError extends Error {
+    readonly phase: PromoteFailurePhase;
+    readonly cause: unknown;
+
+    constructor(phase: PromoteFailurePhase, cause: unknown) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        super(message);
+        this.name = 'PromoteGenerationError';
+        this.phase = phase;
+        this.cause = cause;
+    }
+}
+
 const MANIFEST_STATES: readonly ManifestState[] = ['none', 'migrated', 'active', 'partial', 'unsupported'];
 const DEPENDENCY_KINDS: readonly InputDependencyKind[] = [
     'explicit', 'implicit-override', 'include', 'include-env', 'extends', 'env_file',
@@ -811,7 +827,10 @@ export class GitProjectManifestService {
             return priorRel !== undefined && priorRel !== rel;
         });
         if (caseOnlyChange !== undefined) {
-            throw new Error(`Case-only managed path changes are not supported: ${priorByCaseFold.get(caseOnlyChange.toLowerCase())} -> ${caseOnlyChange}`);
+            throw new PromoteGenerationError(
+                'pre_mutation',
+                new Error(`Case-only managed path changes are not supported: ${priorByCaseFold.get(caseOnlyChange.toLowerCase())} -> ${caseOnlyChange}`),
+            );
         }
         const introduced = incomingFiles.filter((rel) => !priorKeys.has(rel.toLowerCase()));
         const affected = [...new Map([...priorFiles, ...incomingFiles].map((rel) => [rel.toLowerCase(), rel])).values()]
@@ -959,18 +978,22 @@ export class GitProjectManifestService {
                 console.warn('[GitManifest] committed promotion marker cleanup failed:', (e as Error).message);
             }
         } catch (error) {
-            if (!liveMutationStarted) throw error;
+            if (!liveMutationStarted) {
+                throw new PromoteGenerationError('pre_mutation', error);
+            }
             // Mid-write failure: restore the previous applied generation and
-            // rethrow so the caller reports the failure honestly.
+            // rethrow a typed outcome so the caller records restore vs recovery-required.
+            let restored = false;
             try {
-                await this.restorePreviousGeneration(stackName, {
+                restored = await this.restorePreviousGeneration(stackName, {
                     priorManifest: opts.priorManifest,
                     incoming: { inputs: opts.manifest.inputs, buildContexts: opts.manifest.buildContexts },
                 });
             } catch (restoreError) {
                 console.error('[GitManifest] promotion failed and recovery restore also failed:', (restoreError as Error).message);
+                restored = false;
             }
-            throw error;
+            throw new PromoteGenerationError(restored ? 'restored' : 'recovery_required', error);
         }
     }
 

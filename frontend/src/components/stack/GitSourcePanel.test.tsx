@@ -32,8 +32,8 @@ vi.mock('@/context/NodeContext', () => ({
 // Drive applyPull(commitSha, deploy=true) directly without standing up the real
 // diff UI; the panel passes applyPull as onApply.
 vi.mock('./GitSourceDiffDialog', () => ({
-  GitSourceDiffDialog: ({ onApply }: { onApply: (sha: string, deploy: boolean) => void }) => (
-    <button data-testid="apply-deploy" onClick={() => onApply('sha-123', true)}>apply</button>
+  GitSourceDiffDialog: ({ onApply }: { onApply: (sha: string, deploy: boolean, fp: string) => void }) => (
+    <button data-testid="apply-deploy" onClick={() => onApply('sha-123', true, 'fp-test')}>apply</button>
   ),
 }));
 vi.mock('@/components/ui/toast-store', () => ({
@@ -135,6 +135,11 @@ describe('GitSourcePanel deploy-mode apply node binding', () => {
     await waitFor(() => {
       const applyCall = vi.mocked(apiFetch).mock.calls.find(c => String(c[0]).includes('/git-source/apply'));
       expect(applyCall?.[1]).toEqual(expect.objectContaining({ nodeId: 4 }));
+      expect(JSON.parse(String((applyCall?.[1] as { body?: string })?.body))).toEqual({
+        commitSha: 'sha-123',
+        planFingerprint: 'fp-test',
+        deploy: true,
+      });
     });
     expect(dfCtl.params).toEqual(expect.objectContaining({ action: 'deploy', nodeId: 4 }));
   });

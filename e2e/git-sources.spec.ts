@@ -453,16 +453,18 @@ test.describe('Git Sources complete-project materialization (local git server)',
     }, stackName);
     expect(pull.status, JSON.stringify(pull.body)).toBe(200);
     expect(pull.body.candidateReady).toBe(true);
+    expect(pull.body.plan).toBeTruthy();
+    expect(JSON.stringify(pull.body)).not.toContain('incomingCompose');
 
-    const applied = await page.evaluate(async ({ name, sha }) => {
+    const applied = await page.evaluate(async ({ name, sha, fp }) => {
       const res = await fetch(`/api/stacks/${name}/git-source/apply`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ commitSha: sha, deploy: false }),
+        body: JSON.stringify({ commitSha: sha, planFingerprint: fp, deploy: false }),
       });
       return { status: res.status, body: await res.json() };
-    }, { name: stackName, sha: pull.body.commitSha });
+    }, { name: stackName, sha: pull.body.commitSha, fp: pull.body.planFingerprint });
     expect(applied.status).toBe(200);
     expect(applied.body.applied).toBe(true);
 
@@ -495,15 +497,15 @@ test.describe('Git Sources complete-project materialization (local git server)',
       const res = await fetch(`/api/stacks/${name}/git-source/pull`, { method: 'POST', credentials: 'include' });
       return await res.json();
     }, stackName);
-    const applied = await page.evaluate(async ({ name, sha }) => {
+    const applied = await page.evaluate(async ({ name, sha, fp }) => {
       const res = await fetch(`/api/stacks/${name}/git-source/apply`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ commitSha: sha, deploy: false }),
+        body: JSON.stringify({ commitSha: sha, planFingerprint: fp, deploy: false }),
       });
       return res.status;
-    }, { name: stackName, sha: pull.commitSha });
+    }, { name: stackName, sha: pull.commitSha, fp: pull.planFingerprint });
     expect(applied).toBe(200);
 
     // Locally modify a managed input through the file editor API.
@@ -522,18 +524,22 @@ test.describe('Git Sources complete-project materialization (local git server)',
       const res = await fetch(`/api/stacks/${name}/git-source/pull`, { method: 'POST', credentials: 'include' });
       return await res.json();
     }, stackName);
-    const refused = await page.evaluate(async ({ name, sha }) => {
+    const refused = await page.evaluate(async ({ name, sha, fp }) => {
       const res = await fetch(`/api/stacks/${name}/git-source/apply`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ commitSha: sha, deploy: false }),
+        body: JSON.stringify({ commitSha: sha, planFingerprint: fp, deploy: false }),
       });
       return { status: res.status, body: await res.json() };
-    }, { name: stackName, sha: secondPull.commitSha });
-    expect(refused.status).toBe(400);
-    expect(JSON.stringify(refused.body)).toContain('Local modifications');
-    expect(JSON.stringify(refused.body)).toContain('web.env');
+    }, { name: stackName, sha: secondPull.commitSha, fp: secondPull.planFingerprint });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('PLAN_BLOCKED');
+    const stillLocal = await page.evaluate(async (name) => {
+      const res = await fetch(`/api/stacks/${name}/files/content?path=web.env`, { credentials: 'include' });
+      return res.ok ? await res.text() : '';
+    }, stackName);
+    expect(stillLocal).toContain('locally-edited');
   });
 
   test('detaches a multi-file stack with the export contract', async ({ page }) => {
@@ -552,15 +558,15 @@ test.describe('Git Sources complete-project materialization (local git server)',
       const res = await fetch(`/api/stacks/${name}/git-source/pull`, { method: 'POST', credentials: 'include' });
       return await res.json();
     }, stackName);
-    const applied = await page.evaluate(async ({ name, sha }) => {
+    const applied = await page.evaluate(async ({ name, sha, fp }) => {
       const res = await fetch(`/api/stacks/${name}/git-source/apply`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ commitSha: sha, deploy: false }),
+        body: JSON.stringify({ commitSha: sha, planFingerprint: fp, deploy: false }),
       });
       return res.status;
-    }, { name: stackName, sha: pull.commitSha });
+    }, { name: stackName, sha: pull.commitSha, fp: pull.planFingerprint });
     expect(applied).toBe(200);
 
     const detached = await page.evaluate(async (name) => {
@@ -604,5 +610,30 @@ test.describe('Git Sources complete-project materialization (local git server)',
     // The actionable refusal aborts the pull with an actionable message.
     expect(pull.status).toBe(400);
     expect(JSON.stringify(pull.body)).toMatch(/outside the repository|Cannot materialize/);
+  });
+
+  test('shows a classified plan in the review dialog and keeps Apply reachable on a phone', async ({ page }) => {
+    await loginAs(page);
+    await page.evaluate(async (name) => {
+      await fetch('/api/stacks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ stackName: name }),
+      });
+    }, stackName);
+    expect(await saveSource(page, `${server.url}/app.git`, ['compose.yaml'])).toBe(200);
+
+    await page.getByRole('button', { name: 'Create Stack' }).waitFor({ timeout: 15_000 });
+    await page.getByText(stackName).first().click();
+    await page.getByRole('button', { name: /Git Source/i }).click();
+    await expect(page.getByRole('dialog').getByRole('heading', { name: /git source/i })).toBeVisible();
+    await page.getByRole('button', { name: /Pull now/i }).click();
+    await expect(page.getByTestId('git-plan-op').first()).toBeVisible({ timeout: 20_000 });
+    const applyBtn = page.getByRole('button', { name: /^Apply$/ });
+    await expect(applyBtn).toBeEnabled();
+
+    await page.setViewportSize({ width: 375, height: 812 });
+    await expect(applyBtn).toBeVisible();
   });
 });

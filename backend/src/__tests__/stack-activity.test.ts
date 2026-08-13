@@ -238,3 +238,23 @@ describe('DatabaseService.addNotificationHistory (no per-insert prune)', () => {
     expect(aActivity.map((e: any) => e.message)).toEqual(['first']);
   });
 });
+
+describe('DatabaseService.getStackActivity git categories', () => {
+  it('returns git change-plan history categories', () => {
+    const ts = Date.now();
+    for (const category of ['git_pull_ready', 'git_plan_blocked', 'git_apply', 'git_create'] as const) {
+      db.addNotificationHistory(0, {
+        level: 'info',
+        category,
+        message: category,
+        timestamp: ts,
+        stack_name: 'git-act',
+        actor_username: 'alice',
+      });
+    }
+    const out = db.getStackActivity(0, 'git-act', { limit: 50 });
+    expect(out.map((e: { category?: string }) => e.category).sort()).toEqual(
+      ['git_apply', 'git_create', 'git_plan_blocked', 'git_pull_ready'].sort(),
+    );
+  });
+});

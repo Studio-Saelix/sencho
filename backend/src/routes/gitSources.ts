@@ -312,7 +312,9 @@ stackGitSourceRouter.post('/:stackName/git-source/pull', async (req: Request, re
   }
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   try {
-    const result = await GitSourceService.getInstance().pull(stackName);
+    const result = await GitSourceService.getInstance().pull(stackName, {
+      actor: req.user?.username ?? 'unknown',
+    });
     res.json(result);
   } catch (error) {
     sendGitSourceError(res, error);
@@ -327,9 +329,13 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
   }
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   try {
-    const { commitSha, deploy } = req.body ?? {};
+    const { commitSha, deploy, planFingerprint } = req.body ?? {};
     if (typeof commitSha !== 'string' || !commitSha.trim()) {
       res.status(400).json({ error: 'commitSha is required' });
+      return;
+    }
+    if (typeof planFingerprint !== 'string' || !planFingerprint.trim()) {
+      res.status(400).json({ error: 'planFingerprint is required', code: 'PLAN_FINGERPRINT_REQUIRED' });
       return;
     }
     const source = DatabaseService.getInstance().getGitSource(stackName);
@@ -342,6 +348,8 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
         deploy: typeof deploy === 'boolean' ? deploy : undefined,
         actor: req.user?.username ?? 'unknown',
         bypassPolicy: req.query.ignorePolicy === 'true' && req.user?.role === 'admin',
+        planFingerprint: planFingerprint.trim(),
+        requirePlanFingerprint: true,
       },
     );
     invalidateNodeCaches(req.nodeId);

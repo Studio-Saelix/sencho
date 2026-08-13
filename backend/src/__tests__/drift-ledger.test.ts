@@ -429,3 +429,57 @@ describe('drift route (GET read-only, POST recheck persists)', () => {
     expect(db().getOpenDriftFindings(nodeId, STACK)).toHaveLength(1);
   });
 });
+
+describe('DriftLedgerService managed-path conflicts', () => {
+  const STACK = 'gitpath';
+  beforeEach(() => clearLedger(STACK));
+
+  it('upserts without resolving and keeps the original detected_at', () => {
+    const ledger = DriftLedgerService.getInstance();
+    ledger.upsertManagedPathConflicts(nodeId, STACK, [
+      { path: 'compose.yaml', op: 'local-modified', role: 'compose-primary', sensitivity: 'medium' },
+    ]);
+    const first = db().getOpenDriftFindings(nodeId, STACK);
+    expect(first).toHaveLength(1);
+    expect(first[0].finding_type).toBe('managed-path-conflict');
+    expect(first[0].message).toBe('compose-primary local-modified');
+    const detectedAt = first[0].detected_at;
+
+    ledger.upsertManagedPathConflicts(nodeId, STACK, [
+      { path: 'compose.yaml', op: 'local-modified', role: 'compose-primary', sensitivity: 'medium' },
+    ]);
+    const second = db().getOpenDriftFindings(nodeId, STACK);
+    expect(second).toHaveLength(1);
+    expect(second[0].detected_at).toBe(detectedAt);
+    expect(second[0].id).toBe(first[0].id);
+  });
+
+  it('redacts high-sensitivity paths in the stored message', () => {
+    DriftLedgerService.getInstance().upsertManagedPathConflicts(nodeId, STACK, [
+      { path: '.env', op: 'local-modified', role: 'env', sensitivity: 'high' },
+    ]);
+    const open = db().getOpenDriftFindings(nodeId, STACK);
+    expect(open[0].message).toBe('secret-bearing managed path (local-modified)');
+    expect(open[0].service).not.toContain('.env');
+  });
+
+  it('does not resolve a git finding during spatial reconcile', () => {
+    const ledger = DriftLedgerService.getInstance();
+    ledger.upsertManagedPathConflicts(nodeId, STACK, [
+      { path: 'compose.yaml', op: 'local-modified', role: 'compose-primary', sensitivity: 'medium' },
+    ]);
+    const res = ledger.reconcile(nodeId, STACK, reportWith([], { stack: STACK, status: 'in-sync' }));
+    expect(res.resolved).toBe(0);
+    expect(db().getOpenDriftFindings(nodeId, STACK)).toHaveLength(1);
+    expect(db().getOpenDriftFindings(nodeId, STACK)[0].finding_type).toBe('managed-path-conflict');
+  });
+
+  it('resolves git findings only through resolveManagedPathConflicts', () => {
+    const ledger = DriftLedgerService.getInstance();
+    ledger.upsertManagedPathConflicts(nodeId, STACK, [
+      { path: 'compose.yaml', op: 'local-modified', role: 'compose-primary', sensitivity: 'medium' },
+    ]);
+    ledger.resolveManagedPathConflicts(nodeId, STACK);
+    expect(db().getOpenDriftFindings(nodeId, STACK)).toHaveLength(0);
+  });
+});
