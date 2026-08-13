@@ -2481,6 +2481,19 @@ class DockerController {
   }
 
   /**
+   * True when `stackDir` is missing (ENOENT) or is not a directory.
+   * Other stat failures return false so callers keep the existing compose-ps path.
+   */
+  private async isStackDirectoryAbsent(stackDir: string): Promise<boolean> {
+    try {
+      const st = await fs.stat(stackDir);
+      return !st.isDirectory();
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT';
+    }
+  }
+
+  /**
    * Containers visible to `docker compose ps` for this stack. Empty when Compose
    * does not manage any containers (including first deploy or mislabeled legacy).
    */
@@ -2530,6 +2543,7 @@ class DockerController {
    */
   public async getLegacyOrphanContainersByStack(stackName: string): Promise<Array<{ Id: string }>> {
     const stackDir = path.join(NodeRegistry.getInstance().getComposeDir(this.nodeId), stackName);
+    if (await this.isStackDirectoryAbsent(stackDir)) return [];
     const toIds = (list: Array<{ Id?: string }>) =>
       list.filter((c): c is { Id: string } => typeof c.Id === 'string' && c.Id.length > 0)
         .map((c) => ({ Id: c.Id }));
@@ -2573,6 +2587,9 @@ class DockerController {
     | { status: 'classification_failed'; error: string }
   > {
     const stackDir = path.join(NodeRegistry.getInstance().getComposeDir(this.nodeId), stackName);
+    if (await this.isStackDirectoryAbsent(stackDir)) {
+      return { status: 'classification_failed', error: 'Stack directory is gone' };
+    }
     const toIds = (list: Array<{ Id?: string }>) =>
       list.filter((c): c is { Id: string } => typeof c.Id === 'string' && c.Id.length > 0)
         .map((c) => c.Id);
@@ -2614,6 +2631,9 @@ class DockerController {
     // not the process default, so a non-default local node sees its own stack dir
     // and deploy spec.
     const stackDir = path.join(NodeRegistry.getInstance().getComposeDir(this.nodeId), stackName);
+    if (await this.isStackDirectoryAbsent(stackDir)) {
+      return this.enrichContainers([]);
+    }
 
     try {
       const containers = await this.fetchComposePsContainers(stackName, stackDir);

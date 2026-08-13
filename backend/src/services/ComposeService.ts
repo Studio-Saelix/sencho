@@ -736,6 +736,24 @@ export class ComposeService {
     const startStream = async () => {
       if (isClosed || ws.readyState !== WebSocket.OPEN) return;
 
+      const stackDir = path.join(this.baseDir, stackName);
+      let stackDirGone = false;
+      try {
+        const st = await fs.promises.stat(stackDir);
+        stackDirGone = !st.isDirectory();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          stackDirGone = true;
+        }
+        // Other stat failures: keep the existing compose-ps path.
+      }
+      if (stackDirGone) {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(`\r\n\x1b[33m[Sencho] Stack directory is gone. Log stream idle.\x1b[0m\r\n`);
+        }
+        return;
+      }
+
       try {
         const dockerController = DockerController.getInstance(this.nodeId);
         const containers = await dockerController.getContainersByStack(stackName);
