@@ -16,7 +16,7 @@ import { useImageScan } from '@/hooks/useImageScan';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { Masthead, type Tone } from './mobile/mobile-ui';
 import { SecurityMobileTabs, type SecurityMobileTab } from './security/SecurityMobile';
-import type { SecurityTab } from '@/lib/events';
+import { SENCHO_SETTINGS_CHANGED, type SecurityTab, type SenchoSettingsChangedDetail } from '@/lib/events';
 import type { ImageFilterValue } from '@/lib/severityStyles';
 import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, ExploitIntelFinding, FleetRole, PostureReasonKind } from '@/types/security';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
@@ -196,8 +196,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         .catch(() => ({ items: [], truncated: false }));
       try {
         const [overviewRes, summariesRes] = await Promise.all([
-          apiFetch('/security/overview'),
-          apiFetch('/security/image-summaries'),
+          apiFetch('/security/overview', { cache: 'no-store' }),
+          apiFetch('/security/image-summaries', { cache: 'no-store' }),
         ]);
         if (cancelled) return;
         if (overviewRes.ok) {
@@ -243,6 +243,20 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     })();
     return () => { cancelled = true; };
   }, [activeNode?.id, reloadToken]);
+
+  // Toggling image-update checks flips overview.updateChecksDisabled, which
+  // gates Check again and the uncertain-row description. Refetch so Overview
+  // does not stay stale until a page reload.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const keys = (e as CustomEvent<SenchoSettingsChangedDetail>).detail?.changedKeys ?? [];
+      if (keys.includes('image_update_checks_enabled')) {
+        setReloadToken((t) => t + 1);
+      }
+    };
+    window.addEventListener(SENCHO_SETTINGS_CHANGED, handler);
+    return () => window.removeEventListener(SENCHO_SETTINGS_CHANGED, handler);
+  }, []);
 
   // Governance panels (suppressions/acks) are control-governed; probe the local
   // fleet role so a replica renders them read-only, mirroring Settings.
