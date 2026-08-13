@@ -2,26 +2,31 @@ import express, { type Request, type Response, type NextFunction, type RequestHa
 import { NodeRegistry } from '../services/NodeRegistry';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
 import { SYNC_BODY_LIMIT, SYNC_ERROR_CODES, SYNC_PATH_PREFIX } from '../services/fleetSyncConstants';
+import { FLEET_SNAPSHOT_APPLY_BODY_LIMIT } from '../utils/snapshot-capture';
 
-// JSON body parser that also captures the raw bytes for HMAC verification.
 // `rawBody` is part of the Express.Request augmentation (see types/express.ts);
 // the cast is required because body-parser's `verify` signature types `req` as
 // Node's IncomingMessage, not Express's Request.
-const jsonParser = express.json({
-  verify: (req, _res, buf) => {
-    (req as unknown as Request).rawBody = buf;
-  },
-});
+function jsonWithRawBody(limit?: string | number): RequestHandler {
+  return express.json({
+    ...(limit === undefined ? {} : { limit }),
+    verify: (req, _res, buf) => {
+      (req as unknown as Request).rawBody = buf;
+    },
+  });
+}
+
+const jsonParser = jsonWithRawBody();
 
 // Larger-limit parser for the fleet sync receive endpoint. A control instance
 // can push up to MAX_SYNC_ROWS rows in a single payload; the default 100 KB
 // limit is too tight for that.
-const fleetSyncJsonParser = express.json({
-  limit: SYNC_BODY_LIMIT,
-  verify: (req, _res, buf) => {
-    (req as unknown as Request).rawBody = buf;
-  },
-});
+const fleetSyncJsonParser = jsonWithRawBody(SYNC_BODY_LIMIT);
+
+// Combined compose.yaml + .env restore payload; sized for two snapshot files.
+const fleetSnapshotApplyJsonParser = jsonWithRawBody(FLEET_SNAPSHOT_APPLY_BODY_LIMIT);
+
+const FLEET_SNAPSHOT_APPLY_PATH = /^\/api\/stacks\/[^/]+\/fleet-snapshot-apply$/;
 
 /**
  * Parse JSON on local requests but preserve the raw stream for remote proxy
@@ -60,6 +65,10 @@ export const conditionalJsonParser: RequestHandler = (req: Request, res: Respons
       }
       next(err);
     });
+    return;
+  }
+  if (FLEET_SNAPSHOT_APPLY_PATH.test(req.path)) {
+    fleetSnapshotApplyJsonParser(req, res, next);
     return;
   }
   jsonParser(req, res, next);

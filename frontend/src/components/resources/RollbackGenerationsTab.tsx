@@ -14,6 +14,13 @@ import { toast } from '@/components/ui/toast-store';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
 import { TableSkeleton } from './TableSkeleton';
 
+export type RollbackOperationKind =
+    | 'update'
+    | 'deployment'
+    | 'git_apply'
+    | 'manual_backup'
+    | 'unknown';
+
 export interface RollbackGeneration {
     id: string;
     shortId: string;
@@ -23,6 +30,8 @@ export interface RollbackGeneration {
     phase: string;
     createdAt: number;
     artifactExpiresAt: number | null;
+    createdBy: string | null;
+    operationKind: RollbackOperationKind | null;
     /** Best-effort UI hint only; the server revalidates eligibility on release. */
     releasable: boolean;
 }
@@ -280,22 +289,23 @@ export function RollbackGenerationsTab({ generations, isLoading, isAdmin, nodeId
                         <TableRow>
                             <SortableTableHead label="Stack" columnKey="stack" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={SORT_HEAD_MOBILE} />
                             <SortableTableHead label="Generation" columnKey="generation" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={SORT_HEAD_MOBILE} />
+                            <TableHead>Trigger</TableHead>
                             <SortableTableHead label="State" columnKey="state" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={`text-center ${SORT_HEAD_MOBILE}`} />
                             <SortableTableHead label="Retention" columnKey="retention" activeKey={sortKey} dir={sortDir} onSort={toggleSort} className={SORT_HEAD_MOBILE} />
                             <TableHead className="text-right">Actions</TableHead>
                         </TableRow>
                     </TableHeader>
-                    {isLoading ? <TableSkeleton cols={5} /> : (
+                    {isLoading ? <TableSkeleton cols={6} /> : (
                     <TableBody>
                         {generations.length === 0 ? (
                             <TableRow>
-                                <TableCell colSpan={5} className="text-center py-8 text-muted-foreground text-sm">
+                                <TableCell colSpan={6} className="text-center py-8 text-muted-foreground text-sm">
                                     No rollback-protected generations on this node.
                                 </TableCell>
                             </TableRow>
                         ) : sorted.length === 0 ? (
                             <TableRow>
-                                <TableCell colSpan={5} className="text-center py-8 text-muted-foreground text-sm">
+                                <TableCell colSpan={6} className="text-center py-8 text-muted-foreground text-sm">
                                     No generations match this filter.
                                 </TableCell>
                             </TableRow>
@@ -318,6 +328,9 @@ export function RollbackGenerationsTab({ generations, isLoading, isAdmin, nodeId
                                     </button>
                                 </TableCell>
                                 <TableCell className="font-mono text-xs text-muted-foreground">{gen.shortId}</TableCell>
+                                <TableCell className="text-xs text-stat-subtitle">
+                                    {[gen.operationKind, gen.createdBy].filter(Boolean).join(' · ') || 'unknown'}
+                                </TableCell>
                                 <TableCell className="text-center"><StateBadge gen={gen} /></TableCell>
                                 <TableCell className="text-xs text-stat-subtitle">{formatExpiry(gen)}</TableCell>
                                 <TableCell className="text-right">

@@ -43,6 +43,7 @@ describe('named stack route permission inventory', () => {
     ['PUT', '/stacks/web/env', 'stack:edit'],
     ['PUT', '/stacks/web/dossier', 'stack:edit'],
     ['PUT', '/stacks/web/labels', 'stack:edit'],
+    ['POST', '/stacks/web/fleet-snapshot-apply', 'stack:edit'],
     ['POST', '/stacks/web/deploy', 'stack:deploy'],
     ['POST', '/stacks/web/stop', 'stack:deploy'],
     ['POST', '/stacks/web/services/api/update', 'stack:deploy'],

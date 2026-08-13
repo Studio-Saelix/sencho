@@ -300,7 +300,7 @@ If an image update is available, or the stack declares one or more services with
 
 For actionable registry updates, the detail line also reads `patch · safe to apply` (green), `minor · review recommended` (amber), or `major · breaking changes possible` (rose). Build-only stacks show **Rebuild available** instead of a version bump, with a **Rebuild & Update** button. A stack that mixes registry images and local builds still shows a single banner, with the rebuild note folded into the same detail line. Major bumps use the rose styling and are worth reviewing before applying.
 
-Rebuilds can take longer than a registry pull and depend on the local Dockerfile context, network access, and base-image availability. Atomic rollback restores compose and env files only; previously built image layers are not rolled back automatically.
+Rebuilds can take longer than a registry pull and depend on the local Dockerfile context, network access, and base-image availability. When a recovery generation captured the prior image ID, supported local-build recovery restores that exact image identity. Without a held prior ID, restore falls back to the authored files alone and does not reconstruct previously built layers.
 
 A separate amber **scan** banner appears here if the most recent post-deploy vulnerability scan failed or was skipped for one or more images; deploys are never blocked by a scan failure. See [Vulnerability Scanning](/features/vulnerability-scanning).
 
@@ -383,7 +383,7 @@ The stack header groups actions by frequency of use. The most common action is t
 | Secondary | **Stop** | `docker compose stop` | Stops containers without removing them. State is preserved. |
 | Secondary | **Take down** | `docker compose down` | Removes containers and compose-created networks. The stack definition stays on disk so you can deploy again later. Optional volume removal is available in the confirmation dialog. |
 | Secondary | **Update** | `docker compose pull` + `up -d` (or build-aware rebuild when services declare `build:`) | Pulls registry images and recreates containers. When one or more services use `build:`, Update rebuilds those images from source (`compose build --pull`), pulls any remaining registry images, then recreates containers. |
-| Overflow | **Rollback** | Restores backup | Reverts compose and env files to the pre-deploy snapshot and redeploys. Only shown when a backup exists. |
+| Overflow | **Rollback** | Restores recovery generation | Prefers the current recovery generation: restores the managed authored inventory and held prior image IDs where available, then redeploys. Only shown when a generation or fallback backup exists. |
 | Overflow | **Scan config** | Trivy config scan | Scans the compose file for misconfigurations (admin role). |
 | Overflow | **Monitor** | Opens Monitor sheet | Opens the stack **Monitor** sheet on the Alerts tab (alert rules and Auto-heal). Same sheet as sidebar **Alerts** / **Auto-Heal**. |
 | Overflow | **Mute** | Creates a mute rule | Quick presets to mute notifications, deploy-success noise, or monitor alerts for this stack, plus a link to manage its mute rules in full. See [Alerts and Notifications](/features/alerts-notifications). |

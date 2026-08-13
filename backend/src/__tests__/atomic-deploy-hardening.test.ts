@@ -83,7 +83,7 @@ afterAll(() => {
 });
 
 beforeEach(async () => {
-  mockDeployStack.mockReset();
+  mockDeployStack.mockReset().mockResolvedValue({ recoveryId: null });
   mockGetBackupInfo.mockReset().mockResolvedValue({ exists: true, timestamp: Date.now() });
   mockRestoreStackFiles.mockReset().mockResolvedValue(undefined);
   mockSnapshotStackFiles.mockReset().mockResolvedValue(async () => {});
@@ -96,7 +96,7 @@ afterEach(() => vi.restoreAllMocks());
 describe('Rollback holds the stack lifecycle lock (H-1)', () => {
   it('blocks deploy while a rollback is in flight on the same stack', async () => {
     mockTier('paid');
-    const gate = deferred<void>();
+    const gate = deferred<{ recoveryId: string | null }>();
     mockDeployStack.mockImplementationOnce(() => gate.promise);
 
     const rollback = request(app)
@@ -113,14 +113,14 @@ describe('Rollback holds the stack lifecycle lock (H-1)', () => {
     expect(deploy.body.code).toBe('stack_op_in_progress');
     expect(deploy.body.inProgress.action).toBe('rollback');
 
-    gate.resolve();
+    gate.resolve({ recoveryId: null });
     const rollbackRes = await rollback;
     expect(rollbackRes.status).toBe(200);
   });
 
   it('returns 409 when a rollback lands while a deploy is in flight', async () => {
     mockTier('paid');
-    const gate = deferred<void>();
+    const gate = deferred<{ recoveryId: string | null }>();
     mockDeployStack.mockImplementationOnce(() => gate.promise);
 
     const deploy = request(app)
@@ -136,13 +136,13 @@ describe('Rollback holds the stack lifecycle lock (H-1)', () => {
     expect(rollback.status).toBe(409);
     expect(rollback.body.inProgress.action).toBe('deploy');
 
-    gate.resolve();
+    gate.resolve({ recoveryId: null });
     await deploy;
   });
 
   it('releases the lock after a successful rollback', async () => {
     mockTier('paid');
-    mockDeployStack.mockResolvedValue(undefined);
+    mockDeployStack.mockResolvedValue({ recoveryId: null });
 
     const first = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
     expect(first.status).toBe(200);
@@ -157,7 +157,7 @@ describe('Rollback holds the stack lifecycle lock (H-1)', () => {
     const first = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
     expect(first.status).toBe(500);
 
-    mockDeployStack.mockResolvedValueOnce(undefined);
+    mockDeployStack.mockResolvedValueOnce({ recoveryId: null });
     const second = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
     expect(second.status).toBe(200);
   });
@@ -166,7 +166,7 @@ describe('Rollback holds the stack lifecycle lock (H-1)', () => {
 describe('Rollback notifications (M-2)', () => {
   it('dispatches a success notification when a rollback completes', async () => {
     mockTier('paid');
-    mockDeployStack.mockResolvedValue(undefined);
+    mockDeployStack.mockResolvedValue({ recoveryId: null });
     const { NotificationService } = await import('../services/NotificationService');
     const spy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
 
@@ -214,7 +214,7 @@ describe('Rollback returns 404 when no backup exists', () => {
     // The 404 is an early return inside the try; the finally must still release
     // the lock so the stack is not wedged at 409 afterwards.
     mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: Date.now() });
-    mockDeployStack.mockResolvedValue(undefined);
+    mockDeployStack.mockResolvedValue({ recoveryId: null });
     const next = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
     expect(next.status).toBe(200);
   });
@@ -223,7 +223,7 @@ describe('Rollback returns 404 when no backup exists', () => {
 describe('Developer Mode logging matrix', () => {
   it('only emits rollback diagnostic logs when Developer Mode is enabled', async () => {
     mockTier('paid');
-    mockDeployStack.mockResolvedValue(undefined);
+    mockDeployStack.mockResolvedValue({ recoveryId: null });
     const { DatabaseService } = await import('../services/DatabaseService');
     const db = DatabaseService.getInstance();
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -246,7 +246,7 @@ describe('Deploy safety is available on every tier', () => {
   it('allows rollback on community', async () => {
     mockTier('community');
     mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: 1700000000000 });
-    mockDeployStack.mockResolvedValue(undefined);
+    mockDeployStack.mockResolvedValue({ recoveryId: null });
     const res = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
     expect(res.status).toBe(200);
     expect(mockDeployStack).toHaveBeenCalled();
@@ -257,7 +257,7 @@ describe('Deploy safety is available on every tier', () => {
     mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: 1700000000000 });
     const res = await request(app).get('/api/stacks/web/backup').set('Cookie', authCookie);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ exists: true, timestamp: 1700000000000 });
+    expect(res.body).toMatchObject({ exists: true, timestamp: 1700000000000 });
   });
 
   it('returns backup metadata on paid', async () => {
@@ -265,6 +265,6 @@ describe('Deploy safety is available on every tier', () => {
     mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: 1700000000000 });
     const res = await request(app).get('/api/stacks/web/backup').set('Cookie', authCookie);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ exists: true, timestamp: 1700000000000 });
+    expect(res.body).toMatchObject({ exists: true, timestamp: 1700000000000 });
   });
 });

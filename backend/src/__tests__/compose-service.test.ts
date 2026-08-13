@@ -740,7 +740,7 @@ describe('ComposeService - deployStack', () => {
     const promise = ComposeService.getInstance(1).deployStack('my-stack');
     await vi.advanceTimersByTimeAsync(3100);
 
-    await expect(promise).resolves.toBeUndefined();
+    await expect(promise).resolves.toEqual({ recoveryId: null });
     expect(mockGetLegacyOrphanContainersByStack).toHaveBeenCalledWith('my-stack');
   });
 
@@ -834,7 +834,7 @@ describe('ComposeService - deployStack', () => {
     );
   });
 
-  it('creates backup when atomic=true', async () => {
+  it('captures recovery generation when atomic=true', async () => {
     setupAutoCloseSpawn();
     mockListContainers.mockResolvedValue([]);
 
@@ -842,9 +842,16 @@ describe('ComposeService - deployStack', () => {
     const promise = svc.deployStack('my-stack', undefined, true);
 
     await vi.advanceTimersByTimeAsync(3100);
-    await promise;
+    const result = await promise;
 
-    expect(mockBackupStackFiles).toHaveBeenCalledWith('my-stack');
+    expect(result).toEqual({ recoveryId: 'recovery-1' });
+    expect(mockCaptureCandidate).toHaveBeenCalledWith(expect.objectContaining({
+      stackName: 'my-stack',
+      operationKind: 'deployment',
+      createdBy: 'atomic-deploy',
+    }));
+    expect(mockHandoff).toHaveBeenCalled();
+    expect(mockMarkImmediateVerified).toHaveBeenCalledWith('recovery-1');
   });
 
   it('blocks deploy before backup when missing external networks need a prompt', async () => {
@@ -866,7 +873,7 @@ describe('ComposeService - deployStack', () => {
 
     const svc = ComposeService.getInstance(1);
     await expect(svc.deployStack('my-stack', undefined, true)).rejects.toBeInstanceOf(MissingExternalNetworksError);
-    expect(mockBackupStackFiles).not.toHaveBeenCalled();
+    expect(mockCaptureCandidate).not.toHaveBeenCalled();
     expect(mockSpawn).not.toHaveBeenCalled();
     expect(mockAddNotificationHistory).not.toHaveBeenCalled();
   });
@@ -918,7 +925,7 @@ describe('ComposeService - deployStack', () => {
         stack_name: 'my-stack',
       }),
     );
-    expect(mockBackupStackFiles).toHaveBeenCalled();
+    expect(mockCaptureCandidate).toHaveBeenCalled();
   });
 
   it('does not wrap a missing-external prompt in ComposeRollbackError when atomic', async () => {
@@ -943,14 +950,12 @@ describe('ComposeService - deployStack', () => {
     expect(error?.name).toBe('MissingExternalNetworksError');
   });
 
-  it('aborts atomic deploy before docker side effects when backup fails', async () => {
-    mockBackupStackFiles.mockRejectedValueOnce(new Error('disk full'));
+  it('aborts atomic deploy before docker side effects when capture fails', async () => {
+    mockCaptureCandidate.mockRejectedValueOnce(new Error('disk full'));
 
     const svc = ComposeService.getInstance(1);
 
-    await expect(svc.deployStack('my-stack', undefined, true)).rejects.toThrow(
-      'Atomic deployment backup failed',
-    );
+    await expect(svc.deployStack('my-stack', undefined, true)).rejects.toThrow('disk full');
     expect(mockSpawn).not.toHaveBeenCalled();
     expect(mockGetLegacyOrphanContainersByStack).not.toHaveBeenCalled();
   });
@@ -995,7 +1000,7 @@ describe('ComposeService - deployStack', () => {
     expect(error).not.toBeNull();
     expect(error!.message).toContain('CONTAINER_CRASHED');
     expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: true });
-    expect(mockRestoreStackFiles).toHaveBeenCalledWith('my-stack');
+    expect(mockCompensateWithCandidate).toHaveBeenCalledWith('recovery-1', expect.any(Function));
   });
 
   it('reports rollback failure when atomic restore fails', async () => {
@@ -1006,7 +1011,7 @@ describe('ComposeService - deployStack', () => {
       Labels: { 'com.docker.compose.project': 'my-stack' },
     }]);
     mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
-    mockRestoreStackFiles.mockRejectedValueOnce(new Error('restore denied'));
+    mockCompensateWithCandidate.mockResolvedValueOnce(false);
 
     const svc = ComposeService.getInstance(1);
     const result = svc.deployStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
@@ -1014,6 +1019,28 @@ describe('ComposeService - deployStack', () => {
     await vi.runAllTimersAsync();
     const error = await result;
     expect(error).not.toBeNull();
+    expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
+  });
+
+  it('wraps a missing hold tag as rolledBack=false without replacing the original error', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([{
+      Id: 'crashed-c1',
+      State: 'exited',
+      Labels: { 'com.docker.compose.project': 'my-stack' },
+    }]);
+    mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
+    mockCompensateWithCandidate.mockRejectedValueOnce(
+      Object.assign(new Error('Held recovery image is missing'), { code: 'HELD_IMAGE_MISSING' }),
+    );
+
+    const svc = ComposeService.getInstance(1);
+    const result = svc.deployStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
+
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error).not.toBeNull();
+    expect(error!.message).toContain('CONTAINER_CRASHED');
     expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
   });
 

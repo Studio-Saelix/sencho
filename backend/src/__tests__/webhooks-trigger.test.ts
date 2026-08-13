@@ -461,12 +461,15 @@ describe('WebhookService.execute: health gate begin call sites', () => {
         const { HealthGateService } = await import('../services/HealthGateService');
         vi.spyOn(policyGate, 'assertPolicyGateAllows').mockResolvedValue(undefined);
         vi.spyOn(fs.FileSystemService.prototype, 'getStacks').mockResolvedValue([stack]);
-        vi.spyOn(compose.ComposeService.prototype, 'deployStack').mockResolvedValue(undefined);
+        vi.spyOn(compose.ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: 'rec-hook' });
         const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-hook');
+        const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+        const linkSpy = vi.spyOn(StackUpdateRecoveryService.getInstance(), 'linkGateOrRetain');
 
         const result = await WebhookService.getInstance().execute(webhook, 'deploy', 'test', true);
         expect(result.success).toBe(true);
         expect(beginSpy).toHaveBeenCalledWith(nodeId, stack, 'deploy', 'system:webhook');
+        expect(linkSpy).toHaveBeenCalledWith('rec-hook', 'gate-hook');
     });
 
     it('begins an update gate after a webhook pull succeeds', async () => {

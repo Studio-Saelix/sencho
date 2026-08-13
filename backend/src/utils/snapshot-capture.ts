@@ -104,6 +104,21 @@ export const MAX_SNAPSHOT_FILE_BYTES = 1_000_000;
 /** The cap rendered in MB for operator-facing warning text. */
 const MAX_SNAPSHOT_FILE_MB = MAX_SNAPSHOT_FILE_BYTES / 1_000_000;
 
+/** Snapshot files Fleet restore is allowed to write. */
+export const FLEET_SNAPSHOT_APPLY_FILENAMES = ['compose.yaml', '.env'] as const;
+export type FleetSnapshotApplyFilename = typeof FLEET_SNAPSHOT_APPLY_FILENAMES[number];
+
+/**
+ * JSON body limit for POST /api/stacks/:name/fleet-snapshot-apply. Capture
+ * allows 1 MB per allowed file; the apply POST sends those files in one body,
+ * so the default 100 KB parser would 413 a legal captured pair.
+ */
+export const FLEET_SNAPSHOT_APPLY_BODY_LIMIT =
+  FLEET_SNAPSHOT_APPLY_FILENAMES.length * MAX_SNAPSHOT_FILE_BYTES + 256_000;
+
+/** Hub wait for remote capture-then-write. Capture inspects images before any write. */
+export const FLEET_SNAPSHOT_APPLY_TIMEOUT_MS = 300_000;
+
 /**
  * Minimal node shape accepted by capture functions.
  * `mode` is required so remote dispatch can emit a tunnel-aware error when

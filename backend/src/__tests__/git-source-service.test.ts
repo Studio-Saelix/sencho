@@ -32,6 +32,44 @@ vi.mock('isomorphic-git', () => {
 
 vi.mock('isomorphic-git/http/node', () => ({ default: {} }));
 
+
+const {
+  mockCaptureCandidate,
+  mockRecoveryAbandon,
+  mockRecoveryMarkAcquired,
+  mockRecoveryHandoff,
+  mockRecoveryMarkReconciling,
+  mockRecoveryMarkImmediateVerified,
+  mockRecoveryGet,
+  mockRecoveryLinkGateOrRetain,
+} = vi.hoisted(() => ({
+  mockCaptureCandidate: vi.fn(async () => ({ id: 'rec-test-1' })),
+  mockRecoveryAbandon: vi.fn(async () => true),
+  mockRecoveryMarkAcquired: vi.fn(() => true),
+  mockRecoveryHandoff: vi.fn(() => true),
+  mockRecoveryMarkReconciling: vi.fn(() => true),
+  mockRecoveryMarkImmediateVerified: vi.fn(() => true),
+  mockRecoveryGet: vi.fn(() => ({ id: 'rec-test-1', is_current: 1 })),
+  mockRecoveryLinkGateOrRetain: vi.fn(),
+}));
+
+vi.mock('../services/StackUpdateRecoveryService', () => ({
+  StackUpdateRecoveryService: {
+    getInstance: () => ({
+      captureCandidate: mockCaptureCandidate,
+      abandon: mockRecoveryAbandon,
+      markAcquired: mockRecoveryMarkAcquired,
+      handoff: mockRecoveryHandoff,
+      markReconciling: mockRecoveryMarkReconciling,
+      markImmediateVerified: mockRecoveryMarkImmediateVerified,
+      get: mockRecoveryGet,
+      linkGateOrRetain: mockRecoveryLinkGateOrRetain,
+      compensateWithCandidate: vi.fn(async () => true),
+    }),
+  },
+}));
+
+
 let tmpDir: string;
 let GitSourceService: typeof import('../services/GitSourceService').GitSourceService;
 let GitSourceError: typeof import('../services/GitSourceService').GitSourceError;
@@ -50,6 +88,21 @@ afterAll(() => {
 beforeEach(() => {
     mockGitClone.mockReset();
     mockGitLog.mockReset();
+    mockCaptureCandidate.mockReset();
+    mockCaptureCandidate.mockImplementation(async () => ({ id: 'rec-test-1' }));
+    mockRecoveryAbandon.mockReset();
+    mockRecoveryAbandon.mockResolvedValue(true);
+    mockRecoveryMarkAcquired.mockReset();
+    mockRecoveryMarkAcquired.mockReturnValue(true);
+    mockRecoveryHandoff.mockReset();
+    mockRecoveryHandoff.mockReturnValue(true);
+    mockRecoveryMarkReconciling.mockReset();
+    mockRecoveryMarkReconciling.mockReturnValue(true);
+    mockRecoveryMarkImmediateVerified.mockReset();
+    mockRecoveryMarkImmediateVerified.mockReturnValue(true);
+    mockRecoveryGet.mockReset();
+    mockRecoveryLinkGateOrRetain.mockReset();
+    mockRecoveryGet.mockReturnValue({ id: 'rec-test-1', is_current: 1 });
 
     // Wipe persisted git sources between tests
     const db = DatabaseService.getInstance();
@@ -894,6 +947,47 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
         expect(result.message).toMatch(/validation failed/i);
         runSpy.mockRestore();
     });
+
+    it('routes webhook auto-apply through the shared stack-operation lock', async () => {
+        const sha = 'ffff666ffff666ffff666ffff666ffff666ffff6';
+        mockSuccessfulClone({ sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        await svc.upsert({
+            stackName: 'webhook-shared-lock',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: true,
+            autoDeployOnApply: false,
+        });
+        mockGitClone.mockClear();
+
+        const { StackOpLockService } = await import('../services/StackOpLockService');
+        const runExclusive = vi.spyOn(StackOpLockService.getInstance(), 'runExclusive')
+            .mockResolvedValue({
+                ran: false,
+                existing: { action: 'update', actor: 'user:admin', startedAt: Date.now() },
+            } as never);
+
+        const result = await svc.handleWebhookPull('webhook-shared-lock');
+        expect(result.status).toBe('error');
+        expect(result.message).toMatch(/already in progress/i);
+        expect(runExclusive).toHaveBeenCalledWith(
+            expect.any(Number),
+            'webhook-shared-lock',
+            'git_apply',
+            'system:webhook',
+            expect.any(Function),
+        );
+
+        runExclusive.mockRestore();
+        validateSpy.mockRestore();
+    });
 });
 
 describe('GitSourceService per-stack mutex', () => {
@@ -1359,7 +1453,7 @@ describe('GitSourceService.apply', () => {
         const { ComposeService } = await import('../services/ComposeService');
         const { HealthGateService } = await import('../services/HealthGateService');
         const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue();
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
         const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-git');
         const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
 
@@ -1371,6 +1465,7 @@ describe('GitSourceService.apply', () => {
                 actor: 'system:git-source',
             });
             expect(beginSpy).toHaveBeenCalledWith(nodeId, 'apply-deploy-gate', 'deploy', 'system:git-source');
+            expect(mockRecoveryLinkGateOrRetain).toHaveBeenCalledWith('rec-test-1', 'gate-git');
         } finally {
             validateSpy.mockRestore();
             saveSpy.mockRestore();
@@ -1470,7 +1565,7 @@ describe('GitSourceService.apply', () => {
         const TrivyService = (await import('../services/TrivyService')).default;
         const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
         const listImagesSpy = vi.spyOn(ComposeService.prototype, 'listStackImages').mockResolvedValue(['nginx:bad']);
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue();
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
         const trivy = TrivyService.getInstance();
         const trivyAvailableSpy = vi.spyOn(trivy, 'isTrivyAvailable').mockReturnValue(true);
         const scanSpy = vi.spyOn(trivy, 'scanImagePreflight').mockResolvedValue({
@@ -2176,6 +2271,50 @@ describe('GitSourceService legacy pending apply (migration path)', () => {
         } finally {
             validateSpy.mockRestore();
             await cleanupStackDir('legacy-apply');
+        }
+    });
+
+    it('rejects materialize when deleting a stale override fails', async () => {
+        const svc = GitSourceService.getInstance();
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const fsSvc = FileSystemService.getInstance();
+        const stackName = 'legacy-stale-del';
+        await fsSvc.createStack(stackName);
+        await fsSvc.saveStackContent(stackName, 'services:\n  web:\n    image: nginx\n');
+        await fsSvc.writeStackFile(stackName, 'compose.override.yaml', 'services:\n  web:\n    environment: [X=1]\n');
+
+        const deleteSpy = vi.spyOn(FileSystemService.prototype, 'deleteStackPath')
+            .mockRejectedValue(Object.assign(new Error('permission denied'), { code: 'EACCES' }));
+
+        const materialize = (svc as unknown as {
+            materialize: (
+                stackName: string,
+                files: Array<{ path: string; content: string }>,
+                contextDir: string | null,
+                syncEnv: boolean,
+                envContent: string | null,
+                prevSpec: { files: string[]; contextDir: string | null } | null,
+            ) => Promise<unknown>;
+        }).materialize.bind(svc);
+
+        try {
+            await expect(
+                materialize(
+                    stackName,
+                    [{ path: 'compose.yaml', content: 'services:\n  web:\n    image: alpine\n' }],
+                    null,
+                    false,
+                    null,
+                    { files: ['compose.yaml', 'compose.override.yaml'], contextDir: null },
+                ),
+            ).rejects.toThrow(/permission denied/);
+            expect(deleteSpy).toHaveBeenCalledWith(stackName, 'compose.override.yaml');
+            // Stale override must still be present; apply must not report success over a hybrid.
+            const override = await fsSvc.readStackFile(stackName, 'compose.override.yaml');
+            expect(override.content).toContain('X=1');
+        } finally {
+            deleteSpy.mockRestore();
+            await cleanupStackDir(stackName);
         }
     });
 });
