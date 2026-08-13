@@ -7,6 +7,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { spawnSync } from 'child_process';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import type { BuildContextPlan, ComposeInputEntry, GitProjectManifest } from '../types/gitProjectManifest';
 import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
@@ -642,7 +643,8 @@ describe('GitChangePlanService.build', () => {
         const compose = 'services:\n  web:\n    image: nginx\n';
         writeStackFile(stack, 'compose.yaml', compose);
         const fifoPath = path.join(stackDir(stack), 'pipe.fifo');
-        (require('fs') as { mkfifoSync: (p: string, mode: number) => void }).mkfifoSync(fifoPath, 0o644);
+        const created = spawnSync('mkfifo', [fifoPath], { stdio: 'ignore' });
+        expect(created.status).toBe(0);
         const composeEntry = managedEntry({ materializedPath: 'compose.yaml', content: compose });
         const fifoEntry = managedEntry({
             materializedPath: 'pipe.fifo',

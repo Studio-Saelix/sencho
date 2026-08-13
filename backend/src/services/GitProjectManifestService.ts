@@ -665,13 +665,37 @@ export class GitProjectManifestService {
 
     /** Hash of the stack-dir file at a materialized path, or null when absent. */
     async hashStackFile(stackName: string, relPath: string): Promise<string | null> {
-        const abs = await this.stackFileAbs(stackName, relPath);
+        const composeDir = NodeRegistry.getInstance().getComposeDir(NodeRegistry.getInstance().getDefaultNodeId());
+        const baseResolved = path.resolve(composeDir);
+        if (!isValidStackName(stackName) || !isSafeRelPath(relPath)) throw new Error('Invalid stack file path');
+        const stackRoot = path.resolve(baseResolved, stackName);
+        const abs = path.resolve(stackRoot, relPath);
+        // Canonical js/path-injection barrier inline with the open sink. CodeQL
+        // only credits containment when it sits at the sink; helpers are ignored.
+        if (!stackRoot.startsWith(baseResolved + path.sep)) throw new Error('Invalid stack file path');
+        if (abs !== stackRoot && !abs.startsWith(stackRoot + path.sep)) {
+            throw new Error('Stack file path escapes the stack root');
+        }
+        if (!abs.startsWith(baseResolved + path.sep)) {
+            throw new Error('Stack file path escapes the compose directory');
+        }
+        let flags = fs.constants.O_RDONLY;
+        if (typeof fs.constants.O_NOFOLLOW === 'number') flags |= fs.constants.O_NOFOLLOW;
+        if (typeof fs.constants.O_NONBLOCK === 'number') flags |= fs.constants.O_NONBLOCK;
         try {
-            const stat = await fs.promises.lstat(abs);
-            if (!stat.isFile()) return null;
-            return sha256Of(await fs.promises.readFile(abs));
+            const handle = await fs.promises.open(abs, flags);
+            try {
+                const stat = await handle.stat();
+                if (!stat.isFile()) return null;
+                return sha256Of(await handle.readFile());
+            } finally {
+                await handle.close();
+            }
         } catch (e) {
-            if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+            const err = e as NodeJS.ErrnoException;
+            if (err.code === 'ENOENT' || err.code === 'ELOOP' || err.code === 'ENXIO' || err.code === 'EAGAIN') {
+                return null;
+            }
             throw e;
         }
     }
