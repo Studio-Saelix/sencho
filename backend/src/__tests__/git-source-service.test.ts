@@ -2238,7 +2238,7 @@ describe('GitSourceService managed-area lifecycle', () => {
 });
 
 describe('GitSourceService legacy pending apply (migration path)', () => {
-    it('applies a v2 pending blob via the historical path and builds a migrated manifest', async () => {
+    it('refuses a v2 pending blob and returns LEGACY_PENDING', async () => {
         const sha = '9999aaa9999aaa9999aaa9999aaa9999aaa9999a';
         const svc = GitSourceService.getInstance();
         const db = DatabaseService.getInstance();

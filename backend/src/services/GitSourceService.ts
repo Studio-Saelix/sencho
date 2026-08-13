@@ -1456,6 +1456,11 @@ export class GitSourceService {
         } catch {
             // no staged env; compose falls back to environment interpolation
         }
+        try {
+            args.push(...(await authoredComposeEnvFileArgs(stackName, nodeId)));
+        } catch (err) {
+            return { ok: false, error: (err as Error).message || 'Invalid project env file configuration.' };
+        }
         args.push('config', '--quiet');
         const result = await this.runDockerCompose(args, candidateAbs, 30_000);
         if (result.code === 0) return { ok: true };
@@ -2388,6 +2393,7 @@ export class GitSourceService {
             // insert below so list and immediate projections report the real
             // state instead of 'absent'.
             let completeProjectManifest: GitProjectManifest | null = null;
+            let recordedCreatePlan: GitChangePlan | null = null;
             try {
                 await fsSvc.createStack(input.stackName);
                 stackCreated = true;
@@ -2441,6 +2447,43 @@ export class GitSourceService {
                         priorManifest: null,
                         state: materialization.value.inventory.refusals.length > 0 ? 'partial' : 'active',
                     });
+                    const createPlan = await this.computeChangePlan({
+                        stackName: input.stackName,
+                        commitSha: fetched.commitSha,
+                        mode: 'create',
+                        src: {
+                            stack_name: input.stackName,
+                            repo_url: input.repoUrl,
+                            branch: input.branch,
+                            compose_path: input.composePaths[0],
+                            compose_paths: input.composePaths,
+                            context_dir: input.contextDir,
+                            sync_env: input.syncEnv,
+                            env_path: input.syncEnv ? input.envPath : null,
+                            auth_type: input.authType,
+                            encrypted_token: null,
+                            auto_apply_on_webhook: false,
+                            auto_deploy_on_apply: false,
+                            last_applied_commit_sha: null,
+                            last_applied_content_hash: null,
+                            pending_commit_sha: null,
+                            pending_compose_content: null,
+                            pending_env_content: null,
+                            pending_fetched_at: null,
+                            last_debounce_at: null,
+                            applied_deploy_spec: this.deriveAppliedSpec(input.composePaths, input.contextDir),
+                        } as StackGitSource,
+                        inventory: materialization.value.inventory,
+                        envContent: fetched.envContent,
+                        prior: null,
+                    });
+                    if (createPlan.blocked) {
+                        throw new GitSourceError(
+                            'GIT_ERROR',
+                            `Git create blocked for ${input.stackName}: the managed-file change plan reported blocking operations.`,
+                        );
+                    }
+                    recordedCreatePlan = createPlan;
                     await manifestSvc.promoteGeneration(input.stackName, {
                         sha: fetched.commitSha,
                         candidateRelPath: materialization.value.candidateRelPath,
@@ -2502,21 +2545,12 @@ export class GitSourceService {
 
                 rowInserted = true;
                 const operationId = crypto.randomUUID();
-                if (completeProjectManifest && materialization.value) {
-                    const createPlan = await this.computeChangePlan({
-                        stackName: input.stackName,
-                        commitSha: fetched.commitSha,
-                        mode: 'create',
-                        src: db.getGitSource(input.stackName)!,
-                        inventory: materialization.value.inventory,
-                        envContent: fetched.envContent,
-                        prior: null,
-                    });
-                    db.setGitSourceLastPlan(input.stackName, createPlan.fingerprint, 'applied');
+                if (completeProjectManifest && materialization.value && recordedCreatePlan) {
+                    db.setGitSourceLastPlan(input.stackName, recordedCreatePlan.fingerprint, 'applied');
                     this.recordGitActivity(
                         input.stackName,
                         'git_create',
-                        `Git create succeeded for ${input.stackName} (${fetched.commitSha.slice(0, 7)}, op ${operationId.slice(0, 8)}, plan ${createPlan.fingerprint.slice(0, 12)})`,
+                        `Git create succeeded for ${input.stackName} (${fetched.commitSha.slice(0, 7)}, op ${operationId.slice(0, 8)}, plan ${recordedCreatePlan.fingerprint.slice(0, 12)})`,
                         'system:git-source',
                     );
                 } else {
@@ -2855,6 +2889,7 @@ export class GitSourceService {
             liveInvocation,
             legacyOwnedPaths,
             reviewedLiveHashes: opts.reviewedLiveHashes,
+            projectEnvFiles: DatabaseService.getInstance().getStackProjectEnvFiles(nodeId, opts.stackName),
         });
     }
 

@@ -514,4 +514,154 @@ describe('GitChangePlanService.build', () => {
         });
         expect(plan.operations.find((o) => o.pathKey === 'app/Dockerfile')?.op).toBe('unchanged');
     });
+
+    it('blocks locally added files inside a retained build context', async () => {
+        const stack = 'plan-ctx-local-add';
+        const compose = 'services:\n  web:\n    image: nginx\n    build: ./app\n';
+        writeStackFile(stack, 'compose.yaml', compose);
+        writeStackFile(stack, 'app/Dockerfile', 'FROM alpine\n');
+        writeStackFile(stack, 'app/extra.txt', 'local-only\n');
+        const composeEntry = managedEntry({ materializedPath: 'compose.yaml', content: compose });
+        const ctx: BuildContextPlan = {
+            repoPath: 'app',
+            dockerfile: 'Dockerfile',
+            contextBytes: 12,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'Dockerfile', sha256: sha('FROM alpine\n'), sizeBytes: 12 }],
+        };
+        const prior = buildManifest(stack, [composeEntry], ['-f', 'compose.yaml', '-p', stack], [ctx]);
+        const plan = await GitChangePlanService.getInstance().build({
+            stackName: stack,
+            commitSha: 'cafebabe',
+            mode: 'update',
+            priorManifest: prior,
+            candidateInputs: [composeEntry],
+            candidateBuildContexts: [ctx],
+            candidateInvocation: prior.project.invocation,
+            liveInvocation: prior.project.invocation,
+        });
+        expect(plan.blocked).toBe(true);
+        expect(plan.operations.find((o) => o.pathKey === 'app/extra.txt')?.op).toBe('unmanaged-collision');
+    });
+
+    it('classifies a prior-only upstream delete with an already-missing live file as local-missing', async () => {
+        const stack = 'plan-prior-missing';
+        const compose = 'services:\n  web:\n    image: nginx\n';
+        const extra = 'services:\n  db:\n    image: postgres\n';
+        writeStackFile(stack, 'compose.yaml', compose);
+        const composeEntry = managedEntry({ materializedPath: 'compose.yaml', content: compose });
+        const extraEntry = managedEntry({
+            materializedPath: 'extra.yaml',
+            content: extra,
+            role: 'compose-additional',
+        });
+        const prior = buildManifest(stack, [composeEntry, extraEntry]);
+        const plan = await GitChangePlanService.getInstance().build({
+            stackName: stack,
+            commitSha: 'cafebabe',
+            mode: 'update',
+            priorManifest: prior,
+            candidateInputs: [composeEntry],
+            candidateBuildContexts: [],
+            candidateInvocation: prior.project.invocation,
+            liveInvocation: prior.project.invocation,
+        });
+        expect(plan.blocked).toBe(true);
+        expect(plan.operations.find((o) => o.pathKey === 'extra.yaml')?.op).toBe('local-missing');
+    });
+
+    it('binds configured project env files into the fingerprint and blocks reviewed drift', async () => {
+        const stack = 'plan-project-env';
+        const compose = 'services:\n  web:\n    image: nginx\n';
+        writeStackFile(stack, 'compose.yaml', compose);
+        writeStackFile(stack, 'prod.env', 'FOO=1\n');
+        const composeEntry = managedEntry({ materializedPath: 'compose.yaml', content: compose });
+        const prior = buildManifest(stack, [composeEntry]);
+        const { DatabaseService } = await import('../services/DatabaseService');
+        const { NodeRegistry } = await import('../services/NodeRegistry');
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        DatabaseService.getInstance().setStackProjectEnvFiles(nodeId, stack, ['prod.env']);
+
+        const stable = await GitChangePlanService.getInstance().build({
+            stackName: stack,
+            commitSha: 'cafebabe',
+            mode: 'update',
+            priorManifest: prior,
+            candidateInputs: [composeEntry],
+            candidateBuildContexts: [],
+            candidateInvocation: prior.project.invocation,
+            liveInvocation: prior.project.invocation,
+            projectEnvFiles: ['prod.env'],
+        });
+        expect(stable.operations.find((o) => o.pathKey === 'prod.env')?.op).toBe('unchanged');
+
+        writeStackFile(stack, 'prod.env', 'FOO=2\n');
+        const drifted = await GitChangePlanService.getInstance().build({
+            stackName: stack,
+            commitSha: 'cafebabe',
+            mode: 'update',
+            priorManifest: prior,
+            candidateInputs: [composeEntry],
+            candidateBuildContexts: [],
+            candidateInvocation: prior.project.invocation,
+            liveInvocation: prior.project.invocation,
+            projectEnvFiles: ['prod.env'],
+            reviewedLiveHashes: new Map([['prod.env', sha('FOO=1\n')]]),
+        });
+        expect(drifted.blocked).toBe(true);
+        expect(drifted.operations.find((o) => o.pathKey === 'prod.env')?.op).toBe('local-modified');
+    });
+
+    it('records ownership, provenance, and source revision on managed operations', async () => {
+        const stack = 'plan-metadata';
+        const compose = 'services:\n  web:\n    image: nginx\n';
+        writeStackFile(stack, 'compose.yaml', compose);
+        const composeEntry = managedEntry({ materializedPath: 'compose.yaml', content: compose });
+        const prior = buildManifest(stack, [composeEntry]);
+        const plan = await GitChangePlanService.getInstance().build({
+            stackName: stack,
+            commitSha: 'deadbeef',
+            mode: 'update',
+            priorManifest: prior,
+            candidateInputs: [composeEntry],
+            candidateBuildContexts: [],
+            candidateInvocation: prior.project.invocation,
+            liveInvocation: prior.project.invocation,
+        });
+        const row = plan.operations.find((o) => o.pathKey === 'compose.yaml');
+        expect(row?.ownership).toBe('managed');
+        expect(row?.provenance).toBe('fetch');
+        expect(row?.sourceRevision).toBe('deadbeef');
+    });
+
+    it.runIf(process.platform !== 'win32')('classifies fifo nodes as type-changed without reading them', async () => {
+        const stack = 'plan-fifo';
+        const compose = 'services:\n  web:\n    image: nginx\n';
+        writeStackFile(stack, 'compose.yaml', compose);
+        const fifoPath = path.join(stackDir(stack), 'pipe.fifo');
+        (require('fs') as { mkfifoSync: (p: string, mode: number) => void }).mkfifoSync(fifoPath, 0o644);
+        const composeEntry = managedEntry({ materializedPath: 'compose.yaml', content: compose });
+        const fifoEntry = managedEntry({
+            materializedPath: 'pipe.fifo',
+            content: 'ignored',
+            role: 'config',
+            dependencyKind: 'config',
+        });
+        const prior = buildManifest(stack, [composeEntry, fifoEntry]);
+        const plan = await GitChangePlanService.getInstance().build({
+            stackName: stack,
+            commitSha: 'cafebabe',
+            mode: 'update',
+            priorManifest: prior,
+            candidateInputs: [composeEntry, fifoEntry],
+            candidateBuildContexts: [],
+            candidateInvocation: prior.project.invocation,
+            liveInvocation: prior.project.invocation,
+        });
+        expect(plan.blocked).toBe(true);
+        expect(plan.operations.find((o) => o.pathKey === 'pipe.fifo')?.op).toBe('type-changed');
+    });
 });

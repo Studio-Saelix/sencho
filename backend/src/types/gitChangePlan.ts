@@ -3,7 +3,13 @@
  * of prior-manifest paths, candidate inventory, and live disk. Internal hashes
  * stay on the planner; public projections carry operations and counts only.
  */
-import type { DeletionAuthority, InputRole, InputSensitivity } from './gitProjectManifest';
+import type {
+    DeletionAuthority,
+    InputOwnership,
+    InputRole,
+    InputSensitivity,
+    ManifestProvenance,
+} from './gitProjectManifest';
 
 export const GIT_CHANGE_PLAN_SCHEMA_VERSION = 1 as const;
 
@@ -42,6 +48,12 @@ export interface GitChangePlanOperation {
     sensitivity: InputSensitivity;
     /** Present on rename: the prior (deleted) path. */
     fromPath?: string;
+    ownership?: InputOwnership;
+    provenance?: ManifestProvenance;
+    /** Commit SHA the candidate inventory was built from. */
+    sourceRevision?: string;
+    /** Human-readable classification note (internal plan only). */
+    reason?: string | null;
 }
 
 export interface GitChangePlanCounts {

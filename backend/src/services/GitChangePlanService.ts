@@ -13,8 +13,10 @@ import type {
     ComposeInputEntry,
     DeletionAuthority,
     GitProjectManifest,
+    InputOwnership,
     InputRole,
     InputSensitivity,
+    ManifestProvenance,
 } from '../types/gitProjectManifest';
 import {
     BLOCKING_CHANGE_PLAN_OPS,
@@ -36,6 +38,9 @@ interface PathMeta {
     role: InputRole | 'build-context-file';
     deletionAuthority: DeletionAuthority | null;
     sensitivity: InputSensitivity;
+    ownership?: InputOwnership;
+    provenance?: ManifestProvenance;
+    reason?: string | null;
 }
 
 export interface BuildGitChangePlanInput {
@@ -51,6 +56,8 @@ export interface BuildGitChangePlanInput {
     legacyOwnedPaths?: string[];
     /** Live hashes captured when the pending plan was reviewed. A later mismatch is local-modified. */
     reviewedLiveHashes?: ReadonlyMap<string, string | null>;
+    /** Stack-root project env files configured for deploy (live disk, not Git inventory). */
+    projectEnvFiles?: string[];
 }
 
 export class GitChangePlanService {
@@ -75,15 +82,28 @@ export class GitChangePlanService {
             inputs: input.candidateInputs,
             buildContexts: input.candidateBuildContexts,
         });
-        const universe = this.mergePaths(priorPaths, candidatePaths);
+        const contextExtras = await this.collectContextUniverseExtras({
+            stackName: input.stackName,
+            candidateInputs: input.candidateInputs,
+            candidateBuildContexts: input.candidateBuildContexts,
+            manifestSvc: GitProjectManifestService.getInstance(),
+        });
+        const projectEnvFiles = input.projectEnvFiles ?? [];
+        const universe = this.mergePaths(
+            this.mergePaths(priorPaths, candidatePaths),
+            this.mergePaths(contextExtras, projectEnvFiles),
+        );
+        const contextExtraSet = new Set(contextExtras.map((p) => p.toLowerCase()));
+        const projectEnvSet = new Set(projectEnvFiles.map((p) => p.toLowerCase()));
         const legacyOwned = new Set(input.legacyOwnedPaths ?? []);
         const fsSvc = FileSystemService.getInstance();
         const manifestSvc = GitProjectManifestService.getInstance();
 
         const classified: GitChangePlanOperation[] = [];
         for (const pathKey of universe) {
-            const prior = priorIndex.get(pathKey.toLowerCase());
-            const candidate = candidateIndex.get(pathKey.toLowerCase());
+            const pathFold = pathKey.toLowerCase();
+            const prior = priorIndex.get(pathFold);
+            const candidate = candidateIndex.get(pathFold);
             classified.push(await this.classifyPath({
                 stackName: input.stackName,
                 pathKey,
@@ -91,8 +111,13 @@ export class GitChangePlanService {
                 candidate,
                 mode: input.mode,
                 legacyOwned,
-                reviewedLiveHash: input.reviewedLiveHashes?.get(pathKey.toLowerCase()),
-                hasReviewedLive: input.reviewedLiveHashes?.has(pathKey.toLowerCase()) === true,
+                reviewedLiveHash: input.reviewedLiveHashes?.get(pathFold),
+                hasReviewedLive: input.reviewedLiveHashes?.has(pathFold) === true,
+                isContextExtra: contextExtraSet.has(pathFold)
+                    && prior === undefined
+                    && candidate === undefined,
+                isProjectEnv: projectEnvSet.has(pathFold),
+                sourceRevision: input.commitSha,
                 fsSvc,
                 manifestSvc,
             }));
@@ -209,6 +234,9 @@ export class GitChangePlanService {
                 role: entry.role,
                 deletionAuthority: entry.deletionAuthority,
                 sensitivity: entry.sensitivity,
+                ownership: entry.ownership,
+                provenance: entry.provenance,
+                reason: entry.note,
             });
         }
         for (const context of buildContexts) {
@@ -220,6 +248,9 @@ export class GitChangePlanService {
                     role: 'build-context-file',
                     deletionAuthority: 'sencho',
                     sensitivity: parentSensitivity,
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    reason: null,
                 });
             }
         }
@@ -244,13 +275,20 @@ export class GitChangePlanService {
         legacyOwned: Set<string>;
         reviewedLiveHash?: string | null;
         hasReviewedLive: boolean;
+        isContextExtra: boolean;
+        isProjectEnv: boolean;
+        sourceRevision: string;
         fsSvc: FileSystemService;
         manifestSvc: GitProjectManifestService;
     }): Promise<GitChangePlanOperation> {
-        const { pathKey, prior, candidate, mode, legacyOwned } = args;
-        const role = candidate?.role ?? prior?.role ?? 'other';
+        const { pathKey, prior, candidate, mode, legacyOwned, sourceRevision } = args;
+        const role = candidate?.role ?? prior?.role ?? (args.isProjectEnv ? 'env' : 'other');
         const deletionAuthority = candidate?.deletionAuthority ?? prior?.deletionAuthority ?? null;
-        const sensitivity = candidate?.sensitivity ?? prior?.sensitivity ?? 'medium';
+        const sensitivity = candidate?.sensitivity ?? prior?.sensitivity ?? (args.isProjectEnv ? 'high' : 'medium');
+        const ownership = candidate?.ownership ?? prior?.ownership ?? (args.isProjectEnv ? 'unmanaged' : undefined);
+        const provenance = candidate?.provenance ?? prior?.provenance ?? (args.isProjectEnv ? 'adopted' : undefined);
+        const reason = candidate?.reason ?? prior?.reason ?? null;
+        const metaBase = { ownership, provenance, sourceRevision, reason };
         const priorHash = prior?.hash ?? null;
         const candidateHash = candidate?.hash ?? null;
         const liveKind = await args.fsSvc.observeStackPath(args.stackName, pathKey);
@@ -260,8 +298,8 @@ export class GitChangePlanService {
                 liveHash = await args.manifestSvc.hashStackFile(args.stackName, pathKey);
             } catch (err) {
                 const kindAfter = await args.fsSvc.observeStackPath(args.stackName, pathKey);
-                if (kindAfter === 'symlink' || kindAfter === 'directory') {
-                    return this.op(pathKey, 'type-changed', role, deletionAuthority, priorHash, candidateHash, null, sensitivity);
+                if (kindAfter === 'symlink' || kindAfter === 'directory' || kindAfter === 'special') {
+                    return this.op(pathKey, 'type-changed', role, deletionAuthority, priorHash, candidateHash, null, sensitivity, metaBase);
                 }
                 throw err;
             }
@@ -270,42 +308,72 @@ export class GitChangePlanService {
         const priorPresent = prior !== undefined && priorHash !== null;
         const candidatePresent = candidate !== undefined && candidateHash !== null;
 
-        if (liveKind === 'symlink' || liveKind === 'directory') {
-            return this.op(pathKey, 'type-changed', role, deletionAuthority, priorHash, candidateHash, null, sensitivity);
+        if (liveKind === 'symlink' || liveKind === 'directory' || liveKind === 'special') {
+            return this.op(pathKey, 'type-changed', role, deletionAuthority, priorHash, candidateHash, null, sensitivity, metaBase);
         }
 
         if (args.hasReviewedLive && args.reviewedLiveHash !== liveHash) {
-            return this.op(pathKey, 'local-modified', role, deletionAuthority, priorHash, candidateHash, liveHash, sensitivity);
+            return this.op(pathKey, 'local-modified', role, deletionAuthority, priorHash, candidateHash, liveHash, sensitivity, metaBase);
         }
 
         if (priorPresent && candidatePresent) {
             if (liveKind === null) {
-                return this.op(pathKey, 'local-missing', role, deletionAuthority, priorHash, candidateHash, null, sensitivity);
+                return this.op(pathKey, 'local-missing', role, deletionAuthority, priorHash, candidateHash, null, sensitivity, {
+                    ...metaBase,
+                    reason: reason ?? 'managed path absent on disk',
+                });
             }
             if (liveHash !== priorHash) {
-                return this.op(pathKey, 'local-modified', role, deletionAuthority, priorHash, candidateHash, liveHash, sensitivity);
+                return this.op(pathKey, 'local-modified', role, deletionAuthority, priorHash, candidateHash, liveHash, sensitivity, metaBase);
             }
             if (candidateHash === priorHash) {
-                return this.op(pathKey, 'unchanged', role, deletionAuthority, priorHash, candidateHash, liveHash, sensitivity);
+                return this.op(pathKey, 'unchanged', role, deletionAuthority, priorHash, candidateHash, liveHash, sensitivity, metaBase);
             }
-            return this.op(pathKey, 'modify', role, deletionAuthority, priorHash, candidateHash, liveHash, sensitivity);
+            return this.op(pathKey, 'modify', role, deletionAuthority, priorHash, candidateHash, liveHash, sensitivity, metaBase);
         }
 
         if (priorPresent && !candidatePresent) {
+            if (liveKind === null) {
+                return this.op(pathKey, 'local-missing', role, deletionAuthority, priorHash, null, null, sensitivity, {
+                    ...metaBase,
+                    reason: reason ?? 'managed path absent on disk',
+                });
+            }
             if (prior?.deletionAuthority !== 'sencho') {
-                return this.op(pathKey, 'local-modified', role, deletionAuthority, priorHash, null, liveHash, sensitivity);
+                return this.op(pathKey, 'local-modified', role, deletionAuthority, priorHash, null, liveHash, sensitivity, metaBase);
             }
             if (liveKind === 'file' && liveHash !== priorHash) {
-                return this.op(pathKey, 'local-modified', role, deletionAuthority, priorHash, null, liveHash, sensitivity);
+                return this.op(pathKey, 'local-modified', role, deletionAuthority, priorHash, null, liveHash, sensitivity, metaBase);
             }
-            return this.op(pathKey, 'delete', role, deletionAuthority, priorHash, null, liveHash, sensitivity);
+            return this.op(pathKey, 'delete', role, deletionAuthority, priorHash, null, liveHash, sensitivity, metaBase);
+        }
+
+        if (!priorPresent && !candidatePresent) {
+            if (args.isProjectEnv) {
+                if (liveKind === null) {
+                    return this.op(pathKey, 'local-missing', role, deletionAuthority, null, null, null, sensitivity, {
+                        ...metaBase,
+                        reason: 'configured project env file missing on disk',
+                    });
+                }
+                return this.op(pathKey, 'unchanged', role, deletionAuthority, null, null, liveHash, sensitivity, {
+                    ...metaBase,
+                    reason: reason ?? 'configured project env file',
+                });
+            }
+            if (args.isContextExtra) {
+                return this.op(pathKey, 'unmanaged-collision', role, deletionAuthority, null, null, liveHash, sensitivity, {
+                    ...metaBase,
+                    reason: 'locally added in build context',
+                });
+            }
         }
 
         // Candidate-only path (add or collision).
         if (mode === 'create' || liveKind === null || legacyOwned.has(pathKey)) {
-            return this.op(pathKey, 'add', role, deletionAuthority, null, candidateHash, liveHash, sensitivity);
+            return this.op(pathKey, 'add', role, deletionAuthority, null, candidateHash, liveHash, sensitivity, metaBase);
         }
-        return this.op(pathKey, 'unmanaged-collision', role, deletionAuthority, null, candidateHash, liveHash, sensitivity);
+        return this.op(pathKey, 'unmanaged-collision', role, deletionAuthority, null, candidateHash, liveHash, sensitivity, metaBase);
     }
 
     private pairRenames(ops: GitChangePlanOperation[]): GitChangePlanOperation[] {
@@ -353,6 +421,10 @@ export class GitChangePlanService {
                     liveHash: add.liveHash,
                     sensitivity: add.sensitivity === 'high' || del.sensitivity === 'high' ? 'high' : add.sensitivity,
                     fromPath: del.pathKey,
+                    ownership: add.ownership ?? del.ownership,
+                    provenance: add.provenance ?? del.provenance,
+                    sourceRevision: add.sourceRevision ?? del.sourceRevision,
+                    reason: add.reason ?? del.reason ?? null,
                 });
             }
         }
@@ -424,6 +496,55 @@ export class GitChangePlanService {
         return counts;
     }
 
+    private async collectContextUniverseExtras(args: {
+        stackName: string;
+        candidateInputs: ComposeInputEntry[];
+        candidateBuildContexts: BuildContextPlan[];
+        manifestSvc: GitProjectManifestService;
+    }): Promise<string[]> {
+        const managedInputPaths = new Set(
+            args.candidateInputs
+                .filter((i) => i.ownership === 'managed' && i.state === 'present' && i.materializedPath !== null)
+                .map((i) => i.materializedPath!),
+        );
+        const extras: string[] = [];
+        for (const context of args.candidateBuildContexts) {
+            const diverged = await args.manifestSvc.verifyContextOnDisk(
+                args.stackName,
+                context,
+                managedInputPaths,
+            );
+            for (const entry of diverged) {
+                const stackRel = this.stackPathFromContextDivergence(context.repoPath, entry);
+                if (stackRel) extras.push(stackRel);
+            }
+        }
+        return extras;
+    }
+
+    private stackPathFromContextDivergence(contextRepoPath: string, diverged: string): string | null {
+        const locallyAdded = diverged.match(/^(.+) \(locally added, not in the managed context\)$/);
+        if (locallyAdded) {
+            return contextRepoPath ? `${contextRepoPath}/${locallyAdded[1]}` : locallyAdded[1];
+        }
+        const symlink = diverged.match(/^(.+) \(symbolic link\)$/);
+        if (symlink) {
+            return contextRepoPath ? `${contextRepoPath}/${symlink[1]}` : symlink[1];
+        }
+        const special = diverged.match(/^(.+) \(special file node\)$/);
+        if (special) {
+            return contextRepoPath ? `${contextRepoPath}/${special[1]}` : special[1];
+        }
+        const missing = diverged.match(/^(.+) \(missing\)$/);
+        if (missing) {
+            return contextRepoPath ? `${contextRepoPath}/${missing[1]}` : missing[1];
+        }
+        if (!diverged.includes('(')) {
+            return contextRepoPath ? `${contextRepoPath}/${diverged}` : diverged;
+        }
+        return null;
+    }
+
     private op(
         pathKey: string,
         op: GitChangePlanOp,
@@ -433,7 +554,28 @@ export class GitChangePlanService {
         candidateHash: string | null,
         liveHash: string | null,
         sensitivity: InputSensitivity,
+        meta?: {
+            fromPath?: string;
+            ownership?: InputOwnership;
+            provenance?: ManifestProvenance;
+            sourceRevision?: string;
+            reason?: string | null;
+        },
     ): GitChangePlanOperation {
-        return { pathKey, op, role, deletionAuthority, priorHash, candidateHash, liveHash, sensitivity };
+        return {
+            pathKey,
+            op,
+            role,
+            deletionAuthority,
+            priorHash,
+            candidateHash,
+            liveHash,
+            sensitivity,
+            ...(meta?.fromPath !== undefined ? { fromPath: meta.fromPath } : {}),
+            ...(meta?.ownership !== undefined ? { ownership: meta.ownership } : {}),
+            ...(meta?.provenance !== undefined ? { provenance: meta.provenance } : {}),
+            ...(meta?.sourceRevision !== undefined ? { sourceRevision: meta.sourceRevision } : {}),
+            ...(meta?.reason !== undefined ? { reason: meta.reason } : {}),
+        };
     }
 }

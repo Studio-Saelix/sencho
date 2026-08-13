@@ -6409,6 +6409,9 @@ export class DatabaseService {
                 pending_compose_content = NULL,
                 pending_env_content = NULL,
                 pending_fetched_at = NULL,
+                pending_plan_fingerprint = NULL,
+                pending_plan_blocked = NULL,
+                pending_plan_summary = NULL,
                 updated_at = ?
              WHERE stack_name = ?`
         ).run(Date.now(), stackName);

@@ -32,8 +32,28 @@ vi.mock('@/context/NodeContext', () => ({
 // Drive applyPull(commitSha, deploy=true) directly without standing up the real
 // diff UI; the panel passes applyPull as onApply.
 vi.mock('./GitSourceDiffDialog', () => ({
-  GitSourceDiffDialog: ({ onApply }: { onApply: (sha: string, deploy: boolean, fp: string) => void }) => (
-    <button data-testid="apply-deploy" onClick={() => onApply('sha-123', true, 'fp-test')}>apply</button>
+  GitSourceDiffDialog: ({
+    onApply,
+    pull,
+  }: {
+    onApply: (sha: string, deploy: boolean, fp: string) => void;
+    pull: PullResult | null;
+  }) => (
+    <div>
+      <span data-testid="plan-fingerprint">{pull?.planFingerprint ?? ''}</span>
+      <button
+        data-testid="apply-deploy"
+        onClick={() => onApply('sha-123', true, pull?.planFingerprint ?? 'fp-test')}
+      >
+        apply deploy
+      </button>
+      <button
+        data-testid="apply-only"
+        onClick={() => onApply('sha-123', false, pull?.planFingerprint ?? 'fp-test')}
+      >
+        apply
+      </button>
+    </div>
   ),
 }));
 vi.mock('@/components/ui/toast-store', () => ({
@@ -48,6 +68,8 @@ vi.mock('@/components/ui/toast-store', () => ({
 
 import { apiFetch } from '@/lib/api';
 import { GitSourcePanel } from './GitSourcePanel';
+import { toast } from '@/components/ui/toast-store';
+import type { PullResult } from './GitSourceDiffDialog';
 
 function jsonRes(body: unknown, ok = true, status = 200) {
   return { ok, status, json: async () => body, text: async () => '' } as unknown as Response;
@@ -90,6 +112,9 @@ beforeEach(() => {
   vi.mocked(apiFetch).mockReset();
   nodeCtl.activeNode = null;
   dfCtl.params = null;
+  vi.mocked(toast.success).mockClear();
+  vi.mocked(toast.warning).mockClear();
+  vi.mocked(toast.error).mockClear();
 });
 
 describe('GitSourcePanel load', () => {
@@ -129,6 +154,12 @@ describe('GitSourcePanel deploy-mode apply node binding', () => {
   });
 
   it('binds both runWithLog and the apply POST to the captured node when deploying', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (String(url).includes('/git-source/apply')) {
+        return jsonRes({ applied: true, deployed: true });
+      }
+      return jsonRes(LINKED_SOURCE);
+    });
     render(panel());
     fireEvent.click(await screen.findByTestId('apply-deploy'));
 
@@ -142,6 +173,65 @@ describe('GitSourcePanel deploy-mode apply node binding', () => {
       });
     });
     expect(dfCtl.params).toEqual(expect.objectContaining({ action: 'deploy', nodeId: 4 }));
+  });
+});
+
+describe('GitSourcePanel stale plan handling', () => {
+  const PULL_RESULT: PullResult = {
+    commitSha: 'sha-old',
+    validation: { ok: true },
+    refusals: [],
+    warnings: [],
+    plan: {
+      blocked: false,
+      counts: {
+        add: 0,
+        modify: 0,
+        delete: 0,
+        rename: 0,
+        unchanged: 1,
+        localModified: 0,
+        localMissing: 0,
+        typeChanged: 0,
+        unmanagedCollision: 0,
+        invocation: 0,
+      },
+      operations: [],
+      invocation: { candidateChanged: false, liveDiverged: false },
+    },
+    planFingerprint: 'fp-old',
+  };
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (String(url).includes('/git-source/pull')) {
+        return jsonRes(PULL_RESULT);
+      }
+      if (String(url).includes('/git-source/apply')) {
+        return jsonRes({
+          error: 'The change plan is stale.',
+          code: 'STALE_PLAN',
+          planFingerprint: 'fp-new',
+          plan: { ...PULL_RESULT.plan, blocked: true },
+        }, false, 409);
+      }
+      return jsonRes(LINKED_SOURCE);
+    });
+  });
+
+  it('keeps the diff open and replaces the pending plan on STALE_PLAN', async () => {
+    render(panel());
+    fireEvent.click(await screen.findByRole('button', { name: /pull now/i }));
+    await screen.findByTestId('plan-fingerprint');
+    expect(screen.getByTestId('plan-fingerprint')).toHaveTextContent('fp-old');
+
+    fireEvent.click(screen.getByTestId('apply-only'));
+
+    await waitFor(() => {
+      expect(toast.warning).toHaveBeenCalledWith(expect.stringMatching(/stale/i));
+      expect(screen.getByTestId('plan-fingerprint')).toHaveTextContent('fp-new');
+    });
+    expect(toast.success).not.toHaveBeenCalled();
   });
 });
 

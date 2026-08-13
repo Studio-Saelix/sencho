@@ -1876,7 +1876,7 @@ export class FileSystemService {
     stackName: string,
     relPath: string,
     scope?: FileRootScope,
-  ): Promise<'file' | 'directory' | 'symlink' | null> {
+  ): Promise<'file' | 'directory' | 'symlink' | 'special' | null> {
     try {
       if (scope?.rootAbsDir === undefined) {
         // Canonical js/path-injection barrier inline with the lstat sink. A missing
@@ -1892,7 +1892,8 @@ export class FileSystemService {
       const stat = await fsPromises.lstat(safePath);
       if (stat.isSymbolicLink()) return 'symlink';
       if (stat.isDirectory()) return 'directory';
-      return 'file';
+      if (stat.isFile()) return 'file';
+      return 'special';
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException;
       if (e.code === 'ENOENT') return null;

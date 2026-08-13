@@ -667,6 +667,8 @@ export class GitProjectManifestService {
     async hashStackFile(stackName: string, relPath: string): Promise<string | null> {
         const abs = await this.stackFileAbs(stackName, relPath);
         try {
+            const stat = await fs.promises.lstat(abs);
+            if (!stat.isFile()) return null;
             return sha256Of(await fs.promises.readFile(abs));
         } catch (e) {
             if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
@@ -700,6 +702,10 @@ export class GitProjectManifestService {
                 }
                 if (entry.isSymbolicLink()) {
                     diverged.push(`${childRel} (symbolic link)`);
+                    continue;
+                }
+                if (entry.isFIFO() || entry.isSocket() || entry.isBlockDevice() || entry.isCharacterDevice()) {
+                    diverged.push(`${childRel} (special file node)`);
                     continue;
                 }
                 // Files not in the context inventory: if they have a
