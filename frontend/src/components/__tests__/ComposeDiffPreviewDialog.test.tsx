@@ -3,8 +3,8 @@ import { render, screen } from '@testing-library/react';
 import { ComposeDiffPreviewDialog } from '../ComposeDiffPreviewDialog';
 import { resolveComposeDiffActionLabel } from '../resolveComposeDiffActionLabel';
 
-vi.mock('@/lib/monacoLoader', () => ({
-  DiffEditor: () => <div data-testid="diff-editor" />,
+vi.mock('@/lib/SafeDiffEditor', () => ({
+  SafeDiffEditor: () => <div data-testid="diff-editor" />,
 }));
 
 describe('resolveComposeDiffActionLabel', () => {
@@ -44,5 +44,25 @@ describe('ComposeDiffPreviewDialog', () => {
       />,
     );
     expect(screen.getByRole('button', { name: 'Save & reapply' })).toBeInTheDocument();
+  });
+
+  it('unmounts the diff editor without throwing', () => {
+    const { unmount } = render(
+      <ComposeDiffPreviewDialog
+        open
+        onOpenChange={vi.fn()}
+        stackName="sencho"
+        fileName="docker-compose.yml"
+        language="yaml"
+        original="a"
+        modified="b"
+        actionLabel="Save"
+        confirming={false}
+        isDarkMode={false}
+        onConfirm={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId('diff-editor')).toBeInTheDocument();
+    expect(() => unmount()).not.toThrow();
   });
 });

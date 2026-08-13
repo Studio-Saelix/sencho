@@ -1,5 +1,5 @@
 import { useState, Suspense } from 'react';
-import { DiffEditor } from '@/lib/monacoLoader';
+import { SafeDiffEditor } from '@/lib/SafeDiffEditor';
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import { Modal, ModalHeader, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 import { Tabs, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
@@ -120,7 +120,7 @@ export function GitSourceDiffDialog({
         <div className="px-6 pb-4 pt-3">
           <div className="h-[55vh] border border-glass-border rounded-md overflow-hidden">
             <Suspense fallback={<div className="w-full h-full" aria-busy="true" />}>
-              <DiffEditor
+              <SafeDiffEditor
                 height="100%"
                 language={effectiveTab === 'compose' ? 'yaml' : 'ini'}
                 theme={isDarkMode ? 'vs-dark' : 'vs'}

@@ -1,5 +1,5 @@
 import { Suspense } from 'react';
-import { DiffEditor } from '@/lib/monacoLoader';
+import { SafeDiffEditor } from '@/lib/SafeDiffEditor';
 import { Modal, ModalHeader, ModalFooter } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { BusyButton } from '@/components/ui/busy-button';
@@ -43,7 +43,7 @@ export function ComposeDiffPreviewDialog({
       <div className="px-6 pb-4 pt-3">
         <div className="h-[55vh] border border-glass-border rounded-md overflow-hidden">
           <Suspense fallback={<div className="w-full h-full" aria-busy="true" />}>
-            <DiffEditor
+            <SafeDiffEditor
               height="100%"
               language={language}
               theme={isDarkMode ? 'vs-dark' : 'vs'}
