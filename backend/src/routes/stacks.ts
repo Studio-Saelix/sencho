@@ -66,6 +66,12 @@ import {
   UPDATE_VERIFICATION_INCOMPLETE_WARNING,
 } from '../services/ImageUpdateService';
 import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
+import {
+  applyFleetSnapshotFiles,
+  fleetSnapshotApplyConflictCode,
+  getCodedError,
+  selectFleetSnapshotApplyFiles,
+} from '../helpers/applyFleetSnapshotFiles';
 import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/envFileResolution';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
@@ -118,6 +124,7 @@ const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   rollback: 'rolling back',
   backup: 'backing up',
   delete: 'deleting',
+  git_apply: 'applying Git changes',
 };
 
 function linkStackUpdateRecoveryGate(recoveryId: string | null | undefined, healthGateId: string | null): void {
@@ -1814,7 +1821,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     const debug = isDebugEnabled();
     const atomic = true;
     if (debug) console.debug('[Stacks:debug] Deploy starting', { stackName, atomic, nodeId: req.nodeId });
-    await ComposeService.getInstance(req.nodeId).deployStack(
+    const deployResult = await ComposeService.getInstance(req.nodeId).deployStack(
       stackName,
       getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
       atomic,
@@ -1825,6 +1832,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     if (debug) console.debug(`[Stacks:debug] Deploy finished in ${Date.now() - t0}ms`);
     ok = true;
     const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'deploy', req.user?.username ?? null);
+    linkStackUpdateRecoveryGate(deployResult.recoveryId, healthGateId);
     res.json({ message: 'Deployed successfully', healthGateId });
     notifyActionSuccess('deploy_success', `${stackName} deployed`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {
@@ -2475,6 +2483,65 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
   if (!tryAcquireStackOpLock(req, res, stackName, 'rollback')) return;
   let revertRestore: (() => Promise<void>) | null = null;
   try {
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const recoverySvc = StackUpdateRecoveryService.getInstance();
+    const currentGen = recoverySvc.getCurrent(req.nodeId, stackName);
+    // Any current recovery row uses compensateWithCandidate. Policy is evaluated
+    // against the restored target inside compensate, not the live pre-restore project.
+    if (currentGen) {
+      dlog(`[Stacks] Rollback initiated via recovery generation: ${sanitizeForLog(stackName)}`);
+      try {
+        const rolledBack = await recoverySvc.compensateWithCandidate(
+          currentGen.id,
+          async (overridePath, invocation) => {
+            await ComposeService.getInstance(req.nodeId).composeUpWithRecoveryOverride(
+              stackName,
+              overridePath,
+              getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+              invocation,
+            );
+          },
+          buildPolicyGateOptions(req, { actor: req.user?.username ?? 'system' }),
+        );
+        if (!rolledBack) {
+          res.status(500).json({ error: 'Rollback restore did not complete.' });
+          notifyActionFailure('rollback', stackName, new Error('rollback restore did not complete'), req.user?.username ?? 'system');
+          return;
+        }
+      } catch (compError: unknown) {
+        const compCode = (compError as { code?: string }).code;
+        if (compCode === 'ROLLBACK_PROHIBITED') {
+          res.status(409).json({
+            error: (compError as Error).message || 'Rollback is prohibited for this generation',
+            code: 'ROLLBACK_PROHIBITED',
+          });
+          return;
+        }
+        if (compCode === 'HELD_IMAGE_MISSING') {
+          res.status(500).json({
+            error: (compError as Error).message || 'Held recovery image is missing.',
+            code: 'HELD_IMAGE_MISSING',
+          });
+          notifyActionFailure('rollback', stackName, compError, req.user?.username ?? 'system');
+          return;
+        }
+        if (compCode === 'RECOVERY_PROBE_FAILED') {
+          res.status(500).json({
+            error: 'Rollback restore completed but recovery probe failed.',
+            code: 'RECOVERY_PROBE_FAILED',
+          });
+          notifyActionFailure('rollback', stackName, new Error('recovery probe failed'), req.user?.username ?? 'system');
+          return;
+        }
+        throw compError;
+      }
+      invalidateNodeCaches(req.nodeId);
+      dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
+      res.json({ message: 'Stack rolled back from recovery generation.', recoveryId: currentGen.id });
+      notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
+      return;
+    }
+
     const fsSvc = FileSystemService.getInstance(req.nodeId);
     const backupInfo = await fsSvc.getBackupInfo(stackName);
     if (!backupInfo.exists) {
@@ -2548,7 +2615,18 @@ stacksRouter.get('/:stackName/backup', async (req: Request, res: Response) => {
     const stackName = req.params.stackName as string;
     const fsSvc = FileSystemService.getInstance(req.nodeId);
     const info = await fsSvc.getBackupInfo(stackName);
-    res.json(info);
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const currentGen = StackUpdateRecoveryService.getInstance().getCurrent(req.nodeId, stackName);
+    const recoveryAvailable = !!currentGen;
+    const exists = info.exists || recoveryAvailable;
+    const timestamp = currentGen?.created_at ?? info.timestamp;
+    res.json({
+      exists,
+      timestamp,
+      recoveryAvailable,
+      recoveryId: currentGen?.id ?? null,
+      hasGenerationContent: !!(currentGen && currentGen.content_path),
+    });
   } catch (error: unknown) {
     console.error('Failed to get backup info:', error);
     const message = getErrorMessage(error, 'Failed to get backup info.');
@@ -2557,20 +2635,23 @@ stacksRouter.get('/:stackName/backup', async (req: Request, res: Response) => {
 });
 
 stacksRouter.post('/:stackName/backup', async (req: Request, res: Response) => {
-  // Triggers a server-side backup of the stack's managed files: the same
-  // rollback snapshot a deploy takes. Exposed so a scheduled backup can run on
-  // a remote node through the proxy path, and so an operator can capture an
-  // on-demand snapshot.
+  // Captures files, holds, and a recovery override, then hands off that
+  // generation as current without compose or a runtime probe. Exposed so a
+  // scheduled backup can run on a remote node through the proxy path, and so
+  // an operator can capture an on-demand snapshot.
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
-  // The backup slot is shared with the pre-deploy rollback snapshot, so hold the
-  // stack-op lock to keep a backup from interleaving with a concurrent
-  // deploy/update/rollback on the same stack. All early-returns stay inside the
-  // try so finally always releases.
+  // Handoff mutates the current generation, so hold the stack-op lock against
+  // a concurrent deploy/update/rollback. After a successful acquire, release
+  // in finally.
   if (!tryAcquireStackOpLock(req, res, stackName, 'backup')) return;
   try {
-    await FileSystemService.getInstance(req.nodeId).backupStackFiles(stackName);
+    await StackUpdateRecoveryService.getInstance().captureCurrentBackup({
+      nodeId: req.nodeId,
+      stackName,
+      createdBy: req.user?.username ?? null,
+    });
     dlog(`[Stacks] Backup completed: ${sanitizeForLog(stackName)}`);
     res.json({ success: true });
   } catch (error: unknown) {
@@ -2578,6 +2659,51 @@ stacksRouter.post('/:stackName/backup', async (req: Request, res: Response) => {
     res.status(500).json({ error: getErrorMessage(error, 'Failed to back up stack files') });
   } finally {
     releaseStackOpLock(req, stackName);
+  }
+});
+
+function isFleetSnapshotFile(value: unknown): value is { filename: string; content: string } {
+  return typeof value === 'object' && value !== null
+    && 'filename' in value && 'content' in value
+    && typeof value.filename === 'string'
+    && typeof value.content === 'string';
+}
+
+stacksRouter.post('/:stackName/fleet-snapshot-apply', async (req: Request, res: Response) => {
+  // Node-local capture-then-write used by hub Fleet snapshot restore.
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const rawFiles = req.body?.files;
+  if (!Array.isArray(rawFiles) || !rawFiles.every(isFleetSnapshotFile)) {
+    res.status(400).json({ error: 'files must be an array of { filename, content }' });
+    return;
+  }
+  const files = selectFleetSnapshotApplyFiles(rawFiles);
+  if (files.length === 0) {
+    res.status(400).json({ error: 'files must include compose.yaml or .env' });
+    return;
+  }
+  try {
+    const result = await applyFleetSnapshotFiles({
+      nodeId: req.nodeId,
+      stackName,
+      files,
+      actor: req.user?.username ?? 'system',
+    });
+    res.json({ success: true, capturedGenerationId: result.capturedGenerationId });
+  } catch (error: unknown) {
+    const code = getCodedError(error)?.code;
+    if (code === 'INVALID_STACK_NAME' || code === 'INVALID_SNAPSHOT_FILES') {
+      res.status(400).json({ error: getErrorMessage(error, 'Invalid restore request'), code });
+      return;
+    }
+    const conflict = fleetSnapshotApplyConflictCode(error);
+    if (conflict) {
+      res.status(409).json({ error: getErrorMessage(error, 'Restore conflict'), code: conflict });
+      return;
+    }
+    console.error('[Stacks] Fleet snapshot apply failed: %s', sanitizeForLog(stackName), error);
+    res.status(500).json({ error: getErrorMessage(error, 'Failed to restore snapshot files') });
   }
 });
 

@@ -20,6 +20,7 @@ import { applySuppressions } from '../utils/suppression-filter';
 import { validateImageRef } from '../utils/image-ref';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
+import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
 import {
     evaluatePolicyRisk,
     describePolicyInputs,
@@ -58,6 +59,11 @@ export interface PolicyEnforcementOptions {
     auditMethod?: string;
     /** Request path of the originating route; used for audit attribution. */
     auditPath?: string;
+    /**
+     * Rollback compensation: list images via this captured Compose invocation
+     * instead of the live database-derived args.
+     */
+    composeInvocation?: RollbackInvocationRecord | null;
 }
 
 export interface PolicyEnforcementResult {
@@ -286,7 +292,10 @@ export async function enforcePolicyPreDeploy(
 
     let imageRefs: string[] = [];
     try {
-        imageRefs = await ComposeService.getInstance(nodeId).listStackImages(stackName);
+        imageRefs = await ComposeService.getInstance(nodeId).listStackImages(
+            stackName,
+            opts.composeInvocation ?? null,
+        );
     } catch (err) {
         const message = getErrorMessage(err, 'compose parse failed');
         console.error('[Policy] listStackImages failed for %s:', sanitizeForLog(stackName), sanitizeForLog(message));

@@ -1,16 +1,17 @@
 import { DatabaseService } from './DatabaseService';
 /**
  * Tracks in-flight stack lifecycle operations (deploy, down, restart, stop,
- * start, update, rollback, backup) per (nodeId, stackName). A second request to
+ * start, update, rollback, backup, delete, git_apply) per (nodeId, stackName). A second request to
  * the same stack while the first is still running returns 409 instead of racing
  * the first. Backup is included because it rewrites the shared rollback slot, so
  * it must not interleave with a deploy/update/rollback on the same stack.
+ * Git apply holds this lock across capture, promote, handoff, and optional deploy.
  *
  * State is intentionally process-local: a Sencho restart clears all locks,
  * which matches the lifecycle of any in-flight `docker compose` child process.
  */
 
-export type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update' | 'rollback' | 'backup' | 'delete';
+export type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update' | 'rollback' | 'backup' | 'delete' | 'git_apply';
 
 /**
  * Note returned by a background path that skipped its operation because a manual

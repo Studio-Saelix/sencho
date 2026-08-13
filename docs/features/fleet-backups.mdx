@@ -89,12 +89,10 @@ By default, restoring a stack only writes back its files and leaves the stack's 
   <img src="/images/fleet-backups/restore-dialog.png" alt="Restore plex on Local confirmation dialog with the warning that it overwrites the current compose files with the snapshot version, a Redeploy stack after restore checkbox, and Cancel and Restore buttons" />
 </Frame>
 
-Sencho writes the snapshot's files back to the target node:
-- **Local nodes** have files written directly, with the current files backed up first (creating a rollback point via the atomic deployment system)
-- **Remote nodes** receive files via the Distributed API proxy
+Sencho writes the snapshot's files back to the target node. Restoring over an existing stack captures a recovery generation of the current authored project before any snapshot file is written. If that capture fails, the restore stops and the live files are left unchanged. A stack that does not yet exist is created from the snapshot files. Local and remote restores run that capture-then-write sequence on the target node. If a later file write fails after capture succeeded, live files may already have changed; the captured generation remains so you can use Rollback to return to the pre-restore project.
 
 <Warning>
-  Restoring overwrites the current compose and environment files on the target node. If atomic deployments are enabled, the current files are backed up before restoration.
+  Restoring overwrites the current compose and environment files on the target node. For an existing stack, Sencho captures a recovery generation first so you can use Rollback if the restore stops after that capture.
 </Warning>
 
 ### Restoring an entire snapshot

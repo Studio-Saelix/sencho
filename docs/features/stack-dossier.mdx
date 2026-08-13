@@ -108,7 +108,7 @@ Events from the Drift tab (drift detected, drift resolved) appear in the stack's
 
 ### Rollback readiness
 
-At the bottom of the Dossier tab, on nodes that advertise the `update-guard` capability, a **Rollback readiness** section reports an overall **Ready**, **Partial**, or **Not ready** state for the stack, built from six signals: whether a compose backup exists, whether that backup covers the stack's env file, whether the image tag is pinned or moving, whether the last deploy succeeded, whether any service defines a healthcheck, and an explicit note that application data in named volumes and bind mounts is never restored by a rollback. It shares the same capability-plus-fetch-failure behavior described above for the Networking and Storage export summaries. See [Health-Gated Updates](/features/health-gated-updates#rollback-readiness) for what each signal means and how to act on it.
+At the bottom of the Dossier tab, on nodes that advertise the `update-guard` capability, a **Rollback readiness** section reports an overall **Ready**, **Partial**, or **Not ready** state for the stack. It covers managed-input coverage, whether a current recovery generation exists, rollback policy eligibility, plus the existing disclosures for compose/env coverage, previous image identity, last successful deploy, and healthchecks. Application data in named volumes and bind mounts remains explicitly not covered. It shares the same capability-plus-fetch-failure behavior described above for the Networking and Storage export summaries. See [Health-Gated Updates](/features/health-gated-updates#rollback-readiness) for what each signal means and how to act on it.
 
 ## Permissions and per-node scoping
 

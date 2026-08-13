@@ -80,6 +80,7 @@ const EXACT_SUFFIX_RULES: readonly SuffixRule[] = [
   { method: 'PUT', suffix: '/files/permissions', action: 'stack:edit' },
   { method: 'PUT', suffix: '/labels', action: 'stack:edit' },
   { method: 'PUT', suffix: '/git-source', action: 'stack:edit' },
+  { method: 'POST', suffix: '/fleet-snapshot-apply', action: 'stack:edit' },
   { method: 'DELETE', suffix: '/git-source', action: 'stack:edit' },
   { method: 'POST', suffix: '/git-source/pull', action: 'stack:edit' },
   { method: 'POST', suffix: '/git-source/apply', action: 'stack:edit' },

@@ -1,6 +1,7 @@
 /**
- * Docker-backed integration: a failed pull must leave the running stack untouched.
- * Skipped automatically when Docker is unavailable.
+ * Docker-backed: recovery override must recreate containers whose inspected
+ * Image ID equals the captured prior image ID (moving-tag case).
+ * Skipped when Docker is unavailable.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'child_process';
@@ -22,7 +23,7 @@ function dockerAvailable(): boolean {
 }
 
 const hasDocker = dockerAvailable();
-const STACK = 'fpkeep';
+const STACK = 'exactimg';
 
 function compose(args: string[], cwd: string): string {
   return execFileSync('docker', ['compose', '-p', STACK, ...args], {
@@ -32,7 +33,15 @@ function compose(args: string[], cwd: string): string {
   });
 }
 
-describe.skipIf(!hasDocker)('failed pull keeps stack running', () => {
+function inspectImageId(containerId: string): string {
+  const raw = execFileSync('docker', ['inspect', containerId, '--format', '{{.Image}}'], {
+    encoding: 'utf8',
+  }).trim();
+  expect(raw.length).toBeGreaterThan(0);
+  return raw;
+}
+
+describe.skipIf(!hasDocker)('exact prior-image rollback after post-handoff failure', () => {
   let tmpDir: string;
   let composeDir: string;
   let stackDir: string;
@@ -51,6 +60,9 @@ describe.skipIf(!hasDocker)('failed pull keeps stack running', () => {
     nodeId = local.id;
     db.updateGlobalSetting('prune_on_update', '0');
 
+    execFileSync('docker', ['pull', 'busybox:1.36.1'], { stdio: 'ignore' });
+    execFileSync('docker', ['pull', 'busybox:1.36.0'], { stdio: 'ignore' });
+
     fs.writeFileSync(
       path.join(stackDir, 'compose.yaml'),
       [
@@ -63,8 +75,8 @@ describe.skipIf(!hasDocker)('failed pull keeps stack running', () => {
       'utf8',
     );
 
-    compose(['up', '-d', '--pull', 'always'], stackDir);
-  }, 180_000);
+    compose(['up', '-d', '--pull', 'never'], stackDir);
+  }, 300_000);
 
   afterAll(async () => {
     try {
@@ -77,40 +89,62 @@ describe.skipIf(!hasDocker)('failed pull keeps stack running', () => {
     if (tmpDir) cleanupTestDb(tmpDir);
   }, 120_000);
 
-  it('leaves the original container running when ComposeService updateStack pull fails', async () => {
+  it('restores a container whose inspected Image equals the captured prior image ID', async () => {
     const beforeId = compose(['ps', '-q'], stackDir).trim();
     expect(beforeId.length).toBeGreaterThan(0);
+    const priorImageId = inspectImageId(beforeId);
 
-    const beforeInspect = JSON.parse(
-      execFileSync('docker', ['inspect', beforeId], { encoding: 'utf8' }),
-    ) as Array<{ State: { Running: boolean; Status: string } }>;
-    expect(beforeInspect[0].State.Running).toBe(true);
+    const { StackUpdateRecoveryService } = await import('../../services/StackUpdateRecoveryService');
+    StackUpdateRecoveryService.resetForTests();
+    const recoverySvc = StackUpdateRecoveryService.getInstance();
 
+    // Capture while the prior runtime is still healthy.
+    const candidate = await recoverySvc.captureCandidate({
+      nodeId,
+      stackName: STACK,
+      createdBy: null,
+      operationKind: 'update',
+    });
+    expect(candidate.override_path).toBeTruthy();
+    expect(recoverySvc.markAcquired(candidate.id)).toBe(true);
+    expect(recoverySvc.handoff(candidate.id, nodeId, STACK)).toBe(true);
+
+    // Simulate a post-handoff mutation that moves the tag / image identity.
     fs.writeFileSync(
       path.join(stackDir, 'compose.yaml'),
       [
         'services:',
         '  web:',
-        '    image: busybox:sencho-does-not-exist-fpkeep-xyz',
+        '    image: busybox:1.36.0',
         '    command: ["sleep", "3600"]',
         '',
       ].join('\n'),
       'utf8',
     );
+    compose(['up', '-d', '--pull', 'never', '--force-recreate'], stackDir);
+    const midId = compose(['ps', '-q'], stackDir).trim();
+    const midImageId = inspectImageId(midId);
+    expect(midImageId).not.toBe(priorImageId);
 
-    const { StackUpdateRecoveryService } = await import('../../services/StackUpdateRecoveryService');
-    StackUpdateRecoveryService.resetForTests();
     const { ComposeService } = await import('../../services/ComposeService');
-    await expect(
-      ComposeService.getInstance(nodeId).updateStack(STACK, undefined, true),
-    ).rejects.toThrow();
+    const rolledBack = await recoverySvc.compensateWithCandidate(
+      candidate.id,
+      (overridePath, invocation) => ComposeService.getInstance(nodeId).composeUpWithRecoveryOverride(
+        STACK,
+        overridePath,
+        undefined,
+        invocation,
+      ),
+    );
+    expect(rolledBack).toBe(true);
 
     const afterId = compose(['ps', '-q'], stackDir).trim();
-    expect(afterId).toBe(beforeId);
+    expect(afterId.length).toBeGreaterThan(0);
+    expect(inspectImageId(afterId)).toBe(priorImageId);
 
     const afterInspect = JSON.parse(
-      execFileSync('docker', ['inspect', beforeId], { encoding: 'utf8' }),
+      execFileSync('docker', ['inspect', afterId], { encoding: 'utf8' }),
     ) as Array<{ State: { Running: boolean } }>;
     expect(afterInspect[0].State.Running).toBe(true);
-  }, 180_000);
+  }, 300_000);
 });

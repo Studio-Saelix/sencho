@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Check, CircleHelp, Database, X, type LucideIcon } from 'lucide-react';
+import { AlertTriangle, Ban, Check, CircleHelp, Database, X, type LucideIcon } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { useNodes } from '@/context/NodeContext';
 
 // Mirrors the backend payload shape (the frontend never imports backend).
-type RollbackItemState = 'ready' | 'missing' | 'unknown' | 'not_covered';
+type RollbackItemState = 'ready' | 'missing' | 'unknown' | 'not_covered' | 'blocked' | 'warning';
 type RollbackOverall = 'ready' | 'partial' | 'not_ready';
 
 interface RollbackReadinessItem {
@@ -37,6 +37,8 @@ const STATE_META: Record<RollbackItemState, { icon: LucideIcon; tone: string }> 
   missing: { icon: X, tone: 'text-destructive' },
   unknown: { icon: CircleHelp, tone: 'text-stat-subtitle' },
   not_covered: { icon: Database, tone: 'text-warning' },
+  blocked: { icon: Ban, tone: 'text-destructive' },
+  warning: { icon: AlertTriangle, tone: 'text-warning' },
 };
 
 /**

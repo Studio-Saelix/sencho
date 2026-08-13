@@ -7,11 +7,15 @@ const mockTag = vi.fn().mockResolvedValue(undefined);
 const mockRemove = vi.fn().mockResolvedValue(undefined);
 const mockListContainers = vi.fn().mockResolvedValue([]);
 const mockInspectContainer = vi.fn();
-const mockGetContainer = vi.fn(() => ({ inspect: mockInspectContainer }));
+const mockGetContainer = vi.fn((..._args: unknown[]) => ({ inspect: mockInspectContainer }));
 const mockGetImage = vi.fn((ref: string) => ({
   tag: mockTag,
   remove: mockRemove,
-  inspect: vi.fn().mockResolvedValue({ RepoDigests: [] }),
+  inspect: vi.fn().mockResolvedValue({
+    RepoDigests: ['nginx@sha256:digest'],
+    Os: 'linux',
+    Architecture: 'amd64',
+  }),
   _ref: ref,
 }));
 
@@ -41,9 +45,51 @@ vi.mock('../services/composeProjectContext', () => ({
   classifyReferenceKind: () => 'moving_tag',
   resolveComposeProjectContext: vi.fn().mockResolvedValue({
     validateForMutation: vi.fn().mockResolvedValue(undefined),
-    backupFromContext: vi.fn().mockResolvedValue('backup-1'),
+    backupFromContext: vi.fn().mockResolvedValue('11111111-1111-4111-8111-111111111111'),
     restoreFromContext: vi.fn().mockResolvedValue(undefined),
   }),
+  resolveComposeProjectContextForGeneration: vi.fn().mockResolvedValue({
+    validateForMutation: vi.fn().mockResolvedValue(undefined),
+    backupFromContext: vi.fn().mockResolvedValue('11111111-1111-4111-8111-111111111111'),
+    restoreFromContext: vi.fn().mockResolvedValue(undefined),
+    backupSlotId: '11111111-1111-4111-8111-111111111111',
+  }),
+}));
+
+vi.mock('../services/RollbackGenerationStore', () => ({
+  RollbackGenerationStore: {
+    retireGenerationContent: vi.fn().mockResolvedValue(undefined),
+    getGenerationDir: vi.fn(() => '/tmp/gen'),
+    verifyGenerationContent: vi.fn().mockResolvedValue(false),
+    commitRestoreTransaction: vi.fn().mockResolvedValue(undefined),
+    reconcileInterruptedRestore: vi.fn().mockResolvedValue(false),
+    restoreCapturedGitManifest: vi.fn().mockResolvedValue(undefined),
+    hasPendingRestoreIntent: vi.fn().mockResolvedValue(false),
+    attachImages: vi.fn().mockResolvedValue(undefined),
+  },
+  getBackupBaseDir: () => '/tmp/backups',
+}));
+
+vi.mock('../services/GitProjectManifestService', () => ({
+  GitProjectManifestService: {
+    getInstance: () => ({
+      readRawManifestText: vi.fn().mockResolvedValue(null),
+      writeManifest: vi.fn().mockResolvedValue(undefined),
+      clearManifestFile: vi.fn().mockResolvedValue(undefined),
+    }),
+  },
+  MANIFEST_FILENAME: 'manifest.v1.json',
+}));
+
+
+vi.mock('../services/PolicyEnforcement', () => ({
+  enforcePolicyForImageRefs: vi.fn().mockResolvedValue({ ok: true, bypassed: false, violations: [] }),
+  enforcePolicyPreDeploy: vi.fn().mockResolvedValue({ ok: true, bypassed: false, violations: [] }),
+}));
+
+vi.mock('../services/rollbackEligibility', () => ({
+  assessGenerationEligibility: vi.fn().mockResolvedValue('eligible'),
+  evaluateRollbackEligibility: vi.fn(),
 }));
 
 vi.mock('../services/effectiveServiceModel', () => ({
@@ -61,7 +107,7 @@ vi.mock('../services/ComposeService', async () => {
     ComposeService: {
       getInstance: () => ({
         validateExactComposeInvocation: mockValidateExact,
-        buildAuthoredComposeArgs: vi.fn(),
+        buildAuthoredComposeArgs: vi.fn().mockResolvedValue(['compose', '-f', 'compose.yaml', 'config', '--quiet']),
       }),
     },
     getComposeCommandTimeoutMs: () => 60_000,
@@ -71,15 +117,27 @@ vi.mock('../services/ComposeService', async () => {
 const mockUnlink = vi.fn().mockResolvedValue(undefined);
 const mockWriteFile = vi.fn().mockResolvedValue(undefined);
 const mockRealpath = vi.fn(async (p: string) => p);
+const mockAccess = vi.fn().mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+const mockReaddir = vi.fn().mockResolvedValue([]);
+const mockStat = vi.fn();
+const mockRm = vi.fn().mockResolvedValue(undefined);
 vi.mock('fs/promises', () => ({
   default: {
     unlink: (p: string) => mockUnlink(p),
     writeFile: (p: string, data: string, enc?: string) => mockWriteFile(p, data, enc),
     realpath: (p: string) => mockRealpath(p),
+    access: (p: string) => mockAccess(p),
+    readdir: (p: string) => mockReaddir(p),
+    stat: (p: string) => mockStat(p),
+    rm: (p: string, opts?: unknown) => mockRm(p, opts),
   },
   unlink: (p: string) => mockUnlink(p),
   writeFile: (p: string, data: string, enc?: string) => mockWriteFile(p, data, enc),
   realpath: (p: string) => mockRealpath(p),
+  access: (p: string) => mockAccess(p),
+  readdir: (p: string) => mockReaddir(p),
+  stat: (p: string) => mockStat(p),
+  rm: (p: string, opts?: unknown) => mockRm(p, opts),
 }));
 
 import { DatabaseService } from '../services/DatabaseService';
@@ -89,6 +147,9 @@ describe('StackUpdateRecoveryService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     StackUpdateRecoveryService.resetForTests();
+    vi.spyOn(DatabaseService.prototype, 'getGitSource').mockReturnValue(undefined as never);
+    vi.spyOn(DatabaseService.prototype, 'listStackUpdateRecoveryGenerationsForNode')
+      .mockReturnValue([]);
     mockListContainers.mockResolvedValue([
       { Id: 'c1', State: 'running', Labels: {} },
     ]);
@@ -102,6 +163,7 @@ describe('StackUpdateRecoveryService', () => {
     mockRealpath.mockImplementation(async (p: string) => p);
     mockRemove.mockResolvedValue(undefined);
     mockTag.mockResolvedValue(undefined);
+    mockGetContainer.mockImplementation(() => ({ inspect: mockInspectContainer }));
   });
 
   it('validates exact invocation before tagging images', async () => {
@@ -135,6 +197,8 @@ describe('StackUpdateRecoveryService', () => {
       phase: 'captured' as const,
       is_current: 0,
       backup_slot_id: null,
+      content_path: null,
+      operation_kind: null,
       override_path: '/test/compose/my-stack/.sencho-recovery-aaaaaaaaaaaa.yml',
       services_json: JSON.stringify([{
         serviceName: 'web',
@@ -185,6 +249,8 @@ describe('StackUpdateRecoveryService', () => {
       phase: 'reconciling' as const,
       is_current: 1,
       backup_slot_id: 'b1',
+      content_path: null,
+      operation_kind: null,
       override_path: '/test/compose/my-stack/.sencho-recovery-bbbbbbbbbbbb.yml',
       services_json: servicesJson,
       health_gate_id: null,
@@ -206,20 +272,131 @@ describe('StackUpdateRecoveryService', () => {
     mockInspectContainer.mockResolvedValue({ State: { ExitCode: 0 } });
 
     vi.useFakeTimers();
-    const promise = StackUpdateRecoveryService.getInstance().compensateWithCandidate(
+    const result = StackUpdateRecoveryService.getInstance().compensateWithCandidate(
       'gen-2',
       async () => undefined,
-    );
+    ).then(() => null, (error: unknown) => error);
     await vi.advanceTimersByTimeAsync(3100);
-    const ok = await promise;
+    const error = await result;
     vi.useRealTimers();
 
-    expect(ok).toBe(false);
+    expect(error).toMatchObject({ code: 'RECOVERY_PROBE_FAILED' });
     expect(update).toHaveBeenCalledWith('gen-2', expect.objectContaining({ status: 'recovery_required' }));
     expect(update).not.toHaveBeenCalledWith(
       'gen-2',
       expect.objectContaining({ status: 'restored_current' }),
     );
+  });
+
+  it('throws HELD_IMAGE_MISSING when compensation compose-up cannot find the hold tag', async () => {
+    const servicesJson = JSON.stringify([{
+      serviceName: 'web',
+      scale: 1,
+      hasBuild: false,
+      declaredImageRef: 'nginx:latest',
+      referenceKind: 'moving_tag',
+      replicas: [{ containerId: 'c1', imageId: 'sha256:abc', repoDigest: null, state: 'running', rollbackTag: 'sencho-rb/x/web:hold' }],
+    }]);
+    const row = {
+      id: 'gen-missing-hold',
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'active' as const,
+      phase: 'reconciling' as const,
+      is_current: 1,
+      backup_slot_id: 'b1',
+      content_path: null,
+      operation_kind: null,
+      override_path: '/test/compose/my-stack/.sencho-recovery-bbbbbbbbbbbb.yml',
+      services_json: servicesJson,
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    };
+    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue(row);
+    const update = vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
+      .mockImplementation(() => undefined);
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().compensateWithCandidate(
+        'gen-missing-hold',
+        async () => {
+          throw new Error('Error response from daemon: No such image: sencho-rb/x/web:hold');
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'HELD_IMAGE_MISSING', message: 'Held recovery image is missing' });
+    expect(update).toHaveBeenCalledWith('gen-missing-hold', expect.objectContaining({ status: 'recovery_required' }));
+  });
+
+  it('fails closed when content_path is set but generation dir is missing', async () => {
+    const genId = '11111111-1111-4111-8111-111111111111';
+    const restoreSpy = vi.fn().mockResolvedValue(undefined);
+    const { resolveComposeProjectContext, resolveComposeProjectContextForGeneration } =
+      await import('../services/composeProjectContext');
+    vi.mocked(resolveComposeProjectContext).mockResolvedValue({
+      validateForMutation: vi.fn().mockResolvedValue(undefined),
+      backupFromContext: vi.fn().mockResolvedValue(genId),
+      restoreFromContext: restoreSpy,
+      nodeId: 1,
+      stackName: 'my-stack',
+      stackDir: '/test/compose/my-stack',
+      backupSlotId: null,
+      toComposeArgs: vi.fn(),
+      resolveServiceImageMap: vi.fn(),
+    });
+    vi.mocked(resolveComposeProjectContextForGeneration).mockResolvedValue({
+      validateForMutation: vi.fn().mockResolvedValue(undefined),
+      backupFromContext: vi.fn().mockResolvedValue(genId),
+      restoreFromContext: restoreSpy,
+      nodeId: 1,
+      stackName: 'my-stack',
+      stackDir: '/test/compose/my-stack',
+      backupSlotId: genId,
+      toComposeArgs: vi.fn(),
+      resolveServiceImageMap: vi.fn(),
+    });
+
+    const row = {
+      id: genId,
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'active' as const,
+      phase: 'reconciling' as const,
+      is_current: 1,
+      backup_slot_id: genId,
+      content_path: genId,
+      operation_kind: 'update' as const,
+      override_path: '/test/compose/my-stack/.sencho-recovery-bbbbbbbbbbbb.yml',
+      services_json: '[]',
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    };
+    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue(row);
+    const update = vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
+      .mockImplementation(() => undefined);
+    mockAccess.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined),
+    ).rejects.toMatchObject({ code: 'GENERATION_CONTENT_MISSING' });
+
+    expect(restoreSpy).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'recovery_required' }));
   });
 
   const capturedWebReplica = {
@@ -335,6 +512,87 @@ describe('StackUpdateRecoveryService', () => {
     vi.useRealTimers();
   });
 
+  it('probeRecoveredStack rejects extra running replicas beyond captured scale', async () => {
+    const servicesJson = JSON.stringify([{
+      serviceName: 'web', scale: 1, hasBuild: false, declaredImageRef: 'nginx:latest',
+      referenceKind: 'moving_tag', replicas: [capturedWebReplica],
+    }]);
+    mockListContainers.mockResolvedValue([
+      { Id: 'c1', State: 'running', Labels: { 'com.docker.compose.service': 'web' } },
+      { Id: 'c2', State: 'running', Labels: { 'com.docker.compose.service': 'web' } },
+    ]);
+    mockInspectContainer.mockResolvedValue({
+      Image: 'sha256:oldimg',
+      State: { Status: 'running' },
+    });
+    vi.useFakeTimers();
+    const promise = StackUpdateRecoveryService.getInstance().probeRecoveredStack(1, 'my-stack', servicesJson);
+    await vi.advanceTimersByTimeAsync(3100);
+    await expect(promise).resolves.toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('probeRecoveredStack rejects unexpected running services', async () => {
+    const servicesJson = JSON.stringify([{
+      serviceName: 'web', scale: 1, hasBuild: false, declaredImageRef: 'nginx:latest',
+      referenceKind: 'moving_tag', replicas: [capturedWebReplica],
+    }]);
+    mockListContainers.mockResolvedValue([
+      { Id: 'c1', State: 'running', Labels: { 'com.docker.compose.service': 'web' } },
+      { Id: 'c2', State: 'running', Labels: { 'com.docker.compose.service': 'sidecar' } },
+    ]);
+    mockInspectContainer.mockResolvedValue({
+      Image: 'sha256:oldimg',
+      State: { Status: 'running' },
+    });
+    vi.useFakeTimers();
+    const promise = StackUpdateRecoveryService.getInstance().probeRecoveredStack(1, 'my-stack', servicesJson);
+    await vi.advanceTimersByTimeAsync(3100);
+    await expect(promise).resolves.toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('probeRecoveredStack rejects structurally empty service objects', async () => {
+    vi.useFakeTimers();
+    const promise = StackUpdateRecoveryService.getInstance().probeRecoveredStack(1, 'my-stack', '[{}]');
+    await vi.advanceTimersByTimeAsync(3100);
+    await expect(promise).resolves.toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('refuses capture when a service has mixed replica image IDs', async () => {
+    mockListContainers.mockResolvedValue([
+      { Id: 'c1', State: 'running', Labels: { 'com.docker.compose.service': 'web' } },
+      { Id: 'c2', State: 'running', Labels: { 'com.docker.compose.service': 'web' } },
+    ]);
+    mockGetContainer.mockImplementation((...args: unknown[]) => ({
+      inspect: vi.fn().mockResolvedValue({
+        Id: String(args[0] ?? 'c1'),
+        State: { Status: 'running', ExitCode: 0 },
+        Image: args[0] === 'c1' ? 'sha256:aaa' : 'sha256:bbb',
+      }),
+    }));
+    vi.spyOn(DatabaseService.prototype, 'getGlobalSettings').mockReturnValue({});
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().captureCandidate({
+        nodeId: 1,
+        stackName: 'my-stack',
+        createdBy: 'test',
+      }),
+    ).rejects.toMatchObject({ code: 'MIXED_REPLICA_IMAGES' });
+    // Refuse must happen before hold tagging so mixed identity cannot leave Docker residue.
+    expect(mockTag).not.toHaveBeenCalled();
+  });
+
+  it('getHeldImageIds fails closed when held-image listing throws', () => {
+    vi.spyOn(DatabaseService.prototype, 'listHeldStackUpdateRecoveryImageIds')
+      .mockImplementation(() => {
+        throw new Error('Malformed stack recovery services_json while listing held images');
+      });
+    expect(StackUpdateRecoveryService.getInstance().getHeldImageIds(1)).toBeNull();
+  });
+
   it('does not mark artifacts retired when tag removal fails', async () => {
     const row = {
       id: 'gen-3',
@@ -344,6 +602,8 @@ describe('StackUpdateRecoveryService', () => {
       phase: 'captured' as const,
       is_current: 0,
       backup_slot_id: null,
+      content_path: null,
+      operation_kind: null,
       override_path: null,
       services_json: JSON.stringify([{
         serviceName: 'web', scale: 1, hasBuild: false, declaredImageRef: 'nginx:latest',
@@ -367,5 +627,764 @@ describe('StackUpdateRecoveryService', () => {
     const ok = await StackUpdateRecoveryService.getInstance().retireGenerationArtifacts(row);
     expect(ok).toBe(false);
     expect(markRetired).not.toHaveBeenCalled();
+  });
+  it('uses legacy restore for UUID backup_slot_id when content_path is null (B1)', async () => {
+    const legacyUuid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const { resolveComposeProjectContext, resolveComposeProjectContextForGeneration } =
+      await import('../services/composeProjectContext');
+    const restoreSpy = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(resolveComposeProjectContext).mockResolvedValue({
+      validateForMutation: vi.fn().mockResolvedValue(undefined),
+      backupFromContext: vi.fn().mockResolvedValue(legacyUuid),
+      restoreFromContext: restoreSpy,
+      nodeId: 1,
+      stackName: 'my-stack',
+      stackDir: '/test/compose/my-stack',
+      backupSlotId: null,
+      toComposeArgs: vi.fn(),
+      resolveServiceImageMap: vi.fn(),
+    } as never);
+    vi.mocked(resolveComposeProjectContextForGeneration).mockClear();
+
+    const row = {
+      id: 'gen-legacy',
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'active' as const,
+      phase: 'reconciling' as const,
+      is_current: 1,
+      backup_slot_id: legacyUuid,
+      content_path: null,
+      operation_kind: 'update' as const,
+      override_path: '/test/compose/my-stack/.sencho-recovery-aaaaaaaaaaaa.yml',
+      services_json: '[]',
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    };
+    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue(row);
+    vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration').mockImplementation(() => undefined);
+    mockListContainers.mockResolvedValue([]);
+
+    vi.useFakeTimers();
+    const promise = StackUpdateRecoveryService.getInstance().compensateWithCandidate(
+      'gen-legacy',
+      async () => undefined,
+    );
+    await vi.advanceTimersByTimeAsync(3100);
+    const ok = await promise;
+    vi.useRealTimers();
+
+    expect(ok).toBe(true);
+    expect(resolveComposeProjectContextForGeneration).not.toHaveBeenCalled();
+    expect(resolveComposeProjectContext).toHaveBeenCalled();
+    expect(restoreSpy).toHaveBeenCalled();
+  });
+
+  it('refuses compensation when held recovery images fail policy (B4)', async () => {
+    const { enforcePolicyForImageRefs } = await import('../services/PolicyEnforcement');
+    vi.mocked(enforcePolicyForImageRefs).mockResolvedValueOnce({
+      ok: false,
+      bypassed: false,
+      violations: [{ imageRef: 'sencho-rb/aaaaaaaaaaaa/web:hold', reasons: ['critical'] }] as never,
+      policy: { name: 'block-crit' } as never,
+    });
+
+    const genId = '11111111-1111-4111-8111-111111111111';
+    const restoreSpy = vi.fn().mockResolvedValue({
+      priorRecords: { appliedDeploySpec: null, lkgHint: null },
+      invocation: { composeArgsPrefix: [], projectDirectory: null, projectName: 'my-stack', explicitComposeFiles: [] },
+    });
+    const { resolveComposeProjectContextForGeneration, resolveComposeProjectContext } =
+      await import('../services/composeProjectContext');
+    vi.mocked(resolveComposeProjectContextForGeneration).mockResolvedValue({
+      validateForMutation: vi.fn().mockResolvedValue(undefined),
+      backupFromContext: vi.fn().mockResolvedValue(genId),
+      restoreFromContext: restoreSpy,
+      nodeId: 1,
+      stackName: 'my-stack',
+      stackDir: '/test/compose/my-stack',
+      backupSlotId: genId,
+      toComposeArgs: vi.fn(),
+      resolveServiceImageMap: vi.fn(),
+    } as never);
+    vi.mocked(resolveComposeProjectContext).mockResolvedValue({
+      validateForMutation: vi.fn().mockResolvedValue(undefined),
+      backupFromContext: vi.fn().mockResolvedValue(genId),
+      restoreFromContext: restoreSpy,
+      nodeId: 1,
+      stackName: 'my-stack',
+      stackDir: '/test/compose/my-stack',
+      backupSlotId: null,
+      toComposeArgs: vi.fn(),
+      resolveServiceImageMap: vi.fn(),
+    } as never);
+
+    const row = {
+      id: genId,
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'active' as const,
+      phase: 'reconciling' as const,
+      is_current: 1,
+      backup_slot_id: genId,
+      content_path: genId,
+      operation_kind: 'update' as const,
+      override_path: '/test/compose/my-stack/.sencho-recovery-bbbbbbbbbbbb.yml',
+      services_json: JSON.stringify([{
+        serviceName: 'web',
+        scale: 1,
+        hasBuild: false,
+        declaredImageRef: 'nginx:latest',
+        referenceKind: 'moving_tag',
+        replicas: [{
+          containerId: 'c1',
+          imageId: 'sha256:held',
+          repoDigest: null,
+          state: 'running',
+          rollbackTag: 'sencho-rb/aaaaaaaaaaaa/web:hold',
+        }],
+      }]),
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    };
+    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue(row);
+    const update = vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
+      .mockImplementation(() => undefined);
+    mockAccess.mockResolvedValue(undefined);
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined),
+    ).rejects.toMatchObject({ code: 'ROLLBACK_PROHIBITED' });
+    expect(restoreSpy).toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'restored_current' }));
+    expect(enforcePolicyForImageRefs).toHaveBeenCalledWith(
+      'my-stack',
+      1,
+      ['sencho-rb/aaaaaaaaaaaa/web:hold'],
+      expect.objectContaining({ actor: 'recovery-compensate' }),
+    );
+  });
+
+  it('refuses compensation when services_json is malformed', async () => {
+    const genId = '55555555-5555-4555-8555-555555555555';
+    const restoreSpy = vi.fn().mockResolvedValue({
+      priorRecords: { appliedDeploySpec: null, lkgHint: null },
+      invocation: { composeArgsPrefix: [], projectDirectory: null, projectName: 'my-stack', explicitComposeFiles: [] },
+    });
+    const { resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
+    vi.mocked(resolveComposeProjectContextForGeneration).mockResolvedValue({
+      validateForMutation: vi.fn().mockResolvedValue(undefined),
+      backupFromContext: vi.fn().mockResolvedValue(genId),
+      restoreFromContext: restoreSpy,
+      nodeId: 1,
+      stackName: 'my-stack',
+      stackDir: '/test/compose/my-stack',
+      backupSlotId: genId,
+      toComposeArgs: vi.fn(),
+      resolveServiceImageMap: vi.fn(),
+    } as never);
+
+    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue({
+      id: genId,
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'active',
+      phase: 'reconciling',
+      is_current: 1,
+      backup_slot_id: genId,
+      content_path: genId,
+      operation_kind: 'update',
+      override_path: '/test/compose/my-stack/.sencho-recovery-cccccccccccc.yml',
+      services_json: '{not-json',
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    } as never);
+    mockAccess.mockResolvedValue(undefined);
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined),
+    ).rejects.toMatchObject({ code: 'ROLLBACK_PROHIBITED' });
+    expect(restoreSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses compensation when services_json is structurally empty objects', async () => {
+    const genId = '66666666-6666-4666-8666-666666666666';
+    const restoreSpy = vi.fn().mockResolvedValue({
+      priorRecords: { appliedDeploySpec: null, lkgHint: null },
+      invocation: { composeArgsPrefix: [], projectDirectory: null, projectName: 'my-stack', explicitComposeFiles: [] },
+    });
+    const { resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
+    vi.mocked(resolveComposeProjectContextForGeneration).mockResolvedValue({
+      validateForMutation: vi.fn().mockResolvedValue(undefined),
+      backupFromContext: vi.fn().mockResolvedValue(genId),
+      restoreFromContext: restoreSpy,
+      nodeId: 1,
+      stackName: 'my-stack',
+      stackDir: '/test/compose/my-stack',
+      backupSlotId: genId,
+      toComposeArgs: vi.fn(),
+      resolveServiceImageMap: vi.fn(),
+    } as never);
+
+    const { assessGenerationEligibility } = await import('../services/rollbackEligibility');
+    vi.mocked(assessGenerationEligibility).mockResolvedValueOnce('eligible');
+
+    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue({
+      id: genId,
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'active',
+      phase: 'reconciling',
+      is_current: 1,
+      backup_slot_id: genId,
+      content_path: genId,
+      operation_kind: 'update',
+      override_path: '/test/compose/my-stack/.sencho-recovery-dddddddddddd.yml',
+      services_json: '[{}]',
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    } as never);
+    mockAccess.mockResolvedValue(undefined);
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined),
+    ).rejects.toMatchObject({ code: 'ROLLBACK_PROHIBITED' });
+    expect(restoreSpy).not.toHaveBeenCalled();
+  });
+
+
+  it('restores captured Git appliedDeploySpec on compensate (B2)', async () => {
+    const genId = '22222222-2222-4222-8222-222222222222';
+    const priorSpec = { files: ['compose.yaml', 'docker-compose.override.yaml'], contextDir: 'app' };
+    const restoreSpy = vi.fn().mockResolvedValue({
+      priorRecords: {
+        appliedDeploySpec: JSON.stringify(priorSpec),
+        lkgHint: null,
+        lastAppliedContentHash: 'hash-prior',
+        manifestState: 'active',
+        manifestGeneration: 'generations/prior',
+      },
+      git: {
+        repoUrl: 'https://example.com/r.git',
+        branch: 'main',
+        commitSha: 'abc1234deadbeef',
+        manifestVersion: 3,
+      },
+    });
+    const { resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
+    vi.mocked(resolveComposeProjectContextForGeneration).mockResolvedValue({
+      validateForMutation: vi.fn().mockResolvedValue(undefined),
+      backupFromContext: vi.fn().mockResolvedValue(genId),
+      restoreFromContext: restoreSpy,
+      nodeId: 1,
+      stackName: 'my-stack',
+      stackDir: '/test/compose/my-stack',
+      backupSlotId: genId,
+      toComposeArgs: vi.fn(),
+      resolveServiceImageMap: vi.fn(),
+    } as never);
+
+    vi.spyOn(DatabaseService.prototype, 'getGitSource').mockReturnValue({
+      stack_name: 'my-stack',
+      applied_deploy_spec: { files: ['compose.yaml'], contextDir: null },
+      last_applied_commit_sha: 'newsha',
+      last_applied_content_hash: 'hash-new',
+      manifest_version: 3,
+      manifest_state: 'active',
+      manifest_generation: 'generations/new',
+    } as never);
+    const setSpec = vi.spyOn(DatabaseService.prototype, 'setGitSourceAppliedSpec').mockImplementation(() => undefined);
+    const markApplied = vi.spyOn(DatabaseService.prototype, 'markGitSourceApplied').mockImplementation(() => undefined);
+    const setManifest = vi.spyOn(DatabaseService.prototype, 'setGitSourceManifestState').mockImplementation(() => undefined);
+
+    const row = {
+      id: genId,
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'active' as const,
+      phase: 'reconciling' as const,
+      is_current: 1,
+      backup_slot_id: genId,
+      content_path: genId,
+      operation_kind: 'git_apply' as const,
+      override_path: '/test/compose/my-stack/.sencho-recovery-bbbbbbbbbbbb.yml',
+      services_json: '[]',
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    };
+    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue(row);
+    vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration').mockImplementation(() => undefined);
+    mockAccess.mockResolvedValue(undefined);
+    mockListContainers.mockResolvedValue([]);
+
+    vi.useFakeTimers();
+    const promise = StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined);
+    await vi.advanceTimersByTimeAsync(3100);
+    const ok = await promise;
+    vi.useRealTimers();
+
+    expect(ok).toBe(true);
+    expect(setSpec).toHaveBeenCalledWith('my-stack', priorSpec);
+    expect(markApplied).toHaveBeenCalledWith('my-stack', 'abc1234deadbeef', 'hash-prior');
+    expect(setManifest).toHaveBeenCalledWith('my-stack', 3, 'active', 'generations/prior');
+  });
+
+
+  it('clears null appliedDeploySpec on compensate', async () => {
+    const genId = '33333333-3333-4333-8333-333333333333';
+    const restoreSpy = vi.fn().mockResolvedValue({
+      priorRecords: {
+        appliedDeploySpec: null,
+        lkgHint: null,
+        lastAppliedContentHash: null,
+        manifestState: null,
+        manifestGeneration: null,
+      },
+      git: null,
+    });
+    const { resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
+    vi.mocked(resolveComposeProjectContextForGeneration).mockResolvedValue({
+      validateForMutation: vi.fn().mockResolvedValue(undefined),
+      backupFromContext: vi.fn().mockResolvedValue(genId),
+      restoreFromContext: restoreSpy,
+      nodeId: 1,
+      stackName: 'my-stack',
+      stackDir: '/test/compose/my-stack',
+      backupSlotId: genId,
+      toComposeArgs: vi.fn(),
+      resolveServiceImageMap: vi.fn(),
+    } as never);
+
+    vi.spyOn(DatabaseService.prototype, 'getGitSource').mockReturnValue({
+      stack_name: 'my-stack',
+      applied_deploy_spec: { files: ['compose.yaml'], contextDir: null },
+      last_applied_commit_sha: 'newsha',
+      last_applied_content_hash: 'hash-new',
+      manifest_version: null,
+      manifest_state: null,
+      manifest_generation: null,
+    } as never);
+    const setSpec = vi.spyOn(DatabaseService.prototype, 'setGitSourceAppliedSpec').mockImplementation(() => undefined);
+
+    const row = {
+      id: genId,
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'active' as const,
+      phase: 'reconciling' as const,
+      is_current: 1,
+      backup_slot_id: genId,
+      content_path: genId,
+      operation_kind: 'git_apply' as const,
+      override_path: '/test/compose/my-stack/.sencho-recovery-bbbbbbbbbbbb.yml',
+      services_json: '[]',
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    };
+    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue(row);
+    vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration').mockImplementation(() => undefined);
+    mockAccess.mockResolvedValue(undefined);
+    mockListContainers.mockResolvedValue([]);
+
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    vi.mocked(RollbackGenerationStore.commitRestoreTransaction).mockClear();
+
+    vi.useFakeTimers();
+    const promise = StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined);
+    await vi.advanceTimersByTimeAsync(3100);
+    const ok = await promise;
+    vi.useRealTimers();
+
+    expect(ok).toBe(true);
+    expect(setSpec).toHaveBeenCalledWith('my-stack', null);
+    expect(RollbackGenerationStore.commitRestoreTransaction).toHaveBeenCalled();
+  });
+
+  it('does not commit Git state or the restore transaction when probe fails after generation restore', async () => {
+    const genId = '44444444-4444-4444-8444-444444444444';
+    const restoreSpy = vi.fn().mockResolvedValue({
+      priorRecords: { appliedDeploySpec: null, lkgHint: null, lastAppliedContentHash: null, manifestState: null, manifestGeneration: null },
+      git: null,
+    });
+    const { resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
+    vi.mocked(resolveComposeProjectContextForGeneration).mockResolvedValue({
+      validateForMutation: vi.fn().mockResolvedValue(undefined),
+      backupFromContext: vi.fn().mockResolvedValue(genId),
+      restoreFromContext: restoreSpy,
+      nodeId: 1,
+      stackName: 'my-stack',
+      stackDir: '/test/compose/my-stack',
+      backupSlotId: genId,
+      toComposeArgs: vi.fn(),
+      resolveServiceImageMap: vi.fn(),
+    } as never);
+
+    const servicesJson = JSON.stringify([{
+      serviceName: 'web',
+      scale: 1,
+      hasBuild: false,
+      declaredImageRef: 'nginx:latest',
+      referenceKind: 'moving_tag',
+      replicas: [{ containerId: 'c1', imageId: 'sha256:abc', repoDigest: null, state: 'running', rollbackTag: 'sencho-rb/x/web:hold' }],
+    }]);
+    const row = {
+      id: genId,
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'active' as const,
+      phase: 'reconciling' as const,
+      is_current: 1,
+      backup_slot_id: genId,
+      content_path: genId,
+      operation_kind: 'update' as const,
+      override_path: '/test/compose/my-stack/.sencho-recovery-bbbbbbbbbbbb.yml',
+      services_json: servicesJson,
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    };
+    vi.spyOn(DatabaseService.prototype, 'getGitSource').mockReturnValue({
+      stack_name: 'my-stack',
+      applied_deploy_spec: { files: ['compose.yaml'], contextDir: null },
+      last_applied_commit_sha: 'newsha',
+      last_applied_content_hash: 'hash-new',
+      manifest_version: 3,
+      manifest_state: 'active',
+      manifest_generation: 'generations/new',
+    } as never);
+    const setSpec = vi.spyOn(DatabaseService.prototype, 'setGitSourceAppliedSpec').mockImplementation(() => undefined);
+    const updateGen = vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
+      .mockImplementation(() => undefined);
+    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue(row);
+    mockAccess.mockResolvedValue(undefined);
+    mockListContainers.mockResolvedValue([{ Id: 'c1', State: 'exited', Labels: { 'com.docker.compose.service': 'web' } }]);
+    mockInspectContainer.mockResolvedValue({ State: { ExitCode: 1 } });
+
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    vi.mocked(RollbackGenerationStore.commitRestoreTransaction).mockClear();
+    vi.mocked(RollbackGenerationStore.restoreCapturedGitManifest).mockClear();
+    vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockClear();
+
+    vi.useFakeTimers();
+    const result = StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined)
+      .then(() => null, (error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(3100);
+    const error = await result;
+    vi.useRealTimers();
+
+    expect(error).toMatchObject({ code: 'RECOVERY_PROBE_FAILED' });
+    expect(restoreSpy).toHaveBeenCalled();
+    expect(setSpec).not.toHaveBeenCalled();
+    expect(RollbackGenerationStore.commitRestoreTransaction).not.toHaveBeenCalled();
+    expect(RollbackGenerationStore.restoreCapturedGitManifest).not.toHaveBeenCalled();
+    expect(RollbackGenerationStore.reconcileInterruptedRestore).toHaveBeenCalledWith(1, 'my-stack', genId);
+    expect(updateGen).toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'recovery_required' }));
+  });
+
+  it('fails closed when interrupted restore reconcile leaves a pending intent', async () => {
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockResolvedValueOnce(false);
+    vi.mocked(RollbackGenerationStore.hasPendingRestoreIntent).mockResolvedValueOnce(true);
+
+    vi.spyOn(DatabaseService.prototype, 'getNodes').mockReturnValue([
+      { id: 1, name: 'local', type: 'local' } as never,
+    ]);
+    vi.spyOn(DatabaseService.prototype, 'listStackUpdateRecoveryGenerationsForNode').mockReturnValue([
+      {
+        id: 'gen-intent',
+        node_id: 1,
+        stack_name: 'my-stack',
+        status: 'recovery_required',
+        phase: 'reconciling',
+        is_current: 1,
+        backup_slot_id: 'gen-intent',
+        content_path: 'gen-intent',
+        operation_kind: 'update',
+        override_path: null,
+        services_json: '[]',
+        health_gate_id: null,
+        gate_retain_until: null,
+        artifact_expires_at: null,
+        operation_lease_expires_at: null,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+        created_by: null,
+        artifacts_retired: 0,
+        released_at: null,
+        released_by: null,
+      },
+    ] as never);
+    vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
+      .mockImplementation(() => undefined);
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().reconcileInterruptedRestoresAtStartup(),
+    ).rejects.toThrow(/Unresolved interrupted restore intent/);
+  });
+
+  it('blocks capture while a restore intent remains pending', async () => {
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    vi.mocked(RollbackGenerationStore.hasPendingRestoreIntent).mockResolvedValueOnce(true);
+    vi.spyOn(DatabaseService.prototype, 'listStackUpdateRecoveryGenerationsForNode').mockReturnValue([
+      {
+        id: 'gen-block',
+        node_id: 1,
+        stack_name: 'my-stack',
+        content_path: 'gen-block',
+      },
+    ] as never);
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().captureCandidate({
+        nodeId: 1,
+        stackName: 'my-stack',
+        createdBy: null,
+        operationKind: 'update',
+      }),
+    ).rejects.toThrow(/interrupted restore/);
+  });
+
+  it('excludes Compose one-off containers from replica capture and mixed-image checks', async () => {
+    mockListContainers.mockResolvedValue([
+      { Id: 'c1', State: 'running', Labels: { 'com.docker.compose.service': 'web' } },
+      {
+        Id: 'c-run',
+        State: 'running',
+        Labels: { 'com.docker.compose.service': 'web', 'com.docker.compose.oneoff': 'True' },
+      },
+      {
+        Id: 'c-stop',
+        State: 'exited',
+        Labels: { 'com.docker.compose.service': 'web', 'com.docker.compose.oneoff': 'True' },
+      },
+    ]);
+    mockGetContainer.mockImplementation((...args: unknown[]) => ({
+      inspect: vi.fn().mockResolvedValue({
+        Id: String(args[0] ?? 'c1'),
+        State: { Status: args[0] === 'c-stop' ? 'exited' : 'running', ExitCode: 0 },
+        Image: args[0] === 'c1' ? 'sha256:abc' : 'sha256:oneoff',
+      }),
+    }));
+    const spyInsert = vi.spyOn(DatabaseService.prototype, 'insertStackUpdateRecoveryGeneration')
+      .mockImplementation(() => undefined);
+    vi.spyOn(DatabaseService.prototype, 'getGlobalSettings').mockReturnValue({});
+
+    await StackUpdateRecoveryService.getInstance().captureCandidate({
+      nodeId: 1,
+      stackName: 'my-stack',
+      createdBy: 'test',
+    });
+
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    expect(RollbackGenerationStore.attachImages).toHaveBeenCalledWith(
+      1,
+      'my-stack',
+      '11111111-1111-4111-8111-111111111111',
+      [
+        expect.objectContaining({
+          serviceName: 'web',
+          imageId: 'sha256:abc',
+          repoDigest: 'nginx@sha256:digest',
+          platform: 'linux/amd64',
+          declaredImageRef: 'nginx:latest',
+        }),
+      ],
+    );
+    const inserted = spyInsert.mock.calls[0]?.[0] as { services_json: string };
+    const services = JSON.parse(inserted.services_json) as Array<{
+      scale: number;
+      replicas: Array<{ containerId: string }>;
+    }>;
+    expect(services[0].scale).toBe(1);
+    expect(services[0].replicas.map((r) => r.containerId)).toEqual(['c1']);
+  });
+
+  it('probeRecoveredStack ignores running and stopped one-off containers', async () => {
+    const servicesJson = JSON.stringify([{
+      serviceName: 'web',
+      scale: 1,
+      hasBuild: false,
+      declaredImageRef: 'nginx:latest',
+      referenceKind: 'moving_tag',
+      replicas: [{
+        containerId: 'c1',
+        imageId: 'sha256:abc',
+        repoDigest: null,
+        state: 'running',
+        rollbackTag: 'sencho-rb/x/web:hold',
+      }],
+    }]);
+    mockListContainers.mockResolvedValue([
+      { Id: 'c1', State: 'running', Labels: { 'com.docker.compose.service': 'web' } },
+      {
+        Id: 'c-run',
+        State: 'running',
+        Labels: { 'com.docker.compose.service': 'web', 'com.docker.compose.oneoff': 'True' },
+      },
+      {
+        Id: 'c-stop',
+        State: 'exited',
+        Labels: { 'com.docker.compose.service': 'web', 'com.docker.compose.oneoff': 'True' },
+      },
+    ]);
+    mockGetContainer.mockImplementation((...args: unknown[]) => ({
+      inspect: vi.fn().mockResolvedValue({
+        Image: args[0] === 'c1' ? 'sha256:abc' : 'sha256:oneoff',
+        State: { Status: args[0] === 'c-stop' ? 'exited' : 'running' },
+      }),
+    }));
+    vi.useFakeTimers();
+    const promise = StackUpdateRecoveryService.getInstance().probeRecoveredStack(1, 'my-stack', servicesJson);
+    await vi.advanceTimersByTimeAsync(3100);
+    await expect(promise).resolves.toBe(true);
+    vi.useRealTimers();
+  });
+
+  it('captureCurrentBackup hands off a candidate to immediate_verified', async () => {
+    const svc = StackUpdateRecoveryService.getInstance();
+    const genId = '55555555-5555-4555-8555-555555555555';
+    const row = { id: genId, node_id: 1, stack_name: 'my-stack' };
+    vi.spyOn(svc, 'getCurrent').mockReturnValue(undefined);
+    vi.spyOn(svc, 'captureCandidate').mockResolvedValue(row as never);
+    vi.spyOn(svc, 'markAcquired').mockReturnValue(true);
+    vi.spyOn(svc, 'handoff').mockReturnValue(true);
+    vi.spyOn(svc, 'markReconciling').mockReturnValue(true);
+    vi.spyOn(svc, 'markImmediateVerified').mockReturnValue(true);
+    vi.spyOn(svc, 'get').mockReturnValue({
+      ...row,
+      status: 'active',
+      phase: 'immediate_verified',
+      is_current: 1,
+    } as never);
+
+    const result = await svc.captureCurrentBackup({
+      nodeId: 1,
+      stackName: 'my-stack',
+      createdBy: 'admin',
+    });
+
+    expect(svc.captureCandidate).toHaveBeenCalledWith({
+      nodeId: 1,
+      stackName: 'my-stack',
+      createdBy: 'admin',
+      operationKind: 'manual_backup',
+    });
+    expect(svc.handoff).toHaveBeenCalledWith(genId, 1, 'my-stack');
+    expect(result.phase).toBe('immediate_verified');
+  });
+
+  it('captureCurrentBackup abandons the candidate when handoff fails', async () => {
+    const svc = StackUpdateRecoveryService.getInstance();
+    const genId = '66666666-6666-4666-8666-666666666666';
+    const row = { id: genId, node_id: 1, stack_name: 'my-stack' };
+    vi.spyOn(svc, 'getCurrent').mockReturnValue(undefined);
+    vi.spyOn(svc, 'captureCandidate').mockResolvedValue(row as never);
+    vi.spyOn(svc, 'markAcquired').mockReturnValue(true);
+    vi.spyOn(svc, 'handoff').mockReturnValue(false);
+    const abandon = vi.spyOn(svc, 'abandon').mockResolvedValue(true);
+
+    await expect(
+      svc.captureCurrentBackup({ nodeId: 1, stackName: 'my-stack', createdBy: 'admin' }),
+    ).rejects.toThrow(/hand off/);
+    expect(abandon).toHaveBeenCalledWith(genId);
+  });
+
+  it('captureCurrentBackup does not abandon after a successful handoff', async () => {
+    const svc = StackUpdateRecoveryService.getInstance();
+    const genId = '77777777-7777-4777-8777-777777777777';
+    const row = { id: genId, node_id: 1, stack_name: 'my-stack' };
+    vi.spyOn(svc, 'getCurrent').mockReturnValue(undefined);
+    vi.spyOn(svc, 'captureCandidate').mockResolvedValue(row as never);
+    vi.spyOn(svc, 'markAcquired').mockReturnValue(true);
+    vi.spyOn(svc, 'handoff').mockReturnValue(true);
+    vi.spyOn(svc, 'markReconciling').mockReturnValue(true);
+    vi.spyOn(svc, 'markImmediateVerified').mockReturnValue(false);
+    vi.spyOn(svc, 'get').mockReturnValue({
+      ...row,
+      status: 'active',
+      phase: 'reconciling',
+      is_current: 1,
+    } as never);
+    const abandon = vi.spyOn(svc, 'abandon').mockResolvedValue(true);
+
+    const result = await svc.captureCurrentBackup({
+      nodeId: 1,
+      stackName: 'my-stack',
+      createdBy: 'admin',
+    });
+    expect(abandon).not.toHaveBeenCalled();
+    expect(result.is_current).toBe(1);
+  });
+
+  it('captureCurrentBackup refuses to replace a generation while a health gate is observing', async () => {
+    const svc = StackUpdateRecoveryService.getInstance();
+    vi.spyOn(svc, 'getCurrent').mockReturnValue({
+      id: 'cur',
+      node_id: 1,
+      stack_name: 'my-stack',
+      health_gate_id: 'gate-1',
+    } as never);
+    vi.spyOn(DatabaseService.prototype, 'getHealthGateRun').mockReturnValue({ status: 'observing' } as never);
+    const capture = vi.spyOn(svc, 'captureCandidate');
+
+    await expect(
+      svc.captureCurrentBackup({ nodeId: 1, stackName: 'my-stack', createdBy: 'admin' }),
+    ).rejects.toMatchObject({ code: 'HEALTH_GATE_OBSERVING' });
+    expect(capture).not.toHaveBeenCalled();
   });
 });

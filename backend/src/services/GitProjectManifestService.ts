@@ -24,6 +24,7 @@ import { StackFileRootsService } from './StackFileRootsService';
 import { DatabaseService } from './DatabaseService';
 import { ComposeInputDiscoveryService, type ContextCopyPlan, type CopyEntry } from './ComposeInputDiscoveryService';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import { collectManifestFilePaths } from '../helpers/manifestFilePaths';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import type {
@@ -411,6 +412,34 @@ export class GitProjectManifestService {
         await fs.promises.rename(tmp, target);
     }
 
+    /** Raw on-disk manifesto JSON, or null when the file is absent. */
+    async readRawManifestText(stackName: string): Promise<string | null> {
+        // Inline barrier at the readFile sink (CodeQL path-injection).
+        const root = path.resolve(this.managedRoot(stackName));
+        const target = path.resolve(root, MANIFEST_FILENAME);
+        if (!target.startsWith(root + path.sep)) {
+            throw Object.assign(new Error('Path escapes managed project directory'), { code: 'INVALID_PATH' });
+        }
+        try {
+            return await fs.promises.readFile(target, 'utf8');
+        } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+            throw e;
+        }
+    }
+
+    /** Remove the managed manifesto file (first-apply preimage restore). */
+    async clearManifestFile(stackName: string): Promise<void> {
+        // Inline barrier at the rm sink (CodeQL path-injection).
+        const root = path.resolve(this.managedRoot(stackName));
+        const target = path.resolve(root, MANIFEST_FILENAME);
+        if (!target.startsWith(root + path.sep)) {
+            throw Object.assign(new Error('Path escapes managed project directory'), { code: 'INVALID_PATH' });
+        }
+        await fs.promises.rm(target, { force: true });
+        StackFileRootsService.invalidate(NodeRegistry.getInstance().getDefaultNodeId(), stackName);
+    }
+
     /**
      * Public projection for the manifest read endpoint: hashes, size metadata,
      * provenance, and deletion authority are internal-only, and for
@@ -700,19 +729,7 @@ export class GitProjectManifestService {
 
     /** Exact file paths owned by one manifest, excluding directory inventory entries. */
     private manifestFilePaths(manifest: Pick<GitProjectManifest, 'inputs' | 'buildContexts'>): string[] {
-        const paths = new Map<string, string>();
-        for (const entry of manifest.inputs) {
-            if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
-            if (entry.dependencyKind === 'build-context' || entry.dependencyKind === 'build-additional-context') continue;
-            paths.set(entry.materializedPath.toLowerCase(), entry.materializedPath);
-        }
-        for (const context of manifest.buildContexts) {
-            for (const file of context.files) {
-                const rel = context.repoPath ? `${context.repoPath}/${file.path}` : file.path;
-                paths.set(rel.toLowerCase(), rel);
-            }
-        }
-        return [...paths.values()].sort((a, b) => a.localeCompare(b));
+        return collectManifestFilePaths(manifest);
     }
 
     /** Hash one snapshot file, preserving the distinction between missing and unreadable. */

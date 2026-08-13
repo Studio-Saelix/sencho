@@ -513,6 +513,8 @@ systemMaintenanceRouter.get('/rollback/generations', async (req: Request, res: R
       phase: row.phase,
       createdAt: row.created_at,
       artifactExpiresAt: row.artifact_expires_at,
+      createdBy: row.created_by,
+      operationKind: row.operation_kind,
       releasable: service.isReleaseEligible(row),
     })));
   } catch (error) {
@@ -544,6 +546,11 @@ systemMaintenanceRouter.post('/rollback/generations/:id/release', async (req: Re
           return res.status(409).json({
             error: 'This rollback generation cannot be released right now (it may be observing a health gate, mid-recovery, or already in progress).',
             code: 'NOT_ELIGIBLE',
+          });
+        case 'malformed_services':
+          return res.status(409).json({
+            error: 'This rollback generation has malformed recovery image state and cannot be released until that record is repaired.',
+            code: 'MALFORMED_SERVICES',
           });
         default: {
           const _exhaustive: never = result.reason;

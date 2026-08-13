@@ -11,7 +11,6 @@
  * - Services that were fully stopped at capture are kept at `scale: 0`.
  * - Authored replica counts are not used when they diverge from observed state.
  */
-import { randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import {
@@ -23,13 +22,210 @@ import { FileSystemService } from './FileSystemService';
 import { buildEffectiveServiceModel } from './effectiveServiceModel';
 import {
   classifyReferenceKind,
-  type ImageReferenceKind,
   resolveComposeProjectContext,
+  resolveComposeProjectContextForGeneration,
 } from './composeProjectContext';
+import {
+  collectImageIds,
+  collectRollbackTags,
+  parseServicesJsonStrict,
+  scrapeRollbackTagsLenient,
+  type StackRecoveryReplicaCapture,
+  type StackRecoveryServiceCapture,
+} from './recoveryServicesJson';
 import { getComposeCommandTimeoutMs } from './ComposeService';
+import { assessGenerationEligibility } from './rollbackEligibility';
+import { enforcePolicyForImageRefs, type PolicyEnforcementOptions } from './PolicyEnforcement';
+import { describePolicyBlock } from '../helpers/policyGate';
+import type { GitSourceAppliedSpec } from './DatabaseService';
+import type { GitSourceManifestState } from '../types/gitProjectManifest';
+import type {
+  RollbackGenerationManifest,
+  RollbackGitDbSnapshot,
+  RollbackImageIdentity,
+  RollbackInvocationRecord,
+  RollbackOperationKind,
+  RollbackRestoreTransactionMeta,
+} from '../types/rollbackGeneration';
+import { getBackupBaseDir, RollbackGenerationStore } from './RollbackGenerationStore';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
+
+export type { StackRecoveryReplicaCapture, StackRecoveryServiceCapture } from './recoveryServicesJson';
+export { parseServicesJsonStrict } from './recoveryServicesJson';
+
+const GENERATION_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const STAGING_MAX_AGE_MS = 60 * 60 * 1000;
+
+function looksLikeGenerationUuid(value: string): boolean {
+  return GENERATION_UUID_RE.test(value);
+}
+
+function isComposeOneOff(labels: Record<string, string> | undefined): boolean {
+  const value = labels?.['com.docker.compose.oneoff'];
+  return typeof value === 'string' && value.toLowerCase() === 'true';
+}
+
+function isHeldRecoveryImageMissing(error: unknown): boolean {
+  const message = getErrorMessage(error, '');
+  if (/no such image/i.test(message)) return true;
+  return /sencho-rb\//i.test(message)
+    && /manifest unknown|repository does not exist|failed to resolve reference|pull access denied/i.test(message);
+}
+
+function formatImagePlatform(inspect: {
+  Os?: string;
+  Architecture?: string;
+  Variant?: string;
+}): string | null {
+  const os = typeof inspect.Os === 'string' ? inspect.Os.trim() : '';
+  const arch = typeof inspect.Architecture === 'string' ? inspect.Architecture.trim() : '';
+  if (!os || !arch) return null;
+  const variant = typeof inspect.Variant === 'string' ? inspect.Variant.trim() : '';
+  return variant ? `${os}/${arch}/${variant}` : `${os}/${arch}`;
+}
+
+/** New content-store generations always set content_path. Never infer from UUID shape. */
+function expectsGenerationContent(row: StackUpdateRecoveryGenerationRow): boolean {
+  return typeof row.content_path === 'string' && row.content_path.length > 0;
+}
+
+async function generationContentPresent(
+  nodeId: number,
+  stackName: string,
+  generationId: string,
+): Promise<boolean> {
+  try {
+    const genDir = RollbackGenerationStore.getGenerationDir(nodeId, stackName, generationId);
+    await fs.access(path.join(genDir, 'generation.json'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveRestoreContext(row: StackUpdateRecoveryGenerationRow) {
+  if (expectsGenerationContent(row)) {
+    const contentKey = row.content_path!;
+    if (!looksLikeGenerationUuid(contentKey)) {
+      throw Object.assign(
+        new Error('Recovery generation content key is missing or invalid'),
+        { code: 'GENERATION_CONTENT_MISSING' },
+      );
+    }
+    const present = await generationContentPresent(row.node_id, row.stack_name, contentKey);
+    if (!present) {
+      throw Object.assign(
+        new Error('Recovery generation content is missing or incomplete'),
+        { code: 'GENERATION_CONTENT_MISSING' },
+      );
+    }
+    return resolveComposeProjectContextForGeneration(
+      row.node_id,
+      row.stack_name,
+      contentKey,
+    );
+  }
+  // Pre-migration rows: content_path null (even when backup_slot_id is a UUID).
+  return resolveComposeProjectContext(row.node_id, row.stack_name);
+}
+
+async function restoreCapturedGitDatabaseState(
+  stackName: string,
+  manifest: RollbackGenerationManifest,
+): Promise<void> {
+  const db = DatabaseService.getInstance();
+  const src = db.getGitSource(stackName);
+  if (!src) return;
+
+  const rawSpec = manifest.priorRecords?.appliedDeploySpec;
+  if (rawSpec === null) {
+    db.setGitSourceAppliedSpec(stackName, null);
+  } else if (typeof rawSpec === 'string' && rawSpec.length > 0) {
+    try {
+      const parsed = JSON.parse(rawSpec) as GitSourceAppliedSpec;
+      if (parsed && Array.isArray(parsed.files)) {
+        db.setGitSourceAppliedSpec(stackName, parsed);
+      }
+    } catch (e) {
+      throw new Error(
+        `Stored applied deploy specification is corrupt: ${(e as Error).message}`,
+        { cause: e },
+      );
+    }
+  }
+
+  if (!manifest.git) return;
+
+  const commitSha = manifest.git.commitSha?.trim() || null;
+  const contentHash =
+    typeof manifest.priorRecords?.lastAppliedContentHash === 'string'
+      ? manifest.priorRecords.lastAppliedContentHash
+      : null;
+
+  if (commitSha) {
+    db.markGitSourceApplied(stackName, commitSha, contentHash ?? '');
+  } else {
+    // First-apply preimage: clear any SHA written after capture.
+    db.clearGitSourceAppliedRevision(stackName);
+  }
+
+  const capturedGeneration =
+    typeof manifest.priorRecords?.manifestGeneration === 'string'
+      ? manifest.priorRecords.manifestGeneration
+      : null;
+  const manifestStateRaw = manifest.priorRecords?.manifestState;
+  db.setGitSourceManifestState(
+    stackName,
+    manifest.git.manifestVersion ?? null,
+    (typeof manifestStateRaw === 'string'
+      ? manifestStateRaw
+      : null) as GitSourceManifestState | null,
+    capturedGeneration,
+  );
+}
+
+function snapshotGitDb(src: NonNullable<ReturnType<DatabaseService['getGitSource']>>): RollbackGitDbSnapshot {
+  return {
+    appliedDeploySpec: src.applied_deploy_spec
+      ? {
+          files: [...src.applied_deploy_spec.files],
+          contextDir: src.applied_deploy_spec.contextDir,
+        }
+      : null,
+    lastAppliedCommitSha: src.last_applied_commit_sha,
+    lastAppliedContentHash: src.last_applied_content_hash,
+    manifestVersion: src.manifest_version,
+    manifestState: src.manifest_state,
+    manifestGeneration: src.manifest_generation,
+  };
+}
+
+async function captureGitSidePreimage(stackName: string): Promise<RollbackRestoreTransactionMeta> {
+  const priorGit = DatabaseService.getInstance().getGitSource(stackName);
+  if (!priorGit) {
+    return { gitDbBefore: null, managedManifestBefore: null };
+  }
+  const { GitProjectManifestService } = await import('./GitProjectManifestService');
+  return {
+    gitDbBefore: snapshotGitDb(priorGit),
+    managedManifestBefore: await GitProjectManifestService.getInstance().readRawManifestText(stackName),
+  };
+}
+
+async function applyRestoredGenerationGitSide(
+  stackName: string,
+  nodeId: number,
+  contentPath: string,
+  restoredManifest: RollbackGenerationManifest,
+): Promise<void> {
+  const genDir = RollbackGenerationStore.getGenerationDir(nodeId, stackName, contentPath);
+  await RollbackGenerationStore.restoreCapturedGitManifest(stackName, genDir, restoredManifest);
+  await restoreCapturedGitDatabaseState(stackName, restoredManifest);
+}
 
 const SWEEP_INTERVAL_MS = 5 * 60_000;
 const INITIAL_SWEEP_DELAY_MS = 30_000;
@@ -38,28 +234,12 @@ const RECOVERY_TTL_BUFFER_MS = 30 * 60_000;
 const GATE_RETAIN_DEFAULT_MS = 2 * 60 * 60_000;
 const RECOVERY_PROBE_DELAY_MS = 3_000;
 
-export interface StackRecoveryReplicaCapture {
-  containerId: string | null;
-  imageId: string | null;
-  repoDigest: string | null;
-  state: 'running' | 'stopped' | 'none';
-  rollbackTag: string | null;
-}
-
-export interface StackRecoveryServiceCapture {
-  serviceName: string;
-  /** Observed running replica count at capture (supported restore scale). */
-  scale: number;
-  hasBuild: boolean;
-  declaredImageRef: string | null;
-  referenceKind: ImageReferenceKind;
-  replicas: StackRecoveryReplicaCapture[];
-}
-
 export interface CaptureStackUpdateInput {
   nodeId: number;
   stackName: string;
   createdBy: string | null;
+  /** Capture trigger; defaults to 'update'. */
+  operationKind?: RollbackOperationKind;
 }
 
 function yamlQuote(value: string): string {
@@ -77,36 +257,6 @@ export function shortGenerationId(generationId: string): string {
 
 function opaqueRollbackTag(generationId: string, serviceName: string): string {
   return `sencho-rb/${shortGenerationId(generationId)}/${sanitizeServiceSlug(serviceName)}:hold`;
-}
-
-function parseServicesJson(raw: string): StackRecoveryServiceCapture[] {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed as StackRecoveryServiceCapture[];
-  } catch {
-    return [];
-  }
-}
-
-export function collectImageIdsFromServicesJson(servicesJson: string): string[] {
-  const ids = new Set<string>();
-  for (const svc of parseServicesJson(servicesJson)) {
-    for (const replica of svc.replicas ?? []) {
-      if (replica.imageId && replica.imageId.trim()) ids.add(replica.imageId);
-    }
-  }
-  return [...ids];
-}
-
-function collectRollbackTags(services: StackRecoveryServiceCapture[]): string[] {
-  const tags = new Set<string>();
-  for (const svc of services) {
-    for (const replica of svc.replicas ?? []) {
-      if (replica.rollbackTag) tags.add(replica.rollbackTag);
-    }
-  }
-  return [...tags];
 }
 
 export class StackUpdateRecoveryService {
@@ -134,12 +284,101 @@ export class StackUpdateRecoveryService {
   public start(): void {
     this.started = true;
     if (this.initialTimer || this.intervalId) return;
+    // Startup already awaits reconcileInterruptedRestoresAtStartup before
+    // HTTP/mutators. Periodic full reconcile (abandon/TTL) starts after delay.
     this.initialTimer = setTimeout(() => {
       void this.reconcileIncomplete();
       this.intervalId = setInterval(() => {
         void this.reconcileIncomplete();
       }, SWEEP_INTERVAL_MS);
     }, INITIAL_SWEEP_DELAY_MS);
+  }
+
+  /**
+   * Revert any crash-interrupted generation restores (files + Git side state)
+   * before background mutators or HTTP accept traffic.
+   */
+  public async reconcileInterruptedRestoresAtStartup(): Promise<void> {
+    await this.sweepInterruptedRestores(DatabaseService.getInstance());
+  }
+
+  private async sweepInterruptedRestores(db: DatabaseService): Promise<void> {
+    const failures: string[] = [];
+    for (const node of db.getNodes()) {
+      for (const row of db.listStackUpdateRecoveryGenerationsForNode(node.id)) {
+        if (!row.content_path) continue;
+        try {
+          const reverted = await RollbackGenerationStore.reconcileInterruptedRestore(
+            row.node_id,
+            row.stack_name,
+            row.content_path,
+          );
+          if (reverted) {
+            db.updateStackUpdateRecoveryGeneration(row.id, { status: 'recovery_required' });
+          }
+          if (await RollbackGenerationStore.hasPendingRestoreIntent(
+            row.node_id,
+            row.stack_name,
+            row.content_path,
+          )) {
+            failures.push(row.id);
+          }
+        } catch (e) {
+          console.warn(
+            '[StackUpdateRecovery] Interrupted restore reconcile failed for %s: %s',
+            sanitizeForLog(row.id),
+            sanitizeForLog(getErrorMessage(e, 'unknown')),
+          );
+          this.markGenerationRecoveryRequiredBestEffort(db, row.id);
+          failures.push(row.id);
+        }
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(
+        `Unresolved interrupted restore intent(s) remain for generation(s): ${failures.join(', ')}`,
+      );
+    }
+  }
+
+  private markGenerationRecoveryRequiredBestEffort(
+    db: DatabaseService,
+    generationId: string,
+  ): void {
+    try {
+      db.updateStackUpdateRecoveryGeneration(generationId, { status: 'recovery_required' });
+    } catch (updateErr) {
+      console.warn(
+        '[StackUpdateRecovery] Failed to mark recovery_required after reconcile error: %s',
+        sanitizeForLog(getErrorMessage(updateErr, 'unknown')),
+      );
+    }
+  }
+
+  /**
+   * Block mutations while a restore intent is still on disk for any generation
+   * of this stack (mirrors deletion-intent gating).
+   */
+  public async assertNoBlockingRestoreIntent(nodeId: number, stackName: string): Promise<void> {
+    if (!isValidStackName(stackName)) {
+      throw new Error('Invalid stack name');
+    }
+    const db = DatabaseService.getInstance();
+    for (const row of db.listStackUpdateRecoveryGenerationsForNode(nodeId)) {
+      if (row.stack_name !== stackName || !row.content_path) continue;
+      const pending = await RollbackGenerationStore.hasPendingRestoreIntent(
+        nodeId,
+        stackName,
+        row.content_path,
+      );
+      if (!pending) continue;
+      throw Object.assign(
+        new Error(
+          `Stack "${stackName}" has an interrupted restore in progress; resolve recovery before mutating`,
+        ),
+        { code: 'RESTORE_INTENT_BLOCKING' },
+      );
+    }
   }
 
   public stop(): void {
@@ -160,9 +399,11 @@ export class StackUpdateRecoveryService {
    */
   public async captureCandidate(input: CaptureStackUpdateInput): Promise<StackUpdateRecoveryGenerationRow> {
     const { nodeId, stackName, createdBy } = input;
+    const operationKind: RollbackOperationKind = input.operationKind ?? 'update';
     if (!isValidStackName(stackName)) {
       throw new Error('Invalid stack name');
     }
+    await this.assertNoBlockingRestoreIntent(nodeId, stackName);
 
     const context = await resolveComposeProjectContext(nodeId, stackName);
     await context.validateForMutation();
@@ -171,17 +412,17 @@ export class StackUpdateRecoveryService {
     const { ComposeService } = await import('./ComposeService');
     await ComposeService.getInstance(nodeId).validateExactComposeInvocation(stackName);
 
-    const backupSlotId = await context.backupFromContext('update');
+    // Content-store generation id becomes the row id, backup_slot_id, and content_path.
+    const generationId = await context.backupFromContext(operationKind);
 
     const model = await buildEffectiveServiceModel(nodeId, stackName);
     if (!model.renderable) {
       throw new Error(model.error || 'Effective Compose model failed to render');
     }
-
-    const generationId = randomUUID();
     const docker = DockerController.getInstance(nodeId).getDocker();
     const services: StackRecoveryServiceCapture[] = [];
     const createdTags: string[] = [];
+    const platformByImageId = new Map<string, string | null>();
     let overridePath: string | null = null;
 
     try {
@@ -200,6 +441,8 @@ export class StackUpdateRecoveryService {
 
         const replicas: StackRecoveryReplicaCapture[] = [];
         for (const info of listed) {
+          const labels = (info.Labels ?? {}) as Record<string, string>;
+          if (isComposeOneOff(labels)) continue;
           try {
             const inspect = await docker.getContainer(info.Id).inspect();
             const status = inspect.State?.Status;
@@ -219,6 +462,9 @@ export class StackUpdateRecoveryService {
                 const image = await docker.getImage(imageId).inspect();
                 const digests = (image.RepoDigests ?? []) as string[];
                 repoDigest = digests.length > 0 ? digests[0] : null;
+                if (!platformByImageId.has(imageId)) {
+                  platformByImageId.set(imageId, formatImagePlatform(image));
+                }
               } catch {
                 repoDigest = null;
               }
@@ -246,6 +492,36 @@ export class StackUpdateRecoveryService {
           replicas,
         });
       }
+
+      for (const svc of services) {
+        const imageIds = new Set<string>();
+        for (const replica of svc.replicas) {
+          if ((replica.state === 'running' || replica.state === 'stopped') && replica.imageId?.trim()) {
+            imageIds.add(replica.imageId);
+          }
+        }
+        if (imageIds.size > 1) {
+          throw Object.assign(
+            new Error(
+              `Service "${svc.serviceName}" has mixed replica images; refusing recovery capture that cannot restore exact prior identity`,
+            ),
+            { code: 'MIXED_REPLICA_IMAGES' },
+          );
+        }
+      }
+
+      const images: RollbackImageIdentity[] = services.map((svc) => {
+        const primary = svc.replicas.find((r) => r.imageId) ?? null;
+        const imageId = primary?.imageId ?? null;
+        return {
+          serviceName: svc.serviceName,
+          imageId,
+          repoDigest: primary?.repoDigest ?? null,
+          platform: imageId ? (platformByImageId.get(imageId) ?? null) : null,
+          declaredImageRef: svc.declaredImageRef,
+        };
+      });
+      await RollbackGenerationStore.attachImages(nodeId, stackName, generationId, images);
 
       const taggedIds = new Set<string>();
       for (const svc of services) {
@@ -277,7 +553,9 @@ export class StackUpdateRecoveryService {
         status: 'candidate',
         phase: 'captured',
         is_current: 0,
-        backup_slot_id: backupSlotId,
+        backup_slot_id: generationId,
+        content_path: generationId,
+        operation_kind: operationKind,
         override_path: overridePath,
         services_json: JSON.stringify(services),
         health_gate_id: null,
@@ -302,8 +580,78 @@ export class StackUpdateRecoveryService {
           // Best-effort mid-capture cleanup.
         }
       }
+      try {
+        await RollbackGenerationStore.retireGenerationContent(nodeId, stackName, generationId);
+      } catch (retireError) {
+        console.warn(
+          '[StackUpdateRecovery] Failed to retire staged generation content after capture error: %s',
+          sanitizeForLog(getErrorMessage(retireError, 'unknown')),
+        );
+      }
       throw error;
     }
+  }
+
+  /**
+   * Capture the live authored project as the current recovery generation.
+   * Shares captureCandidate with deploy/update (files, holds, override), then
+   * hands off immediately without compose or a runtime probe.
+   */
+  public async captureCurrentBackup(input: Omit<CaptureStackUpdateInput, 'operationKind'>): Promise<StackUpdateRecoveryGenerationRow> {
+    const current = this.getCurrent(input.nodeId, input.stackName);
+    if (current?.health_gate_id) {
+      const gate = DatabaseService.getInstance().getHealthGateRun(
+        current.node_id,
+        current.stack_name,
+        current.health_gate_id,
+      );
+      if (gate?.status === 'observing') {
+        throw Object.assign(
+          new Error('Cannot replace the current recovery generation while a health gate is observing'),
+          { code: 'HEALTH_GATE_OBSERVING' },
+        );
+      }
+    }
+
+    const row = await this.captureCandidate({
+      ...input,
+      operationKind: 'manual_backup',
+    });
+    try {
+      if (!this.markAcquired(row.id)) {
+        throw new Error('Could not acquire the backup generation');
+      }
+      if (!this.handoff(row.id, row.node_id, row.stack_name)) {
+        throw new Error('Could not hand off the backup generation');
+      }
+    } catch (error) {
+      try {
+        await this.abandon(row.id);
+      } catch (abandonErr) {
+        console.warn(
+          '[StackUpdateRecovery] Failed to abandon backup generation after handoff error: %s',
+          sanitizeForLog(getErrorMessage(abandonErr, 'unknown')),
+        );
+      }
+      throw error;
+    }
+
+    if (!this.markReconciling(row.id)) {
+      console.warn(
+        '[StackUpdateRecovery] Backup generation handed off but reconciling CAS failed for %s',
+        sanitizeForLog(row.id),
+      );
+    } else if (!this.markImmediateVerified(row.id)) {
+      console.warn(
+        '[StackUpdateRecovery] Backup generation handed off but immediate_verified CAS failed for %s',
+        sanitizeForLog(row.id),
+      );
+    }
+    const verified = this.get(row.id);
+    if (!verified) {
+      throw new Error('Backup generation missing after handoff');
+    }
+    return verified;
   }
 
   private async writeRecoveryOverride(
@@ -406,8 +754,10 @@ export class StackUpdateRecoveryService {
 
   /**
    * Informational mirror of releaseStackUpdateRecoveryGeneration's WHERE
-   * clause, for the list endpoint to grey out a row it already knows is
-   * ineligible. Not authoritative: releaseGeneration revalidates for real.
+   * clause, plus a strict services_json parse. Malformed recovery image
+   * state is refused here (and in releaseGeneration as malformed_services)
+   * before the DB update; the SQL WHERE clause does not encode that check.
+   * Not authoritative: releaseGeneration revalidates for real.
    */
   public isReleaseEligible(row: StackUpdateRecoveryGenerationRow): boolean {
     if (row.released_at !== null || row.artifacts_retired !== 0) return false;
@@ -417,6 +767,7 @@ export class StackUpdateRecoveryService {
       const gate = DatabaseService.getInstance().getHealthGateRun(row.node_id, row.stack_name, row.health_gate_id);
       if (gate?.status === 'observing') return false;
     }
+    if (!parseServicesJsonStrict(row.services_json).ok) return false;
     return true;
   }
 
@@ -436,11 +787,14 @@ export class StackUpdateRecoveryService {
     releasedBy: string | null,
   ): Promise<
     | { ok: true; row: StackUpdateRecoveryGenerationRow; artifactsCleaned: boolean }
-    | { ok: false; reason: 'not_found' | 'already_released' | 'not_eligible' }
+    | { ok: false; reason: 'not_found' | 'already_released' | 'not_eligible' | 'malformed_services' }
   > {
     const before = this.get(id);
     if (!before) return { ok: false, reason: 'not_found' };
     if (before.released_at !== null) return { ok: false, reason: 'already_released' };
+    if (!parseServicesJsonStrict(before.services_json).ok) {
+      return { ok: false, reason: 'malformed_services' };
+    }
 
     const released = DatabaseService.getInstance().releaseStackUpdateRecoveryGeneration(id, releasedBy);
     if (!released) return { ok: false, reason: 'not_eligible' };
@@ -540,29 +894,130 @@ export class StackUpdateRecoveryService {
    */
   public async compensateWithCandidate(
     generationId: string,
-    composeUp: (overridePath: string) => Promise<void>,
+    composeUp: (
+      overridePath: string,
+      invocation: RollbackInvocationRecord | null,
+    ) => Promise<void>,
+    policyOptions?: PolicyEnforcementOptions,
   ): Promise<boolean> {
     const row = this.get(generationId);
     if (!row) return false;
+    // Finish any leftover restore transaction for this generation before a new
+    // restore can overwrite pre-restore/ with an already-restored tree.
+    if (row.content_path) {
+      try {
+        const reverted = await RollbackGenerationStore.reconcileInterruptedRestore(
+          row.node_id,
+          row.stack_name,
+          row.content_path,
+        );
+        if (reverted) {
+          DatabaseService.getInstance().updateStackUpdateRecoveryGeneration(generationId, {
+            status: 'recovery_required',
+          });
+        }
+      } catch (e) {
+        console.warn(
+          '[StackUpdateRecovery] Pre-compensate reconcile failed for %s: %s',
+          sanitizeForLog(generationId),
+          sanitizeForLog(getErrorMessage(e, 'unknown')),
+        );
+      }
+    }
+    await this.assertNoBlockingRestoreIntent(row.node_id, row.stack_name);
+
+    const db = DatabaseService.getInstance();
+    const transactionMeta = await captureGitSidePreimage(row.stack_name);
+    const generationContentPath =
+      expectsGenerationContent(row) && row.content_path ? row.content_path : null;
+
+    let filesRestored = false;
     try {
-      const context = await resolveComposeProjectContext(row.node_id, row.stack_name);
-      await context.restoreFromContext();
+      // Eligibility (integrity + held images + security posture) before mutation.
+      const integrityVerdict = await assessGenerationEligibility(row);
+      if (integrityVerdict === 'prohibited') {
+        throw Object.assign(
+          new Error('Rollback is prohibited for this generation'),
+          { code: 'ROLLBACK_PROHIBITED' },
+        );
+      }
+
+      // Validate recovery image state before mutating the live project.
+      const servicesParsed = parseServicesJsonStrict(row.services_json);
+      if (!servicesParsed.ok) {
+        throw Object.assign(
+          new Error('Recovery generation has malformed services state; refusing rollback'),
+          { code: 'ROLLBACK_PROHIBITED' },
+        );
+      }
+      const rollbackTags = collectRollbackTags(servicesParsed.services);
+      const heldRefs = rollbackTags.length > 0
+        ? rollbackTags
+        : collectImageIds(servicesParsed.services);
+      if (heldRefs.length === 0 && servicesParsed.services.some((s) => s.scale > 0)) {
+        throw Object.assign(
+          new Error('Recovery generation has no held image references for running services'),
+          { code: 'ROLLBACK_PROHIBITED' },
+        );
+      }
+
+      const context = await resolveRestoreContext(row);
+      const restoredManifest = await context.restoreFromContext(transactionMeta);
+      filesRestored = true;
+
+      // Evaluate current policy against the exact held images rollback will launch
+      // (opaque tags / image ids), not the restored authored moving tags.
+      const restoredInvocation = restoredManifest?.invocation ?? null;
+      const gate = await enforcePolicyForImageRefs(row.stack_name, row.node_id, heldRefs, {
+        bypass: policyOptions?.bypass ?? false,
+        actor: policyOptions?.actor ?? 'recovery-compensate',
+        ip: policyOptions?.ip,
+        auditMethod: policyOptions?.auditMethod ?? 'POST',
+        auditPath: policyOptions?.auditPath ?? '/api/stacks/rollback',
+      });
+      if (!gate.ok) {
+        throw Object.assign(
+          new Error(describePolicyBlock(gate.policy, gate.violations, 'rollback')),
+          { code: 'ROLLBACK_PROHIBITED', policy: gate.policy, violations: gate.violations },
+        );
+      }
+
       if (!row.override_path) {
         throw new Error('Recovery generation has no override path');
       }
-      await composeUp(row.override_path);
+      await composeUp(row.override_path, restoredInvocation);
       const probeOk = await this.probeRecoveredStack(
         row.node_id,
         row.stack_name,
         row.services_json,
       );
       if (!probeOk) {
-        DatabaseService.getInstance().updateStackUpdateRecoveryGeneration(generationId, {
-          status: 'recovery_required',
-        });
-        return false;
+        // Revert files via the existing catch path. Do not apply Git or commit
+        // the restore transaction; a leftover crash-intent would later undo
+        // files while recovered containers stay running.
+        throw Object.assign(new Error('Recovery health probe failed'), { code: 'RECOVERY_PROBE_FAILED' });
       }
-      DatabaseService.getInstance().updateStackUpdateRecoveryGeneration(generationId, {
+
+      if (restoredManifest) {
+        if (generationContentPath) {
+          await applyRestoredGenerationGitSide(
+            row.stack_name,
+            row.node_id,
+            generationContentPath,
+            restoredManifest,
+          );
+        } else {
+          await restoreCapturedGitDatabaseState(row.stack_name, restoredManifest);
+        }
+      }
+      if (generationContentPath) {
+        await RollbackGenerationStore.commitRestoreTransaction(
+          row.node_id,
+          row.stack_name,
+          generationContentPath,
+        );
+      }
+      db.updateStackUpdateRecoveryGeneration(generationId, {
         status: 'restored_current',
         phase: 'immediate_verified',
         is_current: 1,
@@ -570,23 +1025,104 @@ export class StackUpdateRecoveryService {
       });
       return true;
     } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (filesRestored && generationContentPath) {
+        try {
+          await RollbackGenerationStore.reconcileInterruptedRestore(
+            row.node_id,
+            row.stack_name,
+            generationContentPath,
+          );
+        } catch (revertErr) {
+          console.error(
+            '[StackUpdateRecovery] Failed to revert files after compensation error: %s',
+            sanitizeForLog(getErrorMessage(revertErr, 'unknown')),
+          );
+        }
+      }
+      if (code === 'ROLLBACK_PROHIBITED') {
+        throw error;
+      }
       console.error(
         '[StackUpdateRecovery] Compensation failed for %s: %s',
         sanitizeForLog(generationId),
         sanitizeForLog(getErrorMessage(error, 'unknown')),
       );
-      DatabaseService.getInstance().updateStackUpdateRecoveryGeneration(generationId, {
+      db.updateStackUpdateRecoveryGeneration(generationId, {
         status: 'recovery_required',
       });
+      if (
+        code === 'GENERATION_CONTENT_MISSING'
+        || code === 'HELD_IMAGE_MISSING'
+        || code === 'RECOVERY_PROBE_FAILED'
+      ) {
+        throw error;
+      }
+      if (isHeldRecoveryImageMissing(error)) {
+        throw Object.assign(
+          new Error('Held recovery image is missing'),
+          { code: 'HELD_IMAGE_MISSING' },
+        );
+      }
       return false;
     }
   }
 
   /**
-   * Verify recovered runtime against the captured generation.
-   * Rejects absent, restarting, dead, exited, or unhealthy expected replicas,
-   * image-id mismatches vs capture, and any running replica of a scale-0 service.
+   * Restore generation project files + Git manifesto/DB without compose-up.
+   * Used when legacy Git materialize fails mid-write and must reinstate the
+   * pre-apply capture before abandoning the recovery candidate.
    */
+  public async revertToGenerationContent(generationId: string): Promise<boolean> {
+    const row = this.get(generationId);
+    if (!row || !expectsGenerationContent(row) || !row.content_path) return false;
+    await this.assertNoBlockingRestoreIntent(row.node_id, row.stack_name);
+
+    const transactionMeta = await captureGitSidePreimage(row.stack_name);
+
+    try {
+      const context = await resolveComposeProjectContextForGeneration(
+        row.node_id,
+        row.stack_name,
+        row.content_path,
+      );
+      const restoredManifest = await context.restoreFromContext(transactionMeta);
+      if (restoredManifest) {
+        await applyRestoredGenerationGitSide(
+          row.stack_name,
+          row.node_id,
+          row.content_path,
+          restoredManifest,
+        );
+      }
+      await RollbackGenerationStore.commitRestoreTransaction(
+        row.node_id,
+        row.stack_name,
+        row.content_path,
+      );
+      return true;
+    } catch (error) {
+      try {
+        await RollbackGenerationStore.reconcileInterruptedRestore(
+          row.node_id,
+          row.stack_name,
+          row.content_path,
+        );
+      } catch (revertErr) {
+        console.error(
+          '[StackUpdateRecovery] Failed to revert after revertToGenerationContent error: %s',
+          sanitizeForLog(getErrorMessage(revertErr, 'unknown')),
+        );
+      }
+      console.error(
+        '[StackUpdateRecovery] revertToGenerationContent failed for %s: %s',
+        sanitizeForLog(generationId),
+        sanitizeForLog(getErrorMessage(error, 'unknown')),
+      );
+      return false;
+    }
+  }
+
   public async probeRecoveredStack(
     nodeId: number,
     stackName: string,
@@ -594,14 +1130,16 @@ export class StackUpdateRecoveryService {
   ): Promise<boolean> {
     await new Promise((resolve) => setTimeout(resolve, RECOVERY_PROBE_DELAY_MS));
     try {
-      const expected = parseServicesJson(servicesJson);
+      const expectedParsed = parseServicesJsonStrict(servicesJson);
+      if (!expectedParsed.ok) return false;
+      const expected = expectedParsed.services;
       const expectedRunning = new Map<string, number>();
       const expectedImageIds = new Map<string, Set<string>>();
       const scaleZeroServices = new Set<string>();
 
       for (const svc of expected) {
         const imageIds = new Set<string>();
-        for (const replica of svc.replicas ?? []) {
+        for (const replica of svc.replicas) {
           if (replica.imageId?.trim()) imageIds.add(replica.imageId);
         }
         if (svc.scale > 0) {
@@ -627,6 +1165,7 @@ export class StackUpdateRecoveryService {
       const runningByService = new Map<string, number>();
       for (const containerInfo of containers) {
         const labels = (containerInfo.Labels ?? {}) as Record<string, string>;
+        if (isComposeOneOff(labels)) continue;
         const serviceName = labels['com.docker.compose.service'];
         const state = (containerInfo.State || '').toLowerCase();
 
@@ -673,9 +1212,13 @@ export class StackUpdateRecoveryService {
       }
 
       for (const [serviceName, need] of expectedRunning) {
-        if ((runningByService.get(serviceName) ?? 0) < need) {
+        if ((runningByService.get(serviceName) ?? 0) !== need) {
           return false;
         }
+      }
+      // Scale-zero services never enter runningByService (failed above if running).
+      for (const serviceName of runningByService.keys()) {
+        if (!expectedRunning.has(serviceName)) return false;
       }
       return true;
     } catch (error) {
@@ -695,8 +1238,17 @@ export class StackUpdateRecoveryService {
    */
   public async retireGenerationArtifacts(row: StackUpdateRecoveryGenerationRow): Promise<boolean> {
     if (row.artifacts_retired === 1) return true;
-    const services = parseServicesJson(row.services_json);
-    const tagsOk = await this.removeRollbackTags(row.node_id, collectRollbackTags(services));
+    const servicesParsed = parseServicesJsonStrict(row.services_json);
+    const tags = servicesParsed.ok
+      ? collectRollbackTags(servicesParsed.services)
+      : scrapeRollbackTagsLenient(row.services_json);
+    if (!servicesParsed.ok) {
+      console.warn(
+        '[StackUpdateRecovery] Malformed services_json for %s; using best-effort tag scrape before override/content retirement',
+        sanitizeForLog(row.id),
+      );
+    }
+    const tagsOk = await this.removeRollbackTags(row.node_id, tags);
     let overrideOk = true;
     if (row.override_path) {
       try {
@@ -712,7 +1264,25 @@ export class StackUpdateRecoveryService {
         }
       }
     }
-    if (!tagsOk || !overrideOk) return false;
+    let contentOk = true;
+    const contentKey = row.content_path;
+    if (contentKey) {
+      try {
+        await RollbackGenerationStore.retireGenerationContent(
+          row.node_id,
+          row.stack_name,
+          contentKey,
+        );
+      } catch (error) {
+        contentOk = false;
+        console.warn(
+          '[StackUpdateRecovery] Failed to retire generation content %s: %s',
+          sanitizeForLog(contentKey),
+          sanitizeForLog(getErrorMessage(error, 'unknown')),
+        );
+      }
+    }
+    if (!tagsOk || !overrideOk || !contentOk) return false;
     try {
       DatabaseService.getInstance().markStackUpdateRecoveryArtifactsRetired(row.id);
     } catch (error) {
@@ -739,6 +1309,15 @@ export class StackUpdateRecoveryService {
     try {
       const db = DatabaseService.getInstance();
       const now = Date.now();
+      // Revert any crash-interrupted content-store restores (intent still present).
+      try {
+        await this.sweepInterruptedRestores(db);
+      } catch (e) {
+        console.warn(
+          '[StackUpdateRecovery] Interrupted restore sweep failed: %s',
+          sanitizeForLog(getErrorMessage(e, 'unknown')),
+        );
+      }
       let abandoned = 0;
       for (const row of db.listStaleStackUpdateRecoveryCandidates(now)) {
         if (await this.abandon(row.id)) abandoned += 1;
@@ -779,10 +1358,30 @@ export class StackUpdateRecoveryService {
         if (row.is_current === 1 || row.status === 'recovery_required') continue;
         if (await this.retireGenerationArtifacts(row)) retired += 1;
       }
-      if (abandoned > 0 || flagged > 0 || capped > 0 || retired > 0) {
+
+      let orphansRetired = 0;
+      let incompleteFlagged = 0;
+      try {
+        ({ orphansRetired, incompleteFlagged } = await this.reconcileGenerationContentDirs(db));
+      } catch (contentError) {
+        console.warn(
+          '[StackUpdateRecovery] Generation content reconcile failed: %s',
+          sanitizeForLog(getErrorMessage(contentError, 'unknown')),
+        );
+      }
+
+      if (
+        abandoned > 0
+        || flagged > 0
+        || capped > 0
+        || retired > 0
+        || orphansRetired > 0
+        || incompleteFlagged > 0
+      ) {
         console.log(
           `[StackUpdateRecovery] Reconciled ${abandoned} stale candidate(s), `
-          + `${flagged} stuck generation(s), ${capped} generation(s) over cap, retired ${retired} artifact set(s)`,
+          + `${flagged} stuck generation(s), ${capped} generation(s) over cap, retired ${retired} artifact set(s), `
+          + `${orphansRetired} orphan dir(s), ${incompleteFlagged} incomplete generation(s)`,
         );
       }
     } catch (error) {
@@ -791,6 +1390,106 @@ export class StackUpdateRecoveryService {
         sanitizeForLog(getErrorMessage(error, 'unknown')),
       );
     }
+  }
+
+  /**
+   * Retire orphan generation content dirs with no live row, and flag active rows
+   * whose content dir is missing or incomplete as recovery_required.
+   */
+  private async reconcileGenerationContentDirs(
+    db: DatabaseService,
+  ): Promise<{ orphansRetired: number; incompleteFlagged: number }> {
+    let orphansRetired = 0;
+    let incompleteFlagged = 0;
+    const backupsRoot = getBackupBaseDir();
+    let nodeEntries: string[] = [];
+    try {
+      nodeEntries = await fs.readdir(backupsRoot);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { orphansRetired, incompleteFlagged };
+      }
+      throw error;
+    }
+
+    const incompleteStatuses = new Set(['active', 'restored_current', 'candidate']);
+
+    for (const nodeEntry of nodeEntries) {
+      const nodeId = Number(nodeEntry);
+      if (!Number.isFinite(nodeId)) continue;
+      const nodeDir = path.join(backupsRoot, nodeEntry);
+      let stackEntries: string[] = [];
+      try {
+        stackEntries = await fs.readdir(nodeDir);
+      } catch {
+        continue;
+      }
+      for (const stackName of stackEntries) {
+        if (!isValidStackName(stackName)) continue;
+        const gensRoot = path.join(nodeDir, stackName, 'generations');
+        let genIds: string[] = [];
+        try {
+          genIds = await fs.readdir(gensRoot);
+        } catch {
+          continue;
+        }
+        const rows = db.listStackUpdateRecoveryForStack(nodeId, stackName);
+        const liveKeys = new Set<string>();
+        for (const row of rows) {
+          if (row.artifacts_retired !== 0) continue;
+          if (row.content_path) liveKeys.add(row.content_path);
+          if (row.backup_slot_id) liveKeys.add(row.backup_slot_id);
+          liveKeys.add(row.id);
+        }
+        const nowMs = Date.now();
+        for (const genId of genIds) {
+          if (genId.startsWith('staging-')) {
+            const stagingDir = path.join(gensRoot, genId);
+            try {
+              const st = await fs.stat(stagingDir);
+              if (nowMs - st.mtimeMs > STAGING_MAX_AGE_MS) {
+                await fs.rm(stagingDir, { recursive: true, force: true });
+                orphansRetired += 1;
+              }
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+              console.warn(
+                '[StackUpdateRecovery] Failed to retire stale staging dir %s/%s: %s',
+                sanitizeForLog(stackName),
+                sanitizeForLog(genId),
+                sanitizeForLog(getErrorMessage(error, 'unknown')),
+              );
+            }
+            continue;
+          }
+          if (!looksLikeGenerationUuid(genId) || liveKeys.has(genId)) continue;
+          try {
+            await RollbackGenerationStore.retireGenerationContent(nodeId, stackName, genId);
+            orphansRetired += 1;
+          } catch (error) {
+            console.warn(
+              '[StackUpdateRecovery] Failed to retire orphan generation %s/%s: %s',
+              sanitizeForLog(stackName),
+              sanitizeForLog(genId),
+              sanitizeForLog(getErrorMessage(error, 'unknown')),
+            );
+          }
+        }
+        for (const row of rows) {
+          if (row.artifacts_retired !== 0) continue;
+          if (row.status === 'abandoned' || row.status === 'superseded') continue;
+          if (!incompleteStatuses.has(row.status) && row.is_current !== 1) continue;
+          const contentKey = row.content_path;
+          if (!contentKey || !looksLikeGenerationUuid(contentKey)) continue;
+          const present = await generationContentPresent(row.node_id, row.stack_name, contentKey);
+          if (!present && row.status !== 'recovery_required') {
+            db.updateStackUpdateRecoveryGeneration(row.id, { status: 'recovery_required' });
+            incompleteFlagged += 1;
+          }
+        }
+      }
+    }
+    return { orphansRetired, incompleteFlagged };
   }
 
   /** Returns true when every tag is removed or already absent. */

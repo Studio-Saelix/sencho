@@ -1,9 +1,9 @@
 /**
  * Integration tests for POST /api/stacks/:stackName/backup, the on-demand
- * stack-files backup trigger. Covers auth, role, the success path, the
+ * recovery-generation capture. Covers auth, role, the success path, the
  * missing-stack 404, name validation, and error propagation. The route exists
  * so a scheduled auto_backup can run on a remote node through the proxy path,
- * and so an operator can take a snapshot on demand. The backup is available on
+ * and so an operator can capture a current generation on demand. Available on
  * every tier (no paid gate).
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
@@ -11,9 +11,11 @@ import request from 'supertest';
 import bcrypt from 'bcrypt';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 
-const { mockBackupStackFiles, mockHasComposeFile } = vi.hoisted(() => ({
+const { mockBackupStackFiles, mockHasComposeFile, mockCaptureCurrentBackup, mockGetCurrent } = vi.hoisted(() => ({
   mockBackupStackFiles: vi.fn(),
   mockHasComposeFile: vi.fn(),
+  mockCaptureCurrentBackup: vi.fn(),
+  mockGetCurrent: vi.fn(),
 }));
 
 vi.mock('../services/FileSystemService', () => ({
@@ -23,6 +25,15 @@ vi.mock('../services/FileSystemService', () => ({
       hasComposeFile: mockHasComposeFile,
       backupStackFiles: mockBackupStackFiles,
       getStacks: vi.fn().mockResolvedValue([]),
+    }),
+  },
+}));
+
+vi.mock('../services/StackUpdateRecoveryService', () => ({
+  StackUpdateRecoveryService: {
+    getInstance: () => ({
+      getCurrent: mockGetCurrent,
+      captureCurrentBackup: mockCaptureCurrentBackup,
     }),
   },
 }));
@@ -59,6 +70,8 @@ afterAll(() => {
 beforeEach(() => {
   mockBackupStackFiles.mockReset().mockResolvedValue(undefined);
   mockHasComposeFile.mockReset().mockResolvedValue(true);
+  mockCaptureCurrentBackup.mockReset().mockResolvedValue({ id: 'gen-1' });
+  mockGetCurrent.mockReset().mockReturnValue(null);
   tierSpy.mockReturnValue('paid');
 });
 
@@ -67,18 +80,25 @@ describe('POST /api/stacks/:stackName/backup', () => {
     const res = await request(app).post('/api/stacks/web/backup').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(mockBackupStackFiles).toHaveBeenCalledWith('web');
+    expect(mockCaptureCurrentBackup).toHaveBeenCalledWith(expect.objectContaining({
+      nodeId: expect.any(Number),
+      stackName: 'web',
+      createdBy: expect.any(String),
+    }));
+    expect(mockBackupStackFiles).not.toHaveBeenCalled();
   });
 
   it('returns 401 without an auth cookie', async () => {
     const res = await request(app).post('/api/stacks/web/backup');
     expect(res.status).toBe(401);
+    expect(mockCaptureCurrentBackup).not.toHaveBeenCalled();
     expect(mockBackupStackFiles).not.toHaveBeenCalled();
   });
 
   it('returns 403 for a viewer (no deploy permission)', async () => {
     const res = await request(app).post('/api/stacks/web/backup').set('Cookie', viewerCookie);
     expect(res.status).toBe(403);
+    expect(mockCaptureCurrentBackup).not.toHaveBeenCalled();
     expect(mockBackupStackFiles).not.toHaveBeenCalled();
   });
 
@@ -87,32 +107,39 @@ describe('POST /api/stacks/:stackName/backup', () => {
     const res = await request(app).post('/api/stacks/web/backup').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(mockBackupStackFiles).toHaveBeenCalledWith('web');
+    expect(mockCaptureCurrentBackup).toHaveBeenCalledWith(expect.objectContaining({
+      nodeId: expect.any(Number),
+      stackName: 'web',
+      createdBy: expect.any(String),
+    }));
+    expect(mockBackupStackFiles).not.toHaveBeenCalled();
   });
 
   it('returns 404 when the stack does not exist', async () => {
     mockHasComposeFile.mockResolvedValue(false);
     const res = await request(app).post('/api/stacks/ghost/backup').set('Cookie', adminCookie);
     expect(res.status).toBe(404);
+    expect(mockCaptureCurrentBackup).not.toHaveBeenCalled();
     expect(mockBackupStackFiles).not.toHaveBeenCalled();
   });
 
   it('returns 400 for an invalid stack name', async () => {
     const res = await request(app).post('/api/stacks/..bad../backup').set('Cookie', adminCookie);
     expect(res.status).toBe(400);
+    expect(mockCaptureCurrentBackup).not.toHaveBeenCalled();
     expect(mockBackupStackFiles).not.toHaveBeenCalled();
   });
 
   it('returns 500 when the backup operation fails', async () => {
-    mockBackupStackFiles.mockRejectedValue(new Error('disk full'));
+    mockCaptureCurrentBackup.mockRejectedValue(new Error('disk full'));
     const res = await request(app).post('/api/stacks/web/backup').set('Cookie', adminCookie);
     expect(res.status).toBe(500);
     expect(res.body.error).toContain('disk full');
   });
 
   it('returns 409 when the stack is busy with another operation', async () => {
-    // The backup shares the rollback slot, so it must not run while a deploy
-    // holds the stack-op lock for the same stack.
+    // Handoff mutates the current generation, so backup must not run while a
+    // deploy holds the stack-op lock for the same stack.
     const { StackOpLockService } = await import('../services/StackOpLockService');
     const localNodeId = DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!.id;
     StackOpLockService.getInstance().tryAcquire(localNodeId, 'web', 'deploy', 'someone');
@@ -120,6 +147,7 @@ describe('POST /api/stacks/:stackName/backup', () => {
       const res = await request(app).post('/api/stacks/web/backup').set('Cookie', adminCookie);
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('stack_op_in_progress');
+      expect(mockCaptureCurrentBackup).not.toHaveBeenCalled();
       expect(mockBackupStackFiles).not.toHaveBeenCalled();
     } finally {
       StackOpLockService.getInstance().release(localNodeId, 'web');

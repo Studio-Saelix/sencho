@@ -187,7 +187,10 @@ app.use(errorHandler);
 installShutdownHandlers(server);
 
 if (require.main === module) {
-  void startServer(server);
+  void startServer(server).catch((err) => {
+    console.error('[Startup] Fatal startup failure:', (err as Error).message);
+    process.exit(1);
+  });
 }
 
 // Exports used by tests (supertest requires the http.Server instance).

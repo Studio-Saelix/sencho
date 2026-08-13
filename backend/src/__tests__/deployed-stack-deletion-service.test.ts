@@ -50,6 +50,8 @@ describe('DeployedStackDeletionService ready transaction', () => {
       phase: 'immediate_verified',
       is_current: 1,
       backup_slot_id: null,
+      content_path: null,
+      operation_kind: null,
       override_path: null,
       services_json: '[]',
       health_gate_id: null,

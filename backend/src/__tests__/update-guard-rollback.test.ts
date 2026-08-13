@@ -36,6 +36,9 @@ const baseInputs = (over: Partial<RollbackInputs> = {}): RollbackInputs => ({
     name: 'app-web-1', state: 'running', health: 'healthy', exitCode: null,
     hasHealthcheck: true, restartPolicy: 'unless-stopped', mounts: ['volume app_data'],
   }],
+  recoveryGeneration: { exists: false },
+  policyEligibility: null,
+  managedInputs: { covered: true, detail: 'Exact authored-project coverage includes 1 managed path(s).' },
   ...over,
 });
 
@@ -43,19 +46,20 @@ const itemById = (inputs: RollbackInputs, id: string) =>
   buildRollbackItems(inputs, NOW).find(i => i.id === id)!;
 
 describe('buildRollbackItems', () => {
-  it('reports a full set of six items', () => {
+  it('reports the full set of rollback readiness items', () => {
     const items = buildRollbackItems(baseInputs(), NOW);
     expect(items.map(i => i.id)).toEqual([
-      'compose_source', 'env_keys', 'previous_images', 'last_deploy', 'healthchecks', 'volume_data',
+      'recovery_generation', 'compose_source', 'env_keys', 'previous_images', 'last_deploy', 'healthchecks',
+      'policy_eligibility', 'managed_inputs', 'volume_data',
     ]);
   });
 
   it('marks the volume row not_covered unconditionally and names the mounts', () => {
     const item = itemById(baseInputs(), 'volume_data');
     expect(item.state).toBe('not_covered');
-    expect(item.detail).toContain('not included in file backups');
+    expect(item.detail).toContain('not included in recovery generations');
     expect(item.detail).toContain('volume app_data');
-
+    expect(item.detail).toMatch(/managed authored project/i);
     const noMounts = itemById(baseInputs({ containers: [] }), 'volume_data');
     expect(noMounts.state).toBe('not_covered');
 
@@ -122,6 +126,28 @@ describe('buildRollbackItems', () => {
   });
 });
 
+
+  it('marks policy eligibility blocked and warning states', () => {
+    expect(itemById(baseInputs({
+      recoveryGeneration: { exists: true, shortId: 'abc' },
+      policyEligibility: 'prohibited',
+    }), 'policy_eligibility').state).toBe('blocked');
+    expect(itemById(baseInputs({
+      recoveryGeneration: { exists: true, shortId: 'abc' },
+      policyEligibility: 'eligible_with_warning',
+    }), 'policy_eligibility').state).toBe('warning');
+  });
+
+  it('lets recovery_generation supersede the legacy backup slot for compose_source', () => {
+    const items = buildRollbackItems(baseInputs({
+      backup: { exists: false, timestamp: null },
+      recoveryGeneration: { exists: true, shortId: 'deadbeefcaf0' },
+      policyEligibility: 'eligible',
+    }), NOW);
+    expect(items.find(i => i.id === 'compose_source')!.state).toBe('ready');
+    expect(items.find(i => i.id === 'recovery_generation')!.state).toBe('ready');
+  });
+
 describe('aggregateRollbackOverall', () => {
   it('is ready when compose, env, and previous image are all covered', () => {
     expect(aggregateRollbackOverall(buildRollbackItems(baseInputs(), NOW))).toBe('ready');
@@ -157,6 +183,27 @@ describe('aggregateRollbackOverall', () => {
     const items = buildRollbackItems(baseInputs({ containers: 'error' }), NOW);
     expect(aggregateRollbackOverall(items)).toBe('ready');
   });
+  it('is not_ready when policy eligibility is blocked', () => {
+    const items = buildRollbackItems(baseInputs({
+      recoveryGeneration: { exists: true, shortId: 'abc' },
+      policyEligibility: 'prohibited',
+    }), NOW);
+    expect(aggregateRollbackOverall(items)).toBe('not_ready');
+  });
+
+  it('is at best partial when policy eligibility is warning or unknown', () => {
+    const warn = buildRollbackItems(baseInputs({
+      recoveryGeneration: { exists: true, shortId: 'abc' },
+      policyEligibility: 'eligible_with_warning',
+    }), NOW);
+    expect(aggregateRollbackOverall(warn)).toBe('partial');
+    const unk = buildRollbackItems(baseInputs({
+      recoveryGeneration: { exists: true, shortId: 'abc' },
+      policyEligibility: 'unknown',
+    }), NOW);
+    expect(aggregateRollbackOverall(unk)).toBe('partial');
+  });
+
 });
 
 describe('FileSystemService.getBackupEnvSummary', () => {

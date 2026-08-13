@@ -49,7 +49,7 @@ beforeAll(async () => {
 
   const { ComposeService } = await import('../services/ComposeService');
   listImagesSpy = vi.spyOn(ComposeService.prototype, 'listStackImages').mockResolvedValue(['nginx:bad']);
-  deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue(undefined);
+  deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
 
   const TrivyService = (await import('../services/TrivyService')).default;
   const trivy = TrivyService.getInstance();

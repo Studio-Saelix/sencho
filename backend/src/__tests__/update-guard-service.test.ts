@@ -74,6 +74,8 @@ vi.mock('../services/DatabaseService', () => ({
       // Rollback-readiness partial-revert disclosure reads the git source row;
       // no git-managed stacks in these fixtures by default.
       getGitSource: mockGetGitSource,
+      // Generation supersede path; no current recovery generation in these fixtures.
+      getCurrentStackUpdateRecovery: () => undefined,
     }),
   },
 }));

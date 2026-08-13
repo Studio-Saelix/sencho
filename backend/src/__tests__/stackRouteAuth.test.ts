@@ -39,6 +39,9 @@ describe('classifyStackApiPath', () => {
       expect(classifyStackApiPath('DELETE', '/stacks/web/git-source')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:edit',
       });
+      expect(classifyStackApiPath('POST', '/stacks/web/fleet-snapshot-apply')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:edit',
+      });
     });
 
     it('maps deploy routes and service lifecycle ops to stack:deploy', () => {

@@ -75,7 +75,7 @@ describe('Blueprint compose apply (real filesystem)', () => {
         const composeContent = 'services:\n  web:\n    image: traefik:v3\n';
         const markerContent = JSON.stringify({ blueprintId: 1, revision: 1, lastApplied: Date.now() }, null, 2);
 
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue(undefined);
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
 
         const outcome = await BlueprintService.getInstance().applyLocalUnderLock(
             nodeId,
@@ -120,6 +120,7 @@ describe('Blueprint compose apply (real filesystem)', () => {
                 path.join(stackDir, 'docker-compose.yaml'),
                 path.join(stackDir, 'docker-compose.yml'),
             );
+            return { recoveryId: null };
         });
 
         const outcome = await BlueprintService.getInstance().applyLocalUnderLock(
@@ -197,7 +198,7 @@ describe('Blueprint compose apply (real filesystem)', () => {
         const original = 'services:\n  mine:\n    image: nginx:alpine\n';
         await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), original);
 
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue(undefined);
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
 
         await expect(
             BlueprintService.getInstance().applyLocalUnderLock(
