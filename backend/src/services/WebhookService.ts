@@ -151,7 +151,7 @@ export class WebhookService {
                 nodeId, stackName, lockAction, 'system',
                 async () => {
                     switch (action) {
-                        case 'deploy':
+                        case 'deploy': {
                             await assertPolicyGateAllows(
                                 stackName,
                                 nodeId,
@@ -169,6 +169,7 @@ export class WebhookService {
                                 StackUpdateRecoveryService.getInstance().linkGateOrRetain(deployResult.recoveryId, healthGateId);
                             }
                             break;
+                        }
                         case 'restart':
                             await compose.runCommand(stackName, 'restart');
                             break;
