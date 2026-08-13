@@ -117,6 +117,8 @@ export type FailureReason =
   | 'healthcheck_failed'
   | 'dependency_unavailable'
   | 'node_unreachable'
+  | 'mixed_replica_images'
+  | 'rollback_coverage_unavailable'
   | 'unknown';
 
 /**

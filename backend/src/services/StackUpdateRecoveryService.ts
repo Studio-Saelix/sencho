@@ -69,6 +69,13 @@ function isComposeOneOff(labels: Record<string, string> | undefined): boolean {
   return typeof value === 'string' && value.toLowerCase() === 'true';
 }
 
+function isHeldRecoveryImageMissing(error: unknown): boolean {
+  const message = getErrorMessage(error, '');
+  if (/no such image/i.test(message)) return true;
+  return /sencho-rb\//i.test(message)
+    && /manifest unknown|repository does not exist|failed to resolve reference|pull access denied/i.test(message);
+}
+
 function formatImagePlatform(inspect: {
   Os?: string;
   Architecture?: string;
@@ -747,8 +754,10 @@ export class StackUpdateRecoveryService {
 
   /**
    * Informational mirror of releaseStackUpdateRecoveryGeneration's WHERE
-   * clause, for the list endpoint to grey out a row it already knows is
-   * ineligible. Not authoritative: releaseGeneration revalidates for real.
+   * clause, plus a strict services_json parse. Malformed recovery image
+   * state is refused here (and in releaseGeneration as malformed_services)
+   * before the DB update; the SQL WHERE clause does not encode that check.
+   * Not authoritative: releaseGeneration revalidates for real.
    */
   public isReleaseEligible(row: StackUpdateRecoveryGenerationRow): boolean {
     if (row.released_at !== null || row.artifacts_retired !== 0) return false;
@@ -758,6 +767,7 @@ export class StackUpdateRecoveryService {
       const gate = DatabaseService.getInstance().getHealthGateRun(row.node_id, row.stack_name, row.health_gate_id);
       if (gate?.status === 'observing') return false;
     }
+    if (!parseServicesJsonStrict(row.services_json).ok) return false;
     return true;
   }
 
@@ -777,11 +787,14 @@ export class StackUpdateRecoveryService {
     releasedBy: string | null,
   ): Promise<
     | { ok: true; row: StackUpdateRecoveryGenerationRow; artifactsCleaned: boolean }
-    | { ok: false; reason: 'not_found' | 'already_released' | 'not_eligible' }
+    | { ok: false; reason: 'not_found' | 'already_released' | 'not_eligible' | 'malformed_services' }
   > {
     const before = this.get(id);
     if (!before) return { ok: false, reason: 'not_found' };
     if (before.released_at !== null) return { ok: false, reason: 'already_released' };
+    if (!parseServicesJsonStrict(before.services_json).ok) {
+      return { ok: false, reason: 'malformed_services' };
+    }
 
     const released = DatabaseService.getInstance().releaseStackUpdateRecoveryGeneration(id, releasedBy);
     if (!released) return { ok: false, reason: 'not_eligible' };
@@ -1038,8 +1051,18 @@ export class StackUpdateRecoveryService {
       db.updateStackUpdateRecoveryGeneration(generationId, {
         status: 'recovery_required',
       });
-      if (code === 'GENERATION_CONTENT_MISSING') {
+      if (
+        code === 'GENERATION_CONTENT_MISSING'
+        || code === 'HELD_IMAGE_MISSING'
+        || code === 'RECOVERY_PROBE_FAILED'
+      ) {
         throw error;
+      }
+      if (isHeldRecoveryImageMissing(error)) {
+        throw Object.assign(
+          new Error('Held recovery image is missing'),
+          { code: 'HELD_IMAGE_MISSING' },
+        );
       }
       return false;
     }

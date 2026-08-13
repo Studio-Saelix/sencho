@@ -1206,6 +1206,23 @@ describe('useStackActions recovery records', () => {
     await act(async () => { await result.current.rollbackStack(); });
     expect(stackListState.recordActionSuccess).toHaveBeenCalledWith('web.yml');
     expect(stackListState.recordActionFailure).not.toHaveBeenCalled();
+    expect(toast.success).toHaveBeenCalledWith('Stack rolled back from recovery generation.');
+  });
+
+  it('toasts the backend generation rollback message', async () => {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('/rollback')) {
+        return Promise.resolve(new Response(
+          JSON.stringify({ message: 'Restored generation gen-1.', recoveryId: 'gen-1' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ));
+      }
+      return Promise.resolve(new Response('[]', { status: 200 }));
+    });
+    const { result } = setup();
+    await act(async () => { await result.current.rollbackStack(); });
+    expect(toast.success).toHaveBeenCalledWith('Restored generation gen-1.');
   });
 });
 

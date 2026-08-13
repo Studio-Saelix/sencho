@@ -105,7 +105,7 @@ Before an atomic deploy, a full-stack update, or a Git apply that will promote (
 
 Each capture is one **rollback generation**. The generation currently backing a stack's live deployment is retained for as long as it is current; once a newer protected run supersedes it, it is retained for a configurable window before Sencho cleans it up automatically. A stack updated repeatedly in a short span can have more than one superseded generation in that window at once.
 
-The health gate remains observational: it records a verdict and surfaces recovery actions, but it never rolls anything back on its own. Automatic restore after handoff belongs to the atomic deploy/update path when a crash is detected; manual **Rollback** prefers the current recovery generation.
+The health gate remains observational: it records a verdict and surfaces recovery actions, but it never rolls anything back on its own. Automatic restore after handoff belongs to the atomic deploy/update path when a crash is detected; manual **Rollback** prefers the current recovery generation. On-demand and scheduled stack backup will not replace that generation while a health gate is still observing after a deploy or update.
 
 **Resources → Rollback** lists every generation on the node: the stack it belongs to, a short generation id, whether it is the current protection or a superseded one awaiting cleanup, and roughly when it clears. Search by stack name or generation id, filter to Current or Superseded, and click a column header to sort. An admin can release a generation's protection early from that list, including the current one, which immediately frees its image but means Sencho cannot automatically roll that stack back until its next successful atomic deploy, full-stack update, Git apply, or stack backup capture; the confirmation dialog says so before you proceed. A generation that is mid-recovery or still being observed by a health gate cannot be released until that finishes.
 
@@ -122,7 +122,7 @@ Two settings under **Settings > Infrastructure > Stacks > Deploy Guardrails** co
 
 ## Classified failures
 
-When a deploy or update fails, Sencho classifies the failure from the compose output and shows the cause with a suggested next step in the recovery panel: an image pull failure, a missing environment variable, a host port conflict, a missing bind-mount path, a permission problem, a crashed container, a failed healthcheck, an unavailable dependency, an unreachable node or Docker daemon, or an invalid compose file. The classification also lands in **Copy details**, so a bug report carries the cause, not just the raw output.
+When a deploy or update fails, Sencho classifies the failure from the compose output and shows the cause with a suggested next step in the recovery panel: an image pull failure, a missing environment variable, a host port conflict, a missing bind-mount path, a permission problem, a crashed container, a failed healthcheck, an unavailable dependency, an unreachable node or Docker daemon, an invalid compose file, mixed replica images that cannot be captured exactly, or a project whose include/extends paths cannot be captured for exact rollback. The classification also lands in **Copy details**, so a bug report carries the cause, not just the raw output.
 
 ## Troubleshooting
 

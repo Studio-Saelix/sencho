@@ -91,6 +91,18 @@ const RULES: ClassifierRule[] = [
     suggestion: 'Review the compose file syntax (Compose Doctor can pinpoint the issue), then retry.',
     pattern: /yaml:|mapping values are not allowed|cannot unmarshal|additional propert|undefined volume|undefined network|invalid compose/i,
   },
+  {
+    reason: 'mixed_replica_images',
+    label: 'Mixed replica images',
+    suggestion: 'Bring every replica of the service onto the same image, then retry.',
+    pattern: /mixed replica images/i,
+  },
+  {
+    reason: 'rollback_coverage_unavailable',
+    label: 'Exact rollback coverage unavailable',
+    suggestion: 'Remove host-absolute include or extends paths, or capture from a project Sencho can enumerate completely, then retry.',
+    pattern: /cannot be captured for exact rollback|rollback coverage is unavailable/i,
+  },
 ];
 
 const UNKNOWN_FAILURE: FailureClassification = {

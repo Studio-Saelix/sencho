@@ -13,6 +13,7 @@ import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { ComposeRollbackError } from '../services/ComposeService';
 import * as policyGate from '../helpers/policyGate';
+import type { StackUpdateRecoveryGenerationRow } from '../services/DatabaseService';
 
 // ── Hoisted mocks (must come before importing the app) ──────────────────────
 
@@ -141,10 +142,10 @@ afterAll(() => {
 });
 
 beforeEach(() => {
-  mockDeployStack.mockReset();
+  mockDeployStack.mockReset().mockResolvedValue({ recoveryId: null });
   mockRunCommand.mockReset();
   mockRunDown.mockReset();
-  mockUpdateStack.mockReset();
+  mockUpdateStack.mockReset().mockResolvedValue({ recoveryId: null });
   mockGetContainersByStack.mockReset();
   mockRestartContainer.mockReset();
   mockStopContainer.mockReset();
@@ -233,7 +234,7 @@ describe('deploy_failure notification on /deploy error', () => {
   });
 
   it('uses trusted proxy tier headers for remote atomic deploys', async () => {
-    mockDeployStack.mockResolvedValue(undefined);
+    mockDeployStack.mockResolvedValue({ recoveryId: null });
     const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
 
     const res = await request(app)
@@ -259,7 +260,7 @@ describe('health gate begin call sites', () => {
   });
 
   it('begins a gate after a manual deploy and returns its id', async () => {
-    mockDeployStack.mockResolvedValue(undefined);
+    mockDeployStack.mockResolvedValue({ recoveryId: null });
     const res = await request(app)
       .post('/api/stacks/myapp/deploy')
       .set('Cookie', authCookie)
@@ -267,6 +268,19 @@ describe('health gate begin call sites', () => {
     expect(res.status).toBe(200);
     expect(beginSpy).toHaveBeenCalledWith(expect.any(Number), 'myapp', 'deploy', 'testadmin');
     expect(res.body.healthGateId).toBe('gate-123');
+  });
+
+  it('links the deploy recovery generation to the observing gate', async () => {
+    mockDeployStack.mockResolvedValue({ recoveryId: 'rec-deploy' });
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const linkSpy = vi.spyOn(StackUpdateRecoveryService.getInstance(), 'linkGateOrRetain');
+    const res = await request(app)
+      .post('/api/stacks/myapp/deploy')
+      .set('Cookie', authCookie)
+      .send({ skip_scan: true });
+    expect(res.status).toBe(200);
+    expect(linkSpy).toHaveBeenCalledWith('rec-deploy', 'gate-123');
+    linkSpy.mockRestore();
   });
 
   it('begins a gate after a manual update and returns its id', async () => {
@@ -304,7 +318,7 @@ describe('health gate begin call sites', () => {
   });
 
   it('never begins a gate for the rollback recovery path', async () => {
-    mockDeployStack.mockResolvedValue(undefined);
+    mockDeployStack.mockResolvedValue({ recoveryId: null });
     const res = await request(app)
       .post('/api/stacks/myapp/rollback')
       .set('Cookie', authCookie);
@@ -370,13 +384,39 @@ describe('failure classification on deploy/update error responses', () => {
       .set('Cookie', authCookie);
 
     expect(res.status).toBe(500);
-    expect(res.body.failure.reason).toBe('unknown');
+    expect(res.body.failure).toMatchObject({ reason: 'unknown' });
+  });
+
+  it('classifies mixed replica image capture refusals', async () => {
+    mockDeployStack.mockRejectedValue(
+      new Error('Service "web" has mixed replica images; refusing recovery capture that cannot restore exact prior identity'),
+    );
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/deploy')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body.failure).toMatchObject({ reason: 'mixed_replica_images' });
+  });
+
+  it('classifies rollback coverage refusals', async () => {
+    mockDeployStack.mockRejectedValue(
+      new Error('Host-absolute include path cannot be captured for exact rollback'),
+    );
+
+    const res = await request(app)
+      .post('/api/stacks/myapp/deploy')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(500);
+    expect(res.body.failure).toMatchObject({ reason: 'rollback_coverage_unavailable' });
   });
 });
 
 describe('post-deploy scan opt-out', () => {
   it('does not trigger a post-deploy scan when skip_scan is true', async () => {
-    mockDeployStack.mockResolvedValue(undefined);
+    mockDeployStack.mockResolvedValue({ recoveryId: null });
 
     const res = await request(app)
       .post('/api/stacks/myapp/deploy')
@@ -500,6 +540,76 @@ describe('deploy_failure notification on /update error', () => {
 
     expect(res.status).toBe(200);
     expect(mockUpdateStack.mock.calls[0][2]).toBe(true);
+  });
+});
+
+describe('generation rollback error mapping', () => {
+  function stubCurrentGeneration(id: string): StackUpdateRecoveryGenerationRow {
+    return {
+      id,
+      node_id: 1,
+      stack_name: 'myapp',
+      status: 'active',
+      phase: 'immediate_verified',
+      is_current: 1,
+      backup_slot_id: id,
+      content_path: null,
+      operation_kind: null,
+      override_path: '/tmp/override.yml',
+      services_json: '[]',
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: 0,
+      updated_at: 0,
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    };
+  }
+
+  async function withGenerationRollback(compensate: () => Promise<boolean>) {
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const svc = StackUpdateRecoveryService.getInstance();
+    const getSpy = vi.spyOn(svc, 'getCurrent').mockReturnValue(stubCurrentGeneration('gen-1'));
+    const compensateSpy = vi.spyOn(svc, 'compensateWithCandidate').mockImplementation(compensate);
+    try {
+      return await request(app).post('/api/stacks/myapp/rollback').set('Cookie', authCookie);
+    } finally {
+      getSpy.mockRestore();
+      compensateSpy.mockRestore();
+    }
+  }
+
+  it('returns HELD_IMAGE_MISSING when the hold tag is gone', async () => {
+    const res = await withGenerationRollback(async () => {
+      throw Object.assign(new Error('Held recovery image is missing'), { code: 'HELD_IMAGE_MISSING' });
+    });
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({
+      code: 'HELD_IMAGE_MISSING',
+      error: 'Held recovery image is missing',
+    });
+  });
+
+  it('returns RECOVERY_PROBE_FAILED when restore completed but the probe failed', async () => {
+    const res = await withGenerationRollback(async () => {
+      throw Object.assign(new Error('Recovery health probe failed'), { code: 'RECOVERY_PROBE_FAILED' });
+    });
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({
+      code: 'RECOVERY_PROBE_FAILED',
+      error: 'Rollback restore completed but recovery probe failed.',
+    });
+  });
+
+  it('returns a generic restore failure when compensation returns false', async () => {
+    const res = await withGenerationRollback(async () => false);
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ error: 'Rollback restore did not complete.' });
+    expect(res.body.code).toBeUndefined();
   });
 });
 

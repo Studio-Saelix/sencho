@@ -1661,7 +1661,9 @@ export function useStackActions(options: UseStackActionsOptions) {
         throw parseStackActionError(rawBody, 'Rollback failed', res.status);
       }
       overlayState.setPolicyBlock(null);
-      toast.success('Stack rolled back: compose and env files restored.');
+      const body: unknown = await res.json().catch(() => null);
+      const message = isRecord(body) && typeof body.message === 'string' ? body.message.trim() : '';
+      toast.success(message || 'Stack rolled back from recovery generation.');
       stackListState.recordActionSuccess(stackFile);
       // The rollback already succeeded; a failure of the cosmetic refetches below
       // (containers redeployed by the rollback, restored compose content, backup

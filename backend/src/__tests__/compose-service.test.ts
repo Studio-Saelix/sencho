@@ -735,7 +735,7 @@ describe('ComposeService - deployStack', () => {
     const promise = ComposeService.getInstance(1).deployStack('my-stack');
     await vi.advanceTimersByTimeAsync(3100);
 
-    await expect(promise).resolves.toBeUndefined();
+    await expect(promise).resolves.toEqual({ recoveryId: null });
     expect(mockGetLegacyOrphanContainersByStack).toHaveBeenCalledWith('my-stack');
   });
 
@@ -837,8 +837,9 @@ describe('ComposeService - deployStack', () => {
     const promise = svc.deployStack('my-stack', undefined, true);
 
     await vi.advanceTimersByTimeAsync(3100);
-    await promise;
+    const result = await promise;
 
+    expect(result).toEqual({ recoveryId: 'recovery-1' });
     expect(mockCaptureCandidate).toHaveBeenCalledWith(expect.objectContaining({
       stackName: 'my-stack',
       operationKind: 'deployment',
@@ -1013,6 +1014,28 @@ describe('ComposeService - deployStack', () => {
     await vi.runAllTimersAsync();
     const error = await result;
     expect(error).not.toBeNull();
+    expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
+  });
+
+  it('wraps a missing hold tag as rolledBack=false without replacing the original error', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([{
+      Id: 'crashed-c1',
+      State: 'exited',
+      Labels: { 'com.docker.compose.project': 'my-stack' },
+    }]);
+    mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
+    mockCompensateWithCandidate.mockRejectedValueOnce(
+      Object.assign(new Error('Held recovery image is missing'), { code: 'HELD_IMAGE_MISSING' }),
+    );
+
+    const svc = ComposeService.getInstance(1);
+    const result = svc.deployStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
+
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error).not.toBeNull();
+    expect(error!.message).toContain('CONTAINER_CRASHED');
     expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
   });
 

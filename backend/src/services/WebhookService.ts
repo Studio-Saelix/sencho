@@ -157,13 +157,17 @@ export class WebhookService {
                                 nodeId,
                                 buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
                             );
-                            await compose.deployStack(
+                            const deployResult = await compose.deployStack(
                                 stackName,
                                 undefined,
                                 atomic,
                                 { source: 'webhook', actor: 'system:webhook' },
                             );
-                            HealthGateService.getInstance().beginStack(nodeId, stackName, 'deploy', 'system:webhook');
+                            const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'deploy', 'system:webhook');
+                            if (deployResult.recoveryId) {
+                                const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+                                StackUpdateRecoveryService.getInstance().linkGateOrRetain(deployResult.recoveryId, healthGateId);
+                            }
                             break;
                         case 'restart':
                             await compose.runCommand(stackName, 'restart');

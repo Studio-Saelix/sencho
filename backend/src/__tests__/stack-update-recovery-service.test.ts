@@ -272,20 +272,67 @@ describe('StackUpdateRecoveryService', () => {
     mockInspectContainer.mockResolvedValue({ State: { ExitCode: 0 } });
 
     vi.useFakeTimers();
-    const promise = StackUpdateRecoveryService.getInstance().compensateWithCandidate(
+    const result = StackUpdateRecoveryService.getInstance().compensateWithCandidate(
       'gen-2',
       async () => undefined,
-    );
+    ).then(() => null, (error: unknown) => error);
     await vi.advanceTimersByTimeAsync(3100);
-    const ok = await promise;
+    const error = await result;
     vi.useRealTimers();
 
-    expect(ok).toBe(false);
+    expect(error).toMatchObject({ code: 'RECOVERY_PROBE_FAILED' });
     expect(update).toHaveBeenCalledWith('gen-2', expect.objectContaining({ status: 'recovery_required' }));
     expect(update).not.toHaveBeenCalledWith(
       'gen-2',
       expect.objectContaining({ status: 'restored_current' }),
     );
+  });
+
+  it('throws HELD_IMAGE_MISSING when compensation compose-up cannot find the hold tag', async () => {
+    const servicesJson = JSON.stringify([{
+      serviceName: 'web',
+      scale: 1,
+      hasBuild: false,
+      declaredImageRef: 'nginx:latest',
+      referenceKind: 'moving_tag',
+      replicas: [{ containerId: 'c1', imageId: 'sha256:abc', repoDigest: null, state: 'running', rollbackTag: 'sencho-rb/x/web:hold' }],
+    }]);
+    const row = {
+      id: 'gen-missing-hold',
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'active' as const,
+      phase: 'reconciling' as const,
+      is_current: 1,
+      backup_slot_id: 'b1',
+      content_path: null,
+      operation_kind: null,
+      override_path: '/test/compose/my-stack/.sencho-recovery-bbbbbbbbbbbb.yml',
+      services_json: servicesJson,
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    };
+    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue(row);
+    const update = vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
+      .mockImplementation(() => undefined);
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().compensateWithCandidate(
+        'gen-missing-hold',
+        async () => {
+          throw new Error('Error response from daemon: No such image: sencho-rb/x/web:hold');
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'HELD_IMAGE_MISSING', message: 'Held recovery image is missing' });
+    expect(update).toHaveBeenCalledWith('gen-missing-hold', expect.objectContaining({ status: 'recovery_required' }));
   });
 
   it('fails closed when content_path is set but generation dir is missing', async () => {
@@ -1074,12 +1121,13 @@ describe('StackUpdateRecoveryService', () => {
     vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockClear();
 
     vi.useFakeTimers();
-    const promise = StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined);
+    const result = StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined)
+      .then(() => null, (error: unknown) => error);
     await vi.advanceTimersByTimeAsync(3100);
-    const ok = await promise;
+    const error = await result;
     vi.useRealTimers();
 
-    expect(ok).toBe(false);
+    expect(error).toMatchObject({ code: 'RECOVERY_PROBE_FAILED' });
     expect(restoreSpy).toHaveBeenCalled();
     expect(setSpec).not.toHaveBeenCalled();
     expect(RollbackGenerationStore.commitRestoreTransaction).not.toHaveBeenCalled();

@@ -1821,7 +1821,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     const debug = isDebugEnabled();
     const atomic = true;
     if (debug) console.debug('[Stacks:debug] Deploy starting', { stackName, atomic, nodeId: req.nodeId });
-    await ComposeService.getInstance(req.nodeId).deployStack(
+    const deployResult = await ComposeService.getInstance(req.nodeId).deployStack(
       stackName,
       getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
       atomic,
@@ -1832,6 +1832,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     if (debug) console.debug(`[Stacks:debug] Deploy finished in ${Date.now() - t0}ms`);
     ok = true;
     const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'deploy', req.user?.username ?? null);
+    linkStackUpdateRecoveryGate(deployResult.recoveryId, healthGateId);
     res.json({ message: 'Deployed successfully', healthGateId });
     notifyActionSuccess('deploy_success', `${stackName} deployed`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {
@@ -2503,16 +2504,33 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
           buildPolicyGateOptions(req, { actor: req.user?.username ?? 'system' }),
         );
         if (!rolledBack) {
-          res.status(500).json({ error: 'Rollback restore completed but recovery probe failed.' });
-          notifyActionFailure('rollback', stackName, new Error('recovery probe failed'), req.user?.username ?? 'system');
+          res.status(500).json({ error: 'Rollback restore did not complete.' });
+          notifyActionFailure('rollback', stackName, new Error('rollback restore did not complete'), req.user?.username ?? 'system');
           return;
         }
       } catch (compError: unknown) {
-        if ((compError as { code?: string }).code === 'ROLLBACK_PROHIBITED') {
+        const compCode = (compError as { code?: string }).code;
+        if (compCode === 'ROLLBACK_PROHIBITED') {
           res.status(409).json({
             error: (compError as Error).message || 'Rollback is prohibited for this generation',
             code: 'ROLLBACK_PROHIBITED',
           });
+          return;
+        }
+        if (compCode === 'HELD_IMAGE_MISSING') {
+          res.status(500).json({
+            error: (compError as Error).message || 'Held recovery image is missing.',
+            code: 'HELD_IMAGE_MISSING',
+          });
+          notifyActionFailure('rollback', stackName, compError, req.user?.username ?? 'system');
+          return;
+        }
+        if (compCode === 'RECOVERY_PROBE_FAILED') {
+          res.status(500).json({
+            error: 'Rollback restore completed but recovery probe failed.',
+            code: 'RECOVERY_PROBE_FAILED',
+          });
+          notifyActionFailure('rollback', stackName, new Error('recovery probe failed'), req.user?.username ?? 'system');
           return;
         }
         throw compError;

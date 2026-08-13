@@ -92,6 +92,20 @@ export function getComposeRollbackInfo(error: unknown): { attempted: boolean; ro
   return { attempted: error.rollbackAttempted, rolledBack: error.rolledBack };
 }
 
+function isNonFatalCompensationError(error: unknown): boolean {
+  const code = (error as { code?: string }).code;
+  return code === 'HELD_IMAGE_MISSING' || code === 'RECOVERY_PROBE_FAILED';
+}
+
+async function compensateOrSwallow(compensate: () => Promise<boolean>): Promise<boolean> {
+  try {
+    return await compensate();
+  } catch (compError) {
+    if (!isNonFatalCompensationError(compError)) throw compError;
+    return false;
+  }
+}
+
 const DEFAULT_COMPOSE_COMMAND_TIMEOUT_MS = 30 * 60 * 1000;
 
 /** Public so other services (e.g. recovery claim leases) can size their own timers off the same ceiling without depending on a private module-local. */
@@ -650,7 +664,7 @@ export class ComposeService {
     ws?: WebSocket,
     atomic?: boolean,
     ctx?: DeployInvocationContext,
-  ): Promise<void> {
+  ): Promise<{ recoveryId: string | null }> {
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     await this.ensureExternalNetworksForDeploy(stackName, ctx);
@@ -740,13 +754,16 @@ export class ComposeService {
     } catch (deployError) {
       if (atomic && recoverySvc && handedOff && recoveryId) {
         sendOutput('\n=== Deployment failed - restoring previous runtime from recovery generation ===\n');
-        const rolledBack = await recoverySvc.compensateWithCandidate(
-          recoveryId,
-          (overridePath, invocation) => this.composeUpWithRecoveryOverride(
-            stackName,
-            overridePath,
-            ws,
-            invocation,
+        const generationId = recoveryId;
+        const rolledBack = await compensateOrSwallow(() =>
+          recoverySvc.compensateWithCandidate(
+            generationId,
+            (overridePath, invocation) => this.composeUpWithRecoveryOverride(
+              stackName,
+              overridePath,
+              ws,
+              invocation,
+            ),
           ),
         );
         throw new ComposeRollbackError(deployError, true, rolledBack);
@@ -776,6 +793,7 @@ export class ComposeService {
       console.warn('[ComposeService] Exposure refresh failed after deploy for %s:',
         sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
     }
+    return { recoveryId };
   }
 
   streamLogs(stackName: string, ws: WebSocket) {
@@ -1246,13 +1264,16 @@ export class ComposeService {
       }
       if (handedOff && recoveryId) {
         sendOutput('\n=== Update failed - restoring previous runtime from recovery generation ===\n');
-        const rolledBack = await recoverySvc.compensateWithCandidate(
-          recoveryId,
-          (overridePath, invocation) => this.composeUpWithRecoveryOverride(
-            stackName,
-            overridePath,
-            ws,
-            invocation,
+        const generationId = recoveryId;
+        const rolledBack = await compensateOrSwallow(() =>
+          recoverySvc.compensateWithCandidate(
+            generationId,
+            (overridePath, invocation) => this.composeUpWithRecoveryOverride(
+              stackName,
+              overridePath,
+              ws,
+              invocation,
+            ),
           ),
         );
         throw new ComposeRollbackError(updateError, true, rolledBack);

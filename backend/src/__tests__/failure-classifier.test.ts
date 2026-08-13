@@ -109,6 +109,21 @@ describe('classifyFailure', () => {
       message: 'something completely unexpected happened',
       reason: 'unknown',
     },
+    {
+      name: 'mixed replica images capture refusal',
+      message: 'Service "web" has mixed replica images; refusing recovery capture that cannot restore exact prior identity',
+      reason: 'mixed_replica_images',
+    },
+    {
+      name: 'host-absolute include coverage refusal',
+      message: 'Host-absolute include path cannot be captured for exact rollback',
+      reason: 'rollback_coverage_unavailable',
+    },
+    {
+      name: 'generic rollback coverage unavailable',
+      message: 'Exact authored-project rollback coverage is unavailable for this stack',
+      reason: 'rollback_coverage_unavailable',
+    },
   ];
 
   it.each(cases)('classifies $name as $reason', ({ message, reason }) => {

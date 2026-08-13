@@ -547,6 +547,11 @@ systemMaintenanceRouter.post('/rollback/generations/:id/release', async (req: Re
             error: 'This rollback generation cannot be released right now (it may be observing a health gate, mid-recovery, or already in progress).',
             code: 'NOT_ELIGIBLE',
           });
+        case 'malformed_services':
+          return res.status(409).json({
+            error: 'This rollback generation has malformed recovery image state and cannot be released until that record is repaired.',
+            code: 'MALFORMED_SERVICES',
+          });
         default: {
           const _exhaustive: never = result.reason;
           throw new Error(`Unhandled release reason: ${_exhaustive}`);

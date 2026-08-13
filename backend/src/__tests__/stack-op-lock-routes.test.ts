@@ -98,7 +98,7 @@ afterAll(() => {
 });
 
 beforeEach(async () => {
-  mockDeployStack.mockReset();
+  mockDeployStack.mockReset().mockResolvedValue({ recoveryId: null });
   mockRunCommand.mockReset();
   mockRunDown.mockReset();
   mockUpdateStack.mockReset();
@@ -128,7 +128,7 @@ function deferred<T>(): Deferred<T> {
 
 describe('Stack lifecycle mutex', () => {
   it('returns 409 with stack_op_in_progress when a deploy is already running', async () => {
-    const gate = deferred<void>();
+    const gate = deferred<{ recoveryId: string | null }>();
     mockDeployStack.mockImplementationOnce(() => gate.promise);
 
     const first = request(app)
@@ -152,20 +152,20 @@ describe('Stack lifecycle mutex', () => {
     expect(second.body.error).toMatch(/already deploying/i);
     expect(typeof second.body.inProgress.startedAt).toBe('number');
 
-    gate.resolve();
+    gate.resolve({ recoveryId: null });
     const firstRes = await first;
     expect(firstRes.status).toBe(200);
   });
 
   it('releases the lock after a successful deploy so the next request acquires', async () => {
-    mockDeployStack.mockResolvedValueOnce(undefined);
+    mockDeployStack.mockResolvedValueOnce({ recoveryId: null });
     const first = await request(app)
       .post('/api/stacks/web/deploy')
       .set('Cookie', authCookie)
       .send({ skip_scan: true });
     expect(first.status).toBe(200);
 
-    mockDeployStack.mockResolvedValueOnce(undefined);
+    mockDeployStack.mockResolvedValueOnce({ recoveryId: null });
     const second = await request(app)
       .post('/api/stacks/web/deploy')
       .set('Cookie', authCookie)
@@ -181,7 +181,7 @@ describe('Stack lifecycle mutex', () => {
       .send({ skip_scan: true });
     expect(first.status).toBe(500);
 
-    mockDeployStack.mockResolvedValueOnce(undefined);
+    mockDeployStack.mockResolvedValueOnce({ recoveryId: null });
     const second = await request(app)
       .post('/api/stacks/web/deploy')
       .set('Cookie', authCookie)
@@ -190,7 +190,7 @@ describe('Stack lifecycle mutex', () => {
   });
 
   it('blocks restart while a deploy is in flight on the same stack', async () => {
-    const gate = deferred<void>();
+    const gate = deferred<{ recoveryId: string | null }>();
     mockDeployStack.mockImplementationOnce(() => gate.promise);
 
     const deploy = request(app)
@@ -207,12 +207,12 @@ describe('Stack lifecycle mutex', () => {
     expect(restart.body.code).toBe('stack_op_in_progress');
     expect(restart.body.inProgress.action).toBe('deploy');
 
-    gate.resolve();
+    gate.resolve({ recoveryId: null });
     await deploy;
   });
 
   it('allows concurrent ops on different stacks', async () => {
-    const gate = deferred<void>();
+    const gate = deferred<{ recoveryId: string | null }>();
     mockDeployStack.mockImplementation(() => gate.promise);
 
     const webDeploy = request(app)
@@ -229,7 +229,7 @@ describe('Stack lifecycle mutex', () => {
       .then(r => r);
     await vi.waitFor(() => expect(mockDeployStack).toHaveBeenCalledTimes(2));
 
-    gate.resolve();
+    gate.resolve({ recoveryId: null });
     const [webRes, apiRes] = await Promise.all([webDeploy, apiDeploy]);
     expect(webRes.status).toBe(200);
     expect(apiRes.status).toBe(200);

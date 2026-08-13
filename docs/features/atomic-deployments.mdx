@@ -26,7 +26,7 @@ Atomic deployments wrap:
 - **Webhook** triggers for deploy and pull actions.
 - **Image auto-updates** triggered by an auto-update policy.
 
-A scheduled image-update task uses the same atomic wrapper as a manual update, so a recurring update still takes a backup and rolls back automatically when a container crashes. Scheduled lifecycle actions (start, stop, restart) change no stack configuration and run `docker compose` directly without a backup. On-demand **Backup** and scheduled stack backup capture a current recovery generation of the managed authored project.
+A scheduled image-update task uses the same atomic wrapper as a manual update, so a recurring update still takes a backup and rolls back automatically when a container crashes. Scheduled lifecycle actions (start, stop, restart) change no stack configuration and run `docker compose` directly without a backup. On-demand **Backup** and scheduled stack backup capture a current recovery generation of the managed authored project. Backup refuses while a health gate is still observing after a deploy or update, so the pre-operation generation stays available for rollback.
 
 [Blueprint](/features/blueprint-model) deploys are a separate, fleet-wide desired-state path and do not use this atomic wrapper: a failed Blueprint apply is not backed up or rolled back automatically.
 

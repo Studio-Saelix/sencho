@@ -351,6 +351,22 @@ describe('StackUpdateRecoveryService.releaseGeneration', () => {
     if (!second.ok) expect(second.reason).toBe('already_released');
   });
 
+  it('refuses release when services_json is malformed and leaves hold tags intact', async () => {
+    const row = insertRow({ status: 'active', is_current: 1, services_json: '{not-json' });
+    const svc = StackUpdateRecoveryService.getInstance();
+
+    expect(svc.isReleaseEligible(row)).toBe(false);
+    const result = await svc.releaseGeneration(row.id, 'tester');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('malformed_services');
+
+    const after = DatabaseService.getInstance().getStackUpdateRecoveryGeneration(row.id)!;
+    expect(after.released_at).toBeNull();
+    expect(after.is_current).toBe(1);
+    expect(after.artifacts_retired).toBe(0);
+    expect(mockRemove).not.toHaveBeenCalled();
+  });
+
   it('leaves artifacts_retired at 0 (retryable) when Docker tag removal fails', async () => {
     mockRemove.mockRejectedValueOnce(Object.assign(new Error('docker busy'), { statusCode: 500 }));
     const row = insertRow({ status: 'active', is_current: 1 });
@@ -416,6 +432,18 @@ describe('GET/POST /api/system/rollback/generations', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('NOT_ELIGIBLE');
+  });
+
+  it('409s releasing a generation with malformed services_json', async () => {
+    const row = insertRow({ status: 'superseded', is_current: 0, services_json: '{not-json' });
+    const res = await request(app)
+      .post(`/api/system/rollback/generations/${row.id}/release`)
+      .set('Authorization', authHeader);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('MALFORMED_SERVICES');
+    const after = DatabaseService.getInstance().getStackUpdateRecoveryGeneration(row.id)!;
+    expect(after.released_at).toBeNull();
   });
 });
 
