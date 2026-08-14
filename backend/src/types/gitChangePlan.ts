@@ -48,12 +48,12 @@ export interface GitChangePlanOperation {
     sensitivity: InputSensitivity;
     /** Present on rename: the prior (deleted) path. */
     fromPath?: string;
-    ownership?: InputOwnership;
-    provenance?: ManifestProvenance;
+    ownership: InputOwnership;
+    provenance: ManifestProvenance;
     /** Commit SHA the candidate inventory was built from. */
-    sourceRevision?: string;
+    sourceRevision: string;
     /** Human-readable classification note (internal plan only). */
-    reason?: string | null;
+    reason: string;
 }
 
 export interface GitChangePlanCounts {

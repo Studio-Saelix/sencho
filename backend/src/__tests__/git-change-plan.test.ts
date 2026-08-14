@@ -3,7 +3,7 @@
  * in the plan, live applied_deploy_spec not used as candidate invocation, and
  * high-sensitivity paths absent from the public projection.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -636,6 +636,8 @@ describe('GitChangePlanService.build', () => {
         expect(row?.ownership).toBe('managed');
         expect(row?.provenance).toBe('fetch');
         expect(row?.sourceRevision).toBe('deadbeef');
+        expect(row?.reason).toBeTruthy();
+        expect(plan.operations.every((o) => o.ownership && o.provenance && o.sourceRevision && o.reason)).toBe(true);
     });
 
     it.runIf(process.platform !== 'win32')('classifies fifo nodes as type-changed without reading them', async () => {
@@ -665,5 +667,150 @@ describe('GitChangePlanService.build', () => {
         });
         expect(plan.blocked).toBe(true);
         expect(plan.operations.find((o) => o.pathKey === 'pipe.fifo')?.op).toBe('type-changed');
+    });
+
+    it('blocks a locally added file inside a removed build context', async () => {
+        const stack = 'plan-removed-ctx-extra';
+        const compose = 'services:\n  web:\n    image: nginx\n';
+        writeStackFile(stack, 'compose.yaml', compose);
+        writeStackFile(stack, 'app/Dockerfile', 'FROM alpine\n');
+        writeStackFile(stack, 'app/notes.txt', 'keep-me\n');
+        const composeEntry = managedEntry({ materializedPath: 'compose.yaml', content: compose });
+        const ctx: BuildContextPlan = {
+            repoPath: 'app',
+            dockerfile: 'Dockerfile',
+            contextBytes: 12,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'Dockerfile', sha256: sha('FROM alpine\n'), sizeBytes: 12 }],
+        };
+        const prior = buildManifest(stack, [composeEntry], ['-f', 'compose.yaml', '-p', stack], [ctx]);
+        const plan = await GitChangePlanService.getInstance().build({
+            stackName: stack,
+            commitSha: 'cafebabe',
+            mode: 'update',
+            priorManifest: prior,
+            candidateInputs: [composeEntry],
+            candidateBuildContexts: [],
+            candidateInvocation: prior.project.invocation,
+            liveInvocation: prior.project.invocation,
+        });
+        expect(plan.blocked).toBe(true);
+        expect(plan.operations.find((o) => o.pathKey === 'app/notes.txt')?.op).toBe('unmanaged-collision');
+        expect(fs.readFileSync(path.join(stackDir(stack), 'app', 'notes.txt'), 'utf8')).toBe('keep-me\n');
+    });
+
+    it('classifies a clean removed context as delete of owned files only', async () => {
+        const stack = 'plan-removed-ctx-clean';
+        const compose = 'services:\n  web:\n    image: nginx\n';
+        writeStackFile(stack, 'compose.yaml', compose);
+        writeStackFile(stack, 'app/Dockerfile', 'FROM alpine\n');
+        const composeEntry = managedEntry({ materializedPath: 'compose.yaml', content: compose });
+        const ctx: BuildContextPlan = {
+            repoPath: 'app',
+            dockerfile: 'Dockerfile',
+            contextBytes: 12,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'Dockerfile', sha256: sha('FROM alpine\n'), sizeBytes: 12 }],
+        };
+        const prior = buildManifest(stack, [composeEntry], ['-f', 'compose.yaml', '-p', stack], [ctx]);
+        const plan = await GitChangePlanService.getInstance().build({
+            stackName: stack,
+            commitSha: 'cafebabe',
+            mode: 'update',
+            priorManifest: prior,
+            candidateInputs: [composeEntry],
+            candidateBuildContexts: [],
+            candidateInvocation: prior.project.invocation,
+            liveInvocation: prior.project.invocation,
+        });
+        expect(plan.blocked).toBe(false);
+        expect(plan.operations.find((o) => o.pathKey === 'app/Dockerfile')?.op).toBe('delete');
+    });
+
+    it('redacts a secret-bearing locally added context file from the public plan', async () => {
+        const stack = 'plan-ctx-secret-extra';
+        const compose = 'services:\n  web:\n    image: nginx\n';
+        writeStackFile(stack, 'compose.yaml', compose);
+        writeStackFile(stack, 'app/Dockerfile', 'FROM alpine\n');
+        writeStackFile(stack, 'app/.env', 'TOKEN=supersecret\n');
+        const composeEntry = managedEntry({ materializedPath: 'compose.yaml', content: compose });
+        const ctx: BuildContextPlan = {
+            repoPath: 'app',
+            dockerfile: 'Dockerfile',
+            contextBytes: 12,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'Dockerfile', sha256: sha('FROM alpine\n'), sizeBytes: 12 }],
+        };
+        const prior = buildManifest(stack, [composeEntry], ['-f', 'compose.yaml', '-p', stack], [ctx]);
+        const plan = await GitChangePlanService.getInstance().build({
+            stackName: stack,
+            commitSha: 'cafebabe',
+            mode: 'update',
+            priorManifest: prior,
+            candidateInputs: [composeEntry],
+            candidateBuildContexts: [ctx],
+            candidateInvocation: prior.project.invocation,
+            liveInvocation: prior.project.invocation,
+        });
+        const extra = plan.operations.find((o) => o.pathKey === 'app/.env');
+        expect(extra?.op).toBe('unmanaged-collision');
+        expect(extra?.sensitivity).toBe('high');
+        const pub = GitChangePlanService.getInstance().toPublic(plan);
+        expect(JSON.stringify(pub)).not.toContain('.env');
+        expect(JSON.stringify(pub)).not.toContain('TOKEN');
+    });
+
+    it.runIf(process.platform !== 'win32')('blocks a context-root symlink without enumerating the target', async () => {
+        const stack = 'plan-ctx-root-symlink';
+        const compose = 'services:\n  web:\n    image: nginx\n';
+        writeStackFile(stack, 'compose.yaml', compose);
+        const outside = path.join(process.env.COMPOSE_DIR!, '..', 'outside-ctx-root');
+        fs.mkdirSync(outside, { recursive: true });
+        fs.writeFileSync(path.join(outside, 'secret.txt'), 'should-not-be-read\n');
+        const appDir = path.join(stackDir(stack), 'app');
+        fs.symlinkSync(outside, appDir, 'dir');
+        const composeEntry = managedEntry({ materializedPath: 'compose.yaml', content: compose });
+        const ctx: BuildContextPlan = {
+            repoPath: 'app',
+            dockerfile: 'Dockerfile',
+            contextBytes: 12,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'Dockerfile', sha256: sha('FROM alpine\n'), sizeBytes: 12 }],
+        };
+        const prior = buildManifest(stack, [composeEntry], ['-f', 'compose.yaml', '-p', stack], [ctx]);
+        const hashSpy = vi.spyOn(GitProjectManifestService.getInstance(), 'hashStackFile');
+        try {
+            const plan = await GitChangePlanService.getInstance().build({
+                stackName: stack,
+                commitSha: 'cafebabe',
+                mode: 'update',
+                priorManifest: prior,
+                candidateInputs: [composeEntry],
+                candidateBuildContexts: [ctx],
+                candidateInvocation: prior.project.invocation,
+                liveInvocation: prior.project.invocation,
+            });
+            expect(plan.blocked).toBe(true);
+            expect(plan.operations.find((o) => o.pathKey === 'app')?.op).toBe('type-changed');
+            expect(plan.operations.some((o) => o.pathKey.includes('secret.txt'))).toBe(false);
+            expect(JSON.stringify(plan.operations)).not.toContain('outside-ctx-root');
+            const hashedOutside = hashSpy.mock.calls.some((c) => String(c[1]).includes('secret.txt') || String(c[1]).includes('outside'));
+            expect(hashedOutside).toBe(false);
+        } finally {
+            hashSpy.mockRestore();
+            fs.rmSync(outside, { recursive: true, force: true });
+        }
     });
 });

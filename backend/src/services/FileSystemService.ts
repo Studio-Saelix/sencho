@@ -2006,24 +2006,19 @@ export class FileSystemService {
       await fsPromises.rm(leafPath, { recursive: true, force: true });
       return;
     }
-    try {
-      await fsPromises.unlink(leafPath);
-    } catch (err: unknown) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code === 'EISDIR') {
-        try {
-          await fsPromises.rmdir(leafPath);
-        } catch (inner: unknown) {
-          const ie = inner as NodeJS.ErrnoException;
-          if (ie.code === 'ENOTEMPTY' || ie.code === 'EEXIST') {
-            throw Object.assign(new Error('Directory is not empty'), { code: 'NOT_EMPTY' });
-          }
-          throw inner;
+    if (leafStat.isDirectory()) {
+      try {
+        await fsPromises.rmdir(leafPath);
+      } catch (inner: unknown) {
+        const ie = inner as NodeJS.ErrnoException;
+        if (ie.code === 'ENOTEMPTY' || ie.code === 'EEXIST') {
+          throw Object.assign(new Error('Directory is not empty'), { code: 'NOT_EMPTY' });
         }
-      } else {
-        throw err;
+        throw inner;
       }
+      return;
     }
+    await fsPromises.unlink(leafPath);
   }
 
   async mkdirStackPath(stackName: string, relPath: string, scope?: FileRootScope): Promise<void> {

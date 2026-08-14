@@ -848,6 +848,43 @@ describe('GitSourceService pending lifecycle', () => {
         svc.dismissPending('pending-stack');
         expect(db.getGitSource('pending-stack')?.pending_commit_sha).toBeNull();
     });
+
+    it('clearGitSourceAppliedRevision clears pending plan columns', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        await svc.upsert({
+            stackName: 'clear-pending-plan',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        const db = DatabaseService.getInstance();
+        db.setGitSourcePending('clear-pending-plan', 'sha-pend', 'blob', null, {
+            fingerprint: 'fp-clear',
+            blocked: true,
+            summary: '{"fingerprint":"fp-clear"}',
+        });
+        const before = db.getGitSource('clear-pending-plan');
+        expect(before?.pending_plan_fingerprint).toBe('fp-clear');
+        expect(before?.pending_plan_blocked).toBe(true);
+        expect(before?.pending_plan_summary).toBeTruthy();
+        db.clearGitSourceAppliedRevision('clear-pending-plan');
+        const after = db.getGitSource('clear-pending-plan');
+        expect(after?.last_applied_commit_sha).toBeNull();
+        expect(after?.pending_commit_sha).toBeNull();
+        expect(after?.pending_compose_content).toBeNull();
+        expect(after?.pending_env_content).toBeNull();
+        expect(after?.pending_fetched_at).toBeNull();
+        expect(after?.pending_plan_fingerprint).toBeNull();
+        expect(after?.pending_plan_blocked).toBeNull();
+        expect(after?.pending_plan_summary).toBeNull();
+    });
 });
 
 describe('GitSourceService.handleWebhookPull debounce', () => {
@@ -1222,6 +1259,49 @@ describe('GitSourceService.createStackFromGit', () => {
         await cleanupStackDir('create-happy');
         } finally {
             validateSpy.mockRestore();
+        }
+    });
+
+    it('builds the change plan before creating the active stack directory', async () => {
+        const sha = 'planbefore11112222333344445555666677778888';
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx\n',
+            sha,
+        });
+        const svc = GitSourceService.getInstance();
+        const { GitChangePlanService } = await import('../services/GitChangePlanService');
+        const { FileSystemService } = await import('../services/FileSystemService');
+        let stackExistedDuringPlan = true;
+        const origBuild = GitChangePlanService.prototype.build;
+        const buildSpy = vi.spyOn(GitChangePlanService.prototype, 'build').mockImplementation(async function (this: InstanceType<typeof GitChangePlanService>, input) {
+            stackExistedDuringPlan = fs.existsSync(path.join(process.env.COMPOSE_DIR!, input.stackName));
+            return origBuild.call(this, input);
+        });
+        const origCreate = FileSystemService.prototype.createStack;
+        const createSpy = vi.spyOn(FileSystemService.prototype, 'createStack').mockImplementation(async function (this: InstanceType<typeof FileSystemService>, name: string) {
+            expect(buildSpy).toHaveBeenCalled();
+            return origCreate.call(this, name);
+        });
+        try {
+            await svc.createStackFromGit({
+                stackName: 'create-plan-first',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                token: null,
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+            expect(stackExistedDuringPlan).toBe(false);
+            expect(buildSpy.mock.invocationCallOrder[0]).toBeLessThan(createSpy.mock.invocationCallOrder[0]);
+            await cleanupStackDir('create-plan-first');
+        } finally {
+            buildSpy.mockRestore();
+            createSpy.mockRestore();
         }
     });
 

@@ -22,7 +22,7 @@ import { GitProjectManifestService, PromoteGenerationError } from './GitProjectM
 import { GitChangePlanService } from './GitChangePlanService';
 import { DriftLedgerService } from './DriftLedgerService';
 import { StackUpdateRecoveryService } from './StackUpdateRecoveryService';
-import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import { authoredComposeFileArgs, authoredComposeEnvFileArgs, candidateValidationEnvFileArgs } from '../utils/authoredComposeArgs';
 import { buildCandidateComposeInvocation } from '../utils/candidateComposeInvocation';
 import type { ComposeInputEntry, GitProjectManifest, GitSourceManifestState, InventoryResult, ManifestSummary, RefusalInfo } from '../types/gitProjectManifest';
 import type { GitChangePlan, PublicGitChangePlan, GitChangePlanCounts, PublicGitChangePlanOperation } from '../types/gitChangePlan';
@@ -1350,8 +1350,9 @@ export class GitSourceService {
      * Complete-project materialization inside the clone lifecycle: discover +
      * classify every declared input, abort on actionable refusals, build the
      * staged candidate (managed files + filtered build contexts), and validate
-     * the exact candidate with the exact deploy invocation (including -p).
-     * Runs only when the complete-project contract applies.
+     * it with candidateValidationEnvFileArgs (not a mix of staged and live
+     * --env-file inputs). Includes -p. Runs only when the complete-project
+     * contract applies.
      */
     private async buildMaterialization(
         stackName: string,
@@ -1415,10 +1416,11 @@ export class GitSourceService {
     }
 
     /**
-     * Validate the staged candidate with the exact deploy invocation: the same
-     * relative -f order, -p project name, --project-directory, and --env-file
-     * the deploy uses, run inside the candidate dir. Candidate validation gets a
-     * larger budget than the pull preview (30s) and names the timeout.
+     * Validate the staged candidate with the same -f order, -p project name,
+     * and --project-directory deploy will use, run inside the candidate dir.
+     * --env-file follows candidateValidationEnvFileArgs: candidate `.env` when
+     * that file will be the post-promotion legacy env, otherwise the live
+     * configured project env files. Candidate validation gets a 30s budget.
      */
     private async validateCandidate(stackName: string, candidateRelPath: string, composePaths: string[], contextDir: string | null): Promise<{ ok: boolean; error?: string }> {
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
@@ -1447,17 +1449,13 @@ export class GitSourceService {
             }
             args.push('--project-directory', ctxAbs);
         }
-        // Mirror the deploy-time env resolution: only pass --env-file when the
-        // candidate actually carries the env (sync-env stacks stage it there).
-        const candidateEnv = path.join(candidateAbs, '.env');
         try {
-            await fsPromises.access(candidateEnv);
-            args.push('--env-file', candidateEnv);
-        } catch {
-            // no staged env; compose falls back to environment interpolation
-        }
-        try {
-            args.push(...(await authoredComposeEnvFileArgs(stackName, nodeId)));
+            args.push(...(await candidateValidationEnvFileArgs({
+                stackName,
+                nodeId,
+                candidateAbs,
+                contextDir,
+            })));
         } catch (err) {
             return { ok: false, error: (err as Error).message || 'Invalid project env file configuration.' };
         }
@@ -2382,10 +2380,9 @@ export class GitSourceService {
                 throw new GitSourceError('GIT_ERROR', `Compose validation failed: ${validation.error}`);
             }
 
-            // 3. Create directory + boilerplate, then promote the staged
-            //    candidate (or fall back to the historical file-set write).
-            //    createStack() throws if the directory already exists, so a
-            //    name collision is caught here.
+            // 3. Classify the candidate against live disk (the stack directory
+            //    does not exist yet), then create the stack and promote.
+            //    createStack() throws if the directory already exists.
             let stackCreated = false;
             let rowInserted = false;
             // Promotion persists the manifest cache columns BEFORE the row
@@ -2395,8 +2392,6 @@ export class GitSourceService {
             let completeProjectManifest: GitProjectManifest | null = null;
             let recordedCreatePlan: GitChangePlan | null = null;
             try {
-                await fsSvc.createStack(input.stackName);
-                stackCreated = true;
                 let appliedSpec: GitSourceAppliedSpec | null;
                 if (materialization.value) {
                     const inputs = materialization.value.inventory.inputs.filter(
@@ -2484,16 +2479,20 @@ export class GitSourceService {
                         );
                     }
                     recordedCreatePlan = createPlan;
+                    completeProjectManifest = manifest;
+                }
+
+                await fsSvc.createStack(input.stackName);
+                stackCreated = true;
+
+                if (completeProjectManifest && materialization.value) {
                     await manifestSvc.promoteGeneration(input.stackName, {
                         sha: fetched.commitSha,
                         candidateRelPath: materialization.value.candidateRelPath,
-                        manifest,
+                        manifest: completeProjectManifest,
                         priorManifest: null,
-                        // The stack directory was just created by this flow;
-                        // every existing file is adoption boilerplate.
                         adoptExistingMaterializedPaths: 'all',
                     });
-                    completeProjectManifest = manifest;
                     appliedSpec = this.deriveAppliedSpec(input.composePaths, input.contextDir);
                 } else {
                     appliedSpec = await this.materialize(

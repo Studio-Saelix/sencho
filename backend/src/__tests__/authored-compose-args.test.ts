@@ -228,3 +228,88 @@ describe('authoredComposeEnvFileArgs', () => {
         spy.mockRestore();
     });
 });
+
+describe('candidateValidationEnvFileArgs', () => {
+    let candidateValidationEnvFileArgs: typeof import('../utils/authoredComposeArgs').candidateValidationEnvFileArgs;
+
+    beforeAll(async () => {
+        ({ candidateValidationEnvFileArgs } = await import('../utils/authoredComposeArgs'));
+    });
+
+    function makeStackDir(stackName: string, withEnv: boolean): string {
+        const baseDir = NodeRegistry.getInstance().getComposeDir(NodeRegistry.getInstance().getDefaultNodeId());
+        const stackDir = path.join(baseDir, stackName);
+        fs.mkdirSync(stackDir, { recursive: true });
+        if (withEnv) fs.writeFileSync(path.join(stackDir, '.env'), 'TAG=live\n', 'utf-8');
+        else fs.rmSync(path.join(stackDir, '.env'), { force: true });
+        return stackDir;
+    }
+
+    it('uses candidate .env for context-dir sync-env, not the live stack .env', async () => {
+        const stackName = 'val-sync-env';
+        seedSource(stackName, ['compose.yaml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml'],
+            contextDir: 'app',
+        });
+        const liveDir = makeStackDir(stackName, true);
+        const candidateAbs = path.join(tmpDir, 'candidate-sync-env');
+        fs.mkdirSync(candidateAbs, { recursive: true });
+        fs.writeFileSync(path.join(candidateAbs, '.env'), 'TAG=candidate\n', 'utf-8');
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const args = await candidateValidationEnvFileArgs({
+            stackName,
+            nodeId,
+            candidateAbs,
+            contextDir: 'app',
+        });
+        expect(args).toEqual(['--env-file', path.resolve(candidateAbs, '.env')]);
+        expect(args).not.toContain(path.resolve(liveDir, '.env'));
+    });
+
+    it('uses only configured project env files even when candidate .env exists', async () => {
+        const stackName = 'val-project-env';
+        seedSource(stackName, ['compose.yaml']);
+        const liveDir = makeStackDir(stackName, true);
+        fs.writeFileSync(path.join(liveDir, 'prod.env'), 'FOO=1\n', 'utf-8');
+        DatabaseService.getInstance().setStackProjectEnvFiles(
+            NodeRegistry.getInstance().getDefaultNodeId(),
+            stackName,
+            ['prod.env'],
+        );
+        const candidateAbs = path.join(tmpDir, 'candidate-project-env');
+        fs.mkdirSync(candidateAbs, { recursive: true });
+        fs.writeFileSync(path.join(candidateAbs, '.env'), 'TAG=candidate\n', 'utf-8');
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const validation = await candidateValidationEnvFileArgs({
+            stackName,
+            nodeId,
+            candidateAbs,
+            contextDir: 'app',
+        });
+        const deploy = await authoredComposeEnvFileArgs(stackName, nodeId);
+        expect(validation).toEqual(deploy);
+        expect(validation).toEqual(['--env-file', path.resolve(liveDir, 'prod.env')]);
+        expect(validation.join(' ')).not.toContain(path.join(candidateAbs, '.env'));
+    });
+
+    it('throws when a configured project env file is missing', async () => {
+        const stackName = 'val-missing-env';
+        seedSource(stackName, ['compose.yaml']);
+        makeStackDir(stackName, false);
+        DatabaseService.getInstance().setStackProjectEnvFiles(
+            NodeRegistry.getInstance().getDefaultNodeId(),
+            stackName,
+            ['missing.env'],
+        );
+        const candidateAbs = path.join(tmpDir, 'candidate-missing-env');
+        fs.mkdirSync(candidateAbs, { recursive: true });
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        await expect(candidateValidationEnvFileArgs({
+            stackName,
+            nodeId,
+            candidateAbs,
+            contextDir: null,
+        })).rejects.toThrow(/missing/);
+    });
+});

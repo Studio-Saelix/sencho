@@ -150,3 +150,34 @@ export async function authoredComposeEnvFileArgs(stackName: string, nodeId?: num
   }
   return ['--env-file', envPath];
 }
+
+/**
+ * `--env-file` arguments for candidate `docker compose config` validation.
+ * Configured project env files stay live-stack paths (same as deploy).
+ * Otherwise a context-dir stack uses the candidate `.env` when that file
+ * exists on the candidate; if it does not, fall back to the live legacy `.env`.
+ */
+export async function candidateValidationEnvFileArgs(opts: {
+  stackName: string;
+  nodeId: number;
+  candidateAbs: string;
+  contextDir: string | null;
+}): Promise<string[]> {
+  const configured = DatabaseService.getInstance().getStackProjectEnvFiles(opts.nodeId, opts.stackName);
+  if (configured.length > 0) {
+    return authoredComposeEnvFileArgs(opts.stackName, opts.nodeId);
+  }
+  if (!opts.contextDir) return [];
+  const candidateEnv = path.resolve(opts.candidateAbs, '.env');
+  const baseResolved = path.resolve(opts.candidateAbs);
+  if (candidateEnv !== baseResolved && !candidateEnv.startsWith(baseResolved + path.sep)) {
+    throw new Error(`Env file path escapes the candidate directory for stack "${opts.stackName}"`);
+  }
+  try {
+    await fsPromises.access(candidateEnv);
+    return ['--env-file', candidateEnv];
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  return authoredComposeEnvFileArgs(opts.stackName, opts.nodeId);
+}

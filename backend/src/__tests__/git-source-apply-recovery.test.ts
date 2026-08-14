@@ -106,6 +106,7 @@ vi.mock('../services/GitProjectManifestService', async () => {
 vi.mock('../utils/authoredComposeArgs', () => ({
   authoredComposeFileArgs: vi.fn().mockResolvedValue(['-f', 'compose.yaml']),
   authoredComposeEnvFileArgs: vi.fn().mockResolvedValue([]),
+  candidateValidationEnvFileArgs: vi.fn().mockResolvedValue([]),
 }));
 
 const mockGetGitSource = vi.fn();

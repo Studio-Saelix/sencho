@@ -482,4 +482,26 @@ describe('DriftLedgerService managed-path conflicts', () => {
     ledger.resolveManagedPathConflicts(nodeId, STACK);
     expect(db().getOpenDriftFindings(nodeId, STACK)).toHaveLength(0);
   });
+
+  it('GET drift redacts the opaque service key for managed-path conflicts', async () => {
+    const stackDir = path.join(process.env.COMPOSE_DIR as string, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx:1.27\n');
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [], networks: [], volumes: [] }),
+    } as unknown as DockerController);
+    DriftLedgerService.getInstance().upsertManagedPathConflicts(nodeId, STACK, [
+      { path: 'compose.yaml', op: 'local-modified', role: 'compose-primary', sensitivity: 'medium' },
+    ]);
+    const stored = db().getOpenDriftFindings(nodeId, STACK)[0];
+    expect(stored.service.length).toBeGreaterThan(0);
+    const res = await request(app).get(`/api/stacks/${STACK}/drift`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    const gitRow = res.body.ledger.find((r: { kind: string }) => r.kind === 'managed-path-conflict');
+    expect(gitRow).toBeDefined();
+    expect(gitRow.service).toBe('');
+    expect(JSON.stringify(res.body)).not.toContain(stored.service);
+    fs.rmSync(stackDir, { recursive: true, force: true });
+  });
 });
