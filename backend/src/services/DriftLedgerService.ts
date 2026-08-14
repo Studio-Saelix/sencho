@@ -38,6 +38,17 @@ function findingKey(service: string, kind: string): string {
     return JSON.stringify([service, kind]);
 }
 
+const SPATIAL_FINDING_KINDS = new Set([
+    'service-missing',
+    'service-undeclared',
+    'image-mismatch',
+    'ports-mismatch',
+    'network-undeclared',
+    'network-missing',
+]);
+
+const GIT_MANAGED_PATH_KIND = 'managed-path-conflict';
+
 /**
  * Order-independent serialization of the parsed model so two compose files that
  * differ only in comments, whitespace, or key order hash equal, while a real
@@ -141,6 +152,7 @@ export class DriftLedgerService {
         }
         const toResolve: StackDriftFindingRow[] = [];
         for (const [key, row] of openByKey) {
+            if (!SPATIAL_FINDING_KINDS.has(row.finding_type)) continue;
             if (!currentByKey.has(key)) toResolve.push(row);
         }
         // Stamp the check time and apply any transitions in one transaction, so the
@@ -205,6 +217,7 @@ export class DriftLedgerService {
         }
         const toResolve: StackDriftFindingRow[] = [];
         for (const [key, row] of openByKey) {
+            if (!SPATIAL_FINDING_KINDS.has(row.finding_type)) continue;
             if (!currentByKey.has(key)) toResolve.push(row);
         }
         db.getDb().transaction(() => {
@@ -269,6 +282,64 @@ export class DriftLedgerService {
             console.error('[DriftLedger] reconcileServiceForStack failed for %s/%s:', sanitizeForLog(stackName), sanitizeForLog(serviceName), sanitizeForLog(getErrorMessage(error, 'unknown')));
             return { detected: 0, resolved: 0 };
         }
+    }
+
+    /**
+     * Insert or refresh Git managed-path findings. Never resolves. An existing
+     * open row keeps its original detected_at; only the redacted message updates.
+     */
+    upsertManagedPathConflicts(
+        nodeId: number,
+        stackName: string,
+        conflicts: Array<{ path: string; op: string; role: string; sensitivity: 'high' | 'medium' | 'low' }>,
+    ): void {
+        const db = DatabaseService.getInstance();
+        const now = Date.now();
+        const open = db.getOpenDriftFindings(nodeId, stackName)
+            .filter((r) => r.finding_type === GIT_MANAGED_PATH_KIND);
+        const openByKey = new Map(open.map((r) => [r.service, r]));
+        db.getDb().transaction(() => {
+            for (const conflict of conflicts) {
+                const key = sha256Hex(`${stackName}\0${conflict.path}`);
+                const message = conflict.sensitivity === 'high'
+                    ? `secret-bearing managed path (${conflict.op})`
+                    : `${conflict.role} ${conflict.op}`;
+                const existing = openByKey.get(key);
+                if (existing) {
+                    db.updateDriftFindingMessage(existing.id, message);
+                    openByKey.delete(key);
+                    continue;
+                }
+                db.insertDriftFinding({
+                    node_id: nodeId,
+                    stack_name: stackName,
+                    service: key,
+                    finding_type: GIT_MANAGED_PATH_KIND,
+                    severity: 'warning',
+                    message,
+                    expected_json: null,
+                    actual_json: null,
+                    detected_at: now,
+                });
+            }
+        })();
+    }
+
+    /**
+     * Resolve every open managed-path-conflict for this stack. Call only after
+     * a clean promotion; a clean pull must not close an existing Git finding.
+     */
+    resolveManagedPathConflicts(nodeId: number, stackName: string): void {
+        const db = DatabaseService.getInstance();
+        const now = Date.now();
+        const open = db.getOpenDriftFindings(nodeId, stackName)
+            .filter((r) => r.finding_type === GIT_MANAGED_PATH_KIND);
+        if (open.length === 0) return;
+        db.getDb().transaction(() => {
+            for (const row of open) {
+                db.resolveDriftFinding(row.id, now);
+            }
+        })();
     }
 
     /**

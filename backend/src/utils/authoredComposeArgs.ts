@@ -150,3 +150,39 @@ export async function authoredComposeEnvFileArgs(stackName: string, nodeId?: num
   }
   return ['--env-file', envPath];
 }
+
+/**
+ * `--env-file` arguments for candidate `docker compose config` validation.
+ * Configured project env files stay live-stack paths (same as deploy).
+ * Otherwise a context-dir stack uses the candidate `.env` when that file
+ * exists on the candidate. If it does not, fall back to the live legacy `.env`
+ * only when that file will survive promotion (`syncEnv` is false). A managed
+ * synced `.env` that this generation omits must not be used for validation.
+ */
+export async function candidateValidationEnvFileArgs(opts: {
+  stackName: string;
+  nodeId: number;
+  candidateAbs: string;
+  contextDir: string | null;
+  syncEnv: boolean;
+}): Promise<string[]> {
+  const configured = DatabaseService.getInstance().getStackProjectEnvFiles(opts.nodeId, opts.stackName);
+  if (configured.length > 0) {
+    return authoredComposeEnvFileArgs(opts.stackName, opts.nodeId);
+  }
+  if (!opts.contextDir) return [];
+  // Canonical js/path-injection barrier inline with the access sink. CodeQL
+  // does not credit a wrapped helper or a check separated from the sink.
+  const baseResolved = path.resolve(opts.candidateAbs);
+  const candidateEnv = path.resolve(baseResolved, '.env');
+  try {
+    if (candidateEnv.startsWith(baseResolved + path.sep)) {
+      await fsPromises.access(candidateEnv);
+      return ['--env-file', candidateEnv];
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  if (opts.syncEnv) return [];
+  return authoredComposeEnvFileArgs(opts.stackName, opts.nodeId);
+}

@@ -1868,6 +1868,40 @@ export class FileSystemService {
   }
 
   /**
+   * Like pathKind, but distinguishes a symlink leaf from a regular file.
+   * Used by the Git change planner so a swapped symlink is type-changed,
+   * not hashed as if it were the target's content.
+   */
+  async observeStackPath(
+    stackName: string,
+    relPath: string,
+    scope?: FileRootScope,
+  ): Promise<'file' | 'directory' | 'symlink' | 'special' | null> {
+    try {
+      if (scope?.rootAbsDir === undefined) {
+        // Canonical js/path-injection barrier inline with the lstat sink. A missing
+        // stack dir must return null (leaf resolve would throw path-escape). CodeQL
+        // only credits containment when it sits at the sink.
+        const baseResolved = path.resolve(this.baseDir);
+        const stackDir = path.resolve(baseResolved, stackName);
+        if (stackDir.startsWith(baseResolved + path.sep)) {
+          await fsPromises.lstat(stackDir);
+        }
+      }
+      const safePath = await this.resolveScopedLeafPath(stackName, relPath, scope);
+      const stat = await fsPromises.lstat(safePath);
+      if (stat.isSymbolicLink()) return 'symlink';
+      if (stat.isDirectory()) return 'directory';
+      if (stat.isFile()) return 'file';
+      return 'special';
+    } catch (err: unknown) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === 'ENOENT') return null;
+      throw err;
+    }
+  }
+
+  /**
    * Optimistic-concurrency write for arbitrary stack files (file-explorer
    * editor save path). If `expectedMtimeMs` is provided, opens the target,
    * stats it, and refuses the write (returning current content + mtime) when
@@ -1972,24 +2006,19 @@ export class FileSystemService {
       await fsPromises.rm(leafPath, { recursive: true, force: true });
       return;
     }
-    try {
-      await fsPromises.unlink(leafPath);
-    } catch (err: unknown) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code === 'EISDIR') {
-        try {
-          await fsPromises.rmdir(leafPath);
-        } catch (inner: unknown) {
-          const ie = inner as NodeJS.ErrnoException;
-          if (ie.code === 'ENOTEMPTY' || ie.code === 'EEXIST') {
-            throw Object.assign(new Error('Directory is not empty'), { code: 'NOT_EMPTY' });
-          }
-          throw inner;
+    if (leafStat.isDirectory()) {
+      try {
+        await fsPromises.rmdir(leafPath);
+      } catch (inner: unknown) {
+        const ie = inner as NodeJS.ErrnoException;
+        if (ie.code === 'ENOTEMPTY' || ie.code === 'EEXIST') {
+          throw Object.assign(new Error('Directory is not empty'), { code: 'NOT_EMPTY' });
         }
-      } else {
-        throw err;
+        throw inner;
       }
+      return;
     }
+    await fsPromises.unlink(leafPath);
   }
 
   async mkdirStackPath(stackName: string, relPath: string, scope?: FileRootScope): Promise<void> {

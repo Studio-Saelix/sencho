@@ -8,7 +8,7 @@ import { apiFetch } from '@/lib/api';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useNodes } from '@/context/NodeContext';
 import { toast } from '@/components/ui/toast-store';
-import { GitSourceDiffDialog, type PullResult } from './GitSourceDiffDialog';
+import { GitSourceDiffDialog, type PullResult, type PublicPendingPlan } from './GitSourceDiffDialog';
 import { GitSourceFields, type ApplyMode } from './GitSourceFields';
 import { GitManifestSummary, type ManifestSummary } from './GitManifestSummary';
 import type { GitBrowseResult } from './GitComposeFilePicker';
@@ -30,6 +30,9 @@ export interface GitSource {
   last_applied_commit_sha: string | null;
   pending_commit_sha: string | null;
   pending_fetched_at: number | null;
+  pending_plan: PublicPendingPlan | null;
+  last_plan_fingerprint: string | null;
+  last_plan_outcome: string | null;
   created_at: number;
   updated_at: number;
   manifest_state: ManifestSummary['state'] | null;
@@ -58,7 +61,6 @@ export function GitSourcePanel({
   onOpenChange,
   stackName,
   canEdit,
-  isDarkMode,
   onSourceChanged,
 }: GitSourcePanelProps) {
   const [loading, setLoading] = useState(true);
@@ -269,7 +271,7 @@ export function GitSourcePanel({
     }
   };
 
-  const applyPull = async (commitSha: string, deploy: boolean) => {
+  const applyPull = async (commitSha: string, deploy: boolean, planFingerprint: string) => {
     setApplying(true);
     const loadingId = toast.loading(deploy ? 'Applying and deploying...' : 'Applying changes...');
     // Snapshot the node once so the apply (and any deploy it triggers) stays
@@ -281,7 +283,7 @@ export function GitSourcePanel({
         const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/apply`, {
           method: 'POST',
           nodeId: opNodeId,
-          body: JSON.stringify({ commitSha, deploy }),
+          body: JSON.stringify({ commitSha, planFingerprint, deploy }),
         });
         if (res.ok) {
           const data: { applied: boolean; deployed: boolean; deployError?: string } = await res.json();
@@ -298,8 +300,20 @@ export function GitSourcePanel({
           onSourceChanged?.();
           return { ok: true };
         } else {
-          const err = await res.json().catch(() => ({}));
-          const msg = (err as { error?: string }).error || 'Failed to apply changes.';
+          const err = await res.json().catch(() => ({})) as {
+            error?: string;
+            code?: string;
+            plan?: PullResult['plan'];
+            planFingerprint?: string;
+          };
+          if (res.status === 409 && err.code === 'STALE_PLAN' && err.plan && err.planFingerprint) {
+            setPull((prev) => prev
+              ? { ...prev, plan: err.plan ?? null, planFingerprint: err.planFingerprint ?? null }
+              : prev);
+            toast.warning(err.error || 'The change plan is stale. Review the updated plan before applying.');
+            return { ok: false, errorMessage: err.error };
+          }
+          const msg = err.error || 'Failed to apply changes.';
           toast.error(msg);
           return { ok: false, errorMessage: msg };
         }
@@ -360,12 +374,21 @@ export function GitSourcePanel({
               ) : (
                 <>
                   {source?.pending_commit_sha && (
-                    <div className="flex items-start gap-2 rounded-md border border-brand/30 bg-brand/5 px-3 py-2 text-xs shadow-card-bevel">
-                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-brand" strokeWidth={1.5} />
+                    <div className={`flex items-start gap-2 rounded-md border px-3 py-2 text-xs shadow-card-bevel ${
+                      source.pending_plan?.blocked
+                        ? 'border-warning/30 bg-warning/10'
+                        : 'border-brand/30 bg-brand/5'
+                    }`}>
+                      <AlertCircle className={`w-4 h-4 shrink-0 mt-0.5 ${source.pending_plan?.blocked ? 'text-warning' : 'text-brand'}`} strokeWidth={1.5} />
                       <div className="flex-1">
-                        <p className="font-medium">Pending update</p>
+                        <p className="font-medium">
+                          {source.pending_plan?.blocked ? 'Pending update blocked' : 'Pending update'}
+                        </p>
                         <p className="text-stat-subtitle mt-0.5">
-                          Commit <span className="font-mono tabular-nums">{source.pending_commit_sha.slice(0, 7)}</span> is ready to review.
+                          Commit <span className="font-mono tabular-nums">{source.pending_commit_sha.slice(0, 7)}</span>
+                          {source.pending_plan?.blocked
+                            ? ' has local conflicts. Review the plan; apply stays disabled until they are resolved.'
+                            : ' is ready to review.'}
                         </p>
                       </div>
                       <Button
@@ -494,9 +517,7 @@ export function GitSourcePanel({
         onOpenChange={setDiffOpen}
         stackName={stackName}
         pull={pull}
-        syncEnv={syncEnv}
         autoDeployDefault={applyMode === 'auto-deploy'}
-        isDarkMode={isDarkMode}
         applying={applying}
         onApply={applyPull}
         onDismiss={dismissPending}

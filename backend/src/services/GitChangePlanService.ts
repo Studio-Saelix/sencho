@@ -1,0 +1,672 @@
+/**
+ * Classified compare of prior-manifest managed paths, the candidate Git
+ * inventory, and live disk. Pure policy: it never writes the stack directory.
+ * Promotion stays in GitProjectManifestService.
+ */
+import { createHash } from 'crypto';
+import { FileSystemService } from './FileSystemService';
+import { GitProjectManifestService } from './GitProjectManifestService';
+import { collectManifestFilePaths } from '../helpers/manifestFilePaths';
+import { isEnvLikeFileName } from '../helpers/envFileResolution';
+import { sha256Hex } from '../utils/hashing';
+import type {
+    BuildContextPlan,
+    ComposeInputEntry,
+    DeletionAuthority,
+    GitProjectManifest,
+    InputOwnership,
+    InputRole,
+    InputSensitivity,
+    ManifestProvenance,
+} from '../types/gitProjectManifest';
+import {
+    BLOCKING_CHANGE_PLAN_OPS,
+    GIT_CHANGE_PLAN_SCHEMA_VERSION,
+    type GitChangePlan,
+    type GitChangePlanCounts,
+    type GitChangePlanMode,
+    type GitChangePlanOp,
+    type GitChangePlanOperation,
+    type PublicGitChangePlan,
+    type PublicGitChangePlanOperation,
+    type PublicPendingPlan,
+} from '../types/gitChangePlan';
+
+const INVOCATION_PATH_KEY = '__invocation__';
+
+interface PathMeta {
+    hash: string | null;
+    role: InputRole | 'build-context-file';
+    deletionAuthority: DeletionAuthority | null;
+    sensitivity: InputSensitivity;
+    ownership: InputOwnership;
+    provenance: ManifestProvenance;
+}
+
+function isSecretBearingRelPath(rel: string): boolean {
+    const base = rel.split('/').pop()?.toLowerCase() ?? '';
+    return isEnvLikeFileName(rel)
+        || base.includes('secret')
+        || base.includes('credential')
+        || base.endsWith('.pem')
+        || base === 'id_rsa';
+}
+
+type LiveKind = Awaited<ReturnType<FileSystemService['observeStackPath']>>;
+
+function isSymlinkEscape(err: unknown): boolean {
+    return (err as NodeJS.ErrnoException).code === 'SYMLINK_ESCAPE';
+}
+
+async function observeKind(
+    fsSvc: FileSystemService,
+    stackName: string,
+    pathKey: string,
+): Promise<LiveKind | 'escape'> {
+    try {
+        return await fsSvc.observeStackPath(stackName, pathKey);
+    } catch (err) {
+        if (isSymlinkEscape(err)) return 'escape';
+        throw err;
+    }
+}
+
+export interface BuildGitChangePlanInput {
+    stackName: string;
+    commitSha: string;
+    mode: GitChangePlanMode;
+    priorManifest: GitProjectManifest | null;
+    candidateInputs: ComposeInputEntry[];
+    candidateBuildContexts: BuildContextPlan[];
+    candidateInvocation: string[];
+    liveInvocation: string[];
+    /** Pre-manifest stacks: compose files + synced .env that Sencho already wrote. */
+    legacyOwnedPaths?: string[];
+    /** Live hashes captured when the pending plan was reviewed. A later mismatch is local-modified. */
+    reviewedLiveHashes?: ReadonlyMap<string, string | null>;
+    /** Stack-root project env files configured for deploy (live disk, not Git inventory). */
+    projectEnvFiles?: string[];
+}
+
+export class GitChangePlanService {
+    private static instance: GitChangePlanService;
+
+    static getInstance(): GitChangePlanService {
+        if (!GitChangePlanService.instance) {
+            GitChangePlanService.instance = new GitChangePlanService();
+        }
+        return GitChangePlanService.instance;
+    }
+
+    async build(input: BuildGitChangePlanInput): Promise<GitChangePlan> {
+        const priorIndex = input.priorManifest
+            ? this.indexPaths(input.priorManifest.inputs, input.priorManifest.buildContexts)
+            : new Map<string, PathMeta>();
+        const candidateIndex = this.indexPaths(input.candidateInputs, input.candidateBuildContexts);
+        const priorPaths = input.priorManifest
+            ? collectManifestFilePaths(input.priorManifest)
+            : [];
+        const candidatePaths = collectManifestFilePaths({
+            inputs: input.candidateInputs,
+            buildContexts: input.candidateBuildContexts,
+        });
+        const contextExtras = await this.collectContextUniverseExtras({
+            stackName: input.stackName,
+            candidateInputs: input.candidateInputs,
+            candidateBuildContexts: input.candidateBuildContexts,
+            priorBuildContexts: input.priorManifest?.buildContexts ?? [],
+            priorInputs: input.priorManifest?.inputs ?? [],
+            manifestSvc: GitProjectManifestService.getInstance(),
+        });
+        const projectEnvFiles = input.projectEnvFiles ?? [];
+        const universe = this.mergePaths(
+            this.mergePaths(priorPaths, candidatePaths),
+            this.mergePaths(contextExtras, projectEnvFiles),
+        );
+        const contextExtraSet = new Set(contextExtras.map((p) => p.toLowerCase()));
+        const projectEnvSet = new Set(projectEnvFiles.map((p) => p.toLowerCase()));
+        const legacyOwned = new Set(input.legacyOwnedPaths ?? []);
+        const fsSvc = FileSystemService.getInstance();
+        const manifestSvc = GitProjectManifestService.getInstance();
+
+        const classified: GitChangePlanOperation[] = [];
+        for (const pathKey of universe) {
+            const pathFold = pathKey.toLowerCase();
+            const prior = priorIndex.get(pathFold);
+            const candidate = candidateIndex.get(pathFold);
+            classified.push(await this.classifyPath({
+                stackName: input.stackName,
+                pathKey,
+                prior,
+                candidate,
+                mode: input.mode,
+                legacyOwned,
+                reviewedLiveHash: input.reviewedLiveHashes?.get(pathFold),
+                hasReviewedLive: input.reviewedLiveHashes?.has(pathFold) === true,
+                isContextExtra: contextExtraSet.has(pathFold)
+                    && prior === undefined
+                    && candidate === undefined,
+                isProjectEnv: projectEnvSet.has(pathFold),
+                sourceRevision: input.commitSha,
+                fsSvc,
+                manifestSvc,
+            }));
+        }
+
+        const operations = this.pairRenames(classified);
+        const { op: invocationOp, liveDiverged: invocationBlocked } = this.classifyInvocation(
+            input.priorManifest,
+            input.candidateInvocation,
+            input.liveInvocation,
+            input.commitSha,
+        );
+        if (invocationOp) operations.push(invocationOp);
+
+        const counts = this.countOps(operations);
+        const blocked = operations.some((op) => BLOCKING_CHANGE_PLAN_OPS.has(op.op));
+        const fingerprint = this.fingerprint({
+            commitSha: input.commitSha,
+            priorManifestVersion: input.priorManifest?.manifestVersion ?? null,
+            priorAppliedDir: input.priorManifest?.generation.appliedDir ?? null,
+            operations,
+        });
+
+        return {
+            schemaVersion: GIT_CHANGE_PLAN_SCHEMA_VERSION,
+            fingerprint,
+            blocked,
+            invocationBlocked,
+            candidateInvocation: input.candidateInvocation,
+            liveInvocation: input.liveInvocation,
+            priorInvocation: input.priorManifest?.project.invocation ?? [],
+            operations,
+            counts,
+        };
+    }
+
+    toPublic(plan: GitChangePlan): PublicGitChangePlan {
+        return {
+            blocked: plan.blocked,
+            counts: plan.counts,
+            operations: plan.operations
+                .filter((op) => op.op !== 'unchanged')
+                .map((op) => this.toPublicOp(op)),
+            invocation: {
+                candidateChanged: this.invocationsDiffer(plan.candidateInvocation, plan.priorInvocation),
+                liveDiverged: plan.invocationBlocked,
+            },
+        };
+    }
+
+    toPendingSummary(plan: GitChangePlan): PublicPendingPlan {
+        const publicPlan = this.toPublic(plan);
+        return {
+            fingerprint: plan.fingerprint,
+            blocked: publicPlan.blocked,
+            counts: publicPlan.counts,
+            operations: publicPlan.operations,
+        };
+    }
+
+    private toPublicOp(op: GitChangePlanOperation): PublicGitChangePlanOperation {
+        const redact = op.sensitivity === 'high';
+        const publicOp: PublicGitChangePlanOperation = {
+            path: redact || op.op === 'invocation' ? null : op.pathKey,
+            op: op.op,
+            role: op.role,
+        };
+        if (op.fromPath !== undefined) {
+            publicOp.fromPath = redact ? null : op.fromPath;
+        }
+        return publicOp;
+    }
+
+    private fingerprint(input: {
+        commitSha: string;
+        priorManifestVersion: number | null;
+        priorAppliedDir: string | null;
+        operations: GitChangePlanOperation[];
+    }): string {
+        const ops = [...input.operations]
+            .sort((a, b) => a.pathKey.localeCompare(b.pathKey))
+            .map((op) => ({
+                pathKey: op.pathKey,
+                op: op.op,
+                priorHash: op.priorHash,
+                candidateHash: op.candidateHash,
+                liveHash: op.liveHash,
+                role: op.role,
+                deletionAuthority: op.deletionAuthority,
+                fromPath: op.fromPath ?? null,
+                ownership: op.ownership,
+                provenance: op.provenance,
+                sensitivity: op.sensitivity,
+                reason: op.reason,
+            }));
+        const canonical = {
+            schemaVersion: GIT_CHANGE_PLAN_SCHEMA_VERSION,
+            commitSha: input.commitSha,
+            priorManifestVersion: input.priorManifestVersion,
+            priorAppliedDir: input.priorAppliedDir,
+            operations: ops,
+        };
+        return createHash('sha256').update(JSON.stringify(canonical), 'utf8').digest('hex');
+    }
+
+    private indexPaths(inputs: ComposeInputEntry[], buildContexts: BuildContextPlan[]): Map<string, PathMeta> {
+        const index = new Map<string, PathMeta>();
+        const contextSensitivity = new Map<string, InputSensitivity>();
+        for (const entry of inputs) {
+            if (entry.materializedPath === null) continue;
+            if (entry.dependencyKind === 'build-context' || entry.dependencyKind === 'build-additional-context') {
+                contextSensitivity.set(entry.materializedPath.toLowerCase(), entry.sensitivity);
+            }
+            if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
+            if (entry.dependencyKind === 'build-context' || entry.dependencyKind === 'build-additional-context') continue;
+            index.set(entry.materializedPath.toLowerCase(), {
+                hash: entry.contentSha256,
+                role: entry.role,
+                deletionAuthority: entry.deletionAuthority,
+                sensitivity: entry.sensitivity,
+                ownership: entry.ownership,
+                provenance: entry.provenance,
+            });
+        }
+        for (const context of buildContexts) {
+            const parentSensitivity = contextSensitivity.get(context.repoPath.toLowerCase()) ?? 'medium';
+            for (const file of context.files) {
+                const rel = context.repoPath ? `${context.repoPath}/${file.path}` : file.path;
+                index.set(rel.toLowerCase(), {
+                    hash: file.sha256,
+                    role: 'build-context-file',
+                    deletionAuthority: 'sencho',
+                    sensitivity: parentSensitivity,
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                });
+            }
+        }
+        return index;
+    }
+
+    private mergePaths(prior: string[], candidate: string[]): string[] {
+        const byFold = new Map<string, string>();
+        for (const rel of [...prior, ...candidate]) {
+            const key = rel.toLowerCase();
+            if (!byFold.has(key)) byFold.set(key, rel);
+        }
+        return [...byFold.values()].sort((a, b) => a.localeCompare(b));
+    }
+
+    private async classifyPath(args: {
+        stackName: string;
+        pathKey: string;
+        prior: PathMeta | undefined;
+        candidate: PathMeta | undefined;
+        mode: GitChangePlanMode;
+        legacyOwned: Set<string>;
+        reviewedLiveHash?: string | null;
+        hasReviewedLive: boolean;
+        isContextExtra: boolean;
+        isProjectEnv: boolean;
+        sourceRevision: string;
+        fsSvc: FileSystemService;
+        manifestSvc: GitProjectManifestService;
+    }): Promise<GitChangePlanOperation> {
+        const { pathKey, prior, candidate, mode, legacyOwned, sourceRevision } = args;
+        const role = candidate?.role ?? prior?.role ?? (args.isProjectEnv ? 'env' : 'other');
+        const deletionAuthority = candidate?.deletionAuthority ?? prior?.deletionAuthority ?? null;
+        const secretExtra = args.isContextExtra && isSecretBearingRelPath(pathKey);
+        const sensitivity = secretExtra
+            ? 'high'
+            : (candidate?.sensitivity ?? prior?.sensitivity ?? (args.isProjectEnv ? 'high' : 'medium'));
+        const ownership = candidate?.ownership
+            ?? prior?.ownership
+            ?? (args.isProjectEnv || args.isContextExtra ? 'unmanaged' : 'managed');
+        const provenance = candidate?.provenance
+            ?? prior?.provenance
+            ?? (args.isProjectEnv || args.isContextExtra ? 'adopted' : 'fetch');
+        const meta = { ownership, provenance, sourceRevision };
+        const priorHash = prior?.hash ?? null;
+        const candidateHash = candidate?.hash ?? null;
+        const typeChanged = (reason: string): GitChangePlanOperation => this.op(
+            pathKey, 'type-changed', role, deletionAuthority, priorHash, candidateHash, null, sensitivity, { ...meta, reason },
+        );
+
+        const liveKind = await observeKind(args.fsSvc, args.stackName, pathKey);
+        if (liveKind === 'escape') {
+            return typeChanged('live path escapes the stack through a symlink');
+        }
+
+        let liveHash: string | null = null;
+        if (liveKind === 'file') {
+            try {
+                liveHash = await args.manifestSvc.hashStackFile(args.stackName, pathKey);
+            } catch (err) {
+                if (isSymlinkEscape(err)) return typeChanged('live path is not a regular file');
+                const kindAfter = await observeKind(args.fsSvc, args.stackName, pathKey);
+                if (kindAfter !== 'file' && kindAfter !== null) {
+                    return typeChanged('live path is not a regular file');
+                }
+                throw err;
+            }
+        }
+
+        const priorPresent = prior !== undefined && priorHash !== null;
+        const candidatePresent = candidate !== undefined && candidateHash !== null;
+
+        if (liveKind !== 'file' && liveKind !== null) {
+            return typeChanged('live path is not a regular file');
+        }
+
+        if (args.hasReviewedLive && args.reviewedLiveHash !== liveHash) {
+            return this.op(pathKey, 'local-modified', role, deletionAuthority, priorHash, candidateHash, liveHash, sensitivity, {
+                ...meta,
+                reason: 'live hash changed since review',
+            });
+        }
+
+        if (priorPresent && candidatePresent) {
+            if (liveKind === null) {
+                return this.op(pathKey, 'local-missing', role, deletionAuthority, priorHash, candidateHash, null, sensitivity, {
+                    ...meta,
+                    reason: 'managed path absent on disk',
+                });
+            }
+            if (liveHash !== priorHash) {
+                // Live vs last-applied, not vs candidate. Matching incoming
+                // bytes by coincidence is still a local edit.
+                return this.op(pathKey, 'local-modified', role, deletionAuthority, priorHash, candidateHash, liveHash, sensitivity, {
+                    ...meta,
+                    reason: 'live hash differs from prior managed hash',
+                });
+            }
+            if (candidateHash === priorHash) {
+                return this.op(pathKey, 'unchanged', role, deletionAuthority, priorHash, candidateHash, liveHash, sensitivity, {
+                    ...meta,
+                    reason: 'matches prior managed hash',
+                });
+            }
+            return this.op(pathKey, 'modify', role, deletionAuthority, priorHash, candidateHash, liveHash, sensitivity, {
+                ...meta,
+                reason: 'candidate content differs from prior',
+            });
+        }
+
+        if (priorPresent && !candidatePresent) {
+            if (liveKind === null) {
+                return this.op(pathKey, 'local-missing', role, deletionAuthority, priorHash, null, null, sensitivity, {
+                    ...meta,
+                    reason: 'managed path absent on disk',
+                });
+            }
+            if (prior?.deletionAuthority !== 'sencho') {
+                return this.op(pathKey, 'local-modified', role, deletionAuthority, priorHash, null, liveHash, sensitivity, {
+                    ...meta,
+                    reason: 'live path is not sencho-deletable',
+                });
+            }
+            if (liveKind === 'file' && liveHash !== priorHash) {
+                return this.op(pathKey, 'local-modified', role, deletionAuthority, priorHash, null, liveHash, sensitivity, {
+                    ...meta,
+                    reason: 'live hash differs from prior managed hash',
+                });
+            }
+            return this.op(pathKey, 'delete', role, deletionAuthority, priorHash, null, liveHash, sensitivity, {
+                ...meta,
+                reason: 'removed from candidate',
+            });
+        }
+
+        if (!priorPresent && !candidatePresent) {
+            if (args.isProjectEnv) {
+                if (liveKind === null) {
+                    return this.op(pathKey, 'local-missing', role, deletionAuthority, null, null, null, sensitivity, {
+                        ...meta,
+                        reason: 'configured project env file missing on disk',
+                    });
+                }
+                return this.op(pathKey, 'unchanged', role, deletionAuthority, null, null, liveHash, sensitivity, {
+                    ...meta,
+                    reason: 'configured project env file',
+                });
+            }
+            if (args.isContextExtra) {
+                return this.op(pathKey, 'unmanaged-collision', role, deletionAuthority, null, null, liveHash, sensitivity, {
+                    ...meta,
+                    reason: 'locally added in build context',
+                });
+            }
+        }
+
+        // Candidate-only path (add or collision).
+        if (mode === 'create' || liveKind === null || legacyOwned.has(pathKey)) {
+            return this.op(pathKey, 'add', role, deletionAuthority, null, candidateHash, liveHash, sensitivity, {
+                ...meta,
+                reason: 'new managed path',
+            });
+        }
+        return this.op(pathKey, 'unmanaged-collision', role, deletionAuthority, null, candidateHash, liveHash, sensitivity, {
+            ...meta,
+            reason: 'unmanaged live file at a candidate path',
+        });
+    }
+
+    private pairRenames(ops: GitChangePlanOperation[]): GitChangePlanOperation[] {
+        const deletes = ops.filter((o) => o.op === 'delete' && o.priorHash);
+        const adds = ops.filter((o) => o.op === 'add' && o.candidateHash);
+        const usedDeletes = new Set<string>();
+        const usedAdds = new Set<string>();
+        const renames: GitChangePlanOperation[] = [];
+
+        const deletesByHash = new Map<string, GitChangePlanOperation[]>();
+        for (const d of deletes) {
+            const list = deletesByHash.get(d.priorHash!) ?? [];
+            list.push(d);
+            deletesByHash.set(d.priorHash!, list);
+        }
+        const addsByHash = new Map<string, GitChangePlanOperation[]>();
+        for (const a of adds) {
+            const list = addsByHash.get(a.candidateHash!) ?? [];
+            list.push(a);
+            addsByHash.set(a.candidateHash!, list);
+        }
+
+        for (const [hash, delList] of deletesByHash) {
+            const addList = addsByHash.get(hash);
+            if (!addList) continue;
+            const leftoverDel = delList
+                .filter((d) => !usedDeletes.has(d.pathKey))
+                .sort((a, b) => a.pathKey.localeCompare(b.pathKey));
+            const leftoverAdd = addList
+                .filter((a) => !usedAdds.has(a.pathKey))
+                .sort((a, b) => a.pathKey.localeCompare(b.pathKey));
+            const pairs = Math.min(leftoverDel.length, leftoverAdd.length);
+            for (let i = 0; i < pairs; i++) {
+                const del = leftoverDel[i];
+                const add = leftoverAdd[i];
+                usedDeletes.add(del.pathKey);
+                usedAdds.add(add.pathKey);
+                const sensitivity = add.sensitivity === 'high' || del.sensitivity === 'high' ? 'high' : add.sensitivity;
+                renames.push(this.op(
+                    add.pathKey,
+                    'rename',
+                    add.role,
+                    del.deletionAuthority,
+                    del.priorHash,
+                    add.candidateHash,
+                    add.liveHash,
+                    sensitivity,
+                    {
+                        fromPath: del.pathKey,
+                        ownership: add.ownership,
+                        provenance: add.provenance,
+                        sourceRevision: add.sourceRevision,
+                        reason: 'same content, new path',
+                    },
+                ));
+            }
+        }
+
+        const kept = ops.filter((o) =>
+            !(o.op === 'delete' && usedDeletes.has(o.pathKey))
+            && !(o.op === 'add' && usedAdds.has(o.pathKey)),
+        );
+        return [...kept, ...renames].sort((a, b) => a.pathKey.localeCompare(b.pathKey));
+    }
+
+    private classifyInvocation(
+        prior: GitProjectManifest | null,
+        candidateInvocation: string[],
+        liveInvocation: string[],
+        sourceRevision: string,
+    ): { op: GitChangePlanOperation | null; liveDiverged: boolean } {
+        if (prior === null) return { op: null, liveDiverged: false };
+        const priorInv = prior.project.invocation;
+        const liveDiverged = this.invocationsDiffer(liveInvocation, priorInv);
+        const candidateChanged = this.invocationsDiffer(candidateInvocation, priorInv);
+        if (!liveDiverged && !candidateChanged) return { op: null, liveDiverged: false };
+        return {
+            liveDiverged,
+            op: this.op(
+                INVOCATION_PATH_KEY,
+                'invocation',
+                'invocation',
+                null,
+                sha256Hex(JSON.stringify(priorInv)),
+                sha256Hex(JSON.stringify(candidateInvocation)),
+                sha256Hex(JSON.stringify(liveInvocation)),
+                'low',
+                {
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    sourceRevision,
+                    reason: liveDiverged
+                        ? 'live compose invocation diverged from prior'
+                        : 'candidate compose invocation changed',
+                },
+            ),
+        };
+    }
+
+    private invocationsEqual(a: string[], b: string[]): boolean {
+        return JSON.stringify(a) === JSON.stringify(b);
+    }
+
+    private invocationsDiffer(a: string[], b: string[]): boolean {
+        return !this.invocationsEqual(a, b);
+    }
+
+    private countOps(operations: GitChangePlanOperation[]): GitChangePlanCounts {
+        const counts: GitChangePlanCounts = {
+            add: 0,
+            modify: 0,
+            delete: 0,
+            rename: 0,
+            unchanged: 0,
+            localModified: 0,
+            localMissing: 0,
+            typeChanged: 0,
+            unmanagedCollision: 0,
+            invocation: 0,
+        };
+        for (const op of operations) {
+            switch (op.op) {
+                case 'add': counts.add += 1; break;
+                case 'modify': counts.modify += 1; break;
+                case 'delete': counts.delete += 1; break;
+                case 'rename': counts.rename += 1; break;
+                case 'unchanged': counts.unchanged += 1; break;
+                case 'local-modified': counts.localModified += 1; break;
+                case 'local-missing': counts.localMissing += 1; break;
+                case 'type-changed': counts.typeChanged += 1; break;
+                case 'unmanaged-collision': counts.unmanagedCollision += 1; break;
+                case 'invocation': counts.invocation += 1; break;
+            }
+        }
+        return counts;
+    }
+
+    private async collectContextUniverseExtras(args: {
+        stackName: string;
+        candidateInputs: ComposeInputEntry[];
+        candidateBuildContexts: BuildContextPlan[];
+        priorBuildContexts: BuildContextPlan[];
+        priorInputs: ComposeInputEntry[];
+        manifestSvc: GitProjectManifestService;
+    }): Promise<string[]> {
+        const managedInputPaths = new Set(
+            [...args.priorInputs, ...args.candidateInputs]
+                .filter((i) => i.ownership === 'managed' && i.state === 'present' && i.materializedPath !== null)
+                .map((i) => i.materializedPath!),
+        );
+        const contextsByFold = new Map<string, BuildContextPlan>();
+        for (const context of [...args.priorBuildContexts, ...args.candidateBuildContexts]) {
+            contextsByFold.set(context.repoPath.toLowerCase(), context);
+        }
+        const extras: string[] = [];
+        for (const context of contextsByFold.values()) {
+            const diverged = await args.manifestSvc.verifyContextOnDisk(
+                args.stackName,
+                context,
+                managedInputPaths,
+            );
+            for (const entry of diverged) {
+                const stackRel = this.stackPathFromContextDivergence(context.repoPath, entry);
+                if (stackRel) extras.push(stackRel);
+            }
+        }
+        return extras;
+    }
+
+    private stackPathFromContextDivergence(contextRepoPath: string, diverged: string): string | null {
+        if (
+            diverged === '. (symbolic link)'
+            || diverged === '. (special file node)'
+            || diverged === '. (scan limit exceeded)'
+        ) {
+            return contextRepoPath || '.';
+        }
+        const join = (rel: string): string => (contextRepoPath ? `${contextRepoPath}/${rel}` : rel);
+        const annotated = diverged.match(
+            /^(.+) \((?:locally added, not in the managed context|symbolic link|special file node|missing)\)$/,
+        );
+        if (annotated) return join(annotated[1]);
+        if (!diverged.includes('(')) return join(diverged);
+        return null;
+    }
+
+    private op(
+        pathKey: string,
+        op: GitChangePlanOp,
+        role: GitChangePlanOperation['role'],
+        deletionAuthority: DeletionAuthority | null,
+        priorHash: string | null,
+        candidateHash: string | null,
+        liveHash: string | null,
+        sensitivity: InputSensitivity,
+        meta: {
+            fromPath?: string;
+            ownership: InputOwnership;
+            provenance: ManifestProvenance;
+            sourceRevision: string;
+            reason: string;
+        },
+    ): GitChangePlanOperation {
+        return {
+            pathKey,
+            op,
+            role,
+            deletionAuthority,
+            priorHash,
+            candidateHash,
+            liveHash,
+            sensitivity,
+            ownership: meta.ownership,
+            provenance: meta.provenance,
+            sourceRevision: meta.sourceRevision,
+            reason: meta.reason,
+            ...(meta.fromPath !== undefined ? { fromPath: meta.fromPath } : {}),
+        };
+    }
+}

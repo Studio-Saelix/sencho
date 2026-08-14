@@ -244,5 +244,19 @@ describe('StackActivityTimeline - actor rendering', () => {
     await waitFor(() => expect(screen.getByText('event')).toBeTruthy());
     expect(screen.queryByText(/^(by|via)\s/)).toBeNull();
   });
+
+  it('renders webhook and git-source system actors with product labels', async () => {
+    mockFetch.mockReturnValueOnce(jsonResponse([
+      evt({ id: 1, message: 'pull ready', actor_username: 'system:webhook' }),
+    ]));
+    const { unmount } = render(<StackActivityTimeline stackName="web" />);
+    await waitFor(() => expect(screen.getByText(/via Webhook/)).toBeTruthy());
+    unmount();
+    mockFetch.mockReturnValueOnce(jsonResponse([
+      evt({ id: 2, message: 'applied', actor_username: 'system:git-source' }),
+    ]));
+    render(<StackActivityTimeline stackName="web" />);
+    await waitFor(() => expect(screen.getByText(/via Git source/)).toBeTruthy());
+  });
 });
 

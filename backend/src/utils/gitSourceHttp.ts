@@ -17,13 +17,22 @@ import { GitSourceError } from '../services/GitSourceService';
 
 export function gitSourceStatus(code: GitSourceErrorCode): number {
   switch (code) {
-    case 'AUTH_FAILED': return 400;
+    case 'AUTH_FAILED':
+    case 'PLAN_FINGERPRINT_REQUIRED':
+      return 400;
     case 'REPO_NOT_FOUND':
     case 'BRANCH_NOT_FOUND':
     case 'FILE_NOT_FOUND':
       return 404;
-    case 'NETWORK_TIMEOUT': return 504;
-    default: return 400;
+    case 'STALE_PLAN':
+    case 'PLAN_BLOCKED':
+    case 'LEGACY_PENDING':
+    case 'PLAN_UNAVAILABLE':
+      return 409;
+    case 'NETWORK_TIMEOUT':
+      return 504;
+    default:
+      return 400;
   }
 }
 
@@ -54,7 +63,10 @@ export function webhookPullStatus(status: 'success' | 'skipped' | 'error'): numb
 
 export function sendGitSourceError(res: Response, err: unknown): void {
   if (err instanceof GitSourceError) {
-    res.status(gitSourceStatus(err.code)).json({ error: err.message, code: err.code });
+    const body: Record<string, unknown> = { error: err.message, code: err.code };
+    if (err.extras?.plan) body.plan = err.extras.plan;
+    if (err.extras?.planFingerprint) body.planFingerprint = err.extras.planFingerprint;
+    res.status(gitSourceStatus(err.code)).json(body);
     return;
   }
   console.error('[GitSource] Unexpected error:', err);

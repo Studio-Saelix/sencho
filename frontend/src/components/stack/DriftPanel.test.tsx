@@ -228,4 +228,17 @@ describe('DriftPanel', () => {
     await screen.findByTestId('drift-status');
     expect(screen.queryByText(/checked/i)).not.toBeInTheDocument();
   });
+
+  it('labels a managed-path conflict without rendering the opaque service key', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'in-sync',
+      ledger: [
+        { service: 'deadbeefcafebabe', kind: 'managed-path-conflict', message: 'compose-primary local-modified', detectedAt: Date.now(), resolvedAt: null },
+      ],
+    })));
+    render(<DriftPanel stackName="web" />);
+    await screen.findByText('managed path');
+    expect(screen.queryByText('deadbeefcafebabe')).not.toBeInTheDocument();
+    expect(screen.getByText('compose-primary local-modified')).toBeInTheDocument();
+  });
 });

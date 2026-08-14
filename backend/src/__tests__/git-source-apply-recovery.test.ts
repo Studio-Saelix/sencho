@@ -3,6 +3,7 @@
  * compensateWithCandidate is not called.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
 
 const mockCaptureCandidate = vi.fn();
 const mockAbandon = vi.fn();
@@ -76,36 +77,46 @@ vi.mock('../services/NodeRegistry', () => ({
 }));
 
 const mockPromoteGeneration = vi.fn().mockResolvedValue(undefined);
-vi.mock('../services/GitProjectManifestService', () => ({
-  GitProjectManifestService: {
-    getInstance: () => ({
-      readManifest: vi.fn().mockResolvedValue(null),
-      buildManifest: vi.fn().mockReturnValue({
-        manifestVersion: 1,
-        state: 'active',
-        inputs: [],
-        refusals: [],
-        generation: { candidateDir: 'c', appliedDir: 'a', previousDir: null },
+vi.mock('../services/GitProjectManifestService', async () => {
+  const actual = await vi.importActual<typeof import('../services/GitProjectManifestService')>(
+    '../services/GitProjectManifestService',
+  );
+  return {
+    ...actual,
+    GitProjectManifestService: {
+      getInstance: () => ({
+        readManifest: vi.fn().mockResolvedValue(null),
+        buildManifest: vi.fn().mockReturnValue({
+          manifestVersion: 1,
+          state: 'active',
+          inputs: [],
+          refusals: [],
+          generation: { candidateDir: 'c', appliedDir: 'a', previousDir: null },
+        }),
+        promoteGeneration: mockPromoteGeneration,
+        boundsConfig: vi.fn().mockReturnValue({}),
+        hashStackFile: vi.fn(),
+        verifyContextOnDisk: vi.fn().mockResolvedValue([]),
+        writeManifest: vi.fn(),
+        buildMigratedManifest: vi.fn(),
       }),
-      promoteGeneration: mockPromoteGeneration,
-      boundsConfig: vi.fn().mockReturnValue({}),
-      hashStackFile: vi.fn(),
-      verifyContextOnDisk: vi.fn().mockResolvedValue([]),
-      writeManifest: vi.fn(),
-      buildMigratedManifest: vi.fn(),
-    }),
-  },
-}));
+    },
+  };
+});
 
 vi.mock('../utils/authoredComposeArgs', () => ({
   authoredComposeFileArgs: vi.fn().mockResolvedValue(['-f', 'compose.yaml']),
   authoredComposeEnvFileArgs: vi.fn().mockResolvedValue([]),
+  candidateValidationEnvFileArgs: vi.fn().mockResolvedValue([]),
 }));
 
 const mockGetGitSource = vi.fn();
 const mockMarkGitSourceApplied = vi.fn();
 const mockSetGitSourceAppliedSpec = vi.fn();
 const mockSetGitSourceManifestState = vi.fn();
+const mockUpdateGitSourcePendingPlan = vi.fn();
+const mockSetGitSourceLastPlan = vi.fn();
+const mockAddNotificationHistory = vi.fn();
 
 vi.mock('../services/DatabaseService', () => ({
   DatabaseService: {
@@ -114,6 +125,19 @@ vi.mock('../services/DatabaseService', () => ({
       markGitSourceApplied: mockMarkGitSourceApplied,
       setGitSourceAppliedSpec: mockSetGitSourceAppliedSpec,
       setGitSourceManifestState: mockSetGitSourceManifestState,
+      updateGitSourcePendingPlan: mockUpdateGitSourcePendingPlan,
+      setGitSourceLastPlan: mockSetGitSourceLastPlan,
+      addNotificationHistory: mockAddNotificationHistory,
+      getStackProjectEnvFiles: vi.fn().mockReturnValue([]),
+    }),
+  },
+}));
+
+vi.mock('../services/DriftLedgerService', () => ({
+  DriftLedgerService: {
+    getInstance: () => ({
+      upsertManagedPathConflicts: vi.fn(),
+      resolveManagedPathConflicts: vi.fn(),
     }),
   },
 }));
@@ -162,7 +186,7 @@ describe('git-source apply recovery (R1)', () => {
       branch: 'main',
       pending_commit_sha: 'abc1234deadbeef',
       pending_compose_content: JSON.stringify({
-        v: 3,
+        v: 4,
         files: { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' },
         contextDir: null,
         candidateRelPath: 'generations/cand',
@@ -171,8 +195,12 @@ describe('git-source apply recovery (R1)', () => {
           refusals: [],
           buildContexts: [],
         },
+        planFingerprint: 'fp-test',
+        planSchemaVersion: GIT_CHANGE_PLAN_SCHEMA_VERSION,
+        operationId: 'op-aaaaaaaa',
       }),
       pending_env_content: null,
+      pending_plan_blocked: false,
       sync_env: false,
       compose_paths: ['compose.yaml'],
       context_dir: null,
@@ -181,52 +209,57 @@ describe('git-source apply recovery (R1)', () => {
     });
   });
 
-  it('keeps applied=true and generation current without compensate when deploy fails', async () => {
-    const { GitSourceService } = await import('../services/GitSourceService');
-    // Avoid withStackLock contention by calling applyLocked through apply
-    // after stubbing the lock if present.
-    const svc = GitSourceService.getInstance();
-    const withLock = vi.spyOn(
-      svc as unknown as { withStackLock: (name: string, fn: () => Promise<unknown>) => Promise<unknown> },
-      'withStackLock',
-    );
-    withLock.mockImplementation(async (_name, fn) => fn());
+  const CLEAN_PLAN = {
+    schemaVersion: GIT_CHANGE_PLAN_SCHEMA_VERSION,
+    fingerprint: 'fp-test',
+    blocked: false,
+    invocationBlocked: false,
+    candidateInvocation: ['-f', 'compose.yaml', '-p', 'app'],
+    liveInvocation: ['-f', 'compose.yaml', '-p', 'app'],
+    priorInvocation: ['-f', 'compose.yaml', '-p', 'app'],
+    operations: [],
+    counts: {
+      add: 0, modify: 0, delete: 0, rename: 0, unchanged: 0,
+      localModified: 0, localMissing: 0, typeChanged: 0, unmanagedCollision: 0, invocation: 0,
+    },
+  };
 
-    // validateCandidate is used on the v3 path; stub it open.
-    vi.spyOn(
-      svc as unknown as {
-        validateCandidate: (...args: unknown[]) => Promise<{ ok: boolean }>;
-      },
-      'validateCandidate',
-    ).mockResolvedValue({ ok: true });
-
-    vi.spyOn(
-      svc as unknown as {
-        decodePendingCompose: (raw: string) => unknown;
-      },
-      'decodePendingCompose',
-    ).mockReturnValue({
-      files: { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' },
+  function stubApplyPath(svc: {
+    withStackLock: (name: string, fn: () => Promise<unknown>) => Promise<unknown>;
+    validateCandidate: (...args: unknown[]) => Promise<{ ok: boolean }>;
+    decodePendingCompose: (raw: string) => unknown;
+    deriveAppliedSpec: (...args: unknown[]) => unknown;
+    hashContent: (...args: unknown[]) => string;
+    computeChangePlan: (...args: unknown[]) => Promise<typeof CLEAN_PLAN>;
+  }) {
+    vi.spyOn(svc, 'withStackLock').mockImplementation(async (_name, fn) => fn());
+    vi.spyOn(svc, 'validateCandidate').mockResolvedValue({ ok: true });
+    vi.spyOn(svc, 'decodePendingCompose').mockReturnValue({
+      version: 4,
+      files: [{ path: 'compose.yaml', content: 'services:\n  web:\n    image: nginx\n' }],
       contextDir: null,
       candidateRelPath: 'generations/cand',
       inventory: { inputs: [], refusals: [], buildContexts: [] },
+      planFingerprint: 'fp-test',
+      planSchemaVersion: GIT_CHANGE_PLAN_SCHEMA_VERSION,
+      operationId: 'op-aaaaaaaa',
+      reviewedLive: [],
     });
+    vi.spyOn(svc, 'computeChangePlan').mockResolvedValue(CLEAN_PLAN);
+    vi.spyOn(svc, 'deriveAppliedSpec').mockReturnValue({ files: ['compose.yaml'], contextDir: null });
+    vi.spyOn(svc, 'hashContent').mockReturnValue('hash');
+  }
 
-    vi.spyOn(
-      svc as unknown as {
-        deriveAppliedSpec: (...args: unknown[]) => unknown;
-      },
-      'deriveAppliedSpec',
-    ).mockReturnValue({ files: ['compose.yaml'], contextDir: null });
+  it('keeps applied=true and generation current without compensate when deploy fails', async () => {
+    const { GitSourceService } = await import('../services/GitSourceService');
+    const svc = GitSourceService.getInstance();
+    stubApplyPath(svc as never);
 
-    vi.spyOn(
-      svc as unknown as {
-        hashContent: (...args: unknown[]) => string;
-      },
-      'hashContent',
-    ).mockReturnValue('hash');
-
-    const result = await svc.apply('app', 'abc1234deadbeef', { deploy: true, actor: 'tester' });
+    const result = await svc.apply('app', 'abc1234deadbeef', {
+      deploy: true,
+      actor: 'tester',
+      requirePlanFingerprint: false,
+    });
 
     expect(result.applied).toBe(true);
     expect(result.deployed).toBe(false);
@@ -239,6 +272,7 @@ describe('git-source apply recovery (R1)', () => {
     expect(mockHandoff).toHaveBeenCalled();
     expect(mockCompensate).not.toHaveBeenCalled();
     expect(mockAbandon).not.toHaveBeenCalled();
+    expect(mockSetGitSourceLastPlan).toHaveBeenCalledWith('app', 'fp-test', 'applied');
   });
 
   it('refuses to promote when recovery capture fails', async () => {
@@ -247,37 +281,62 @@ describe('git-source apply recovery (R1)', () => {
 
     const { GitSourceService, GitSourceError } = await import('../services/GitSourceService');
     const svc = GitSourceService.getInstance();
-    vi.spyOn(
-      svc as unknown as { withStackLock: (name: string, fn: () => Promise<unknown>) => Promise<unknown> },
-      'withStackLock',
-    ).mockImplementation(async (_name, fn) => fn());
-    vi.spyOn(
-      svc as unknown as { validateCandidate: (...args: unknown[]) => Promise<{ ok: boolean }> },
-      'validateCandidate',
-    ).mockResolvedValue({ ok: true });
-    vi.spyOn(
-      svc as unknown as { decodePendingCompose: (raw: string) => unknown },
-      'decodePendingCompose',
-    ).mockReturnValue({
-      files: { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' },
-      contextDir: null,
-      candidateRelPath: 'generations/cand',
-      inventory: { inputs: [], refusals: [], buildContexts: [] },
-    });
-    vi.spyOn(
-      svc as unknown as { deriveAppliedSpec: (...args: unknown[]) => unknown },
-      'deriveAppliedSpec',
-    ).mockReturnValue({ files: ['compose.yaml'], contextDir: null });
-    vi.spyOn(
-      svc as unknown as { hashContent: (...args: unknown[]) => string },
-      'hashContent',
-    ).mockReturnValue('hash');
+    stubApplyPath(svc as never);
 
-    await expect(svc.apply('app', 'abc1234deadbeef', { deploy: true, actor: 'tester' })).rejects.toBeInstanceOf(GitSourceError);
+    await expect(svc.apply('app', 'abc1234deadbeef', {
+      deploy: true,
+      actor: 'tester',
+      requirePlanFingerprint: false,
+    })).rejects.toBeInstanceOf(GitSourceError);
     expect(mockPromoteGeneration).not.toHaveBeenCalled();
     expect(mockCaptureCandidate).toHaveBeenCalled();
     expect(mockMarkGitSourceApplied).not.toHaveBeenCalled();
     expect(mockHandoff).not.toHaveBeenCalled();
     expect(mockAbandon).not.toHaveBeenCalled();
+  });
+
+  it('records git_apply_failed when promote fails before mutation', async () => {
+    const { PromoteGenerationError } = await import('../services/GitProjectManifestService');
+    mockPromoteGeneration.mockRejectedValueOnce(new PromoteGenerationError('pre_mutation', new Error('refused')));
+    const { GitSourceService, GitSourceError } = await import('../services/GitSourceService');
+    const svc = GitSourceService.getInstance();
+    stubApplyPath(svc as never);
+
+    await expect(svc.apply('app', 'abc1234deadbeef', { requirePlanFingerprint: false })).rejects.toBeInstanceOf(GitSourceError);
+    expect(mockSetGitSourceLastPlan).toHaveBeenCalledWith('app', 'fp-test', 'failed');
+    expect(mockAddNotificationHistory).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ category: 'git_apply_failed' }),
+    );
+  });
+
+  it('records git_apply_rolled_back when promote restore succeeds', async () => {
+    const { PromoteGenerationError } = await import('../services/GitProjectManifestService');
+    mockPromoteGeneration.mockRejectedValueOnce(new PromoteGenerationError('restored', new Error('write failed')));
+    const { GitSourceService, GitSourceError } = await import('../services/GitSourceService');
+    const svc = GitSourceService.getInstance();
+    stubApplyPath(svc as never);
+
+    await expect(svc.apply('app', 'abc1234deadbeef', { requirePlanFingerprint: false })).rejects.toBeInstanceOf(GitSourceError);
+    expect(mockSetGitSourceLastPlan).toHaveBeenCalledWith('app', 'fp-test', 'rolled_back');
+    expect(mockAddNotificationHistory).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ category: 'git_apply_rolled_back' }),
+    );
+  });
+
+  it('records git_apply_failed when restore itself fails', async () => {
+    const { PromoteGenerationError } = await import('../services/GitProjectManifestService');
+    mockPromoteGeneration.mockRejectedValueOnce(new PromoteGenerationError('recovery_required', new Error('restore failed')));
+    const { GitSourceService, GitSourceError } = await import('../services/GitSourceService');
+    const svc = GitSourceService.getInstance();
+    stubApplyPath(svc as never);
+
+    await expect(svc.apply('app', 'abc1234deadbeef', { requirePlanFingerprint: false })).rejects.toBeInstanceOf(GitSourceError);
+    expect(mockSetGitSourceLastPlan).toHaveBeenCalledWith('app', 'fp-test', 'failed');
+    expect(mockAddNotificationHistory).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ category: 'git_apply_failed' }),
+    );
   });
 });

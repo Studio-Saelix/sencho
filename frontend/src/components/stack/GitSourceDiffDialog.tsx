@@ -1,25 +1,67 @@
-import { useState, Suspense } from 'react';
-import { SafeDiffEditor } from '@/lib/SafeDiffEditor';
-import { AlertTriangle, Loader2 } from 'lucide-react';
-import { Modal, ModalHeader, ModalFooter, ConfirmModal } from '@/components/ui/modal';
-import { Tabs, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
+import { useState } from 'react';
+import { AlertTriangle, GitBranch, Loader2 } from 'lucide-react';
+import { Modal, ModalHeader, ModalFooter } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
-import { springs } from '@/lib/motion';
+import { ScrollArea } from '@/components/ui/scroll-area';
+
+export type GitChangePlanOp =
+  | 'add'
+  | 'modify'
+  | 'delete'
+  | 'rename'
+  | 'unchanged'
+  | 'local-modified'
+  | 'local-missing'
+  | 'type-changed'
+  | 'unmanaged-collision'
+  | 'invocation';
+
+export interface PublicGitChangePlanOperation {
+  path: string | null;
+  op: GitChangePlanOp;
+  role: string;
+  fromPath?: string | null;
+}
+
+export interface GitChangePlanCounts {
+  add: number;
+  modify: number;
+  delete: number;
+  rename: number;
+  unchanged: number;
+  localModified: number;
+  localMissing: number;
+  typeChanged: number;
+  unmanagedCollision: number;
+  invocation: number;
+}
+
+export interface PublicGitChangePlan {
+  blocked: boolean;
+  counts: GitChangePlanCounts;
+  operations: PublicGitChangePlanOperation[];
+  invocation: {
+    candidateChanged: boolean;
+    liveDiverged: boolean;
+  };
+}
+
+export interface PublicPendingPlan {
+  fingerprint: string;
+  blocked: boolean;
+  counts: GitChangePlanCounts;
+  operations: PublicGitChangePlanOperation[];
+}
 
 export interface PullResult {
   commitSha: string;
-  incomingCompose: string;
-  incomingEnv: string | null;
-  currentCompose: string;
-  currentEnv: string | null;
   validation: { ok: boolean; error?: string };
-  hasLocalChanges: boolean;
-  /** Tolerated refusals from complete-project discovery; intentionally not surfaced in this dialog (actionable refusals abort the pull, so this is always empty). */
   refusals?: Array<{ sourcePath: string | null; kind: string; reason: string; actionable: boolean }>;
-  /** Clone-time warnings (submodules present, for example). */
   warnings?: string[];
+  plan: PublicGitChangePlan | null;
+  planFingerprint: string | null;
 }
 
 interface GitSourceDiffDialogProps {
@@ -27,12 +69,38 @@ interface GitSourceDiffDialogProps {
   onOpenChange: (open: boolean) => void;
   stackName: string;
   pull: PullResult | null;
-  syncEnv: boolean;
   autoDeployDefault: boolean;
-  isDarkMode: boolean;
   applying: boolean;
-  onApply: (commitSha: string, deploy: boolean) => Promise<void>;
+  onApply: (commitSha: string, deploy: boolean, planFingerprint: string) => Promise<void>;
   onDismiss: () => Promise<void>;
+}
+
+const OP_LABEL: Record<GitChangePlanOp, string> = {
+  add: 'Add',
+  modify: 'Modify',
+  delete: 'Remove',
+  rename: 'Rename',
+  unchanged: 'Unchanged',
+  'local-modified': 'Locally modified',
+  'local-missing': 'Missing on disk',
+  'type-changed': 'Type changed',
+  'unmanaged-collision': 'Unmanaged file in the way',
+  invocation: 'Compose invocation',
+};
+
+const BLOCKING_OPS = new Set<GitChangePlanOp>([
+  'local-modified',
+  'local-missing',
+  'type-changed',
+  'unmanaged-collision',
+]);
+
+function opPathLabel(op: PublicGitChangePlanOperation): string {
+  if (op.op === 'invocation') return 'Compose command line';
+  if (op.op === 'rename' && op.fromPath) {
+    return `${op.fromPath} → ${op.path ?? 'secret-bearing path'}`;
+  }
+  return op.path ?? 'secret-bearing managed path';
 }
 
 export function GitSourceDiffDialog({
@@ -40,165 +108,152 @@ export function GitSourceDiffDialog({
   onOpenChange,
   stackName,
   pull,
-  syncEnv,
   autoDeployDefault,
-  isDarkMode,
   applying,
   onApply,
   onDismiss,
 }: GitSourceDiffDialogProps) {
-  const [diffTab, setDiffTab] = useState<'compose' | 'env'>('compose');
   const [deployAfter, setDeployAfter] = useState<boolean>(autoDeployDefault);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-
-  const envAvailable = syncEnv && pull?.incomingEnv !== null;
-  const effectiveTab = envAvailable ? diffTab : 'compose';
 
   if (!pull) return null;
 
   const shortSha = pull.commitSha.slice(0, 7);
+  const missingPlan = !pull.plan || !pull.planFingerprint;
+  // plan.blocked is file conflicts only; invocation.liveDiverged does not disable Apply.
+  const blocked = missingPlan || pull.plan?.blocked === true || !pull.validation.ok;
+  const ops = pull.plan?.operations ?? [];
+  const unchanged = pull.plan?.counts.unchanged ?? 0;
 
   const apply = async () => {
-    await onApply(pull.commitSha, deployAfter);
+    if (!pull.planFingerprint || blocked) return;
+    await onApply(pull.commitSha, deployAfter, pull.planFingerprint);
   };
-
-  const handleApplyClick = () => {
-    if (pull.hasLocalChanges) {
-      setConfirmOpen(true);
-      return;
-    }
-    apply();
-  };
-
-  const currentValue = effectiveTab === 'compose' ? pull.currentCompose : (pull.currentEnv ?? '');
-  const incomingValue = effectiveTab === 'compose' ? pull.incomingCompose : (pull.incomingEnv ?? '');
 
   return (
-    <>
-      <Modal size="wide" open={open} onOpenChange={onOpenChange}>
-        <ModalHeader
-          kicker="GIT · PULL PREVIEW"
-          title={stackName}
-          description={`Incoming commit ${shortSha}. Review the diff between the current on-disk stack files and the incoming Git commit.`}
-        />
-
-        <div className="px-6 pt-4 space-y-3">
-          {!pull.validation.ok && (
-            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" strokeWidth={1.5} />
-              <div>
-                <p className="font-medium">Incoming compose failed validation</p>
-                <pre className="font-mono text-[11px] whitespace-pre-wrap mt-1">{pull.validation.error}</pre>
-              </div>
-            </div>
-          )}
-          {pull.hasLocalChanges && (
-            <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" strokeWidth={1.5} />
-              <div>
-                <p className="font-medium">Local edits detected on disk</p>
-                <p className="mt-0.5">Applying will overwrite changes that differ from the last applied commit.</p>
-              </div>
-            </div>
-          )}
-          {envAvailable && (
-            <Tabs value={diffTab} onValueChange={(v) => setDiffTab(v as 'compose' | 'env')}>
-              <TabsList>
-                <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
-                  <TabsHighlightItem value="compose">
-                    <TabsTrigger value="compose">Compose</TabsTrigger>
-                  </TabsHighlightItem>
-                  <TabsHighlightItem value="env">
-                    <TabsTrigger value="env">.env</TabsTrigger>
-                  </TabsHighlightItem>
-                </TabsHighlight>
-              </TabsList>
-            </Tabs>
-          )}
-        </div>
-
-        <div className="px-6 pb-4 pt-3">
-          <div className="h-[55vh] border border-glass-border rounded-md overflow-hidden">
-            <Suspense fallback={<div className="w-full h-full" aria-busy="true" />}>
-              <SafeDiffEditor
-                height="100%"
-                language={effectiveTab === 'compose' ? 'yaml' : 'ini'}
-                theme={isDarkMode ? 'vs-dark' : 'vs'}
-                original={currentValue}
-                modified={incomingValue}
-                options={{
-                  readOnly: true,
-                  renderSideBySide: true,
-                  minimap: { enabled: false },
-                  scrollBeyondLastLine: false,
-                  fontFamily: "'Geist Mono', monospace",
-                  fontSize: 12,
-                }}
-              />
-            </Suspense>
-          </div>
-        </div>
-
-        <ModalFooter
-          hint={
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="git-source-deploy-after"
-                checked={deployAfter}
-                onCheckedChange={(checked) => setDeployAfter(checked === true)}
-                disabled={applying || !pull.validation.ok}
-              />
-              <Label
-                htmlFor="git-source-deploy-after"
-                className="text-xs normal-case tracking-normal cursor-pointer"
-              >
-                Deploy after apply
-              </Label>
-            </div>
-          }
-          secondary={
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => onDismiss()}
-              disabled={applying}
-            >
-              Dismiss
-            </Button>
-          }
-          primary={
-            <Button
-              size="sm"
-              onClick={handleApplyClick}
-              disabled={applying || !pull.validation.ok}
-            >
-              {applying ? (
-                <>
-                  <Loader2 className="w-4 h-4 mr-1.5 animate-spin" strokeWidth={1.5} />
-                  Applying...
-                </>
-              ) : (
-                'Apply'
-              )}
-            </Button>
-          }
-        />
-      </Modal>
-
-      <ConfirmModal
-        open={confirmOpen}
-        onOpenChange={setConfirmOpen}
-        variant="destructive"
-        kicker="GIT · LOCAL CHANGES"
-        title="Overwrite local edits?"
-        description="The on-disk stack files differ from the last applied commit. Applying this pull will replace them with the incoming content."
-        confirmLabel="Overwrite and apply"
-        confirming={applying}
-        onConfirm={async () => {
-          setConfirmOpen(false);
-          await apply();
-        }}
+    <Modal size="wide" open={open} onOpenChange={onOpenChange} mobileFullScreen>
+      <ModalHeader
+        kicker="GIT · CHANGE PLAN"
+        title={stackName}
+        description={`Incoming commit ${shortSha}. Review classified file operations before applying. Unmanaged files are left untouched.`}
       />
-    </>
+
+      <div className="px-6 pt-4 space-y-3 max-md:px-4">
+        {!pull.validation.ok && (
+          <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" strokeWidth={1.5} />
+            <div>
+              <p className="font-medium">Incoming compose failed validation</p>
+              <pre className="font-mono text-[11px] whitespace-pre-wrap mt-1">{pull.validation.error}</pre>
+            </div>
+          </div>
+        )}
+        {missingPlan && (
+          <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" strokeWidth={1.5} />
+            <div>
+              <p className="font-medium">Change plan unavailable</p>
+              <p className="mt-0.5">This node did not return a classified plan. Pull again after updating the remote instance.</p>
+            </div>
+          </div>
+        )}
+        {pull.plan?.blocked && (
+          <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" strokeWidth={1.5} />
+            <div>
+              <p className="font-medium">Local conflicts block apply</p>
+              <p className="mt-0.5">Resolve locally modified, missing, or colliding files, then pull again. Sencho will not overwrite them.</p>
+            </div>
+          </div>
+        )}
+        {pull.plan?.invocation.liveDiverged && (
+          <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" strokeWidth={1.5} />
+            <div>
+              <p className="font-medium">Live Compose invocation changed</p>
+              <p className="mt-0.5">The Compose command line on disk no longer matches the last applied generation, for example a .env file was added or removed outside Git. Apply records the incoming invocation as the new baseline. Unmanaged files stay on disk.</p>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="px-6 pb-4 pt-3 max-md:px-4">
+        <ScrollArea className="h-[45vh] max-md:h-[40vh] border border-glass-border rounded-md">
+          <ul className="divide-y divide-glass-border text-sm">
+            {ops.map((op, i) => (
+              <li
+                key={`${op.op}-${op.path ?? 'redacted'}-${i}`}
+                className="flex items-start gap-3 px-3 py-2"
+                data-testid="git-plan-op"
+                data-op={op.op}
+              >
+                <GitBranch className="w-3.5 h-3.5 shrink-0 mt-0.5 text-stat-subtitle" strokeWidth={1.5} />
+                <div className="min-w-0 flex-1">
+                  <p className="font-medium">
+                    {OP_LABEL[op.op]}
+                    {BLOCKING_OPS.has(op.op) ? ' (blocks apply)' : ''}
+                  </p>
+                  <p className="font-mono text-xs text-stat-subtitle truncate">
+                    {opPathLabel(op)}
+                  </p>
+                </div>
+              </li>
+            ))}
+            {unchanged > 0 && (
+              <li className="px-3 py-2 text-xs text-stat-subtitle">
+                {unchanged} unchanged file{unchanged === 1 ? '' : 's'}
+              </li>
+            )}
+            {ops.length === 0 && unchanged === 0 && !missingPlan && (
+              <li className="px-3 py-2 text-xs text-stat-subtitle">No file operations in this plan.</li>
+            )}
+          </ul>
+        </ScrollArea>
+      </div>
+
+      <ModalFooter
+        hint={
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="git-source-deploy-after"
+              checked={deployAfter}
+              onCheckedChange={(checked) => setDeployAfter(checked === true)}
+              disabled={applying || blocked}
+            />
+            <Label
+              htmlFor="git-source-deploy-after"
+              className="text-xs normal-case tracking-normal cursor-pointer"
+            >
+              Deploy after apply
+            </Label>
+          </div>
+        }
+        secondary={
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onDismiss()}
+            disabled={applying}
+          >
+            Dismiss
+          </Button>
+        }
+        primary={
+          <Button
+            size="sm"
+            onClick={apply}
+            disabled={applying || blocked}
+          >
+            {applying ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-1.5 animate-spin" strokeWidth={1.5} />
+                Applying...
+              </>
+            ) : (
+              'Apply'
+            )}
+          </Button>
+        }
+      />
+    </Modal>
   );
 }

@@ -54,6 +54,14 @@ export type NotificationCategory =
     | 'rollback_generation_released'
     // Automatic external-network creation during deploy. History-only.
     | 'network_auto_created'
+    // Git source change-plan attempts. History-only (Activity timeline).
+    | 'git_pull_ready'
+    | 'git_plan_blocked'
+    | 'git_pull_failed'
+    | 'git_apply'
+    | 'git_apply_failed'
+    | 'git_apply_rolled_back'
+    | 'git_create'
     | 'node_update_available'
     | 'system';
 
@@ -72,6 +80,8 @@ export const ALL_SUPPRESSIBLE_CATEGORIES: readonly NotificationCategory[] = [
     'drift_detected', 'drift_resolved',
     'update_started', 'health_gate_passed', 'health_gate_failed',
     'network_auto_created', 'rollback_generation_released',
+    'git_pull_ready', 'git_plan_blocked', 'git_pull_failed',
+    'git_apply', 'git_apply_failed', 'git_apply_rolled_back', 'git_create',
 ];
 
 /** Webhook timeout: 10 seconds per external dispatch call. */

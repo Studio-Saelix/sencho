@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Rocket, RefreshCcw, CircleStop, Play, ArrowUp, Activity, Loader2, AlertCircle,
   TriangleAlert, CircleCheck, HeartPulse, HeartCrack, ArrowDownToLine, Unlock,
+  GitBranch, GitPullRequest, CircleX, Ban,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -50,6 +51,13 @@ const CATEGORY_ICON: Record<string, LucideIcon> = {
   health_gate_passed: HeartPulse,
   health_gate_failed: HeartCrack,
   rollback_generation_released: Unlock,
+  git_pull_ready: GitPullRequest,
+  git_plan_blocked: Ban,
+  git_pull_failed: CircleX,
+  git_apply: GitBranch,
+  git_apply_failed: CircleX,
+  git_apply_rolled_back: RefreshCcw,
+  git_create: GitBranch,
 };
 
 const DAY_MS = 86_400_000;
@@ -65,6 +73,8 @@ const SYSTEM_ACTOR_LABEL: Record<string, string> = {
   'system:blueprint': 'Blueprint',
   'system:monitor': 'Monitor',
   'system:policy': 'Policy',
+  'system:webhook': 'Webhook',
+  'system:git-source': 'Git source',
 };
 
 function formatActor(actor: string): { label: string; isSystem: boolean } {

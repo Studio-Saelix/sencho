@@ -10,7 +10,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { loginAs } from './helpers';
 
 const DOCS_IMAGES = path.resolve(__dirname, '../docs/images');
@@ -50,4 +50,145 @@ test('resources', async ({ page }) => {
   await page.getByRole('button', { name: /resources/i }).click();
   await page.waitForTimeout(800);
   await page.screenshot({ path: path.join(DOCS_IMAGES, 'resources.png'), fullPage: true });
+});
+
+function emptyCounts() {
+  return {
+    add: 0, modify: 0, delete: 0, rename: 0, unchanged: 0,
+    localModified: 0, localMissing: 0, typeChanged: 0, unmanagedCollision: 0, invocation: 0,
+  };
+}
+
+function linkedSource(stackName: string) {
+  return {
+    id: 1,
+    stack_name: stackName,
+    repo_url: 'https://github.com/example/compose.git',
+    branch: 'main',
+    compose_path: 'compose.yaml',
+    compose_paths: ['compose.yaml'],
+    sync_env: false,
+    env_path: null,
+    auth_type: 'none',
+    has_token: false,
+    auto_apply_on_webhook: false,
+    auto_deploy_on_apply: false,
+    last_applied_commit_sha: '1111111111111111111111111111111111111111',
+    pending_commit_sha: null,
+    pending_fetched_at: null,
+    created_at: 0,
+    updated_at: 0,
+    manifest_state: 'active',
+    manifest: null,
+  };
+}
+
+async function createStack(page: Page, stackName: string) {
+  await page.evaluate(async (name) => {
+    await fetch(`/api/stacks/${name}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
+    await fetch('/api/stacks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ stackName: name }),
+    });
+  }, stackName);
+}
+
+async function stubGitSourceAndPull(page: Page, stackName: string, pullBody: unknown) {
+  await page.route('**/git-source/pull', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(pullBody),
+    });
+  });
+  await page.route(new RegExp(`/api/stacks/${stackName}/git-source$`), async (route) => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(linkedSource(stackName)),
+      });
+      return;
+    }
+    await route.continue();
+  });
+}
+
+async function openStubbedChangePlan(page: Page, stackName: string) {
+  await page.getByRole('button', { name: 'Create Stack' }).waitFor({ timeout: 15_000 });
+  await page.getByText(stackName).first().click();
+  await page.getByRole('button', { name: /Git Source/i }).click();
+  await expect(page.getByRole('dialog').getByRole('heading', { name: /git source/i })).toBeVisible();
+  await page.getByRole('button', { name: /Pull now/i }).click();
+  await expect(page.getByTestId('git-plan-op').first()).toBeVisible({ timeout: 10_000 });
+}
+
+test.describe('classified change-plan docs screenshots', () => {
+  test.use({ viewport: { width: 1920, height: 1080 } });
+
+  test('git-sources change plan dialog', async ({ page }) => {
+    await loginAs(page);
+    const stackName = 'demo-app';
+    await createStack(page, stackName);
+    await stubGitSourceAndPull(page, stackName, {
+      commitSha: 'c0ffee12c0ffee12c0ffee12c0ffee12c0ffee12',
+      validation: { ok: true },
+      refusals: [],
+      warnings: [],
+      plan: {
+        blocked: false,
+        counts: { ...emptyCounts(), add: 1, modify: 1, delete: 1, unchanged: 2 },
+        operations: [
+          { path: 'added.conf', op: 'add', role: 'config' },
+          { path: 'compose.yaml', op: 'modify', role: 'compose-primary' },
+          { path: 'extra.conf', op: 'delete', role: 'config' },
+        ],
+        invocation: { candidateChanged: false, liveDiverged: false },
+      },
+      planFingerprint: 'fp-demo-docs',
+    });
+    await page.goto('/');
+    await openStubbedChangePlan(page, stackName);
+    const planDialog = page.getByRole('dialog').filter({ hasText: 'GIT · CHANGE PLAN' });
+    await expect(planDialog).toBeVisible();
+    await planDialog.screenshot({
+      path: path.join(DOCS_IMAGES, 'git-sources', 'diff-dialog.png'),
+    });
+    await page.evaluate(async (name) => {
+      await fetch(`/api/stacks/${name}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
+    }, stackName);
+  });
+
+  test('tutorial pull change plan dialog', async ({ page }) => {
+    await loginAs(page);
+    const stackName = 'marketing-site';
+    await createStack(page, stackName);
+    await stubGitSourceAndPull(page, stackName, {
+      commitSha: 'a1b2c3da1b2c3da1b2c3da1b2c3da1b2c3da1b2c',
+      validation: { ok: true },
+      refusals: [],
+      warnings: [],
+      plan: {
+        blocked: false,
+        counts: { ...emptyCounts(), modify: 1, unchanged: 0 },
+        operations: [
+          { path: 'compose.yaml', op: 'modify', role: 'compose-primary' },
+        ],
+        invocation: { candidateChanged: false, liveDiverged: false },
+      },
+      planFingerprint: 'fp-marketing-docs',
+    });
+    await page.goto('/');
+    await openStubbedChangePlan(page, stackName);
+    const planDialog = page.getByRole('dialog').filter({ hasText: 'GIT · CHANGE PLAN' });
+    await expect(planDialog).toBeVisible();
+    await planDialog.screenshot({
+      path: path.join(DOCS_IMAGES, 'tutorials', 'connect-a-git-source', 'pull-preview-diff.png'),
+    });
+    await page.evaluate(async (name) => {
+      await fetch(`/api/stacks/${name}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
+    }, stackName);
+  });
 });

@@ -1,10 +1,10 @@
 ---
 title: Deploy Compose Changes by Pulling From Git Instead of Editing by Hand
 sidebarTitle: Deploy compose changes from Git
-description: Link a running stack to a Git repository, pull a real commit, review the diff, and deploy it, instead of hand-editing the compose file in the browser.
+description: Link a running stack to a Git repository, pull a real commit, review the classified change plan, and deploy it, instead of hand-editing the compose file in the browser.
 ---
 
-Say `marketing-site` is a small nginx stack you created directly in Sencho, and your team has decided the compose file should live in a Git repository instead, so changes go through a commit and a pull request before they reach the stack. This walks through connecting that already-running stack to a repository, pulling a real commit a teammate pushed, reviewing the diff Sencho builds against what is on disk, and applying it, which both writes the new file and redeploys the container.
+Say `marketing-site` is a small nginx stack you created directly in Sencho, and your team has decided the compose file should live in a Git repository instead, so changes go through a commit and a pull request before they reach the stack. This walks through connecting that already-running stack to a repository, pulling a real commit a teammate pushed, reviewing the classified change plan Sencho builds against what is on disk, and applying it, which both writes the new files and redeploys the container.
 
 This tutorial covers linking an existing stack to a Git source and running one manual pull-review-apply cycle. It doesn't cover creating a brand-new stack directly from a repository, the three webhook-driven apply modes, or multi-file compose sources; see the [Git Sources](/features/git-sources) feature page for all of that.
 
@@ -43,18 +43,18 @@ This tutorial covers linking an existing stack to a Git source and running one m
       <img src="/images/tutorials/connect-a-git-source/browse-picker.png" alt="Git source panel with a Repository URL filled in and the Browse file picker open below the Compose files list, showing a checked compose.yaml and an unchecked README.md fetched live from the repository." />
     </Frame>
 
-    Leave **Authentication** on **Public (no auth)** for a public repository, and **Apply behavior** on **Review only**, the safest default: a pull only stages a diff for you to review, it never writes or deploys on its own. Select **Save**. Sencho runs a reachability check against the repository before persisting anything; if that check fails, nothing is saved and the panel reports why.
+    Leave **Authentication** on **Public (no auth)** for a public repository, and **Apply behavior** on **Review only**, the safest default: a pull only stages a change plan for you to review, it never writes or deploys on its own. Select **Save**. Sencho runs a reachability check against the repository before persisting anything; if that check fails, nothing is saved and the panel reports why.
   </Step>
   <Step title="Pull the latest commit">
     Now make a change the way your team actually would: edit the compose file in your repository (not in Sencho) and push a commit. For this tutorial, bump the pinned tag from `nginx:1.27-alpine` to `nginx:1.28-alpine` and push it to the branch you configured.
 
-    Back in the Git Source panel, select **Pull now**. Sencho fetches the branch's current commit and opens a side-by-side diff against what's on disk.
+    Back in the Git Source panel, select **Pull now**. Sencho fetches the branch's current commit and opens a classified change plan against what's on disk.
 
     <Frame>
-      <img src="/images/tutorials/connect-a-git-source/pull-preview-diff.png" alt="GIT · PULL PREVIEW dialog for marketing-site, showing a Monaco side-by-side diff with the on-disk compose.yaml on the left and the incoming commit on the right, the only difference highlighted on the image line: nginx:1.27-alpine changing to nginx:1.28-alpine." />
+      <img src="/images/tutorials/connect-a-git-source/pull-preview-diff.png" alt="GIT · CHANGE PLAN dialog for marketing-site, listing a Modify row for compose.yaml (image tag change) with Deploy after apply and Apply in the footer." />
     </Frame>
 
-    The diff shows only the line that actually changed. If the incoming compose file failed `docker compose config` validation, an error banner would appear here and the **Apply** button would stay disabled; since this pull is clean, Apply is enabled.
+    The plan lists only the files that actually change. If the incoming compose file failed `docker compose config` validation, an error banner would appear here and the **Apply** button would stay disabled; since this pull is clean, Apply is enabled.
   </Step>
   <Step title="Apply and deploy in one step">
     Tick **Deploy after apply** at the bottom of the dialog, then select **Apply**. This both writes the incoming file to disk and runs `docker compose up -d` against it, so the running container picks up the new tag immediately instead of just staging the file for a later manual deploy.

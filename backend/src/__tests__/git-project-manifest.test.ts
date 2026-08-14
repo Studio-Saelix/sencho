@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import { FileSystemService } from '../services/FileSystemService';
-import { GitProjectManifestService, PROMOTION_MARKER, CANDIDATE_COMPLETE_MARKER } from '../services/GitProjectManifestService';
+import { GitProjectManifestService, PROMOTION_MARKER, CANDIDATE_COMPLETE_MARKER, PromoteGenerationError } from '../services/GitProjectManifestService';
+import { NodeRegistry } from '../services/NodeRegistry';
+import { authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import type { ComposeInputEntry, GitProjectManifest, ManifestBounds } from '../types/gitProjectManifest';
 
 const BOUNDS: ManifestBounds = {
@@ -434,7 +437,11 @@ describe('promoteGeneration', () => {
             candidateRelPath: candidateRel,
             manifest: incoming,
             priorManifest: prior,
-        })).rejects.toThrow(/Case-only managed path changes/);
+        })).rejects.toSatisfy((err: unknown) =>
+            err instanceof PromoteGenerationError
+            && err.phase === 'pre_mutation'
+            && /Case-only managed path changes/.test(err.message),
+        );
         expect(readStackFile(stackName, 'Config.yml')).toBe('PRIOR\n');
         expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
     });
@@ -653,6 +660,71 @@ describe('promoteGeneration', () => {
             priorManifest: prior,
         });
         expect(readStackFile(stackName, '.env')).toBe('NEW=1\n');
+    });
+
+    it('deletes a previously managed synced .env when the next generation omits it', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'promote-sync-env-removed';
+        writeStackFile(stackName, 'compose.yaml', 'v1\n');
+        writeStackFile(stackName, '.env', 'SYNC=1\n');
+        seedGitSource(stackName);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml'],
+            contextDir: 'app',
+        });
+        const syncEnvEntry: ComposeInputEntry = {
+            sourcePath: null,
+            materializedPath: '.env',
+            role: 'env',
+            dependencyKind: 'sync-env',
+            ownership: 'managed',
+            provenance: 'fetch',
+            sensitivity: 'high',
+            contentSha256: crypto.createHash('sha256').update('SYNC=1\n').digest('hex'),
+            sizeBytes: Buffer.byteLength('SYNC=1\n'),
+            state: 'present',
+            deletionAuthority: 'sencho',
+            note: null,
+        };
+        const prior = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml' }),
+            syncEnvEntry,
+        ]);
+        const priorRel = 'generations/applied-prior';
+        const priorAbs = path.join(tmpDir, 'git-managed', '1', stackName, priorRel);
+        fs.mkdirSync(priorAbs, { recursive: true });
+        fs.writeFileSync(path.join(priorAbs, 'compose.yaml'), 'v1\n');
+        fs.writeFileSync(path.join(priorAbs, '.env'), 'SYNC=1\n');
+        prior.generation.appliedDir = priorRel;
+        await svc.writeManifest(stackName, prior);
+
+        const incoming = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml' }),
+        ], prior);
+        const clone = makeClone({ 'compose.yaml': 'v2\n' });
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'sha-env-gone',
+            clone,
+            [{ srcRel: 'compose.yaml', destRel: 'compose.yaml' }],
+            [],
+            BOUNDS,
+        );
+
+        await svc.promoteGeneration(stackName, {
+            sha: 'sha-env-gone',
+            candidateRelPath: candidateRel,
+            manifest: incoming,
+            priorManifest: prior,
+        });
+        expect(fs.existsSync(path.join(stackDir(stackName), '.env'))).toBe(false);
+        expect(readStackFile(stackName, 'compose.yaml')).toBe('v2\n');
+
+        const deployArgs = await authoredComposeEnvFileArgs(
+            stackName,
+            NodeRegistry.getInstance().getDefaultNodeId(),
+        );
+        expect(deployArgs).toEqual([]);
     });
 });
 
@@ -1482,5 +1554,234 @@ describe('build-context file-level ownership (audit round 2 C-2)', () => {
         fs.writeFileSync(path.join(stackDir(stackName), 'web', 'keep.txt'), 'locally edited\n');
         const divergedAfter = await svc.verifyContextOnDisk(stackName, manifest2.buildContexts[0]);
         expect(divergedAfter.some((p) => p.includes('keep.txt'))).toBe(true);
+    });
+
+    it('preserves an unowned file when a non-root context is removed', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const { ComposeInputDiscoveryService } = await import('../services/ComposeInputDiscoveryService');
+        const discovery = ComposeInputDiscoveryService.getInstance();
+        const stackName = 'context-removed-unowned';
+        writeStackFile(stackName, 'compose.yaml', 'services: {}\n');
+        const clone1 = makeClone({
+            'compose.yaml': 'services:\n  web:\n    build:\n      context: web\n',
+            'web/keep.txt': 'keep\n',
+        });
+        const inv1 = await discovery.discoverFromClone({ cloneDir: clone1, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        const managed1 = inv1.inputs.filter((i) => i.ownership === 'managed' && i.materializedPath !== null);
+        const manifest1 = buildManifest(stackName, managed1, null, inv1.buildContexts);
+        const fileList1 = managed1.filter((i) => i.dependencyKind !== 'build-context');
+        const cand1 = await svc.buildCandidate(stackName, 'rev1', clone1, fileList1.map((i) => ({ srcRel: i.sourcePath!, destRel: i.materializedPath! })), inv1.contextCopyPlans, BOUNDS);
+        await svc.promoteGeneration(stackName, { sha: 'rev1', candidateRelPath: cand1, manifest: manifest1, priorManifest: null, adoptExistingMaterializedPaths: 'all' });
+        fs.writeFileSync(path.join(stackDir(stackName), 'web', 'notes.txt'), 'local\n');
+
+        const clone2 = makeClone({
+            'compose.yaml': 'services:\n  web:\n    image: nginx\n',
+        });
+        const inv2 = await discovery.discoverFromClone({ cloneDir: clone2, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        const managed2 = inv2.inputs.filter((i) => i.ownership === 'managed' && i.materializedPath !== null);
+        const manifest2 = buildManifest(stackName, managed2, manifest1, inv2.buildContexts);
+        const fileList2 = managed2.filter((i) => i.dependencyKind !== 'build-context');
+        const cand2 = await svc.buildCandidate(stackName, 'rev2', clone2, fileList2.map((i) => ({ srcRel: i.sourcePath!, destRel: i.materializedPath! })), inv2.contextCopyPlans, BOUNDS);
+        await svc.promoteGeneration(stackName, { sha: 'rev2', candidateRelPath: cand2, manifest: manifest2, priorManifest: manifest1 });
+        expect(fs.existsSync(path.join(stackDir(stackName), 'web', 'keep.txt'))).toBe(false);
+        expect(fs.readFileSync(path.join(stackDir(stackName), 'web', 'notes.txt'), 'utf8')).toBe('local\n');
+    });
+
+    it('removes a clean non-root context directory after owned files are gone', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const { ComposeInputDiscoveryService } = await import('../services/ComposeInputDiscoveryService');
+        const discovery = ComposeInputDiscoveryService.getInstance();
+        const stackName = 'context-removed-clean';
+        writeStackFile(stackName, 'compose.yaml', 'services: {}\n');
+        const clone1 = makeClone({
+            'compose.yaml': 'services:\n  web:\n    build:\n      context: web\n',
+            'web/keep.txt': 'keep\n',
+        });
+        const inv1 = await discovery.discoverFromClone({ cloneDir: clone1, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        const managed1 = inv1.inputs.filter((i) => i.ownership === 'managed' && i.materializedPath !== null);
+        const manifest1 = buildManifest(stackName, managed1, null, inv1.buildContexts);
+        const fileList1 = managed1.filter((i) => i.dependencyKind !== 'build-context');
+        const cand1 = await svc.buildCandidate(stackName, 'rev1', clone1, fileList1.map((i) => ({ srcRel: i.sourcePath!, destRel: i.materializedPath! })), inv1.contextCopyPlans, BOUNDS);
+        await svc.promoteGeneration(stackName, { sha: 'rev1', candidateRelPath: cand1, manifest: manifest1, priorManifest: null, adoptExistingMaterializedPaths: 'all' });
+
+        const clone2 = makeClone({
+            'compose.yaml': 'services:\n  web:\n    image: nginx\n',
+        });
+        const inv2 = await discovery.discoverFromClone({ cloneDir: clone2, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        const managed2 = inv2.inputs.filter((i) => i.ownership === 'managed' && i.materializedPath !== null);
+        const manifest2 = buildManifest(stackName, managed2, manifest1, inv2.buildContexts);
+        const fileList2 = managed2.filter((i) => i.dependencyKind !== 'build-context');
+        const cand2 = await svc.buildCandidate(stackName, 'rev2', clone2, fileList2.map((i) => ({ srcRel: i.sourcePath!, destRel: i.materializedPath! })), inv2.contextCopyPlans, BOUNDS);
+        await svc.promoteGeneration(stackName, { sha: 'rev2', candidateRelPath: cand2, manifest: manifest2, priorManifest: manifest1 });
+        expect(fs.existsSync(path.join(stackDir(stackName), 'web'))).toBe(false);
+    });
+
+    it('removes root-context managed files individually and leaves unowned stack files', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'context-root-removed';
+        writeStackFile(stackName, 'compose.yaml', 'services: {}\n');
+        writeStackFile(stackName, 'Dockerfile', 'FROM alpine\n');
+        writeStackFile(stackName, 'local-notes.txt', 'keep\n');
+        const composeEntry = {
+            sourcePath: 'compose.yaml',
+            materializedPath: 'compose.yaml',
+            role: 'compose-primary' as const,
+            dependencyKind: 'explicit' as const,
+            ownership: 'managed' as const,
+            provenance: 'fetch' as const,
+            sensitivity: 'medium' as const,
+            contentSha256: crypto.createHash('sha256').update('services: {}\n').digest('hex'),
+            sizeBytes: 12,
+            state: 'present' as const,
+            deletionAuthority: 'sencho' as const,
+            note: null,
+        };
+        const priorCtx = {
+            repoPath: '',
+            dockerfile: 'Dockerfile',
+            contextBytes: 12,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'Dockerfile', sha256: crypto.createHash('sha256').update('FROM alpine\n').digest('hex'), sizeBytes: 12 }],
+        };
+        const prior = buildManifest(stackName, [composeEntry], null, [priorCtx]);
+        const clone = makeClone({ 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+        const nextCompose = {
+            ...composeEntry,
+            contentSha256: crypto.createHash('sha256').update('services:\n  web:\n    image: nginx\n').digest('hex'),
+            sizeBytes: Buffer.byteLength('services:\n  web:\n    image: nginx\n'),
+        };
+        const next = buildManifest(stackName, [nextCompose], prior, []);
+        const cand = await svc.buildCandidate(stackName, 'root-rm', clone, [{ srcRel: 'compose.yaml', destRel: 'compose.yaml' }], [], BOUNDS);
+        await svc.promoteGeneration(stackName, { sha: 'root-rm', candidateRelPath: cand, manifest: next, priorManifest: prior });
+        expect(fs.existsSync(path.join(stackDir(stackName), 'Dockerfile'))).toBe(false);
+        expect(fs.readFileSync(path.join(stackDir(stackName), 'local-notes.txt'), 'utf8')).toBe('keep\n');
+        expect(fs.existsSync(path.join(stackDir(stackName), 'compose.yaml'))).toBe(true);
+    });
+
+    it('fails closed when live context scanning exceeds the file bound', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'context-scan-bound';
+        writeStackFile(stackName, 'compose.yaml', 'services: {}\n');
+        writeStackFile(stackName, 'web/a.txt', 'a\n');
+        writeStackFile(stackName, 'web/b.txt', 'b\n');
+        writeStackFile(stackName, 'web/c.txt', 'c\n');
+        const ctx = {
+            repoPath: 'web',
+            dockerfile: null,
+            contextBytes: 0,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'a.txt', sha256: 'x', sizeBytes: 1 }],
+        };
+        const diverged = await svc.verifyContextOnDisk(stackName, ctx, undefined, { ...BOUNDS, maxFiles: 1 });
+        expect(diverged.some((p) => p.includes('scan limit exceeded'))).toBe(true);
+    });
+
+    it('fails closed when live context scanning exceeds the path-depth bound', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'context-scan-depth';
+        writeStackFile(stackName, 'compose.yaml', 'services: {}\n');
+        writeStackFile(stackName, 'web/a/b/c.txt', 'deep\n');
+        const ctx = {
+            repoPath: 'web',
+            dockerfile: null,
+            contextBytes: 0,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'a/b/c.txt', sha256: 'x', sizeBytes: 1 }],
+        };
+        const diverged = await svc.verifyContextOnDisk(stackName, ctx, undefined, { ...BOUNDS, maxPathDepth: 1 });
+        expect(diverged.some((p) => p.includes('scan limit exceeded'))).toBe(true);
+    });
+
+    it('fails closed when a live context file exceeds maxFileBytes before hashing', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'context-scan-file-bytes';
+        writeStackFile(stackName, 'compose.yaml', 'services: {}\n');
+        writeStackFile(stackName, 'web/big.txt', 'abcdefghij\n');
+        const ctx = {
+            repoPath: 'web',
+            dockerfile: null,
+            contextBytes: 0,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'big.txt', sha256: 'x', sizeBytes: 1 }],
+        };
+        const hashSpy = vi.spyOn(svc, 'hashStackFile');
+        try {
+            const diverged = await svc.verifyContextOnDisk(stackName, ctx, undefined, { ...BOUNDS, maxFileBytes: 4 });
+            expect(diverged.some((p) => p.includes('scan limit exceeded'))).toBe(true);
+            expect(hashSpy).not.toHaveBeenCalled();
+        } finally {
+            hashSpy.mockRestore();
+        }
+    });
+
+    it('fails closed when live context scanning exceeds the directory-entry bound', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'context-scan-empty-dirs';
+        writeStackFile(stackName, 'compose.yaml', 'services: {}\n');
+        for (let i = 0; i < 8; i++) {
+            fs.mkdirSync(path.join(stackDir(stackName), 'web', `d${i}`), { recursive: true });
+        }
+        const ctx = {
+            repoPath: 'web',
+            dockerfile: null,
+            contextBytes: 0,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'keep.txt', sha256: 'x', sizeBytes: 1 }],
+        };
+        const diverged = await svc.verifyContextOnDisk(stackName, ctx, undefined, { ...BOUNDS, maxFiles: 3 });
+        expect(diverged.some((p) => p.includes('scan limit exceeded'))).toBe(true);
+    });
+
+    it.runIf(process.platform !== 'win32')('does not follow a nested context symlink to inspect owned descendants', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'context-nested-symlink';
+        writeStackFile(stackName, 'compose.yaml', 'services: {}\n');
+        const outside = path.join(process.env.COMPOSE_DIR!, '..', 'outside-nested-symlink');
+        fs.mkdirSync(outside, { recursive: true });
+        fs.writeFileSync(path.join(outside, 'Dockerfile'), 'FROM alpine\n');
+        fs.writeFileSync(path.join(outside, 'secret.txt'), 'should-not-be-read\n');
+        const webDir = path.join(stackDir(stackName), 'web');
+        fs.mkdirSync(webDir, { recursive: true });
+        fs.symlinkSync(outside, path.join(webDir, 'nested'), 'dir');
+        const ctx = {
+            repoPath: 'web',
+            dockerfile: 'Dockerfile',
+            contextBytes: 12,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'nested/Dockerfile', sha256: 'x', sizeBytes: 12 }],
+        };
+        const hashSpy = vi.spyOn(svc, 'hashStackFile');
+        const observeSpy = vi.spyOn(FileSystemService.getInstance(), 'observeStackPath');
+        try {
+            const diverged = await svc.verifyContextOnDisk(stackName, ctx);
+            expect(diverged.some((p) => p.includes('nested') && p.includes('symbolic link'))).toBe(true);
+            expect(hashSpy.mock.calls.some((c) => String(c[1]).includes('secret') || String(c[1]).includes('outside'))).toBe(false);
+            expect(observeSpy.mock.calls.some((c) => {
+                const rel = String(c[1]);
+                return rel.includes('nested/Dockerfile') || rel.includes('secret.txt');
+            })).toBe(false);
+        } finally {
+            hashSpy.mockRestore();
+            observeSpy.mockRestore();
+            fs.rmSync(outside, { recursive: true, force: true });
+        }
     });
 });

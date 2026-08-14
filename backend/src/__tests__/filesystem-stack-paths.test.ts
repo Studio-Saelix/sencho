@@ -13,9 +13,8 @@ import path from 'path';
 import os from 'os';
 import { isValidRelativeStackPath } from '../utils/validation';
 
-// On Windows, fs.unlink on a directory returns EPERM rather than EISDIR.
-// The deleteStackPath empty-dir and NOT_EMPTY paths rely on EISDIR (Linux/macOS).
-// Skip those specific cases on Windows.
+// deleteStackPath rmdirs directories directly, so empty-dir and NOT_EMPTY
+// cases run on every platform.
 const isWindows = process.platform === 'win32';
 
 // Mutable state the mocked NodeRegistry reads. Each beforeEach updates it
@@ -458,7 +457,7 @@ describe('FileSystemService stack methods', () => {
       await expect(fs.access(path.join(stackDir, 'todelete.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
     });
 
-    it.skipIf(isWindows)('deletes an empty directory (Linux/macOS only: Windows unlink returns EPERM)', async () => {
+    it('deletes an empty directory', async () => {
       await fs.mkdir(path.join(stackDir, 'emptydir'));
 
       const service = FileSystemService.getInstance();
@@ -467,7 +466,7 @@ describe('FileSystemService stack methods', () => {
       await expect(fs.access(path.join(stackDir, 'emptydir'))).rejects.toMatchObject({ code: 'ENOENT' });
     });
 
-    it.skipIf(isWindows)('throws NOT_EMPTY for non-empty directory without recursive flag (Linux/macOS only)', async () => {
+    it('throws NOT_EMPTY for a non-empty directory without the recursive flag', async () => {
       await fs.mkdir(path.join(stackDir, 'nonempty'));
       await fs.writeFile(path.join(stackDir, 'nonempty', 'child.txt'), '');
 

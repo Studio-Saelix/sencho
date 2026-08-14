@@ -1,4 +1,4 @@
-import { promises as fsPromises } from 'fs';
+import { promises as fsPromises, existsSync } from 'fs';
 import { spawn } from 'child_process';
 import crypto from 'crypto';
 import os from 'os';
@@ -18,10 +18,16 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
 import { gitSourceLocalComposeFiles, PRIMARY_COMPOSE_FILENAME } from '../utils/gitComposeFiles';
 import { ComposeInputDiscoveryService, type ContextCopyPlan } from './ComposeInputDiscoveryService';
-import { GitProjectManifestService } from './GitProjectManifestService';
+import { GitProjectManifestService, PromoteGenerationError } from './GitProjectManifestService';
+import { GitChangePlanService } from './GitChangePlanService';
+import { DriftLedgerService } from './DriftLedgerService';
 import { StackUpdateRecoveryService } from './StackUpdateRecoveryService';
-import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import { authoredComposeFileArgs, authoredComposeEnvFileArgs, candidateValidationEnvFileArgs } from '../utils/authoredComposeArgs';
+import { buildCandidateComposeInvocation } from '../utils/candidateComposeInvocation';
 import type { ComposeInputEntry, GitProjectManifest, GitSourceManifestState, InventoryResult, ManifestSummary, RefusalInfo } from '../types/gitProjectManifest';
+import type { GitChangePlan, PublicGitChangePlan, GitChangePlanCounts, PublicGitChangePlanOperation } from '../types/gitChangePlan';
+import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
+import type { NotificationCategory } from './NotificationService';
 import type { GitHttpRequest, GitHttpResponse, HttpClient } from 'isomorphic-git/http/node';
 
 // isomorphic-git is the heaviest dependency in the backend (~5 MB) and only
@@ -169,10 +175,19 @@ export type GitSourceErrorCode =
     | 'BRANCH_NOT_FOUND'
     | 'FILE_NOT_FOUND'
     | 'NETWORK_TIMEOUT'
-    | 'GIT_ERROR';
+    | 'GIT_ERROR'
+    | 'STALE_PLAN'
+    | 'PLAN_FINGERPRINT_REQUIRED'
+    | 'PLAN_BLOCKED'
+    | 'LEGACY_PENDING'
+    | 'PLAN_UNAVAILABLE';
 
 export class GitSourceError extends Error {
-    constructor(public code: GitSourceErrorCode, message: string) {
+    constructor(
+        public code: GitSourceErrorCode,
+        message: string,
+        public extras?: { plan?: PublicGitChangePlan; planFingerprint?: string },
+    ) {
         super(message);
         this.name = 'GitSourceError';
     }
@@ -270,12 +285,7 @@ export interface CreateStackFromGitResult {
 
 export interface PullResult {
     commitSha: string;
-    incomingCompose: string;
-    incomingEnv: string | null;
-    currentCompose: string;
-    currentEnv: string | null;
     validation: { ok: boolean; error?: string };
-    hasLocalChanges: boolean;
     /** Tolerated (non-actionable) refusals from complete-project discovery. */
     refusals: RefusalInfo[];
     /** Projection of the current managed-project manifest, when one exists. */
@@ -284,6 +294,15 @@ export interface PullResult {
     candidateReady: boolean;
     /** Clone-time warnings (submodules present, for example). */
     warnings: string[];
+    plan: PublicGitChangePlan | null;
+    planFingerprint: string | null;
+}
+
+export interface PublicPendingPlanView {
+    fingerprint: string;
+    blocked: boolean;
+    counts: GitChangePlanCounts;
+    operations: PublicGitChangePlanOperation[];
 }
 
 export interface PublicGitSource {
@@ -307,6 +326,18 @@ export interface PublicGitSource {
     updated_at: number;
     /** Managed-project manifest cache state (DB-only enum, see gitProjectManifest.ts). */
     manifest_state: GitSourceManifestState | null;
+    pending_plan: PublicPendingPlanView | null;
+    last_plan_fingerprint: string | null;
+    last_plan_outcome: string | null;
+}
+
+export interface GitApplyOpts {
+    deploy?: boolean;
+    actor?: string;
+    bypassPolicy?: boolean;
+    planFingerprint?: string;
+    /** Public apply requires a fingerprint. Webhook and internal callers pass false. */
+    requirePlanFingerprint?: boolean;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -646,6 +677,9 @@ export class GitSourceService {
             created_at: src.created_at,
             updated_at: src.updated_at,
             manifest_state: src.manifest_state ?? 'absent',
+            pending_plan: this.parsePendingPlanSummary(src.pending_plan_summary),
+            last_plan_fingerprint: src.last_plan_fingerprint,
+            last_plan_outcome: src.last_plan_outcome,
         };
     }
 
@@ -1316,8 +1350,9 @@ export class GitSourceService {
      * Complete-project materialization inside the clone lifecycle: discover +
      * classify every declared input, abort on actionable refusals, build the
      * staged candidate (managed files + filtered build contexts), and validate
-     * the exact candidate with the exact deploy invocation (including -p).
-     * Runs only when the complete-project contract applies.
+     * it with candidateValidationEnvFileArgs (not a mix of staged and live
+     * --env-file inputs). Includes -p. Runs only when the complete-project
+     * contract applies.
      */
     private async buildMaterialization(
         stackName: string,
@@ -1376,17 +1411,23 @@ export class GitSourceService {
             await fsPromises.writeFile(path.join(candidateAbs, '.env'), envContent, 'utf8');
         }
 
-        const validation = await this.validateCandidate(stackName, candidateRel, src.compose_paths, src.context_dir);
+        const validation = await this.validateCandidate(stackName, candidateRel, src.compose_paths, src.context_dir, src.sync_env);
         return { inventory, contextCopyPlans: inventory.contextCopyPlans, candidateRelPath: candidateRel, validation };
     }
 
     /**
-     * Validate the staged candidate with the exact deploy invocation: the same
-     * relative -f order, -p project name, --project-directory, and --env-file
-     * the deploy uses, run inside the candidate dir. Candidate validation gets a
-     * larger budget than the pull preview (30s) and names the timeout.
+     * Validate the staged candidate with the same -f order, -p project name,
+     * and --project-directory deploy will use, run inside the candidate dir.
+     * --env-file comes from candidateValidationEnvFileArgs. Candidate
+     * validation gets a 30s budget.
      */
-    private async validateCandidate(stackName: string, candidateRelPath: string, composePaths: string[], contextDir: string | null): Promise<{ ok: boolean; error?: string }> {
+    private async validateCandidate(
+        stackName: string,
+        candidateRelPath: string,
+        composePaths: string[],
+        contextDir: string | null,
+        syncEnv: boolean,
+    ): Promise<{ ok: boolean; error?: string }> {
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
         const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, candidateRelPath);
@@ -1413,14 +1454,16 @@ export class GitSourceService {
             }
             args.push('--project-directory', ctxAbs);
         }
-        // Mirror the deploy-time env resolution: only pass --env-file when the
-        // candidate actually carries the env (sync-env stacks stage it there).
-        const candidateEnv = path.join(candidateAbs, '.env');
         try {
-            await fsPromises.access(candidateEnv);
-            args.push('--env-file', candidateEnv);
-        } catch {
-            // no staged env; compose falls back to environment interpolation
+            args.push(...(await candidateValidationEnvFileArgs({
+                stackName,
+                nodeId,
+                candidateAbs,
+                contextDir,
+                syncEnv,
+            })));
+        } catch (err) {
+            return { ok: false, error: (err as Error).message || 'Invalid project env file configuration.' };
         }
         args.push('config', '--quiet');
         const result = await this.runDockerCompose(args, candidateAbs, 30_000);
@@ -1478,12 +1521,6 @@ export class GitSourceService {
         return h.digest('hex');
     }
 
-    /** Combine an ordered file set into a single path-headed preview for the diff UI. */
-    private combinedComposePreview(files: ComposeFile[]): string {
-        if (files.length <= 1) return files[0]?.content ?? '';
-        return files.map(f => `# ── ${f.path} ──\n${f.content}`).join('\n\n');
-    }
-
     /**
      * The deploy-time spec for an ordered file set. Single-file stacks with no
      * context dir get `null`, so runtime stays plain `docker compose` auto-discovery.
@@ -1493,26 +1530,90 @@ export class GitSourceService {
         return { files: gitSourceLocalComposeFiles(composePaths), contextDir: contextDir ?? null };
     }
 
-    /** Encrypt the ordered compose file set as the v3 pending blob (carries contextDir + staged candidate + inventory). */
-    private encodePendingCompose(files: ComposeFile[], contextDir: string | null, candidateRelPath: string | null, inventory: InventoryResult | null): string {
-        return this.crypto.encrypt(JSON.stringify({ v: 3, files, contextDir, candidateRelPath, inventory }));
+    /** Encrypt the candidate as a v4 pending blob (files + inventory + plan identity). */
+    private encodePendingCompose(
+        files: ComposeFile[],
+        contextDir: string | null,
+        candidateRelPath: string | null,
+        inventory: InventoryResult | null,
+        plan: {
+            fingerprint: string;
+            schemaVersion: number;
+            operationId: string;
+            reviewedLive?: Array<{ pathKey: string; liveHash: string | null }>;
+        },
+    ): string {
+        return this.crypto.encrypt(JSON.stringify({
+            v: 4,
+            files,
+            contextDir,
+            candidateRelPath,
+            inventory,
+            planFingerprint: plan.fingerprint,
+            planSchemaVersion: plan.schemaVersion,
+            operationId: plan.operationId,
+            reviewedLive: plan.reviewedLive ?? [],
+        }));
     }
 
     /**
-     * Decrypt a stored pending compose blob into its ordered file set + contextDir.
-     * Detects the v3 marker first, then v2, then legacy single-file plaintext.
-     * The `{"v":2` / `{"v":3` prefixes are mutually exclusive, so ordering is for
-     * readability only; a parse failure under a version marker is corrupt state
-     * (logged, never silently treated as legacy).
+     * Decrypt a stored pending compose blob. v4 is the classified-plan format.
+     * v3 / v2 / plaintext are recognized so apply can refuse them as LEGACY_PENDING
+     * instead of treating them as a reviewable plan.
      */
-    private decodePendingCompose(stored: string): { files: ComposeFile[]; contextDir: string | null; candidateRelPath: string | null; inventory: InventoryResult | null } {
+    private decodePendingCompose(stored: string): {
+        version: 2 | 3 | 4 | 'plaintext';
+        files: ComposeFile[];
+        contextDir: string | null;
+        candidateRelPath: string | null;
+        inventory: InventoryResult | null;
+        planFingerprint: string | null;
+        planSchemaVersion: number | null;
+        operationId: string | null;
+        reviewedLive: Array<{ pathKey: string; liveHash: string | null }>;
+    } {
         const raw = this.crypto.decrypt(stored);
+        if (raw.startsWith('{"v":4')) {
+            try {
+                const parsed = JSON.parse(raw) as {
+                    v: number;
+                    files?: ComposeFile[];
+                    contextDir?: string | null;
+                    candidateRelPath?: string | null;
+                    inventory?: InventoryResult | null;
+                    planFingerprint?: string;
+                    planSchemaVersion?: number;
+                    operationId?: string;
+                    reviewedLive?: Array<{ pathKey: string; liveHash: string | null }>;
+                };
+                const inventoryValid =
+                    parsed.inventory === null ||
+                    (parsed.inventory !== undefined &&
+                        Array.isArray(parsed.inventory.inputs) &&
+                        Array.isArray(parsed.inventory.refusals) &&
+                        Array.isArray(parsed.inventory.buildContexts));
+                const reviewedLive = this.parseReviewedLive(parsed.reviewedLive);
+                if (Array.isArray(parsed.files) && parsed.files.length > 0 && inventoryValid && reviewedLive !== null) {
+                    return {
+                        version: 4,
+                        files: parsed.files,
+                        contextDir: parsed.contextDir ?? null,
+                        candidateRelPath: typeof parsed.candidateRelPath === 'string' ? parsed.candidateRelPath : null,
+                        inventory: parsed.inventory ?? null,
+                        planFingerprint: typeof parsed.planFingerprint === 'string' ? parsed.planFingerprint : null,
+                        planSchemaVersion: typeof parsed.planSchemaVersion === 'number' ? parsed.planSchemaVersion : null,
+                        operationId: typeof parsed.operationId === 'string' ? parsed.operationId : null,
+                        reviewedLive,
+                    };
+                }
+            } catch (e) {
+                console.error('[GitSource] pending compose blob carried the v4 marker but failed to parse:', (e as Error).message);
+            }
+            throw new GitSourceError('PLAN_UNAVAILABLE', 'Pending update cannot be reviewed; pull again.');
+        }
         if (raw.startsWith('{"v":3')) {
             try {
                 const parsed = JSON.parse(raw) as { v: number; files?: ComposeFile[]; contextDir?: string | null; candidateRelPath?: string | null; inventory?: InventoryResult | null };
-                // Shape gate: the inventory drives the manifest build, so a
-                // structurally wrong inventory must be corrupt, never silently
-                // filtered into a half-populated manifest.
                 const inventoryValid =
                     parsed.inventory === null ||
                     (parsed.inventory !== undefined &&
@@ -1521,63 +1622,82 @@ export class GitSourceService {
                         Array.isArray(parsed.inventory.buildContexts));
                 if (Array.isArray(parsed.files) && parsed.files.length > 0 && inventoryValid) {
                     return {
+                        version: 3,
                         files: parsed.files,
                         contextDir: parsed.contextDir ?? null,
                         candidateRelPath: typeof parsed.candidateRelPath === 'string' ? parsed.candidateRelPath : null,
                         inventory: parsed.inventory ?? null,
+                        planFingerprint: null,
+                        planSchemaVersion: null,
+                        operationId: null,
+                        reviewedLive: [],
                     };
                 }
             } catch (e) {
                 console.error('[GitSource] pending compose blob carried the v3 marker but failed to parse:', (e as Error).message);
             }
-            // A v3-marker blob that fails to parse is corrupt state, not a
-            // legacy row: applying it as plaintext compose would deploy garbage
-            // or a misleading validation error.
-            throw new GitSourceError('GIT_ERROR', 'Pending update is corrupt; pull again to rebuild it.');
+            throw new GitSourceError('PLAN_UNAVAILABLE', 'Pending update cannot be reviewed; pull again.');
         }
         if (raw.startsWith('{"v":2')) {
             try {
                 const parsed = JSON.parse(raw) as { v: number; files?: ComposeFile[]; contextDir?: string | null };
                 if (Array.isArray(parsed.files) && parsed.files.length > 0) {
-                    return { files: parsed.files, contextDir: parsed.contextDir ?? null, candidateRelPath: null, inventory: null };
+                    return {
+                        version: 2,
+                        files: parsed.files,
+                        contextDir: parsed.contextDir ?? null,
+                        candidateRelPath: null,
+                        inventory: null,
+                        planFingerprint: null,
+                        planSchemaVersion: null,
+                        operationId: null,
+                        reviewedLive: [],
+                    };
                 }
             } catch (e) {
                 console.error('[GitSource] pending compose blob carried the v2 marker but failed to parse; treating as legacy:', (e as Error).message);
             }
         }
-        return { files: [{ path: PRIMARY_COMPOSE_FILENAME, content: raw }], contextDir: null, candidateRelPath: null, inventory: null };
+        return {
+            version: 'plaintext',
+            files: [{ path: PRIMARY_COMPOSE_FILENAME, content: raw }],
+            contextDir: null,
+            candidateRelPath: null,
+            inventory: null,
+            planFingerprint: null,
+            planSchemaVersion: null,
+            operationId: null,
+            reviewedLive: [],
+        };
     }
 
-    private async readDiskContent(stackName: string, syncEnv: boolean, relFiles: string[]): Promise<{ files: ComposeFile[]; env: string | null }> {
-        const fsSvc = FileSystemService.getInstance();
-        const files: ComposeFile[] = [];
-        for (let i = 0; i < relFiles.length; i++) {
-            const rel = relFiles[i];
-            try {
-                // The primary uses compose discovery (compose.yaml / docker-compose.yml);
-                // additional files are read at their materialized relative path.
-                const content = i === 0
-                    ? await fsSvc.getStackContent(stackName)
-                    : (await fsSvc.readStackFile(stackName, rel)).content ?? '';
-                files.push({ path: rel, content });
-            } catch (e) {
-                // Empty-on-error is a defensible default (a prior-spec file may have
-                // been removed by a concurrent edit), but log it so an unexpected
-                // "local changes detected" can be traced to an unreadable file.
-                console.warn(`[GitSource] could not read ${sanitizeForLog(rel)} for ${sanitizeForLog(stackName)} diff:`, (e as Error).message);
-                files.push({ path: rel, content: '' });
-            }
+    private parseReviewedLive(
+        raw: Array<{ pathKey: string; liveHash: string | null }> | undefined,
+    ): Array<{ pathKey: string; liveHash: string | null }> | null {
+        if (!Array.isArray(raw)) return null;
+        const parsed: Array<{ pathKey: string; liveHash: string | null }> = [];
+        for (const row of raw) {
+            if (!row || typeof row.pathKey !== 'string') return null;
+            if (row.liveHash !== null && typeof row.liveHash !== 'string') return null;
+            parsed.push({ pathKey: row.pathKey, liveHash: row.liveHash });
         }
-        let env: string | null = null;
-        if (syncEnv) {
-            try {
-                env = await fsSvc.getEnvContent(stackName);
-            } catch (e) {
-                console.warn(`[GitSource] could not read .env for ${sanitizeForLog(stackName)} diff:`, (e as Error).message);
-                env = null;
-            }
+        return parsed;
+    }
+
+    private reviewedLiveFromPlan(plan: GitChangePlan): Array<{ pathKey: string; liveHash: string | null }> {
+        return plan.operations
+            .filter((op) => op.op !== 'invocation')
+            .map((op) => ({ pathKey: op.pathKey, liveHash: op.liveHash }));
+    }
+
+    private reviewedLiveMap(
+        rows: Array<{ pathKey: string; liveHash: string | null }> | null | undefined,
+    ): Map<string, string | null> {
+        const map = new Map<string, string | null>();
+        for (const row of rows ?? []) {
+            map.set(row.pathKey.toLowerCase(), row.liveHash);
         }
-        return { files, env };
+        return map;
     }
 
     /**
@@ -1634,11 +1754,19 @@ export class GitSourceService {
 
     // ─── Pull / apply ────────────────────────────────────────────────────────
 
-    public async pull(stackName: string): Promise<PullResult> {
+    public async pull(stackName: string, opts: { actor?: string } = {}): Promise<PullResult> {
         // Guarded by the per-stack mutex (see withStackLock). Without this, a
         // concurrent delete-source + pull can land a pending row on a stack
         // whose config row has just been removed.
-        return this.withStackLock(stackName, () => this.pullLocked(stackName));
+        const actor = opts.actor ?? 'unknown';
+        return this.withStackLock(stackName, async () => {
+            try {
+                return await this.pullLocked(stackName, actor);
+            } catch (e) {
+                this.recordGitActivity(stackName, 'git_pull_failed', `Git pull failed for ${stackName}`, actor, 'error');
+                throw e;
+            }
+        });
     }
 
     /**
@@ -1649,7 +1777,7 @@ export class GitSourceService {
      * reads last_debounce_at while it is still unset on every request, slips
      * past the gate, and clones once per request.
      */
-    private async pullLocked(stackName: string): Promise<PullResult> {
+    private async pullLocked(stackName: string, actor: string): Promise<PullResult> {
         const db = DatabaseService.getInstance();
         const src = db.getGitSource(stackName);
         if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
@@ -1678,49 +1806,92 @@ export class GitSourceService {
         const validation = materialization.value
             ? materialization.value.validation
             : await this.validateCompose(fetched.composeFiles, fetched.envContent, src.context_dir);
-        const appliedFiles = src.applied_deploy_spec?.files ?? [PRIMARY_COMPOSE_FILENAME];
-        const disk = await this.readDiskContent(stackName, src.sync_env, appliedFiles);
-        const currentHash = this.hashContent(disk.files, disk.env);
-        const hasLocalChanges = src.last_applied_content_hash !== null
-            && src.last_applied_content_hash !== currentHash;
 
-        // Store pending so a subsequent apply doesn't re-fetch. Compose files
-        // routinely contain secrets inlined as env interpolations or passwords,
-        // so the v3 blob (ordered files + contextDir + candidate + inventory)
-        // is encrypted at rest.
+        let manifestSummary: ManifestSummary | null = null;
+        const priorRead = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
+        if (priorRead !== null && 'corrupt' in priorRead) {
+            const identityMismatch = priorRead.corrupt.includes('identity');
+            throw new GitSourceError(
+                'GIT_ERROR',
+                identityMismatch
+                    ? `The managed-project manifest for ${stackName} is stamped for a different repository or branch. Detach the Git source, then re-link it to the current repository and branch.`
+                    : `The managed-project manifest for ${stackName} cannot be trusted (${priorRead.corrupt}). Detach the Git source and re-link it to rebuild the managed project.`,
+            );
+        }
+        const prior = priorRead;
+        if (prior) manifestSummary = manifestSvc.summaryFrom(prior);
+
+        const operationId = crypto.randomUUID();
+        let plan: GitChangePlan | null = null;
+        if (materialization.value?.inventory) {
+            plan = await this.computeChangePlan({
+                stackName,
+                commitSha: fetched.commitSha,
+                mode: 'update',
+                src,
+                inventory: materialization.value.inventory,
+                envContent: fetched.envContent,
+                prior,
+            });
+        }
+
+        const publicPlan = plan ? GitChangePlanService.getInstance().toPublic(plan) : null;
+        const summary = plan ? GitChangePlanService.getInstance().toPendingSummary(plan) : null;
         db.setGitSourcePending(
             stackName,
             fetched.commitSha,
-            this.encodePendingCompose(fetched.composeFiles, src.context_dir, materialization.value?.candidateRelPath ?? null, materialization.value?.inventory ?? null),
+            this.encodePendingCompose(
+                fetched.composeFiles,
+                src.context_dir,
+                materialization.value?.candidateRelPath ?? null,
+                materialization.value?.inventory ?? null,
+                {
+                    fingerprint: plan?.fingerprint ?? '',
+                    schemaVersion: GIT_CHANGE_PLAN_SCHEMA_VERSION,
+                    operationId,
+                    reviewedLive: plan ? this.reviewedLiveFromPlan(plan) : [],
+                },
+            ),
             fetched.envContent !== null ? this.crypto.encrypt(fetched.envContent) : null,
+            summary ? { fingerprint: summary.fingerprint, blocked: summary.blocked, summary: JSON.stringify(summary) } : undefined,
         );
 
-        // Prior manifest summary for the pull response (managed/unmanaged/refused
-        // counts + pinned revision); a corrupt manifest is surfaced as such.
-        let manifestSummary: ManifestSummary | null = null;
-        const prior = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
-        if (prior !== null && !('corrupt' in prior)) {
-            manifestSummary = manifestSvc.summaryFrom(prior);
+        if (plan) {
+            this.upsertGitPlanDrift(stackName, plan);
+            const shortSha = fetched.commitSha.slice(0, 7);
+            const fpPrefix = plan.fingerprint.slice(0, 12);
+            if (plan.blocked) {
+                this.recordGitActivity(
+                    stackName,
+                    'git_plan_blocked',
+                    `Git plan blocked for ${stackName} (${shortSha}, op ${operationId.slice(0, 8)}, plan ${fpPrefix})`,
+                    actor,
+                    'warning',
+                );
+            } else {
+                this.recordGitActivity(
+                    stackName,
+                    'git_pull_ready',
+                    `Git pull ready for ${stackName} (${shortSha}, op ${operationId.slice(0, 8)}, plan ${fpPrefix})`,
+                    actor,
+                );
+            }
         }
 
-        console.log(`[GitSource] Pending update ready for ${stackName} at ${fetched.commitSha.slice(0, 7)} (validation=${validation.ok ? 'ok' : 'fail'}, localEdits=${hasLocalChanges}, candidate=${materialization.value?.candidateRelPath ?? "none"})`);
+        console.log(`[GitSource] Pending update ready for ${stackName} at ${fetched.commitSha.slice(0, 7)} (validation=${validation.ok ? 'ok' : 'fail'}, blocked=${plan?.blocked ?? 'n/a'}, candidate=${materialization.value?.candidateRelPath ?? "none"})`);
         if (diag) {
-            console.log(`[GitSource:diag] pull done stack=${stackName} sha=${fetched.commitSha.slice(0, 7)} validation=${validation.ok} localEdits=${hasLocalChanges} candidate=${materialization.value !== null}`);
+            console.log(`[GitSource:diag] pull done stack=${stackName} sha=${fetched.commitSha.slice(0, 7)} validation=${validation.ok} blocked=${plan?.blocked ?? 'n/a'} candidate=${materialization.value !== null}`);
         }
 
         return {
             commitSha: fetched.commitSha,
-            incomingCompose: this.combinedComposePreview(fetched.composeFiles),
-            incomingEnv: fetched.envContent,
-            currentCompose: this.combinedComposePreview(disk.files),
-            currentEnv: disk.env,
             validation,
-            hasLocalChanges,
-            // High-sensitivity refusals are redacted on every public surface.
             refusals: manifestSvc.toPublicRefusals(materialization.value?.inventory.refusals ?? []),
             manifestSummary,
             candidateReady: materialization.value !== null && materialization.value.validation.ok,
             warnings: fetched.warnings,
+            plan: publicPlan,
+            planFingerprint: plan?.fingerprint ?? null,
         };
     }
 
@@ -1739,9 +1910,12 @@ export class GitSourceService {
     public async apply(
         stackName: string,
         commitSha: string,
-        opts: { deploy?: boolean; actor?: string; bypassPolicy?: boolean } = {},
+        opts: GitApplyOpts = {},
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
-        return this.withStackLock(stackName, () => this.applyWithSharedLock(stackName, commitSha, opts));
+        return this.withStackLock(stackName, () => this.applyWithSharedLock(stackName, commitSha, {
+            ...opts,
+            requirePlanFingerprint: opts.requirePlanFingerprint !== false,
+        }));
     }
 
     /**
@@ -1753,7 +1927,7 @@ export class GitSourceService {
     private async applyWithSharedLock(
         stackName: string,
         commitSha: string,
-        opts: { deploy?: boolean; actor?: string; bypassPolicy?: boolean },
+        opts: GitApplyOpts,
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const lock = await StackOpLockService.getInstance().runExclusive(
@@ -1776,7 +1950,7 @@ export class GitSourceService {
     private async applyLocked(
         stackName: string,
         commitSha: string,
-        opts: { deploy?: boolean; actor?: string; bypassPolicy?: boolean },
+        opts: GitApplyOpts,
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
         const diag = isDebugEnabled();
         const db = DatabaseService.getInstance();
@@ -1793,20 +1967,36 @@ export class GitSourceService {
 
         // Materialize from the pending blob (its files + contextDir), never the
         // live config: a config edit between pull and apply must not change what
-        // gets written. The v3 blob is decoded here (legacy v2/plaintext blobs
-        // fall back to the historical file-set path below).
+        // gets written.
         const pending = this.decodePendingCompose(src.pending_compose_content);
+        if (pending.version === 2 || pending.version === 3 || pending.version === 'plaintext') {
+            throw new GitSourceError('LEGACY_PENDING', 'Pending update was stored before classified review. Pull again to rebuild it.');
+        }
+        if (
+            pending.version !== 4
+            || pending.inventory === null
+            || !pending.planFingerprint
+            || pending.planSchemaVersion !== GIT_CHANGE_PLAN_SCHEMA_VERSION
+            || !pending.operationId
+        ) {
+            throw new GitSourceError('PLAN_UNAVAILABLE', 'Pending update cannot be reviewed; pull again.');
+        }
+        const requireFingerprint = opts.requirePlanFingerprint !== false;
+        if (requireFingerprint && (!opts.planFingerprint || !opts.planFingerprint.trim())) {
+            throw new GitSourceError('PLAN_FINGERPRINT_REQUIRED', 'planFingerprint is required to apply this pull.');
+        }
         const envContent = src.pending_env_content !== null
             ? this.crypto.decrypt(src.pending_env_content)
             : null;
         const manifestSvc = GitProjectManifestService.getInstance();
         const recoverySvc = StackUpdateRecoveryService.getInstance();
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const actor = opts.actor ?? 'system:git-source';
         let recoveryId: string | undefined;
 
         let appliedSpec: GitSourceAppliedSpec | null;
         if (pending.candidateRelPath !== null && pending.inventory !== null) {
-            // ── Complete-project path (v3 pending) ───────────────────────────
+            // ── Complete-project path (v4 pending) ───────────────────────────
             const prior = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
             if (prior !== null && 'corrupt' in prior) {
                 // Any identity-stamp corruption (missing identity, node/stack/
@@ -1828,56 +2018,105 @@ export class GitSourceService {
             const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, pending.candidateRelPath);
             try {
                 await fsPromises.access(candidateAbs);
-            } catch {
+            } catch (accessErr: unknown) {
+                const code = (accessErr as NodeJS.ErrnoException).code;
+                if (code !== 'ENOENT') {
+                    console.error(
+                        `[GitSource] candidate access failed for ${sanitizeForLog(stackName)}:`,
+                        accessErr instanceof Error ? accessErr.message : String(accessErr),
+                    );
+                    throw new GitSourceError('GIT_ERROR', 'Cannot read the pending candidate; try again.');
+                }
                 throw new GitSourceError('GIT_ERROR', 'Pending update was invalidated; pull again.');
             }
 
             // Re-validate the exact candidate before touching the live project.
-            const candValidation = await this.validateCandidate(stackName, pending.candidateRelPath, src.compose_paths, src.context_dir);
+            const candValidation = await this.validateCandidate(
+                stackName,
+                pending.candidateRelPath,
+                src.compose_paths,
+                src.context_dir,
+                src.sync_env,
+            );
             if (!candValidation.ok) {
                 if (diag) console.log(`[GitSource:diag] apply candidate validation fail stack=${stackName}`);
                 throw new GitSourceError('GIT_ERROR', `Candidate validation failed: ${candValidation.error}`);
             }
 
-            // Local-modification refusal (convergence prelude): every managed,
-            // present input must still match the manifest hash, or the incoming
-            // commit would overwrite user edits. Abort before any write.
-            if (prior) {
-                const diverged: string[] = [];
-                const unreadable: string[] = [];
-                for (const entry of prior.inputs) {
-                    if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
-                    if (entry.contentSha256 === null) continue;
-                    const diskHash = await manifestSvc.hashStackFile(stackName, entry.materializedPath);
-                    if (diskHash === null) unreadable.push(entry.materializedPath);
-                    else if (diskHash !== entry.contentSha256) diverged.push(entry.materializedPath);
-                }
-                // Build contexts are file-granular: local edits, added files,
-                // and missing files inside a retained context are divergence.
-                const managedInputPaths = new Set(
-                    prior.inputs
-                        .filter((i) => i.ownership === 'managed' && i.materializedPath !== null)
-                        .map((i) => i.materializedPath!),
+            const plan = await this.computeChangePlan({
+                stackName,
+                commitSha,
+                mode: 'update',
+                src,
+                inventory: pending.inventory,
+                envContent,
+                prior: prior ?? null,
+                reviewedLiveHashes: this.reviewedLiveMap(pending.reviewedLive),
+            });
+            const publicPlan = GitChangePlanService.getInstance().toPublic(plan);
+            if (plan.fingerprint !== pending.planFingerprint || plan.blocked !== (src.pending_plan_blocked === true)) {
+                db.updateGitSourcePendingPlan(
+                    stackName,
+                    this.encodePendingCompose(
+                        pending.files,
+                        pending.contextDir,
+                        pending.candidateRelPath,
+                        pending.inventory,
+                        {
+                            fingerprint: plan.fingerprint,
+                            schemaVersion: GIT_CHANGE_PLAN_SCHEMA_VERSION,
+                            operationId: pending.operationId,
+                            reviewedLive: pending.reviewedLive,
+                        },
+                    ),
+                    {
+                        fingerprint: plan.fingerprint,
+                        blocked: plan.blocked,
+                        summary: JSON.stringify(GitChangePlanService.getInstance().toPendingSummary(plan)),
+                    },
                 );
-                for (const context of prior.buildContexts) {
-                    if (context.files.length === 0) continue;
-                    const contextDiverged = await manifestSvc.verifyContextOnDisk(stackName, context, managedInputPaths);
-                    for (const rel of contextDiverged) {
-                        diverged.push(`${context.repoPath}/${rel}`);
-                    }
-                }
-                if (diverged.length > 0) {
-                    throw new GitSourceError(
-                        'GIT_ERROR',
-                        `Local modifications detected on ${diverged.join(', ')}. Detach the Git source or restore these files; the incoming commit will not overwrite local changes.`,
+            }
+            if (requireFingerprint && opts.planFingerprint !== plan.fingerprint) {
+                throw new GitSourceError(
+                    'STALE_PLAN',
+                    'The change plan is stale. Review the updated plan before applying.',
+                    { plan: publicPlan, planFingerprint: plan.fingerprint },
+                );
+            }
+            const blockedPlanActivity = `Git plan blocked for ${stackName} (${commitSha.slice(0, 7)}, op ${pending.operationId.slice(0, 8)}, plan ${plan.fingerprint.slice(0, 12)})`;
+            if (plan.blocked) {
+                this.upsertGitPlanDrift(stackName, plan);
+                db.setGitSourceLastPlan(stackName, plan.fingerprint, 'blocked');
+                if (src.pending_plan_blocked !== true) {
+                    this.recordGitActivity(
+                        stackName,
+                        'git_plan_blocked',
+                        blockedPlanActivity,
+                        actor,
+                        'warning',
                     );
                 }
-                if (unreadable.length > 0) {
-                    throw new GitSourceError(
-                        'GIT_ERROR',
-                        `Could not read ${unreadable.join(', ')} to verify it is unchanged; restore it or detach the Git source before applying.`,
-                    );
-                }
+                throw new GitSourceError(
+                    'PLAN_BLOCKED',
+                    'The change plan is blocked by local conflicts. Resolve them before applying.',
+                    { plan: publicPlan, planFingerprint: plan.fingerprint },
+                );
+            }
+            // Unattended apply (webhook auto-write) still refuses invocation drift.
+            if (!requireFingerprint && plan.invocationBlocked) {
+                db.setGitSourceLastPlan(stackName, plan.fingerprint, 'blocked');
+                this.recordGitActivity(
+                    stackName,
+                    'git_plan_blocked',
+                    blockedPlanActivity,
+                    actor,
+                    'warning',
+                );
+                throw new GitSourceError(
+                    'PLAN_BLOCKED',
+                    'The live Compose invocation no longer matches the last applied generation. Review the change plan and apply it to record the incoming invocation.',
+                    { plan: publicPlan, planFingerprint: plan.fingerprint },
+                );
             }
 
             // Assemble the new manifest from the pull-time inventory.
@@ -1898,13 +2137,7 @@ export class GitSourceService {
                           note: null,
                       }
                     : null;
-            const invocation: string[] = [];
-            try {
-                invocation.push(...(await authoredComposeFileArgs(stackName, nodeId)));
-                invocation.push(...(await authoredComposeEnvFileArgs(stackName, nodeId)));
-            } catch (e) {
-                console.warn(`[GitSource] invocation build failed for ${stackName}:`, (e as Error).message);
-            }
+            const invocation = plan.candidateInvocation;
             const manifest = manifestSvc.buildManifest({
                 stackName,
                 repoUrl: src.repo_url,
@@ -1959,11 +2192,10 @@ export class GitSourceService {
                     adoptExistingMaterializedPaths: legacyOwnedPaths,
                 });
             } catch (e) {
-                // Pre-mutation refusals (collision guard, case-only changes)
-                // and promotion failures surface as clean GitSourceErrors.
-                // The original error is logged with its stack for diagnosis,
-                // and the message is scrubbed of credentials and of the
-                // incoming manifest's high-sensitivity paths.
+                // Pre-mutation refusals and promotion failures surface as
+                // GitSourceErrors. Typed PromoteGenerationError records whether
+                // restore confirmed so last_plan_outcome never claims a rollback
+                // that did not happen.
                 if (recoveryId) {
                     try {
                         await recoverySvc.abandon(recoveryId);
@@ -1984,70 +2216,39 @@ export class GitSourceService {
                 for (const rel of sensitivePaths) {
                     redacted = redacted.split(rel).join('[redacted]');
                 }
+                const phase = e instanceof PromoteGenerationError ? e.phase : 'pre_mutation';
+                if (phase === 'restored') {
+                    db.setGitSourceLastPlan(stackName, plan.fingerprint, 'rolled_back');
+                    this.recordGitActivity(
+                        stackName,
+                        'git_apply_rolled_back',
+                        `Git apply rolled back for ${stackName} (${commitSha.slice(0, 7)}, op ${pending.operationId.slice(0, 8)}, plan ${plan.fingerprint.slice(0, 12)})`,
+                        actor,
+                        'warning',
+                    );
+                } else {
+                    db.setGitSourceLastPlan(stackName, plan.fingerprint, 'failed');
+                    this.recordGitActivity(
+                        stackName,
+                        'git_apply_failed',
+                        `Git apply failed for ${stackName} (${commitSha.slice(0, 7)}, op ${pending.operationId.slice(0, 8)}, plan ${plan.fingerprint.slice(0, 12)})`,
+                        actor,
+                        'error',
+                    );
+                }
                 throw new GitSourceError('GIT_ERROR', scrubCredentials(redacted));
             }
             appliedSpec = this.deriveAppliedSpec(src.compose_paths, src.context_dir);
+            db.setGitSourceLastPlan(stackName, plan.fingerprint, 'applied');
+            DriftLedgerService.getInstance().resolveManagedPathConflicts(nodeId, stackName);
+            this.recordGitActivity(
+                stackName,
+                'git_apply',
+                `Git apply succeeded for ${stackName} (${commitSha.slice(0, 7)}, op ${pending.operationId.slice(0, 8)}, plan ${plan.fingerprint.slice(0, 12)})`,
+                actor,
+            );
         } else {
-            // ── Legacy path (v2/plaintext pending from before the upgrade) ──
-            const validation = await this.validateCompose(pending.files, envContent, pending.contextDir);
-            if (!validation.ok) {
-                if (diag) console.log(`[GitSource:diag] apply validation fail stack=${stackName}`);
-                throw new GitSourceError('GIT_ERROR', `Compose validation failed: ${validation.error}`);
-            }
-            // Capture the true pre-apply project BEFORE materialize writes new files.
-            try {
-                const captured = await recoverySvc.captureCandidate({
-                    nodeId,
-                    stackName,
-                    createdBy: opts.actor ?? 'git-source',
-                    operationKind: 'git_apply',
-                });
-                recoveryId = captured.id;
-            } catch (captureError) {
-                const detail = captureError instanceof Error ? captureError.message : String(captureError);
-                console.error(
-                    `[GitSource] Recovery capture failed before legacy apply of ${sanitizeForLog(stackName)}:`,
-                    detail,
-                );
-                throw new GitSourceError(
-                    'GIT_ERROR',
-                    `Rollback capture failed before apply; refusing to materialize without recovery coverage: ${scrubCredentials(detail)}`,
-                );
-            }
-            appliedSpec = await this.materialize(
-                stackName, pending.files, pending.contextDir, src.sync_env, envContent, src.applied_deploy_spec,
-            ).catch(async (materializeError: unknown) => {
-                if (recoveryId) {
-                    const reverted = await recoverySvc.revertToGenerationContent(recoveryId);
-                    if (!reverted) {
-                        throw new GitSourceError(
-                            'GIT_ERROR',
-                            `Legacy materialize failed and pre-apply generation restore also failed: ${scrubCredentials(
-                                materializeError instanceof Error ? materializeError.message : String(materializeError),
-                            )}`,
-                        );
-                    }
-                    try {
-                        await recoverySvc.abandon(recoveryId);
-                    } catch (abandonError) {
-                        console.warn(
-                            `[GitSource] Failed to abandon recovery after legacy materialize failure for ${sanitizeForLog(stackName)}:`,
-                            abandonError instanceof Error ? abandonError.message : String(abandonError),
-                        );
-                    }
-                    recoveryId = undefined;
-                }
-                throw materializeError;
-            });
-            // Migration: build the conservative manifest from spec + disk.
-            const migrated = await manifestSvc.buildMigratedManifest(stackName, {
-                repo_url: src.repo_url,
-                branch: src.branch,
-                sync_env: src.sync_env,
-                applied_deploy_spec: appliedSpec,
-            });
-            await manifestSvc.writeManifest(stackName, migrated);
-            db.setGitSourceManifestState(stackName, migrated.manifestVersion, migrated.state, migrated.generation.appliedDir);
+            throw new GitSourceError('PLAN_UNAVAILABLE', 'Pending update cannot be reviewed; pull again.');
         }
 
         const hash = this.hashContent(pending.files, envContent);
@@ -2208,10 +2409,9 @@ export class GitSourceService {
                 throw new GitSourceError('GIT_ERROR', `Compose validation failed: ${validation.error}`);
             }
 
-            // 3. Create directory + boilerplate, then promote the staged
-            //    candidate (or fall back to the historical file-set write).
-            //    createStack() throws if the directory already exists, so a
-            //    name collision is caught here.
+            // 3. Classify the candidate against live disk (the stack directory
+            //    does not exist yet), then create the stack and promote.
+            //    createStack() throws if the directory already exists.
             let stackCreated = false;
             let rowInserted = false;
             // Promotion persists the manifest cache columns BEFORE the row
@@ -2219,9 +2419,8 @@ export class GitSourceService {
             // insert below so list and immediate projections report the real
             // state instead of 'absent'.
             let completeProjectManifest: GitProjectManifest | null = null;
+            let recordedCreatePlan: GitChangePlan | null = null;
             try {
-                await fsSvc.createStack(input.stackName);
-                stackCreated = true;
                 let appliedSpec: GitSourceAppliedSpec | null;
                 if (materialization.value) {
                     const inputs = materialization.value.inventory.inputs.filter(
@@ -2244,13 +2443,18 @@ export class GitSourceService {
                                   note: null,
                               }
                             : null;
-                    const invocation: string[] = [];
-                    try {
-                        invocation.push(...(await authoredComposeFileArgs(input.stackName, NodeRegistry.getInstance().getDefaultNodeId())));
-                        invocation.push(...(await authoredComposeEnvFileArgs(input.stackName, NodeRegistry.getInstance().getDefaultNodeId())));
-                    } catch {
-                        // best-effort; a fresh pull rebuilds the invocation
-                    }
+                    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+                    const stackDir = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId), input.stackName);
+                    const invocation = buildCandidateComposeInvocation({
+                        stackName: input.stackName,
+                        composePaths: input.composePaths,
+                        contextDir: input.contextDir,
+                        stackDir,
+                        syncEnv: input.syncEnv,
+                        envContentPresent: fetched.envContent !== null,
+                        projectEnvFiles: db.getStackProjectEnvFiles(nodeId, input.stackName),
+                        rootEnvFilePresent: fetched.envContent !== null,
+                    });
                     const manifest = manifestSvc.buildManifest({
                         stackName: input.stackName,
                         repoUrl: input.repoUrl,
@@ -2267,16 +2471,57 @@ export class GitSourceService {
                         priorManifest: null,
                         state: materialization.value.inventory.refusals.length > 0 ? 'partial' : 'active',
                     });
+                    const createPlan = await this.computeChangePlan({
+                        stackName: input.stackName,
+                        commitSha: fetched.commitSha,
+                        mode: 'create',
+                        src: {
+                            stack_name: input.stackName,
+                            repo_url: input.repoUrl,
+                            branch: input.branch,
+                            compose_path: input.composePaths[0],
+                            compose_paths: input.composePaths,
+                            context_dir: input.contextDir,
+                            sync_env: input.syncEnv,
+                            env_path: input.syncEnv ? input.envPath : null,
+                            auth_type: input.authType,
+                            encrypted_token: null,
+                            auto_apply_on_webhook: false,
+                            auto_deploy_on_apply: false,
+                            last_applied_commit_sha: null,
+                            last_applied_content_hash: null,
+                            pending_commit_sha: null,
+                            pending_compose_content: null,
+                            pending_env_content: null,
+                            pending_fetched_at: null,
+                            last_debounce_at: null,
+                            applied_deploy_spec: this.deriveAppliedSpec(input.composePaths, input.contextDir),
+                        } as StackGitSource,
+                        inventory: materialization.value.inventory,
+                        envContent: fetched.envContent,
+                        prior: null,
+                    });
+                    if (createPlan.blocked) {
+                        throw new GitSourceError(
+                            'GIT_ERROR',
+                            `Git create blocked for ${input.stackName}: the managed-file change plan reported blocking operations.`,
+                        );
+                    }
+                    recordedCreatePlan = createPlan;
+                    completeProjectManifest = manifest;
+                }
+
+                await fsSvc.createStack(input.stackName);
+                stackCreated = true;
+
+                if (completeProjectManifest && materialization.value) {
                     await manifestSvc.promoteGeneration(input.stackName, {
                         sha: fetched.commitSha,
                         candidateRelPath: materialization.value.candidateRelPath,
-                        manifest,
+                        manifest: completeProjectManifest,
                         priorManifest: null,
-                        // The stack directory was just created by this flow;
-                        // every existing file is adoption boilerplate.
                         adoptExistingMaterializedPaths: 'all',
                     });
-                    completeProjectManifest = manifest;
                     appliedSpec = this.deriveAppliedSpec(input.composePaths, input.contextDir);
                 } else {
                     appliedSpec = await this.materialize(
@@ -2327,6 +2572,24 @@ export class GitSourceService {
                 }
 
                 rowInserted = true;
+                const operationId = crypto.randomUUID();
+                if (completeProjectManifest && materialization.value && recordedCreatePlan) {
+                    db.setGitSourceLastPlan(input.stackName, recordedCreatePlan.fingerprint, 'applied');
+                    this.recordGitActivity(
+                        input.stackName,
+                        'git_create',
+                        `Git create succeeded for ${input.stackName} (${fetched.commitSha.slice(0, 7)}, op ${operationId.slice(0, 8)}, plan ${recordedCreatePlan.fingerprint.slice(0, 12)})`,
+                        'system:git-source',
+                    );
+                } else {
+                    this.recordGitActivity(
+                        input.stackName,
+                        'git_create',
+                        `Git create succeeded for ${input.stackName} (${fetched.commitSha.slice(0, 7)}, op ${operationId.slice(0, 8)})`,
+                        'system:git-source',
+                    );
+                }
+
                 const source = this.get(input.stackName);
                 if (!source) {
                     throw new GitSourceError('GIT_ERROR', 'Failed to read back created git source.');
@@ -2505,8 +2768,17 @@ export class GitSourceService {
                 return { status: 'skipped', message: 'Rate limited (debounced).' };
             }
 
+            let pullResult: PullResult;
             try {
-                const pullResult = await this.pullLocked(stackName);
+                pullResult = await this.pullLocked(stackName, 'system:webhook');
+            } catch (e) {
+                const msg = e instanceof GitSourceError ? `${e.code}: ${e.message}` : (e as Error).message;
+                const scrubbed = scrubCredentials(msg);
+                this.recordGitActivity(stackName, 'git_pull_failed', `Git pull failed for ${stackName}`, 'system:webhook', 'error');
+                console.error(`[GitSource] Webhook pull failed for ${sanitizeForLog(stackName)}: ${sanitizeForLog(scrubbed)}`);
+                return { status: 'error', message: scrubbed };
+            }
+            try {
                 // Only burn the debounce window once the fetch actually produced
                 // something. A transient network failure should be retriable
                 // immediately rather than locked out for the debounce interval.
@@ -2526,6 +2798,7 @@ export class GitSourceService {
                 const applied = await this.applyWithSharedLock(stackName, pullResult.commitSha, {
                     deploy: src.auto_deploy_on_apply,
                     actor: 'system:webhook',
+                    requirePlanFingerprint: false,
                 });
                 if (applied.deployError) {
                     // Apply wrote to disk but deploy failed. Surface it so the
@@ -2545,6 +2818,151 @@ export class GitSourceService {
                 return { status: 'error', message: scrubbed };
             }
         });
+    }
+
+    // ─── Change plan helpers ─────────────────────────────────────────────────
+
+    private parsePendingPlanSummary(raw: string | null): PublicPendingPlanView | null {
+        if (!raw) return null;
+        try {
+            const parsed = JSON.parse(raw) as PublicPendingPlanView;
+            if (typeof parsed.fingerprint !== 'string' || typeof parsed.blocked !== 'boolean') return null;
+            return parsed;
+        } catch {
+            return null;
+        }
+    }
+
+    private async liveInvocationArgs(stackName: string, nodeId: number): Promise<string[]> {
+        try {
+            return [
+                ...authoredComposeFileArgs(stackName, nodeId),
+                ...(await authoredComposeEnvFileArgs(stackName, nodeId)),
+            ];
+        } catch (e) {
+            const detail = e instanceof Error ? e.message : String(e);
+            console.warn(`[GitSource] live invocation read failed for ${stackName}:`, detail);
+            throw new GitSourceError('GIT_ERROR', `Cannot read the live compose invocation for ${stackName}.`);
+        }
+    }
+
+    private candidateInvocationArgs(stackName: string, src: StackGitSource, envContentPresent: boolean): string[] {
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        // Canonical js/path-injection barrier inline with the existsSync sink.
+        // CodeQL does not credit a wrapped helper or a check separated from the sink.
+        const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId));
+        const stackDir = path.resolve(baseResolved, stackName);
+        let rootEnvFilePresent = false;
+        if (!src.sync_env) {
+            const envPath = path.resolve(stackDir, '.env');
+            if (envPath.startsWith(baseResolved + path.sep) && existsSync(envPath)) {
+                rootEnvFilePresent = true;
+            }
+        }
+        return buildCandidateComposeInvocation({
+            stackName,
+            composePaths: src.compose_paths,
+            contextDir: src.context_dir,
+            stackDir,
+            syncEnv: src.sync_env,
+            envContentPresent,
+            projectEnvFiles: DatabaseService.getInstance().getStackProjectEnvFiles(nodeId, stackName),
+            rootEnvFilePresent,
+        });
+    }
+
+    private async computeChangePlan(opts: {
+        stackName: string;
+        commitSha: string;
+        mode: 'update' | 'create';
+        src: StackGitSource;
+        inventory: InventoryResult;
+        envContent: string | null;
+        prior: GitProjectManifest | null;
+        reviewedLiveHashes?: ReadonlyMap<string, string | null>;
+    }): Promise<GitChangePlan> {
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const syncEnvEntry: ComposeInputEntry | null =
+            opts.src.sync_env && opts.envContent !== null
+                ? {
+                    sourcePath: null,
+                    materializedPath: '.env',
+                    role: 'env',
+                    dependencyKind: 'sync-env',
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    sensitivity: 'high',
+                    contentSha256: crypto.createHash('sha256').update(opts.envContent).digest('hex'),
+                    sizeBytes: Buffer.byteLength(opts.envContent, 'utf8'),
+                    state: 'present',
+                    deletionAuthority: 'sencho',
+                    note: null,
+                }
+                : null;
+        const inputs = mergeSyncEnvEntry(opts.inventory.inputs, syncEnvEntry);
+        const liveInvocation = await this.liveInvocationArgs(opts.stackName, nodeId);
+        const candidateInvocation = this.candidateInvocationArgs(opts.stackName, opts.src, opts.envContent !== null);
+        const legacyOwnedPaths = opts.prior
+            ? undefined
+            : [
+                ...(opts.src.applied_deploy_spec?.files ?? [PRIMARY_COMPOSE_FILENAME]),
+                ...(opts.src.sync_env ? ['.env'] : []),
+            ];
+        return GitChangePlanService.getInstance().build({
+            stackName: opts.stackName,
+            commitSha: opts.commitSha,
+            mode: opts.mode,
+            priorManifest: opts.prior,
+            candidateInputs: inputs,
+            candidateBuildContexts: opts.inventory.buildContexts,
+            candidateInvocation,
+            liveInvocation,
+            legacyOwnedPaths,
+            reviewedLiveHashes: opts.reviewedLiveHashes,
+            projectEnvFiles: DatabaseService.getInstance().getStackProjectEnvFiles(nodeId, opts.stackName),
+        });
+    }
+
+    private upsertGitPlanDrift(stackName: string, plan: GitChangePlan): void {
+        const blocking = plan.operations.filter((op) =>
+            op.op === 'local-modified' || op.op === 'local-missing' || op.op === 'type-changed' || op.op === 'unmanaged-collision',
+        );
+        if (blocking.length === 0) return;
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        DriftLedgerService.getInstance().upsertManagedPathConflicts(
+            nodeId,
+            stackName,
+            blocking.map((op) => ({
+                path: op.pathKey,
+                op: op.op,
+                role: String(op.role),
+                sensitivity: op.sensitivity,
+            })),
+        );
+    }
+
+    private recordGitActivity(
+        stackName: string,
+        category: NotificationCategory,
+        message: string,
+        actor: string,
+        level: 'info' | 'warning' | 'error' = 'info',
+    ): void {
+        try {
+            DatabaseService.getInstance().addNotificationHistory(
+                NodeRegistry.getInstance().getDefaultNodeId(),
+                {
+                    level,
+                    category,
+                    message,
+                    timestamp: Date.now(),
+                    stack_name: stackName,
+                    actor_username: actor,
+                },
+            );
+        } catch (error) {
+            console.error('[GitSource] Failed to record activity for %s:', sanitizeForLog(stackName), error);
+        }
     }
 
     // ─── Concurrency ─────────────────────────────────────────────────────────

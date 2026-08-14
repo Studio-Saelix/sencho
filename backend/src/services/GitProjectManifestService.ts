@@ -97,6 +97,22 @@ type RecoveryIncoming =
     | { inputs: ComposeInputEntry[]; buildContexts: BuildContextPlan[] }
     | { introducedPaths: string[] };
 
+export type PromoteFailurePhase = 'pre_mutation' | 'restored' | 'recovery_required';
+
+/** Typed promotion failure so apply can record restore vs pre-mutation vs recovery-required. */
+export class PromoteGenerationError extends Error {
+    readonly phase: PromoteFailurePhase;
+    readonly cause: unknown;
+
+    constructor(phase: PromoteFailurePhase, cause: unknown) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        super(message);
+        this.name = 'PromoteGenerationError';
+        this.phase = phase;
+        this.cause = cause;
+    }
+}
+
 const MANIFEST_STATES: readonly ManifestState[] = ['none', 'migrated', 'active', 'partial', 'unsupported'];
 const DEPENDENCY_KINDS: readonly InputDependencyKind[] = [
     'explicit', 'implicit-override', 'include', 'include-env', 'extends', 'env_file',
@@ -649,70 +665,189 @@ export class GitProjectManifestService {
 
     /** Hash of the stack-dir file at a materialized path, or null when absent. */
     async hashStackFile(stackName: string, relPath: string): Promise<string | null> {
-        const abs = await this.stackFileAbs(stackName, relPath);
+        const composeDir = NodeRegistry.getInstance().getComposeDir(NodeRegistry.getInstance().getDefaultNodeId());
+        const baseResolved = path.resolve(composeDir);
+        if (!isValidStackName(stackName) || !isSafeRelPath(relPath)) throw new Error('Invalid stack file path');
+        const stackRoot = path.resolve(baseResolved, stackName);
+        const abs = path.resolve(stackRoot, relPath);
+        // Canonical js/path-injection barrier inline with the open sink. CodeQL
+        // only credits containment when it sits at the sink; helpers are ignored.
+        if (!stackRoot.startsWith(baseResolved + path.sep)) throw new Error('Invalid stack file path');
+        if (abs !== stackRoot && !abs.startsWith(stackRoot + path.sep)) {
+            throw new Error('Stack file path escapes the stack root');
+        }
+        if (!abs.startsWith(baseResolved + path.sep)) {
+            throw new Error('Stack file path escapes the compose directory');
+        }
+        let flags = fs.constants.O_RDONLY;
+        if (typeof fs.constants.O_NOFOLLOW === 'number') flags |= fs.constants.O_NOFOLLOW;
+        if (typeof fs.constants.O_NONBLOCK === 'number') flags |= fs.constants.O_NONBLOCK;
         try {
-            return sha256Of(await fs.promises.readFile(abs));
+            const handle = await fs.promises.open(abs, flags);
+            try {
+                const stat = await handle.stat();
+                if (!stat.isFile()) return null;
+                return sha256Of(await handle.readFile());
+            } finally {
+                await handle.close();
+            }
         } catch (e) {
-            if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+            const err = e as NodeJS.ErrnoException;
+            if (err.code === 'ENOENT' || err.code === 'ELOOP' || err.code === 'ENXIO' || err.code === 'EAGAIN') {
+                return null;
+            }
             throw e;
         }
     }
 
     /**
-     * Verify a build-context subtree on disk against the manifest's file-level
-     * inventory. Returns the context-relative paths that diverge: files whose
-     * hash differs, files missing from the stack, and files present in the
-     * stack that the manifest does not own (locally added). This gives contexts
-     * the same local-modification protection as plain managed files.
+     * Compare a build-context subtree on disk to the manifest inventory.
+     * Observes the context root with no-follow semantics before walking.
+     * A symlink, special node, or file at the root returns a sentinel and
+     * does not enumerate the target. Nested symlinks are classified without
+     * following, and owned descendants beneath them are not inspected.
+     * Scan limits count every visited entry (files and directories), plus
+     * depth and on-disk bytes, and fail closed with `. (scan limit exceeded)`.
+     * `boundsOverride` is for tests.
      */
-    async verifyContextOnDisk(stackName: string, context: BuildContextPlan, managedInputPaths?: Set<string>): Promise<string[]> {
-        const abs = await this.stackFileAbs(stackName, context.repoPath);
+    async verifyContextOnDisk(
+        stackName: string,
+        context: BuildContextPlan,
+        managedInputPaths?: Set<string>,
+        boundsOverride?: ManifestBounds,
+    ): Promise<string[]> {
+        const bounds = boundsOverride ?? this.boundsConfig();
+        const fsSvc = FileSystemService.getInstance();
+        let rootKind: Awaited<ReturnType<FileSystemService['observeStackPath']>>;
+        try {
+            rootKind = await fsSvc.observeStackPath(stackName, context.repoPath);
+        } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'SYMLINK_ESCAPE') throw err;
+            rootKind = 'symlink';
+        }
+        if (rootKind === 'symlink') return ['. (symbolic link)'];
+        if (rootKind === 'special' || rootKind === 'file') return ['. (special file node)'];
+        if (rootKind !== 'directory') return [];
+
+        if (!isValidStackName(stackName) || !isSafeRelPath(context.repoPath)) {
+            throw new Error('Invalid stack file path');
+        }
+        const composeDir = NodeRegistry.getInstance().getComposeDir(NodeRegistry.getInstance().getDefaultNodeId());
         const diverged: string[] = [];
-        const owned = new Set(context.files.map((f) => f.path));
-        const walk = async (dir: string, rel: string): Promise<void> => {
+        const expectedByPath = new Map(context.files.map((f) => [f.path, f.sha256]));
+        const symlinkPrefixes: string[] = [];
+        let filesSeen = 0;
+        let bytesSeen = 0;
+        let limitExceeded = false;
+        const exceedLimit = (): void => {
+            diverged.push('. (scan limit exceeded)');
+            limitExceeded = true;
+        };
+        const walk = async (rel: string): Promise<void> => {
+            if (limitExceeded) return;
+            if (!isSafeRelPath(rel)) return;
+            const depth = rel === '' ? 0 : rel.split('/').filter(Boolean).length;
+            if (depth > bounds.maxPathDepth) {
+                exceedLimit();
+                return;
+            }
             let entriesList: fs.Dirent[];
             try {
-                entriesList = await fs.promises.readdir(dir, { withFileTypes: true });
+                const baseResolved = path.resolve(composeDir);
+                const dirParts = [stackName, context.repoPath, rel].filter((p) => p !== '');
+                const dirAbs = path.resolve(baseResolved, ...dirParts);
+                if (!dirAbs.startsWith(baseResolved + path.sep)) return;
+                entriesList = await fs.promises.readdir(dirAbs, { withFileTypes: true });
             } catch {
-                return; // missing context dir reported by the owned-file loop below
+                return;
             }
             for (const entry of entriesList) {
+                if (limitExceeded) return;
                 const childRel = rel ? `${rel}/${entry.name}` : entry.name;
-                if (entry.isDirectory()) {
-                    await walk(path.join(dir, entry.name), childRel);
-                    continue;
+                if (!isSafeRelPath(childRel)) continue;
+                filesSeen += 1;
+                if (filesSeen > bounds.maxFiles) {
+                    exceedLimit();
+                    return;
                 }
                 if (entry.isSymbolicLink()) {
                     diverged.push(`${childRel} (symbolic link)`);
+                    symlinkPrefixes.push(childRel);
                     continue;
                 }
-                // Files not in the context inventory: if they have a
-                // managed-input owner (stack-relative path), they are owned
-                // by another manifest entry. The managed set uses stack-
-                // relative paths; the walk uses context-relative paths.
-                if (!owned.has(childRel)) {
-                    const stackRel = context.repoPath ? `${context.repoPath}/${childRel}` : childRel;
-                    if (managedInputPaths && managedInputPaths.has(stackRel)) continue;
+                if (entry.isDirectory()) {
+                    await walk(childRel);
+                    continue;
+                }
+                if (entry.isFIFO() || entry.isSocket() || entry.isBlockDevice() || entry.isCharacterDevice()) {
+                    diverged.push(`${childRel} (special file node)`);
+                    continue;
+                }
+                const stackRel = context.repoPath ? `${context.repoPath}/${childRel}` : childRel;
+                if (!expectedByPath.has(childRel)) {
+                    if (managedInputPaths?.has(stackRel)) continue;
                     diverged.push(`${childRel} (locally added, not in the managed context)`);
                     continue;
                 }
-                const expected = context.files.find((f) => f.path === childRel)?.sha256;
-                const actual = await this.hashStackFile(stackName, context.repoPath ? `${context.repoPath}/${childRel}` : childRel);
+                let onDiskBytes = 0;
+                try {
+                    const baseResolved = path.resolve(composeDir);
+                    const childAbs = path.resolve(baseResolved, stackName, stackRel);
+                    if (!childAbs.startsWith(baseResolved + path.sep)) continue;
+                    onDiskBytes = (await fs.promises.lstat(childAbs)).size;
+                } catch {
+                    diverged.push(`${childRel} (missing)`);
+                    continue;
+                }
+                if (onDiskBytes > bounds.maxFileBytes || bytesSeen + onDiskBytes > bounds.maxContextBytes) {
+                    exceedLimit();
+                    return;
+                }
+                bytesSeen += onDiskBytes;
+                const expected = expectedByPath.get(childRel);
+                const actual = await this.hashStackFile(stackName, stackRel);
                 if (expected === undefined || actual !== expected) {
                     diverged.push(childRel);
                 }
             }
         };
-        await walk(abs, '');
+        await walk('');
         for (const ownedFile of context.files) {
-            if (!owned.has(ownedFile.path)) continue;
-            const present = await fs.promises
-                .access(path.join(abs, ownedFile.path))
-                .then(() => true)
-                .catch(() => false);
-            if (!present) diverged.push(`${ownedFile.path} (missing)`);
+            if (!isSafeRelPath(ownedFile.path)) continue;
+            if (symlinkPrefixes.some((p) => ownedFile.path === p || ownedFile.path.startsWith(`${p}/`))) {
+                continue;
+            }
+            const stackRel = context.repoPath ? `${context.repoPath}/${ownedFile.path}` : ownedFile.path;
+            let kind: Awaited<ReturnType<FileSystemService['observeStackPath']>>;
+            try {
+                kind = await fsSvc.observeStackPath(stackName, stackRel);
+            } catch (err) {
+                if ((err as NodeJS.ErrnoException).code !== 'SYMLINK_ESCAPE') throw err;
+                kind = 'symlink';
+            }
+            if (kind === null) diverged.push(`${ownedFile.path} (missing)`);
+            else if (kind === 'symlink') diverged.push(`${ownedFile.path} (symbolic link)`);
+            else if (kind !== 'file') diverged.push(`${ownedFile.path} (special file node)`);
         }
         return diverged;
+    }
+
+    private async tryRemoveEmptyDir(stackName: string, relPath: string, fsSvc: FileSystemService): Promise<void> {
+        if (!relPath) return;
+        try {
+            await fsSvc.deleteStackPath(stackName, relPath, false, { protectedEnabled: false });
+        } catch (err) {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code === 'ENOENT' || code === 'ENOTEMPTY' || code === 'EEXIST' || code === 'NOT_EMPTY') return;
+            throw err;
+        }
+    }
+
+    private async tryRemoveEmptyParents(stackName: string, fileRel: string, fsSvc: FileSystemService): Promise<void> {
+        const parts = fileRel.replace(/\\/g, '/').split('/').filter(Boolean);
+        for (let i = parts.length - 1; i >= 1; i--) {
+            await this.tryRemoveEmptyDir(stackName, parts.slice(0, i).join('/'), fsSvc);
+        }
     }
 
     private async stackFileAbs(stackName: string, relPath: string): Promise<string> {
@@ -811,7 +946,10 @@ export class GitProjectManifestService {
             return priorRel !== undefined && priorRel !== rel;
         });
         if (caseOnlyChange !== undefined) {
-            throw new Error(`Case-only managed path changes are not supported: ${priorByCaseFold.get(caseOnlyChange.toLowerCase())} -> ${caseOnlyChange}`);
+            throw new PromoteGenerationError(
+                'pre_mutation',
+                new Error(`Case-only managed path changes are not supported: ${priorByCaseFold.get(caseOnlyChange.toLowerCase())} -> ${caseOnlyChange}`),
+            );
         }
         const introduced = incomingFiles.filter((rel) => !priorKeys.has(rel.toLowerCase()));
         const affected = [...new Map([...priorFiles, ...incomingFiles].map((rel) => [rel.toLowerCase(), rel])).values()]
@@ -882,18 +1020,16 @@ export class GitProjectManifestService {
             }
 
             // 2. Stale cleanup: prior-manifest paths Sencho owns (deletionAuthority
-            //    sencho), absent from the new set. Only sencho-authority paths are
-            //    ever unlinked; user/none authority stays untouched. A failed
-            //    unlink FAILS the promotion (the transaction restores the prior
-            //    generation) rather than recording a tombstone for a file that
-            //    still exists and can silently change the deployed model.
+            //    sencho), absent from the new set. Only sencho-authority files are
+            //    unlinked. Build-context directory inventory entries are tombstoned
+            //    without a recursive directory delete; their owned files are
+            //    removed one path at a time. A failed unlink fails the promotion.
             const newPaths = new Set(managed.map((i) => i.materializedPath!));
             const removed: ComposeInputEntry[] = [];
             const fsSvc = FileSystemService.getInstance();
-            // Context files are reconciled FILE-LEVEL: a file removed from the
-            // repository inside a retained context must disappear from the
-            // stack context too, or the deployed/build context would keep
-            // deleted (possibly secret-bearing) content.
+            // Context files are reconciled file-level for both retained and
+            // removed contexts. After owned files are gone, an empty non-root
+            // context directory is removed; unowned leftovers keep the directory.
             const newContextFiles = new Map<string, Set<string>>();
             for (const ctx of manifest.buildContexts) {
                 newContextFiles.set(ctx.repoPath, new Set(ctx.files.map((f) => f.path)));
@@ -901,26 +1037,25 @@ export class GitProjectManifestService {
             if (priorManifest) {
                 for (const entry of priorManifest.inputs) {
                     if (entry.ownership !== 'managed' || entry.state !== 'present' || entry.materializedPath === null) continue;
-                    if (entry.deletionAuthority !== 'sencho') continue; // never touch user/none authority
+                    if (entry.deletionAuthority !== 'sencho') continue;
                     if (newPaths.has(entry.materializedPath)) continue;
-                    // Directories (build contexts) need a recursive unlink; a
-                    // non-recursive attempt would throw and fail the promotion
-                    // even though the directory is legitimately removable.
-                    const isDir = await fsSvc
-                        .pathKind(stackName, entry.materializedPath)
-                        .then((kind) => kind === 'directory')
-                        .catch(() => false);
-                    await fsSvc.deleteStackPath(stackName, entry.materializedPath, isDir, { protectedEnabled: false });
+                    if (entry.dependencyKind === 'build-context' || entry.dependencyKind === 'build-additional-context') {
+                        removed.push({ ...entry, state: 'tombstoned', contentSha256: null, sizeBytes: null });
+                        continue;
+                    }
+                    await fsSvc.deleteStackPath(stackName, entry.materializedPath, false, { protectedEnabled: false });
                     removed.push({ ...entry, state: 'tombstoned', contentSha256: null, sizeBytes: null });
                 }
-                // Context-file reconciliation for contexts retained in both sets.
                 for (const priorCtx of priorManifest.buildContexts) {
-                    const newFiles = newContextFiles.get(priorCtx.repoPath);
-                    if (!newFiles) continue; // context removed entirely; handled above
+                    const newFiles = newContextFiles.get(priorCtx.repoPath) ?? new Set<string>();
                     for (const priorFile of priorCtx.files) {
                         if (newFiles.has(priorFile.path)) continue;
                         const rel = priorCtx.repoPath ? `${priorCtx.repoPath}/${priorFile.path}` : priorFile.path;
                         await fsSvc.deleteStackPath(stackName, rel, false, { protectedEnabled: false });
+                        await this.tryRemoveEmptyParents(stackName, rel, fsSvc);
+                    }
+                    if (!newContextFiles.has(priorCtx.repoPath) && priorCtx.repoPath) {
+                        await this.tryRemoveEmptyDir(stackName, priorCtx.repoPath, fsSvc);
                     }
                 }
             }
@@ -959,18 +1094,22 @@ export class GitProjectManifestService {
                 console.warn('[GitManifest] committed promotion marker cleanup failed:', (e as Error).message);
             }
         } catch (error) {
-            if (!liveMutationStarted) throw error;
+            if (!liveMutationStarted) {
+                throw new PromoteGenerationError('pre_mutation', error);
+            }
             // Mid-write failure: restore the previous applied generation and
-            // rethrow so the caller reports the failure honestly.
+            // rethrow a typed outcome so the caller records restore vs recovery-required.
+            let restored = false;
             try {
-                await this.restorePreviousGeneration(stackName, {
+                restored = await this.restorePreviousGeneration(stackName, {
                     priorManifest: opts.priorManifest,
                     incoming: { inputs: opts.manifest.inputs, buildContexts: opts.manifest.buildContexts },
                 });
             } catch (restoreError) {
                 console.error('[GitManifest] promotion failed and recovery restore also failed:', (restoreError as Error).message);
+                restored = false;
             }
-            throw error;
+            throw new PromoteGenerationError(restored ? 'restored' : 'recovery_required', error);
         }
     }
 
