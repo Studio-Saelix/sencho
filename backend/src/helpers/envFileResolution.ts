@@ -21,6 +21,12 @@ import { parseInterpolationRefs, type InterpolationRef } from './envVarParse';
 const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB, matches the routes/stacks.ts bound
 const ROOT_COMPOSE_CANDIDATES = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
 
+/** Basename is `.env`, `*.env` (e.g. `stack.env`), or `.env.*` (e.g. `.env.local`). */
+export function isEnvLikeFileName(name: string): boolean {
+  const base = name.replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? '';
+  return base === '.env' || base.endsWith('.env') || base.startsWith('.env.');
+}
+
 export type EnvFileExistence = 'present' | 'missing' | 'unverifiable';
 
 /**
@@ -310,14 +316,11 @@ export async function discoverStackLocalEnvFiles(nodeId: number, stackName: stri
   const candidates: string[] = [];
   for (const entry of entries) {
     const name = entry.name;
-    if (name === '.env' || name.endsWith('.env') || name.startsWith('.env.')) {
-      // Must be a regular file, not a directory.
-      if (entry.type !== 'file') continue;
-      // Validate containment (defense in depth).
-      const absPath = path.resolve(stackDir, name);
-      if (!isPathWithinBase(absPath, stackDir)) continue;
-      candidates.push(name);
-    }
+    if (!isEnvLikeFileName(name) || entry.type !== 'file') continue;
+    // Validate containment (defense in depth).
+    const absPath = path.resolve(stackDir, name);
+    if (!isPathWithinBase(absPath, stackDir)) continue;
+    candidates.push(name);
   }
 
   candidates.sort();

@@ -11,7 +11,7 @@ import type {
     ManifestProvenance,
 } from './gitProjectManifest';
 
-export const GIT_CHANGE_PLAN_SCHEMA_VERSION = 1 as const;
+export const GIT_CHANGE_PLAN_SCHEMA_VERSION = 2 as const;
 
 export type GitChangePlanOp =
     | 'add'

@@ -155,13 +155,16 @@ export async function authoredComposeEnvFileArgs(stackName: string, nodeId?: num
  * `--env-file` arguments for candidate `docker compose config` validation.
  * Configured project env files stay live-stack paths (same as deploy).
  * Otherwise a context-dir stack uses the candidate `.env` when that file
- * exists on the candidate; if it does not, fall back to the live legacy `.env`.
+ * exists on the candidate. If it does not, fall back to the live legacy `.env`
+ * only when that file will survive promotion (`syncEnv` is false). A managed
+ * synced `.env` that this generation omits must not be used for validation.
  */
 export async function candidateValidationEnvFileArgs(opts: {
   stackName: string;
   nodeId: number;
   candidateAbs: string;
   contextDir: string | null;
+  syncEnv: boolean;
 }): Promise<string[]> {
   const configured = DatabaseService.getInstance().getStackProjectEnvFiles(opts.nodeId, opts.stackName);
   if (configured.length > 0) {
@@ -180,5 +183,6 @@ export async function candidateValidationEnvFileArgs(opts: {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
+  if (opts.syncEnv) return [];
   return authoredComposeEnvFileArgs(opts.stackName, opts.nodeId);
 }

@@ -7,6 +7,7 @@ import { createHash } from 'crypto';
 import { FileSystemService } from './FileSystemService';
 import { GitProjectManifestService } from './GitProjectManifestService';
 import { collectManifestFilePaths } from '../helpers/manifestFilePaths';
+import { isEnvLikeFileName } from '../helpers/envFileResolution';
 import { sha256Hex } from '../utils/hashing';
 import type {
     BuildContextPlan,
@@ -44,8 +45,7 @@ interface PathMeta {
 
 function isSecretBearingRelPath(rel: string): boolean {
     const base = rel.split('/').pop()?.toLowerCase() ?? '';
-    return base === '.env'
-        || base.endsWith('.env')
+    return isEnvLikeFileName(rel)
         || base.includes('secret')
         || base.includes('credential')
         || base.endsWith('.pem')
@@ -239,6 +239,11 @@ export class GitChangePlanService {
                 liveHash: op.liveHash,
                 role: op.role,
                 deletionAuthority: op.deletionAuthority,
+                fromPath: op.fromPath ?? null,
+                ownership: op.ownership,
+                provenance: op.provenance,
+                sensitivity: op.sensitivity,
+                reason: op.reason,
             }));
         const canonical = {
             schemaVersion: GIT_CHANGE_PLAN_SCHEMA_VERSION,

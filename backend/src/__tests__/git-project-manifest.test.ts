@@ -7,6 +7,8 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import { FileSystemService } from '../services/FileSystemService';
 import { GitProjectManifestService, PROMOTION_MARKER, CANDIDATE_COMPLETE_MARKER, PromoteGenerationError } from '../services/GitProjectManifestService';
+import { NodeRegistry } from '../services/NodeRegistry';
+import { authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import type { ComposeInputEntry, GitProjectManifest, ManifestBounds } from '../types/gitProjectManifest';
 
 const BOUNDS: ManifestBounds = {
@@ -658,6 +660,71 @@ describe('promoteGeneration', () => {
             priorManifest: prior,
         });
         expect(readStackFile(stackName, '.env')).toBe('NEW=1\n');
+    });
+
+    it('deletes a previously managed synced .env when the next generation omits it', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'promote-sync-env-removed';
+        writeStackFile(stackName, 'compose.yaml', 'v1\n');
+        writeStackFile(stackName, '.env', 'SYNC=1\n');
+        seedGitSource(stackName);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml'],
+            contextDir: 'app',
+        });
+        const syncEnvEntry: ComposeInputEntry = {
+            sourcePath: null,
+            materializedPath: '.env',
+            role: 'env',
+            dependencyKind: 'sync-env',
+            ownership: 'managed',
+            provenance: 'fetch',
+            sensitivity: 'high',
+            contentSha256: crypto.createHash('sha256').update('SYNC=1\n').digest('hex'),
+            sizeBytes: Buffer.byteLength('SYNC=1\n'),
+            state: 'present',
+            deletionAuthority: 'sencho',
+            note: null,
+        };
+        const prior = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml' }),
+            syncEnvEntry,
+        ]);
+        const priorRel = 'generations/applied-prior';
+        const priorAbs = path.join(tmpDir, 'git-managed', '1', stackName, priorRel);
+        fs.mkdirSync(priorAbs, { recursive: true });
+        fs.writeFileSync(path.join(priorAbs, 'compose.yaml'), 'v1\n');
+        fs.writeFileSync(path.join(priorAbs, '.env'), 'SYNC=1\n');
+        prior.generation.appliedDir = priorRel;
+        await svc.writeManifest(stackName, prior);
+
+        const incoming = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml' }),
+        ], prior);
+        const clone = makeClone({ 'compose.yaml': 'v2\n' });
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'sha-env-gone',
+            clone,
+            [{ srcRel: 'compose.yaml', destRel: 'compose.yaml' }],
+            [],
+            BOUNDS,
+        );
+
+        await svc.promoteGeneration(stackName, {
+            sha: 'sha-env-gone',
+            candidateRelPath: candidateRel,
+            manifest: incoming,
+            priorManifest: prior,
+        });
+        expect(fs.existsSync(path.join(stackDir(stackName), '.env'))).toBe(false);
+        expect(readStackFile(stackName, 'compose.yaml')).toBe('v2\n');
+
+        const deployArgs = await authoredComposeEnvFileArgs(
+            stackName,
+            NodeRegistry.getInstance().getDefaultNodeId(),
+        );
+        expect(deployArgs).toEqual([]);
     });
 });
 
@@ -1656,6 +1723,65 @@ describe('build-context file-level ownership (audit round 2 C-2)', () => {
             expect(hashSpy).not.toHaveBeenCalled();
         } finally {
             hashSpy.mockRestore();
+        }
+    });
+
+    it('fails closed when live context scanning exceeds the directory-entry bound', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'context-scan-empty-dirs';
+        writeStackFile(stackName, 'compose.yaml', 'services: {}\n');
+        for (let i = 0; i < 8; i++) {
+            fs.mkdirSync(path.join(stackDir(stackName), 'web', `d${i}`), { recursive: true });
+        }
+        const ctx = {
+            repoPath: 'web',
+            dockerfile: null,
+            contextBytes: 0,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'keep.txt', sha256: 'x', sizeBytes: 1 }],
+        };
+        const diverged = await svc.verifyContextOnDisk(stackName, ctx, undefined, { ...BOUNDS, maxFiles: 3 });
+        expect(diverged.some((p) => p.includes('scan limit exceeded'))).toBe(true);
+    });
+
+    it.runIf(process.platform !== 'win32')('does not follow a nested context symlink to inspect owned descendants', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'context-nested-symlink';
+        writeStackFile(stackName, 'compose.yaml', 'services: {}\n');
+        const outside = path.join(process.env.COMPOSE_DIR!, '..', 'outside-nested-symlink');
+        fs.mkdirSync(outside, { recursive: true });
+        fs.writeFileSync(path.join(outside, 'Dockerfile'), 'FROM alpine\n');
+        fs.writeFileSync(path.join(outside, 'secret.txt'), 'should-not-be-read\n');
+        const webDir = path.join(stackDir(stackName), 'web');
+        fs.mkdirSync(webDir, { recursive: true });
+        fs.symlinkSync(outside, path.join(webDir, 'nested'), 'dir');
+        const ctx = {
+            repoPath: 'web',
+            dockerfile: 'Dockerfile',
+            contextBytes: 12,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'nested/Dockerfile', sha256: 'x', sizeBytes: 12 }],
+        };
+        const hashSpy = vi.spyOn(svc, 'hashStackFile');
+        const observeSpy = vi.spyOn(FileSystemService.getInstance(), 'observeStackPath');
+        try {
+            const diverged = await svc.verifyContextOnDisk(stackName, ctx);
+            expect(diverged.some((p) => p.includes('nested') && p.includes('symbolic link'))).toBe(true);
+            expect(hashSpy.mock.calls.some((c) => String(c[1]).includes('secret') || String(c[1]).includes('outside'))).toBe(false);
+            expect(observeSpy.mock.calls.some((c) => {
+                const rel = String(c[1]);
+                return rel.includes('nested/Dockerfile') || rel.includes('secret.txt');
+            })).toBe(false);
+        } finally {
+            hashSpy.mockRestore();
+            observeSpy.mockRestore();
+            fs.rmSync(outside, { recursive: true, force: true });
         }
     });
 });

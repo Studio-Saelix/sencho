@@ -24,9 +24,8 @@ export interface CandidateComposeInvocationInput {
     /** Stack-root project env files currently configured for this stack. */
     projectEnvFiles?: string[];
     /**
-     * True when stack-root `.env` already exists (or will after this generation).
-     * Live deploy emits `--env-file` for context-dir stacks whenever that file
-     * is present, including when sync-env is off.
+     * True when an unmanaged stack-root `.env` will survive promotion.
+     * Ignored when `syncEnv` is true; that path uses `envContentPresent` only.
      */
     rootEnvFilePresent?: boolean;
 }
@@ -82,10 +81,12 @@ export function buildCandidateComposeInvocation(input: CandidateComposeInvocatio
         return args;
     }
 
-    // Match authoredComposeEnvFileArgs: Compose auto-loads stack-root .env for
-    // single-file selections. For a context dir, live deploy passes --env-file
-    // whenever `.env` exists (or this generation will write it).
-    if (contextDir && ((syncEnv && envContentPresent) || rootEnvFilePresent)) {
+    // Compose auto-loads stack-root .env for single-file selections. For a
+    // context dir, emit --env-file only when this generation will own `.env`
+    // (sync-env content) or an unmanaged live file will survive promotion.
+    // A managed `.env` scheduled for deletion must not appear here.
+    const includeRootEnvFile = syncEnv ? envContentPresent : rootEnvFilePresent;
+    if (contextDir && includeRootEnvFile) {
         const envPath = path.resolve(stackRoot, '.env');
         if (!isPathWithinBase(envPath, stackRoot)) {
             throw new Error(`Env file path escapes the stack directory for stack "${stackName}"`);

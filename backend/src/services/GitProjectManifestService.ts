@@ -704,9 +704,11 @@ export class GitProjectManifestService {
      * Compare a build-context subtree on disk to the manifest inventory.
      * Observes the context root with no-follow semantics before walking.
      * A symlink, special node, or file at the root returns a sentinel and
-     * does not enumerate the target. Scan limits (file count, depth, on-disk
-     * bytes) fail closed with `. (scan limit exceeded)`. `boundsOverride` is
-     * for tests.
+     * does not enumerate the target. Nested symlinks are classified without
+     * following, and owned descendants beneath them are not inspected.
+     * Scan limits count every visited entry (files and directories), plus
+     * depth and on-disk bytes, and fail closed with `. (scan limit exceeded)`.
+     * `boundsOverride` is for tests.
      */
     async verifyContextOnDisk(
         stackName: string,
@@ -715,9 +717,10 @@ export class GitProjectManifestService {
         boundsOverride?: ManifestBounds,
     ): Promise<string[]> {
         const bounds = boundsOverride ?? this.boundsConfig();
+        const fsSvc = FileSystemService.getInstance();
         let rootKind: Awaited<ReturnType<FileSystemService['observeStackPath']>>;
         try {
-            rootKind = await FileSystemService.getInstance().observeStackPath(stackName, context.repoPath);
+            rootKind = await fsSvc.observeStackPath(stackName, context.repoPath);
         } catch (err) {
             if ((err as NodeJS.ErrnoException).code !== 'SYMLINK_ESCAPE') throw err;
             rootKind = 'symlink';
@@ -732,6 +735,7 @@ export class GitProjectManifestService {
         const composeDir = NodeRegistry.getInstance().getComposeDir(NodeRegistry.getInstance().getDefaultNodeId());
         const diverged: string[] = [];
         const expectedByPath = new Map(context.files.map((f) => [f.path, f.sha256]));
+        const symlinkPrefixes: string[] = [];
         let filesSeen = 0;
         let bytesSeen = 0;
         let limitExceeded = false;
@@ -761,10 +765,6 @@ export class GitProjectManifestService {
                 if (limitExceeded) return;
                 const childRel = rel ? `${rel}/${entry.name}` : entry.name;
                 if (!isSafeRelPath(childRel)) continue;
-                if (entry.isDirectory()) {
-                    await walk(childRel);
-                    continue;
-                }
                 filesSeen += 1;
                 if (filesSeen > bounds.maxFiles) {
                     exceedLimit();
@@ -772,6 +772,11 @@ export class GitProjectManifestService {
                 }
                 if (entry.isSymbolicLink()) {
                     diverged.push(`${childRel} (symbolic link)`);
+                    symlinkPrefixes.push(childRel);
+                    continue;
+                }
+                if (entry.isDirectory()) {
+                    await walk(childRel);
                     continue;
                 }
                 if (entry.isFIFO() || entry.isSocket() || entry.isBlockDevice() || entry.isCharacterDevice()) {
@@ -809,19 +814,20 @@ export class GitProjectManifestService {
         await walk('');
         for (const ownedFile of context.files) {
             if (!isSafeRelPath(ownedFile.path)) continue;
-            const stackRel = context.repoPath ? `${context.repoPath}/${ownedFile.path}` : ownedFile.path;
-            let present = false;
-            try {
-                const baseResolved = path.resolve(composeDir);
-                const fileAbs = path.resolve(baseResolved, stackName, stackRel);
-                if (fileAbs.startsWith(baseResolved + path.sep)) {
-                    await fs.promises.access(fileAbs);
-                    present = true;
-                }
-            } catch {
-                present = false;
+            if (symlinkPrefixes.some((p) => ownedFile.path === p || ownedFile.path.startsWith(`${p}/`))) {
+                continue;
             }
-            if (!present) diverged.push(`${ownedFile.path} (missing)`);
+            const stackRel = context.repoPath ? `${context.repoPath}/${ownedFile.path}` : ownedFile.path;
+            let kind: Awaited<ReturnType<FileSystemService['observeStackPath']>>;
+            try {
+                kind = await fsSvc.observeStackPath(stackName, stackRel);
+            } catch (err) {
+                if ((err as NodeJS.ErrnoException).code !== 'SYMLINK_ESCAPE') throw err;
+                kind = 'symlink';
+            }
+            if (kind === null) diverged.push(`${ownedFile.path} (missing)`);
+            else if (kind === 'symlink') diverged.push(`${ownedFile.path} (symbolic link)`);
+            else if (kind !== 'file') diverged.push(`${ownedFile.path} (special file node)`);
         }
         return diverged;
     }

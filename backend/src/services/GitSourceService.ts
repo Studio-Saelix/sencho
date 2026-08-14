@@ -1411,18 +1411,23 @@ export class GitSourceService {
             await fsPromises.writeFile(path.join(candidateAbs, '.env'), envContent, 'utf8');
         }
 
-        const validation = await this.validateCandidate(stackName, candidateRel, src.compose_paths, src.context_dir);
+        const validation = await this.validateCandidate(stackName, candidateRel, src.compose_paths, src.context_dir, src.sync_env);
         return { inventory, contextCopyPlans: inventory.contextCopyPlans, candidateRelPath: candidateRel, validation };
     }
 
     /**
      * Validate the staged candidate with the same -f order, -p project name,
      * and --project-directory deploy will use, run inside the candidate dir.
-     * --env-file follows candidateValidationEnvFileArgs: candidate `.env` when
-     * that file will be the post-promotion legacy env, otherwise the live
-     * configured project env files. Candidate validation gets a 30s budget.
+     * --env-file comes from candidateValidationEnvFileArgs. Candidate
+     * validation gets a 30s budget.
      */
-    private async validateCandidate(stackName: string, candidateRelPath: string, composePaths: string[], contextDir: string | null): Promise<{ ok: boolean; error?: string }> {
+    private async validateCandidate(
+        stackName: string,
+        candidateRelPath: string,
+        composePaths: string[],
+        contextDir: string | null,
+        syncEnv: boolean,
+    ): Promise<{ ok: boolean; error?: string }> {
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
         const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, candidateRelPath);
@@ -1455,6 +1460,7 @@ export class GitSourceService {
                 nodeId,
                 candidateAbs,
                 contextDir,
+                syncEnv,
             })));
         } catch (err) {
             return { ok: false, error: (err as Error).message || 'Invalid project env file configuration.' };
@@ -2025,7 +2031,13 @@ export class GitSourceService {
             }
 
             // Re-validate the exact candidate before touching the live project.
-            const candValidation = await this.validateCandidate(stackName, pending.candidateRelPath, src.compose_paths, src.context_dir);
+            const candValidation = await this.validateCandidate(
+                stackName,
+                pending.candidateRelPath,
+                src.compose_paths,
+                src.context_dir,
+                src.sync_env,
+            );
             if (!candValidation.ok) {
                 if (diag) console.log(`[GitSource:diag] apply candidate validation fail stack=${stackName}`);
                 throw new GitSourceError('GIT_ERROR', `Candidate validation failed: ${candValidation.error}`);
@@ -2823,10 +2835,12 @@ export class GitSourceService {
         // CodeQL does not credit a wrapped helper or a check separated from the sink.
         const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId));
         const stackDir = path.resolve(baseResolved, stackName);
-        let rootEnvFilePresent = src.sync_env && envContentPresent;
-        const envPath = path.resolve(stackDir, '.env');
-        if (envPath.startsWith(baseResolved + path.sep) && existsSync(envPath)) {
-            rootEnvFilePresent = true;
+        let rootEnvFilePresent = false;
+        if (!src.sync_env) {
+            const envPath = path.resolve(stackDir, '.env');
+            if (envPath.startsWith(baseResolved + path.sep) && existsSync(envPath)) {
+                rootEnvFilePresent = true;
+            }
         }
         return buildCandidateComposeInvocation({
             stackName,

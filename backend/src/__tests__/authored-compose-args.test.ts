@@ -262,9 +262,55 @@ describe('candidateValidationEnvFileArgs', () => {
             nodeId,
             candidateAbs,
             contextDir: 'app',
+            syncEnv: true,
         });
         expect(args).toEqual(['--env-file', path.resolve(candidateAbs, '.env')]);
         expect(args).not.toContain(path.resolve(liveDir, '.env'));
+    });
+
+    it('does not fall back to a live .env when sync-env omits the candidate file', async () => {
+        const stackName = 'val-sync-env-removed';
+        seedSource(stackName, ['compose.yaml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml'],
+            contextDir: 'app',
+        });
+        const liveDir = makeStackDir(stackName, true);
+        const candidateAbs = path.join(tmpDir, 'candidate-sync-env-removed');
+        fs.mkdirSync(candidateAbs, { recursive: true });
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const args = await candidateValidationEnvFileArgs({
+            stackName,
+            nodeId,
+            candidateAbs,
+            contextDir: 'app',
+            syncEnv: true,
+        });
+        expect(args).toEqual([]);
+        expect(args).not.toContain(path.resolve(liveDir, '.env'));
+        const deploy = await authoredComposeEnvFileArgs(stackName, nodeId);
+        expect(deploy).toEqual(['--env-file', path.resolve(liveDir, '.env')]);
+    });
+
+    it('falls back to the live .env when an unmanaged candidate file is absent', async () => {
+        const stackName = 'val-unmanaged-env-fallback';
+        seedSource(stackName, ['compose.yaml']);
+        DatabaseService.getInstance().setGitSourceAppliedSpec(stackName, {
+            files: ['compose.yaml'],
+            contextDir: 'app',
+        });
+        const liveDir = makeStackDir(stackName, true);
+        const candidateAbs = path.join(tmpDir, 'candidate-unmanaged-env');
+        fs.mkdirSync(candidateAbs, { recursive: true });
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const args = await candidateValidationEnvFileArgs({
+            stackName,
+            nodeId,
+            candidateAbs,
+            contextDir: 'app',
+            syncEnv: false,
+        });
+        expect(args).toEqual(['--env-file', path.resolve(liveDir, '.env')]);
     });
 
     it('uses only configured project env files even when candidate .env exists', async () => {
@@ -286,6 +332,7 @@ describe('candidateValidationEnvFileArgs', () => {
             nodeId,
             candidateAbs,
             contextDir: 'app',
+            syncEnv: true,
         });
         const deploy = await authoredComposeEnvFileArgs(stackName, nodeId);
         expect(validation).toEqual(deploy);
@@ -310,6 +357,7 @@ describe('candidateValidationEnvFileArgs', () => {
             nodeId,
             candidateAbs,
             contextDir: null,
+            syncEnv: false,
         })).rejects.toThrow(/missing/);
     });
 });

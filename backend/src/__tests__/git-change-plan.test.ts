@@ -158,6 +158,21 @@ describe('buildCandidateComposeInvocation', () => {
         expect(args).toContain(path.resolve(stackDirAbs, '.env'));
     });
 
+    it('does not keep --env-file when sync-env omits the candidate .env', () => {
+        const stackDirAbs = path.resolve('/tmp/compose/web');
+        const args = buildCandidateComposeInvocation({
+            stackName: 'web',
+            composePaths: ['infra/compose.yaml'],
+            contextDir: 'infra',
+            stackDir: stackDirAbs,
+            syncEnv: true,
+            envContentPresent: false,
+            rootEnvFilePresent: true,
+        });
+        expect(args).not.toContain('--env-file');
+        expect(args).not.toContain(path.resolve(stackDirAbs, '.env'));
+    });
+
     it('does not add --env-file for a single-file selection (Compose auto-loads .env)', () => {
         const stackDirAbs = path.resolve('/tmp/compose/web');
         expect(buildCandidateComposeInvocation({
@@ -767,6 +782,137 @@ describe('GitChangePlanService.build', () => {
         const pub = GitChangePlanService.getInstance().toPublic(plan);
         expect(JSON.stringify(pub)).not.toContain('.env');
         expect(JSON.stringify(pub)).not.toContain('TOKEN');
+    });
+
+    it('redacts .env.local and .env.production context extras from the public plan', async () => {
+        const stack = 'plan-ctx-env-dot-names';
+        const compose = 'services:\n  web:\n    image: nginx\n';
+        writeStackFile(stack, 'compose.yaml', compose);
+        writeStackFile(stack, 'app/Dockerfile', 'FROM alpine\n');
+        writeStackFile(stack, 'app/.env.local', 'TOKEN=local\n');
+        writeStackFile(stack, 'app/.env.production', 'TOKEN=prod\n');
+        const composeEntry = managedEntry({ materializedPath: 'compose.yaml', content: compose });
+        const ctx: BuildContextPlan = {
+            repoPath: 'app',
+            dockerfile: 'Dockerfile',
+            contextBytes: 12,
+            ignoredCount: 0,
+            dockerignoreApplied: false,
+            excludedFromCopy: false,
+            note: null,
+            files: [{ path: 'Dockerfile', sha256: sha('FROM alpine\n'), sizeBytes: 12 }],
+        };
+        const prior = buildManifest(stack, [composeEntry], ['-f', 'compose.yaml', '-p', stack], [ctx]);
+        const plan = await GitChangePlanService.getInstance().build({
+            stackName: stack,
+            commitSha: 'cafebabe',
+            mode: 'update',
+            priorManifest: prior,
+            candidateInputs: [composeEntry],
+            candidateBuildContexts: [ctx],
+            candidateInvocation: prior.project.invocation,
+            liveInvocation: prior.project.invocation,
+        });
+        const local = plan.operations.find((o) => o.pathKey === 'app/.env.local');
+        const prod = plan.operations.find((o) => o.pathKey === 'app/.env.production');
+        expect(local?.op).toBe('unmanaged-collision');
+        expect(local?.sensitivity).toBe('high');
+        expect(prod?.op).toBe('unmanaged-collision');
+        expect(prod?.sensitivity).toBe('high');
+        const pub = GitChangePlanService.getInstance().toPublic(plan);
+        const collisions = pub.operations.filter((o) => o.op === 'unmanaged-collision');
+        expect(collisions).toHaveLength(2);
+        expect(collisions.every((o) => o.path === null)).toBe(true);
+        expect(JSON.stringify(pub)).not.toContain('.env.local');
+        expect(JSON.stringify(pub)).not.toContain('.env.production');
+        expect(JSON.stringify(pub)).not.toContain('TOKEN');
+    });
+
+    it('records an invocation change when a synced .env disappears from the candidate', async () => {
+        const stack = 'plan-sync-env-removed';
+        const compose = 'services:\n  web:\n    image: nginx\n';
+        const env = 'TAG=live\n';
+        writeStackFile(stack, 'compose.yaml', compose);
+        writeStackFile(stack, '.env', env);
+        const composeEntry = managedEntry({ materializedPath: 'compose.yaml', content: compose });
+        const envEntry = managedEntry({
+            materializedPath: '.env',
+            content: env,
+            role: 'env',
+            dependencyKind: 'sync-env',
+            sensitivity: 'high',
+        });
+        const stackDirAbs = path.resolve(stackDir(stack));
+        const invOpts = {
+            stackName: stack,
+            composePaths: ['app/compose.yaml'],
+            contextDir: 'app',
+            stackDir: stackDirAbs,
+            syncEnv: true,
+        };
+        const priorInv = buildCandidateComposeInvocation({ ...invOpts, envContentPresent: true });
+        const candidateInv = buildCandidateComposeInvocation({
+            ...invOpts,
+            envContentPresent: false,
+            rootEnvFilePresent: true,
+        });
+        expect(priorInv).toContain('--env-file');
+        expect(candidateInv).not.toContain('--env-file');
+        const prior = buildManifest(stack, [composeEntry, envEntry], priorInv);
+        const plan = await GitChangePlanService.getInstance().build({
+            stackName: stack,
+            commitSha: 'cafebabe',
+            mode: 'update',
+            priorManifest: prior,
+            candidateInputs: [composeEntry],
+            candidateBuildContexts: [],
+            candidateInvocation: candidateInv,
+            liveInvocation: priorInv,
+        });
+        expect(plan.blocked).toBe(false);
+        expect(plan.operations.find((o) => o.pathKey === '.env')?.op).toBe('delete');
+        expect(plan.operations.find((o) => o.op === 'invocation')).toBeTruthy();
+        expect(plan.candidateInvocation).toEqual(candidateInv);
+        expect(plan.candidateInvocation).not.toContain('--env-file');
+    });
+
+    it('changes the fingerprint when rename source, ownership, sensitivity, or reason changes', () => {
+        const fingerprintOf = (overrides: Record<string, unknown>): string => {
+            const svc = GitChangePlanService.getInstance() as unknown as {
+                fingerprint: (input: {
+                    commitSha: string;
+                    priorManifestVersion: number | null;
+                    priorAppliedDir: string | null;
+                    operations: unknown[];
+                }) => string;
+            };
+            const base = {
+                pathKey: 'compose.yaml',
+                op: 'modify',
+                role: 'compose-primary',
+                deletionAuthority: 'sencho',
+                priorHash: 'aa',
+                candidateHash: 'bb',
+                liveHash: 'aa',
+                sensitivity: 'medium',
+                ownership: 'managed',
+                provenance: 'fetch',
+                sourceRevision: 'deadbeef',
+                reason: 'candidate content differs from prior',
+            };
+            return svc.fingerprint({
+                commitSha: 'deadbeef',
+                priorManifestVersion: 1,
+                priorAppliedDir: 'generations/applied',
+                operations: [{ ...base, ...overrides }],
+            });
+        };
+        const base = fingerprintOf({});
+        expect(fingerprintOf({ fromPath: 'old.yaml' })).not.toBe(base);
+        expect(fingerprintOf({ ownership: 'unmanaged' })).not.toBe(base);
+        expect(fingerprintOf({ sensitivity: 'high' })).not.toBe(base);
+        expect(fingerprintOf({ reason: 'live hash differs from prior managed hash' })).not.toBe(base);
+        expect(fingerprintOf({ provenance: 'adopted' })).not.toBe(base);
     });
 
     it.runIf(process.platform !== 'win32')('blocks a context-root symlink without enumerating the target', async () => {

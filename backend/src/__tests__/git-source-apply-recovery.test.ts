@@ -3,6 +3,7 @@
  * compensateWithCandidate is not called.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
 
 const mockCaptureCandidate = vi.fn();
 const mockAbandon = vi.fn();
@@ -195,7 +196,7 @@ describe('git-source apply recovery (R1)', () => {
           buildContexts: [],
         },
         planFingerprint: 'fp-test',
-        planSchemaVersion: 1,
+        planSchemaVersion: GIT_CHANGE_PLAN_SCHEMA_VERSION,
         operationId: 'op-aaaaaaaa',
       }),
       pending_env_content: null,
@@ -209,7 +210,7 @@ describe('git-source apply recovery (R1)', () => {
   });
 
   const CLEAN_PLAN = {
-    schemaVersion: 1 as const,
+    schemaVersion: GIT_CHANGE_PLAN_SCHEMA_VERSION,
     fingerprint: 'fp-test',
     blocked: false,
     invocationBlocked: false,
@@ -240,7 +241,7 @@ describe('git-source apply recovery (R1)', () => {
       candidateRelPath: 'generations/cand',
       inventory: { inputs: [], refusals: [], buildContexts: [] },
       planFingerprint: 'fp-test',
-      planSchemaVersion: 1,
+      planSchemaVersion: GIT_CHANGE_PLAN_SCHEMA_VERSION,
       operationId: 'op-aaaaaaaa',
       reviewedLive: [],
     });
