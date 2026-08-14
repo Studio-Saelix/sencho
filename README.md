@@ -8,7 +8,9 @@
 
   <p>
     <a href="https://docs.sencho.io">Docs</a> ·
+    <a href="https://docs.sencho.io/tutorials">Tutorials</a> ·
     <a href="https://sencho.io">Website</a> ·
+    <a href="https://sencho.io/roadmap">Roadmap</a> ·
     <a href="https://github.com/studio-saelix/sencho/discussions">Discussions</a> ·
     <a href="https://github.com/sponsors/Studio-Saelix">Sponsor</a> ·
     <a href="https://buymeacoffee.com/sencho">Buy Me a Coffee</a>
@@ -23,14 +25,12 @@
   [![Open issues](https://img.shields.io/github/issues/studio-saelix/sencho)](https://github.com/studio-saelix/sencho/issues)
   [![Website](https://img.shields.io/website?url=https%3A%2F%2Fsencho.io&label=website)](https://sencho.io)
   [![Docs](https://img.shields.io/website?url=https%3A%2F%2Fdocs.sencho.io&label=docs)](https://docs.sencho.io)
+  [![Roadmap](https://img.shields.io/website?url=https%3A%2F%2Fsencho.io%2Froadmap&label=roadmap)](https://sencho.io/roadmap)
 </div>
 
 <br />
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-dark.png">
-  <img src="docs/images/dashboard-light.png" alt="Sencho dashboard">
-</picture>
+<img src="docs/images/hero.png" alt="Sencho stack detail view showing the Drift tab for the cloudflared stack">
 
 > [!NOTE]
 > Sencho is used in production for day-to-day Docker Compose and fleet management. As a pre-1.0 project it still evolves quickly, so review the known limitations and validate against your own setup before deploying it on critical infrastructure.
@@ -80,6 +80,8 @@ Sencho is free, open-source software under AGPLv3. Everything below is included 
 - [Fleet Federation](https://docs.sencho.io/features/fleet-federation): cordon nodes and pin Blueprints to specific hosts
 - [Fleet Actions](https://docs.sencho.io/features/fleet-actions): bulk label operations, fleet-wide stop-by-label, and fleet-wide prune
 - [Fleet Dossier](https://docs.sencho.io/features/fleet-dossier): export the whole fleet as a single browsable Markdown archive
+- [Fleet Secrets](https://docs.sencho.io/features/fleet-secrets): author environment-variable bundles once, push them to labeled nodes' stacks, with an audit trail of every change
+- [Fleet Sync](https://docs.sencho.io/features/fleet-sync): push scan policies, CVE suppressions, and misconfig acknowledgements from a control instance to its replicas
 - [Docker Label Audit](https://docs.sencho.io/features/docker-label-audit) across every node, for labels that drive external automation
 - [Remote updates](https://docs.sencho.io/features/remote-updates): pull the latest image and recreate any node in the fleet from the Fleet view, no SSH session required
 - Node labels and grouping
@@ -110,6 +112,7 @@ Sencho is free, open-source software under AGPLv3. Everything below is included 
 - [Notification routing](https://docs.sencho.io/features/alerts-notifications#notification-routing) to Slack, Discord, and any generic webhook
 - [Global search](https://docs.sencho.io/features/global-search) across pages, nodes, and every stack in the fleet
 - [Resources view](https://docs.sencho.io/features/resources) for images, volumes, and networks with scoped prune actions
+- [Host console](https://docs.sencho.io/features/host-console): an interactive terminal on the host OS in the browser, no SSH session required
 
 ---
 
@@ -179,10 +182,34 @@ See the [multi-node guide](https://docs.sencho.io/features/multi-node) for the f
 
 | | |
 |---|---|
-| ![Stacks](docs/images/stacks.png) | ![Editor](docs/images/editor.png) |
-| ![Fleet](docs/images/fleet.png) | ![Logs](docs/images/logs.png) |
-| ![Security overview](docs/images/overview/security-overview.png) | ![Blueprints and drift](docs/images/overview/blueprint-deployments.png) |
-| ![Scheduled Operations](docs/images/overview/scheduled-operations.png) | ![Compose Doctor](docs/images/overview/compose-doctor.png) |
+| ![Stacks](docs/images/stacks-dim.png) | ![Editor](docs/images/editor-dim.png) |
+| ![Fleet](docs/images/fleet-dim.png) | ![Logs](docs/images/logs-dim.png) |
+| ![Security overview](docs/images/overview/security-overview-dim.png) | ![Blueprints and drift](docs/images/overview/blueprint-deployments-dim.png) |
+| ![Scheduled Operations](docs/images/overview/scheduled-operations-dim.png) | ![Compose Doctor](docs/images/overview/compose-doctor-dim.png) |
+
+<details>
+<summary>Same screens in OLED</summary>
+
+| | |
+|---|---|
+| ![Stacks](docs/images/stacks-oled.png) | ![Editor](docs/images/editor-oled.png) |
+| ![Fleet](docs/images/fleet-oled.png) | ![Logs](docs/images/logs-oled.png) |
+| ![Security overview](docs/images/overview/security-overview-oled.png) | ![Blueprints and drift](docs/images/overview/blueprint-deployments-oled.png) |
+| ![Scheduled Operations](docs/images/overview/scheduled-operations-oled.png) | ![Compose Doctor](docs/images/overview/compose-doctor-oled.png) |
+
+</details>
+
+<details>
+<summary>Same screens in Light</summary>
+
+| | |
+|---|---|
+| ![Stacks](docs/images/stacks-light.png) | ![Editor](docs/images/editor-light.png) |
+| ![Fleet](docs/images/fleet-light.png) | ![Logs](docs/images/logs-light.png) |
+| ![Security overview](docs/images/overview/security-overview-light.png) | ![Blueprints and drift](docs/images/overview/blueprint-deployments-light.png) |
+| ![Scheduled Operations](docs/images/overview/scheduled-operations-light.png) | ![Compose Doctor](docs/images/overview/compose-doctor-light.png) |
+
+</details>
 
 ---
 
