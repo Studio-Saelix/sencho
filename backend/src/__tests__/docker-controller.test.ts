@@ -78,6 +78,7 @@ beforeEach(() => {
   // holds re-spy after this beforeEach runs.
   vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set());
   vi.spyOn(ServiceUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set());
+  vi.spyOn(fs, 'stat').mockResolvedValue({ isDirectory: () => true } as Awaited<ReturnType<typeof fs.stat>>);
 });
 
 /** Hold specific images via the stack-side recovery service for one test. */
@@ -2475,6 +2476,76 @@ describe('DockerController - smartFallback stack-dir evidence', () => {
     spyOrphanDc(dc, 'fetchComposePsContainers').mockResolvedValue([]);
     const result = await dc.classifyLegacyOrphansForUpdate('my-stack');
     expect(result).toEqual({ status: 'classification_failed', error: 'daemon unavailable' });
+  });
+});
+
+describe('DockerController - missing stack directory', () => {
+  const enoent = () => Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' });
+
+  beforeEach(() => {
+    vi.spyOn(fs, 'stat').mockRejectedValue(enoent());
+  });
+
+  it('getContainersByStack returns [] without spawning compose', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dc = DockerController.getInstance(1);
+    const fetchSpy = spyOrphanDc(dc, 'fetchComposePsContainers');
+
+    await expect(dc.getContainersByStack('gone-stack')).resolves.toEqual([]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockExecFileAsync).not.toHaveBeenCalled();
+    expect(errSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it('getLegacyOrphanContainersByStack returns [] without spawning compose', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dc = DockerController.getInstance(1);
+    const fetchSpy = spyOrphanDc(dc, 'fetchComposePsContainers');
+    const fallbackSpy = spyOrphanDc(dc, 'smartFallback');
+
+    await expect(dc.getLegacyOrphanContainersByStack('gone-stack')).resolves.toEqual([]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(fallbackSpy).not.toHaveBeenCalled();
+    expect(mockExecFileAsync).not.toHaveBeenCalled();
+    expect(errSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+    fallbackSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it('classifyLegacyOrphansForUpdate returns classification_failed without spawning compose', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dc = DockerController.getInstance(1);
+    const fetchSpy = spyOrphanDc(dc, 'fetchComposePsContainers');
+
+    await expect(dc.classifyLegacyOrphansForUpdate('gone-stack')).resolves.toEqual({
+      status: 'classification_failed',
+      error: 'Stack directory is gone',
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockExecFileAsync).not.toHaveBeenCalled();
+    expect(errSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it('still logs Docker CLI unavailable when the stack dir exists and compose ENOENT fires', async () => {
+    vi.spyOn(fs, 'stat').mockResolvedValue({ isDirectory: () => true } as Awaited<ReturnType<typeof fs.stat>>);
+    vi.spyOn(os, 'freemem').mockReturnValue(2 * 1024 * 1024 * 1024);
+    vi.spyOn(os, 'totalmem').mockReturnValue(8 * 1024 * 1024 * 1024);
+    mockExecFileAsync.mockRejectedValue(Object.assign(new Error('spawn docker ENOENT'), { code: 'ENOENT' }));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const dc = DockerController.getInstance(1);
+    await dc.getContainersByStack('my-stack');
+
+    expect(mockExecFileAsync).toHaveBeenCalled();
+    const logged = errSpy.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+    expect(logged).toMatch(/Docker Compose Error for/);
+    expect(logged).toContain('Docker CLI unavailable on this node');
+    errSpy.mockRestore();
   });
 });
 

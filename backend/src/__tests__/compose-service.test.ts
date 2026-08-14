@@ -35,6 +35,7 @@ const {
   mockCompensateWithCandidate,
   mockBuildUnifiedHeldImagePredicate,
   mockGetRecovery,
+  mockFsStat,
 } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
@@ -87,6 +88,7 @@ const {
   mockCompensateWithCandidate: vi.fn().mockResolvedValue(true),
   mockBuildUnifiedHeldImagePredicate: vi.fn().mockReturnValue(() => false),
   mockGetRecovery: vi.fn().mockReturnValue(undefined),
+  mockFsStat: vi.fn().mockResolvedValue({ isDirectory: () => true }),
 }));
 
 vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
@@ -97,11 +99,13 @@ vi.mock('fs', () => ({
     writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
     unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
     rmdirSync: (...args: unknown[]) => mockRmdirSync(...args),
+    promises: { stat: (...args: unknown[]) => mockFsStat(...args) },
   },
   mkdtempSync: (...args: unknown[]) => mockMkdtempSync(...args),
   writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
   unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
   rmdirSync: (...args: unknown[]) => mockRmdirSync(...args),
+  promises: { stat: (...args: unknown[]) => mockFsStat(...args) },
 }));
 
 vi.mock('../services/NodeRegistry', () => ({
@@ -316,6 +320,7 @@ beforeEach(() => {
   mockIsMeshStackEnabled.mockReturnValue(false);
   mockCompensateWithCandidate.mockResolvedValue(true);
   mockBuildUnifiedHeldImagePredicate.mockReturnValue(() => false);
+  mockFsStat.mockResolvedValue({ isDirectory: () => true });
   delete process.env.SENCHO_MODE;
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
@@ -1708,6 +1713,84 @@ describe('ComposeService - streamLogs', () => {
       ['logs', '-f', '-t', '--tail', '100', 'mystack-redis-1'],
       expect.anything(),
     );
+  });
+
+  it('does not reschedule when the stack directory is gone', async () => {
+    mockFsStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(ws.send).toHaveBeenCalled());
+
+    const sent = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+      .flatMap((c) => String(c[0]).split(/\r?\n/))
+      .filter(Boolean);
+    expect(sent.some((line) => line.includes('Stack directory is gone'))).toBe(true);
+    expect(mockGetContainersByStack).not.toHaveBeenCalled();
+    expect(ws.send).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(mockGetContainersByStack).not.toHaveBeenCalled();
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    expect(ws.close).not.toHaveBeenCalled();
+  });
+
+  it('retries every 2s when the stack dir exists and no containers are found', async () => {
+    mockGetContainersByStack.mockResolvedValue([]);
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(mockGetContainersByStack).toHaveBeenCalledTimes(1));
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mockGetContainersByStack).toHaveBeenCalledTimes(2);
+
+    const sent = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+      .flatMap((c) => String(c[0]))
+      .join('');
+    expect(sent).toContain('No containers found. Waiting for activity');
+  });
+
+  it('stops retrying after the websocket closes', async () => {
+    mockGetContainersByStack.mockResolvedValue([]);
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(mockGetContainersByStack).toHaveBeenCalledTimes(1));
+
+    ws.readyState = 3;
+    ws.emit('close');
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(mockGetContainersByStack).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops the empty-container retry after the stack directory disappears', async () => {
+    mockGetContainersByStack.mockResolvedValue([]);
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(mockGetContainersByStack).toHaveBeenCalledTimes(1));
+
+    mockFsStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(mockGetContainersByStack).toHaveBeenCalledTimes(1);
+    const sent = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+      .flatMap((c) => String(c[0]))
+      .join('');
+    expect(sent).toContain('No containers found. Waiting for activity');
+    expect(sent).toContain('Stack directory is gone');
+    expect(ws.close).not.toHaveBeenCalled();
+
+    const sendsAfterGone = (ws.send as ReturnType<typeof vi.fn>).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(mockGetContainersByStack).toHaveBeenCalledTimes(1);
+    expect(ws.send).toHaveBeenCalledTimes(sendsAfterGone);
+    expect(ws.close).not.toHaveBeenCalled();
   });
 });
 
