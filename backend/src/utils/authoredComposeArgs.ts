@@ -168,14 +168,15 @@ export async function candidateValidationEnvFileArgs(opts: {
     return authoredComposeEnvFileArgs(opts.stackName, opts.nodeId);
   }
   if (!opts.contextDir) return [];
-  const candidateEnv = path.resolve(opts.candidateAbs, '.env');
+  // Canonical js/path-injection barrier inline with the access sink. CodeQL
+  // does not credit a wrapped helper or a check separated from the sink.
   const baseResolved = path.resolve(opts.candidateAbs);
-  if (candidateEnv !== baseResolved && !candidateEnv.startsWith(baseResolved + path.sep)) {
-    throw new Error(`Env file path escapes the candidate directory for stack "${opts.stackName}"`);
-  }
+  const candidateEnv = path.resolve(baseResolved, '.env');
   try {
-    await fsPromises.access(candidateEnv);
-    return ['--env-file', candidateEnv];
+    if (candidateEnv.startsWith(baseResolved + path.sep)) {
+      await fsPromises.access(candidateEnv);
+      return ['--env-file', candidateEnv];
+    }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
