@@ -726,11 +726,10 @@ export class GitProjectManifestService {
         if (rootKind === 'special' || rootKind === 'file') return ['. (special file node)'];
         if (rootKind !== 'directory') return [];
 
+        if (!isValidStackName(stackName) || !isSafeRelPath(context.repoPath)) {
+            throw new Error('Invalid stack file path');
+        }
         const composeDir = NodeRegistry.getInstance().getComposeDir(NodeRegistry.getInstance().getDefaultNodeId());
-        const baseResolved = path.resolve(composeDir);
-        const stackRoot = path.resolve(baseResolved, stackName);
-        if (!stackRoot.startsWith(baseResolved + path.sep)) throw new Error('Invalid stack file path');
-        const abs = await this.stackFileAbs(stackName, context.repoPath);
         const diverged: string[] = [];
         const expectedByPath = new Map(context.files.map((f) => [f.path, f.sha256]));
         let filesSeen = 0;
@@ -740,8 +739,9 @@ export class GitProjectManifestService {
             diverged.push('. (scan limit exceeded)');
             limitExceeded = true;
         };
-        const walk = async (dir: string, rel: string): Promise<void> => {
+        const walk = async (rel: string): Promise<void> => {
             if (limitExceeded) return;
+            if (!isSafeRelPath(rel)) return;
             const depth = rel === '' ? 0 : rel.split('/').filter(Boolean).length;
             if (depth > bounds.maxPathDepth) {
                 exceedLimit();
@@ -749,20 +749,20 @@ export class GitProjectManifestService {
             }
             let entriesList: fs.Dirent[];
             try {
-                const dirResolved = path.resolve(dir);
-                if (dirResolved !== abs && !dirResolved.startsWith(abs + path.sep)) return;
-                if (dirResolved !== stackRoot && !dirResolved.startsWith(stackRoot + path.sep)) return;
-                entriesList = await fs.promises.readdir(dirResolved, { withFileTypes: true });
+                const baseResolved = path.resolve(composeDir);
+                const dirParts = [stackName, context.repoPath, rel].filter((p) => p !== '');
+                const dirAbs = path.resolve(baseResolved, ...dirParts);
+                if (!dirAbs.startsWith(baseResolved + path.sep)) return;
+                entriesList = await fs.promises.readdir(dirAbs, { withFileTypes: true });
             } catch {
                 return;
             }
             for (const entry of entriesList) {
                 if (limitExceeded) return;
                 const childRel = rel ? `${rel}/${entry.name}` : entry.name;
-                const childAbs = path.resolve(dir, entry.name);
-                if (!childAbs.startsWith(stackRoot + path.sep) || !childAbs.startsWith(abs + path.sep)) continue;
+                if (!isSafeRelPath(childRel)) continue;
                 if (entry.isDirectory()) {
-                    await walk(childAbs, childRel);
+                    await walk(childRel);
                     continue;
                 }
                 filesSeen += 1;
@@ -786,10 +786,9 @@ export class GitProjectManifestService {
                 }
                 let onDiskBytes = 0;
                 try {
-                    // Canonical js/path-injection barrier inline with the lstat sink.
-                    if (!childAbs.startsWith(stackRoot + path.sep) || !childAbs.startsWith(baseResolved + path.sep)) {
-                        continue;
-                    }
+                    const baseResolved = path.resolve(composeDir);
+                    const childAbs = path.resolve(baseResolved, stackName, stackRel);
+                    if (!childAbs.startsWith(baseResolved + path.sep)) continue;
                     onDiskBytes = (await fs.promises.lstat(childAbs)).size;
                 } catch {
                     diverged.push(`${childRel} (missing)`);
@@ -807,13 +806,15 @@ export class GitProjectManifestService {
                 }
             }
         };
-        await walk(abs, '');
+        await walk('');
         for (const ownedFile of context.files) {
-            const fileAbs = path.resolve(abs, ownedFile.path);
+            if (!isSafeRelPath(ownedFile.path)) continue;
+            const stackRel = context.repoPath ? `${context.repoPath}/${ownedFile.path}` : ownedFile.path;
             let present = false;
             try {
-                // Canonical js/path-injection barrier inline with the access sink.
-                if (fileAbs.startsWith(stackRoot + path.sep) && fileAbs.startsWith(baseResolved + path.sep)) {
+                const baseResolved = path.resolve(composeDir);
+                const fileAbs = path.resolve(baseResolved, stackName, stackRel);
+                if (fileAbs.startsWith(baseResolved + path.sep)) {
                     await fs.promises.access(fileAbs);
                     present = true;
                 }
