@@ -68,6 +68,33 @@ describe('GitSourceDiffDialog', () => {
     expect(screen.getAllByText(/Local conflicts block apply/i).length).toBeGreaterThan(0);
   });
 
+  it('keeps Apply enabled for invocation drift and does not claim file conflicts', () => {
+    const onApply = renderDialog({
+      plan: {
+        blocked: false,
+        counts: { ...emptyCounts(), invocation: 1, modify: 1 },
+        operations: [
+          { path: 'compose.yaml', op: 'modify', role: 'compose-primary' },
+          { path: null, op: 'invocation', role: 'invocation' },
+        ],
+        invocation: { candidateChanged: false, liveDiverged: true },
+      },
+      planFingerprint: 'fp-inv',
+    });
+    expect(screen.queryByText(/Local conflicts block apply/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Live Compose invocation changed/i)).toBeInTheDocument();
+    expect(screen.getByText('Compose command line')).toBeInTheDocument();
+    expect(screen.queryByText(/secret-bearing managed path/i)).not.toBeInTheDocument();
+    const apply = screen.getByRole('button', { name: /^Apply$/ });
+    expect(apply).toBeEnabled();
+    fireEvent.click(apply);
+    expect(onApply).toHaveBeenCalledWith(
+      'abcdef1234567890abcdef1234567890abcdef12',
+      false,
+      'fp-inv',
+    );
+  });
+
   it('disables Apply when the plan is missing', () => {
     renderDialog({ plan: null, planFingerprint: null });
     expect(screen.getByRole('button', { name: /^Apply$/ })).toBeDisabled();

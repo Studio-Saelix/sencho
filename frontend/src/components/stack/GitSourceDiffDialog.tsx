@@ -95,6 +95,14 @@ const BLOCKING_OPS = new Set<GitChangePlanOp>([
   'unmanaged-collision',
 ]);
 
+function opPathLabel(op: PublicGitChangePlanOperation): string {
+  if (op.op === 'invocation') return 'Compose command line';
+  if (op.op === 'rename' && op.fromPath) {
+    return `${op.fromPath} → ${op.path ?? 'secret-bearing path'}`;
+  }
+  return op.path ?? 'secret-bearing managed path';
+}
+
 export function GitSourceDiffDialog({
   open,
   onOpenChange,
@@ -111,6 +119,7 @@ export function GitSourceDiffDialog({
 
   const shortSha = pull.commitSha.slice(0, 7);
   const missingPlan = !pull.plan || !pull.planFingerprint;
+  // plan.blocked is file conflicts only; invocation.liveDiverged does not disable Apply.
   const blocked = missingPlan || pull.plan?.blocked === true || !pull.validation.ok;
   const ops = pull.plan?.operations ?? [];
   const unchanged = pull.plan?.counts.unchanged ?? 0;
@@ -125,7 +134,7 @@ export function GitSourceDiffDialog({
       <ModalHeader
         kicker="GIT · CHANGE PLAN"
         title={stackName}
-        description={`Incoming commit ${shortSha}. Review classified file operations before applying. Local conflicts block apply; unmanaged files are left untouched.`}
+        description={`Incoming commit ${shortSha}. Review classified file operations before applying. Unmanaged files are left untouched.`}
       />
 
       <div className="px-6 pt-4 space-y-3 max-md:px-4">
@@ -159,7 +168,10 @@ export function GitSourceDiffDialog({
         {pull.plan?.invocation.liveDiverged && (
           <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
             <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" strokeWidth={1.5} />
-            <p className="font-medium">Live compose invocation no longer matches the last applied generation.</p>
+            <div>
+              <p className="font-medium">Live Compose invocation changed</p>
+              <p className="mt-0.5">The Compose command line on disk no longer matches the last applied generation, for example a .env file was added or removed outside Git. Apply records the incoming invocation as the new baseline. Unmanaged files stay on disk.</p>
+            </div>
           </div>
         )}
       </div>
@@ -181,9 +193,7 @@ export function GitSourceDiffDialog({
                     {BLOCKING_OPS.has(op.op) ? ' (blocks apply)' : ''}
                   </p>
                   <p className="font-mono text-xs text-stat-subtitle truncate">
-                    {op.op === 'rename' && op.fromPath
-                      ? `${op.fromPath} → ${op.path ?? 'secret-bearing path'}`
-                      : op.path ?? 'secret-bearing managed path'}
+                    {opPathLabel(op)}
                   </p>
                 </div>
               </li>

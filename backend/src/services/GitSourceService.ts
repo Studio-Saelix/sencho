@@ -2083,6 +2083,7 @@ export class GitSourceService {
                     { plan: publicPlan, planFingerprint: plan.fingerprint },
                 );
             }
+            const blockedPlanActivity = `Git plan blocked for ${stackName} (${commitSha.slice(0, 7)}, op ${pending.operationId.slice(0, 8)}, plan ${plan.fingerprint.slice(0, 12)})`;
             if (plan.blocked) {
                 this.upsertGitPlanDrift(stackName, plan);
                 db.setGitSourceLastPlan(stackName, plan.fingerprint, 'blocked');
@@ -2090,7 +2091,7 @@ export class GitSourceService {
                     this.recordGitActivity(
                         stackName,
                         'git_plan_blocked',
-                        `Git plan blocked for ${stackName} (${commitSha.slice(0, 7)}, op ${pending.operationId.slice(0, 8)}, plan ${plan.fingerprint.slice(0, 12)})`,
+                        blockedPlanActivity,
                         actor,
                         'warning',
                     );
@@ -2098,6 +2099,22 @@ export class GitSourceService {
                 throw new GitSourceError(
                     'PLAN_BLOCKED',
                     'The change plan is blocked by local conflicts. Resolve them before applying.',
+                    { plan: publicPlan, planFingerprint: plan.fingerprint },
+                );
+            }
+            // Unattended apply (webhook auto-write) still refuses invocation drift.
+            if (!requireFingerprint && plan.invocationBlocked) {
+                db.setGitSourceLastPlan(stackName, plan.fingerprint, 'blocked');
+                this.recordGitActivity(
+                    stackName,
+                    'git_plan_blocked',
+                    blockedPlanActivity,
+                    actor,
+                    'warning',
+                );
+                throw new GitSourceError(
+                    'PLAN_BLOCKED',
+                    'The live Compose invocation no longer matches the last applied generation. Review the change plan and apply it to record the incoming invocation.',
                     { plan: publicPlan, planFingerprint: plan.fingerprint },
                 );
             }

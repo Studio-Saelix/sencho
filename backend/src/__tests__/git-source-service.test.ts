@@ -2506,6 +2506,49 @@ describe('GitSourceService classified plan fingerprint', () => {
         }
     });
 
+    it('lets a reviewed apply record invocation drift and refuses unattended apply', async () => {
+        const sha = 'aa11bb22cc33dd44ee55ff6677889900aabbccdd';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const fsSvc = FileSystemService.getInstance();
+        try {
+            await svc.createStackFromGit({
+                stackName: 'inv-drift',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: 'app',
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                token: null,
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+            await fsSvc.writeStackFile('inv-drift', '.env', 'FOO=1\n');
+
+            const pull = await svc.pull('inv-drift');
+            expect(pull.plan?.blocked).toBe(false);
+            expect(pull.plan?.invocation.liveDiverged).toBe(true);
+
+            await expect(svc.apply('inv-drift', sha, SKIP_PLAN_FINGERPRINT)).rejects.toMatchObject({
+                code: 'PLAN_BLOCKED',
+                message: expect.stringMatching(/invocation/i),
+            });
+            expect((await fsSvc.readStackFile('inv-drift', '.env')).content).toBe('FOO=1\n');
+            expect(DatabaseService.getInstance().getGitSource('inv-drift')?.pending_commit_sha).toBe(sha);
+
+            const applied = await svc.apply('inv-drift', sha, { planFingerprint: pull.planFingerprint! });
+            expect(applied.applied).toBe(true);
+            expect((await fsSvc.readStackFile('inv-drift', '.env')).content).toBe('FOO=1\n');
+        } finally {
+            validateSpy.mockRestore();
+            await cleanupStackDir('inv-drift');
+        }
+    });
+
     it('keeps operationId across a live-file recompute and flips GET pending to blocked', async () => {
         const sha = 'eeee1111eeee1111eeee1111eeee1111eeee1111';
         mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });

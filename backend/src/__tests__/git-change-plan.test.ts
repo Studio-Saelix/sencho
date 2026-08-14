@@ -230,6 +230,31 @@ describe('GitChangePlanService.build', () => {
         expect(plan.operations.find((o) => o.pathKey === 'compose.yaml')?.op).toBe('local-modified');
     });
 
+    it('still blocks when live bytes match the candidate but not the last-applied hash', async () => {
+        const stack = 'plan-local-match-cand';
+        const priorContent = 'services:\n  web:\n    image: nginx\n';
+        const candidateContent = 'services:\n  web:\n    image: nginx:git\n';
+        writeStackFile(stack, 'compose.yaml', candidateContent);
+        const priorEntry = managedEntry({ materializedPath: 'compose.yaml', content: priorContent });
+        const candEntry = managedEntry({ materializedPath: 'compose.yaml', content: candidateContent });
+        const prior = buildManifest(stack, [priorEntry]);
+        const plan = await GitChangePlanService.getInstance().build({
+            stackName: stack,
+            commitSha: 'cafebabe',
+            mode: 'update',
+            priorManifest: prior,
+            candidateInputs: [candEntry],
+            candidateBuildContexts: [],
+            candidateInvocation: prior.project.invocation,
+            liveInvocation: prior.project.invocation,
+        });
+        expect(plan.blocked).toBe(true);
+        const localOp = plan.operations.find((o) => o.pathKey === 'compose.yaml');
+        expect(localOp?.op).toBe('local-modified');
+        expect(localOp?.liveHash).toBe(localOp?.candidateHash);
+        expect(localOp?.liveHash).not.toBe(localOp?.priorHash);
+    });
+
     it('classifies a missing live file as local-missing and blocks', async () => {
         const stack = 'plan-missing';
         stackDir(stack);
@@ -437,7 +462,7 @@ describe('GitChangePlanService.build', () => {
         expect(plan.candidateInvocation).toEqual(candidateInv);
     });
 
-    it('blocks when live invocation diverges from the prior manifest', async () => {
+    it('records live invocation divergence without a file-conflict block', async () => {
         const stack = 'plan-inv-block';
         const compose = 'services:\n  web:\n    image: nginx\n';
         writeStackFile(stack, 'compose.yaml', compose);
@@ -454,8 +479,14 @@ describe('GitChangePlanService.build', () => {
             candidateInvocation: priorInv,
             liveInvocation: ['-f', 'compose.yaml', '-f', 'override.yaml', '-p', stack],
         });
-        expect(plan.blocked).toBe(true);
+        expect(plan.blocked).toBe(false);
         expect(plan.invocationBlocked).toBe(true);
+        expect(plan.operations.some((o) => o.op === 'invocation')).toBe(true);
+        const pub = GitChangePlanService.getInstance().toPublic(plan);
+        expect(pub.blocked).toBe(false);
+        expect(pub.invocation.liveDiverged).toBe(true);
+        expect(pub.operations.some((o) => o.op === 'invocation')).toBe(true);
+        expect(pub.operations.find((o) => o.op === 'invocation')?.path).toBeNull();
     });
 
     it('redacts high-sensitivity paths from the public projection and omits hashes', async () => {

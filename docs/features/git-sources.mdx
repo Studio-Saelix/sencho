@@ -14,7 +14,7 @@ Git Sources turn any stack into a GitOps target. Point Sencho at a repository an
 1. Open a stack and click the **Git Source** button in the editor toolbar.
 2. Fill in the repository URL and branch, then choose the compose files. Use **Browse** to pick them from the repository tree, or type a path and press Enter. Add a token if the repo is private.
 3. Click **Pull now** to fetch the latest commit. Sencho opens a classified change plan: adds, modifications, removals, and any local conflicts.
-4. Click **Apply** to write the incoming files to disk. Apply stays disabled while local conflicts are present. Tick **Deploy after apply** in the same dialog to redeploy in one step.
+4. Click **Apply** to write the incoming files to disk. Apply stays disabled while local file conflicts are present. A Compose invocation change (for example a `.env` file added or removed outside Git) is shown in the plan and does not disable Apply. Applying records the incoming invocation as the new baseline and leaves unmanaged files on disk. Tick **Deploy after apply** in the same dialog to redeploy in one step.
 
 Writes land in the stack's existing directory using the same storage Sencho uses for the in-browser editor.
 
@@ -95,9 +95,10 @@ Click **Pull now** on the Git Source panel to fetch the latest commit on the con
 The change plan shows:
 
 - The `GIT · CHANGE PLAN` kicker and the short SHA of the incoming commit at the top.
-- One row per classified operation: add, modify, remove, rename, or a local conflict. Unchanged files collapse to a count.
+- One row per classified operation: add, modify, remove, rename, a Compose invocation change, or a local conflict. Unchanged files collapse to a count.
 - An **Incoming compose failed validation** banner when the incoming compose fails `docker compose config`. The Apply button stays disabled until validation passes.
 - A **Local conflicts block apply** banner when a managed file was edited or removed on disk, or an unmanaged file sits in the way. Apply stays disabled until those conflicts are resolved. Sencho does not overwrite them.
+- A **Live Compose invocation changed** banner when the Compose command line on disk no longer matches the last applied generation. Apply stays enabled. Applying records the incoming invocation as the new baseline and leaves unmanaged files on disk.
 
 High-sensitivity paths (secret-bearing files) appear as "secret-bearing managed path" rather than as a filename.
 
@@ -158,10 +159,12 @@ The encryption boundary covers the pending update payload too: every pull caches
 
 ## Local edits vs Git
 
-Sencho classifies every managed path against the incoming commit and the live disk.
+Sencho classifies every managed path against the last applied generation and the live disk.
 
-- Matching content: applying writes files Sencho itself last wrote.
+- Matching the last applied content: applying writes files Sencho itself last wrote.
 - Locally modified, missing, type-changed, or colliding unmanaged files: the plan is blocked. Resolve those files on disk (or commit them back to the repository), then pull again. Sencho will not overwrite them.
+- A local edit still blocks even when the live bytes already match the incoming commit. Classification compares disk to the last applied generation, not to the incoming files, so an uncommitted local edit is never treated as a clean Git apply.
+- Compose invocation drift (for example adding or removing a root `.env` outside Git): the plan shows the invocation change and stays applicable. Applying records the incoming invocation as the new baseline. Unmanaged files stay on disk. Webhook auto-apply still refuses until you review that plan.
 
 The in-browser editor and the Git Source panel both write to the same files, so you can always fall back to editing locally. The next pull will flag the divergence rather than silently clobbering your edits.
 
@@ -195,6 +198,10 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
 
   <Accordion title="Local conflicts block apply">
     A managed file was edited or removed on disk, or an unmanaged file sits on a path the incoming commit wants to add. Sencho will not overwrite those files. Restore or relocate the local copy, or commit the local change back to the repository so the next pull is clean, then pull again.
+  </Accordion>
+
+  <Accordion title="Live Compose invocation changed">
+    The Compose command line on disk no longer matches the last applied generation, most often because a root `.env` file was added or removed outside Git. This is not a file conflict: Apply stays enabled. Applying records the incoming invocation as the new baseline and leaves unmanaged files on disk. Webhook auto-apply will not write until you review that plan in the dashboard.
   </Accordion>
 
   <Accordion title="Webhook skipped (rate limited)">

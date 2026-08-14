@@ -72,7 +72,9 @@ export interface GitChangePlanCounts {
 export interface GitChangePlan {
     schemaVersion: typeof GIT_CHANGE_PLAN_SCHEMA_VERSION;
     fingerprint: string;
+    /** File conflicts only. Invocation drift is `invocationBlocked`. */
     blocked: boolean;
+    /** Live Compose invocation differs from the last applied generation. */
     invocationBlocked: boolean;
     candidateInvocation: string[];
     liveInvocation: string[];
@@ -90,6 +92,7 @@ export interface PublicGitChangePlanOperation {
 }
 
 export interface PublicGitChangePlan {
+    /** File conflicts only. Invocation drift is `invocation.liveDiverged`. */
     blocked: boolean;
     counts: GitChangePlanCounts;
     operations: PublicGitChangePlanOperation[];
@@ -102,6 +105,7 @@ export interface PublicGitChangePlan {
 /** GET /git-source pending summary stored in `pending_plan_summary`. */
 export interface PublicPendingPlan {
     fingerprint: string;
+    /** File conflicts only. Invocation drift is not this field. */
     blocked: boolean;
     counts: GitChangePlanCounts;
     operations: PublicGitChangePlanOperation[];

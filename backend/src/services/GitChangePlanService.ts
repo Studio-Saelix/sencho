@@ -154,7 +154,7 @@ export class GitChangePlanService {
         }
 
         const operations = this.pairRenames(classified);
-        const invocationOp = this.classifyInvocation(
+        const { op: invocationOp, liveDiverged: invocationBlocked } = this.classifyInvocation(
             input.priorManifest,
             input.candidateInvocation,
             input.liveInvocation,
@@ -163,9 +163,7 @@ export class GitChangePlanService {
         if (invocationOp) operations.push(invocationOp);
 
         const counts = this.countOps(operations);
-        const invocationBlocked = input.priorManifest !== null
-            && this.invocationsDiffer(input.liveInvocation, input.priorManifest.project.invocation);
-        const blocked = operations.some((op) => BLOCKING_CHANGE_PLAN_OPS.has(op.op)) || invocationBlocked;
+        const blocked = operations.some((op) => BLOCKING_CHANGE_PLAN_OPS.has(op.op));
         const fingerprint = this.fingerprint({
             commitSha: input.commitSha,
             priorManifestVersion: input.priorManifest?.manifestVersion ?? null,
@@ -376,6 +374,8 @@ export class GitChangePlanService {
                 });
             }
             if (liveHash !== priorHash) {
+                // Live vs last-applied, not vs candidate. Matching incoming
+                // bytes by coincidence is still a local edit.
                 return this.op(pathKey, 'local-modified', role, deletionAuthority, priorHash, candidateHash, liveHash, sensitivity, {
                     ...meta,
                     reason: 'live hash differs from prior managed hash',
@@ -520,30 +520,33 @@ export class GitChangePlanService {
         candidateInvocation: string[],
         liveInvocation: string[],
         sourceRevision: string,
-    ): GitChangePlanOperation | null {
-        if (prior === null) return null;
+    ): { op: GitChangePlanOperation | null; liveDiverged: boolean } {
+        if (prior === null) return { op: null, liveDiverged: false };
         const priorInv = prior.project.invocation;
         const liveDiverged = this.invocationsDiffer(liveInvocation, priorInv);
         const candidateChanged = this.invocationsDiffer(candidateInvocation, priorInv);
-        if (!liveDiverged && !candidateChanged) return null;
-        return this.op(
-            INVOCATION_PATH_KEY,
-            'invocation',
-            'invocation',
-            null,
-            sha256Hex(JSON.stringify(priorInv)),
-            sha256Hex(JSON.stringify(candidateInvocation)),
-            sha256Hex(JSON.stringify(liveInvocation)),
-            'low',
-            {
-                ownership: 'managed',
-                provenance: 'fetch',
-                sourceRevision,
-                reason: liveDiverged
-                    ? 'live compose invocation diverged from prior'
-                    : 'candidate compose invocation changed',
-            },
-        );
+        if (!liveDiverged && !candidateChanged) return { op: null, liveDiverged: false };
+        return {
+            liveDiverged,
+            op: this.op(
+                INVOCATION_PATH_KEY,
+                'invocation',
+                'invocation',
+                null,
+                sha256Hex(JSON.stringify(priorInv)),
+                sha256Hex(JSON.stringify(candidateInvocation)),
+                sha256Hex(JSON.stringify(liveInvocation)),
+                'low',
+                {
+                    ownership: 'managed',
+                    provenance: 'fetch',
+                    sourceRevision,
+                    reason: liveDiverged
+                        ? 'live compose invocation diverged from prior'
+                        : 'candidate compose invocation changed',
+                },
+            ),
+        };
     }
 
     private invocationsEqual(a: string[], b: string[]): boolean {
