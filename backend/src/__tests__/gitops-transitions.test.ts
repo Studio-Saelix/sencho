@@ -206,6 +206,142 @@ describe('gitops transitions', () => {
     expect(store.getTarget('app-obs', 1)?.observed_artifact_identity_json).toBe('{"kind":"nonsense"}');
   });
 
+  it('advances the fetched SHA on an invalid commit without minting a candidate', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-inv', 'inv-web'), nodeId: 1, envelope: envelope('op-act-inv') });
+    tx.fetchStarted('app-inv', envelope('op-f-inv'));
+    tx.fetchedInvalid('app-inv', 'bad1234', envelope('op-f-inv'));
+    const application = store.getApplication('app-inv')!;
+    expect(application.desired_commit_sha).toBe('bad1234');
+    expect(application.fetched_commit_sha).toBe('bad1234');
+    expect(application.candidate_generation_id).toBeNull();
+    expect(application.failure_stage).toBe('validation');
+    expect(mustProject('app-inv').facets.source.status).toBe('source_failed');
+  });
+
+  it('exposes a blocked candidate without allowing it to apply', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-blk', 'blk-web'), nodeId: 1, envelope: envelope('op-act-blk') });
+    store.insertGeneration({ ...gen('gen-blk', 'app-blk'), plan_blocked: 1 });
+    tx.fetchStarted('app-blk', envelope('op-f-blk'));
+    tx.fetched('app-blk', 'abc123', envelope('op-f-blk'));
+    tx.sourceConflictBlocker('app-blk', 'gen-blk', envelope('op-b-blk'));
+    expect(store.getApplication('app-blk')?.candidate_plan_blocked).toBe(1);
+    expect(store.getTarget('app-blk', 1)?.candidate_generation_id).toBe('gen-blk');
+    const projection = mustProject('app-blk');
+    expect(projection.facets.source.status).toBe('source_conflict_blocker');
+    expect(projection.availableActions).not.toContain('apply');
+    expect(() => tx.applyStarted('app-blk', 'gen-blk', envelope('op-a-blk'))).toThrow(/blocked/);
+  });
+
+  it('dismisses a candidate without touching what is already applied', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-dis', 'dis-web', 'gen-dis', 'art-dis', 'acc-dis');
+    store.insertGeneration(gen('gen-dis-2', 'app-dis'));
+    tx.candidateReady('app-dis', 'gen-dis-2', false, envelope('op-c-dis'));
+    tx.dismissed('app-dis', envelope('op-d-dis'));
+    const application = store.getApplication('app-dis')!;
+    expect(application.candidate_generation_id).toBeNull();
+    expect(application.accepted_generation_id).toBe('gen-dis');
+    expect(store.getTarget('app-dis', 1)?.applied_generation_id).toBe('gen-dis');
+    expect(store.getTarget('app-dis', 1)?.candidate_generation_id).toBeNull();
+  });
+
+  it('refuses to dismiss while an operation is in flight', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-dis2', 'dis2-web'), nodeId: 1, envelope: envelope('op-act-dis2') });
+    store.insertGeneration(gen('gen-dis2', 'app-dis2'));
+    tx.fetchStarted('app-dis2', envelope('op-f-dis2'));
+    tx.fetched('app-dis2', 'abc123', envelope('op-f-dis2'));
+    tx.candidateReady('app-dis2', 'gen-dis2', false, envelope('op-c-dis2'));
+    tx.applyStarted('app-dis2', 'gen-dis2', envelope('op-a-dis2'));
+    expect(() => tx.dismissed('app-dis2', envelope('op-d-dis2'))).toThrow(/in flight/);
+    expect(store.getApplication('app-dis2')?.candidate_generation_id).toBe('gen-dis2');
+  });
+
+  it('invalidates a staged candidate when the material configuration changes', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-cfg', 'cfg-web', 'gen-cfg', 'art-cfg', 'acc-cfg');
+    store.insertGeneration(gen('gen-cfg-2', 'app-cfg'));
+    tx.candidateReady('app-cfg', 'gen-cfg-2', false, envelope('op-c-cfg'));
+    tx.configChangedPendingCleared({
+      applicationId: 'app-cfg',
+      identity: {
+        repoUrl: 'https://github.com/org/other.git',
+        repoIdentityJson: '{"host":"github.com","pathname":"/org/other.git"}',
+        configuredRef: 'release',
+      },
+      material: {
+        composePathsJson: '["compose.yml","compose.prod.yml"]',
+        contextDir: null,
+        syncEnv: 0,
+        envPath: null,
+        fingerprint: 'd'.repeat(64),
+      },
+      envelope: envelope('op-cfg'),
+    });
+    const application = store.getApplication('app-cfg')!;
+    expect(application.configured_ref).toBe('release');
+    expect(application.materialization_fingerprint).toBe('d'.repeat(64));
+    expect(application.desired_commit_sha).toBeNull();
+    expect(application.candidate_generation_id).toBeNull();
+    // The workload that is running did not change because the config did.
+    expect(application.accepted_generation_id).toBe('gen-cfg');
+    expect(store.getTarget('app-cfg', 1)?.applied_generation_id).toBe('gen-cfg');
+    const projection = mustProject('app-cfg');
+    expect(projection.facets.source.status).toBe('source_reconcile_required');
+    expect(projection.availableActions).toContain('fetch');
+  });
+
+  it('records deploy failures without moving the deployed generation', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-dep', 'dep-web', 'gen-dep', 'art-dep', 'acc-dep');
+    tx.deployStarted('app-dep', 1, 'gen-dep', envelope('op-dep-1'));
+    tx.deployUnbound('app-dep', 1, 'gen-dep', envelope('op-dep-1'));
+    let target = store.getTarget('app-dep', 1)!;
+    expect(target.deployed_generation_id).toBeNull();
+    expect(target.failure_class).toBe('unbound');
+    expect(mustProject('app-dep').targets[0]?.runtime.status).toBe('failed_previous_workload_intact');
+
+    tx.deployStarted('app-dep', 1, 'gen-dep', envelope('op-dep-2'));
+    tx.deployFailed('app-dep', 1, 'post_mutation', envelope('op-dep-2'));
+    target = store.getTarget('app-dep', 1)!;
+    expect(target.deployed_generation_id).toBeNull();
+    expect(target.failure_class).toBe('post_mutation');
+    expect(mustProject('app-dep').targets[0]?.runtime.status).toBe('failed_after_mutation');
+
+    // A later success clears the failure in the same move as the pointer.
+    tx.deployStarted('app-dep', 1, 'gen-dep', envelope('op-dep-3'));
+    tx.deployBound('app-dep', 1, 'gen-dep', envelope('op-dep-3'));
+    target = store.getTarget('app-dep', 1)!;
+    expect(target.deployed_generation_id).toBe('gen-dep');
+    expect(target.failure_stage).toBeNull();
+  });
+
+  it('tombstones an application and its target, and never reactivates it', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-tomb', 'tomb-web', 'gen-tomb', 'art-tomb', 'acc-tomb');
+    tx.targetTombstoned('app-tomb', 1, envelope('op-tomb'));
+    tx.applicationTombstoned('app-tomb', 'detached', envelope('op-tomb'));
+    const application = store.getApplication('app-tomb')!;
+    expect(application.lifecycle_status).toBe('detached');
+    // Configured identity survives as a frozen fact.
+    expect(application.configured_repo_url).toBe('https://github.com/org/repo.git');
+    expect(application.desired_commit_sha).toBe('abc123');
+    expect(store.getTarget('app-tomb', 1)?.target_status).toBe('tombstoned');
+    expect(store.getLiveDirectApplication('tomb-web')).toBeUndefined();
+    expect(() => tx.applicationTombstoned('app-tomb', 'deleted', envelope('op-tomb-2')))
+      .toThrow(/already tombstoned/);
+    expect(mustProject('app-tomb').facets.source.status).toBe('not_live');
+  });
+
   it('rejects terminal events with no matching operation', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();

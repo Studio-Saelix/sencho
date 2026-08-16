@@ -122,6 +122,120 @@ export class GitOpsTransitions {
     });
   }
 
+  /**
+   * A fetch that resolved a commit whose project does not validate.
+   *
+   * The SHA still advances: we know what the remote has, we just cannot build
+   * from it. Retry count is deliberately not reset, because nothing about this
+   * outcome suggests the next attempt will differ.
+   */
+  fetchedInvalid(applicationId: string, commitSha: string, envelope: EventEnvelope): TransitionResult {
+    return this.mutateApp(applicationId, envelope, 'fetched_invalid', 'failed', (app) => {
+      this.requireMatchingFetch(app, envelope);
+      this.clearActive(app);
+      app.desired_commit_sha = commitSha;
+      app.fetched_commit_sha = commitSha;
+      app.failure_stage = 'validation';
+      app.failure_class = 'validation';
+      app.failure_at = envelope.at;
+      this.clearInterruption(app, 'fetch_started');
+    });
+  }
+
+  /**
+   * A candidate whose change plan is blocked.
+   *
+   * It becomes the current candidate so the operator can see what is waiting,
+   * but it is marked blocked and can never be applied.
+   */
+  sourceConflictBlocker(applicationId: string, generationId: string, envelope: EventEnvelope): TransitionResult {
+    return this.mutateApp(applicationId, envelope, 'source_conflict_blocker', 'committed', (app, extras) => {
+      const generation = this.requireOwnedGeneration(app.id, generationId);
+      if (generation.plan_blocked !== 1) {
+        throw new GitOpsTransitionError('generation is not blocked');
+      }
+      if (app.active_operation_stage === 'apply_started' && app.candidate_generation_id !== generationId) {
+        throw new GitOpsTransitionError('cannot replace the candidate while an apply is in flight');
+      }
+      this.supersedeCandidate(app, generationId, envelope, extras);
+      app.candidate_generation_id = generationId;
+      app.candidate_plan_blocked = 1;
+      this.forEachLiveDirectTarget(app, (target) => {
+        target.candidate_generation_id = generationId;
+        this.store().upsertTarget(target);
+      });
+    }, { generationId });
+  }
+
+  /**
+   * The operator declined the pending candidate.
+   *
+   * Only the candidate is cleared. Whatever is accepted, applied, or deployed
+   * stays exactly where it is, and an operation in flight blocks the dismissal
+   * rather than pulling the candidate out from under it.
+   */
+  dismissed(applicationId: string, envelope: EventEnvelope): TransitionResult {
+    return this.mutateApp(applicationId, envelope, 'dismissed', 'skipped', (app) => {
+      if (!app.candidate_generation_id) throw new GitOpsTransitionError('no candidate to dismiss');
+      if (app.active_operation_stage) {
+        throw new GitOpsTransitionError('cannot dismiss while an operation is in flight');
+      }
+      app.candidate_generation_id = null;
+      app.candidate_plan_blocked = 0;
+      app.review_required = 0;
+      this.forEachLiveDirectTarget(app, (target) => {
+        target.candidate_generation_id = null;
+        this.store().upsertTarget(target);
+      });
+    });
+  }
+
+  /**
+   * The material source configuration changed under a staged candidate.
+   *
+   * Everything derived from the old configuration is cleared, including the
+   * candidate, because a candidate built from a different repository, ref, or
+   * file set can no longer be applied. Accepted, applied, deployed, and healthy
+   * pointers survive: the workload that is running did not change just because
+   * the configuration pointing at it did.
+   */
+  configChangedPendingCleared(args: {
+    applicationId: string;
+    identity: { repoUrl: string; repoIdentityJson: string; configuredRef: string };
+    material: {
+      composePathsJson: string;
+      contextDir: string | null;
+      syncEnv: number;
+      envPath: string | null;
+      fingerprint: string;
+    };
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateApp(args.applicationId, args.envelope, 'config_changed_pending_cleared', 'committed', (app) => {
+      if (app.target_mode !== 'direct') {
+        throw new GitOpsTransitionError('material configuration applies to Direct applications only');
+      }
+      app.configured_repo_url = args.identity.repoUrl;
+      app.repo_identity_json = args.identity.repoIdentityJson;
+      app.configured_ref = args.identity.configuredRef;
+      app.compose_paths_json = args.material.composePathsJson;
+      app.context_dir = args.material.contextDir;
+      app.sync_env = args.material.syncEnv;
+      app.env_path = args.material.envPath;
+      app.materialization_fingerprint = args.material.fingerprint;
+      app.desired_commit_sha = null;
+      app.fetched_commit_sha = null;
+      app.candidate_generation_id = null;
+      app.candidate_plan_blocked = 0;
+      app.review_required = 0;
+      this.clearAppFailure(app, ['fetch', 'validation']);
+      this.forEachLiveDirectTarget(app, (target) => {
+        target.candidate_generation_id = null;
+        this.store().upsertTarget(target);
+      });
+    });
+  }
+
   candidateReady(applicationId: string, generationId: string, reviewRequired: boolean, envelope: EventEnvelope): TransitionResult {
     return this.mutateApp(applicationId, envelope, 'candidate_ready', 'committed', (app, extras) => {
       const generation = this.requireOwnedGeneration(app.id, generationId);
@@ -134,16 +248,7 @@ export class GitOpsTransitions {
       if (app.active_operation_stage === 'apply_started' && app.candidate_generation_id !== generationId) {
         throw new GitOpsTransitionError('cannot replace the candidate while an apply is in flight');
       }
-      if (app.candidate_generation_id && app.candidate_generation_id !== generationId) {
-        const superseded = this.history(app, envelope, {
-          stage: 'candidate_superseded',
-          outcome: 'superseded',
-          generationId: app.candidate_generation_id,
-          before: { candidateGenerationId: app.candidate_generation_id },
-          after: { candidateGenerationId: generationId },
-        });
-        if (superseded) extras.historyIds.push(superseded);
-      }
+      this.supersedeCandidate(app, generationId, envelope, extras);
       app.candidate_generation_id = generationId;
       app.candidate_plan_blocked = 0;
       app.review_required = reviewRequired ? 1 : 0;
@@ -440,13 +545,10 @@ export class GitOpsTransitions {
 
   deployBound(applicationId: string, nodeId: number, generationId: string, envelope: EventEnvelope): TransitionResult {
     return this.mutateTarget(applicationId, nodeId, envelope, 'deploy_bound', generationId, (target) => {
-      const live = target.active_operation_stage === 'deploy_started'
-        && target.active_generation_id === generationId
-        && (!target.active_operation_id || target.active_operation_id === envelope.operationId);
-      const interrupted = target.interruption_stage === 'deploy_started'
-        && target.interruption_generation_id === generationId
-        && (!target.interruption_operation_id || target.interruption_operation_id === envelope.operationId);
-      if (!live && !interrupted) throw new GitOpsTransitionError('no matching deploy operation');
+      if (target.target_status !== 'active') {
+        throw new GitOpsTransitionError('cannot bind a deploy on a tombstoned target');
+      }
+      this.requireMatchingDeploy(target, generationId, envelope);
       target.deployed_generation_id = generationId;
       this.clearTargetActive(target);
       if (target.failure_stage === 'deploy') {
@@ -456,6 +558,96 @@ export class GitOpsTransitions {
       }
       this.clearTargetInterruption(target, 'deploy_started');
       return { before: {}, after: { deployedGenerationId: generationId } };
+    });
+  }
+
+  /**
+   * The deploy ran but Compose did not bind the generation to the workload.
+   *
+   * Deployed does not move: the previous workload is what is still running, and
+   * claiming otherwise would make health and rollback reason about a generation
+   * that was never live.
+   */
+  deployUnbound(applicationId: string, nodeId: number, generationId: string, envelope: EventEnvelope): TransitionResult {
+    return this.mutateTarget(applicationId, nodeId, envelope, 'deploy_unbound', generationId, (target) => {
+      this.requireMatchingDeploy(target, generationId, envelope);
+      this.clearTargetActive(target);
+      target.failure_stage = 'deploy';
+      target.failure_class = 'unbound';
+      target.failure_at = envelope.at;
+      this.clearTargetInterruption(target, 'deploy_started');
+      return {
+        before: { deployedGenerationId: target.deployed_generation_id },
+        after: { failureClass: 'unbound' },
+      };
+    }, 'failed');
+  }
+
+  /**
+   * The deploy failed outright.
+   *
+   * `pre_mutation` means the workload was never touched, `post_mutation` means
+   * it was. The deriver reports those differently because only one of them
+   * leaves the previous workload intact, so the caller must classify honestly
+   * from whether the mutation was handed off.
+   */
+  deployFailed(
+    applicationId: string,
+    nodeId: number,
+    failureClass: 'pre_mutation' | 'post_mutation',
+    envelope: EventEnvelope,
+  ): TransitionResult {
+    return this.mutateTarget(applicationId, nodeId, envelope, 'deploy_failed', null, (target) => {
+      this.clearTargetActive(target);
+      target.failure_stage = 'deploy';
+      target.failure_class = failureClass;
+      target.failure_at = envelope.at;
+      this.clearTargetInterruption(target, 'deploy_started');
+      return {
+        before: { deployedGenerationId: target.deployed_generation_id },
+        after: { failureClass },
+      };
+    }, 'failed');
+  }
+
+  /**
+   * Retire an application. Tombstones never reactivate.
+   *
+   * Configured identity and SHA pointers are kept as frozen facts so the
+   * projection can still say what this application was, and a reattach must
+   * mint a new application id rather than reviving this row.
+   */
+  applicationTombstoned(
+    applicationId: string,
+    lifecycleStatus: 'deleted' | 'detached',
+    envelope: EventEnvelope,
+  ): TransitionResult {
+    return this.mutateApp(applicationId, envelope, 'application_tombstoned', 'committed', (app) => {
+      if (app.lifecycle_status === 'deleted' || app.lifecycle_status === 'detached') {
+        throw new GitOpsTransitionError('application is already tombstoned');
+      }
+      app.lifecycle_status = lifecycleStatus;
+      this.clearActive(app);
+      app.failure_stage = null;
+      app.failure_class = null;
+      app.failure_at = null;
+    });
+  }
+
+  /** Retire one target, clearing its last-known-good along with its operation state. */
+  targetTombstoned(applicationId: string, nodeId: number, envelope: EventEnvelope): TransitionResult {
+    return this.mutateTarget(applicationId, nodeId, envelope, 'target_tombstoned', null, (target) => {
+      const before = { targetStatus: target.target_status };
+      target.target_status = 'tombstoned';
+      this.clearTargetActive(target);
+      target.failure_stage = null;
+      target.failure_class = null;
+      target.failure_at = null;
+      target.lkg_generation_id = null;
+      target.lkg_artifact_set_id = null;
+      target.lkg_unavailable_at = null;
+      target.lkg_unavailable_reason = null;
+      return { before, after: { targetStatus: 'tombstoned' } };
     });
   }
 
@@ -601,6 +793,45 @@ export class GitOpsTransitions {
     });
   }
 
+  /**
+   * A terminal deploy event must name the operation it is settling.
+   *
+   * It matches either the live operation or, after a restart, the interruption
+   * that operation left behind. A late result for a superseded operation is
+   * rejected rather than allowed to move pointers a newer deploy now owns.
+   */
+  private requireMatchingDeploy(
+    target: GitOpsTargetCurrentRow,
+    generationId: string,
+    envelope: EventEnvelope,
+  ): void {
+    const live = target.active_operation_stage === 'deploy_started'
+      && target.active_generation_id === generationId
+      && (!target.active_operation_id || target.active_operation_id === envelope.operationId);
+    const interrupted = target.interruption_stage === 'deploy_started'
+      && target.interruption_generation_id === generationId
+      && (!target.interruption_operation_id || target.interruption_operation_id === envelope.operationId);
+    if (!live && !interrupted) throw new GitOpsTransitionError('no matching deploy operation');
+  }
+
+  /** Record that a new candidate displaced the one already pending. */
+  private supersedeCandidate(
+    app: GitOpsApplicationRow,
+    nextGenerationId: string,
+    envelope: EventEnvelope,
+    extras: { historyIds: string[] },
+  ): void {
+    if (!app.candidate_generation_id || app.candidate_generation_id === nextGenerationId) return;
+    const superseded = this.history(app, envelope, {
+      stage: 'candidate_superseded',
+      outcome: 'superseded',
+      generationId: app.candidate_generation_id,
+      before: { candidateGenerationId: app.candidate_generation_id },
+      after: { candidateGenerationId: nextGenerationId },
+    });
+    if (superseded) extras.historyIds.push(superseded);
+  }
+
   private allowedExpectedAdvance(
     loadedExpectedId: string | null,
     qualification: ArtifactQualification,
@@ -660,8 +891,9 @@ export class GitOpsTransitions {
     nodeId: number,
     envelope: EventEnvelope,
     stage: string,
-    generationId: string,
+    generationId: string | null,
     mutate: (target: GitOpsTargetCurrentRow) => { before: unknown; after: unknown },
+    outcome: HistoryOutcome = 'committed',
   ): TransitionResult {
     return this.raw().transaction(() => {
       const app = this.requireApp(applicationId);
@@ -673,7 +905,7 @@ export class GitOpsTransitions {
       const historyId = this.history(app, envelope, {
         nodeId,
         stage,
-        outcome: 'committed',
+        outcome,
         generationId,
         before: snapshots.before,
         after: snapshots.after,
@@ -794,32 +1026,48 @@ export class GitOpsTransitions {
   /**
    * Persist the mutable half of an application row.
    *
-   * Only the columns listed here can change after insert. The mutator callback
-   * receives the whole row, so assigning a column that is absent from this
-   * UPDATE compiles, shows up in the history snapshot, and is then silently
-   * dropped at commit. Add the column here before any transition writes it.
+   * Every column a transition is allowed to change is written here. The mutator
+   * callback receives the whole row, so a column missing from this UPDATE would
+   * compile, appear in the history snapshot, and then be silently dropped at
+   * commit. Only identity and provenance are excluded, because they are fixed
+   * at insert: id, lifecycle_key, target_mode, stack_name, blueprint_id,
+   * created_at.
    */
   private writeApplication(app: GitOpsApplicationRow): void {
     this.raw().prepare(
       `UPDATE gitops_applications SET
-        lifecycle_status=?, desired_commit_sha=?, fetched_commit_sha=?,
+        lifecycle_status=?, configured_repo_url=?, repo_identity_json=?, configured_ref=?,
+        compose_paths_json=?, context_dir=?, sync_env=?, env_path=?,
+        materialization_fingerprint=?, desired_commit_sha=?, fetched_commit_sha=?,
         candidate_generation_id=?, accepted_generation_id=?, candidate_plan_blocked=?,
         review_required=?, artifact_set_id=?, latest_artifact_set_id=?,
-        source_acceptance_ref=?, latest_operation_id=?, active_operation_id=?,
+        intent_revision_id=?, rollout_candidate_id=?, rollout_generation_id=?,
+        source_acceptance_ref=?, placement_approval_ref=?, rollout_authorization_ref=?,
+        legacy_combined_approval_ref=?, preflight_fingerprint=?,
+        latest_operation_id=?, active_operation_id=?,
         active_operation_stage=?, active_operation_at=?, active_generation_id=?,
+        pause_at=?, pause_reason=?, partial_json=?,
         failure_stage=?, failure_class=?, failure_at=?, retry_at=?, retry_count=?,
+        suspended_at=?, recovery_ref=?, recovery_phase=?,
         interruption_stage=?, interruption_at=?, interruption_operation_id=?,
-        interruption_generation_id=?, updated_at=?
+        interruption_generation_id=?, evidence_fresh_at=?, updated_at=?
        WHERE id=?`,
     ).run(
-      app.lifecycle_status, app.desired_commit_sha, app.fetched_commit_sha,
+      app.lifecycle_status, app.configured_repo_url, app.repo_identity_json, app.configured_ref,
+      app.compose_paths_json, app.context_dir, app.sync_env, app.env_path,
+      app.materialization_fingerprint, app.desired_commit_sha, app.fetched_commit_sha,
       app.candidate_generation_id, app.accepted_generation_id, app.candidate_plan_blocked,
       app.review_required, app.artifact_set_id, app.latest_artifact_set_id,
-      app.source_acceptance_ref, app.latest_operation_id, app.active_operation_id,
+      app.intent_revision_id, app.rollout_candidate_id, app.rollout_generation_id,
+      app.source_acceptance_ref, app.placement_approval_ref, app.rollout_authorization_ref,
+      app.legacy_combined_approval_ref, app.preflight_fingerprint,
+      app.latest_operation_id, app.active_operation_id,
       app.active_operation_stage, app.active_operation_at, app.active_generation_id,
+      app.pause_at, app.pause_reason, app.partial_json,
       app.failure_stage, app.failure_class, app.failure_at, app.retry_at, app.retry_count,
+      app.suspended_at, app.recovery_ref, app.recovery_phase,
       app.interruption_stage, app.interruption_at, app.interruption_operation_id,
-      app.interruption_generation_id, app.updated_at, app.id,
+      app.interruption_generation_id, app.evidence_fresh_at, app.updated_at, app.id,
     );
   }
 }
