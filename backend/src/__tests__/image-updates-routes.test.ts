@@ -826,7 +826,7 @@ describe('POST /api/auto-update/execute', () => {
       expect(res.status).toBe(200);
       expect(updateSpy).toHaveBeenCalledWith('auto-upd-gate', undefined, true);
       expect(recheckSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-gate');
-      expect(beginSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-gate', 'update', `auto-update:${TEST_USERNAME}`);
+      expect(beginSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-gate', 'update', `auto-update:${TEST_USERNAME}`, { deployedGenerationId: null });
       expect(callOrder.indexOf('beginStack')).toBeLessThan(callOrder.indexOf('recheckStack'));
     } finally {
       containersSpy.mockRestore();

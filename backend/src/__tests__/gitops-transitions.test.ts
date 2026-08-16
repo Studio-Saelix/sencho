@@ -324,6 +324,98 @@ describe('gitops transitions', () => {
     expect(target.failure_stage).toBeNull();
   });
 
+  it('promotes healthy and last-known-good only for the generation the run watched', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-hl', 'hl-web', 'gen-hl', 'art-hl', 'acc-hl');
+    tx.deployStarted('app-hl', 1, 'gen-hl', envelope('op-hl-dep'));
+    tx.deployBound('app-hl', 1, 'gen-hl', envelope('op-hl-dep'));
+
+    // A verdict for a generation that is not the deployed one proves nothing.
+    tx.healthFinalized({
+      applicationId: 'app-hl',
+      nodeId: 1,
+      healthRunId: 'run-stale',
+      healthStatus: 'passed',
+      deployedGenerationId: 'gen-other',
+      targetScope: 'stack',
+      envelope: envelope('op-hl-stale'),
+    });
+    expect(store.getTarget('app-hl', 1)?.healthy_generation_id).toBeNull();
+
+    // Nor does a service-scoped run, which never observed the whole stack.
+    tx.healthFinalized({
+      applicationId: 'app-hl',
+      nodeId: 1,
+      healthRunId: 'run-service',
+      healthStatus: 'passed',
+      deployedGenerationId: 'gen-hl',
+      targetScope: 'service',
+      envelope: envelope('op-hl-service'),
+    });
+    expect(store.getTarget('app-hl', 1)?.healthy_generation_id).toBeNull();
+
+    // Nor does a failure.
+    tx.healthFinalized({
+      applicationId: 'app-hl',
+      nodeId: 1,
+      healthRunId: 'run-failed',
+      healthStatus: 'failed',
+      deployedGenerationId: 'gen-hl',
+      targetScope: 'stack',
+      envelope: envelope('op-hl-failed'),
+    });
+    expect(store.getTarget('app-hl', 1)?.healthy_generation_id).toBeNull();
+
+    tx.healthFinalized({
+      applicationId: 'app-hl',
+      nodeId: 1,
+      healthRunId: 'run-pass',
+      healthStatus: 'passed',
+      deployedGenerationId: 'gen-hl',
+      targetScope: 'stack',
+      envelope: envelope('op-hl-pass'),
+    });
+    const target = store.getTarget('app-hl', 1)!;
+    expect(target.healthy_generation_id).toBe('gen-hl');
+    expect(target.lkg_generation_id).toBe('gen-hl');
+    // The expected artifact belongs to this generation, so it is kept as the
+    // qualification evidence for the last-known-good.
+    expect(target.lkg_artifact_set_id).toBe('art-hl');
+    expect(target.lkg_unavailable_at).toBeNull();
+    const projection = mustProject('app-hl');
+    expect(projection.targets[0]?.runtime.status).toBe('synced_and_healthy');
+    expect(projection.targets[0]?.lkg.status).not.toBe('none');
+  });
+
+  it('keeps the last-known-good generation when its artifact belongs elsewhere', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-lkg', 'lkg-web', 'gen-lkg', 'art-lkg', 'acc-lkg');
+    tx.deployStarted('app-lkg', 1, 'gen-lkg', envelope('op-lkg-dep'));
+    tx.deployBound('app-lkg', 1, 'gen-lkg', envelope('op-lkg-dep'));
+    // Clear the expectation so the promotion has no artifact to qualify with.
+    DatabaseService.getInstance().getDb().prepare(
+      "UPDATE gitops_target_current SET expected_artifact_set_id = NULL WHERE application_id = 'app-lkg'",
+    ).run();
+
+    tx.healthFinalized({
+      applicationId: 'app-lkg',
+      nodeId: 1,
+      healthRunId: 'run-lkg',
+      healthStatus: 'passed',
+      deployedGenerationId: 'gen-lkg',
+      targetScope: 'stack',
+      envelope: envelope('op-lkg-pass'),
+    });
+
+    const target = store.getTarget('app-lkg', 1)!;
+    // The generation is still good; only its executable identity is unproven.
+    expect(target.lkg_generation_id).toBe('gen-lkg');
+    expect(target.lkg_artifact_set_id).toBeNull();
+    expect(mustProject('app-lkg').targets[0]?.lkg.status).toBe('available');
+  });
+
   it('tombstones an application and its target, and never reactivates it', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();

@@ -181,7 +181,7 @@ afterEach(() => {
 
 describe('HealthGateService verdicts', () => {
   it('passes at the window end when containers stay running', async () => {
-    const id = svc().beginStack(0, 'web', 'update', 'tester');
+    const id = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     expect(id).toBeTruthy();
     await ticks(3); // 15s: still observing
     expect(latest().status).toBe('observing');
@@ -191,7 +191,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('fails fast when a container exits', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1); // baseline
     setContainers([{ id: 'aaa', name: 'web-app-1', state: 'exited', exitCode: 1, restartPolicy: 'unless-stopped' }]);
     await ticks(1);
@@ -207,7 +207,7 @@ describe('HealthGateService verdicts', () => {
       { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
       { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
     ]);
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     setContainers([
       { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
@@ -229,7 +229,7 @@ describe('HealthGateService verdicts', () => {
         state: 'running', restartPolicy: 'no',
       },
     ]);
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     setContainers([
       {
@@ -248,7 +248,7 @@ describe('HealthGateService verdicts', () => {
       { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
       { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
     ]);
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     setContainers([
       { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
@@ -269,7 +269,7 @@ describe('HealthGateService verdicts', () => {
       { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
       { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
     ]);
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     setContainers([
       { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
@@ -290,7 +290,7 @@ describe('HealthGateService verdicts', () => {
       { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
       { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
     ]);
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     setContainers([
       {
@@ -310,7 +310,7 @@ describe('HealthGateService verdicts', () => {
       { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
       { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
     ]);
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     setContainers([
       {
@@ -327,7 +327,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('fails when exit 0 has unless-stopped restart policy', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     setContainers([{ id: 'aaa', name: 'web-app-1', state: 'exited', exitCode: 0, restartPolicy: 'unless-stopped' }]);
     await ticks(1);
@@ -336,7 +336,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('fails when exit 0 has always restart policy', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     setContainers([{ id: 'aaa', name: 'web-app-1', state: 'exited', exitCode: 0, restartPolicy: 'always' }]);
     await ticks(1);
@@ -345,7 +345,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('fails closed when exit code is null on an exited container', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     setContainers([{ id: 'aaa', name: 'web-app-1', state: 'exited', exitCode: null, restartPolicy: 'no' }]);
     await ticks(1);
@@ -354,7 +354,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('fails when a one-shot exits non-zero', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     setContainers([{ id: 'aaa', name: 'web-app-1', state: 'exited', exitCode: 1, restartPolicy: 'no' }]);
     await ticks(1);
@@ -363,7 +363,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('fails fast when a healthcheck reports unhealthy', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     setContainers([{ id: 'aaa', name: 'web-app-1', health: 'unhealthy' }]);
     await ticks(1);
@@ -372,7 +372,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('detects a restart loop via container replacement (new id)', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     setContainers([{ id: 'bbb', name: 'web-app-1' }]);
     await ticks(1); // restart 1 observed; carried as new baseline
@@ -388,7 +388,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('detects a restart loop via RestartCount and StartedAt movement', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     setContainers([{ id: 'aaa', name: 'web-app-1', restartCount: 1 }]);
     await ticks(1);
@@ -403,7 +403,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('tolerates a one-poll disappearance but fails on two consecutive misses', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1); // baseline
     setContainers([]); // one missed poll: tolerated
     await ticks(1);
@@ -411,7 +411,7 @@ describe('HealthGateService verdicts', () => {
     await ticks(5); // through the 30s window
     expect(latest().status).toBe('passed');
 
-    const second = svc().beginStack(0, 'web', 'update', 'tester')!;
+    const second = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
     await ticks(1);
     setContainers([]);
     await ticks(2); // two consecutive misses: disappeared
@@ -421,7 +421,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('fails when a container is stuck restarting across consecutive polls', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     setContainers([{ id: 'aaa', name: 'web-app-1', state: 'restarting' }]);
     await ticks(2);
@@ -430,7 +430,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('goes unknown after three consecutive docker errors', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
     state.listContainers.mockRejectedValue(new Error('socket gone'));
     await ticks(3);
@@ -439,7 +439,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('resolves unknown when every docker observe hangs', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     // A wedged socket never settles. The per-observe timeout turns each poll
     // into an error, and three in a row finalize the gate unknown instead of
     // observing forever on a pending promise.
@@ -452,7 +452,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('recovers from a transient observe timeout instead of finalizing', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     // One observe wedges and times out (a single strike), then the socket
     // recovers; the gate must keep observing, not give up at one error.
     state.listContainers.mockImplementationOnce(() => new Promise<never>(() => {}));
@@ -465,7 +465,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('runs polls single-flight: no second observe until the first settles', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     let release: (value: Array<{ Id: string; Names: string[]; State: string }>) => void = () => {};
     state.listContainers.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
     // Advance past a second poll interval while the first observe is still
@@ -480,7 +480,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('ends unknown when a healthcheck is still starting at the window end', async () => {
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     setContainers([{ id: 'aaa', name: 'web-app-1', health: 'starting' }]);
     await ticks(7);
     expect(latest().status).toBe('unknown');
@@ -489,7 +489,7 @@ describe('HealthGateService verdicts', () => {
 
   it('goes unknown when no containers ever appear', async () => {
     setContainers([]);
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(4);
     expect(latest().status).toBe('unknown');
     expect(latest().reason).toContain('no containers');
@@ -501,7 +501,7 @@ describe('HealthGateService lifecycle', () => {
     // A poll is mid-await on Docker when a newer update supersedes the gate;
     // when the await resolves with healthy containers, the superseded run
     // must keep its terminal unknown verdict.
-    const first = svc().beginStack(0, 'web', 'update', 'tester')!;
+    const first = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
     await ticks(2); // baseline established, healthy
 
     let releasePoll: (value: Array<{ Id: string; Names: string[]; State: string }>) => void = () => {};
@@ -510,7 +510,7 @@ describe('HealthGateService lifecycle', () => {
     );
     const straddlingPoll = vi.advanceTimersByTimeAsync(5_000); // poll now awaiting Docker
 
-    const second = svc().beginStack(0, 'web', 'update', 'tester')!;
+    const second = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
     expect(svc().getReport(0, 'web', first).status).toBe('unknown');
 
     releasePoll([{ Id: 'aaa', Names: ['/web-app-1'], State: 'running' }]);
@@ -525,10 +525,10 @@ describe('HealthGateService lifecycle', () => {
   });
 
   it('supersede finalizes the old run as unknown, clears its timer, and getRun still resolves it', async () => {
-    const first = svc().beginStack(0, 'web', 'update', 'tester')!;
+    const first = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
     await ticks(1);
     const timersBefore = vi.getTimerCount();
-    const second = svc().beginStack(0, 'web', 'update', 'tester')!;
+    const second = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
     expect(vi.getTimerCount()).toBe(timersBefore); // old interval cleared, new one added
 
     const superseded = svc().getReport(0, 'web', first);
@@ -554,7 +554,7 @@ describe('HealthGateService lifecycle', () => {
 
   it('no-ops when disabled but still records the update_started event', () => {
     state.settings.health_gate_enabled = '0';
-    const id = svc().beginStack(0, 'web', 'update', 'tester');
+    const id = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     expect(id).toBeNull();
     expect(state.runs.size).toBe(0);
     expect(state.activity.some(a => a.category === 'update_started')).toBe(true);
@@ -562,24 +562,24 @@ describe('HealthGateService lifecycle', () => {
   });
 
   it('records update_started for update triggers but not deploy triggers', () => {
-    svc().beginStack(0, 'web', 'deploy', 'tester');
+    svc().beginStack(0, 'web', 'deploy', 'tester', { deployedGenerationId: null });
     expect(state.activity.some(a => a.category === 'update_started')).toBe(false);
-    svc().beginStack(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     expect(state.activity.some(a => a.category === 'update_started')).toBe(true);
   });
 
   it('refuses to begin before start() so shutdown cannot leak timers', () => {
     svc().stop();
-    expect(svc().beginStack(0, 'web', 'update', 'tester')).toBeNull();
+    expect(svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })).toBeNull();
     expect(vi.getTimerCount()).toBe(0);
     svc().start();
   });
 
   it('persists an immediate unknown past the concurrency cap', () => {
     for (let i = 0; i < 25; i++) {
-      svc().beginStack(0, `stack-${i}`, 'update', 'tester');
+      svc().beginStack(0, `stack-${i}`, 'update', 'tester', { deployedGenerationId: null });
     }
-    const overCap = svc().beginStack(0, 'one-too-many', 'update', 'tester')!;
+    const overCap = svc().beginStack(0, 'one-too-many', 'update', 'tester', { deployedGenerationId: null })!;
     const report = svc().getReport(0, 'one-too-many', overCap);
     expect(report.status).toBe('unknown');
     expect(report.reason).toContain('concurrent');
@@ -587,10 +587,10 @@ describe('HealthGateService lifecycle', () => {
 
   it('clamps the configured window into its valid range and falls back on garbage', () => {
     state.settings.health_gate_window_seconds = '99999';
-    const a = svc().beginStack(0, 'web', 'update', 'tester')!;
+    const a = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
     expect(svc().getReport(0, 'web', a).windowSeconds).toBe(600);
     state.settings.health_gate_window_seconds = 'banana';
-    const b = svc().beginStack(0, 'web', 'update', 'tester')!;
+    const b = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
     expect(svc().getReport(0, 'web', b).windowSeconds).toBe(90);
   });
 
@@ -601,7 +601,7 @@ describe('HealthGateService lifecycle', () => {
   });
 
   it('stop() finalizes in-flight gates as unknown with zero timers left', async () => {
-    const id = svc().beginStack(0, 'web', 'update', 'tester')!;
+    const id = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
     await ticks(1);
     svc().stop();
     expect(vi.getTimerCount()).toBe(0);

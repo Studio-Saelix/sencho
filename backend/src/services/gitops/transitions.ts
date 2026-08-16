@@ -611,6 +611,76 @@ export class GitOpsTransitions {
   }
 
   /**
+   * A health gate reached a verdict on a deployed generation.
+   *
+   * Promotion is deliberately narrow. Healthy and last-known-good move only
+   * when the run passed, it observed the whole stack, and the generation it
+   * watched is still the one deployed. A run that observed generation A cannot
+   * vouch for B, so a stale verdict records history and moves nothing.
+   *
+   * Last-known-good keeps the artifact expectation only when that expectation
+   * belongs to the generation being promoted. Otherwise the generation is still
+   * good, its executable identity just is not proven, so the artifact pointer is
+   * left null rather than borrowed from a different generation.
+   */
+  healthFinalized(args: {
+    applicationId: string;
+    nodeId: number;
+    healthRunId: string;
+    healthStatus: 'passed' | 'failed' | 'unknown';
+    deployedGenerationId: string | null;
+    targetScope: 'stack' | 'service';
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'health_finalized',
+      args.deployedGenerationId,
+      (target) => {
+        const before = {
+          healthyGenerationId: target.healthy_generation_id,
+          lkgGenerationId: target.lkg_generation_id,
+        };
+        const promotable = args.healthStatus === 'passed'
+          && args.targetScope === 'stack'
+          && !!args.deployedGenerationId
+          && target.deployed_generation_id === args.deployedGenerationId;
+        if (!promotable) {
+          return { before, after: { ...before, promoted: false, healthStatus: args.healthStatus } };
+        }
+
+        const generationId = args.deployedGenerationId as string;
+        target.healthy_generation_id = generationId;
+        target.lkg_generation_id = generationId;
+
+        const expected = target.expected_artifact_set_id
+          ? this.store().getArtifactSet(target.expected_artifact_set_id)
+          : undefined;
+        target.lkg_artifact_set_id = expected && expected.generation_id === generationId
+          ? expected.id
+          : null;
+        // A generation that just passed is available again, whatever made the
+        // previous one unavailable.
+        target.lkg_unavailable_at = null;
+        target.lkg_unavailable_reason = null;
+
+        return {
+          before,
+          after: {
+            healthyGenerationId: generationId,
+            lkgGenerationId: generationId,
+            lkgArtifactSetId: target.lkg_artifact_set_id,
+            promoted: true,
+          },
+        };
+      },
+      args.healthStatus === 'unknown' ? 'unknown' : 'committed',
+    );
+  }
+
+  /**
    * Retire an application. Tombstones never reactivate.
    *
    * Configured identity and SHA pointers are kept as frozen facts so the

@@ -2482,7 +2482,7 @@ export class GitSourceService {
                     await finalizeRecoveryCurrent(recoveryId, false);
                 }
                 // Shared stack lock already held as git_apply for capture→deploy.
-                await ComposeService.getInstance(nodeId).deployStack(
+                const autoDeploy = await ComposeService.getInstance(nodeId).deployStack(
                     stackName,
                     undefined,
                     undefined,
@@ -2498,6 +2498,7 @@ export class GitSourceService {
                     stackName,
                     'deploy',
                     'system:git-source',
+                    { deployedGenerationId: autoDeploy.deployedGenerationId },
                 );
                 if (recoveryId) {
                     recoverySvc.linkGateOrRetain(recoveryId, healthGateId);

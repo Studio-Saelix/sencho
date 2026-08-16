@@ -285,7 +285,7 @@ describe('git-source apply recovery (R1)', () => {
 
   it('refuses to promote when recovery capture fails', async () => {
     mockCaptureCandidate.mockRejectedValue(new Error('Exact authored-project rollback coverage is unavailable'));
-    mockDeployStack.mockResolvedValue({ recoveryId: null });
+    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
 
     const { GitSourceService, GitSourceError } = await import('../services/GitSourceService');
     const svc = GitSourceService.getInstance();

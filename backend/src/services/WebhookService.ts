@@ -163,7 +163,7 @@ export class WebhookService {
                                 atomic,
                                 { source: 'webhook', actor: 'system:webhook' },
                             );
-                            const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'deploy', 'system:webhook');
+                            const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'deploy', 'system:webhook', { deployedGenerationId: deployResult.deployedGenerationId });
                             if (deployResult.recoveryId) {
                                 const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
                                 StackUpdateRecoveryService.getInstance().linkGateOrRetain(deployResult.recoveryId, healthGateId);
@@ -189,7 +189,7 @@ export class WebhookService {
                                 { nodeId, stackName, target: { scope: 'stack' }, trigger: 'webhook', actor: 'system:webhook' },
                                 { atomic: atomic ?? false, terminalWs: null },
                             );
-                            const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:webhook');
+                            const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:webhook', { deployedGenerationId: null });
                             const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
                             if (recoveryId) {
                                 const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');

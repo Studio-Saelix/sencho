@@ -9,6 +9,8 @@ import { isCleanOneShotCompletion } from '../utils/oneShotCompletion';
 import { declaredFromEffectiveModel } from '../helpers/effectiveToDeclaredCompose';
 import { parseEffectiveModel } from './preflight/effectiveModel';
 import type { HealthGateContainer, HealthGateReport } from './updateGuard/types';
+import { GitOpsStore } from './gitops/store';
+import { GitOpsTransitions } from './gitops/transitions';
 import { ComposeService, getComposeCommandTimeoutMs } from './ComposeService';
 
 const POLL_INTERVAL_MS = 5_000;
@@ -303,11 +305,22 @@ export class HealthGateService {
    * every gated update path gets the timeline marker even when the gate
    * itself is disabled.
    */
+  /**
+   * Start a stack-scoped health observation.
+   *
+   * `binding.deployedGenerationId` is the generation the mutation that preceded
+   * this call actually deployed, or null when there was none. It is a required
+   * argument rather than something this method reads from current state,
+   * because a verdict is only meaningful for the generation the run watched:
+   * reading it later could bind a run to whatever happens to be deployed by
+   * then, and a pass would then promote a generation this run never observed.
+   */
   public beginStack(
     nodeId: number,
     stackName: string,
     trigger: 'update' | 'deploy',
     actor: string | null,
+    binding: { deployedGenerationId: string | null },
   ): string | null {
     // Refuses work outside the start()/stop() lifecycle so a late call during
     // shutdown cannot leave a dangling poll timer.
@@ -343,6 +356,7 @@ export class HealthGateService {
         target_scope: 'stack',
         service_name: null,
         failure_source: null,
+        deployed_generation_id: binding.deployedGenerationId,
       };
 
       if (this.active.size >= MAX_CONCURRENT_GATES) {
@@ -392,8 +406,9 @@ export class HealthGateService {
     stackName: string,
     trigger: 'update' | 'deploy',
     actor: string | null,
+    binding: { deployedGenerationId: string | null },
   ): string | null {
-    return this.beginStack(nodeId, stackName, trigger, actor);
+    return this.beginStack(nodeId, stackName, trigger, actor, binding);
   }
 
   /**
@@ -1018,6 +1033,41 @@ export class HealthGateService {
     });
   }
 
+  /**
+   * Hand a finalized verdict to the GitOps state model.
+   *
+   * The generation is read back from the persisted run row rather than taken
+   * from memory, so the verdict is attributed to what this run was recorded as
+   * observing. The transition decides whether that is still promotable; this
+   * method only reports.
+   *
+   * Never throws: a health gate is an observer, and a bookkeeping failure must
+   * not change the verdict that was just written.
+   */
+  private recordGitOpsHealthVerdict(gate: ActiveGate, status: 'passed' | 'failed' | 'unknown'): void {
+    try {
+      const run = DatabaseService.getInstance().getHealthGateRun(gate.nodeId, gate.stackName, gate.runId);
+      if (!run) return;
+      const app = GitOpsStore.getInstance().getLiveDirectApplication(gate.stackName);
+      if (!app || app.lifecycle_status !== 'active') return;
+      if (!GitOpsStore.getInstance().getTarget(app.id, gate.nodeId)) return;
+      GitOpsTransitions.getInstance().healthFinalized({
+        applicationId: app.id,
+        nodeId: gate.nodeId,
+        healthRunId: gate.runId,
+        healthStatus: status,
+        deployedGenerationId: run.deployed_generation_id ?? null,
+        targetScope: run.target_scope,
+        envelope: { operationId: gate.runId, actor: 'system:health-gate', trigger: 'health', at: Date.now() },
+      });
+    } catch (error) {
+      console.error(
+        '[GitOps] Could not record the health verdict for %s:',
+        sanitizeForLog(gate.stackName), getErrorMessage(error, 'unknown'),
+      );
+    }
+  }
+
   private finalize(
     gate: ActiveGate,
     status: 'passed' | 'failed' | 'unknown',
@@ -1047,6 +1097,7 @@ export class HealthGateService {
       DatabaseService.getInstance().finalizeHealthGateRun(
         gate.runId, status, reason, Date.now(), JSON.stringify(containers), failureSource,
       );
+      this.recordGitOpsHealthVerdict(gate, status);
     } catch (error) {
       // The verdict is lost from the DB (the startup sweep will later rewrite
       // the row as unknown), so log everything needed to reconstruct it.

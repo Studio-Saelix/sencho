@@ -298,7 +298,7 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
         fs.writeFileSync(composePath('corrupt-web'), beforeCompose);
         fs.writeFileSync(envPath('corrupt-web'), beforeEnv);
 
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
         const res = await request(app)
             .post(`/api/fleet/snapshots/${id}/restore`)
             .set('Cookie', adminCookie)
@@ -329,7 +329,7 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
         fs.writeFileSync(composePath('mixed-web'), beforeCompose);
         fs.writeFileSync(envPath('mixed-web'), beforeEnv);
 
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
         const res = await request(app)
             .post(`/api/fleet/snapshots/${id}/restore`)
             .set('Cookie', adminCookie)
@@ -355,7 +355,7 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
         const beforeCompose = 'services:\n  keep: {}\n';
         fs.writeFileSync(composePath('delim-web'), beforeCompose);
 
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
         const res = await request(app)
             .post(`/api/fleet/snapshots/${id}/restore`)
             .set('Cookie', adminCookie)
@@ -396,7 +396,7 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
 
     it('redeploys after restore when requested', async () => {
         vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
         const db = DatabaseService.getInstance();
         const id = db.createSnapshot('restore-redeploy', 'admin', 1, 1, '[]', '[]');
         db.insertSnapshotFiles(id, [
@@ -758,7 +758,7 @@ describe('Restore-all', () => {
 
     it('isolates corrupt decrypt stacks before any mutation with notes and redeploy requested', async () => {
         vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
         const db = DatabaseService.getInstance();
         const id = db.createSnapshot('restore-all-corrupt', 'admin', 1, 2, '[]', '[]');
         const good = CryptoService.getInstance().encrypt('services:\n  app: {}\n');
@@ -800,7 +800,7 @@ describe('Restore-all', () => {
 
     it('isolates delimiter-byte corruption before restore-all mutation', async () => {
         vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
         const db = DatabaseService.getInstance();
         const id = db.createSnapshot('restore-all-delim', 'admin', 1, 2, '[]', '[]');
         const good = CryptoService.getInstance().encrypt('services:\n  app: {}\n');
@@ -835,7 +835,7 @@ describe('Restore-all', () => {
 
     it('redeploys each restored stack when requested', async () => {
         vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
         const db = DatabaseService.getInstance();
         const id = db.createSnapshot('restore-all-redeploy', 'admin', 1, 1, '[]', '[]');
         db.insertSnapshotFiles(id, [
@@ -856,7 +856,7 @@ describe('Restore-all', () => {
     });
 
     it('records a policy-blocked redeploy as a per-stack failure and still restores the rest', async () => {
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
         vi.spyOn(policyGate, 'assertPolicyGateAllows').mockImplementation(async (stackName: string) => {
             if (stackName === 'blocked-web') throw new Error('Policy "block-criticals" blocked deploy: 1 image(s) exceed high');
         });

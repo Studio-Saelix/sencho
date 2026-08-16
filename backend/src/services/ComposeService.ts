@@ -672,7 +672,11 @@ export class ComposeService {
    * thing is a no-op. Recording never fails the deploy: the store describes
    * what happened, it does not make it happen.
    */
-  private beginGitOpsDeploy(stackName: string): { bound: () => void; failed: (failureClass: 'pre_mutation' | 'post_mutation') => void } | null {
+  private beginGitOpsDeploy(stackName: string): {
+    generationId: string;
+    bound: () => void;
+    failed: (failureClass: 'pre_mutation' | 'post_mutation') => void;
+  } | null {
     try {
       const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
       if (!app || app.lifecycle_status !== 'active') return null;
@@ -694,6 +698,7 @@ export class ComposeService {
       };
       record('start', () => tx.deployStarted(app.id, this.nodeId, generationId, envelope));
       return {
+        generationId,
         bound: () => record('binding', () => tx.deployBound(app.id, this.nodeId, generationId, envelope)),
         failed: (failureClass) => record('failure', () => tx.deployFailed(app.id, this.nodeId, failureClass, envelope)),
       };
@@ -711,7 +716,7 @@ export class ComposeService {
     ws?: WebSocket,
     atomic?: boolean,
     ctx?: DeployInvocationContext,
-  ): Promise<{ recoveryId: string | null }> {
+  ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null }> {
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     await this.ensureExternalNetworksForDeploy(stackName, ctx);
@@ -851,7 +856,7 @@ export class ComposeService {
       console.warn('[ComposeService] Exposure refresh failed after deploy for %s:',
         sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
     }
-    return { recoveryId };
+    return { recoveryId, deployedGenerationId: gitopsDeploy?.generationId ?? null };
   }
 
   streamLogs(stackName: string, ws: WebSocket) {

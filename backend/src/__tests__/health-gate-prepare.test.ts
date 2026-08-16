@@ -209,7 +209,7 @@ describe('prepare / beginPrepared nullability', () => {
   });
 
   it('persists an immediate unknown past the concurrency cap', async () => {
-    for (let i = 0; i < 25; i++) svc().beginStack(0, `stack-${i}`, 'update', 'tester');
+    for (let i = 0; i < 25; i++) svc().beginStack(0, `stack-${i}`, 'update', 'tester', { deployedGenerationId: null });
     const token = await prepareService([{ id: 'p1', name: 'web-app-1', service: 'app' }]);
     svc().attachExpectedImage(token, 'sha256:app');
     const result = svc().beginPrepared({ prepareToken: token, actor: 'tester' });

@@ -740,7 +740,7 @@ describe('ComposeService - deployStack', () => {
     const promise = ComposeService.getInstance(1).deployStack('my-stack');
     await vi.advanceTimersByTimeAsync(3100);
 
-    await expect(promise).resolves.toEqual({ recoveryId: null });
+    await expect(promise).resolves.toEqual({ recoveryId: null, deployedGenerationId: null });
     expect(mockGetLegacyOrphanContainersByStack).toHaveBeenCalledWith('my-stack');
   });
 
@@ -844,7 +844,7 @@ describe('ComposeService - deployStack', () => {
     await vi.advanceTimersByTimeAsync(3100);
     const result = await promise;
 
-    expect(result).toEqual({ recoveryId: 'recovery-1' });
+    expect(result).toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null });
     expect(mockCaptureCandidate).toHaveBeenCalledWith(expect.objectContaining({
       stackName: 'my-stack',
       operationKind: 'deployment',
