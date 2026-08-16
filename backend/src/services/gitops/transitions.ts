@@ -722,6 +722,273 @@ export class GitOpsTransitions {
   }
 
   /**
+   * A restore is about to touch the filesystem.
+   *
+   * The recovery reference and the generation it intends to restore are made
+   * durable before anything moves, so a crash mid-restore leaves a target that
+   * says what it was doing rather than one that looks merely broken. Success
+   * pointers are untouched here: nothing has been restored yet.
+   */
+  recoveryStarted(args: {
+    applicationId: string;
+    nodeId: number;
+    recoveryRef: string;
+    recoveryGenerationId: string | null;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'recovery_started',
+      args.recoveryGenerationId,
+      (target) => {
+        if (target.target_status !== 'active') {
+          throw new GitOpsTransitionError('cannot recover a tombstoned target');
+        }
+        const before = { recoveryPhase: target.recovery_phase };
+        target.recovery_phase = 'restoring';
+        target.recovery_ref = args.recoveryRef;
+        target.recovery_generation_id = args.recoveryGenerationId;
+        // The application carries the same phase so the source facet reports a
+        // recovery in flight instead of whatever the source last did.
+        this.withApplication(args.applicationId, args.envelope, (app) => {
+          app.recovery_phase = 'restoring';
+          app.recovery_ref = args.recoveryRef;
+        });
+        target.active_operation_id = args.envelope.operationId;
+        target.active_operation_stage = 'recovery_started';
+        target.active_operation_at = args.envelope.at;
+        target.active_generation_id = args.recoveryGenerationId;
+        return { before, after: { recoveryPhase: 'restoring', recoveryRef: args.recoveryRef } };
+      },
+    );
+  }
+
+  /**
+   * A restore finished and the workload is back.
+   *
+   * `proven` is the whole question. It means the recovery row named a
+   * generation, that generation still exists and belongs to this application,
+   * and the restored files match it. Only then do pointers move, and they move
+   * to the restored generation rather than to whatever the application has
+   * since accepted: the target is running the old thing again, and saying
+   * otherwise would make every later comparison wrong.
+   *
+   * An unproven restore is still a real operational recovery. It is recorded as
+   * one and moves nothing, because there is no evidence to move pointers to.
+   */
+  recoverySucceeded(args: {
+    applicationId: string;
+    nodeId: number;
+    recoveryRef: string;
+    recoveryGenerationId: string | null;
+    proven: boolean;
+    gitopsBinding: 'bound' | 'unbound' | 'not_applicable' | 'service_only';
+    capturedArtifactSetId: string | null;
+    capturedSourceAcceptanceRef: string | null;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'recovery_succeeded',
+      args.recoveryGenerationId,
+      (target) => {
+        const before = {
+          desiredGenerationId: target.desired_generation_id,
+          deployedGenerationId: target.deployed_generation_id,
+          healthyGenerationId: target.healthy_generation_id,
+        };
+        this.clearTargetActive(target);
+        target.recovery_phase = 'complete';
+        if (target.failure_stage === 'recovery') {
+          target.failure_stage = null;
+          target.failure_class = null;
+          target.failure_at = null;
+        }
+        this.withApplication(args.applicationId, args.envelope, (app) => {
+          app.recovery_phase = 'complete';
+          this.clearAppFailure(app, ['recovery']);
+        });
+
+        const generationId = args.recoveryGenerationId;
+        const generation = generationId ? this.store().getGeneration(generationId) : undefined;
+        const provable = args.proven
+          && !!generationId
+          && !!generation
+          && generation.application_id === args.applicationId;
+        if (!provable) {
+          return { before, after: { ...before, proven: false } };
+        }
+
+        const restored = generationId as string;
+        target.desired_generation_id = restored;
+        target.applied_generation_id = restored;
+        if (args.gitopsBinding === 'bound') target.deployed_generation_id = restored;
+        // A restored workload has not been observed healthy yet, whatever the
+        // previous generation proved.
+        target.healthy_generation_id = null;
+
+        this.restoreArtifactPointers(target, restored, args.capturedArtifactSetId);
+        this.restoreLastKnownGood(target, args.applicationId, args.envelope.at);
+        this.restoreSourceAcceptance(target, args.applicationId, restored, args.capturedSourceAcceptanceRef);
+
+        return {
+          before,
+          after: {
+            desiredGenerationId: restored,
+            deployedGenerationId: target.deployed_generation_id,
+            healthyGenerationId: null,
+            proven: true,
+          },
+        };
+      },
+      'recovered',
+    );
+  }
+
+  /** A restore failed. Success pointers stay exactly where they were. */
+  recoveryFailed(args: {
+    applicationId: string;
+    nodeId: number;
+    recoveryRef: string;
+    failureClass: 'pre_mutation' | 'post_mutation';
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'recovery_failed',
+      null,
+      (target) => {
+        const before = { recoveryPhase: target.recovery_phase };
+        this.clearTargetActive(target);
+        target.recovery_phase = 'failed';
+        target.recovery_ref = args.recoveryRef;
+        target.failure_stage = 'recovery';
+        target.failure_class = args.failureClass;
+        target.failure_at = args.envelope.at;
+        this.withApplication(args.applicationId, args.envelope, (app) => {
+          app.recovery_phase = 'failed';
+          app.recovery_ref = args.recoveryRef;
+          app.failure_stage = 'recovery';
+          app.failure_class = args.failureClass;
+          app.failure_at = args.envelope.at;
+        });
+        return { before, after: { recoveryPhase: 'failed', failureClass: args.failureClass } };
+      },
+      'failed',
+    );
+  }
+
+  /**
+   * Apply a change to the owning application inside the current transaction.
+   *
+   * Recovery state lives on both rows: the target says which node is being
+   * restored, the application says the stack is in recovery at all. Writing
+   * only one leaves the projection contradicting itself.
+   */
+  private withApplication(
+    applicationId: string,
+    envelope: EventEnvelope,
+    mutate: (app: GitOpsApplicationRow) => void,
+  ): void {
+    const app = this.requireApp(applicationId);
+    mutate(app);
+    app.updated_at = envelope.at;
+    this.writeApplication(app);
+  }
+
+  /**
+   * Rebind the artifact expectation to the restored generation.
+   *
+   * The expectation comes from what the recovery point captured, never from
+   * what the application expects now: those describe different generations
+   * after a restore. Latest becomes the newest evidence for the restored
+   * generation, which is a statement about what has been seen, not an
+   * acceptance of it.
+   */
+  private restoreArtifactPointers(
+    target: GitOpsTargetCurrentRow,
+    generationId: string,
+    capturedArtifactSetId: string | null,
+  ): void {
+    const captured = capturedArtifactSetId ? this.store().getArtifactSet(capturedArtifactSetId) : undefined;
+    target.expected_artifact_set_id = captured && captured.generation_id === generationId
+      ? captured.id
+      : null;
+
+    const newest = this.raw().prepare(
+      `SELECT id FROM gitops_artifact_sets
+       WHERE generation_id = ?
+       ORDER BY evidence_version DESC LIMIT 1`,
+    ).get(generationId) as { id: string } | undefined;
+    target.latest_artifact_set_id = newest?.id ?? target.expected_artifact_set_id;
+  }
+
+  /**
+   * Decide what survives of the last-known-good after a restore.
+   *
+   * A last-known-good that still exists and still belongs to this application
+   * is kept: restoring an older generation does not invalidate the knowledge
+   * that some generation once passed. Only when that generation is gone, or
+   * turns out to belong elsewhere, is the pointer cleared, and then the reason
+   * is recorded so the projection can say "unavailable" rather than "none".
+   */
+  private restoreLastKnownGood(
+    target: GitOpsTargetCurrentRow,
+    applicationId: string,
+    at: number,
+  ): void {
+    if (!target.lkg_generation_id) return;
+    const lkg = this.store().getGeneration(target.lkg_generation_id);
+    const reason = !lkg
+      ? 'generation_missing'
+      : lkg.application_id !== applicationId ? 'recovery_unretainable' : null;
+    if (reason) {
+      target.lkg_generation_id = null;
+      target.lkg_artifact_set_id = null;
+      target.lkg_unavailable_at = at;
+      target.lkg_unavailable_reason = reason;
+      return;
+    }
+    // The generation stands. Its captured artifact only stands with it.
+    if (!target.lkg_artifact_set_id) return;
+    const artifact = this.store().getArtifactSet(target.lkg_artifact_set_id);
+    if (!artifact || artifact.generation_id !== target.lkg_generation_id) {
+      target.lkg_artifact_set_id = null;
+    }
+  }
+
+  /**
+   * Restore the acceptance that authorized the generation now running.
+   *
+   * Only a captured reference that still proves this exact generation is kept.
+   * The application's current reference is never borrowed: it authorizes a
+   * newer generation, and pointing it at this one would fabricate approval.
+   */
+  private restoreSourceAcceptance(
+    target: GitOpsTargetCurrentRow,
+    applicationId: string,
+    generationId: string,
+    capturedRef: string | null,
+  ): void {
+    if (!capturedRef) {
+      target.source_acceptance_ref = null;
+      return;
+    }
+    const resolved = this.store().resolveApprovalRef(capturedRef, {
+      kind: 'source_acceptance',
+      applicationId,
+      generationId,
+    });
+    target.source_acceptance_ref = resolved ? capturedRef : null;
+  }
+
+  /**
    * Retire every live target on a node that is going away.
    *
    * Must run before the node's rows are deleted, so the tombstones and their
