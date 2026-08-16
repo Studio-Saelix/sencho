@@ -151,6 +151,8 @@ export function buildGenerationRow(args: {
   trigger: string;
   actor: string | null;
   at: number;
+  /** A blocked change plan is recorded, but such a generation can never apply. */
+  planBlocked?: boolean;
 }): GitOpsGenerationRow {
   return {
     id: args.id,
@@ -165,7 +167,7 @@ export function buildGenerationRow(args: {
     expected_invocation_json: encodeGitOpsJson(args.expectedInvocation),
     materialization_fingerprint: args.identity.fingerprint,
     validation_ok: 1,
-    plan_blocked: 0,
+    plan_blocked: args.planBlocked ? 1 : 0,
     change_plan_fingerprint: args.changePlanFingerprint,
     operation_id: args.operationId,
     trigger: args.trigger,

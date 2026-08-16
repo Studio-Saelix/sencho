@@ -38,6 +38,7 @@ import {
     newGitOpsId,
     stackManagedRoot,
 } from './gitops/directApplication';
+import type { GitOpsApplicationRow } from './gitops/types';
 import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readStagingMarker, writeStagingMarker } from './gitops/createStagingMarker';
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops/createCleanup';
 import type { GitHttpRequest, GitHttpResponse, HttpClient } from 'isomorphic-git/http/node';
@@ -945,7 +946,24 @@ export class GitSourceService {
                 await rollbackAndThrow('Managed project data disappeared during detach');
             }
             try {
-                DatabaseService.getInstance().deleteGitSource(stackName);
+                // The source row and the GitOps tombstones commit together, so
+                // a detached stack can never leave a live application pointing
+                // at a source that no longer exists. Configured identity and
+                // SHA pointers survive on the tombstone as frozen facts, and a
+                // later reattach mints a new application rather than reviving
+                // this one.
+                const gitopsApp = this.gitopsApplicationFor(stackName);
+                DatabaseService.getInstance().getDb().transaction(() => {
+                    DatabaseService.getInstance().deleteGitSource(stackName);
+                    if (!gitopsApp) return;
+                    const tx = GitOpsTransitions.getInstance();
+                    const envelope = this.gitopsEnvelope(crypto.randomUUID(), 'system:git-source', 'detach');
+                    for (const target of GitOpsStore.getInstance().listTargets(gitopsApp.id)) {
+                        if (target.target_status !== 'active') continue;
+                        tx.targetTombstoned(gitopsApp.id, target.node_id, envelope);
+                    }
+                    tx.applicationTombstoned(gitopsApp.id, 'detached', envelope);
+                })();
             } catch (e) {
                 await rollbackAndThrow('Could not commit the Git source removal', e);
             }
@@ -1789,10 +1807,54 @@ export class GitSourceService {
      * reads last_debounce_at while it is still unset on every request, slips
      * past the gate, and clones once per request.
      */
+    /**
+     * The GitOps application tracking this stack, or null when there is none.
+     *
+     * Stacks that predate the revision-state model have no application until
+     * migration runs, so every producer is a no-op for them rather than
+     * inventing an application from configuration alone.
+     */
+    private gitopsApplicationFor(stackName: string): GitOpsApplicationRow | null {
+        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        return app && app.lifecycle_status === 'active' ? app : null;
+    }
+
+    private gitopsEnvelope(operationId: string, actor: string, trigger: string) {
+        return { operationId, actor, trigger, at: Date.now() };
+    }
+
+    /**
+     * Record a GitOps transition without letting it break the operation it
+     * describes.
+     *
+     * The store is the record of what happened, not the mechanism that makes it
+     * happen, so a rejected transition must not fail a fetch or an apply that
+     * has already touched the filesystem. The rejection is logged loudly
+     * because it means the recorded state has drifted from reality.
+     */
+    private recordGitOps(stackName: string, what: string, write: () => void): void {
+        try {
+            write();
+        } catch (error) {
+            console.error(
+                `[GitOps] Could not record ${what} for ${sanitizeForLog(stackName)}:`,
+                error instanceof Error ? error.message : String(error),
+            );
+        }
+    }
+
     private async pullLocked(stackName: string, actor: string): Promise<PullResult> {
         const db = DatabaseService.getInstance();
         const src = db.getGitSource(stackName);
         if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
+        const gitopsApp = this.gitopsApplicationFor(stackName);
+        const gitopsOperationId = crypto.randomUUID();
+        const gitopsEnv = this.gitopsEnvelope(gitopsOperationId, actor, 'pull');
+        if (gitopsApp) {
+            this.recordGitOps(stackName, 'fetch start', () => {
+                GitOpsTransitions.getInstance().fetchStarted(gitopsApp.id, gitopsEnv);
+            });
+        }
 
         const diag = isDebugEnabled();
         if (diag) {
@@ -1804,16 +1866,26 @@ export class GitSourceService {
         // Object holder: property access is not narrowed by control-flow
         // analysis, so the closure assignment below stays visible.
         const materialization: { value: MaterializationResult | null } = { value: null };
-        const fetched = await this.fetchFromGit({
-            repoUrl: src.repo_url,
-            branch: src.branch,
-            composePaths: src.compose_paths,
-            envPath: src.sync_env ? src.env_path : null,
-            token,
-            onClone: async (cloneDir, commitSha, envContent) => {
-                materialization.value = await this.buildMaterialization(stackName, cloneDir, commitSha, src, envContent);
-            },
-        });
+        let fetched: FetchResult;
+        try {
+            fetched = await this.fetchFromGit({
+                repoUrl: src.repo_url,
+                branch: src.branch,
+                composePaths: src.compose_paths,
+                envPath: src.sync_env ? src.env_path : null,
+                token,
+                onClone: async (cloneDir, commitSha, envContent) => {
+                    materialization.value = await this.buildMaterialization(stackName, cloneDir, commitSha, src, envContent);
+                },
+            });
+        } catch (e) {
+            if (gitopsApp) {
+                this.recordGitOps(stackName, 'fetch failure', () => {
+                    GitOpsTransitions.getInstance().fetchFailed(gitopsApp.id, gitopsEnv);
+                });
+            }
+            throw e;
+        }
 
         const validation = materialization.value
             ? materialization.value.validation
@@ -1844,6 +1916,48 @@ export class GitSourceService {
                 inventory: materialization.value.inventory,
                 envContent: fetched.envContent,
                 prior,
+            });
+        }
+
+        // Record what this fetch resolved before the pending blob is written,
+        // so the durable pointers and the operational pending store agree.
+        if (gitopsApp) {
+            this.recordGitOps(stackName, 'fetch outcome', () => {
+                const tx = GitOpsTransitions.getInstance();
+                if (!validation.ok) {
+                    tx.fetchedInvalid(gitopsApp.id, fetched.commitSha, gitopsEnv);
+                    return;
+                }
+                tx.fetched(gitopsApp.id, fetched.commitSha, gitopsEnv);
+                if (!materialization.value) return;
+                const generationId = newGitOpsId();
+                const nextManifestVersion = (prior?.manifestVersion ?? 0) + 1;
+                GitOpsStore.getInstance().insertGeneration(buildGenerationRow({
+                    id: generationId,
+                    applicationId: gitopsApp.id,
+                    commitSha: fetched.commitSha,
+                    identity: directSourceIdentity({
+                        repoUrl: src.repo_url,
+                        branch: src.branch,
+                        composePaths: src.compose_paths,
+                        contextDir: src.context_dir,
+                        syncEnv: src.sync_env,
+                        envPath: src.env_path,
+                    }),
+                    configuredRef: src.branch,
+                    candidateRelPath: materialization.value.candidateRelPath,
+                    appliedRelPath: appliedRelPathFor(fetched.commitSha, nextManifestVersion),
+                    manifestVersion: nextManifestVersion,
+                    expectedInvocation: prior?.project.invocation ?? null,
+                    changePlanFingerprint: plan?.fingerprint ?? null,
+                    operationId: gitopsOperationId,
+                    trigger: gitopsEnv.trigger,
+                    actor,
+                    at: gitopsEnv.at,
+                    planBlocked: plan?.blocked === true,
+                }));
+                if (plan?.blocked) tx.sourceConflictBlocker(gitopsApp.id, generationId, gitopsEnv);
+                else tx.candidateReady(gitopsApp.id, generationId, false, gitopsEnv);
             });
         }
 
@@ -1959,10 +2073,47 @@ export class GitSourceService {
     }
 
     /** Body of apply(); assumes the caller already holds Git mutex + shared stack lock. */
+    /**
+     * Apply a pending pull, recording the attempt as a GitOps operation.
+     *
+     * The wrapper exists so a throw anywhere in the body still closes the
+     * operation. An apply that started and never terminated would leave the
+     * source projecting `applying` until the next restart reclassified it as an
+     * interruption, which reads as "still working" when nothing is.
+     */
     private async applyLocked(
         stackName: string,
         commitSha: string,
         opts: GitApplyOpts,
+    ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
+        const started: { app: GitOpsApplicationRow | null; env: ReturnType<GitSourceService['gitopsEnvelope']> | null; settled: boolean } = {
+            app: null,
+            env: null,
+            settled: false,
+        };
+        try {
+            return await this.applyLockedBody(stackName, commitSha, opts, started);
+        } catch (e) {
+            if (started.app && started.env && !started.settled) {
+                const app = started.app;
+                const env = started.env;
+                this.recordGitOps(stackName, 'apply failure', () => {
+                    GitOpsTransitions.getInstance().applyFailed(
+                        app.id,
+                        e instanceof GitSourceError ? e.code : 'apply',
+                        env,
+                    );
+                });
+            }
+            throw e;
+        }
+    }
+
+    private async applyLockedBody(
+        stackName: string,
+        commitSha: string,
+        opts: GitApplyOpts,
+        started: { app: GitOpsApplicationRow | null; env: ReturnType<GitSourceService['gitopsEnvelope']> | null; settled: boolean },
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
         const diag = isDebugEnabled();
         const db = DatabaseService.getInstance();
@@ -2005,6 +2156,20 @@ export class GitSourceService {
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const actor = opts.actor ?? 'system:git-source';
         let recoveryId: string | undefined;
+
+        // The apply is bound to the candidate the pull recorded. Without one
+        // there is nothing to accept, so the acceptance below is skipped rather
+        // than inventing a generation from the pending blob.
+        const gitopsApp = this.gitopsApplicationFor(stackName);
+        const gitopsGenerationId = gitopsApp?.candidate_generation_id ?? null;
+        const gitopsEnv = this.gitopsEnvelope(pending.operationId, actor, 'apply');
+        if (gitopsApp && gitopsGenerationId) {
+            this.recordGitOps(stackName, 'apply start', () => {
+                GitOpsTransitions.getInstance().applyStarted(gitopsApp.id, gitopsGenerationId, gitopsEnv);
+                started.app = gitopsApp;
+                started.env = gitopsEnv;
+            });
+        }
 
         let appliedSpec: GitSourceAppliedSpec | null;
         if (pending.candidateRelPath !== null && pending.inventory !== null) {
@@ -2266,6 +2431,22 @@ export class GitSourceService {
         const hash = this.hashContent(pending.files, envContent);
         db.markGitSourceApplied(stackName, commitSha, hash);
         db.setGitSourceAppliedSpec(stackName, appliedSpec);
+
+        // The files are on disk and the source row now points at this commit,
+        // so this is where the generation becomes the accepted one.
+        if (gitopsApp && gitopsGenerationId) {
+            this.recordGitOps(stackName, 'acceptance', () => {
+                GitOpsTransitions.getInstance().applied({
+                    applicationId: gitopsApp.id,
+                    generationId: gitopsGenerationId,
+                    artifactSetId: newGitOpsId(),
+                    sourceAcceptanceId: newGitOpsId(),
+                    authority: actor === 'system:webhook' ? 'configured_policy' : 'operator',
+                    envelope: gitopsEnv,
+                });
+                started.settled = true;
+            });
+        }
 
         const shouldDeploy = opts.deploy ?? src.auto_deploy_on_apply;
         if (diag) console.log('[GitSource:diag] apply wrote stack=%s sha=%s deploy=%s', sanitizeForLog(stackName), sanitizeForLog(commitSha.slice(0, 7)), sanitizeForLog(shouldDeploy));

@@ -129,6 +129,14 @@ vi.mock('../services/DatabaseService', () => ({
       setGitSourceLastPlan: mockSetGitSourceLastPlan,
       addNotificationHistory: mockAddNotificationHistory,
       getStackProjectEnvFiles: vi.fn().mockReturnValue([]),
+      // The apply path now asks whether this stack has a GitOps application.
+      // These fixtures predate the revision-state model, so the lookup finds
+      // nothing and every GitOps producer stays a no-op, which is exactly the
+      // behavior an install with pre-existing Git stacks gets.
+      getDb: () => ({
+        prepare: () => ({ get: () => undefined, all: () => [], run: () => ({ changes: 0 }) }),
+        transaction: (fn: () => unknown) => () => fn(),
+      }),
     }),
   },
 }));
