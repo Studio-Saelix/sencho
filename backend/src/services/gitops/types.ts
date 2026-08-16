@@ -87,6 +87,48 @@ export type GitOpsApplicationRow = {
   updated_at: number;
 };
 
+/**
+ * How far a create-from-Git operation got before it stopped.
+ *
+ * The phase is what startup uses to decide between finishing the create and
+ * tearing it down, so it is advanced only after the durable write it names has
+ * actually committed.
+ */
+export type GitOpsCreatePhase =
+  | 'pre_stack'
+  | 'stack_created'
+  | 'promoting'
+  | 'manifest_committed'
+  | 'pointers_committed';
+
+export type GitOpsCreateCheckpointRow = {
+  application_id: string;
+  stack_name: string;
+  phase: GitOpsCreatePhase;
+  generation_id: string | null;
+  operation_id: string;
+  repo_url: string;
+  branch: string;
+  compose_path: string;
+  compose_paths_json: string;
+  context_dir: string | null;
+  sync_env: number;
+  env_path: string | null;
+  auth_type: string;
+  encrypted_token: string | null;
+  auto_apply_on_webhook: number;
+  auto_deploy_on_apply: number;
+  commit_sha: string | null;
+  applied_spec_json: string | null;
+  /**
+   * 1 only when this operation observed the managed root as absent and then
+   * created it. Deleting the whole root during cleanup requires that proof.
+   */
+  created_managed_root: number;
+  created_at: number;
+  updated_at: number;
+};
+
 export type GitOpsGenerationRow = {
   id: string;
   application_id: string;

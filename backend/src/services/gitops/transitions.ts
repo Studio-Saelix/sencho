@@ -7,6 +7,7 @@ import type {
   GitOpsApplicationRow,
   GitOpsApprovalAuthority,
   GitOpsArtifactSetRow,
+  GitOpsCreateCheckpointRow,
   GitOpsGenerationRow,
   GitOpsTargetCurrentRow,
 } from './types';
@@ -222,6 +223,142 @@ export class GitOpsTransitions {
       artifactSetId: args.artifactSetId,
       sourceAcceptanceRef: args.sourceAcceptanceId,
     });
+  }
+
+  /**
+   * The single transaction that makes a create-from-Git durable.
+   *
+   * Nothing here runs until the fetch, the candidate build, and the change-plan
+   * classification have all succeeded, so a create that fails early leaves no
+   * GitOps rows at all. Once this commits, the crash matrix can finish the
+   * create from the checkpoint instead of guessing what the process intended.
+   *
+   * History order is fixed: activation, then the fetch that resolved the SHA,
+   * then the candidate that fetch produced. Source acceptance is deliberately
+   * not written here; it belongs to `applied`, which is the success boundary.
+   */
+  activateCreateFromGit(args: {
+    application: GitOpsApplicationRow;
+    nodeId: number;
+    commitSha: string;
+    generation: GitOpsGenerationRow;
+    checkpoint: GitOpsCreateCheckpointRow;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.raw().transaction(() => {
+      const stackName = args.application.stack_name ?? '';
+      if (this.store().getLiveDirectApplication(stackName)) {
+        throw new GitOpsTransitionError('live direct application already exists');
+      }
+      if (args.application.lifecycle_status !== 'creating') {
+        throw new GitOpsTransitionError('create activation requires a creating application');
+      }
+      if (args.generation.application_id !== args.application.id) {
+        throw new GitOpsTransitionError('generation does not belong to the application');
+      }
+      if (args.generation.materialization_fingerprint !== args.application.materialization_fingerprint) {
+        throw new GitOpsTransitionError('generation fingerprint does not match the application');
+      }
+      if (args.generation.validation_ok !== 1 || args.generation.plan_blocked !== 0) {
+        throw new GitOpsTransitionError('create cannot persist an invalid or blocked candidate');
+      }
+
+      const app = { ...args.application };
+      this.store().insertApplication(app);
+      const target = emptyTargetRow(app.id, args.nodeId, args.envelope.at);
+      this.store().upsertTarget(target);
+      const historyIds: string[] = [];
+      const pushHistory = (id: string | null): void => {
+        if (id) historyIds.push(id);
+      };
+
+      pushHistory(this.history(app, args.envelope, {
+        stage: 'application_activated',
+        outcome: 'committed',
+        before: { lifecycleStatus: null },
+        after: { lifecycleStatus: 'creating', targetMode: app.target_mode },
+      }));
+
+      app.desired_commit_sha = args.commitSha;
+      app.fetched_commit_sha = args.commitSha;
+      app.retry_count = 0;
+      pushHistory(this.history(app, args.envelope, {
+        stage: 'fetched',
+        outcome: 'committed',
+        before: { desiredCommitSha: null },
+        after: { desiredCommitSha: args.commitSha },
+      }));
+
+      this.store().insertGeneration(args.generation);
+      this.store().insertCreateCheckpoint({ ...args.checkpoint, generation_id: args.generation.id });
+
+      app.candidate_generation_id = args.generation.id;
+      app.candidate_plan_blocked = 0;
+      app.review_required = 0;
+      app.latest_operation_id = args.envelope.operationId;
+      app.updated_at = args.envelope.at;
+      this.writeApplication(app);
+      target.candidate_generation_id = args.generation.id;
+      target.updated_at = args.envelope.at;
+      this.store().upsertTarget(target);
+      pushHistory(this.history(app, args.envelope, {
+        stage: 'candidate_ready',
+        outcome: 'committed',
+        generationId: args.generation.id,
+        before: { candidateGenerationId: null },
+        after: { candidateGenerationId: args.generation.id, reviewRequired: false },
+      }));
+
+      return { historyIds, replayed: historyIds.length === 0 };
+    })();
+  }
+
+  /**
+   * Tear down a create that never reached `applied`.
+   *
+   * Callers must have already removed this operation's files. Filesystem work
+   * cannot join a SQLite transaction, so ordering it first is what keeps the
+   * two consistent: if cleanup fails, the caller leaves the checkpoint in place
+   * and never calls this, and the next boot retries from the crash matrix.
+   */
+  createFailed(applicationId: string, failureClass: string, envelope: EventEnvelope): TransitionResult {
+    return this.raw().transaction(() => {
+      const app = this.requireApp(applicationId);
+      if (app.lifecycle_status !== 'creating') {
+        throw new GitOpsTransitionError('create_failed requires a creating application');
+      }
+      app.failure_stage = 'create';
+      app.failure_class = failureClass;
+      app.failure_at = envelope.at;
+      app.lifecycle_status = 'deleted';
+      this.clearActive(app);
+      app.latest_operation_id = envelope.operationId;
+      app.updated_at = envelope.at;
+      this.writeApplication(app);
+
+      for (const target of this.store().listTargets(app.id)) {
+        target.target_status = 'tombstoned';
+        this.clearTargetActive(target);
+        target.failure_stage = null;
+        target.failure_class = null;
+        target.failure_at = null;
+        target.lkg_generation_id = null;
+        target.lkg_artifact_set_id = null;
+        target.lkg_unavailable_at = null;
+        target.lkg_unavailable_reason = null;
+        target.updated_at = envelope.at;
+        this.store().upsertTarget(target);
+      }
+
+      this.store().deleteCreateCheckpoint(app.id);
+      const id = this.history(app, envelope, {
+        stage: 'create_failed',
+        outcome: 'failed',
+        before: { lifecycleStatus: 'creating' },
+        after: { lifecycleStatus: 'deleted', failureClass },
+      });
+      return { historyIds: id ? [id] : [], replayed: !id };
+    })();
   }
 
   recordArtifactEvidence(args: {

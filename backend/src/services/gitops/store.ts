@@ -13,6 +13,8 @@ import type {
   GitOpsApplicationRow,
   GitOpsApprovalRow,
   GitOpsArtifactSetRow,
+  GitOpsCreateCheckpointRow,
+  GitOpsCreatePhase,
   GitOpsGenerationRow,
   GitOpsIntentRevisionRow,
   GitOpsRolloutCandidateRow,
@@ -122,6 +124,70 @@ export class GitOpsStore {
        ORDER BY created_at DESC, id DESC LIMIT 1`,
     ).get(applicationId, generationId) as { id: string } | undefined;
     return row?.id ?? null;
+  }
+
+  insertCreateCheckpoint(row: GitOpsCreateCheckpointRow): void {
+    decodeGitOpsJson(row.compose_paths_json);
+    this.db().prepare(
+      `INSERT INTO gitops_create_checkpoints (
+        application_id, stack_name, phase, generation_id, operation_id, repo_url, branch,
+        compose_path, compose_paths_json, context_dir, sync_env, env_path, auth_type,
+        encrypted_token, auto_apply_on_webhook, auto_deploy_on_apply, commit_sha,
+        applied_spec_json, created_managed_root, created_at, updated_at
+      ) VALUES (${Array(21).fill('?').join(', ')})`,
+    ).run(
+      row.application_id, row.stack_name, row.phase, row.generation_id, row.operation_id,
+      row.repo_url, row.branch, row.compose_path, row.compose_paths_json, row.context_dir,
+      row.sync_env, row.env_path, row.auth_type, row.encrypted_token, row.auto_apply_on_webhook,
+      row.auto_deploy_on_apply, row.commit_sha, row.applied_spec_json, row.created_managed_root,
+      row.created_at, row.updated_at,
+    );
+  }
+
+  getCreateCheckpoint(applicationId: string): GitOpsCreateCheckpointRow | undefined {
+    return this.db().prepare(
+      'SELECT * FROM gitops_create_checkpoints WHERE application_id = ?',
+    ).get(applicationId) as GitOpsCreateCheckpointRow | undefined;
+  }
+
+  listCreateCheckpoints(): GitOpsCreateCheckpointRow[] {
+    return this.db().prepare(
+      'SELECT * FROM gitops_create_checkpoints ORDER BY created_at ASC',
+    ).all() as GitOpsCreateCheckpointRow[];
+  }
+
+  /** Advance the phase, and optionally record facts the phase depends on. */
+  updateCreateCheckpoint(
+    applicationId: string,
+    patch: {
+      phase?: GitOpsCreatePhase;
+      generationId?: string | null;
+      commitSha?: string | null;
+      appliedSpecJson?: string | null;
+      createdManagedRoot?: number;
+    },
+    at: number,
+  ): void {
+    const current = this.getCreateCheckpoint(applicationId);
+    if (!current) throw new Error('create checkpoint not found');
+    this.db().prepare(
+      `UPDATE gitops_create_checkpoints SET
+        phase=?, generation_id=?, commit_sha=?, applied_spec_json=?,
+        created_managed_root=?, updated_at=?
+       WHERE application_id=?`,
+    ).run(
+      patch.phase ?? current.phase,
+      patch.generationId === undefined ? current.generation_id : patch.generationId,
+      patch.commitSha === undefined ? current.commit_sha : patch.commitSha,
+      patch.appliedSpecJson === undefined ? current.applied_spec_json : patch.appliedSpecJson,
+      patch.createdManagedRoot ?? current.created_managed_root,
+      at,
+      applicationId,
+    );
+  }
+
+  deleteCreateCheckpoint(applicationId: string): void {
+    this.db().prepare('DELETE FROM gitops_create_checkpoints WHERE application_id = ?').run(applicationId);
   }
 
   insertApproval(row: GitOpsApprovalRow): void {
