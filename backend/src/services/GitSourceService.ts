@@ -32,7 +32,7 @@ import { GitOpsStore } from './gitops/store';
 import { GitOpsTransitions } from './gitops/transitions';
 import {
     buildCreateCheckpointRow,
-    buildCreatingApplicationRow,
+    buildDirectApplicationRow,
     buildGenerationRow,
     directSourceIdentity,
     newGitOpsId,
@@ -771,31 +771,88 @@ export class GitSourceService {
             (existing.context_dir ?? null) !== input.contextDir
         );
 
-        db.upsertGitSource({
-            stack_name: input.stackName,
-            repo_url: input.repoUrl,
+        const gitopsConfig = {
+            repoUrl: input.repoUrl,
             branch: input.branch,
-            compose_path: input.composePaths[0],
-            compose_paths: input.composePaths,
-            context_dir: input.contextDir,
-            sync_env: input.syncEnv,
-            env_path: resolvedEnvPath,
-            auth_type: input.authType,
-            encrypted_token: encryptedToken,
-            auto_apply_on_webhook: input.autoApplyOnWebhook,
-            auto_deploy_on_apply: input.autoDeployOnApply,
-            last_applied_commit_sha: existing?.last_applied_commit_sha ?? null,
-            last_applied_content_hash: existing?.last_applied_content_hash ?? null,
-            pending_commit_sha: existing?.pending_commit_sha ?? null,
-            pending_compose_content: existing?.pending_compose_content ?? null,
-            pending_env_content: existing?.pending_env_content ?? null,
-            pending_fetched_at: existing?.pending_fetched_at ?? null,
-            last_debounce_at: existing?.last_debounce_at ?? null,
-        });
+            composePaths: input.composePaths,
+            contextDir: input.contextDir,
+            syncEnv: input.syncEnv,
+            envPath: resolvedEnvPath,
+        };
+        const gitopsIdentity = directSourceIdentity(gitopsConfig);
 
-        if (configChanged) {
-            db.clearGitSourcePending(input.stackName);
-        }
+        // The source row, the pending clear, and the GitOps transition commit
+        // together. Clearing pending without invalidating the candidate would
+        // leave the model offering an apply for files the operator can no
+        // longer produce.
+        db.getDb().transaction(() => {
+            db.upsertGitSource({
+                stack_name: input.stackName,
+                repo_url: input.repoUrl,
+                branch: input.branch,
+                compose_path: input.composePaths[0],
+                compose_paths: input.composePaths,
+                context_dir: input.contextDir,
+                sync_env: input.syncEnv,
+                env_path: resolvedEnvPath,
+                auth_type: input.authType,
+                encrypted_token: encryptedToken,
+                auto_apply_on_webhook: input.autoApplyOnWebhook,
+                auto_deploy_on_apply: input.autoDeployOnApply,
+                last_applied_commit_sha: existing?.last_applied_commit_sha ?? null,
+                last_applied_content_hash: existing?.last_applied_content_hash ?? null,
+                pending_commit_sha: existing?.pending_commit_sha ?? null,
+                pending_compose_content: existing?.pending_compose_content ?? null,
+                pending_env_content: existing?.pending_env_content ?? null,
+                pending_fetched_at: existing?.pending_fetched_at ?? null,
+                last_debounce_at: existing?.last_debounce_at ?? null,
+            });
+
+            if (configChanged) {
+                db.clearGitSourcePending(input.stackName);
+            }
+
+            const app = this.gitopsApplicationFor(input.stackName);
+            const envelope = this.gitopsEnvelope(crypto.randomUUID(), 'system:git-source', 'configure');
+            if (!app && !existing) {
+                // Linking a stack that already exists. Nothing is fetched or
+                // accepted yet, so the application starts live with no desired
+                // commit and the projection asks for a fetch.
+                GitOpsTransitions.getInstance().activateDirect({
+                    application: buildDirectApplicationRow({
+                        id: newGitOpsId(),
+                        stackName: input.stackName,
+                        config: gitopsConfig,
+                        identity: gitopsIdentity,
+                        lifecycleStatus: 'active',
+                        at: envelope.at,
+                    }),
+                    nodeId: NodeRegistry.getInstance().getDefaultNodeId(),
+                    envelope,
+                });
+                return;
+            }
+            // Credential-only and policy-only edits change nothing material, so
+            // they leave the candidate and every accepted pointer alone.
+            if (app && configChanged) {
+                GitOpsTransitions.getInstance().configChangedPendingCleared({
+                    applicationId: app.id,
+                    identity: {
+                        repoUrl: gitopsIdentity.repoUrl,
+                        repoIdentityJson: JSON.stringify(gitopsIdentity.identity),
+                        configuredRef: input.branch,
+                    },
+                    material: {
+                        composePathsJson: JSON.stringify([...input.composePaths]),
+                        contextDir: input.contextDir,
+                        syncEnv: input.syncEnv ? 1 : 0,
+                        envPath: resolvedEnvPath,
+                        fingerprint: gitopsIdentity.fingerprint,
+                    },
+                    envelope,
+                });
+            }
+        })();
 
         return this.get(input.stackName)!;
     }
@@ -2769,11 +2826,12 @@ export class GitSourceService {
                         envPath: input.envPath,
                     };
                     GitOpsTransitions.getInstance().activateCreateFromGit({
-                        application: buildCreatingApplicationRow({
+                        application: buildDirectApplicationRow({
                             id: applicationId,
                             stackName: input.stackName,
                             config: sourceConfig,
                             identity: gitopsIdentity,
+                            lifecycleStatus: 'creating',
                             at: envelope.at,
                         }),
                         nodeId: NodeRegistry.getInstance().getDefaultNodeId(),

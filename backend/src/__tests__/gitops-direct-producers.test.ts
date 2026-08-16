@@ -50,6 +50,7 @@ vi.mock('../services/StackUpdateRecoveryService', () => ({
 const REPO = 'https://github.com/example/project.git';
 const COMPOSE = 'services:\n  web:\n    image: nginx:1.27\n';
 const COMPOSE_V2 = 'services:\n  web:\n    image: nginx:1.28\n';
+const COMPOSE_PROD = 'services:\n  web:\n    restart: always\n';
 
 let tmpDir: string;
 let GitSourceService: typeof import('../services/GitSourceService').GitSourceService;
@@ -58,10 +59,13 @@ let GitOpsTransitions: typeof import('../services/gitops/transitions').GitOpsTra
 let projectApplication: typeof import('../services/gitops/derive').projectApplication;
 
 /** Make the next clone produce a project containing this compose content. */
-function stageRepo(content: string, sha: string): void {
+function stageRepo(content: string, sha: string, extraFiles: Record<string, string> = {}): void {
   mockGitClone.mockImplementation(async ({ dir }: { dir: string }) => {
     await fsPromises.mkdir(dir, { recursive: true });
     await fsPromises.writeFile(path.join(dir, 'compose.yaml'), content, 'utf8');
+    for (const [name, body] of Object.entries(extraFiles)) {
+      await fsPromises.writeFile(path.join(dir, name), body, 'utf8');
+    }
   });
   mockGitLog.mockResolvedValue([{ oid: sha }]);
 }
@@ -316,17 +320,16 @@ describe('Direct Git producers drive the revision state', () => {
     expect(store.getApplication(app.id)?.failure_stage).toBeNull();
   });
 
-  it('leaves a stack with no GitOps application untouched', async () => {
+  it('brings a newly linked stack into the model and invalidates its candidate on a material edit', async () => {
     const svc = GitSourceService.getInstance();
     const store = GitOpsStore.getInstance();
-    const stackName = 'producers-legacy';
+    const stackName = 'producers-link';
 
-    // A stack linked the way installs did before the revision-state model:
-    // a source row and files, but no application.
     const composeDir = process.env.COMPOSE_DIR!;
     await fsPromises.mkdir(path.join(composeDir, stackName), { recursive: true });
     await fsPromises.writeFile(path.join(composeDir, stackName, 'compose.yaml'), COMPOSE, 'utf8');
-    stageRepo(COMPOSE, 'eeeeeee5');
+
+    stageRepo(COMPOSE, '33333333');
     await svc.upsert({
       stackName,
       repoUrl: REPO,
@@ -339,6 +342,99 @@ describe('Direct Git producers drive the revision state', () => {
       token: null,
       autoApplyOnWebhook: false,
       autoDeployOnApply: false,
+    });
+
+    const app = store.getLiveDirectApplication(stackName);
+    expect(app).toBeTruthy();
+    if (!app) throw new Error('expected an application');
+    // Linked, not fetched: nothing is desired or accepted until a pull runs.
+    expect(app.lifecycle_status).toBe('active');
+    expect(app.desired_commit_sha).toBeNull();
+    expect(app.accepted_generation_id).toBeNull();
+    let projection = projectOf(app.id);
+    expect(projection.facets.source.status).toBe('never_reconciled');
+    expect(projection.availableActions).toContain('fetch');
+
+    // A pull produces a candidate against the current configuration.
+    stageRepo(COMPOSE_V2, '44444444');
+    await svc.pull(stackName, { actor: 'tester' });
+    const candidateId = store.getApplication(app.id)!.candidate_generation_id;
+    expect(candidateId).not.toBeNull();
+
+    // A credential-only edit changes nothing material, so the candidate stands.
+    stageRepo(COMPOSE_V2, '44444444');
+    await svc.upsert({
+      stackName,
+      repoUrl: REPO,
+      branch: 'main',
+      composePaths: ['compose.yaml'],
+      contextDir: null,
+      syncEnv: false,
+      envPath: null,
+      authType: 'none',
+      token: null,
+      autoApplyOnWebhook: true,
+      autoDeployOnApply: false,
+    });
+    expect(store.getApplication(app.id)?.candidate_generation_id).toBe(candidateId);
+
+    // Changing the compose file set does invalidate it: that candidate was
+    // built from a different set and can no longer be applied.
+    stageRepo(COMPOSE_V2, '44444444', { 'compose.prod.yaml': COMPOSE_PROD });
+    await svc.upsert({
+      stackName,
+      repoUrl: REPO,
+      branch: 'main',
+      composePaths: ['compose.yaml', 'compose.prod.yaml'],
+      contextDir: null,
+      syncEnv: false,
+      envPath: null,
+      authType: 'none',
+      token: null,
+      autoApplyOnWebhook: true,
+      autoDeployOnApply: false,
+    });
+    const afterEdit = store.getApplication(app.id)!;
+    expect(afterEdit.candidate_generation_id).toBeNull();
+    expect(afterEdit.desired_commit_sha).toBeNull();
+    expect(store.getTarget(app.id, 1)?.candidate_generation_id).toBeNull();
+    projection = projectOf(app.id);
+    expect(projection.availableActions).toContain('fetch');
+    expect(projection.availableActions).not.toContain('apply');
+  });
+
+  it('leaves a stack with no GitOps application untouched', async () => {
+    const svc = GitSourceService.getInstance();
+    const store = GitOpsStore.getInstance();
+    const stackName = 'producers-legacy';
+
+    // A Git stack exactly as an install carries it across an upgrade: the
+    // source row was written before this model existed, so there is no
+    // application and nothing has migrated it yet. Seeded directly, because
+    // linking through the service now creates one.
+    const composeDir = process.env.COMPOSE_DIR!;
+    await fsPromises.mkdir(path.join(composeDir, stackName), { recursive: true });
+    await fsPromises.writeFile(path.join(composeDir, stackName, 'compose.yaml'), COMPOSE, 'utf8');
+    (await import('../services/DatabaseService')).DatabaseService.getInstance().upsertGitSource({
+      stack_name: stackName,
+      repo_url: REPO,
+      branch: 'main',
+      compose_path: 'compose.yaml',
+      compose_paths: ['compose.yaml'],
+      context_dir: null,
+      sync_env: false,
+      env_path: null,
+      auth_type: 'none',
+      encrypted_token: null,
+      auto_apply_on_webhook: false,
+      auto_deploy_on_apply: false,
+      last_applied_commit_sha: 'eeeeeee5',
+      last_applied_content_hash: null,
+      pending_commit_sha: null,
+      pending_compose_content: null,
+      pending_env_content: null,
+      pending_fetched_at: null,
+      last_debounce_at: null,
     });
     expect(store.getLiveDirectApplication(stackName)).toBeUndefined();
 

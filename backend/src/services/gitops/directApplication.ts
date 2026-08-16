@@ -72,17 +72,26 @@ export function newGitOpsId(): string {
   return randomUUID();
 }
 
-export function buildCreatingApplicationRow(args: {
+/**
+ * Build a Direct application row.
+ *
+ * `creating` is for create-from-Git, where the stack does not exist yet and the
+ * checkpoint decides what happens if the process dies. `active` is for linking
+ * a stack that already exists: there is nothing to recover, so it is live from
+ * the moment the source row commits.
+ */
+export function buildDirectApplicationRow(args: {
   id: string;
   stackName: string;
   config: DirectSourceConfig;
   identity: DirectSourceIdentity;
+  lifecycleStatus: 'creating' | 'active';
   at: number;
 }): GitOpsApplicationRow {
   return {
     id: args.id,
     lifecycle_key: `direct:${args.stackName}`,
-    lifecycle_status: 'creating',
+    lifecycle_status: args.lifecycleStatus,
     target_mode: 'direct',
     stack_name: args.stackName,
     blueprint_id: null,
