@@ -1,0 +1,269 @@
+/**
+ * End-to-end coverage for the Direct Git producers.
+ *
+ * The transport is the only thing stubbed: `git.clone` writes a real project
+ * into the clone directory and `git.log` returns a commit. Everything after
+ * that runs for real, so fetch, candidate materialization, change-plan
+ * classification, the apply, and the detach all drive the GitOps state model
+ * the way they do in production.
+ *
+ * This exists because the producer wiring is the seam between the operational
+ * Git path and the revision state, and a mismatch there type-checks and passes
+ * transition-level tests.
+ */
+import fsPromises from 'fs/promises';
+import path from 'path';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+
+const { mockGitClone, mockGitLog } = vi.hoisted(() => ({
+  mockGitClone: vi.fn(),
+  mockGitLog: vi.fn(),
+}));
+
+vi.mock('isomorphic-git', () => {
+  const api = { clone: mockGitClone, log: mockGitLog };
+  return { default: api, clone: mockGitClone, log: mockGitLog };
+});
+vi.mock('isomorphic-git/http/node', () => ({ default: {} }));
+
+// Rollback capture talks to Docker, which is not available here. Stubbing it
+// keeps the apply on its success path so the GitOps wiring is what the test
+// actually exercises.
+vi.mock('../services/StackUpdateRecoveryService', () => ({
+  StackUpdateRecoveryService: {
+    getInstance: () => ({
+      captureCandidate: vi.fn(async () => ({ id: 'rec-producers-1' })),
+      abandon: vi.fn(async () => true),
+      markAcquired: vi.fn(() => true),
+      handoff: vi.fn(() => true),
+      markReconciling: vi.fn(() => true),
+      markImmediateVerified: vi.fn(() => true),
+      get: vi.fn(() => ({ id: 'rec-producers-1', is_current: 1 })),
+      linkGateOrRetain: vi.fn(),
+      compensateWithCandidate: vi.fn(async () => true),
+      start: vi.fn(),
+    }),
+  },
+}));
+
+const REPO = 'https://github.com/example/project.git';
+const COMPOSE = 'services:\n  web:\n    image: nginx:1.27\n';
+const COMPOSE_V2 = 'services:\n  web:\n    image: nginx:1.28\n';
+
+let tmpDir: string;
+let GitSourceService: typeof import('../services/GitSourceService').GitSourceService;
+let GitOpsStore: typeof import('../services/gitops/store').GitOpsStore;
+let GitOpsTransitions: typeof import('../services/gitops/transitions').GitOpsTransitions;
+let projectApplication: typeof import('../services/gitops/derive').projectApplication;
+
+/** Make the next clone produce a project containing this compose content. */
+function stageRepo(content: string, sha: string): void {
+  mockGitClone.mockImplementation(async ({ dir }: { dir: string }) => {
+    await fsPromises.mkdir(dir, { recursive: true });
+    await fsPromises.writeFile(path.join(dir, 'compose.yaml'), content, 'utf8');
+  });
+  mockGitLog.mockResolvedValue([{ oid: sha }]);
+}
+
+function projectOf(applicationId: string) {
+  const projection = projectApplication(applicationId, true);
+  if (projection.targetMode === 'not_applicable') throw new Error('expected an application');
+  return projection;
+}
+
+describe('Direct Git producers drive the revision state', () => {
+  beforeAll(async () => {
+    tmpDir = await setupTestDb();
+    ({ GitSourceService } = await import('../services/GitSourceService'));
+    ({ GitOpsStore } = await import('../services/gitops/store'));
+    ({ GitOpsTransitions } = await import('../services/gitops/transitions'));
+    ({ projectApplication } = await import('../services/gitops/derive'));
+    GitOpsStore.resetForTests();
+    GitOpsTransitions.resetForTests();
+  });
+
+  afterAll(() => {
+    cleanupTestDb(tmpDir);
+  });
+
+  beforeEach(() => {
+    mockGitClone.mockReset();
+    mockGitLog.mockReset();
+  });
+
+  it('creates, fetches, applies, and detaches a Git stack through the state model', async () => {
+    const svc = GitSourceService.getInstance();
+    const store = GitOpsStore.getInstance();
+    const stackName = 'producers-web';
+
+    // ── create ────────────────────────────────────────────────────────────
+    stageRepo(COMPOSE, 'aaaaaaa1');
+    await svc.createStackFromGit({
+      stackName,
+      repoUrl: REPO,
+      branch: 'main',
+      composePaths: ['compose.yaml'],
+      contextDir: null,
+      syncEnv: false,
+      envPath: null,
+      authType: 'none',
+      token: null,
+      autoApplyOnWebhook: false,
+      autoDeployOnApply: false,
+    });
+
+    const app = store.getLiveDirectApplication(stackName);
+    expect(app).toBeTruthy();
+    if (!app) throw new Error('expected an application');
+    expect(app.lifecycle_status).toBe('active');
+    expect(app.accepted_generation_id).not.toBeNull();
+    expect(app.desired_commit_sha).toBe('aaaaaaa1');
+    // The create records a secret-free identity, never the operational URL.
+    expect(app.configured_repo_url).toBe('https://github.com/example/project.git');
+    // The success boundary cleared its own checkpoint.
+    expect(store.getCreateCheckpoint(app.id)).toBeUndefined();
+
+    const afterCreate = projectOf(app.id);
+    expect(afterCreate.facets.source.status).toBe('application_generation_accepted');
+    expect(afterCreate.targets[0]?.runtime.status).toBe('applied_not_deployed');
+
+    // ── fetch a newer commit ──────────────────────────────────────────────
+    stageRepo(COMPOSE_V2, 'bbbbbbb2');
+    await svc.pull(stackName, { actor: 'tester' });
+
+    const afterPull = store.getApplication(app.id)!;
+    expect(afterPull.desired_commit_sha).toBe('bbbbbbb2');
+    expect(afterPull.fetched_commit_sha).toBe('bbbbbbb2');
+    // A fetch advances the resolved commit and offers a candidate, but the
+    // accepted generation does not move until the apply.
+    expect(afterPull.accepted_generation_id).toBe(app.accepted_generation_id);
+    expect(afterPull.candidate_generation_id).not.toBeNull();
+    expect(afterPull.candidate_generation_id).not.toBe(app.accepted_generation_id);
+
+    const candidateId = afterPull.candidate_generation_id!;
+    const candidate = store.getGeneration(candidateId)!;
+    expect(candidate.commit_sha).toBe('bbbbbbb2');
+    expect(candidate.application_id).toBe(app.id);
+    expect(candidate.materialization_fingerprint).toBe(afterPull.materialization_fingerprint);
+    expect(store.getTarget(app.id, 1)?.candidate_generation_id).toBe(candidateId);
+    expect(projectOf(app.id).availableActions).toContain('apply');
+
+    // ── apply ─────────────────────────────────────────────────────────────
+    await svc.apply(stackName, 'bbbbbbb2', { requirePlanFingerprint: false, deploy: false, actor: 'tester' });
+
+    const afterApply = store.getApplication(app.id)!;
+    expect(afterApply.accepted_generation_id).toBe(candidateId);
+    expect(afterApply.candidate_generation_id).toBeNull();
+    expect(afterApply.active_operation_stage).toBeNull();
+    expect(afterApply.source_acceptance_ref).not.toBeNull();
+
+    const target = store.getTarget(app.id, 1)!;
+    expect(target.desired_generation_id).toBe(candidateId);
+    expect(target.applied_generation_id).toBe(candidateId);
+    expect(target.candidate_generation_id).toBeNull();
+
+    // The acceptance is provable against the exact generation it authorized.
+    expect(store.resolveApprovalRef(afterApply.source_acceptance_ref!, {
+      kind: 'source_acceptance',
+      applicationId: app.id,
+      generationId: candidateId,
+    })).toBeTruthy();
+    expect(store.resolveApprovalRef(afterApply.source_acceptance_ref!, {
+      kind: 'source_acceptance',
+      applicationId: app.id,
+      generationId: app.accepted_generation_id!,
+    })).toBeNull();
+
+    // ── detach ────────────────────────────────────────────────────────────
+    await svc.detach(stackName);
+
+    expect(store.getLiveDirectApplication(stackName)).toBeUndefined();
+    const tombstoned = store.getApplication(app.id)!;
+    expect(tombstoned.lifecycle_status).toBe('detached');
+    // Configured identity and resolved commit survive as frozen facts.
+    expect(tombstoned.configured_repo_url).toBe('https://github.com/example/project.git');
+    expect(tombstoned.desired_commit_sha).toBe('bbbbbbb2');
+    expect(store.getTarget(app.id, 1)?.target_status).toBe('tombstoned');
+    expect(projectOf(app.id).facets.source.status).toBe('not_live');
+  });
+
+  it('records a failed fetch without moving any pointer', async () => {
+    const svc = GitSourceService.getInstance();
+    const store = GitOpsStore.getInstance();
+    const stackName = 'producers-fail';
+
+    stageRepo(COMPOSE, 'ccccccc3');
+    await svc.createStackFromGit({
+      stackName,
+      repoUrl: REPO,
+      branch: 'main',
+      composePaths: ['compose.yaml'],
+      contextDir: null,
+      syncEnv: false,
+      envPath: null,
+      authType: 'none',
+      token: null,
+      autoApplyOnWebhook: false,
+      autoDeployOnApply: false,
+    });
+    const app = store.getLiveDirectApplication(stackName)!;
+    const acceptedBefore = app.accepted_generation_id;
+
+    mockGitClone.mockRejectedValue(new Error('could not resolve host'));
+    await expect(svc.pull(stackName, { actor: 'tester' })).rejects.toThrow();
+
+    const afterFailure = store.getApplication(app.id)!;
+    expect(afterFailure.failure_stage).toBe('fetch');
+    expect(afterFailure.active_operation_stage).toBeNull();
+    expect(afterFailure.accepted_generation_id).toBe(acceptedBefore);
+    expect(afterFailure.candidate_generation_id).toBeNull();
+
+    const projection = projectOf(app.id);
+    expect(projection.facets.source.status).toBe('source_failed');
+    expect(projection.availableActions).toContain('fetch');
+
+    // A later successful fetch clears the failure.
+    stageRepo(COMPOSE_V2, 'ddddddd4');
+    await svc.pull(stackName, { actor: 'tester' });
+    expect(store.getApplication(app.id)?.failure_stage).toBeNull();
+  });
+
+  it('leaves a stack with no GitOps application untouched', async () => {
+    const svc = GitSourceService.getInstance();
+    const store = GitOpsStore.getInstance();
+    const stackName = 'producers-legacy';
+
+    // A stack linked the way installs did before the revision-state model:
+    // a source row and files, but no application.
+    const composeDir = process.env.COMPOSE_DIR!;
+    await fsPromises.mkdir(path.join(composeDir, stackName), { recursive: true });
+    await fsPromises.writeFile(path.join(composeDir, stackName, 'compose.yaml'), COMPOSE, 'utf8');
+    stageRepo(COMPOSE, 'eeeeeee5');
+    await svc.upsert({
+      stackName,
+      repoUrl: REPO,
+      branch: 'main',
+      composePaths: ['compose.yaml'],
+      contextDir: null,
+      syncEnv: false,
+      envPath: null,
+      authType: 'none',
+      token: null,
+      autoApplyOnWebhook: false,
+      autoDeployOnApply: false,
+    });
+    expect(store.getLiveDirectApplication(stackName)).toBeUndefined();
+
+    stageRepo(COMPOSE_V2, 'fffffff6');
+    await svc.pull(stackName, { actor: 'tester' });
+
+    // The pull succeeded operationally and wrote no GitOps rows.
+    expect(store.getLiveDirectApplication(stackName)).toBeUndefined();
+    const historyRows = (await import('../services/DatabaseService')).DatabaseService
+      .getInstance().getDb()
+      .prepare('SELECT COUNT(*) AS n FROM gitops_history WHERE stack_name = ?')
+      .get(stackName) as { n: number };
+    expect(historyRows.n).toBe(0);
+  });
+});
