@@ -602,7 +602,7 @@ async function runStackBulkOp(
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>
         console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
       );
-      const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null, { deployedGenerationId: null });
+      const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null, { deployedGenerationId: orchResult.kind === 'stack_compose_done' ? orchResult.deployedGenerationId : null });
       const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
       linkStackUpdateRecoveryGate(recoveryId, healthGateId);
       return { stackName, ok: true, healthGateId };
@@ -2409,7 +2409,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     // Health observation starts immediately after Compose; registry recheck is
     // isolated so a verification failure cannot turn Compose success into 500.
     ok = true;
-    const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null, { deployedGenerationId: null });
+    const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null, { deployedGenerationId: orchResult.kind === 'stack_compose_done' ? orchResult.deployedGenerationId : null });
     const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
     linkStackUpdateRecoveryGate(recoveryId, healthGateId);
 

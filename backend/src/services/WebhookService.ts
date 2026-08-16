@@ -189,7 +189,7 @@ export class WebhookService {
                                 { nodeId, stackName, target: { scope: 'stack' }, trigger: 'webhook', actor: 'system:webhook' },
                                 { atomic: atomic ?? false, terminalWs: null },
                             );
-                            const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:webhook', { deployedGenerationId: null });
+                            const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:webhook', { deployedGenerationId: orchResult.kind === 'stack_compose_done' ? orchResult.deployedGenerationId : null });
                             const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
                             if (recoveryId) {
                                 const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');

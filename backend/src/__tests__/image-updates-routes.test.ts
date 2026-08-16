@@ -761,7 +761,7 @@ describe('POST /api/auto-update/execute', () => {
       .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
     const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
       .mockResolvedValue({ hasUpdate: true, digestUpdate: true } as never);
-    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
     const gateSpy = vi.spyOn(PolicyEnforcement, 'enforcePolicyPreDeploy').mockResolvedValue({
       ok: false,
       bypassed: false,
@@ -808,7 +808,7 @@ describe('POST /api/auto-update/execute', () => {
       .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
     const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
       .mockResolvedValue({ hasUpdate: true, digestUpdate: true } as never);
-    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
     const recheckSpy = vi.spyOn(ImageUpdateService.getInstance(), 'recheckStack')
       .mockImplementation(async () => {
         callOrder.push('recheckStack');
@@ -848,7 +848,7 @@ describe('POST /api/auto-update/execute', () => {
       .mockResolvedValue([{ Id: 'c1', Image: 'nginx:1.2.3' }] as never);
     const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
       .mockResolvedValue({ hasUpdate: true, digestUpdate: false, tagUpdate: true } as never);
-    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
     const recheckSpy = vi.spyOn(ImageUpdateService.getInstance(), 'recheckStack');
     const clearSpy = vi.spyOn(DatabaseService.getInstance(), 'clearStackUpdateStatus');
     try {
@@ -883,7 +883,7 @@ describe('POST /api/auto-update/execute', () => {
     const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
       .mockResolvedValueOnce({ hasUpdate: true, digestUpdate: true, tagUpdate: false } as never)
       .mockResolvedValueOnce({ hasUpdate: false, error: 'registry timeout', checkStatus: 'failed' } as never);
-    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
     const recheckSpy = vi.spyOn(ImageUpdateService.getInstance(), 'recheckStack');
     try {
       const res = await request(app)
@@ -913,7 +913,7 @@ describe('POST /api/auto-update/execute', () => {
       .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
     const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
       .mockResolvedValue({ hasUpdate: true, digestUpdate: true, tagUpdate: false } as never);
-    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
     const recheckSpy = vi.spyOn(ImageUpdateService.getInstance(), 'recheckStack')
       .mockResolvedValue({ outcome: 'still_present', warning: null } as never);
     const clearSpy = vi.spyOn(DatabaseService.getInstance(), 'clearStackUpdateStatus');

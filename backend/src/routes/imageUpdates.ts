@@ -560,8 +560,8 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
 
         // Health observation starts immediately after Compose; registry recheck is
         // isolated so a verification failure cannot turn Compose success into a failure.
-        const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', `auto-update:${req.user?.username ?? 'scheduler'}`, { deployedGenerationId: null });
         const orchResult = lock.result;
+        const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', `auto-update:${req.user?.username ?? 'scheduler'}`, { deployedGenerationId: orchResult && orchResult.kind === 'stack_compose_done' ? orchResult.deployedGenerationId : null });
         const recoveryId = orchResult && orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
         if (recoveryId) {
           const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');

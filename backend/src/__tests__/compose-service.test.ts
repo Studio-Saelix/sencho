@@ -1221,7 +1221,7 @@ describe('ComposeService - updateStack prune-on-update', () => {
 
     // The update already succeeded before the prune ran, so a prune failure
     // must neither reject nor trigger the atomic restore.
-    await expect(promise).resolves.toEqual({ recoveryId: 'recovery-1' });
+    await expect(promise).resolves.toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null });
     expect(mockRestoreStackFiles).not.toHaveBeenCalled();
   });
 
@@ -1235,7 +1235,7 @@ describe('ComposeService - updateStack prune-on-update', () => {
     const promise = svc.updateStack('my-stack');
     await vi.advanceTimersByTimeAsync(3100);
 
-    await expect(promise).resolves.toEqual({ recoveryId: 'recovery-1' });
+    await expect(promise).resolves.toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null });
   });
 });
 

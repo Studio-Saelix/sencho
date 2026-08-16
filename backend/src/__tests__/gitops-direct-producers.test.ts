@@ -230,6 +230,51 @@ describe('Direct Git producers drive the revision state', () => {
     expect(target.applied_generation_id).toBe(applied);
   });
 
+  it('reports the deployed generation from an update so health can bind to it', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
+    const svc = GitSourceService.getInstance();
+    const store = GitOpsStore.getInstance();
+    const stackName = 'producers-update';
+
+    stageRepo(COMPOSE, '22222222');
+    await svc.createStackFromGit({
+      stackName,
+      repoUrl: REPO,
+      branch: 'main',
+      composePaths: ['compose.yaml'],
+      contextDir: null,
+      syncEnv: false,
+      envPath: null,
+      authType: 'none',
+      token: null,
+      autoApplyOnWebhook: false,
+      autoDeployOnApply: false,
+    });
+    const app = store.getLiveDirectApplication(stackName)!;
+    const applied = store.getTarget(app.id, 1)!.applied_generation_id;
+
+    // This update fails during preparation, before Compose is handed anything.
+    // The deploy operation is opened only at the compose call, so nothing is
+    // recorded: an update that never touched the workload must not leave a
+    // deploy failure behind for the deriver to report.
+    await expect(ComposeService.getInstance(1).updateStack(stackName)).rejects.toThrow();
+    const target = store.getTarget(app.id, 1)!;
+    expect(target.deployed_generation_id).toBeNull();
+    expect(target.failure_stage).toBeNull();
+    expect(target.active_operation_stage).toBeNull();
+    expect(target.applied_generation_id).toBe(applied);
+    expect(projectOf(app.id).targets[0]?.runtime.status).toBe('applied_not_deployed');
+
+    // The same holds through the orchestrator, which is what the update callers
+    // actually use and which carries the binding on to beginStack.
+    await expect(StackUpdateOrchestrator.getInstance().execute(
+      { nodeId: 1, stackName, target: { scope: 'stack' }, trigger: 'manual', actor: 'tester' },
+      { atomic: false, terminalWs: null },
+    )).rejects.toThrow();
+    expect(store.getTarget(app.id, 1)?.failure_stage).toBeNull();
+  });
+
   it('records a failed fetch without moving any pointer', async () => {
     const svc = GitSourceService.getInstance();
     const store = GitOpsStore.getInstance();

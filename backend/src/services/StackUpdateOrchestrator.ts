@@ -47,7 +47,7 @@ export interface ServiceUpdateOptions {
 }
 
 export type OrchestratorResult =
-  | { kind: 'stack_compose_done'; recoveryId: string | null }
+  | { kind: 'stack_compose_done'; recoveryId: string | null; deployedGenerationId: string | null }
   | {
       kind: 'service_done';
       serviceName: string;
@@ -186,7 +186,11 @@ export class StackUpdateOrchestrator {
       ctx.stackName, options.terminalWs ?? undefined, options.atomic,
     );
     const recoveryId = updateResult?.recoveryId ?? null;
-    return { kind: 'stack_compose_done', recoveryId };
+    return {
+      kind: 'stack_compose_done',
+      recoveryId,
+      deployedGenerationId: updateResult?.deployedGenerationId ?? null,
+    };
   }
 
   private async executeServiceUpdate(

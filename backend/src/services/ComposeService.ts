@@ -1184,7 +1184,7 @@ export class ComposeService {
     stackName: string,
     ws?: WebSocket,
     atomic?: boolean,
-  ): Promise<{ recoveryId: string | null }> {
+  ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null }> {
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
@@ -1194,6 +1194,12 @@ export class ComposeService {
     const sendOutput = (data: string) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
     };
+
+    // Opened once the update is committed to recreating containers, not at the
+    // top: an update that fails during capture or classification never reached
+    // Compose, so there is no deploy to record.
+    let gitopsDeploy: ReturnType<ComposeService['beginGitOpsDeploy']> = null;
+    let composeHandedOff = false;
 
     // Dynamic import avoids a static cycle (recovery imports getComposeCommandTimeoutMs).
     const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
@@ -1281,6 +1287,8 @@ export class ComposeService {
         }
       }
 
+      gitopsDeploy = this.beginGitOpsDeploy(stackName);
+      composeHandedOff = true;
       await this.withRegistryAuth(async (env) => {
         sendOutput('=== Recreating containers ===\n');
         await this.execute(
@@ -1342,7 +1350,9 @@ export class ComposeService {
       if (debug) {
         console.debug(`[ComposeService:debug] updateStack completed in ${Date.now() - t0}ms`, { stackName });
       }
+      gitopsDeploy?.bound();
     } catch (updateError) {
+      gitopsDeploy?.failed(composeHandedOff ? 'post_mutation' : 'pre_mutation');
       if (!handedOff && recoveryId) {
         await recoverySvc.abandon(recoveryId);
         recoveryId = null;
@@ -1378,7 +1388,7 @@ export class ComposeService {
         sanitizeForLog(getErrorMessage(err, 'unknown')),
       );
     }
-    return { recoveryId };
+    return { recoveryId, deployedGenerationId: gitopsDeploy?.generationId ?? null };
   }
 
   /**

@@ -1342,8 +1342,8 @@ export class SchedulerService {
 
         // Health observation starts immediately after Compose; registry recheck is
         // isolated so a verification failure cannot turn Compose success into a failure.
-        const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:scheduler', { deployedGenerationId: null });
         const orchResult = lock.result;
+        const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:scheduler', { deployedGenerationId: orchResult && orchResult.kind === 'stack_compose_done' ? orchResult.deployedGenerationId : null });
         const recoveryId = orchResult && orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
         if (recoveryId) {
             const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
