@@ -29,6 +29,7 @@ import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { PilotMetrics } from '../services/PilotMetrics';
 import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { sweepStaleTempDirs as sweepStaleGitTempDirs, sweepGitManifestOrphans } from '../services/GitSourceService';
+import { resolveInterruptedCreates } from '../services/gitops/createRecovery';
 import { PORT } from '../helpers/constants';
 import { LOW_MEMORY_FLOOR_BYTES } from '../utils/spawnErrors';
 
@@ -162,6 +163,14 @@ export async function startServer(server: Server): Promise<void> {
   // ownership is still undecided. A failure is logged rather than fatal: the
   // sweep is conservative by construction and preserves anything it cannot
   // prove it owns, so retrying on the next boot is safe.
+  try {
+    const settled = await resolveInterruptedCreates();
+    for (const entry of settled) {
+      console.log(`[GitOps] Interrupted create for ${entry.stackName}: ${entry.outcome}`);
+    }
+  } catch (err) {
+    console.warn('[GitOps] Interrupted-create recovery failed:', (err as Error).message);
+  }
   try {
     await sweepGitManifestOrphans();
   } catch (err) {
