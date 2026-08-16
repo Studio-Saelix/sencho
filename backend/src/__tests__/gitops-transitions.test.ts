@@ -434,6 +434,23 @@ describe('gitops transitions', () => {
     expect(mustProject('app-tomb').facets.source.status).toBe('not_live');
   });
 
+  it('retires every live target on a node without touching its applications', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-node-a', 'node-a-web', 'gen-node-a', 'art-node-a', 'acc-node-a');
+    seedApplied('app-node-b', 'node-b-web', 'gen-node-b', 'art-node-b', 'acc-node-b');
+
+    tx.tombstoneNodeTargets(1, envelope('op-node-del'));
+
+    expect(store.getTarget('app-node-a', 1)?.target_status).toBe('tombstoned');
+    expect(store.getTarget('app-node-b', 1)?.target_status).toBe('tombstoned');
+    // The applications still describe real stacks, so they stay live.
+    expect(store.getApplication('app-node-a')?.lifecycle_status).toBe('active');
+    expect(store.getApplication('app-node-b')?.lifecycle_status).toBe('active');
+    // Replaying finds nothing left to retire.
+    expect(tx.tombstoneNodeTargets(1, envelope('op-node-del-2')).historyIds).toHaveLength(0);
+  });
+
   it('rejects terminal events with no matching operation', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();

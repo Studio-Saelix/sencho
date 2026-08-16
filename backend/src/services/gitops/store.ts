@@ -126,6 +126,15 @@ export class GitOpsStore {
     ).all(applicationId) as GitOpsTargetCurrentRow[];
   }
 
+  /** Every live target on one node, across all applications. */
+  listActiveTargetsForNode(nodeId: number): GitOpsTargetCurrentRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_target_current
+       WHERE node_id = ? AND target_status = 'active'
+       ORDER BY application_id ASC`,
+    ).all(nodeId) as GitOpsTargetCurrentRow[];
+  }
+
   newestSourceAcceptanceId(applicationId: string, generationId: string): string | null {
     const row = this.db().prepare(
       `SELECT id FROM gitops_approvals

@@ -721,6 +721,26 @@ export class GitOpsTransitions {
     });
   }
 
+  /**
+   * Retire every live target on a node that is going away.
+   *
+   * Must run before the node's rows are deleted, so the tombstones and their
+   * history are written while the target rows still exist. Applications are
+   * left alone: a Direct application whose only target was on this node still
+   * describes a real stack, and a Blueprint application may have targets
+   * elsewhere.
+   */
+  tombstoneNodeTargets(nodeId: number, envelope: EventEnvelope): TransitionResult {
+    return this.raw().transaction(() => {
+      const historyIds: string[] = [];
+      for (const target of this.store().listActiveTargetsForNode(nodeId)) {
+        const result = this.targetTombstoned(target.application_id, nodeId, envelope);
+        historyIds.push(...result.historyIds);
+      }
+      return { historyIds, replayed: historyIds.length === 0 };
+    })();
+  }
+
   interruptActiveOperations(applicationId: string, envelope: EventEnvelope): TransitionResult {
     return this.raw().transaction(() => {
       const app = this.requireApp(applicationId);

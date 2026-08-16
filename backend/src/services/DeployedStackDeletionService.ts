@@ -558,6 +558,31 @@ export class DeployedStackDeletionService {
   }
 
   /**
+   * Remove a node and retire the GitOps targets that lived on it, together.
+   *
+   * The tombstones have to be written while the target rows still exist, and in
+   * the same transaction as the delete, or a failure part-way through would
+   * leave targets pointing at a node that is gone. Applications are left live:
+   * a Direct application still describes a real stack, and a Blueprint one may
+   * have targets on other nodes.
+   */
+  public deleteNodeWithGitOps(
+    nodeId: number,
+    localCleanup?: { tombstoneId: string; tags: string[]; overridePaths: string[] },
+  ): void {
+    const db = DatabaseService.getInstance();
+    db.getDb().transaction(() => {
+      GitOpsTransitions.getInstance().tombstoneNodeTargets(nodeId, {
+        operationId: localCleanup?.tombstoneId ?? randomUUID(),
+        actor: 'system:node-deletion',
+        trigger: 'node_delete',
+        at: Date.now(),
+      });
+      db.deleteNode(nodeId, localCleanup);
+    })();
+  }
+
+  /**
    * Delete a local-socket node with an atomic ready tombstone, then sweep.
    * Remote node records call DatabaseService.deleteNode without cleanup.
    */
@@ -566,7 +591,7 @@ export class DeployedStackDeletionService {
     const node = db.getNode(nodeId);
     if (!node) throw new Error('Node not found');
     if (node.type !== 'local') {
-      db.deleteNode(nodeId);
+      this.deleteNodeWithGitOps(nodeId);
       return;
     }
     // Preserve Docker + compose dir before the row disappears so sweep never
@@ -575,7 +600,7 @@ export class DeployedStackDeletionService {
     const composeDir = FileSystemService.getInstance(nodeId).getBaseDir();
     const { tags, overridePaths } = this.collectNodeArtifacts(nodeId);
     const tombstoneId = randomUUID();
-    db.deleteNode(nodeId, { tombstoneId, tags, overridePaths });
+    this.deleteNodeWithGitOps(nodeId, { tombstoneId, tags, overridePaths });
     NodeRegistry.getInstance().evictConnection(nodeId);
     try {
       await this.sweepReadyIntent(tombstoneId, { docker, composeDir });

@@ -429,7 +429,7 @@ nodesRouter.delete('/:id', async (req: Request, res: Response) => {
     if (existing.type === 'local') {
       await DeployedStackDeletionService.getInstance().deleteLocalNode(id);
     } else {
-      DatabaseService.getInstance().deleteNode(id);
+      DeployedStackDeletionService.getInstance().deleteNodeWithGitOps(id);
     }
     NodeRegistry.getInstance().evictConnection(id);
     NodeRegistry.getInstance().notifyNodeRemoved(id);
