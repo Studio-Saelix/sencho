@@ -3010,19 +3010,32 @@ export class GitSourceService {
                 }
                 continue;
             }
-            // Nothing in the database claims this directory. Recursive deletion
-            // is only safe with proof of ownership, which means a valid staging
-            // marker naming exactly what one create operation staged. Without
-            // that proof the area is preserved and logged: an unexplained
-            // directory is cheaper to keep than a wrongly deleted generation.
+            // Nothing in the database claims this directory: no git-source row,
+            // no create checkpoint, no creating application. What happens next
+            // turns on the staging marker, and the distinction between its two
+            // failure states is the whole rule.
+            //
+            //   valid   an in-flight create owns this area. Remove only what
+            //           that operation staged.
+            //   missing nothing ever claimed it. This is the ordinary orphan a
+            //           crashed stack deletion leaves behind, and reaping it is
+            //           the long-standing behavior that keeps managed data from
+            //           outliving its stack.
+            //   corrupt something claimed it and we cannot read the claim.
+            //           Preserve: an unexplained directory is far cheaper than a
+            //           wrongly deleted generation.
             const area = path.join(managedRoot, entry.name);
             try {
                 const marker = await readStagingMarker(area);
-                if (marker.state !== 'valid') {
-                    const why = marker.state === 'missing' ? 'no staging marker' : `marker unusable (${marker.reason})`;
+                if (marker.state === 'corrupt') {
                     console.warn(
-                        `[GitManifest] preserving unclaimed managed area ${sanitizeForLog(entry.name)}: ${why}, so ownership is unproven`,
+                        `[GitManifest] preserving unclaimed managed area ${sanitizeForLog(entry.name)}: its staging marker is unreadable (${marker.reason}), so ownership cannot be established`,
                     );
+                    continue;
+                }
+                if (marker.state === 'missing') {
+                    await fsPromises.rm(area, { recursive: true, force: true });
+                    console.log(`[GitManifest] removed orphaned managed area ${sanitizeForLog(entry.name)}: no stack, no create, no marker claims it`);
                     continue;
                 }
                 const outcome = await cleanupUnclaimedManagedRoot(area, marker.marker);
