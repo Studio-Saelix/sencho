@@ -85,6 +85,15 @@ export class GitOpsStore {
     ).get(stackName) as GitOpsApplicationRow | undefined;
   }
 
+  /** Direct applications that never reached their success boundary. */
+  listCreatingDirectApplications(): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE target_mode = 'direct' AND lifecycle_status = 'creating'
+       ORDER BY created_at ASC`,
+    ).all() as GitOpsApplicationRow[];
+  }
+
   getGeneration(id: string): GitOpsGenerationRow | undefined {
     return this.db().prepare('SELECT * FROM gitops_generations WHERE id = ?').get(id) as GitOpsGenerationRow | undefined;
   }

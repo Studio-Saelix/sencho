@@ -156,6 +156,18 @@ export async function startServer(server: Server): Promise<void> {
   }
   StackUpdateRecoveryService.getInstance().start();
 
+  // The managed-area sweep is awaited here, ahead of every mutation service,
+  // because it is what settles a create that was interrupted mid-flight. A
+  // scheduler or webhook that fired first could otherwise act on a stack whose
+  // ownership is still undecided. A failure is logged rather than fatal: the
+  // sweep is conservative by construction and preserves anything it cannot
+  // prove it owns, so retrying on the next boot is safe.
+  try {
+    await sweepGitManifestOrphans();
+  } catch (err) {
+    console.warn('[GitManifest] Managed-area sweep failed:', (err as Error).message);
+  }
+
   // Synchronous starts: schedule background timers and continue. None of
   // these fire their first tick for at least a few seconds, so they
   // safely run alongside the async initializers below.
@@ -202,9 +214,6 @@ export async function startServer(server: Server): Promise<void> {
   // Fire-and-forget housekeeping; logged but never awaited.
   sweepStaleGitTempDirs().catch((err) => {
     console.warn('[GitSource] Temp dir sweep failed:', (err as Error).message);
-  });
-  sweepGitManifestOrphans().catch((err) => {
-    console.warn('[GitManifest] Managed-area sweep failed:', (err as Error).message);
   });
   sweepStaleTrivyTempDirs().catch((err) => {
     console.warn('[Trivy] Temp dir sweep failed:', (err as Error).message);

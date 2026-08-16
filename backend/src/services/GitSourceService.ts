@@ -28,6 +28,18 @@ import type { ComposeInputEntry, GitProjectManifest, GitSourceManifestState, Inv
 import type { GitChangePlan, PublicGitChangePlan, GitChangePlanCounts, PublicGitChangePlanOperation } from '../types/gitChangePlan';
 import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
 import type { NotificationCategory } from './NotificationService';
+import { GitOpsStore } from './gitops/store';
+import { GitOpsTransitions } from './gitops/transitions';
+import {
+    buildCreateCheckpointRow,
+    buildCreatingApplicationRow,
+    buildGenerationRow,
+    directSourceIdentity,
+    newGitOpsId,
+    stackManagedRoot,
+} from './gitops/directApplication';
+import { candidateRelPathForSha, deleteStagingMarker, readStagingMarker, writeStagingMarker } from './gitops/createStagingMarker';
+import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops/createCleanup';
 import type { GitHttpRequest, GitHttpResponse, HttpClient } from 'isomorphic-git/http/node';
 
 // isomorphic-git is the heaviest dependency in the backend (~5 MB) and only
@@ -2380,6 +2392,22 @@ export class GitSourceService {
                 throw new GitSourceError('GIT_ERROR', 'Auto-deploy requires auto-apply-on-webhook to be enabled.');
             }
 
+            const gitopsOperationId = crypto.randomUUID();
+            const managedRoot = stackManagedRoot(input.stackName);
+            // Whether the managed root is ours to delete is decided once, here,
+            // before anything can create it. Cleanup later reads this answer
+            // rather than re-probing a directory it may itself have made.
+            const rootPreexisted = existsSync(managedRoot);
+            const gitopsIdentity = directSourceIdentity({
+                repoUrl: input.repoUrl,
+                branch: input.branch,
+                composePaths: input.composePaths,
+                contextDir: input.contextDir,
+                syncEnv: input.syncEnv,
+                envPath: input.envPath,
+            });
+            const staged: { candidateRelPath: string | null } = { candidateRelPath: null };
+
             // 1. Fetch from git BEFORE touching disk or DB. If the fetch
             //    fails there is nothing to clean up. The onClone hook stages
             //    the complete-project candidate inside the clone lifecycle.
@@ -2392,6 +2420,17 @@ export class GitSourceService {
                 envPath: input.syncEnv ? input.envPath : null,
                 token: input.token,
                 onClone: async (cloneDir, commitSha, envContent) => {
+                    // The candidate path is recorded before the build that
+                    // creates it, so a crash mid-build still names exactly one
+                    // directory this operation owns.
+                    staged.candidateRelPath = candidateRelPathForSha(commitSha);
+                    await writeStagingMarker(managedRoot, {
+                        schemaVersion: 1,
+                        operationId: gitopsOperationId,
+                        rootPreexisted,
+                        candidateRelPath: staged.candidateRelPath,
+                        createdAt: Date.now(),
+                    });
                     materialization.value = await this.buildMaterialization(input.stackName, cloneDir, commitSha, {
                         compose_paths: input.composePaths,
                         context_dir: input.contextDir,
@@ -2406,6 +2445,7 @@ export class GitSourceService {
                 ? materialization.value.validation
                 : await this.validateCompose(fetched.composeFiles, fetched.envContent, input.contextDir);
             if (!validation.ok) {
+                await this.cleanupStagedCreate(managedRoot, staged.candidateRelPath, rootPreexisted);
                 throw new GitSourceError('GIT_ERROR', `Compose validation failed: ${validation.error}`);
             }
 
@@ -2420,6 +2460,12 @@ export class GitSourceService {
             // state instead of 'absent'.
             let completeProjectManifest: GitProjectManifest | null = null;
             let recordedCreatePlan: GitChangePlan | null = null;
+            // Set once the activation transaction commits. Before that there is
+            // nothing in the database to tear down; after it, cleanup has to go
+            // through create_failed so the checkpoint and tombstone stay
+            // consistent with what was removed from disk.
+            let gitopsApplicationId: string | null = null;
+            let gitopsCommitted = false;
             try {
                 let appliedSpec: GitSourceAppliedSpec | null;
                 if (materialization.value) {
@@ -2511,10 +2557,87 @@ export class GitSourceService {
                     completeProjectManifest = manifest;
                 }
 
+                // 3b. Persist the GitOps identity of this create. Everything
+                //     above is still reversible by deleting files; from here on
+                //     recovery is driven by the checkpoint instead of guesswork.
+                if (completeProjectManifest && materialization.value && staged.candidateRelPath) {
+                    const applicationId = newGitOpsId();
+                    const envelope = {
+                        operationId: gitopsOperationId,
+                        actor: 'system:git-source',
+                        trigger: 'create',
+                        at: Date.now(),
+                    };
+                    const sourceConfig = {
+                        repoUrl: input.repoUrl,
+                        branch: input.branch,
+                        composePaths: input.composePaths,
+                        contextDir: input.contextDir,
+                        syncEnv: input.syncEnv,
+                        envPath: input.envPath,
+                    };
+                    GitOpsTransitions.getInstance().activateCreateFromGit({
+                        application: buildCreatingApplicationRow({
+                            id: applicationId,
+                            stackName: input.stackName,
+                            config: sourceConfig,
+                            identity: gitopsIdentity,
+                            at: envelope.at,
+                        }),
+                        nodeId: NodeRegistry.getInstance().getDefaultNodeId(),
+                        commitSha: fetched.commitSha,
+                        generation: buildGenerationRow({
+                            id: newGitOpsId(),
+                            applicationId,
+                            commitSha: fetched.commitSha,
+                            identity: gitopsIdentity,
+                            configuredRef: input.branch,
+                            candidateRelPath: staged.candidateRelPath,
+                            appliedRelPath: completeProjectManifest.generation.appliedDir,
+                            manifestVersion: completeProjectManifest.manifestVersion,
+                            expectedInvocation: completeProjectManifest.project.invocation,
+                            changePlanFingerprint: recordedCreatePlan?.fingerprint ?? null,
+                            operationId: gitopsOperationId,
+                            trigger: envelope.trigger,
+                            actor: envelope.actor,
+                            at: envelope.at,
+                        }),
+                        checkpoint: buildCreateCheckpointRow({
+                            applicationId,
+                            stackName: input.stackName,
+                            operationId: gitopsOperationId,
+                            config: sourceConfig,
+                            identity: gitopsIdentity,
+                            authType: input.authType,
+                            encryptedToken: input.authType === 'token' && input.token
+                                ? this.crypto.encrypt(input.token)
+                                : null,
+                            autoApplyOnWebhook: input.autoApplyOnWebhook,
+                            autoDeployOnApply: input.autoDeployOnApply,
+                            commitSha: fetched.commitSha,
+                            createdManagedRoot: !rootPreexisted,
+                            at: envelope.at,
+                        }),
+                        envelope,
+                    });
+                    gitopsApplicationId = applicationId;
+                    await deleteStagingMarker(managedRoot);
+                }
+
                 await fsSvc.createStack(input.stackName);
                 stackCreated = true;
+                if (gitopsApplicationId) {
+                    GitOpsStore.getInstance().updateCreateCheckpoint(
+                        gitopsApplicationId, { phase: 'stack_created' }, Date.now(),
+                    );
+                }
 
                 if (completeProjectManifest && materialization.value) {
+                    if (gitopsApplicationId) {
+                        GitOpsStore.getInstance().updateCreateCheckpoint(
+                            gitopsApplicationId, { phase: 'promoting' }, Date.now(),
+                        );
+                    }
                     await manifestSvc.promoteGeneration(input.stackName, {
                         sha: fetched.commitSha,
                         candidateRelPath: materialization.value.candidateRelPath,
@@ -2523,6 +2646,13 @@ export class GitSourceService {
                         adoptExistingMaterializedPaths: 'all',
                     });
                     appliedSpec = this.deriveAppliedSpec(input.composePaths, input.contextDir);
+                    if (gitopsApplicationId) {
+                        GitOpsStore.getInstance().updateCreateCheckpoint(
+                            gitopsApplicationId,
+                            { phase: 'manifest_committed', appliedSpecJson: JSON.stringify(appliedSpec) },
+                            Date.now(),
+                        );
+                    }
                 } else {
                     appliedSpec = await this.materialize(
                         input.stackName, fetched.composeFiles, input.contextDir, input.syncEnv, fetched.envContent, null,
@@ -2537,6 +2667,11 @@ export class GitSourceService {
                     ? this.crypto.encrypt(input.token)
                     : null;
                 const hash = this.hashContent(fetched.composeFiles, fetched.envContent);
+                // The source row, the applied pointers, and the checkpoint
+                // advance together. This commit is the success boundary: once
+                // it lands the stack is live, and any later error is reported
+                // without deleting anything.
+                const commitCreate = db.getDb().transaction(() => {
                 db.upsertGitSource({
                     stack_name: input.stackName,
                     repo_url: input.repoUrl,
@@ -2570,6 +2705,32 @@ export class GitSourceService {
                         completeProjectManifest.generation.appliedDir,
                     );
                 }
+                if (gitopsApplicationId) {
+                    const checkpoint = GitOpsStore.getInstance().getCreateCheckpoint(gitopsApplicationId);
+                    if (!checkpoint?.generation_id) {
+                        throw new GitSourceError('GIT_ERROR', 'Create checkpoint lost its generation before acceptance.');
+                    }
+                    GitOpsTransitions.getInstance().applied({
+                        applicationId: gitopsApplicationId,
+                        generationId: checkpoint.generation_id,
+                        artifactSetId: newGitOpsId(),
+                        sourceAcceptanceId: newGitOpsId(),
+                        authority: 'operator',
+                        envelope: {
+                            operationId: gitopsOperationId,
+                            actor: 'system:git-source',
+                            trigger: 'create',
+                            at: Date.now(),
+                        },
+                        activateCreating: true,
+                    });
+                    GitOpsStore.getInstance().updateCreateCheckpoint(
+                        gitopsApplicationId, { phase: 'pointers_committed' }, Date.now(),
+                    );
+                }
+                });
+                commitCreate();
+                gitopsCommitted = true;
 
                 rowInserted = true;
                 const operationId = crypto.randomUUID();
@@ -2601,6 +2762,16 @@ export class GitSourceService {
                 }
                 return { source, commitSha: fetched.commitSha, envWritten, warnings: fetched.warnings };
             } catch (e) {
+                // Past the success boundary the stack is live and owned by the
+                // operator. A later error is reported, never compensated: the
+                // leftover marker or checkpoint is finished by the boot sweep.
+                if (gitopsCommitted) {
+                    console.error(
+                        `[GitSource] Create for ${sanitizeForLog(input.stackName)} succeeded but a later step failed:`,
+                        e instanceof Error ? e.message : String(e),
+                    );
+                    throw e;
+                }
                 // Roll back any partial on-disk state so the caller can retry
                 // cleanly. The DB row is only inserted at step 4, so an error
                 // earlier leaves nothing to clean in the DB.
@@ -2632,9 +2803,59 @@ export class GitSourceService {
                 if (rowInserted) {
                     db.deleteGitSource(input.stackName);
                 }
+                // Filesystem cleanup has to succeed before the tombstone, so a
+                // create whose files could not be removed keeps its checkpoint
+                // and is retried by the next boot rather than being recorded as
+                // cleanly failed.
+                if (gitopsApplicationId) {
+                    try {
+                        await removeOperationOwnedPaths({
+                            stackManagedRoot: managedRoot,
+                            candidateRelPath: staged.candidateRelPath,
+                            appliedRelPath: completeProjectManifest?.generation.appliedDir ?? null,
+                            ownsManagedRoot: !rootPreexisted,
+                        });
+                        GitOpsTransitions.getInstance().createFailed(
+                            gitopsApplicationId,
+                            e instanceof GitSourceError ? e.code : 'create',
+                            { operationId: gitopsOperationId, actor: 'system:git-source', trigger: 'create', at: Date.now() },
+                        );
+                    } catch (cleanupErr) {
+                        console.error(
+                            `[GitSource] Could not finish tearing down the failed create for ${sanitizeForLog(input.stackName)}; leaving it for the next boot sweep:`,
+                            cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+                        );
+                    }
+                }
                 throw e;
             }
         });
+    }
+
+    /**
+     * Remove what a create staged before any GitOps row existed.
+     *
+     * Best-effort by design: the caller is already throwing the real error, and
+     * a leftover directory here is picked up by the boot sweep, which has the
+     * marker to tell it what this operation owned.
+     */
+    private async cleanupStagedCreate(
+        managedRoot: string,
+        candidateRelPath: string | null,
+        rootPreexisted: boolean,
+    ): Promise<void> {
+        try {
+            await removeOperationOwnedPaths({
+                stackManagedRoot: managedRoot,
+                candidateRelPath,
+                ownsManagedRoot: !rootPreexisted,
+            });
+        } catch (error) {
+            console.warn(
+                '[GitSource] Could not remove the staged create area:',
+                error instanceof Error ? error.message : String(error),
+            );
+        }
     }
 
     /**
@@ -2730,13 +2951,49 @@ export class GitSourceService {
             }
             return;
         }
+        // A managed area with no git-source row is not automatically an orphan.
+        // An in-flight or crashed create owns its area through a checkpoint or
+        // a creating application before the source row exists, so both count as
+        // known and must survive the sweep.
+        for (const checkpoint of GitOpsStore.getInstance().listCreateCheckpoints()) {
+            known.add(checkpoint.stack_name);
+        }
+        for (const app of GitOpsStore.getInstance().listCreatingDirectApplications()) {
+            if (app.stack_name) known.add(app.stack_name);
+        }
+
         for (const entry of entries) {
             if (!entry.isDirectory() || known.has(entry.name)) continue;
-            if (entry.name.startsWith('.detach-') && known.has(entry.name.slice('.detach-'.length))) continue;
+            // Detach staging areas carry their own ownership proof in the
+            // detach journal, not a create marker. They are reaped exactly as
+            // before once their stack is gone.
+            if (entry.name.startsWith('.detach-')) {
+                if (known.has(entry.name.slice('.detach-'.length))) continue;
+                try {
+                    await fsPromises.rm(path.join(managedRoot, entry.name), { recursive: true, force: true });
+                } catch (e) {
+                    console.error(`[GitManifest] could not remove staged detach area ${sanitizeForLog(entry.name)}:`, (e as Error).message);
+                }
+                continue;
+            }
+            // Nothing in the database claims this directory. Recursive deletion
+            // is only safe with proof of ownership, which means a valid staging
+            // marker naming exactly what one create operation staged. Without
+            // that proof the area is preserved and logged: an unexplained
+            // directory is cheaper to keep than a wrongly deleted generation.
+            const area = path.join(managedRoot, entry.name);
             try {
-                await fsPromises.rm(path.join(managedRoot, entry.name), { recursive: true, force: true });
+                const marker = await readStagingMarker(area);
+                if (marker.state !== 'valid') {
+                    console.warn(
+                        `[GitManifest] preserving unclaimed managed area ${sanitizeForLog(entry.name)}: no valid staging marker to prove ownership`,
+                    );
+                    continue;
+                }
+                const outcome = await cleanupUnclaimedManagedRoot(area, marker.marker);
+                console.log(`[GitManifest] unclaimed managed area ${sanitizeForLog(entry.name)}: ${outcome}`);
             } catch (e) {
-                console.error(`[GitManifest] could not remove orphaned area ${sanitizeForLog(entry.name)}:`, (e as Error).message);
+                console.error(`[GitManifest] could not clean unclaimed area ${sanitizeForLog(entry.name)}:`, (e as Error).message);
             }
         }
     }
