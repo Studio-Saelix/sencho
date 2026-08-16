@@ -125,6 +125,40 @@ export async function resolveInterruptedCreates(): Promise<CreateRecoveryResult[
   return results;
 }
 
+/**
+ * Reclassify every operation the previous process left open.
+ *
+ * An operation that started and never terminated keeps reporting as in flight,
+ * and the deriver offers no actions while it does, so without this a single
+ * interrupted fetch or apply strands a stack until someone notices. The
+ * interruption is recorded as unknown rather than failed: we genuinely do not
+ * know whether the work completed.
+ *
+ * Runs at boot, after create recovery and before any mutation service, and is
+ * guarded per application so one bad row cannot strand the rest.
+ */
+export function reclassifyInterruptedOperations(): number {
+  const store = GitOpsStore.getInstance();
+  let reclassified = 0;
+  for (const app of store.listApplicationsWithOpenOperations()) {
+    try {
+      GitOpsTransitions.getInstance().interruptActiveOperations(app.id, {
+        operationId: app.latest_operation_id ?? newGitOpsId(),
+        actor: 'system:startup',
+        trigger: 'startup_reconcile',
+        at: Date.now(),
+      });
+      reclassified += 1;
+    } catch (error) {
+      console.error(
+        `[GitOps] Could not reclassify the interrupted operation for ${sanitizeForLog(app.stack_name ?? app.id)}:`,
+        error instanceof Error ? error.stack ?? error.message : String(error),
+      );
+    }
+  }
+  return reclassified;
+}
+
 async function resolveOne(checkpoint: GitOpsCreateCheckpointRow): Promise<CreateRecoveryResult> {
   const store = GitOpsStore.getInstance();
   const db = DatabaseService.getInstance();

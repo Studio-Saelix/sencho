@@ -353,11 +353,28 @@ export class DeployedStackDeletionService {
         trigger: 'delete',
         at: Date.now(),
       };
-      for (const target of GitOpsStore.getInstance().listTargets(app.id)) {
-        if (target.target_status !== 'active') continue;
-        tx.targetTombstoned(app.id, target.node_id, envelope);
+      // The files are already gone by the time this runs, and the startup
+      // reconciler loops over every prepared intent. A rejected tombstone must
+      // fail this one deletion, not throw an opaque driver error out of a
+      // deletion that already succeeded on disk, and not abandon the intents
+      // that follow it.
+      try {
+        for (const target of GitOpsStore.getInstance().listTargets(app.id)) {
+          if (target.target_status !== 'active') continue;
+          tx.targetTombstoned(app.id, target.node_id, envelope);
+        }
+        tx.applicationTombstoned(app.id, 'deleted', envelope);
+      } catch (error) {
+        console.error(
+          '[GitOps] Could not retire the application for deleted stack %s (application %s):',
+          sanitizeForLog(stackName), app.id,
+          error instanceof Error ? error.stack ?? error.message : String(error),
+        );
+        return false;
       }
-      tx.applicationTombstoned(app.id, 'deleted', envelope);
+      // A create that never settled leaves a checkpoint whose application is
+      // now gone; drop it so boot recovery does not retry it for ever.
+      GitOpsStore.getInstance().deleteCreateCheckpoint(app.id);
       return true;
     })();
   }

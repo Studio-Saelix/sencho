@@ -126,6 +126,29 @@ export class GitOpsStore {
     ).all(applicationId) as GitOpsTargetCurrentRow[];
   }
 
+  /**
+   * Live applications that were mid-operation, on the application row or on any
+   * of their targets.
+   *
+   * Read at boot to reclassify work the previous process never finished. An
+   * operation left open reports as still running forever, and offers no actions
+   * while it does.
+   */
+  listApplicationsWithOpenOperations(): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT a.* FROM gitops_applications a
+       WHERE a.lifecycle_status IN ('active','creating')
+         AND (
+           a.active_operation_stage IS NOT NULL
+           OR EXISTS (
+             SELECT 1 FROM gitops_target_current t
+             WHERE t.application_id = a.id AND t.active_operation_stage IS NOT NULL
+           )
+         )
+       ORDER BY a.created_at ASC`,
+    ).all() as GitOpsApplicationRow[];
+  }
+
   /** Every live target on one node, across all applications. */
   listActiveTargetsForNode(nodeId: number): GitOpsTargetCurrentRow[] {
     return this.db().prepare(

@@ -29,7 +29,7 @@ import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { PilotMetrics } from '../services/PilotMetrics';
 import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { sweepStaleTempDirs as sweepStaleGitTempDirs, sweepGitManifestOrphans } from '../services/GitSourceService';
-import { resolveInterruptedCreates } from '../services/gitops/createRecovery';
+import { reclassifyInterruptedOperations, resolveInterruptedCreates } from '../services/gitops/createRecovery';
 import { sanitizeForLog } from '../utils/safeLog';
 import { PORT } from '../helpers/constants';
 import { LOW_MEMORY_FLOOR_BYTES } from '../utils/spawnErrors';
@@ -171,6 +171,18 @@ export async function startServer(server: Server): Promise<void> {
   } catch (err) {
     console.error('[GitOps] Interrupted-create recovery failed:', err instanceof Error ? err.stack ?? err.message : String(err));
   }
+  // Operations the last process never finished are reclassified as unknown.
+  // Without this an interrupted fetch or apply reports as still running for
+  // ever and the stack is offered no actions at all.
+  try {
+    const reclassified = reclassifyInterruptedOperations();
+    if (reclassified > 0) {
+      console.log(`[GitOps] Reclassified ${reclassified} interrupted operation(s) as unknown`);
+    }
+  } catch (err) {
+    console.error('[GitOps] Interrupted-operation reclassification failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+  }
+
   // The managed-area sweep follows. It preserves anything whose ownership it
   // cannot prove, so a failure here can only leave files behind, never remove
   // the wrong ones, and retrying next boot is safe.

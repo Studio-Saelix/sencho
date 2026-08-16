@@ -215,6 +215,12 @@ export class GitOpsTransitions {
       if (app.target_mode !== 'direct') {
         throw new GitOpsTransitionError('material configuration applies to Direct applications only');
       }
+      // The same guard dismissal and candidate replacement carry, and for the
+      // same reason: pulling the candidate out from under a live operation
+      // makes that operation's completion event unmatchable.
+      if (app.active_operation_stage) {
+        throw new GitOpsTransitionError('cannot change material configuration while an operation is in flight');
+      }
       app.configured_repo_url = args.identity.repoUrl;
       app.repo_identity_json = args.identity.repoIdentityJson;
       app.configured_ref = args.identity.configuredRef;
@@ -644,6 +650,7 @@ export class GitOpsTransitions {
           lkgGenerationId: target.lkg_generation_id,
         };
         const promotable = args.healthStatus === 'passed'
+          && target.target_status === 'active'
           && args.targetScope === 'stack'
           && !!args.deployedGenerationId
           && target.deployed_generation_id === args.deployedGenerationId;
@@ -1012,7 +1019,17 @@ export class GitOpsTransitions {
     return this.raw().transaction(() => {
       const app = this.requireApp(applicationId);
       const historyIds: string[] = [];
-      if (app.active_operation_stage) {
+      // A restore that never finished is not still running. Left alone, the
+      // phase reports a live recovery for ever, because only the terminal
+      // recovery events clear it and neither one is coming.
+      const interruptedRecovery = app.recovery_phase === 'restoring' || app.recovery_phase === 'compensating';
+      if (interruptedRecovery) {
+        app.recovery_phase = 'failed';
+        app.failure_stage = 'recovery';
+        app.failure_class = 'interrupted';
+        app.failure_at = envelope.at;
+      }
+      if (app.active_operation_stage || interruptedRecovery) {
         app.interruption_stage = app.active_operation_stage;
         app.interruption_at = envelope.at;
         app.interruption_operation_id = app.active_operation_id;
@@ -1029,7 +1046,15 @@ export class GitOpsTransitions {
         if (id) historyIds.push(id);
       }
       for (const target of this.store().listTargets(applicationId)) {
-        if (!target.active_operation_stage) continue;
+        const targetRecoveryInterrupted = target.recovery_phase === 'restoring'
+          || target.recovery_phase === 'compensating';
+        if (!target.active_operation_stage && !targetRecoveryInterrupted) continue;
+        if (targetRecoveryInterrupted) {
+          target.recovery_phase = 'failed';
+          target.failure_stage = 'recovery';
+          target.failure_class = 'interrupted';
+          target.failure_at = envelope.at;
+        }
         target.interruption_stage = target.active_operation_stage;
         target.interruption_at = envelope.at;
         target.interruption_operation_id = target.active_operation_id;

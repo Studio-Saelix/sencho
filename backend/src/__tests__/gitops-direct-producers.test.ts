@@ -439,6 +439,57 @@ describe('Direct Git producers drive the revision state', () => {
     expect(store.getTarget(app.id, 1)?.target_status).toBe('tombstoned');
   });
 
+  it('closes the operation when a terminal transition is rejected', async () => {
+    const svc = GitSourceService.getInstance();
+    const store = GitOpsStore.getInstance();
+    const stackName = 'producers-reject';
+
+    stageRepo(COMPOSE, '66666666');
+    await svc.createStackFromGit({
+      stackName,
+      repoUrl: REPO,
+      branch: 'main',
+      composePaths: ['compose.yaml'],
+      contextDir: null,
+      syncEnv: false,
+      envPath: null,
+      authType: 'none',
+      token: null,
+      autoApplyOnWebhook: false,
+      autoDeployOnApply: false,
+    });
+    const app = store.getLiveDirectApplication(stackName)!;
+
+    // Reject the transition that closes a fetch. Recording must not fail the
+    // pull, but it must not leave the operation open either: a fetch that never
+    // terminates blocks every later pull from being recorded at all.
+    const tx = GitOpsTransitions.getInstance();
+    const realFetched = tx.fetched.bind(tx);
+    tx.fetched = () => { throw new Error('rejected for test'); };
+    try {
+      stageRepo(COMPOSE_V2, '77777777');
+      await svc.pull(stackName, { actor: 'tester' });
+    } finally {
+      tx.fetched = realFetched;
+    }
+
+    const afterReject = store.getApplication(app.id)!;
+    expect(afterReject.active_operation_stage).toBeNull();
+    expect(afterReject.failure_stage).toBe('fetch');
+    // The projection reports an error the operator can act on, not a spinner.
+    const projection = projectOf(app.id);
+    expect(projection.facets.source.status).toBe('source_failed');
+    expect(projection.availableActions).toContain('fetch');
+
+    // And the next pull records normally, rather than being locked out.
+    stageRepo(COMPOSE_V2, '88888888');
+    await svc.pull(stackName, { actor: 'tester' });
+    const recovered = store.getApplication(app.id)!;
+    expect(recovered.fetched_commit_sha).toBe('88888888');
+    expect(recovered.failure_stage).toBeNull();
+    expect(recovered.active_operation_stage).toBeNull();
+  });
+
   it('leaves a stack with no GitOps application untouched', async () => {
     const svc = GitSourceService.getInstance();
     const store = GitOpsStore.getInstance();

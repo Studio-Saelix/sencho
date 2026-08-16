@@ -686,17 +686,21 @@ export class ComposeService {
 
       const tx = GitOpsTransitions.getInstance();
       const envelope = { operationId: randomUUID(), actor: 'system:compose', trigger: 'deploy', at: Date.now() };
-      const record = (what: string, write: () => void): void => {
+      const record = (what: string, write: () => void): boolean => {
         try {
           write();
+          return true;
         } catch (error) {
           console.error(
-            `[GitOps] Could not record deploy ${what} for ${sanitizeForLog(stackName)}:`,
-            error instanceof Error ? error.message : String(error),
+            `[GitOps] Could not record deploy ${what} for ${sanitizeForLog(stackName)} (application ${app.id}, generation ${generationId}):`,
+            error instanceof Error ? error.stack ?? error.message : String(error),
           );
+          return false;
         }
       };
-      record('start', () => tx.deployStarted(app.id, this.nodeId, generationId, envelope));
+      if (!record('start', () => tx.deployStarted(app.id, this.nodeId, generationId, envelope))) {
+        return null;
+      }
       return {
         generationId,
         bound: () => record('binding', () => tx.deployBound(app.id, this.nodeId, generationId, envelope)),
@@ -775,9 +779,10 @@ export class ComposeService {
         console.warn('Failed to clean up legacy containers for %s:', sanitizeForLog(stackName), e);
       }
 
-      composeHandedOff = true;
       await this.withRegistryAuth(async (env) => {
-        await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env, getComposeStallTimeoutMs());
+        const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']);
+        composeHandedOff = true;
+        await this.execute('docker', args, stackDir, ws, true, env, getComposeStallTimeoutMs());
       }, sendOutput);
 
       // Post-Deploy Health Probe
@@ -1288,14 +1293,14 @@ export class ComposeService {
       }
 
       gitopsDeploy = this.beginGitOpsDeploy(stackName);
-      composeHandedOff = true;
       await this.withRegistryAuth(async (env) => {
         sendOutput('=== Recreating containers ===\n');
-        await this.execute(
-          'docker',
-          await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']),
-          stackDir, ws, true, env, getComposeStallTimeoutMs(),
-        );
+        const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']);
+        // Set only once Compose is genuinely about to receive the mutation:
+        // reading compose args or resolving registry auth can still fail with
+        // the previous workload provably intact.
+        composeHandedOff = true;
+        await this.execute('docker', args, stackDir, ws, true, env, getComposeStallTimeoutMs());
       }, sendOutput);
 
       // Immediate verification probe

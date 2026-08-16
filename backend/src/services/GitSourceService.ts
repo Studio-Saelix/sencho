@@ -814,7 +814,7 @@ export class GitSourceService {
 
             const app = this.gitopsApplicationFor(input.stackName);
             const envelope = this.gitopsEnvelope(crypto.randomUUID(), 'system:git-source', 'configure');
-            if (!app && !existing) {
+            if (!app && !existing && !this.gitopsNameHeld(input.stackName)) {
                 // Linking a stack that already exists. Nothing is fetched or
                 // accepted yet, so the application starts live with no desired
                 // commit and the projection asks for a fetch.
@@ -1876,6 +1876,18 @@ export class GitSourceService {
         return app && app.lifecycle_status === 'active' ? app : null;
     }
 
+    /**
+     * Whether any application still holds this stack name.
+     *
+     * Wider than `gitopsApplicationFor`, which only reports usable applications.
+     * A `creating` row left by a crash the boot sweep could not settle still
+     * occupies the unique live-application index, so activating over it would
+     * fail the whole save with an internal constraint message.
+     */
+    private gitopsNameHeld(stackName: string): boolean {
+        return !!GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+    }
+
     private gitopsEnvelope(operationId: string, actor: string, trigger: string) {
         return { operationId, actor, trigger, at: Date.now() };
     }
@@ -1889,15 +1901,36 @@ export class GitSourceService {
      * has already touched the filesystem. The rejection is logged loudly
      * because it means the recorded state has drifted from reality.
      */
-    private recordGitOps(stackName: string, what: string, write: () => void): void {
+    private recordGitOps(stackName: string, what: string, write: () => void): boolean {
         try {
             write();
+            return true;
         } catch (error) {
             console.error(
                 `[GitOps] Could not record ${what} for ${sanitizeForLog(stackName)}:`,
-                error instanceof Error ? error.message : String(error),
+                error instanceof Error ? error.stack ?? error.message : String(error),
             );
+            return false;
         }
+    }
+
+    /**
+     * Close an operation whose terminal transition was rejected.
+     *
+     * A start that never terminates leaves the source reporting work in
+     * progress and offering no actions, permanently. When the real terminal
+     * event cannot be recorded, the next best truth is that we lost track:
+     * clear the operation and stamp a failure the projection can render, so the
+     * operator sees an error they can retry instead of a spinner.
+     */
+    private abandonGitOpsOperation(
+        stackName: string,
+        applicationId: string,
+        envelope: ReturnType<GitSourceService['gitopsEnvelope']>,
+    ): void {
+        this.recordGitOps(stackName, 'lost-track fallback', () => {
+            GitOpsTransitions.getInstance().applyFailed(applicationId, 'bookkeeping_rejected', envelope);
+        });
     }
 
     private async pullLocked(stackName: string, actor: string): Promise<PullResult> {
@@ -1907,13 +1940,55 @@ export class GitSourceService {
         const gitopsApp = this.gitopsApplicationFor(stackName);
         const gitopsOperationId = crypto.randomUUID();
         const gitopsEnv = this.gitopsEnvelope(gitopsOperationId, actor, 'pull');
+        // A fetch that starts and never terminates is worse than one that is
+        // never recorded: fetchStarted refuses to open a second operation, so
+        // every later pull silently stops being tracked until a restart.
+        let fetchOpen = false;
         if (gitopsApp) {
-            this.recordGitOps(stackName, 'fetch start', () => {
+            fetchOpen = this.recordGitOps(stackName, 'fetch start', () => {
                 GitOpsTransitions.getInstance().fetchStarted(gitopsApp.id, gitopsEnv);
             });
         }
+        const closeFetch = (): void => {
+            if (!gitopsApp || !fetchOpen) return;
+            fetchOpen = false;
+            this.recordGitOps(stackName, 'fetch failure', () => {
+                GitOpsTransitions.getInstance().fetchFailed(gitopsApp.id, gitopsEnv);
+            });
+        };
 
+        try {
+            return await this.pullLockedBody(stackName, actor, src, {
+                app: gitopsApp,
+                operationId: gitopsOperationId,
+                envelope: gitopsEnv,
+                markSettled: () => { fetchOpen = false; },
+                abandon: closeFetch,
+            });
+        } catch (e) {
+            closeFetch();
+            throw e;
+        }
+    }
+
+    private async pullLockedBody(
+        stackName: string,
+        actor: string,
+        src: StackGitSource,
+        gitops: {
+            app: GitOpsApplicationRow | null;
+            operationId: string;
+            envelope: ReturnType<GitSourceService['gitopsEnvelope']>;
+            markSettled: () => void;
+            abandon: () => void;
+        },
+    ): Promise<PullResult> {
+        const db = DatabaseService.getInstance();
         const diag = isDebugEnabled();
+        const gitopsApp = gitops.app;
+        const gitopsOperationId = gitops.operationId;
+        const gitopsEnv = gitops.envelope;
+
         if (diag) {
             console.log(`[GitSource:diag] pull start stack=${stackName} branch=${src.branch} host=${repoHost(src.repo_url)}`);
         }
@@ -1923,26 +1998,18 @@ export class GitSourceService {
         // Object holder: property access is not narrowed by control-flow
         // analysis, so the closure assignment below stays visible.
         const materialization: { value: MaterializationResult | null } = { value: null };
-        let fetched: FetchResult;
-        try {
-            fetched = await this.fetchFromGit({
-                repoUrl: src.repo_url,
-                branch: src.branch,
-                composePaths: src.compose_paths,
-                envPath: src.sync_env ? src.env_path : null,
-                token,
-                onClone: async (cloneDir, commitSha, envContent) => {
-                    materialization.value = await this.buildMaterialization(stackName, cloneDir, commitSha, src, envContent);
-                },
-            });
-        } catch (e) {
-            if (gitopsApp) {
-                this.recordGitOps(stackName, 'fetch failure', () => {
-                    GitOpsTransitions.getInstance().fetchFailed(gitopsApp.id, gitopsEnv);
-                });
-            }
-            throw e;
-        }
+        // Every throw from here on, including this fetch, is closed by the
+        // caller's handler, so nothing is recorded locally.
+        const fetched: FetchResult = await this.fetchFromGit({
+            repoUrl: src.repo_url,
+            branch: src.branch,
+            composePaths: src.compose_paths,
+            envPath: src.sync_env ? src.env_path : null,
+            token,
+            onClone: async (cloneDir, commitSha, envContent) => {
+                materialization.value = await this.buildMaterialization(stackName, cloneDir, commitSha, src, envContent);
+            },
+        });
 
         const validation = materialization.value
             ? materialization.value.validation
@@ -1979,8 +2046,12 @@ export class GitSourceService {
         // Record what this fetch resolved before the pending blob is written,
         // so the durable pointers and the operational pending store agree.
         if (gitopsApp) {
-            this.recordGitOps(stackName, 'fetch outcome', () => {
+            const outcomeRecorded = this.recordGitOps(stackName, 'fetch outcome', () => {
                 const tx = GitOpsTransitions.getInstance();
+                // One transaction: a candidate that exists without the fetch
+                // that produced it would let a later apply accept the wrong
+                // generation while the projection reports the older commit.
+                DatabaseService.getInstance().getDb().transaction(() => {
                 if (!validation.ok) {
                     tx.fetchedInvalid(gitopsApp.id, fetched.commitSha, gitopsEnv);
                     return;
@@ -2005,7 +2076,10 @@ export class GitSourceService {
                     candidateRelPath: materialization.value.candidateRelPath,
                     appliedRelPath: appliedRelPathFor(fetched.commitSha, nextManifestVersion),
                     manifestVersion: nextManifestVersion,
-                    expectedInvocation: prior?.project.invocation ?? null,
+                    // The candidate's own invocation. Recording the prior
+                    // generation's would attribute one generation's facts to
+                    // another, which is the whole failure this model prevents.
+                    expectedInvocation: plan?.candidateInvocation ?? prior?.project.invocation ?? null,
                     changePlanFingerprint: plan?.fingerprint ?? null,
                     operationId: gitopsOperationId,
                     trigger: gitopsEnv.trigger,
@@ -2015,7 +2089,13 @@ export class GitSourceService {
                 }));
                 if (plan?.blocked) tx.sourceConflictBlocker(gitopsApp.id, generationId, gitopsEnv);
                 else tx.candidateReady(gitopsApp.id, generationId, false, gitopsEnv);
+                })();
+                gitops.markSettled();
             });
+            // The pull itself succeeded; the files and the pending blob are
+            // real. Closing the operation is what stops the source reporting a
+            // fetch in flight for ever and locking out every later pull.
+            if (!outcomeRecorded) gitops.abandon();
         }
 
         const publicPlan = plan ? GitChangePlanService.getInstance().toPublic(plan) : null;
@@ -2218,7 +2298,21 @@ export class GitSourceService {
         // there is nothing to accept, so the acceptance below is skipped rather
         // than inventing a generation from the pending blob.
         const gitopsApp = this.gitopsApplicationFor(stackName);
-        const gitopsGenerationId = gitopsApp?.candidate_generation_id ?? null;
+        // The candidate must be the generation built from the commit being
+        // applied. Without this check a candidate left behind by a swallowed
+        // fetch outcome would be accepted for files from a different commit,
+        // and the projection would confidently report the wrong one.
+        const candidateId = gitopsApp?.candidate_generation_id ?? null;
+        const candidateGeneration = candidateId
+            ? GitOpsStore.getInstance().getGeneration(candidateId)
+            : undefined;
+        const gitopsGenerationId = candidateGeneration?.commit_sha === commitSha ? candidateId : null;
+        if (candidateId && !gitopsGenerationId) {
+            console.warn(
+                '[GitOps] Skipping acceptance for %s: the recorded candidate is not built from %s',
+                sanitizeForLog(stackName), sanitizeForLog(commitSha.slice(0, 7)),
+            );
+        }
         const gitopsEnv = this.gitopsEnvelope(pending.operationId, actor, 'apply');
         if (gitopsApp && gitopsGenerationId) {
             this.recordGitOps(stackName, 'apply start', () => {
@@ -2492,7 +2586,7 @@ export class GitSourceService {
         // The files are on disk and the source row now points at this commit,
         // so this is where the generation becomes the accepted one.
         if (gitopsApp && gitopsGenerationId) {
-            this.recordGitOps(stackName, 'acceptance', () => {
+            const recorded = this.recordGitOps(stackName, 'acceptance', () => {
                 GitOpsTransitions.getInstance().applied({
                     applicationId: gitopsApp.id,
                     generationId: gitopsGenerationId,
@@ -2501,8 +2595,11 @@ export class GitSourceService {
                     authority: actor === 'system:webhook' ? 'configured_policy' : 'operator',
                     envelope: gitopsEnv,
                 });
-                started.settled = true;
             });
+            started.settled = true;
+            // The files are on disk either way. What we can still control is
+            // not leaving the operation open when the acceptance was rejected.
+            if (!recorded) this.abandonGitOpsOperation(stackName, gitopsApp.id, gitopsEnv);
         }
 
         const shouldDeploy = opts.deploy ?? src.auto_deploy_on_apply;
