@@ -1,9 +1,10 @@
 /**
  * Route-layer tests for the git-source API.
  *
- * Covers input-validation and guard behavior that lives in the Express
- * handlers (not in GitSourceService), specifically:
- *   - HTTPS-only repo URL enforcement
+ * Covers input-validation and guard behavior reachable through the Express
+ * handlers (the URL rules themselves live in services/gitops/repoIdentity.ts,
+ * not in GitSourceService), specifically:
+ *   - HTTPS-only repo URL enforcement, including userinfo/query/fragment rejection
  *   - Max-length caps on repo_url / branch / compose_path / env_path / token
  *   - Stack-existence 404 guard on PUT
  *   - 400 on invalid stack names
@@ -93,6 +94,27 @@ describe('PUT /api/stacks/:stackName/git-source — URL validation', () => {
         expect(res.body.error).toMatch(/HTTPS/i);
     });
 
+    it('rejects repo URLs with userinfo, query, or fragment', async () => {
+        const cases = [
+            { repo_url: 'https://user:pass@github.com/example/repo.git', error: /userinfo/i },
+            { repo_url: 'https://github.com/example/repo.git?token=1', error: /query/i },
+            { repo_url: 'https://github.com/example/repo.git#head', error: /fragment/i },
+        ];
+        for (const c of cases) {
+            const res = await request(app)
+                .put('/api/stacks/existing-stack/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({
+                    repo_url: c.repo_url,
+                    branch: 'main',
+                    compose_path: 'compose.yaml',
+                    auth_type: 'none',
+                });
+            expect(res.status).toBe(400);
+            expect(res.body.error).toMatch(c.error);
+        }
+    });
+
     it('rejects missing repo_url with 400', async () => {
         const res = await request(app)
             .put('/api/stacks/existing-stack/git-source')
@@ -104,6 +126,28 @@ describe('PUT /api/stacks/:stackName/git-source — URL validation', () => {
             });
         expect(res.status).toBe(400);
         expect(res.body.error).toMatch(/repo_url/i);
+    });
+});
+
+describe('POST /api/git-sources/browse: URL validation', () => {
+    it('rejects non-HTTPS, userinfo, query, and fragment URLs before cloning', async () => {
+        const listRepoTree = vi.spyOn(GitSourceService.getInstance(), 'listRepoTree');
+        const cases = [
+            { repo_url: 'http://github.com/example/repo.git', error: /HTTPS/i },
+            { repo_url: 'https://user:pass@github.com/example/repo.git', error: /userinfo/i },
+            { repo_url: 'https://github.com/example/repo.git?token=1', error: /query/i },
+            { repo_url: 'https://github.com/example/repo.git#head', error: /fragment/i },
+        ];
+        for (const c of cases) {
+            const res = await request(app)
+                .post('/api/git-sources/browse')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ repo_url: c.repo_url, branch: 'main', auth_type: 'none' });
+            expect(res.status).toBe(400);
+            expect(res.body.error).toMatch(c.error);
+        }
+        expect(listRepoTree).not.toHaveBeenCalled();
+        listRepoTree.mockRestore();
     });
 });
 
@@ -477,6 +521,15 @@ describe('POST /api/stacks/from-git', () => {
             .send({ ...validBody, repo_url: 'http://github.com/example/repo.git' });
         expect(res.status).toBe(400);
         expect(res.body.error).toMatch(/HTTPS/i);
+    });
+
+    it('rejects repo URLs with userinfo, query, or fragment', async () => {
+        const res = await request(app)
+            .post('/api/stacks/from-git')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ ...validBody, repo_url: 'https://github.com/example/repo.git?token=1' });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/query/i);
     });
 
     it('rejects oversized repo_url with 400', async () => {

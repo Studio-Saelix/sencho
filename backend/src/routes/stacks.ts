@@ -23,6 +23,7 @@ import {
   buildDetectionDisabledPreview,
 } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
+import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
@@ -1110,11 +1111,9 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'auto_deploy_on_apply must be a boolean' });
     }
     const resolvedAuthType = auth_type === 'token' ? 'token' : 'none';
-    if (!/^https:\/\//i.test(repo_url)) {
-      return res.status(400).json({ error: 'Only HTTPS repository URLs are supported' });
-    }
-    if (repo_url.length > 2048) {
-      return res.status(400).json({ error: 'repo_url is too long' });
+    const repoUrlError = repoUrlRejectionMessage(repo_url);
+    if (repoUrlError) {
+      return res.status(400).json({ error: repoUrlError });
     }
     if (branch.length > 256) {
       return res.status(400).json({ error: 'branch is too long' });

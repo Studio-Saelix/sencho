@@ -257,4 +257,33 @@ describe('hubOnlyGuard', () => {
 
     expect(res.body?.code).not.toBe('HUB_ONLY_ENDPOINT');
   });
+
+  it('rejects /api/blueprints with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/blueprints')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects /api/node-labels with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/node-labels')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('does not treat /api/git-sources as hub-only', async () => {
+    const res = await request(app)
+      .get('/api/git-sources')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.body?.code).not.toBe('HUB_ONLY_ENDPOINT');
+  });
 });

@@ -38,6 +38,11 @@ import { assessGenerationEligibility } from './rollbackEligibility';
 import { enforcePolicyForImageRefs, type PolicyEnforcementOptions } from './PolicyEnforcement';
 import { describePolicyBlock } from '../helpers/policyGate';
 import type { GitSourceAppliedSpec } from './DatabaseService';
+import {
+    captureGitOpsRecoveryBinding,
+    EMPTY_GITOPS_RECOVERY_CAPTURE,
+    type GitOpsRecoveryCapture,
+} from './gitops/recoveryCapture';
 import type { GitSourceManifestState } from '../types/gitProjectManifest';
 import type {
   RollbackGenerationManifest,
@@ -568,6 +573,7 @@ export class StackUpdateRecoveryService {
         artifacts_retired: 0,
         released_at: null,
         released_by: null,
+        ...this.captureGitOpsBindingOrEmpty(stackName, nodeId),
       };
       DatabaseService.getInstance().insertStackUpdateRecoveryGeneration(row);
       return row;
@@ -589,6 +595,29 @@ export class StackUpdateRecoveryService {
         );
       }
       throw error;
+    }
+  }
+
+  /**
+   * Read the GitOps binding for this recovery point, degrading to no binding
+   * if that lookup fails.
+   *
+   * These three columns are advisory: they let a later restore rebind the
+   * generation, artifact, and acceptance pointers instead of guessing. Rollback
+   * protection itself does not depend on them, so a failure here must not abort
+   * the capture and block the update it protects. The failure is logged rather
+   * than swallowed, and the degraded shape is the same one legacy rows carry.
+   */
+  private captureGitOpsBindingOrEmpty(stackName: string, nodeId: number): GitOpsRecoveryCapture {
+    try {
+      return captureGitOpsRecoveryBinding(stackName, nodeId);
+    } catch (error) {
+      console.warn(
+        '[StackUpdateRecovery] Could not capture the GitOps binding for %s; recovery point stored without it: %s',
+        sanitizeForLog(stackName),
+        sanitizeForLog(getErrorMessage(error, 'unknown')),
+      );
+      return { ...EMPTY_GITOPS_RECOVERY_CAPTURE };
     }
   }
 

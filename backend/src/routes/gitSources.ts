@@ -11,10 +11,10 @@ import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelec
 import { isValidGitSourcePath, isValidStackName } from '../utils/validation';
 import { sendGitSourceError, webhookPullStatus } from '../utils/gitSourceHttp';
 import { sanitizeForLog } from '../utils/safeLog';
+import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 
 // Reasonable upper bounds so a caller cannot flood the service with huge
 // payloads. Generous compared to anything a real Git provider emits.
-const MAX_REPO_URL_LENGTH = 2048;
 const MAX_BRANCH_LENGTH = 256;
 const MAX_ENV_PATH_LENGTH = 1024;
 const MAX_TOKEN_LENGTH = 8192;
@@ -35,12 +35,9 @@ async function handleBrowse(req: Request, res: Response, storedToken: string | n
     res.status(400).json({ error: 'branch is required' });
     return;
   }
-  if (!/^https:\/\//i.test(repo_url)) {
-    res.status(400).json({ error: 'Only HTTPS repository URLs are supported' });
-    return;
-  }
-  if (repo_url.length > MAX_REPO_URL_LENGTH) {
-    res.status(400).json({ error: 'repo_url is too long' });
+  const repoUrlError = repoUrlRejectionMessage(repo_url);
+  if (repoUrlError) {
+    res.status(400).json({ error: repoUrlError });
     return;
   }
   if (branch.length > MAX_BRANCH_LENGTH) {
@@ -181,12 +178,9 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       res.status(400).json({ error: 'auto_deploy_on_apply must be a boolean' });
       return;
     }
-    if (!/^https:\/\//i.test(repo_url)) {
-      res.status(400).json({ error: 'Only HTTPS repository URLs are supported' });
-      return;
-    }
-    if (repo_url.length > MAX_REPO_URL_LENGTH) {
-      res.status(400).json({ error: 'repo_url is too long' });
+    const repoUrlError = repoUrlRejectionMessage(repo_url);
+    if (repoUrlError) {
+      res.status(400).json({ error: repoUrlError });
       return;
     }
     if (branch.length > MAX_BRANCH_LENGTH) {

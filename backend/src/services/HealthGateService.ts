@@ -79,7 +79,7 @@ interface ActiveGate {
   /** 'stack' for the legacy post-mutation gate, 'service' for prepared gates. */
   targetScope: 'stack' | 'service';
   /** Named trigger persisted on the row. */
-  trigger: 'update' | 'deploy' | 'service_update' | 'service_restore';
+  trigger: 'update' | 'deploy' | 'service_update' | 'service_restore' | 'recovery';
   /** Service gates only. */
   serviceName: string | null;
   /** Single image id every primary replica must converge on (service gates). */
