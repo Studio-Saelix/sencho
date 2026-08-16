@@ -13,6 +13,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import {
+  appliedRelPathFor,
   candidateRelPathForSha,
   deleteStagingMarker,
   readStagingMarker,
@@ -183,6 +184,14 @@ describe('gitops create staging marker', () => {
   function areaFor(name: string): string {
     return path.join(root, name);
   }
+
+  it('derives generation paths without depending on import order', () => {
+    // These were briefly built from a constant imported across a module cycle,
+    // which evaluated as undefined and produced `undefined/candidate-<sha>`:
+    // a path that passes containment, names nothing, and makes cleanup a no-op.
+    expect(candidateRelPathForSha('abc123')).toBe('generations/candidate-abc123');
+    expect(appliedRelPathFor('abc123', 2)).toBe('generations/applied-abc123-2');
+  });
 
   it('round-trips a valid marker and refuses a foreign live marker', async () => {
     const area = areaFor('round-trip');

@@ -42,8 +42,17 @@ export async function removeOperationOwnedPaths(input: OperationOwnedCleanup): P
   for (const relPath of [input.candidateRelPath, input.appliedRelPath ?? null]) {
     if (!relPath) continue;
     const resolved = path.resolve(base, relPath);
-    if (!isPathWithinBase(resolved, base)) {
+    // A strict descendant, not merely "within": `.` and `./` resolve to the
+    // base itself, and containment alone would let them wipe the whole managed
+    // root on the branch whose entire purpose is to protect it.
+    if (resolved === base || !isPathWithinBase(resolved, base)) {
       throw new Error('refusing to remove a path outside the managed root');
+    }
+    // Paths that arrive from a persisted row get the same shape check as
+    // marker paths, so a malformed generation row cannot widen the blast
+    // radius to a whole generations directory.
+    if (!/^(generations)[\\/](candidate|applied)-/.test(relPath)) {
+      throw new Error(`refusing to remove a path that is not a generation directory: ${relPath}`);
     }
     await fs.rm(resolved, { recursive: true, force: true });
   }

@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import path from 'path';
 import { NodeRegistry } from '../NodeRegistry';
-import { MANAGED_ROOT_NAME } from '../GitProjectManifestService';
+import { MANAGED_ROOT_NAME } from './managedPaths';
 import { encodeGitOpsJson } from './json';
 import { materializationFingerprint } from './fingerprint';
 import { parseHttpsRepoUrl, secretFreeRepoUrl, serializeRepoIdentity, type RepoIdentity } from './repoIdentity';

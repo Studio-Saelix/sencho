@@ -1,7 +1,8 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { DatabaseService } from '../DatabaseService';
+import { DatabaseService, type GitSourceAppliedSpec } from '../DatabaseService';
 import { FileSystemService } from '../FileSystemService';
+import { GitProjectManifestService } from '../GitProjectManifestService';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { removeOperationOwnedPaths } from './createCleanup';
 import { deleteStagingMarker } from './createStagingMarker';
@@ -33,16 +34,25 @@ function envelopeFor(checkpoint: GitOpsCreateCheckpointRow) {
   };
 }
 
-async function stackDirExists(stackName: string): Promise<boolean> {
+/**
+ * Three states, because the two callers need opposite fail-safe directions.
+ *
+ * Teardown must not treat "cannot tell" as absent, or it would skip a directory
+ * that is really there. Completion must not treat it as present, or it would
+ * mark a create live on the strength of a failed stat.
+ */
+async function stackDirState(stackName: string): Promise<'present' | 'absent' | 'unknown'> {
   try {
     const base = FileSystemService.getInstance().getBaseDir();
     await fs.stat(path.join(base, stackName));
-    return true;
+    return 'present';
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    // Any other error means we cannot prove the directory is gone, and
-    // deleting on uncertainty is what this whole path exists to avoid.
-    return true;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'absent';
+    console.warn(
+      `[GitOps] Cannot determine whether stack ${sanitizeForLog(stackName)} exists on disk:`,
+      error instanceof Error ? error.message : String(error),
+    );
+    return 'unknown';
   }
 }
 
@@ -69,7 +79,7 @@ export async function resolveInterruptedCreates(): Promise<CreateRecoveryResult[
     } catch (error) {
       console.error(
         `[GitOps] Could not settle the interrupted create for ${sanitizeForLog(checkpoint.stack_name)}; retrying next boot:`,
-        error instanceof Error ? error.message : String(error),
+        error instanceof Error ? error.stack ?? error.message : String(error),
       );
       results.push({
         stackName: checkpoint.stack_name,
@@ -86,18 +96,30 @@ export async function resolveInterruptedCreates(): Promise<CreateRecoveryResult[
   for (const app of store.listCreatingDirectApplications()) {
     if (store.getCreateCheckpoint(app.id)) continue;
     const stackName = app.stack_name ?? '';
-    const sourceRow = stackName ? db.getGitSource(stackName) : null;
-    GitOpsTransitions.getInstance().createFailed(app.id, 'create_checkpoint_missing', {
-      operationId: app.latest_operation_id ?? newGitOpsId(),
-      actor: 'system:startup',
-      trigger: 'create_recovery',
-      at: Date.now(),
-    });
-    results.push({
-      stackName,
-      applicationId: app.id,
-      outcome: sourceRow ? 'source_preserved' : 'tombstoned',
-    });
+    // Guarded per row for the same reason as the loop above: one application
+    // that cannot be tombstoned must not strand the rest. A creating row that
+    // survives keeps matching the live-application lookup, so every later
+    // create for that name would fail until it is cleared.
+    try {
+      const sourceRow = stackName ? db.getGitSource(stackName) : null;
+      GitOpsTransitions.getInstance().createFailed(app.id, 'create_checkpoint_missing', {
+        operationId: app.latest_operation_id ?? newGitOpsId(),
+        actor: 'system:startup',
+        trigger: 'create_recovery',
+        at: Date.now(),
+      });
+      results.push({
+        stackName,
+        applicationId: app.id,
+        outcome: sourceRow ? 'source_preserved' : 'tombstoned',
+      });
+    } catch (error) {
+      console.error(
+        `[GitOps] Could not tombstone the checkpointless create for ${sanitizeForLog(stackName)}; retrying next boot:`,
+        error instanceof Error ? error.stack ?? error.message : String(error),
+      );
+      results.push({ stackName, applicationId: app.id, outcome: 'retained' });
+    }
   }
 
   return results;
@@ -127,8 +149,18 @@ async function resolveOne(checkpoint: GitOpsCreateCheckpointRow): Promise<Create
   // The manifest is committed on disk, so the authored project the operator
   // asked for exists. Finish the create rather than destroying it: this is the
   // same source-row plus acceptance commit the live path performs.
-  if (checkpoint.phase === 'manifest_committed' && checkpoint.generation_id && await stackDirExists(stackName)) {
+  if (
+    checkpoint.phase === 'manifest_committed'
+    && checkpoint.generation_id
+    && await stackDirState(stackName) === 'present'
+  ) {
     const generationId = checkpoint.generation_id;
+    const appliedSpec = checkpoint.applied_spec_json
+      ? JSON.parse(checkpoint.applied_spec_json) as GitSourceAppliedSpec
+      : null;
+    const manifest = await GitProjectManifestService.getInstance().readManifest(
+      stackName, checkpoint.repo_url, checkpoint.branch,
+    );
     db.getDb().transaction(() => {
       if (!db.getGitSource(stackName)) {
         db.upsertGitSource({
@@ -158,6 +190,19 @@ async function resolveOne(checkpoint: GitOpsCreateCheckpointRow): Promise<Create
       // bytes that produced it belonged to the process that crashed; the first
       // pull after recovery re-establishes it.
       db.markGitSourceApplied(stackName, checkpoint.commit_sha ?? '', '');
+      // The live path also stamps the deploy spec and the manifest cache. Both
+      // are load-bearing: a null spec silently reverts a multi-file stack to
+      // single-file auto-discovery, and an unset manifest state makes a managed
+      // stack render as unmanaged and suppresses its rollback disclosure.
+      if (appliedSpec) db.setGitSourceAppliedSpec(stackName, appliedSpec);
+      if (manifest && 'manifestVersion' in manifest) {
+        db.setGitSourceManifestState(
+          stackName,
+          manifest.manifestVersion,
+          manifest.state,
+          manifest.generation.appliedDir,
+        );
+      }
       GitOpsTransitions.getInstance().applied({
         applicationId: checkpoint.application_id,
         generationId,
@@ -178,7 +223,19 @@ async function resolveOne(checkpoint: GitOpsCreateCheckpointRow): Promise<Create
   // this operation put on disk, then record the failure. Filesystem first: if it
   // throws, the checkpoint survives and the next boot retries.
   const generation = checkpoint.generation_id ? store.getGeneration(checkpoint.generation_id) : undefined;
-  if (await stackDirExists(stackName)) {
+  // `pre_stack` is durable proof that createStack had not returned, so a
+  // directory present now was not necessarily made by this operation. It could
+  // be the operator's own stack that appeared while the create was fetching.
+  // Removing it on that evidence is the one mistake this path cannot take back,
+  // so an orphaned directory is left behind instead.
+  const stackDir = await stackDirState(stackName);
+  if (checkpoint.phase === 'pre_stack') {
+    if (stackDir === 'present') {
+      console.warn(
+        `[GitOps] Leaving the directory for ${sanitizeForLog(stackName)} in place: the interrupted create never recorded creating it.`,
+      );
+    }
+  } else if (stackDir === 'present') {
     await FileSystemService.getInstance().deleteStack(stackName);
   }
   await removeOperationOwnedPaths({

@@ -30,6 +30,7 @@ import { PilotMetrics } from '../services/PilotMetrics';
 import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { sweepStaleTempDirs as sweepStaleGitTempDirs, sweepGitManifestOrphans } from '../services/GitSourceService';
 import { resolveInterruptedCreates } from '../services/gitops/createRecovery';
+import { sanitizeForLog } from '../utils/safeLog';
 import { PORT } from '../helpers/constants';
 import { LOW_MEMORY_FLOOR_BYTES } from '../utils/spawnErrors';
 
@@ -157,24 +158,26 @@ export async function startServer(server: Server): Promise<void> {
   }
   StackUpdateRecoveryService.getInstance().start();
 
-  // The managed-area sweep is awaited here, ahead of every mutation service,
-  // because it is what settles a create that was interrupted mid-flight. A
-  // scheduler or webhook that fired first could otherwise act on a stack whose
-  // ownership is still undecided. A failure is logged rather than fatal: the
-  // sweep is conservative by construction and preserves anything it cannot
-  // prove it owns, so retrying on the next boot is safe.
+  // Interrupted creates are settled here, ahead of every mutation service,
+  // because a scheduler or webhook that fired first could act on a stack whose
+  // ownership is still undecided. Each create is settled independently and a
+  // failure leaves that one checkpoint for the next boot, so a single bad row
+  // does not block startup.
   try {
     const settled = await resolveInterruptedCreates();
     for (const entry of settled) {
-      console.log(`[GitOps] Interrupted create for ${entry.stackName}: ${entry.outcome}`);
+      console.log(`[GitOps] Interrupted create for ${sanitizeForLog(entry.stackName)}: ${entry.outcome}`);
     }
   } catch (err) {
-    console.warn('[GitOps] Interrupted-create recovery failed:', (err as Error).message);
+    console.error('[GitOps] Interrupted-create recovery failed:', err instanceof Error ? err.stack ?? err.message : String(err));
   }
+  // The managed-area sweep follows. It preserves anything whose ownership it
+  // cannot prove, so a failure here can only leave files behind, never remove
+  // the wrong ones, and retrying next boot is safe.
   try {
     await sweepGitManifestOrphans();
   } catch (err) {
-    console.warn('[GitManifest] Managed-area sweep failed:', (err as Error).message);
+    console.warn('[GitManifest] Managed-area sweep failed:', err instanceof Error ? err.message : String(err));
   }
 
   // Synchronous starts: schedule background timers and continue. None of

@@ -1,7 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { isPathWithinBase } from '../../utils/validation';
-import { GENERATIONS_DIR } from '../GitProjectManifestService';
+import { GENERATIONS_DIR } from './managedPaths';
 
 export const CREATE_STAGING_MARKER_FILENAME = '.create-staging.v1.json';
 
@@ -33,6 +33,20 @@ export type ReadStagingMarkerResult =
  */
 export function candidateRelPathForSha(commitSha: string): string {
   return `${CANDIDATE_PREFIX}${commitSha}`;
+}
+
+/**
+ * The applied directory promotion will move this candidate into.
+ *
+ * Computed here rather than read from the manifest because the generation row
+ * is written before promotion runs, and the manifest carries an empty applied
+ * path until then. Storing that empty value would make "not promoted yet"
+ * indistinguishable from "nothing to clean up" during teardown.
+ *
+ * Must stay in step with the promotion path in GitProjectManifestService.
+ */
+export function appliedRelPathFor(commitSha: string, manifestVersion: number): string {
+  return `${GENERATIONS_DIR}/applied-${commitSha}-${manifestVersion}`;
 }
 
 function isSafeRelPath(value: unknown): value is string {

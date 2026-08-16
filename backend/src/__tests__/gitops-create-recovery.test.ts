@@ -63,6 +63,22 @@ describe('gitops interrupted create recovery', () => {
     expect(fs.existsSync(managedRoot)).toBe(false);
   });
 
+  it('leaves a stack directory alone when the create never recorded making it', async () => {
+    // pre_stack is durable proof that createStack had not returned, so a
+    // directory present now may be the operator's own. Deleting it is the one
+    // mistake recovery cannot take back.
+    seedCreate('app-notours', 'notours-web', 'pre_stack');
+    const composeDir = process.env.COMPOSE_DIR!;
+    const stackDir = path.join(composeDir, 'notours-web');
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services: {}\n');
+
+    const settled = await resolveInterruptedCreates();
+
+    expect(settled[0].outcome).toBe('tombstoned');
+    expect(fs.existsSync(path.join(stackDir, 'compose.yaml'))).toBe(true);
+  });
+
   it('removes the stack directory a crashed create had already made', async () => {
     seedCreate('app-mid', 'mid-web', 'stack_created');
     const composeDir = process.env.COMPOSE_DIR!;

@@ -38,7 +38,7 @@ import {
     newGitOpsId,
     stackManagedRoot,
 } from './gitops/directApplication';
-import { candidateRelPathForSha, deleteStagingMarker, readStagingMarker, writeStagingMarker } from './gitops/createStagingMarker';
+import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readStagingMarker, writeStagingMarker } from './gitops/createStagingMarker';
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops/createCleanup';
 import type { GitHttpRequest, GitHttpResponse, HttpClient } from 'isomorphic-git/http/node';
 
@@ -2413,31 +2413,41 @@ export class GitSourceService {
             //    the complete-project candidate inside the clone lifecycle.
             const manifestSvc = GitProjectManifestService.getInstance();
             const materialization: { value: MaterializationResult | null } = { value: null };
-            const fetched = await this.fetchFromGit({
-                repoUrl: input.repoUrl,
-                branch: input.branch,
-                composePaths: input.composePaths,
-                envPath: input.syncEnv ? input.envPath : null,
-                token: input.token,
-                onClone: async (cloneDir, commitSha, envContent) => {
-                    // The candidate path is recorded before the build that
-                    // creates it, so a crash mid-build still names exactly one
-                    // directory this operation owns.
-                    staged.candidateRelPath = candidateRelPathForSha(commitSha);
-                    await writeStagingMarker(managedRoot, {
-                        schemaVersion: 1,
-                        operationId: gitopsOperationId,
-                        rootPreexisted,
-                        candidateRelPath: staged.candidateRelPath,
-                        createdAt: Date.now(),
-                    });
-                    materialization.value = await this.buildMaterialization(input.stackName, cloneDir, commitSha, {
-                        compose_paths: input.composePaths,
-                        context_dir: input.contextDir,
-                        sync_env: input.syncEnv,
-                    }, envContent);
-                },
-            });
+            let fetched: FetchResult;
+            try {
+                fetched = await this.fetchFromGit({
+                    repoUrl: input.repoUrl,
+                    branch: input.branch,
+                    composePaths: input.composePaths,
+                    envPath: input.syncEnv ? input.envPath : null,
+                    token: input.token,
+                    onClone: async (cloneDir, commitSha, envContent) => {
+                        // The candidate path is recorded before the build that
+                        // creates it, so a crash mid-build still names exactly one
+                        // directory this operation owns.
+                        staged.candidateRelPath = candidateRelPathForSha(commitSha);
+                        await writeStagingMarker(managedRoot, {
+                            schemaVersion: 1,
+                            operationId: gitopsOperationId,
+                            rootPreexisted,
+                            candidateRelPath: staged.candidateRelPath,
+                            createdAt: Date.now(),
+                        });
+                        materialization.value = await this.buildMaterialization(input.stackName, cloneDir, commitSha, {
+                            compose_paths: input.composePaths,
+                            context_dir: input.contextDir,
+                            sync_env: input.syncEnv,
+                        }, envContent);
+                    },
+                });
+            } catch (e) {
+                // Materialization refuses routinely, not just on crashes. The
+                // marker has to come off with the staged files, or it would
+                // claim this managed area against every later attempt and make
+                // the stack name uncreatable until the next restart.
+                await this.cleanupStagedCreate(managedRoot, staged.candidateRelPath, rootPreexisted);
+                throw e;
+            }
 
             // 2. Validate against the same `docker compose config` check the
             //    apply path uses. Reject before creating anything on disk.
@@ -2593,7 +2603,7 @@ export class GitSourceService {
                             identity: gitopsIdentity,
                             configuredRef: input.branch,
                             candidateRelPath: staged.candidateRelPath,
-                            appliedRelPath: completeProjectManifest.generation.appliedDir,
+                            appliedRelPath: appliedRelPathFor(fetched.commitSha, completeProjectManifest.manifestVersion),
                             manifestVersion: completeProjectManifest.manifestVersion,
                             expectedInvocation: completeProjectManifest.project.invocation,
                             changePlanFingerprint: recordedCreatePlan?.fingerprint ?? null,
@@ -2731,6 +2741,12 @@ export class GitSourceService {
                 });
                 commitCreate();
                 gitopsCommitted = true;
+                // The checkpoint has done its job. Dropping it here keeps the
+                // boot sweep reporting only genuine interruptions, and stops a
+                // copy of the encrypted token living past the create.
+                if (gitopsApplicationId) {
+                    GitOpsStore.getInstance().deleteCreateCheckpoint(gitopsApplicationId);
+                }
 
                 rowInserted = true;
                 const operationId = crypto.randomUUID();
@@ -2766,11 +2782,26 @@ export class GitSourceService {
                 // operator. A later error is reported, never compensated: the
                 // leftover marker or checkpoint is finished by the boot sweep.
                 if (gitopsCommitted) {
+                    const detail = e instanceof Error ? e.message : String(e);
                     console.error(
                         `[GitSource] Create for ${sanitizeForLog(input.stackName)} succeeded but a later step failed:`,
-                        e instanceof Error ? e.message : String(e),
+                        detail,
                     );
-                    throw e;
+                    this.recordGitActivity(
+                        input.stackName,
+                        'git_create',
+                        `Git create for ${input.stackName} completed, but a follow-up step failed: ${detail}`,
+                        'system:git-source',
+                        'warning',
+                    );
+                    // Say plainly that the stack exists. The raw downstream
+                    // error reads as a failed create, and an operator acting on
+                    // it retries and hits "stack already exists", which looks
+                    // like corruption rather than success.
+                    throw new GitSourceError(
+                        'GIT_ERROR',
+                        `The stack was created from Git, but a follow-up step failed: ${detail}`,
+                    );
                 }
                 // Roll back any partial on-disk state so the caller can retry
                 // cleanly. The DB row is only inserted at step 4, so an error
@@ -2787,7 +2818,10 @@ export class GitSourceService {
                 // for a non-existence reason) must never lose its previous
                 // applied generations to someone else's rollback: when the stack
                 // dir was NOT created by us, remove only the candidate we staged.
-                if (stackCreated) {
+                if (stackCreated && !rootPreexisted) {
+                    // Only legal because this operation created the managed
+                    // root. A root that predated the create holds retained
+                    // generations of its own and is cleaned path by path below.
                     await GitProjectManifestService.getInstance().deleteManagedArea(input.stackName);
                 } else if (materialization.value) {
                     const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -2985,8 +3019,9 @@ export class GitSourceService {
             try {
                 const marker = await readStagingMarker(area);
                 if (marker.state !== 'valid') {
+                    const why = marker.state === 'missing' ? 'no staging marker' : `marker unusable (${marker.reason})`;
                     console.warn(
-                        `[GitManifest] preserving unclaimed managed area ${sanitizeForLog(entry.name)}: no valid staging marker to prove ownership`,
+                        `[GitManifest] preserving unclaimed managed area ${sanitizeForLog(entry.name)}: ${why}, so ownership is unproven`,
                     );
                     continue;
                 }
