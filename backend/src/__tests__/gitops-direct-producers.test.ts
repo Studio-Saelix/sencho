@@ -403,6 +403,42 @@ describe('Direct Git producers drive the revision state', () => {
     expect(projection.availableActions).not.toContain('apply');
   });
 
+  it('retires the application when the stack itself is deleted', async () => {
+    const { DeployedStackDeletionService } = await import('../services/DeployedStackDeletionService');
+    const svc = GitSourceService.getInstance();
+    const store = GitOpsStore.getInstance();
+    const stackName = 'producers-delete';
+
+    stageRepo(COMPOSE, '55555555');
+    await svc.createStackFromGit({
+      stackName,
+      repoUrl: REPO,
+      branch: 'main',
+      composePaths: ['compose.yaml'],
+      contextDir: null,
+      syncEnv: false,
+      envPath: null,
+      authType: 'none',
+      token: null,
+      autoApplyOnWebhook: false,
+      autoDeployOnApply: false,
+    });
+    const app = store.getLiveDirectApplication(stackName)!;
+
+    await DeployedStackDeletionService.getInstance().deleteDeployedStack({
+      nodeId: 1,
+      stackName,
+      pruneVolumes: false,
+      actor: 'tester',
+    });
+
+    // A deleted stack must not leave a live application behind: it would keep
+    // claiming the name and block re-creating it.
+    expect(store.getLiveDirectApplication(stackName)).toBeUndefined();
+    expect(store.getApplication(app.id)?.lifecycle_status).toBe('deleted');
+    expect(store.getTarget(app.id, 1)?.target_status).toBe('tombstoned');
+  });
+
   it('leaves a stack with no GitOps application untouched', async () => {
     const svc = GitSourceService.getInstance();
     const store = GitOpsStore.getInstance();

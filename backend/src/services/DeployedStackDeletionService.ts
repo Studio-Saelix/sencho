@@ -28,6 +28,8 @@ import {
   BLUEPRINT_MARKER_FILENAME,
   parseBlueprintMarker,
 } from '../helpers/blueprintMarker';
+import { GitOpsStore } from './gitops/store';
+import { GitOpsTransitions } from './gitops/transitions';
 import { scrapeRollbackTagsLenient } from './recoveryServicesJson';
 
 /**
@@ -329,6 +331,37 @@ export class DeployedStackDeletionService {
   }
 
   /** Ready transaction, secondary DB/RBAC cleanup, mesh opt-out, sweep, invalidate. */
+  /**
+   * Commit the deletion and retire the stack's GitOps application together.
+   *
+   * One transaction, because a deleted stack with a live application would keep
+   * claiming a stack name that no longer exists, and would block re-creating it
+   * through the unique live-application index. The tombstone is driven from
+   * here rather than from inside DatabaseService so the store keeps its
+   * transitions, and its history, in one place.
+   */
+  private commitDeletionReady(intentId: string, nodeId: number, stackName: string): boolean {
+    const db = DatabaseService.getInstance();
+    return db.getDb().transaction(() => {
+      if (!db.commitStackDeletionReadyTransaction(intentId, nodeId, stackName)) return false;
+      const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+      if (!app) return true;
+      const tx = GitOpsTransitions.getInstance();
+      const envelope = {
+        operationId: intentId,
+        actor: 'system:stack-deletion',
+        trigger: 'delete',
+        at: Date.now(),
+      };
+      for (const target of GitOpsStore.getInstance().listTargets(app.id)) {
+        if (target.target_status !== 'active') continue;
+        tx.targetTombstoned(app.id, target.node_id, envelope);
+      }
+      tx.applicationTombstoned(app.id, 'deleted', envelope);
+      return true;
+    })();
+  }
+
   private async finalizeLogicalDeletion(
     input: DeleteDeployedStackInput,
     intentId: string,
@@ -336,7 +369,7 @@ export class DeployedStackDeletionService {
     const { nodeId, stackName } = input;
     const db = DatabaseService.getInstance();
 
-    if (!db.commitStackDeletionReadyTransaction(intentId, nodeId, stackName)) {
+    if (!this.commitDeletionReady(intentId, nodeId, stackName)) {
       return {
         ok: false,
         code: 'db_failed',
@@ -585,7 +618,7 @@ export class DeployedStackDeletionService {
       }
 
       if (!dirExists) {
-        if (!db.commitStackDeletionReadyTransaction(intent.id, nodeId, stackName)) {
+        if (!this.commitDeletionReady(intent.id, nodeId, stackName)) {
           console.warn(
             '[DeployedStackDeletion] Startup ready commit failed for %s/%s',
             nodeId,
