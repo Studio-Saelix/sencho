@@ -24,6 +24,9 @@ import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/au
 import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
+import { randomUUID } from 'crypto';
+import { GitOpsStore } from './gitops/store';
+import { GitOpsTransitions } from './gitops/transitions';
 import { pathsMatch, resolveHostBindPath } from '../utils/composePathMapping';
 import { loadStackBuildServices } from './ImageUpdateService';
 import { resolveMissingExternalNetworks } from './network/resolveMissingExternalNetworks';
@@ -659,6 +662,50 @@ export class ComposeService {
     recordCreatedNetworks('info');
   }
 
+  /**
+   * Open a GitOps deploy operation for this stack, or nothing when there is no
+   * generation to bind.
+   *
+   * Returns closures rather than ids so the caller cannot terminate an
+   * operation it never started. A stack with no live application, or one whose
+   * target has nothing applied, has no deploy identity to record, so the whole
+   * thing is a no-op. Recording never fails the deploy: the store describes
+   * what happened, it does not make it happen.
+   */
+  private beginGitOpsDeploy(stackName: string): { bound: () => void; failed: (failureClass: 'pre_mutation' | 'post_mutation') => void } | null {
+    try {
+      const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+      if (!app || app.lifecycle_status !== 'active') return null;
+      const target = GitOpsStore.getInstance().getTarget(app.id, this.nodeId);
+      const generationId = target?.applied_generation_id;
+      if (!target || target.target_status !== 'active' || !generationId) return null;
+
+      const tx = GitOpsTransitions.getInstance();
+      const envelope = { operationId: randomUUID(), actor: 'system:compose', trigger: 'deploy', at: Date.now() };
+      const record = (what: string, write: () => void): void => {
+        try {
+          write();
+        } catch (error) {
+          console.error(
+            `[GitOps] Could not record deploy ${what} for ${sanitizeForLog(stackName)}:`,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      };
+      record('start', () => tx.deployStarted(app.id, this.nodeId, generationId, envelope));
+      return {
+        bound: () => record('binding', () => tx.deployBound(app.id, this.nodeId, generationId, envelope)),
+        failed: (failureClass) => record('failure', () => tx.deployFailed(app.id, this.nodeId, failureClass, envelope)),
+      };
+    } catch (error) {
+      console.error(
+        `[GitOps] Could not open a deploy operation for ${sanitizeForLog(stackName)}:`,
+        error instanceof Error ? error.message : String(error),
+      );
+      return null;
+    }
+  }
+
   async deployStack(
     stackName: string,
     ws?: WebSocket,
@@ -705,6 +752,12 @@ export class ComposeService {
       }
     }
 
+    // ComposeService is the only producer of deploy events: every deploy path
+    // (manual, bulk, Git auto-deploy, App Store, scheduler, webhook) funnels
+    // through here, so recording it anywhere else would double-count.
+    const gitopsDeploy = this.beginGitOpsDeploy(stackName);
+    let composeHandedOff = false;
+
     try {
       try {
         const dockerController = DockerController.getInstance(this.nodeId);
@@ -717,6 +770,7 @@ export class ComposeService {
         console.warn('Failed to clean up legacy containers for %s:', sanitizeForLog(stackName), e);
       }
 
+      composeHandedOff = true;
       await this.withRegistryAuth(async (env) => {
         await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env, getComposeStallTimeoutMs());
       }, sendOutput);
@@ -751,7 +805,11 @@ export class ComposeService {
         }
       }
       if (debug) console.debug(`[ComposeService:debug] deployStack completed in ${Date.now() - t0}ms`, { stackName });
+      gitopsDeploy?.bound();
     } catch (deployError) {
+      // Classified by whether Compose was handed the mutation. Only a failure
+      // before that leaves the previous workload provably intact.
+      gitopsDeploy?.failed(composeHandedOff ? 'post_mutation' : 'pre_mutation');
       if (atomic && recoverySvc && handedOff && recoveryId) {
         sendOutput('\n=== Deployment failed - restoring previous runtime from recovery generation ===\n');
         const generationId = recoveryId;

@@ -188,6 +188,48 @@ describe('Direct Git producers drive the revision state', () => {
     expect(projectOf(app.id).facets.source.status).toBe('not_live');
   });
 
+  it('binds the deployed generation through the Compose adapter', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    const svc = GitSourceService.getInstance();
+    const store = GitOpsStore.getInstance();
+    const stackName = 'producers-deploy';
+
+    stageRepo(COMPOSE, '11111111');
+    await svc.createStackFromGit({
+      stackName,
+      repoUrl: REPO,
+      branch: 'main',
+      composePaths: ['compose.yaml'],
+      contextDir: null,
+      syncEnv: false,
+      envPath: null,
+      authType: 'none',
+      token: null,
+      autoApplyOnWebhook: false,
+      autoDeployOnApply: false,
+    });
+    const app = store.getLiveDirectApplication(stackName)!;
+    const applied = store.getTarget(app.id, 1)!.applied_generation_id;
+    expect(applied).not.toBeNull();
+    expect(store.getTarget(app.id, 1)?.deployed_generation_id).toBeNull();
+
+    // Docker is unavailable here, so the compose command fails. That is the
+    // failure path the adapter has to classify, and it must not move the
+    // deployed pointer.
+    const compose = ComposeService.getInstance(1);
+    await expect(compose.deployStack(stackName)).rejects.toThrow();
+
+    const target = store.getTarget(app.id, 1)!;
+    expect(target.deployed_generation_id).toBeNull();
+    expect(target.failure_stage).toBe('deploy');
+    // Classified conservatively: once the compose command has been handed off,
+    // we cannot prove the workload was untouched, and claiming it was intact
+    // would be the more dangerous error.
+    expect(target.failure_class).toBe('post_mutation');
+    expect(projectOf(app.id).targets[0]?.runtime.status).toBe('failed_after_mutation');
+    expect(target.applied_generation_id).toBe(applied);
+  });
+
   it('records a failed fetch without moving any pointer', async () => {
     const svc = GitSourceService.getInstance();
     const store = GitOpsStore.getInstance();
