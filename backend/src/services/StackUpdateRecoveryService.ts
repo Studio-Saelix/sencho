@@ -43,6 +43,8 @@ import {
     EMPTY_GITOPS_RECOVERY_CAPTURE,
     type GitOpsRecoveryCapture,
 } from './gitops/recoveryCapture';
+import { GitOpsStore } from './gitops/store';
+import { GitOpsTransitions } from './gitops/transitions';
 import type { GitSourceManifestState } from '../types/gitProjectManifest';
 import type {
   RollbackGenerationManifest,
@@ -921,6 +923,101 @@ export class StackUpdateRecoveryService {
    * Post-handoff compensation: restore files + pinned up, then probe before
    * reporting restored_current / immediate_verified.
    */
+  /**
+   * Open a GitOps recovery for this restore, or nothing when the stack is not
+   * modelled.
+   *
+   * Returns closures rather than ids so a terminal event cannot be recorded for
+   * an operation that was never opened. Recording never fails the restore: the
+   * files and containers are the real work, and the store describes it.
+   *
+   * The proof rule is deliberately strict. Pointers move only when the recovery
+   * point named a generation, that generation still exists, and the manifest
+   * that was actually restored carries the same commit and manifest version. A
+   * restore we cannot tie to a generation is still a real recovery, it just has
+   * nothing to bind, and the transition records it as unproven rather than
+   * guessing.
+   */
+  private beginGitOpsRecovery(row: StackUpdateRecoveryGenerationRow): {
+    succeeded: (restored: RollbackGenerationManifest | null) => void;
+    failed: (failureClass: 'pre_mutation' | 'post_mutation') => void;
+  } | null {
+    const record = (what: string, write: () => void): void => {
+      try {
+        write();
+      } catch (error) {
+        console.error(
+          '[GitOps] Could not record recovery %s for %s (recovery %s):',
+          what, sanitizeForLog(row.stack_name), row.id,
+          error instanceof Error ? error.stack ?? error.message : String(error),
+        );
+      }
+    };
+    try {
+      const store = GitOpsStore.getInstance();
+      const app = store.getLiveDirectApplication(row.stack_name);
+      if (!app || app.lifecycle_status !== 'active') return null;
+      const target = store.getTarget(app.id, row.node_id);
+      if (!target || target.target_status !== 'active') return null;
+
+      const tx = GitOpsTransitions.getInstance();
+      const envelope = {
+        operationId: row.id,
+        actor: 'system:recovery',
+        trigger: 'recovery',
+        at: Date.now(),
+      };
+      const capturedGenerationId = row.gitops_generation_id ?? null;
+      record('start', () => tx.recoveryStarted({
+        applicationId: app.id,
+        nodeId: row.node_id,
+        recoveryRef: row.id,
+        recoveryGenerationId: capturedGenerationId,
+        envelope,
+      }));
+
+      return {
+        succeeded: (restored) => record('success', () => {
+          const generation = capturedGenerationId
+            ? store.getGeneration(capturedGenerationId)
+            : undefined;
+          const proven = !!generation
+            && !!restored
+            && restored.git?.commitSha === generation.commit_sha
+            && restored.git?.manifestVersion === generation.manifest_version;
+          tx.recoverySucceeded({
+            applicationId: app.id,
+            nodeId: row.node_id,
+            recoveryRef: row.id,
+            recoveryGenerationId: capturedGenerationId,
+            proven,
+            // This restore path drives Compose through a callback that reports
+            // nothing back, so the deployed pointer is never claimed. Applied
+            // still moves when the restore is proven.
+            gitopsBinding: 'unbound',
+            capturedArtifactSetId: row.gitops_artifact_set_id ?? null,
+            capturedSourceAcceptanceRef: row.gitops_source_acceptance_ref ?? null,
+            envelope: { ...envelope, at: Date.now() },
+          });
+        }),
+        failed: (failureClass) => record('failure', () => tx.recoveryFailed({
+          applicationId: app.id,
+          nodeId: row.node_id,
+          recoveryRef: row.id,
+          failureClass,
+          envelope: { ...envelope, at: Date.now() },
+        })),
+      };
+    } catch (error) {
+      console.error(
+        '[GitOps] Could not open a recovery for %s:',
+        sanitizeForLog(row.stack_name),
+        error instanceof Error ? error.stack ?? error.message : String(error),
+      );
+      return null;
+    }
+  }
+
   public async compensateWithCandidate(
     generationId: string,
     composeUp: (
@@ -959,6 +1056,11 @@ export class StackUpdateRecoveryService {
     const transactionMeta = await captureGitSidePreimage(row.stack_name);
     const generationContentPath =
       expectsGenerationContent(row) && row.content_path ? row.content_path : null;
+
+    // Open the recovery in the model before any file moves, so a crash mid
+    // restore leaves a target that says what it was doing rather than one that
+    // merely looks broken.
+    const gitopsRecovery = this.beginGitOpsRecovery(row);
 
     let filesRestored = false;
     try {
@@ -1052,9 +1154,13 @@ export class StackUpdateRecoveryService {
         is_current: 1,
         artifact_expires_at: null,
       });
+      gitopsRecovery?.succeeded(restoredManifest ?? null);
       return true;
     } catch (error) {
       const code = (error as { code?: string }).code;
+      // Classified by whether the files had already moved. Only a failure
+      // before that leaves the previous workload provably intact.
+      gitopsRecovery?.failed(filesRestored ? 'post_mutation' : 'pre_mutation');
       if (filesRestored && generationContentPath) {
         try {
           await RollbackGenerationStore.reconcileInterruptedRestore(

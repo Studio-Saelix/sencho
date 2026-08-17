@@ -281,6 +281,57 @@ describe('gitops recovery', () => {
     expect(projectApplication('app-rec-clear', true).limitations).toHaveLength(0);
   });
 
+  it('opens and closes a recovery from the restore path itself', async () => {
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const store = GitOpsStore.getInstance();
+    seedTwoGenerations('app-rec-wire', 'rec-wire-web');
+    const genA = 'gen-a-app-rec-wire';
+
+    // A recovery row bound to generation A, exactly as capture writes one.
+    DatabaseService.getInstance().insertStackUpdateRecoveryGeneration({
+      id: 'rec-wire-1',
+      node_id: 1,
+      stack_name: 'rec-wire-web',
+      status: 'candidate',
+      phase: 'captured',
+      is_current: 0,
+      operation_kind: 'update',
+      content_path: null,
+      backup_slot_id: null,
+      services_json: '[]',
+      override_path: null,
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: Date.now() + 60_000,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: 'tester',
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+      gitops_generation_id: genA,
+      gitops_artifact_set_id: 'art-a-app-rec-wire',
+      gitops_source_acceptance_ref: 'acc-a-app-rec-wire',
+    });
+
+    // The restore fails before touching files, which is the classification the
+    // model has to get right: the previous workload is provably intact.
+    await StackUpdateRecoveryService.getInstance().compensateWithCandidate(
+      'rec-wire-1',
+      async () => { throw new Error('compose unavailable'); },
+    );
+
+    const target = store.getTarget('app-rec-wire', 1)!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.failure_stage).toBe('recovery');
+    expect(target.failure_class).toBe('pre_mutation');
+    expect(target.active_operation_stage).toBeNull();
+    // The restore never completed, so nothing moved back to generation A.
+    expect(target.desired_generation_id).toBe('gen-b-app-rec-wire');
+    expect(projectApplication('app-rec-wire', true).targets[0]?.runtime.status).toBe('recovery_failed');
+  });
+
   it('records a failed restore without moving success pointers', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
