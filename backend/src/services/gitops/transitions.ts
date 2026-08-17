@@ -872,6 +872,169 @@ export class GitOpsTransitions {
     });
   }
 
+  /**
+   * A rollout-scoped rollback started.
+   *
+   * The same columns and the same rules as `recovery_started`; only the trigger
+   * differs. Direct Git recovery emits the `recovery_*` names, and a later
+   * rollout producer emits these. Nothing in this PR writes them.
+   */
+  rollbackInProgress(args: {
+    applicationId: string;
+    nodeId: number | null;
+    recoveryRef: string;
+    recoveryGenerationId: string | null;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    if (args.nodeId === null) {
+      return this.mutateApp(args.applicationId, args.envelope, 'rollback_in_progress', 'committed', (app) => {
+        if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
+        app.recovery_phase = 'restoring';
+        app.recovery_ref = args.recoveryRef;
+      });
+    }
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'rollback_in_progress',
+      args.recoveryGenerationId,
+      (target) => {
+        if (target.target_status !== 'active') {
+          throw new GitOpsTransitionError('cannot roll back a tombstoned target');
+        }
+        const before = { recoveryPhase: target.recovery_phase };
+        target.recovery_phase = 'restoring';
+        target.recovery_ref = args.recoveryRef;
+        target.recovery_generation_id = args.recoveryGenerationId;
+        this.withApplication(args.applicationId, args.envelope, (app) => {
+          app.recovery_phase = 'restoring';
+          app.recovery_ref = args.recoveryRef;
+        });
+        return { before, after: { recoveryPhase: 'restoring', recoveryRef: args.recoveryRef } };
+      },
+    );
+  }
+
+  /**
+   * A rollout-scoped rollback failed, wholly or on some targets.
+   *
+   * Persists the failure class it was given rather than deriving one, because
+   * the projection reports these columns verbatim. `partial` is the class this
+   * alias adds over `recovery_failed`: some targets came back and some did not,
+   * which is neither of the recovery classes.
+   */
+  rollbackPartialFailed(args: {
+    applicationId: string;
+    nodeId: number | null;
+    recoveryRef: string;
+    failureClass: 'pre_mutation' | 'post_mutation' | 'partial';
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    const applyFailure = (row: {
+      recovery_phase: string | null;
+      recovery_ref: string | null;
+      failure_stage: string | null;
+      failure_class: string | null;
+      failure_at: number | null;
+    }): void => {
+      row.recovery_phase = 'failed';
+      row.recovery_ref = args.recoveryRef;
+      row.failure_stage = 'recovery';
+      row.failure_class = args.failureClass;
+      row.failure_at = args.envelope.at;
+    };
+
+    if (args.nodeId === null) {
+      return this.mutateApp(args.applicationId, args.envelope, 'rollback_partial_failed', 'failed', (app) => {
+        applyFailure(app);
+      });
+    }
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'rollback_partial_failed',
+      null,
+      (target) => {
+        const before = { recoveryPhase: target.recovery_phase, failureStage: target.failure_stage };
+        applyFailure(target);
+        return { before, after: { recoveryPhase: 'failed', failureClass: args.failureClass } };
+      },
+      'failed',
+    );
+  }
+
+  /**
+   * A rollout-scoped rollback finished and the target is back on its generation.
+   *
+   * Refuses without a generation it can prove, on the same rule as
+   * `recovery_succeeded`: the target's own `recovery_generation_id` must name a
+   * generation that still exists and belongs to this application. There is no
+   * unproven variant, because a rollback nobody can bind to a generation has
+   * nothing to complete against.
+   */
+  rollbackCompleted(args: {
+    applicationId: string;
+    nodeId: number;
+    recoveryRef: string;
+    capturedArtifactSetId: string | null;
+    capturedSourceAcceptanceRef: string | null;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'rollback_completed',
+      null,
+      (target) => {
+        const restored = target.recovery_generation_id;
+        if (!restored) {
+          throw new GitOpsTransitionError('rollback_completed requires a bound recovery generation');
+        }
+        const generation = this.store().getGeneration(restored);
+        if (!generation || generation.application_id !== args.applicationId) {
+          throw new GitOpsTransitionError('rollback_completed names a generation this application does not own');
+        }
+
+        const before = {
+          desiredGenerationId: target.desired_generation_id,
+          deployedGenerationId: target.deployed_generation_id,
+          healthyGenerationId: target.healthy_generation_id,
+        };
+        this.clearTargetActive(target);
+        target.recovery_phase = 'complete';
+        target.recovery_ref = args.recoveryRef;
+        if (target.failure_stage === 'recovery') {
+          target.failure_stage = null;
+          target.failure_class = null;
+          target.failure_at = null;
+        }
+        this.withApplication(args.applicationId, args.envelope, (app) => {
+          app.recovery_phase = 'complete';
+          this.clearAppFailure(app, ['recovery']);
+        });
+
+        target.desired_generation_id = restored;
+        target.applied_generation_id = restored;
+        // A restored workload has not been observed healthy yet, whatever the
+        // previous generation proved.
+        target.healthy_generation_id = null;
+
+        this.restoreArtifactPointers(target, restored, args.capturedArtifactSetId);
+        this.restoreLastKnownGood(target, args.applicationId, args.envelope.at);
+        this.restoreSourceAcceptance(target, args.applicationId, restored, args.capturedSourceAcceptanceRef);
+
+        return {
+          before,
+          after: { desiredGenerationId: restored, deployedGenerationId: target.deployed_generation_id, healthyGenerationId: null },
+        };
+      },
+      'recovered',
+    );
+  }
+
   partialCleared(applicationId: string, nodeId: number | null, envelope: EventEnvelope): TransitionResult {
     if (nodeId === null) {
       return this.mutateApp(applicationId, envelope, 'partial_cleared', 'committed', (app) => {

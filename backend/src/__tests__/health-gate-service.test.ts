@@ -9,7 +9,7 @@ interface StoredRun {
   id: string;
   node_id: number;
   stack_name: string;
-  trigger_action: 'update' | 'deploy' | 'service_update' | 'service_restore';
+  trigger_action: 'update' | 'deploy' | 'service_update' | 'service_restore' | 'recovery';
   status: 'observing' | 'passed' | 'failed' | 'unknown';
   reason: string | null;
   window_seconds: number;
@@ -20,13 +20,17 @@ interface StoredRun {
   target_scope: 'stack' | 'service';
   service_name: string | null;
   failure_source: 'primary' | 'collateral' | null;
+  deployed_generation_id?: string | null;
 }
 
 const { state } = vi.hoisted(() => ({
   state: {
     runs: new Map<string, StoredRun>(),
+    recoveries: new Map<string, { id: string; health_gate_id: string | null }>(),
     activity: [] as Array<{ category?: string; message: string; level: string }>,
     settings: {} as Record<string, string>,
+    /** Run id whose finalize write should fail, for the per-row sweep guard. */
+    failFinalizeFor: null as string | null,
     listContainers: vi.fn(),
     inspect: vi.fn(),
     renderConfig: vi.fn(),
@@ -39,6 +43,7 @@ vi.mock('../services/DatabaseService', () => ({
       getGlobalSettings: () => state.settings,
       insertHealthGateRun: (run: StoredRun) => { state.runs.set(run.id, { ...run }); },
       finalizeHealthGateRun: (id: string, status: StoredRun['status'], reason: string | null, endedAt: number, containersJson: string, failureSource: StoredRun['failure_source'] = null) => {
+        if (state.failFinalizeFor === id) throw new Error('row is unreadable');
         const run = state.runs.get(id);
         if (run) Object.assign(run, { status, reason, ended_at: endedAt, containers_json: containersJson, failure_source: failureSource });
       },
@@ -51,6 +56,14 @@ vi.mock('../services/DatabaseService', () => ({
           .filter(r => r.node_id === nodeId && r.stack_name === stackName)
           .sort((a, b) => b.started_at - a.started_at);
         return matches[0] ? { ...matches[0] } : undefined;
+      },
+      getStackUpdateRecoveryGeneration: (id: string) => {
+        const row = state.recoveries.get(id);
+        return row ? { ...row } : undefined;
+      },
+      updateStackUpdateRecoveryGeneration: (id: string, patch: { health_gate_id?: string | null }) => {
+        const row = state.recoveries.get(id);
+        if (row) Object.assign(row, patch);
       },
       listObservingHealthGateRuns: () => [...state.runs.values()]
         .filter(run => run.status === 'observing')
@@ -156,6 +169,8 @@ async function ticks(n: number): Promise<void> {
 beforeEach(() => {
   vi.useFakeTimers();
   state.runs.clear();
+  state.recoveries.clear();
+  state.failFinalizeFor = null;
   state.activity.length = 0;
   state.settings = { health_gate_enabled: '1', health_gate_window_seconds: '30' };
   state.listContainers.mockReset();
@@ -543,6 +558,142 @@ describe('HealthGateService lifecycle', () => {
     svc().start();
     expect(state.runs.get('stale')!.status).toBe('unknown');
     expect(state.runs.get('stale')!.reason).toContain('restarted');
+  });
+
+  it('start() finalizes every interrupted run even when one of them is unreadable', () => {
+    state.runs.set('bad', {
+      id: 'bad', node_id: 0, stack_name: 'web', trigger_action: 'update', status: 'observing',
+      reason: null, window_seconds: 30, containers_json: '[]', started_at: 1, ended_at: null, created_by: null,
+      target_scope: 'stack', service_name: null, failure_source: null,
+    });
+    state.runs.set('good', {
+      id: 'good', node_id: 0, stack_name: 'other', trigger_action: 'recovery', status: 'observing',
+      reason: null, window_seconds: 30, containers_json: '[]', started_at: 1, ended_at: null, created_by: null,
+      target_scope: 'stack', service_name: null, failure_source: null,
+    });
+    // One row that cannot be written must not cost every later row its verdict.
+    // A bulk sweep is what this replaced, and it told the model about none of
+    // them; finalizing per row is only better if one bad row stays contained.
+    state.failFinalizeFor = 'bad';
+
+    svc().start();
+
+    expect(state.runs.get('bad')!.status).toBe('observing');
+    expect(state.runs.get('good')!.status).toBe('unknown');
+  });
+});
+
+describe('HealthGateService recovery reservations', () => {
+  /** A reserved, committed recovery run as `compensateWithCandidate` leaves it. */
+  function reserve(recoveryRef = 'rec-1', stackName = 'web') {
+    state.recoveries.set(recoveryRef, { id: recoveryRef, health_gate_id: null });
+    return svc().reserveRecoveryRun({
+      recoveryRef,
+      nodeId: 0,
+      stackName,
+      deployedGenerationId: 'gen-1',
+      actor: 'system:recovery',
+    });
+  }
+
+  it('writes the run and links it to the recovery generation', () => {
+    const result = reserve();
+    expect(result.outcome).toBe('reserved');
+    expect(result.runId).toBeTruthy();
+
+    const run = state.runs.get(result.runId!)!;
+    expect(run.trigger_action).toBe('recovery');
+    expect(run.status).toBe('observing');
+    // The generation is on the row, so the verdict is attributed to what this
+    // run was recorded as observing rather than to whatever is current later.
+    expect(run.deployed_generation_id).toBe('gen-1');
+    expect(state.recoveries.get('rec-1')!.health_gate_id).toBe(result.runId);
+    // Reserving is a write, not an observation: no timer yet.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('reuses the run a replayed recovery already owns', () => {
+    const first = reserve();
+    const second = svc().reserveRecoveryRun({
+      recoveryRef: 'rec-1',
+      nodeId: 0,
+      stackName: 'web',
+      deployedGenerationId: 'gen-1',
+      actor: 'system:recovery',
+    });
+    expect(second.outcome).toBe('replayed');
+    expect(second.runId).toBe(first.runId);
+    expect(state.runs.size).toBe(1);
+  });
+
+  it('reserves nothing when the gate is disabled', () => {
+    state.settings.health_gate_enabled = '0';
+    const result = reserve();
+    expect(result).toEqual({ outcome: 'disabled', runId: null });
+    expect(state.runs.size).toBe(0);
+  });
+
+  it('arms a reserved run without inserting a second one, and is idempotent', async () => {
+    const { runId } = reserve();
+    svc().armReservedRun(runId!, 0, 'web');
+    expect(state.runs.size).toBe(1);
+
+    // Arming the run that is already the active gate must not supersede it.
+    svc().armReservedRun(runId!, 0, 'web');
+    expect(state.runs.size).toBe(1);
+    expect(state.runs.get(runId!)!.status).toBe('observing');
+
+    await ticks(7);
+    expect(state.runs.get(runId!)!.status).toBe('passed');
+  });
+
+  it('supersedes a conflicting stack gate rather than observing twice', async () => {
+    const older = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
+    const { runId } = reserve();
+    svc().armReservedRun(runId!, 0, 'web');
+
+    expect(state.runs.get(older!)!.status).toBe('unknown');
+    expect(state.runs.get(older!)!.reason).toContain('superseded');
+    await ticks(7);
+    expect(state.runs.get(runId!)!.status).toBe('passed');
+  });
+
+  it('refuses to arm a run that is not a reserved stack recovery', () => {
+    const { runId } = reserve();
+    state.runs.get(runId!)!.trigger_action = 'update';
+    expect(() => svc().armReservedRun(runId!, 0, 'web')).toThrow(/reserved stack recovery/);
+
+    expect(() => svc().armReservedRun('no-such-run', 0, 'web')).toThrow(/not found/);
+  });
+
+  it('refuses to arm anything once the service is stopped', () => {
+    const { runId } = reserve();
+    svc().stop();
+    expect(() => svc().armReservedRun(runId!, 0, 'web')).toThrow(/not started/);
+    svc().start();
+  });
+
+  it('writes off a reservation nothing could arm', () => {
+    const { runId } = reserve();
+    svc().abandonReservedRun(runId!, 0, 'web', 'could not arm: too many concurrent observations');
+
+    const run = state.runs.get(runId!)!;
+    expect(run.status).toBe('unknown');
+    expect(run.reason).toContain('could not arm');
+    // Writing it off twice must not reopen or rewrite it.
+    svc().abandonReservedRun(runId!, 0, 'web', 'second attempt');
+    expect(state.runs.get(runId!)!.reason).toContain('could not arm');
+  });
+
+  it('never arms a reservation that outlived its process', () => {
+    const { runId } = reserve();
+    // A restart: the row is still observing, and nothing in memory owns it.
+    svc().stop();
+    svc().start();
+
+    expect(state.runs.get(runId!)!.status).toBe('unknown');
+    expect(state.runs.get(runId!)!.reason).toContain('restarted');
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('no-ops when disabled but still records the update_started event', () => {

@@ -131,6 +131,118 @@ describe('gitops deferred state', () => {
     expect(() => tx.partiallyRolledOut('app-partial-bad', 1, 'not json', env('op-partial-bad')))
       .toThrow();
   });
+
+  it('reports a rollback in flight on both the application and the target', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-start', 'rb-start-web');
+    const generationId = 'gen-app-rb-start';
+
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-start',
+      nodeId: 1,
+      recoveryRef: 'rb-1',
+      recoveryGenerationId: generationId,
+      envelope: env('op-rb-start'),
+    });
+
+    const target = store.getTarget('app-rb-start', 1)!;
+    expect(target.recovery_phase).toBe('restoring');
+    expect(target.recovery_ref).toBe('rb-1');
+    expect(target.recovery_generation_id).toBe(generationId);
+    // Written to both, because a target-only write left the source facet
+    // reporting whatever the source last did instead of the rollback.
+    expect(store.getApplication('app-rb-start')?.recovery_phase).toBe('restoring');
+    expect(projectOf('app-rb-start').facets.rollout.status).toBe('rollback_in_progress');
+  });
+
+  it('persists the failure class a partial rollback was given', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-partial', 'rb-partial-web');
+    const applied = store.getTarget('app-rb-partial', 1)!.applied_generation_id;
+
+    tx.rollbackPartialFailed({
+      applicationId: 'app-rb-partial',
+      nodeId: 1,
+      recoveryRef: 'rb-2',
+      failureClass: 'partial',
+      envelope: env('op-rb-partial'),
+    });
+
+    const target = store.getTarget('app-rb-partial', 1)!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.failure_stage).toBe('recovery');
+    // Reported verbatim: the deriver reads these columns rather than inventing
+    // a class, and `partial` is the one this alias adds over a recovery.
+    expect(target.failure_class).toBe('partial');
+    // A failed rollback moves no success pointer.
+    expect(target.applied_generation_id).toBe(applied);
+    expect(target.healthy_generation_id).toBeNull();
+  });
+
+  it('completes a rollback only against a generation it can prove', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-done', 'rb-done-web');
+    const generationId = 'gen-app-rb-done';
+
+    // Nothing bound yet, so there is no generation to complete against.
+    expect(() => tx.rollbackCompleted({
+      applicationId: 'app-rb-done',
+      nodeId: 1,
+      recoveryRef: 'rb-3',
+      capturedArtifactSetId: null,
+      capturedSourceAcceptanceRef: null,
+      envelope: env('op-rb-done-early'),
+    })).toThrow(/bound recovery generation/);
+
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-done',
+      nodeId: 1,
+      recoveryRef: 'rb-3',
+      recoveryGenerationId: generationId,
+      envelope: env('op-rb-done-start'),
+    });
+    tx.rollbackCompleted({
+      applicationId: 'app-rb-done',
+      nodeId: 1,
+      recoveryRef: 'rb-3',
+      capturedArtifactSetId: null,
+      capturedSourceAcceptanceRef: null,
+      envelope: env('op-rb-done'),
+    });
+
+    const target = store.getTarget('app-rb-done', 1)!;
+    expect(target.recovery_phase).toBe('complete');
+    expect(target.desired_generation_id).toBe(generationId);
+    expect(target.applied_generation_id).toBe(generationId);
+    // The workload is back but nothing has observed it yet.
+    expect(target.healthy_generation_id).toBeNull();
+  });
+
+  it('refuses to complete a rollback onto another application generation', () => {
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-rb-foreign', 'rb-foreign-web');
+    seedApplied('app-rb-owner', 'rb-owner-web');
+
+    tx.rollbackInProgress({
+      applicationId: 'app-rb-foreign',
+      nodeId: 1,
+      recoveryRef: 'rb-4',
+      recoveryGenerationId: 'gen-app-rb-owner',
+      envelope: env('op-rb-foreign-start'),
+    });
+
+    expect(() => tx.rollbackCompleted({
+      applicationId: 'app-rb-foreign',
+      nodeId: 1,
+      recoveryRef: 'rb-4',
+      capturedArtifactSetId: null,
+      capturedSourceAcceptanceRef: null,
+      envelope: env('op-rb-foreign'),
+    })).toThrow(/does not own/);
+  });
 });
 
 function projectOf(applicationId: string) {
