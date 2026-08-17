@@ -34,6 +34,9 @@ import {
   type StackRecoveryServiceCapture,
 } from './recoveryServicesJson';
 import { getComposeCommandTimeoutMs } from './ComposeService';
+import type { ComposeMutationResult } from './ComposeService';
+import { HealthGateService } from './HealthGateService';
+import type { HealthRunReservation } from './gitops/transitions';
 import { assessGenerationEligibility } from './rollbackEligibility';
 import { enforcePolicyForImageRefs, type PolicyEnforcementOptions } from './PolicyEnforcement';
 import { describePolicyBlock } from '../helpers/policyGate';
@@ -938,19 +941,52 @@ export class StackUpdateRecoveryService {
    * nothing to bind, and the transition records it as unproven rather than
    * guessing.
    */
+  /**
+   * Start observing a run the recovery transaction reserved.
+   *
+   * Runs after that transaction commits, because arming is in-memory work that
+   * a rollback could not undo. Anything that stops the timer starting writes
+   * the run off immediately: an observing row with nothing behind it would
+   * otherwise report a restore as still being watched for ever.
+   */
+  private armReservedRecoveryRun(
+    reservation: HealthRunReservation | null,
+    row: StackUpdateRecoveryGenerationRow,
+  ): void {
+    if (!reservation?.runId || reservation.outcome === 'disabled') return;
+    const gate = HealthGateService.getInstance();
+    try {
+      gate.armReservedRun(reservation.runId, row.node_id, row.stack_name);
+    } catch (error) {
+      const reason = getErrorMessage(error, 'unknown');
+      console.warn(
+        '[HealthGate] Could not arm the reserved recovery run %s for %s: %s',
+        reservation.runId, sanitizeForLog(row.stack_name), sanitizeForLog(reason),
+      );
+      gate.abandonReservedRun(reservation.runId, row.node_id, row.stack_name, `could not arm: ${reason}`);
+    }
+  }
+
   private beginGitOpsRecovery(row: StackUpdateRecoveryGenerationRow): {
-    succeeded: (restored: RollbackGenerationManifest | null) => void;
+    succeeded: (
+      restored: RollbackGenerationManifest | null,
+      binding: 'bound' | 'unbound',
+    ) => HealthRunReservation | null;
     failed: (failureClass: 'pre_mutation' | 'post_mutation') => void;
   } | null {
-    const record = (what: string, write: () => void): void => {
+    // Returns what the write produced, or null when it could not be recorded.
+    // Recording never fails the restore: the store describes what happened, it
+    // does not make it happen.
+    const record = <T>(what: string, write: () => T): T | null => {
       try {
-        write();
+        return write();
       } catch (error) {
         console.error(
           '[GitOps] Could not record recovery %s for %s (recovery %s):',
           what, sanitizeForLog(row.stack_name), row.id,
           error instanceof Error ? error.stack ?? error.message : String(error),
         );
+        return null;
       }
     };
     try {
@@ -977,7 +1013,7 @@ export class StackUpdateRecoveryService {
       }));
 
       return {
-        succeeded: (restored) => record('success', () => {
+        succeeded: (restored, binding) => record('success', () => {
           const generation = capturedGenerationId
             ? store.getGeneration(capturedGenerationId)
             : undefined;
@@ -985,20 +1021,28 @@ export class StackUpdateRecoveryService {
             && !!restored
             && restored.git?.commitSha === generation.commit_sha
             && restored.git?.manifestVersion === generation.manifest_version;
-          tx.recoverySucceeded({
+          const result = tx.recoverySucceeded({
             applicationId: app.id,
             nodeId: row.node_id,
             recoveryRef: row.id,
             recoveryGenerationId: capturedGenerationId,
             proven,
-            // This restore path drives Compose through a callback that reports
-            // nothing back, so the deployed pointer is never claimed. Applied
-            // still moves when the restore is proven.
-            gitopsBinding: 'unbound',
+            gitopsBinding: binding,
             capturedArtifactSetId: row.gitops_artifact_set_id ?? null,
             capturedSourceAcceptanceRef: row.gitops_source_acceptance_ref ?? null,
             envelope: { ...envelope, at: Date.now() },
+            // Claimed inside the recovery transaction so the run and the
+            // pointers it describes commit together. Arming it is a separate
+            // step once that transaction has landed.
+            reserveHealthRun: (deployedGenerationId) => HealthGateService.getInstance().reserveRecoveryRun({
+              recoveryRef: row.id,
+              nodeId: row.node_id,
+              stackName: row.stack_name,
+              deployedGenerationId,
+              actor: envelope.actor,
+            }),
           });
+          return result.healthReservation;
         }),
         failed: (failureClass) => record('failure', () => tx.recoveryFailed({
           applicationId: app.id,
@@ -1023,7 +1067,7 @@ export class StackUpdateRecoveryService {
     composeUp: (
       overridePath: string,
       invocation: RollbackInvocationRecord | null,
-    ) => Promise<void>,
+    ) => Promise<ComposeMutationResult | void>,
     policyOptions?: PolicyEnforcementOptions,
   ): Promise<boolean> {
     const row = this.get(generationId);
@@ -1116,7 +1160,10 @@ export class StackUpdateRecoveryService {
       if (!row.override_path) {
         throw new Error('Recovery generation has no override path');
       }
-      await composeUp(row.override_path, restoredInvocation);
+      // Only a callback that reports a Compose mutation licenses the deployed
+      // pointer. A restore driven some other way resolves the same, and binding
+      // on that would claim a workload nobody launched.
+      const composeResult = await composeUp(row.override_path, restoredInvocation);
       const probeOk = await this.probeRecoveredStack(
         row.node_id,
         row.stack_name,
@@ -1154,7 +1201,11 @@ export class StackUpdateRecoveryService {
         is_current: 1,
         artifact_expires_at: null,
       });
-      gitopsRecovery?.succeeded(restoredManifest ?? null);
+      const reservation = gitopsRecovery?.succeeded(
+        restoredManifest ?? null,
+        composeResult?.mutatedByCompose ? 'bound' : 'unbound',
+      ) ?? null;
+      this.armReservedRecoveryRun(reservation, row);
       return true;
     } catch (error) {
       const code = (error as { code?: string }).code;

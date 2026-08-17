@@ -142,6 +142,16 @@ function getComposeStallTimeoutMs(): number {
  * In the Distributed API model, remote node compose operations are handled
  * by the remote Sencho instance. This service only executes commands locally.
  */
+/**
+ * Evidence that a Compose mutation actually ran.
+ *
+ * Returned rather than inferred from a resolved promise because the recovery
+ * path takes its Compose step as a callback: a caller that restores some other
+ * way resolves identically, and binding the deployed pointer on that would
+ * claim a workload nobody launched.
+ */
+export type ComposeMutationResult = { mutatedByCompose: true };
+
 export class ComposeService {
   private baseDir: string;
   private nodeId: number;
@@ -1015,7 +1025,7 @@ export class ComposeService {
     overridePath: string,
     ws?: WebSocket,
     invocation?: RollbackInvocationRecord | null,
-  ): Promise<void> {
+  ): Promise<ComposeMutationResult> {
     const stackDir = path.join(this.baseDir, stackName);
     const sendOutput = (data: string) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
@@ -1036,6 +1046,7 @@ export class ComposeService {
         getComposeStallTimeoutMs(),
       );
     }, sendOutput);
+    return { mutatedByCompose: true };
   }
 
   /**

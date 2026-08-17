@@ -52,7 +52,7 @@ vi.mock('../services/DatabaseService', () => ({
           .sort((a, b) => b.started_at - a.started_at);
         return matches[0] ? { ...matches[0] } : undefined;
       },
-      markInterruptedHealthGateRuns: () => 0,
+      listObservingHealthGateRuns: () => [],
       addNotificationHistory: (_nodeId: number, item: { category?: string; message: string; level: string }) => ({ ...item, id: 1, is_read: false }),
     }),
   },

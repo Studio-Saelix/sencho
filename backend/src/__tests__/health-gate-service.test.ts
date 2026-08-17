@@ -52,16 +52,9 @@ vi.mock('../services/DatabaseService', () => ({
           .sort((a, b) => b.started_at - a.started_at);
         return matches[0] ? { ...matches[0] } : undefined;
       },
-      markInterruptedHealthGateRuns: (reason: string, endedAt: number) => {
-        let n = 0;
-        for (const run of state.runs.values()) {
-          if (run.status === 'observing') {
-            Object.assign(run, { status: 'unknown', reason, ended_at: endedAt });
-            n++;
-          }
-        }
-        return n;
-      },
+      listObservingHealthGateRuns: () => [...state.runs.values()]
+        .filter(run => run.status === 'observing')
+        .map(run => ({ ...run })),
       addNotificationHistory: (_nodeId: number, item: { category?: string; message: string; level: string }) => {
         state.activity.push(item);
         return { ...item, id: state.activity.length, is_read: false };

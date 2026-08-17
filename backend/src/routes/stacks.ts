@@ -2498,14 +2498,14 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       try {
         const rolledBack = await recoverySvc.compensateWithCandidate(
           currentGen.id,
-          async (overridePath, invocation) => {
-            await ComposeService.getInstance(req.nodeId).composeUpWithRecoveryOverride(
-              stackName,
-              overridePath,
-              getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
-              invocation,
-            );
-          },
+          // Returns the Compose result rather than swallowing it, so a proven
+          // restore can bind its deployed pointer and open a health run.
+          (overridePath, invocation) => ComposeService.getInstance(req.nodeId).composeUpWithRecoveryOverride(
+            stackName,
+            overridePath,
+            getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+            invocation,
+          ),
           buildPolicyGateOptions(req, { actor: req.user?.username ?? 'system' }),
         );
         if (!rolledBack) {

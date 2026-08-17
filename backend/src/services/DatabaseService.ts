@@ -4139,11 +4139,17 @@ export class DatabaseService {
     }
 
     /** Finalize runs left observing by a previous process (startup sweep). */
-    public markInterruptedHealthGateRuns(reason: string, endedAt: number): number {
-        const result = this.db.prepare(
-            "UPDATE health_gate_runs SET status = 'unknown', reason = ?, ended_at = ? WHERE status = 'observing'"
-        ).run(reason, endedAt);
-        return result.changes;
+    /**
+     * Runs a previous process left observing.
+     *
+     * Returned as rows rather than swept with one UPDATE because each has to be
+     * finalized individually: the verdict is what the revision state listens
+     * for, and a bulk update moves the rows while telling the model nothing.
+     */
+    public listObservingHealthGateRuns(): HealthGateRunRow[] {
+        return this.db.prepare(
+            "SELECT * FROM health_gate_runs WHERE status = 'observing'"
+        ).all() as HealthGateRunRow[];
     }
 
     // --- Service Update Recovery ---

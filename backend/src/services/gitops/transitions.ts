@@ -40,6 +40,17 @@ export type TransitionResult = {
   replayed: boolean;
 };
 
+/**
+ * What a health run claimed inside a recovery transaction reported back.
+ *
+ * `replayed` means the recovery already owned a run, so the caller arms that
+ * one rather than opening a second observation of the same restore.
+ */
+export type HealthRunReservation = {
+  outcome: 'reserved' | 'replayed' | 'disabled';
+  runId: string | null;
+};
+
 export class GitOpsTransitionError extends Error {
   constructor(message: string) {
     super(message);
@@ -943,8 +954,19 @@ export class GitOpsTransitions {
     capturedArtifactSetId: string | null;
     capturedSourceAcceptanceRef: string | null;
     envelope: EventEnvelope;
-  }): TransitionResult {
-    return this.mutateTarget(
+    /**
+     * Claim a health run for this recovery, inside this transaction.
+     *
+     * Injected rather than reached for directly: the health gate reports its
+     * verdicts back through this store, so importing it here would close a
+     * module cycle. Called only for a recovery that both proved its generation
+     * and bound the deployed pointer, because a run against an unproven restore
+     * would be observing a generation nobody can name.
+     */
+    reserveHealthRun?: (deployedGenerationId: string) => HealthRunReservation;
+  }): TransitionResult & { healthReservation: HealthRunReservation | null } {
+    let healthReservation: HealthRunReservation | null = null;
+    const result = this.mutateTarget(
       args.applicationId,
       args.nodeId,
       args.envelope,
@@ -999,6 +1021,10 @@ export class GitOpsTransitions {
         this.restoreLastKnownGood(target, args.applicationId, args.envelope.at);
         this.restoreSourceAcceptance(target, args.applicationId, restored, args.capturedSourceAcceptanceRef);
 
+        if (args.gitopsBinding === 'bound' && args.reserveHealthRun) {
+          healthReservation = args.reserveHealthRun(restored);
+        }
+
         return {
           before,
           after: {
@@ -1011,6 +1037,7 @@ export class GitOpsTransitions {
       },
       'recovered',
     );
+    return { ...result, healthReservation };
   }
 
   /** A restore failed. Success pointers stay exactly where they were. */
