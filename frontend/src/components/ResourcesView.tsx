@@ -126,16 +126,25 @@ function PrunePlanPreview({
                 {plan.items.length} {plan.items.length === 1 ? 'item' : 'items'}
                 {plan.reclaimableBytes > 0 ? ` · ${formatBytes(plan.reclaimableBytes)}` : ''}
             </p>
-            <ul className="max-h-40 overflow-y-auto space-y-1 font-mono text-[12px] text-stat-subtitle/90">
-                {shown.map((item) => (
-                    <li key={`${item.target}:${item.id}`} className="block truncate">
-                        <span className="text-stat-subtitle/60">{item.target}</span>
-                        {' · '}
-                        {item.name}
-                        {item.sizeBytes != null && item.sizeBytes > 0 ? ` · ${formatBytes(item.sizeBytes)}` : ''}
-                    </li>
-                ))}
-            </ul>
+            <ScrollArea type="hover" className="max-h-40">
+                <ul className="space-y-1 font-mono text-[12px] text-stat-subtitle/90">
+                    {shown.map((item) => (
+                        <li key={`${item.target}:${item.id}`} className="block">
+                            <span className="block truncate">
+                                <span className="text-stat-subtitle/60">{item.target}</span>
+                                {' · '}
+                                {item.name}
+                                {item.sizeBytes != null && item.sizeBytes > 0 ? ` · ${formatBytes(item.sizeBytes)}` : ''}
+                            </span>
+                            {item.target === 'images' && item.image.references
+                                .filter((ref) => ref !== item.name)
+                                .map((ref) => (
+                                    <span key={ref} className="block break-all">{ref}</span>
+                                ))}
+                        </li>
+                    ))}
+                </ul>
+            </ScrollArea>
             {remaining > 0 && (
                 <p className="text-xs text-stat-subtitle/70">and {remaining} more</p>
             )}

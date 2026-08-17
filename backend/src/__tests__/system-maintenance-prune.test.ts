@@ -174,6 +174,7 @@ describe('Prune plan routes', () => {
       outcomes: [{ id: 'v1', target: 'volumes', status: 'removed', sizeBytes: 42 }],
       reclaimedBytes: 42,
       success: true,
+      mutated: true,
     });
     vi.spyOn(DockerController, 'getInstance').mockReturnValue({
       buildPrunePlan: vi.fn().mockResolvedValue(plan),
@@ -267,5 +268,54 @@ describe('Prune plan routes', () => {
     expect(res.body.fingerprint).toBe('fp-dry');
     expect(res.body.items).toHaveLength(1);
     expect(executePrunePlan).not.toHaveBeenCalled();
+  });
+
+  it('invalidates node caches when a failed image outcome is mutated', async () => {
+    stubFsStacks();
+    const plan = samplePlan('fp-partial');
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      buildPrunePlan: vi.fn().mockResolvedValue(plan),
+      executePrunePlan: vi.fn().mockResolvedValue({
+        outcomes: [{ id: 'img-multi', target: 'images', status: 'failed', error: 'tags remain' }],
+        reclaimedBytes: 0,
+        success: false,
+        mutated: true,
+      }),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+    const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate');
+
+    const res = await request(app)
+      .post('/api/system/prune/system')
+      .set('Authorization', authHeader)
+      .send({ target: 'volumes', scope: 'managed', planFingerprint: 'fp-partial' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(false);
+    expect(res.body.outcomes[0].status).toBe('failed');
+    expect(invalidate).toHaveBeenCalledWith('stats:1');
+    expect(invalidate).toHaveBeenCalledWith('stack-statuses:1');
+  });
+
+  it('does not invalidate node caches when a failed outcome is not mutated', async () => {
+    stubFsStacks();
+    const plan = samplePlan('fp-nomut');
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      buildPrunePlan: vi.fn().mockResolvedValue(plan),
+      executePrunePlan: vi.fn().mockResolvedValue({
+        outcomes: [{ id: 'img-multi', target: 'images', status: 'failed', error: 'references changed' }],
+        reclaimedBytes: 0,
+        success: false,
+        mutated: false,
+      }),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+    const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate');
+
+    const res = await request(app)
+      .post('/api/system/prune/system')
+      .set('Authorization', authHeader)
+      .send({ target: 'volumes', scope: 'managed', planFingerprint: 'fp-nomut' });
+
+    expect(res.status).toBe(200);
+    expect(invalidate).not.toHaveBeenCalled();
   });
 });

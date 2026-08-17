@@ -250,7 +250,7 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
           success: result.success,
         });
       }
-      if (result.outcomes.some((outcome) => outcome.status === 'removed')) {
+      if (result.mutated) {
         invalidateNodeCaches(req.nodeId);
       }
       res.json({

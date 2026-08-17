@@ -241,6 +241,43 @@ describe('ResourcesView', () => {
     expect(body.planFingerprint).toBe('fp-test');
   });
 
+  it('discloses extra repository tags in the prune confirm list', async () => {
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(samplePrunePlan({
+          items: [{
+            target: 'images',
+            id: 'img-multi',
+            name: 'ghcr.io/example/very-long-app-name:1.5.2-build.1844',
+            sizeBytes: 1000,
+            managed: false,
+            reason: 'Image is not used by any container',
+            image: {
+              references: [
+                'ghcr.io/example/very-long-app-name:1.5.2-build.1844',
+                'ghcr.io/example/very-long-app-name:latest',
+              ],
+            },
+          }],
+        })));
+      }
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources'));
+    await user.click(screen.getByRole('button', { name: /Prune Unused Images/ }));
+
+    const extraRef = await screen.findByText('ghcr.io/example/very-long-app-name:latest');
+    expect(extraRef).toHaveClass('break-all');
+    expect(extraRef).not.toHaveClass('truncate');
+    expect(screen.getByText(/1\.5\.2-build\.1844/)).toBeInTheDocument();
+  });
+
   it('surfaces the server error on a failed prune instead of a false success (M-2)', async () => {
     mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
       if (url === '/system/prune/plan' && opts?.method === 'POST') {

@@ -427,7 +427,7 @@ async function executeLocal(entry: Preflight, targets: FleetPruneTarget[]): Prom
     const knownStacks = await FileSystemService.getInstance(entry.node.id).getStacks();
     const isImageHeld = ServiceUpdateRecoveryService.getInstance().buildHeldImagePredicate(entry.node.id);
     const result = await DockerController.getInstance(entry.node.id).executePrunePlan(plan, knownStacks, isImageHeld);
-    if (result.outcomes.some((outcome) => outcome.status === 'removed')) {
+    if (result.mutated) {
       try {
         invalidateNodeCaches(entry.node.id);
       } catch (error) {
