@@ -101,6 +101,57 @@ export function encodeGitOpsRequiredTargetsJson(nodeIds: readonly number[]): str
   return encodeGitOpsJson({ nodeIds: [...nodeIds] });
 }
 
+/**
+ * Why a writer could not prove something, recorded on the row it affected.
+ *
+ * Distinct from the limitations the deriver computes at read time: those are
+ * re-derivable from current rows, these are facts only the transition that
+ * dropped a pointer knew. Without them a pointer that was cleared because it
+ * could not be proven is indistinguishable from one that never existed.
+ */
+export type GitOpsEvidenceLimitation = { code: string; detail: string | null };
+
+export function decodeGitOpsEvidenceLimitations(raw: string | null): GitOpsEvidenceLimitation[] {
+  if (raw === null) return [];
+  const decoded = decodeGitOpsJson(raw);
+  if (!Array.isArray(decoded)) {
+    throw new GitOpsJsonError('evidence_limitations_json must be an array');
+  }
+  return decoded.map((item) => {
+    if (!isRecord(item)) throw new GitOpsJsonError('evidence limitation must be an object');
+    const keys = Object.keys(item);
+    if (keys.length !== 2 || !('code' in item) || !('detail' in item)) {
+      throw new GitOpsJsonError('evidence limitation must have exactly code and detail');
+    }
+    if (typeof item.code !== 'string' || item.code.length === 0) {
+      throw new GitOpsJsonError('evidence limitation code must be a non-empty string');
+    }
+    if (item.detail !== null && typeof item.detail !== 'string') {
+      throw new GitOpsJsonError('evidence limitation detail must be a string or null');
+    }
+    return { code: item.code, detail: item.detail };
+  });
+}
+
+/**
+ * Replace the limitations for one code, keeping every other code intact.
+ *
+ * Returns null when nothing remains, so a row that has recovered its evidence
+ * stores NULL rather than an empty array.
+ */
+export function encodeGitOpsEvidenceLimitations(
+  existing: GitOpsEvidenceLimitation[],
+  code: string,
+  next: GitOpsEvidenceLimitation | null,
+): string | null {
+  const kept = existing.filter((item) => item.code !== code);
+  if (next) kept.push(next);
+  if (kept.length === 0) return null;
+  const encoded = encodeGitOpsJson(kept);
+  decodeGitOpsEvidenceLimitations(encoded);
+  return encoded;
+}
+
 export type GitOpsApprovedTargetEffectJson = Array<{ nodeId: number; outcome: 'place' | 'remove' }>;
 
 export function decodeGitOpsApprovedTargetEffectJson(raw: string): GitOpsApprovedTargetEffectJson {

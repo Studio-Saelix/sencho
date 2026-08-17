@@ -83,6 +83,8 @@ export type GitOpsApplicationRow = {
   interruption_operation_id: string | null;
   interruption_generation_id: string | null;
   evidence_fresh_at: number | null;
+  /** Write-time record of what this row could not prove. See json.ts. */
+  evidence_limitations_json: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -266,6 +268,8 @@ export type GitOpsTargetCurrentRow = {
   retry_at: number | null;
   suspended_at: number | null;
   partial_json: string | null;
+  /** Write-time record of what this target could not prove. See json.ts. */
+  evidence_limitations_json: string | null;
   updated_at: number;
 };
 

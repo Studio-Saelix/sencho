@@ -321,6 +321,7 @@ function directApp(id: string, stackName: string): GitOpsApplicationRow {
     interruption_operation_id: null,
     interruption_generation_id: null,
     evidence_fresh_at: null,
+    evidence_limitations_json: null,
     created_at: 1,
     updated_at: 1,
   };

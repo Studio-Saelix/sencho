@@ -140,6 +140,7 @@ export function buildDirectApplicationRow(args: {
     interruption_operation_id: null,
     interruption_generation_id: null,
     evidence_fresh_at: null,
+    evidence_limitations_json: null,
     created_at: args.at,
     updated_at: args.at,
   };

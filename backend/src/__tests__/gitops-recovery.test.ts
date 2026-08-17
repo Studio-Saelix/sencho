@@ -186,6 +186,101 @@ describe('gitops recovery', () => {
     expect(projectApplication('app-rec-lkg-gone', true).targets[0]?.lkg.status).toBe('unavailable');
   });
 
+  it('says why it dropped a pointer it could not prove', () => {
+    const tx = GitOpsTransitions.getInstance();
+    seedTwoGenerations('app-rec-why', 'rec-why-web');
+
+    tx.recoveryStarted({
+      applicationId: 'app-rec-why',
+      nodeId: 1,
+      recoveryRef: 'rec-why',
+      recoveryGenerationId: 'gen-a-app-rec-why',
+      envelope: env('op-rec-why'),
+    });
+    tx.recoverySucceeded({
+      applicationId: 'app-rec-why',
+      nodeId: 1,
+      recoveryRef: 'rec-why',
+      recoveryGenerationId: 'gen-a-app-rec-why',
+      proven: true,
+      gitopsBinding: 'bound',
+      // Both captured references belong to the other generation.
+      capturedArtifactSetId: 'art-b-app-rec-why',
+      capturedSourceAcceptanceRef: 'acc-b-app-rec-why',
+      envelope: env('op-rec-why'),
+    });
+
+    // Without these the cleared pointers are indistinguishable from pointers
+    // that never existed, and the target reads healthier than it is.
+    const codes = projectApplication('app-rec-why', true).limitations.map((l) => l.code);
+    expect(codes).toContain('artifact_expectation_unprovable');
+    expect(codes).toContain('source_acceptance_unprovable');
+  });
+
+  it('flags an unproven restore so it cannot read as healthy', () => {
+    const tx = GitOpsTransitions.getInstance();
+    seedTwoGenerations('app-rec-flag', 'rec-flag-web');
+
+    tx.recoveryStarted({
+      applicationId: 'app-rec-flag',
+      nodeId: 1,
+      recoveryRef: 'rec-flag',
+      recoveryGenerationId: null,
+      envelope: env('op-rec-flag'),
+    });
+    tx.recoverySucceeded({
+      applicationId: 'app-rec-flag',
+      nodeId: 1,
+      recoveryRef: 'rec-flag',
+      recoveryGenerationId: null,
+      proven: false,
+      gitopsBinding: 'unbound',
+      capturedArtifactSetId: null,
+      capturedSourceAcceptanceRef: null,
+      envelope: env('op-rec-flag'),
+    });
+
+    const codes = projectApplication('app-rec-flag', true).limitations.map((l) => l.code);
+    expect(codes).toContain('recovery_unproven');
+  });
+
+  it('clears a limitation once the evidence is provable again', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedTwoGenerations('app-rec-clear', 'rec-clear-web');
+    const genA = 'gen-a-app-rec-clear';
+
+    const restore = (artifactSetId: string, acceptanceRef: string): void => {
+      tx.recoveryStarted({
+        applicationId: 'app-rec-clear',
+        nodeId: 1,
+        recoveryRef: 'rec-clear',
+        recoveryGenerationId: genA,
+        envelope: env(`op-rec-clear-${artifactSetId}`),
+      });
+      tx.recoverySucceeded({
+        applicationId: 'app-rec-clear',
+        nodeId: 1,
+        recoveryRef: 'rec-clear',
+        recoveryGenerationId: genA,
+        proven: true,
+        gitopsBinding: 'bound',
+        capturedArtifactSetId: artifactSetId,
+        capturedSourceAcceptanceRef: acceptanceRef,
+        envelope: env(`op-rec-clear-${artifactSetId}`),
+      });
+    };
+
+    restore('art-b-app-rec-clear', 'acc-b-app-rec-clear');
+    expect(store.getTarget('app-rec-clear', 1)?.evidence_limitations_json).not.toBeNull();
+
+    restore('art-a-app-rec-clear', 'acc-a-app-rec-clear');
+    // A stale limitation is worse than none: it would keep reporting doubt
+    // about evidence that is now proven.
+    expect(store.getTarget('app-rec-clear', 1)?.evidence_limitations_json).toBeNull();
+    expect(projectApplication('app-rec-clear', true).limitations).toHaveLength(0);
+  });
+
   it('records a failed restore without moving success pointers', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
@@ -327,6 +422,7 @@ function app(id: string, stackName: string): GitOpsApplicationRow {
     interruption_operation_id: null,
     interruption_generation_id: null,
     evidence_fresh_at: null,
+    evidence_limitations_json: null,
     created_at: 1,
     updated_at: 1,
   };

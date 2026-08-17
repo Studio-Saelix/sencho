@@ -1,5 +1,10 @@
 import { DatabaseService } from '../DatabaseService';
-import { decodeArtifactEvidenceJson, encodeArtifactEvidenceJson } from './json';
+import {
+  decodeArtifactEvidenceJson,
+  decodeGitOpsEvidenceLimitations,
+  encodeArtifactEvidenceJson,
+  encodeGitOpsEvidenceLimitations,
+} from './json';
 import { insertHistory, type HistoryOutcome } from './history';
 import { emptyTargetRow, GitOpsStore } from './store';
 import type {
@@ -827,8 +832,17 @@ export class GitOpsTransitions {
           && !!generation
           && generation.application_id === args.applicationId;
         if (!provable) {
+          // Nothing moved, so every pointer still agrees with itself and the
+          // target would otherwise read as healthy after a restore we could not
+          // prove restored anything.
+          this.noteTargetLimitation(
+            target,
+            'recovery_unproven',
+            args.recoveryGenerationId ?? args.recoveryRef,
+          );
           return { before, after: { ...before, proven: false } };
         }
+        this.noteTargetLimitation(target, 'recovery_unproven', null);
 
         const restored = generationId as string;
         target.desired_generation_id = restored;
@@ -909,6 +923,30 @@ export class GitOpsTransitions {
     this.writeApplication(app);
   }
 
+
+  /**
+   * Record, on the row itself, that a pointer was dropped because it could not
+   * be proven.
+   *
+   * The deriver computes limitations it can re-derive from current rows. This
+   * is for the ones only the writer knows: after the pointer is gone, "could
+   * not prove it" and "there was never one" look identical. Passing null clears
+   * the code, so a row that recovers its evidence stops reporting the old
+   * limitation.
+   */
+  private noteTargetLimitation(
+    target: GitOpsTargetCurrentRow,
+    code: string,
+    detail: string | null,
+  ): void {
+    const existing = decodeGitOpsEvidenceLimitations(target.evidence_limitations_json);
+    target.evidence_limitations_json = encodeGitOpsEvidenceLimitations(
+      existing,
+      code,
+      detail === null ? null : { code, detail },
+    );
+  }
+
   /**
    * Rebind the artifact expectation to the restored generation.
    *
@@ -924,9 +962,16 @@ export class GitOpsTransitions {
     capturedArtifactSetId: string | null,
   ): void {
     const captured = capturedArtifactSetId ? this.store().getArtifactSet(capturedArtifactSetId) : undefined;
-    target.expected_artifact_set_id = captured && captured.generation_id === generationId
-      ? captured.id
-      : null;
+    const usable = captured && captured.generation_id === generationId;
+    target.expected_artifact_set_id = usable ? captured.id : null;
+    // Dropping this silently would also disable the runtime artifact-drift
+    // check for this target, so the projection would read healthier, not less
+    // certain, than before the restore.
+    this.noteTargetLimitation(
+      target,
+      'artifact_expectation_unprovable',
+      capturedArtifactSetId && !usable ? capturedArtifactSetId : null,
+    );
 
     const newest = this.raw().prepare(
       `SELECT id FROM gitops_artifact_sets
@@ -966,6 +1011,9 @@ export class GitOpsTransitions {
     if (!target.lkg_artifact_set_id) return;
     const artifact = this.store().getArtifactSet(target.lkg_artifact_set_id);
     if (!artifact || artifact.generation_id !== target.lkg_generation_id) {
+      // Without this the last-known-good silently drops from qualified to
+      // merely available, which reads as "it never had qualifying evidence".
+      this.noteTargetLimitation(target, 'lkg_artifact_unprovable', target.lkg_artifact_set_id);
       target.lkg_artifact_set_id = null;
     }
   }
@@ -985,6 +1033,7 @@ export class GitOpsTransitions {
   ): void {
     if (!capturedRef) {
       target.source_acceptance_ref = null;
+      this.noteTargetLimitation(target, 'source_acceptance_unprovable', null);
       return;
     }
     const resolved = this.store().resolveApprovalRef(capturedRef, {
@@ -993,6 +1042,13 @@ export class GitOpsTransitions {
       generationId,
     });
     target.source_acceptance_ref = resolved ? capturedRef : null;
+    // A workload running under an approval we can no longer prove is not the
+    // same as one that was never approved, and the second reads better.
+    this.noteTargetLimitation(
+      target,
+      'source_acceptance_unprovable',
+      resolved ? null : capturedRef,
+    );
   }
 
   /**
@@ -1432,7 +1488,7 @@ export class GitOpsTransitions {
         failure_stage=?, failure_class=?, failure_at=?, retry_at=?, retry_count=?,
         suspended_at=?, recovery_ref=?, recovery_phase=?,
         interruption_stage=?, interruption_at=?, interruption_operation_id=?,
-        interruption_generation_id=?, evidence_fresh_at=?, updated_at=?
+        interruption_generation_id=?, evidence_fresh_at=?, evidence_limitations_json=?, updated_at=?
        WHERE id=?`,
     ).run(
       app.lifecycle_status, app.configured_repo_url, app.repo_identity_json, app.configured_ref,
@@ -1449,7 +1505,8 @@ export class GitOpsTransitions {
       app.failure_stage, app.failure_class, app.failure_at, app.retry_at, app.retry_count,
       app.suspended_at, app.recovery_ref, app.recovery_phase,
       app.interruption_stage, app.interruption_at, app.interruption_operation_id,
-      app.interruption_generation_id, app.evidence_fresh_at, app.updated_at, app.id,
+      app.interruption_generation_id, app.evidence_fresh_at, app.evidence_limitations_json,
+      app.updated_at, app.id,
     );
   }
 }

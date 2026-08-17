@@ -114,6 +114,9 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   interruption_operation_id TEXT NULL,
   interruption_generation_id TEXT NULL,
   evidence_fresh_at INTEGER NULL,
+  -- Why this row could not prove something, recorded at write time. Read-time
+  -- limitations are derived; these are the ones only the writer knows.
+  evidence_limitations_json TEXT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   CHECK (target_mode != 'direct' OR (stack_name IS NOT NULL AND blueprint_id IS NULL)),
@@ -355,6 +358,8 @@ CREATE TABLE IF NOT EXISTS gitops_target_current (
   retry_at INTEGER NULL,
   suspended_at INTEGER NULL,
   partial_json TEXT NULL,
+  -- Why this target could not prove something, recorded at write time.
+  evidence_limitations_json TEXT NULL,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (application_id, node_id),
   CHECK (

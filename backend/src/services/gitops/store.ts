@@ -273,8 +273,8 @@ export class GitOpsStore {
         failure_stage, failure_class, failure_at, retry_at, retry_count, suspended_at,
         recovery_ref, recovery_phase, interruption_stage, interruption_at,
         interruption_operation_id, interruption_generation_id, evidence_fresh_at,
-        created_at, updated_at
-      ) VALUES (${Array(53).fill('?').join(', ')})`,
+        evidence_limitations_json, created_at, updated_at
+      ) VALUES (${Array(54).fill('?').join(', ')})`,
     ).run(
       row.id, row.lifecycle_key, row.lifecycle_status, row.target_mode, row.stack_name, row.blueprint_id,
       row.configured_repo_url, row.repo_identity_json, row.configured_ref, row.compose_paths_json,
@@ -288,7 +288,7 @@ export class GitOpsStore {
       row.failure_stage, row.failure_class, row.failure_at, row.retry_at, row.retry_count, row.suspended_at,
       row.recovery_ref, row.recovery_phase, row.interruption_stage, row.interruption_at,
       row.interruption_operation_id, row.interruption_generation_id, row.evidence_fresh_at,
-      row.created_at, row.updated_at,
+      row.evidence_limitations_json, row.created_at, row.updated_at,
     );
   }
 
@@ -372,8 +372,8 @@ export class GitOpsStore {
         failure_stage, failure_class, failure_at, recovery_ref, recovery_generation_id,
         recovery_phase, interruption_stage, interruption_at, interruption_operation_id,
         interruption_generation_id, interruption_intent_revision_id, interruption_rollout_candidate_id,
-        pause_at, pause_reason, retry_at, suspended_at, partial_json, updated_at
-      ) VALUES (${Array(49).fill('?').join(', ')})
+        pause_at, pause_reason, retry_at, suspended_at, partial_json, evidence_limitations_json, updated_at
+      ) VALUES (${Array(50).fill('?').join(', ')})
       ON CONFLICT(application_id, node_id) DO UPDATE SET
         target_status=excluded.target_status,
         desired_generation_id=excluded.desired_generation_id,
@@ -421,6 +421,7 @@ export class GitOpsStore {
         retry_at=excluded.retry_at,
         suspended_at=excluded.suspended_at,
         partial_json=excluded.partial_json,
+        evidence_limitations_json=excluded.evidence_limitations_json,
         updated_at=excluded.updated_at`,
     ).run(
       row.application_id, row.node_id, row.target_status, row.desired_generation_id, row.candidate_generation_id,
@@ -434,7 +435,8 @@ export class GitOpsStore {
       row.failure_stage, row.failure_class, row.failure_at, row.recovery_ref, row.recovery_generation_id,
       row.recovery_phase, row.interruption_stage, row.interruption_at, row.interruption_operation_id,
       row.interruption_generation_id, row.interruption_intent_revision_id, row.interruption_rollout_candidate_id,
-      row.pause_at, row.pause_reason, row.retry_at, row.suspended_at, row.partial_json, row.updated_at,
+      row.pause_at, row.pause_reason, row.retry_at, row.suspended_at, row.partial_json,
+      row.evidence_limitations_json, row.updated_at,
     );
   }
 
@@ -715,6 +717,7 @@ export function emptyTargetRow(
     retry_at: null,
     suspended_at: null,
     partial_json: null,
+    evidence_limitations_json: null,
     updated_at: now,
   };
 }

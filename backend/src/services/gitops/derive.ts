@@ -1,5 +1,6 @@
 import {
   decodeArtifactEvidenceJson,
+  decodeGitOpsEvidenceLimitations,
   decodeObservedArtifactIdentity,
   GitOpsJsonError,
 } from './json';
@@ -354,6 +355,7 @@ function deriveTarget(
   } else if (target.connectivity) {
     limitations.push({ code: 'connectivity_invalid', message: 'stored connectivity is illegal', evidence: target.connectivity });
   }
+  mergePersistedLimitations(target.evidence_limitations_json, limitations);
   const observed = decodeObservedSafe(target.observed_artifact_identity_json, limitations);
   const artifact = deriveArtifact(app, target.desired_generation_id, target.expected_artifact_set_id, target.latest_artifact_set_id, limitations);
   const runtime = deriveRuntime(target, artifact, observed, healthDisabled);
@@ -517,6 +519,33 @@ function deriveActions(
   if (targets.some((target) => target.runtime.status === 'applied_not_deployed')) actions.add('deploy');
   if (actions.size === 0) return ['none'];
   return Array.from(actions);
+}
+
+/**
+ * Fold the limitations a writer recorded into the ones derived here.
+ *
+ * These cannot be re-derived: they describe evidence that was dropped because
+ * it could not be proven, and once dropped the row looks the same as one that
+ * never had it. Decoded fail-closed, so a corrupt record surfaces as its own
+ * limitation rather than disappearing.
+ */
+function mergePersistedLimitations(raw: string | null, limitations: GitOpsLimitation[]): void {
+  if (!raw) return;
+  try {
+    for (const item of decodeGitOpsEvidenceLimitations(raw)) {
+      limitations.push({
+        code: item.code,
+        message: 'evidence recorded at write time could not be proven',
+        evidence: item.detail,
+      });
+    }
+  } catch (err) {
+    limitations.push({
+      code: 'evidence_limitations_invalid',
+      message: err instanceof Error ? err.message : String(err),
+      evidence: raw,
+    });
+  }
 }
 
 function decodeObservedSafe(
