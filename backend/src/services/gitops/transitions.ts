@@ -15,6 +15,8 @@ import type {
   GitOpsArtifactSetRow,
   GitOpsCreateCheckpointRow,
   GitOpsGenerationRow,
+  GitOpsIntentRevisionRow,
+  GitOpsRolloutCandidateRow,
   GitOpsTargetCurrentRow,
 } from './types';
 
@@ -873,6 +875,332 @@ export class GitOpsTransitions {
   }
 
   /**
+   * A Blueprint's effective source state changed, so a new intent describes it.
+   *
+   * Minting is the caller's decision, not this transition's: a no-op edit must
+   * mint nothing, because every later comparison is against the intent that is
+   * current, and a fresh id for an unchanged Blueprint would invalidate
+   * acknowledgements that are still accurate.
+   */
+  intentRevised(args: {
+    applicationId: string;
+    intent: GitOpsIntentRevisionRow;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateApp(args.applicationId, args.envelope, 'intent_revised', 'committed', (app) => {
+      if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
+      if (args.intent.application_id !== args.applicationId) {
+        throw new GitOpsTransitionError('intent belongs to another application');
+      }
+      this.store().insertIntentRevision(args.intent);
+      app.intent_revision_id = args.intent.id;
+    });
+  }
+
+  /**
+   * Open a rollout candidate for an intent and the nodes it must reach.
+   *
+   * Carries candidate-time facts only. Approval and preflight identities are
+   * composed later from their own rows, so a candidate can be opened before
+   * anything has authorized it without implying that anything has.
+   */
+  rolloutCandidateOpened(args: {
+    applicationId: string;
+    candidate: GitOpsRolloutCandidateRow;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateApp(args.applicationId, args.envelope, 'rollout_candidate_opened', 'committed', (app) => {
+      if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
+      if (args.candidate.application_id !== args.applicationId) {
+        throw new GitOpsTransitionError('candidate belongs to another application');
+      }
+      if (args.candidate.intent_revision_id !== app.intent_revision_id) {
+        throw new GitOpsTransitionError('candidate does not name the current intent');
+      }
+      this.store().insertRolloutCandidate(args.candidate);
+      app.rollout_candidate_id = args.candidate.id;
+    });
+  }
+
+  /**
+   * A Blueprint deploy was handed to one node.
+   *
+   * The intent and candidate it was launched for are recorded on the target, so
+   * the acknowledgement can be matched against what was actually requested. A
+   * later intent supersedes this one, and an ack that arrives for the older
+   * request is then ignored rather than accepted as current.
+   */
+  blueprintDeployStarted(args: {
+    applicationId: string;
+    nodeId: number;
+    intentRevisionId: string;
+    rolloutCandidateId: string | null;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'blueprint_deploy_started',
+      null,
+      (target) => {
+        if (target.target_status !== 'active') {
+          throw new GitOpsTransitionError('cannot deploy to a tombstoned target');
+        }
+        if (target.active_operation_stage && target.active_operation_id !== args.envelope.operationId) {
+          throw new GitOpsTransitionError('conflicting target operation');
+        }
+        const before = { activeStage: target.active_operation_stage };
+        target.active_operation_id = args.envelope.operationId;
+        target.active_operation_stage = 'blueprint_deploy_started';
+        target.active_operation_at = args.envelope.at;
+        target.active_intent_revision_id = args.intentRevisionId;
+        target.active_rollout_candidate_id = args.rolloutCandidateId;
+        // This start supersedes an interrupted one, which would otherwise keep
+        // matching terminals and report completion_unknown for ever.
+        this.clearTargetInterruption(target, 'blueprint_deploy_started');
+        return {
+          before,
+          after: { activeStage: 'blueprint_deploy_started', intentRevisionId: args.intentRevisionId },
+        };
+      },
+    );
+  }
+
+  /**
+   * A node acknowledged the Blueprint deploy it was given.
+   *
+   * Accepted only for the identity the deploy was launched with, live or
+   * interrupted. An ack naming a superseded intent is a statement about work
+   * that no longer describes what is wanted, and recording it would report the
+   * node as converged on something it is not running.
+   */
+  blueprintAckRecorded(args: {
+    applicationId: string;
+    nodeId: number;
+    intentRevisionId: string;
+    rolloutCandidateId: string | null;
+    legacyAppliedRevision: number | null;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'blueprint_ack_recorded',
+      null,
+      (target) => {
+        const request = this.matchBlueprintRequest(
+          target, 'blueprint_deploy_started', args.intentRevisionId, 'acknowledge',
+        );
+        if (args.rolloutCandidateId !== request.rolloutCandidateId) {
+          throw new GitOpsTransitionError('acknowledged candidate is not the one deployed');
+        }
+        const before = { intentRevisionId: target.intent_revision_id };
+        this.clearTargetActive(target);
+        this.clearTargetInterruption(target, 'blueprint_deploy_started');
+        target.intent_revision_id = args.intentRevisionId;
+        // From the matched request, never from the payload: the two can name
+        // different sides, and pairing one request's intent with another's
+        // candidate is the exact misattribution this guards.
+        target.rollout_candidate_id = request.rolloutCandidateId;
+        // Display only. The acknowledged identity is the intent, never this.
+        target.legacy_applied_revision = args.legacyAppliedRevision;
+        if (target.failure_stage === 'blueprint_deploy') {
+          target.failure_stage = null;
+          target.failure_class = null;
+          target.failure_at = null;
+        }
+        return { before, after: { intentRevisionId: args.intentRevisionId } };
+      },
+    );
+  }
+
+  /** A Blueprint deploy failed. Acknowledgement pointers stay where they were. */
+  blueprintDeployFailed(args: {
+    applicationId: string;
+    nodeId: number;
+    failureClass: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'blueprint_deploy_failed',
+      null,
+      (target) => {
+        const before = { failureStage: target.failure_stage };
+        this.clearTargetActive(target);
+        this.clearTargetInterruption(target, 'blueprint_deploy_started');
+        target.failure_stage = 'blueprint_deploy';
+        target.failure_class = args.failureClass;
+        target.failure_at = args.envelope.at;
+        return { before, after: { failureStage: 'blueprint_deploy', failureClass: args.failureClass } };
+      },
+      'failed',
+    );
+  }
+
+  /**
+   * A Blueprint deployment is being removed from one node.
+   *
+   * The intent recorded here is the one currently acknowledged, the thing being
+   * taken away, not a later replacement. Withdrawing is finished only against
+   * that same id.
+   */
+  blueprintWithdrawStarted(args: {
+    applicationId: string;
+    nodeId: number;
+    intentRevisionId: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'blueprint_withdraw_started',
+      null,
+      (target) => {
+        if (target.target_status !== 'active') {
+          throw new GitOpsTransitionError('cannot withdraw from a tombstoned target');
+        }
+        if (target.active_operation_stage && target.active_operation_id !== args.envelope.operationId) {
+          throw new GitOpsTransitionError('conflicting target operation');
+        }
+        const before = { activeStage: target.active_operation_stage };
+        target.active_operation_id = args.envelope.operationId;
+        target.active_operation_stage = 'blueprint_withdraw_started';
+        target.active_operation_at = args.envelope.at;
+        target.active_intent_revision_id = args.intentRevisionId;
+        this.clearTargetInterruption(target, 'blueprint_withdraw_started');
+        return { before, after: { activeStage: 'blueprint_withdraw_started' } };
+      },
+    );
+  }
+
+  /** The deployment is gone from this node, so the target stops claiming it. */
+  blueprintWithdrawn(args: {
+    applicationId: string;
+    nodeId: number;
+    intentRevisionId: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'blueprint_withdrawn',
+      null,
+      (target) => {
+        this.matchBlueprintRequest(
+          target, 'blueprint_withdraw_started', args.intentRevisionId, 'withdraw',
+        );
+        const before = { targetStatus: target.target_status };
+        this.clearTargetActive(target);
+        this.clearTargetInterruption(target, 'blueprint_withdraw_started');
+        target.target_status = 'tombstoned';
+        target.failure_stage = null;
+        target.failure_class = null;
+        target.failure_at = null;
+        return { before, after: { targetStatus: 'tombstoned' } };
+      },
+    );
+  }
+
+  /** A withdraw failed, which is a different state from a deploy that failed. */
+  blueprintWithdrawFailed(args: {
+    applicationId: string;
+    nodeId: number;
+    failureClass: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'blueprint_withdraw_failed',
+      null,
+      (target) => {
+        const before = { failureStage: target.failure_stage };
+        this.clearTargetActive(target);
+        this.clearTargetInterruption(target, 'blueprint_withdraw_started');
+        target.failure_stage = 'blueprint_withdraw';
+        target.failure_class = args.failureClass;
+        target.failure_at = args.envelope.at;
+        return { before, after: { failureStage: 'blueprint_withdraw', failureClass: args.failureClass } };
+      },
+      'failed',
+    );
+  }
+
+  /**
+   * The reconciler observed something worth recording against a target.
+   *
+   * History only. None of these mints an intent or a candidate, and none
+   * acknowledges anything: they say what was seen, not what was decided.
+   */
+  blueprintObservation(args: {
+    applicationId: string;
+    nodeId: number;
+    stage: 'blueprint_state_review' | 'blueprint_evict_blocked' | 'blueprint_drifted' | 'blueprint_correcting';
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      args.stage,
+      null,
+      (target) => {
+        if (target.target_status !== 'active') {
+          throw new GitOpsTransitionError('cannot observe a tombstoned target');
+        }
+        const before = { latestStage: target.latest_stage };
+        // The placement facet reads the latest stage to decide whether a
+        // stateful deployment is waiting on confirmation, so an observation
+        // that only wrote history could never reach a reader.
+        target.latest_stage = args.stage;
+        return { before, after: { observed: args.stage } };
+      },
+    );
+  }
+
+  /**
+   * The intent a Blueprint request was launched against, live or interrupted.
+   *
+   * A terminal event has to match what was actually requested. Accepting one
+   * that names a superseded intent would report a node as converged on an
+   * intent nobody asked it for.
+   */
+  private matchBlueprintRequest(
+    target: GitOpsTargetCurrentRow,
+    expectedStage: 'blueprint_deploy_started' | 'blueprint_withdraw_started',
+    intentRevisionId: string,
+    what: string,
+  ): { rolloutCandidateId: string | null } {
+    // Stage and identity have to come from the same side. Matching an id
+    // against one request while a different one is in flight is what would let
+    // a deploy be acknowledged out of a withdraw, or one request's intent be
+    // paired with another's candidate.
+    if (
+      target.active_operation_stage === expectedStage
+      && target.active_intent_revision_id === intentRevisionId
+    ) {
+      return { rolloutCandidateId: target.active_rollout_candidate_id };
+    }
+    if (
+      target.interruption_stage === expectedStage
+      && target.interruption_intent_revision_id === intentRevisionId
+    ) {
+      return { rolloutCandidateId: target.interruption_rollout_candidate_id };
+    }
+    throw new GitOpsTransitionError(
+      `cannot ${what} an intent this target was not asked to run`,
+    );
+  }
+
+  /**
    * A rollout-scoped rollback started.
    *
    * The same columns and the same rules as `recovery_started`; only the trigger
@@ -1451,8 +1779,6 @@ export class GitOpsTransitions {
         target.interruption_intent_revision_id = target.active_intent_revision_id;
         target.interruption_rollout_candidate_id = target.active_rollout_candidate_id;
         this.clearTargetActive(target);
-        target.active_intent_revision_id = null;
-        target.active_rollout_candidate_id = null;
         target.updated_at = envelope.at;
         this.store().upsertTarget(target);
         const id = this.history(app, envelope, {
@@ -1761,13 +2087,30 @@ export class GitOpsTransitions {
     app.interruption_generation_id = null;
   }
 
+  /**
+   * Release the in-flight operation, identity included.
+   *
+   * The identity columns go with the stage. Leaving them behind lets a later
+   * start that sets only the stage resurrect a superseded intent as though it
+   * were live, which is how an acknowledgement for work nobody asked for gets
+   * accepted.
+   */
   private clearTargetActive(target: GitOpsTargetCurrentRow): void {
     target.active_operation_id = null;
     target.active_operation_stage = null;
     target.active_operation_at = null;
     target.active_generation_id = null;
+    target.active_intent_revision_id = null;
+    target.active_rollout_candidate_id = null;
   }
 
+  /**
+   * Retire an interruption once its stage has reached a real outcome.
+   *
+   * Identity goes with it, for the same reason as above: an interruption that
+   * outlives its resolution keeps matching, so a late terminal for the
+   * interrupted request is still accepted after two later ones have succeeded.
+   */
   private clearTargetInterruption(
     target: GitOpsTargetCurrentRow,
     stage: GitOpsTargetCurrentRow['interruption_stage'],
@@ -1777,6 +2120,8 @@ export class GitOpsTransitions {
     target.interruption_at = null;
     target.interruption_operation_id = null;
     target.interruption_generation_id = null;
+    target.interruption_intent_revision_id = null;
+    target.interruption_rollout_candidate_id = null;
   }
 
   private clearAppFailure(app: GitOpsApplicationRow, stages: Array<NonNullable<GitOpsApplicationRow['failure_stage']>>): void {
