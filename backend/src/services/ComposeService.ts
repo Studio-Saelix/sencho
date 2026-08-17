@@ -692,7 +692,11 @@ export class ComposeService {
           return true;
         } catch (error) {
           console.error(
-            `[GitOps] Could not record deploy ${what} for ${sanitizeForLog(stackName)} (application ${app.id}, generation ${generationId}):`,
+            '[GitOps] Could not record deploy %s for %s (application %s, generation %s):',
+            what,
+            sanitizeForLog(stackName),
+            app.id,
+            generationId,
             error instanceof Error ? error.stack ?? error.message : String(error),
           );
           return false;
@@ -708,7 +712,8 @@ export class ComposeService {
       };
     } catch (error) {
       console.error(
-        `[GitOps] Could not open a deploy operation for ${sanitizeForLog(stackName)}:`,
+        '[GitOps] Could not open a deploy operation for %s:',
+        sanitizeForLog(stackName),
         error instanceof Error ? error.message : String(error),
       );
       return null;

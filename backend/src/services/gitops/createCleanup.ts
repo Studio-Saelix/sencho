@@ -1,7 +1,9 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { isPathWithinBase } from '../../utils/validation';
+import { sanitizeForLog } from '../../utils/safeLog';
 import { deleteStagingMarker, validateCandidateRelPath } from './createStagingMarker';
+import { managedAreaBase } from './managedPaths';
 
 export type OperationOwnedCleanup = {
   /** Absolute path of the stack's managed root. */
@@ -33,6 +35,11 @@ export type OperationOwnedCleanup = {
  */
 export async function removeOperationOwnedPaths(input: OperationOwnedCleanup): Promise<void> {
   const base = path.resolve(input.stackManagedRoot);
+  // Inline containment barrier at the removal sink (see `managedAreaBase`).
+  const areaBase = managedAreaBase();
+  if (!base.startsWith(areaBase + path.sep)) {
+    throw new Error('refusing to remove a managed root outside the managed area');
+  }
 
   if (input.ownsManagedRoot) {
     await fs.rm(base, { recursive: true, force: true });
@@ -53,6 +60,12 @@ export async function removeOperationOwnedPaths(input: OperationOwnedCleanup): P
     // radius to a whole generations directory.
     if (!/^(generations)[\\/](candidate|applied)-/.test(relPath)) {
       throw new Error(`refusing to remove a path that is not a generation directory: ${relPath}`);
+    }
+    // Redundant as a security check: `resolved` is already a strict descendant
+    // of `base`, and `base` of `areaBase`. Present because it is this variable
+    // that reaches the removal below, and the barrier has to sit at the call.
+    if (!resolved.startsWith(areaBase + path.sep)) {
+      throw new Error('refusing to remove a path outside the managed area');
     }
     await fs.rm(resolved, { recursive: true, force: true });
   }
@@ -77,7 +90,21 @@ export async function cleanupUnclaimedManagedRoot(
   if (reason) return 'preserved';
 
   if (!marker.rootPreexisted) {
-    await fs.rm(path.resolve(stackManagedRoot), { recursive: true, force: true });
+    // Same inline containment barrier as the sinks above: this one removes a
+    // whole managed root, so it gets the check even though the analyzer has not
+    // reported it. Reported as `preserved` rather than thrown, because every
+    // other unprovable case here answers that way and the caller reads the
+    // outcome; the warning is what says this one is anomalous rather than
+    // merely unproven.
+    const root = path.resolve(stackManagedRoot);
+    if (!root.startsWith(managedAreaBase() + path.sep)) {
+      console.warn(
+        '[GitOps] Refusing to reap a managed root outside the managed area: %s',
+        sanitizeForLog(stackManagedRoot),
+      );
+      return 'preserved';
+    }
+    await fs.rm(root, { recursive: true, force: true });
     return 'removed_root';
   }
 

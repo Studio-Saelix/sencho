@@ -41,6 +41,7 @@ import {
 import type { GitOpsApplicationRow } from './gitops/types';
 import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readStagingMarker, writeStagingMarker } from './gitops/createStagingMarker';
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops/createCleanup';
+import { managedAreaBase } from './gitops/managedPaths';
 import type { GitHttpRequest, GitHttpResponse, HttpClient } from 'isomorphic-git/http/node';
 
 // isomorphic-git is the heaviest dependency in the backend (~5 MB) and only
@@ -2729,7 +2730,14 @@ export class GitSourceService {
             }
 
             const gitopsOperationId = crypto.randomUUID();
-            const managedRoot = stackManagedRoot(input.stackName);
+            // Inline containment barrier at the stat sink. CodeQL does not
+            // credit the wrapped isPathWithinBase helper, so resolve against the
+            // managed-area base and check containment right here.
+            const areaBase = managedAreaBase();
+            const managedRoot = path.resolve(stackManagedRoot(input.stackName));
+            if (!managedRoot.startsWith(areaBase + path.sep)) {
+                throw new GitSourceError('GIT_ERROR', 'Invalid stack path');
+            }
             // Whether the managed root is ours to delete is decided once, here,
             // before anything can create it. Cleanup later reads this answer
             // rather than re-probing a directory it may itself have made.

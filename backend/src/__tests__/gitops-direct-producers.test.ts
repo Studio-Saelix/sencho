@@ -18,7 +18,7 @@
 import { EventEmitter } from 'events';
 import fsPromises from 'fs/promises';
 import path from 'path';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
 const { mockGitClone, mockGitLog, compose } = vi.hoisted(() => ({
@@ -171,6 +171,13 @@ describe('Direct Git producers drive the revision state', () => {
     compose.exitCode = 1;
   });
 
+  // Prototype spies a test installs are restored here rather than in a per-test
+  // finally, so a failing test cannot leak one into the next. Only spies are
+  // touched, so the hoisted git mocks keep the reset above.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('creates, fetches, applies, and detaches a Git stack through the state model', async () => {
     const svc = GitSourceService.getInstance();
     const store = GitOpsStore.getInstance();
@@ -295,55 +302,47 @@ describe('Direct Git producers drive the revision state', () => {
 
     // The post-deploy probe asks the daemon what came up. It is not what this
     // test is about, and `getInstance` hands back a fresh controller each call,
-    // so the stubs go on the prototype. Created inside the try that restores
-    // them: a stub that outlives a failing test would silently change the two
-    // tests after it.
+    // so the stubs go on the prototype. `afterEach` restores them, so a failing
+    // test cannot leak one into the next.
     const composeSvc = ComposeService.getInstance(1);
-    let orphans: ReturnType<typeof vi.spyOn> | null = null;
-    let docker: ReturnType<typeof vi.spyOn> | null = null;
-    try {
-      orphans = vi.spyOn(DockerController.prototype, 'getLegacyOrphanContainersByStack')
-        .mockResolvedValue([]);
-      docker = vi.spyOn(DockerController.prototype, 'getDocker')
-        .mockReturnValue({ listContainers: async () => [] } as unknown as ReturnType<
-          typeof DockerController.prototype.getDocker
-        >);
+    vi.spyOn(DockerController.prototype, 'getLegacyOrphanContainersByStack')
+      .mockResolvedValue([]);
+    vi.spyOn(DockerController.prototype, 'getDocker')
+      .mockReturnValue({ listContainers: async () => [] } as unknown as ReturnType<
+        typeof DockerController.prototype.getDocker
+      >);
 
-      // ── the compose command fails ──────────────────────────────────────
-      compose.exitCode = 1;
-      await expect(composeSvc.deployStack(stackName)).rejects.toThrow();
+    // ── the compose command fails ──────────────────────────────────────
+    compose.exitCode = 1;
+    await expect(composeSvc.deployStack(stackName)).rejects.toThrow();
 
-      const failed = store.getTarget(app.id, 1)!;
-      expect(failed.deployed_generation_id).toBeNull();
-      expect(failed.failure_stage).toBe('deploy');
-      // Classified conservatively: once the compose command has been handed
-      // off, we cannot prove the workload was untouched, and claiming it was
-      // intact would be the more dangerous error.
-      expect(failed.failure_class).toBe('post_mutation');
-      expect(projectOf(app.id).targets[0]?.runtime.status).toBe('failed_after_mutation');
-      expect(failed.applied_generation_id).toBe(applied);
+    const failed = store.getTarget(app.id, 1)!;
+    expect(failed.deployed_generation_id).toBeNull();
+    expect(failed.failure_stage).toBe('deploy');
+    // Classified conservatively: once the compose command has been handed
+    // off, we cannot prove the workload was untouched, and claiming it was
+    // intact would be the more dangerous error.
+    expect(failed.failure_class).toBe('post_mutation');
+    expect(projectOf(app.id).targets[0]?.runtime.status).toBe('failed_after_mutation');
+    expect(failed.applied_generation_id).toBe(applied);
 
-      // ── the compose command succeeds ───────────────────────────────────
-      compose.exitCode = 0;
-      const result = await composeSvc.deployStack(stackName);
+    // ── the compose command succeeds ───────────────────────────────────
+    compose.exitCode = 0;
+    const result = await composeSvc.deployStack(stackName);
 
-      // The adapter reports the generation it bound, which is what lets the
-      // caller start health against that exact generation rather than against
-      // whatever is applied by the time health runs.
-      expect(result.deployedGenerationId).toBe(applied);
+    // The adapter reports the generation it bound, which is what lets the
+    // caller start health against that exact generation rather than against
+    // whatever is applied by the time health runs.
+    expect(result.deployedGenerationId).toBe(applied);
 
-      const bound = store.getTarget(app.id, 1)!;
-      expect(bound.deployed_generation_id).toBe(applied);
-      expect(bound.applied_generation_id).toBe(applied);
-      // A bound deploy clears the earlier failure: the target is no longer in
-      // the state the operator was asked to act on.
-      expect(bound.failure_stage).toBeNull();
-      expect(bound.failure_class).toBeNull();
-      expect(projectOf(app.id).targets[0]?.runtime.status).not.toBe('failed_after_mutation');
-    } finally {
-      orphans?.mockRestore();
-      docker?.mockRestore();
-    }
+    const bound = store.getTarget(app.id, 1)!;
+    expect(bound.deployed_generation_id).toBe(applied);
+    expect(bound.applied_generation_id).toBe(applied);
+    // A bound deploy clears the earlier failure: the target is no longer in
+    // the state the operator was asked to act on.
+    expect(bound.failure_stage).toBeNull();
+    expect(bound.failure_class).toBeNull();
+    expect(projectOf(app.id).targets[0]?.runtime.status).not.toBe('failed_after_mutation');
   });
 
   it('reports the deployed generation from an update so health can bind to it', async () => {

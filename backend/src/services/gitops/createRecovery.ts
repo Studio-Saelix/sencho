@@ -170,8 +170,11 @@ async function resolveOne(checkpoint: GitOpsCreateCheckpointRow): Promise<Create
   // success boundary. Either way there is nothing to decide: drop the
   // bookkeeping and clear any marker the last process could not.
   if (!app || app.lifecycle_status === 'active' || checkpoint.phase === 'pointers_committed') {
-    store.deleteCreateCheckpoint(checkpoint.application_id);
+    // Marker first: clearing it can fail, and dropping the checkpoint before
+    // that would report the area as settled while leaving a marker that makes
+    // the stack name uncreatable.
     await deleteStagingMarker(managedRoot);
+    store.deleteCreateCheckpoint(checkpoint.application_id);
     return { stackName, applicationId: checkpoint.application_id, outcome: 'checkpoint_cleared' };
   }
 
@@ -248,8 +251,9 @@ async function resolveOne(checkpoint: GitOpsCreateCheckpointRow): Promise<Create
       });
       store.updateCreateCheckpoint(checkpoint.application_id, { phase: 'pointers_committed' }, Date.now());
     })();
-    store.deleteCreateCheckpoint(checkpoint.application_id);
+    // Marker before checkpoint, for the reason given on the branch above.
     await deleteStagingMarker(managedRoot);
+    store.deleteCreateCheckpoint(checkpoint.application_id);
     return { stackName, applicationId: checkpoint.application_id, outcome: 'completed' };
   }
 

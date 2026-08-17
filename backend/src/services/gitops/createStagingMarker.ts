@@ -1,7 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { isPathWithinBase } from '../../utils/validation';
-import { GENERATIONS_DIR } from './managedPaths';
+import { GENERATIONS_DIR, managedAreaBase } from './managedPaths';
 
 export const CREATE_STAGING_MARKER_FILENAME = '.create-staging.v1.json';
 
@@ -75,14 +75,23 @@ export function validateCandidateRelPath(candidateRelPath: unknown, stackManaged
   return null;
 }
 
+/** Test-only. Production call sites resolve this path inline at their own sink. */
 export function stagingMarkerPath(stackManagedRoot: string): string {
   return path.join(stackManagedRoot, CREATE_STAGING_MARKER_FILENAME);
 }
 
 export async function readStagingMarker(stackManagedRoot: string): Promise<ReadStagingMarkerResult> {
+  // Inline containment barrier at the read sink (see `managedAreaBase`). A root
+  // outside the managed area is treated as corrupt rather than thrown, matching
+  // this module's rule that an unreadable claim preserves rather than deletes.
+  const areaBase = managedAreaBase();
+  const markerPath = path.resolve(stackManagedRoot, CREATE_STAGING_MARKER_FILENAME);
+  if (!markerPath.startsWith(areaBase + path.sep)) {
+    return { state: 'corrupt', reason: 'managed root escapes the managed area' };
+  }
   let raw: string;
   try {
-    raw = await fs.readFile(stagingMarkerPath(stackManagedRoot), 'utf8');
+    raw = await fs.readFile(markerPath, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { state: 'missing' };
     return { state: 'corrupt', reason: (error as Error).message };
@@ -149,13 +158,30 @@ export async function writeStagingMarker(
     );
   }
 
-  await fs.mkdir(stackManagedRoot, { recursive: true });
-  const target = stagingMarkerPath(stackManagedRoot);
-  const temp = `${target}.${marker.operationId}.tmp`;
+  // Inline containment barrier at each write sink (see `managedAreaBase`).
+  const areaBase = managedAreaBase();
+  const root = path.resolve(stackManagedRoot);
+  const target = path.resolve(stackManagedRoot, CREATE_STAGING_MARKER_FILENAME);
+  const temp = path.resolve(stackManagedRoot, `${CREATE_STAGING_MARKER_FILENAME}.${marker.operationId}.tmp`);
+  if (
+    !root.startsWith(areaBase + path.sep)
+    || !target.startsWith(areaBase + path.sep)
+    || !temp.startsWith(areaBase + path.sep)
+  ) {
+    throw new CreateStagingMarkerError('managed root escapes the managed area');
+  }
+
+  await fs.mkdir(root, { recursive: true });
   await fs.writeFile(temp, JSON.stringify(marker), 'utf8');
   await fs.rename(temp, target);
 }
 
 export async function deleteStagingMarker(stackManagedRoot: string): Promise<void> {
-  await fs.rm(stagingMarkerPath(stackManagedRoot), { force: true });
+  // Inline containment barrier at the removal sink (see `managedAreaBase`).
+  const areaBase = managedAreaBase();
+  const markerPath = path.resolve(stackManagedRoot, CREATE_STAGING_MARKER_FILENAME);
+  if (!markerPath.startsWith(areaBase + path.sep)) {
+    throw new CreateStagingMarkerError('managed root escapes the managed area');
+  }
+  await fs.rm(markerPath, { force: true });
 }

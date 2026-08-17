@@ -22,6 +22,7 @@ import {
   CreateStagingMarkerError,
 } from '../services/gitops/createStagingMarker';
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from '../services/gitops/createCleanup';
+import { managedAreaBase } from '../services/gitops/managedPaths';
 import type {
   GitOpsApplicationRow,
   GitOpsCreateCheckpointRow,
@@ -172,13 +173,24 @@ describe('gitops create-from-git', () => {
 
 describe('gitops create staging marker', () => {
   let root: string;
+  let dataDir: string;
+  let priorDataDir: string | undefined;
 
   beforeAll(() => {
-    root = fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'sencho-marker-'));
+    // A managed root only ever lives inside the managed area, and the marker
+    // helpers enforce that at every filesystem call, so the fixture has to be a
+    // real managed area rather than a bare temp directory.
+    priorDataDir = process.env.DATA_DIR;
+    dataDir = fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'sencho-marker-'));
+    process.env.DATA_DIR = dataDir;
+    root = managedAreaBase();
+    fs.mkdirSync(root, { recursive: true });
   });
 
   afterAll(() => {
-    fs.rmSync(root, { recursive: true, force: true });
+    if (priorDataDir === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = priorDataDir;
+    if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
   function areaFor(name: string): string {
@@ -251,13 +263,23 @@ describe('gitops create staging marker', () => {
 
 describe('gitops create cleanup', () => {
   let root: string;
+  let dataDir: string;
+  let priorDataDir: string | undefined;
 
   beforeAll(() => {
-    root = fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'sencho-cleanup-'));
+    // Same as the marker describe: cleanup refuses to touch anything outside
+    // the managed area, so the fixture areas have to live inside one.
+    priorDataDir = process.env.DATA_DIR;
+    dataDir = fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'sencho-cleanup-'));
+    process.env.DATA_DIR = dataDir;
+    root = managedAreaBase();
+    fs.mkdirSync(root, { recursive: true });
   });
 
   afterAll(() => {
-    fs.rmSync(root, { recursive: true, force: true });
+    if (priorDataDir === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = priorDataDir;
+    if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
   async function seedArea(name: string): Promise<{ area: string; candidateRel: string; sentinel: string }> {
