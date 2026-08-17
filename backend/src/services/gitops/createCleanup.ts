@@ -87,7 +87,16 @@ export async function cleanupUnclaimedManagedRoot(
 ): Promise<'removed_root' | 'removed_candidate' | 'preserved'> {
   if (!marker) return 'preserved';
   const reason = validateCandidateRelPath(marker.candidateRelPath, stackManagedRoot);
-  if (reason) return 'preserved';
+  if (reason) {
+    // Said out loud, because the caller only logs the outcome. A directory
+    // that survives every boot with no stated reason is indistinguishable
+    // from one nothing has looked at.
+    console.warn(
+      '[GitOps] Preserving unclaimed managed area %s: %s',
+      sanitizeForLog(stackManagedRoot), reason,
+    );
+    return 'preserved';
+  }
 
   if (!marker.rootPreexisted) {
     // Same inline containment barrier as the sinks above: this one removes a

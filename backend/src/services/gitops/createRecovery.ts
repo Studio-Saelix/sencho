@@ -17,7 +17,13 @@ export type CreateRecoveryOutcome =
   | 'tombstoned'
   | 'checkpoint_cleared'
   | 'source_preserved'
-  | 'retained';
+  | 'retained'
+  /**
+   * The create itself is settled; only clearing its staging marker failed.
+   * Distinct from `retained` so the boot log does not send an operator looking
+   * for an unfinished create that finished.
+   */
+  | 'marker_retained';
 
 export type CreateRecoveryResult = {
   stackName: string;
@@ -41,6 +47,29 @@ function envelopeFor(checkpoint: GitOpsCreateCheckpointRow) {
  * that is really there. Completion must not treat it as present, or it would
  * mark a create live on the strength of a failed stat.
  */
+/**
+ * Clear a settled create's staging marker, reporting rather than throwing.
+ *
+ * The checkpoint is only dropped once this succeeds, because a marker left
+ * behind with no checkpoint has nothing to retry it and refuses every later
+ * create for that stack name. The cost is that a marker this keeps failing on
+ * also keeps the checkpoint row, and its encrypted token, alive across boots.
+ * That is the lesser harm: the row is encrypted at rest with the same key as
+ * the source it came from, and it is what makes the retry possible at all.
+ */
+async function clearSettledMarker(stackName: string, managedRoot: string): Promise<boolean> {
+  try {
+    await deleteStagingMarker(managedRoot);
+    return true;
+  } catch (error) {
+    console.warn(
+      `[GitOps] Settled the create for ${sanitizeForLog(stackName)} but could not clear its staging marker:`,
+      error instanceof Error ? error.message : String(error),
+    );
+    return false;
+  }
+}
+
 async function stackDirState(stackName: string): Promise<'present' | 'absent' | 'unknown'> {
   try {
     const base = FileSystemService.getInstance().getBaseDir();
@@ -171,9 +200,11 @@ async function resolveOne(checkpoint: GitOpsCreateCheckpointRow): Promise<Create
   // bookkeeping and clear any marker the last process could not.
   if (!app || app.lifecycle_status === 'active' || checkpoint.phase === 'pointers_committed') {
     // Marker first: clearing it can fail, and dropping the checkpoint before
-    // that would report the area as settled while leaving a marker that makes
-    // the stack name uncreatable.
-    await deleteStagingMarker(managedRoot);
+    // that would leave a marker that makes the stack name uncreatable with
+    // nothing left to retry it.
+    if (!await clearSettledMarker(stackName, managedRoot)) {
+      return { stackName, applicationId: checkpoint.application_id, outcome: 'marker_retained' };
+    }
     store.deleteCreateCheckpoint(checkpoint.application_id);
     return { stackName, applicationId: checkpoint.application_id, outcome: 'checkpoint_cleared' };
   }
@@ -251,8 +282,11 @@ async function resolveOne(checkpoint: GitOpsCreateCheckpointRow): Promise<Create
       });
       store.updateCreateCheckpoint(checkpoint.application_id, { phase: 'pointers_committed' }, Date.now());
     })();
-    // Marker before checkpoint, for the reason given on the branch above.
-    await deleteStagingMarker(managedRoot);
+    // Marker before checkpoint, for the reason given on the branch above. The
+    // create is live either way by this point: the transaction above committed.
+    if (!await clearSettledMarker(stackName, managedRoot)) {
+      return { stackName, applicationId: checkpoint.application_id, outcome: 'marker_retained' };
+    }
     store.deleteCreateCheckpoint(checkpoint.application_id);
     return { stackName, applicationId: checkpoint.application_id, outcome: 'completed' };
   }

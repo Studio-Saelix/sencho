@@ -152,6 +152,15 @@ export async function writeStagingMarker(
   if (reason) throw new CreateStagingMarkerError(reason);
 
   const existing = await readStagingMarker(stackManagedRoot);
+  // A marker that exists but cannot be read is still a claim. Overwriting it
+  // would hand this operation deletion authority over whatever the last one
+  // staged, which is the opposite of what the rest of this module does with a
+  // corrupt marker, and it would do so with nothing said about why.
+  if (existing.state === 'corrupt') {
+    throw new CreateStagingMarkerError(
+      `this managed area has an unreadable staging marker (${existing.reason}); refusing to claim it`,
+    );
+  }
   if (existing.state === 'valid' && existing.marker.operationId !== marker.operationId) {
     throw new CreateStagingMarkerError(
       'another create operation already owns this managed area',

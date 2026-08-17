@@ -259,6 +259,45 @@ describe('gitops create staging marker', () => {
     await fsPromises.writeFile(stagingMarkerPath(area), 'not json', 'utf8');
     expect((await readStagingMarker(area)).state).toBe('corrupt');
   });
+
+  it('refuses to claim an area whose marker cannot be read', async () => {
+    // A marker that exists but will not parse is still someone's claim.
+    // Writing over it would hand this operation deletion authority over what
+    // the last one staged.
+    const area = areaFor('unreadable-claim');
+    await fsPromises.mkdir(area, { recursive: true });
+    await fsPromises.writeFile(stagingMarkerPath(area), 'not json', 'utf8');
+    await expect(writeStagingMarker(area, {
+      schemaVersion: 1,
+      operationId: 'op-new',
+      rootPreexisted: true,
+      candidateRelPath: candidateRelPathForSha(SHA),
+      createdAt: 1,
+    })).rejects.toThrow(/unreadable staging marker/);
+  });
+
+  it('refuses every marker operation on a root outside the managed area', async () => {
+    // The stack name reaches this root without being validated here, so each
+    // call checks containment itself. Without these the checks are deletable
+    // and nothing notices.
+    const outside = path.join(dataDir, 'not-the-managed-area', 'web');
+    await fsPromises.mkdir(outside, { recursive: true });
+
+    const read = await readStagingMarker(outside);
+    expect(read.state).toBe('corrupt');
+    if (read.state !== 'corrupt') throw new Error('expected a corrupt result');
+    expect(read.reason).toMatch(/managed area/);
+
+    await expect(writeStagingMarker(outside, {
+      schemaVersion: 1,
+      operationId: 'op-outside',
+      rootPreexisted: true,
+      candidateRelPath: candidateRelPathForSha(SHA),
+      createdAt: 1,
+    })).rejects.toBeInstanceOf(CreateStagingMarkerError);
+
+    await expect(deleteStagingMarker(outside)).rejects.toBeInstanceOf(CreateStagingMarkerError);
+  });
 });
 
 describe('gitops create cleanup', () => {
@@ -303,6 +342,27 @@ describe('gitops create cleanup', () => {
     const { area, candidateRel } = await seedArea('owned');
     await removeOperationOwnedPaths({ stackManagedRoot: area, candidateRelPath: candidateRel, ownsManagedRoot: true });
     expect(fs.existsSync(area)).toBe(false);
+  });
+
+  it('refuses to remove a managed root outside the managed area', async () => {
+    // The guard that keeps a recursive removal inside the area it is meant to
+    // clean. Without a test it is deletable and nothing notices.
+    const outside = path.join(dataDir, 'not-the-managed-area', 'web');
+    fs.mkdirSync(outside, { recursive: true });
+    await expect(removeOperationOwnedPaths({
+      stackManagedRoot: outside,
+      candidateRelPath: null,
+      ownsManagedRoot: true,
+    })).rejects.toThrow(/outside the managed area/);
+    expect(fs.existsSync(outside)).toBe(true);
+
+    // The reaper reports rather than throws, so it answers `preserved`.
+    expect(await cleanupUnclaimedManagedRoot(outside, {
+      operationId: 'op-outside',
+      rootPreexisted: false,
+      candidateRelPath: candidateRelPathForSha(SHA),
+    })).toBe('preserved');
+    expect(fs.existsSync(outside)).toBe(true);
   });
 
   it('refuses to remove a path outside the managed root', async () => {
