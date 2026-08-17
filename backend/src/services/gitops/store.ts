@@ -85,6 +85,22 @@ export class GitOpsStore {
     ).get(stackName) as GitOpsApplicationRow | undefined;
   }
 
+  /**
+   * The live application for a Blueprint, in either Blueprint mode.
+   *
+   * One query across both modes because a Blueprint owns at most one live
+   * application whichever way it is delivered, and the unique live index
+   * enforces exactly that.
+   */
+  getLiveBlueprintApplication(blueprintId: number): GitOpsApplicationRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE blueprint_id = ?
+         AND target_mode IN ('inline_blueprint','blueprint')
+         AND lifecycle_status IN ('active','creating')`,
+    ).get(blueprintId) as GitOpsApplicationRow | undefined;
+  }
+
   /** Direct applications that never reached their success boundary. */
   listCreatingDirectApplications(): GitOpsApplicationRow[] {
     return this.db().prepare(
