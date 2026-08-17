@@ -30,6 +30,7 @@ import { PilotMetrics } from '../services/PilotMetrics';
 import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { sweepStaleTempDirs as sweepStaleGitTempDirs, sweepGitManifestOrphans } from '../services/GitSourceService';
 import { reclassifyInterruptedOperations, resolveInterruptedCreates } from '../services/gitops/createRecovery';
+import { loadMigrationManifests, migrateDirectGitStacks } from '../services/gitops/migrate';
 import { sanitizeForLog } from '../utils/safeLog';
 import { PORT } from '../helpers/constants';
 import { LOW_MEMORY_FLOOR_BYTES } from '../utils/spawnErrors';
@@ -181,6 +182,20 @@ export async function startServer(server: Server): Promise<void> {
     }
   } catch (err) {
     console.error('[GitOps] Interrupted-operation reclassification failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+  }
+
+  // Git stacks that predate the revision state model are brought into it here,
+  // after interrupted work is settled so migration never races a half-finished
+  // create, and before any mutation service can act on a stack the model does
+  // not yet describe.
+  try {
+    await loadMigrationManifests();
+    const migrated = migrateDirectGitStacks().filter((entry) => entry.outcome !== 'skipped_current');
+    for (const entry of migrated) {
+      console.log(`[GitOps] Migrated Git stack ${sanitizeForLog(entry.stackName)}: ${entry.outcome}`);
+    }
+  } catch (err) {
+    console.error('[GitOps] Migration of pre-existing Git stacks failed:', err instanceof Error ? err.stack ?? err.message : String(err));
   }
 
   // The managed-area sweep follows. It preserves anything whose ownership it

@@ -167,6 +167,52 @@ export class GitOpsStore {
     return row?.id ?? null;
   }
 
+  getMigrationCheckpoint(scope: string): { scope: string; schema_version: number; fingerprint: string } | undefined {
+    return this.db().prepare(
+      'SELECT scope, schema_version, fingerprint FROM gitops_migration_checkpoints WHERE scope = ?',
+    ).get(scope) as { scope: string; schema_version: number; fingerprint: string } | undefined;
+  }
+
+  /**
+   * Record that this scope has been migrated at this schema version and
+   * configuration fingerprint.
+   *
+   * Replay is decided from the triple: an unchanged fingerprint skips, a
+   * changed one re-runs the matrix. It never licenses upgrading an already
+   * justified pointer to a stronger claim.
+   */
+  upsertMigrationCheckpoint(scope: string, schemaVersion: number, fingerprint: string, at: number): void {
+    this.db().prepare(
+      `INSERT INTO gitops_migration_checkpoints (scope, schema_version, fingerprint, migrated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(scope) DO UPDATE SET
+         schema_version=excluded.schema_version,
+         fingerprint=excluded.fingerprint,
+         migrated_at=excluded.migrated_at`,
+    ).run(scope, schemaVersion, fingerprint, at);
+  }
+
+  /**
+   * Persist an application's mutable columns without going through a
+   * transition.
+   *
+   * Used only by migration, which builds a whole row from evidence rather than
+   * moving one pointer at a time. Every other writer goes through the
+   * transitions so the change lands in history.
+   */
+  writeApplicationPointers(app: GitOpsApplicationRow): void {
+    this.db().prepare(
+      `UPDATE gitops_applications SET
+        desired_commit_sha=?, fetched_commit_sha=?, accepted_generation_id=?,
+        artifact_set_id=?, latest_artifact_set_id=?, evidence_limitations_json=?, updated_at=?
+       WHERE id=?`,
+    ).run(
+      app.desired_commit_sha, app.fetched_commit_sha, app.accepted_generation_id,
+      app.artifact_set_id, app.latest_artifact_set_id, app.evidence_limitations_json,
+      app.updated_at, app.id,
+    );
+  }
+
   insertCreateCheckpoint(row: GitOpsCreateCheckpointRow): void {
     decodeGitOpsJson(row.compose_paths_json);
     this.db().prepare(

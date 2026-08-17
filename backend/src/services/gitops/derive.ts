@@ -54,6 +54,7 @@ export function deriveGitOpsRevision(
     };
   }
   const limitations: GitOpsLimitation[] = [];
+  mergePersistedLimitations(app.evidence_limitations_json, limitations);
   const source = deriveSource(app, limitations);
   const artifact = deriveArtifact(app, app.accepted_generation_id, app.artifact_set_id, app.latest_artifact_set_id, limitations);
   const placement = derivePlacement(app);
