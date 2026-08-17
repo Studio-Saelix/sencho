@@ -2,6 +2,7 @@ import { DatabaseService } from '../DatabaseService';
 import {
   decodeArtifactEvidenceJson,
   decodeGitOpsEvidenceLimitations,
+  decodeGitOpsJson,
   encodeArtifactEvidenceJson,
   encodeGitOpsEvidenceLimitations,
 } from './json';
@@ -730,6 +731,148 @@ export class GitOpsTransitions {
       target.lkg_unavailable_at = null;
       target.lkg_unavailable_reason = null;
       return { before, after: { targetStatus: 'tombstoned' } };
+    });
+  }
+
+  /**
+   * Schedule a retry after a failed fetch.
+   *
+   * The failure stays visible: a scheduled retry is a plan, not a resolution,
+   * and hiding the failure behind it would make a stack that keeps failing look
+   * merely busy. `fetch_started` clears the schedule when the retry runs.
+   */
+  sourceRetryScheduled(
+    applicationId: string,
+    retryAt: number,
+    retryCount: number,
+    envelope: EventEnvelope,
+  ): TransitionResult {
+    return this.mutateApp(applicationId, envelope, 'source_retry_scheduled', 'committed', (app) => {
+      if (app.suspended_at) throw new GitOpsTransitionError('source is suspended');
+      if (app.active_operation_stage) {
+        throw new GitOpsTransitionError('cannot schedule a retry while an operation is in flight');
+      }
+      app.retry_at = retryAt;
+      app.retry_count = retryCount;
+    });
+  }
+
+  /**
+   * Stop acting on a source without forgetting anything about it.
+   *
+   * Suspension is a decision about future work, so every success pointer stays
+   * exactly where it is. An operation in flight is interrupted rather than
+   * abandoned, so it does not report as running for ever.
+   */
+  sourceSuspended(applicationId: string, reason: string, envelope: EventEnvelope): TransitionResult {
+    return this.mutateApp(applicationId, envelope, 'source_suspended', 'committed', (app, extras) => {
+      if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('source is not live');
+      if (app.active_operation_stage) {
+        const interrupted = this.interruptActiveOperations(applicationId, envelope);
+        extras.historyIds.push(...interrupted.historyIds);
+        const reloaded = this.requireApp(applicationId);
+        app.interruption_stage = reloaded.interruption_stage;
+        app.interruption_at = reloaded.interruption_at;
+        app.interruption_operation_id = reloaded.interruption_operation_id;
+        app.interruption_generation_id = reloaded.interruption_generation_id;
+        this.clearActive(app);
+      }
+      app.suspended_at = envelope.at;
+      app.pause_reason = reason;
+    });
+  }
+
+  /** Resume acting on a source. Does not fetch: the operator decides when. */
+  sourceUnsuspended(applicationId: string, envelope: EventEnvelope): TransitionResult {
+    return this.mutateApp(applicationId, envelope, 'source_unsuspended', 'committed', (app) => {
+      if (!app.suspended_at) throw new GitOpsTransitionError('source is not suspended');
+      app.suspended_at = null;
+      app.pause_reason = null;
+    });
+  }
+
+  /**
+   * Pause a rollout, application-wide or on one target.
+   *
+   * A pause says nothing about health: whatever was deployed is still deployed,
+   * and treating a paused rollout as converged is the misreading this guards.
+   */
+  rolloutPaused(
+    applicationId: string,
+    nodeId: number | null,
+    reason: string,
+    envelope: EventEnvelope,
+  ): TransitionResult {
+    if (nodeId === null) {
+      return this.mutateApp(applicationId, envelope, 'rollout_paused', 'committed', (app) => {
+        if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
+        app.pause_at = envelope.at;
+        app.pause_reason = reason;
+      });
+    }
+    return this.mutateTarget(applicationId, nodeId, envelope, 'rollout_paused', null, (target) => {
+      if (target.target_status !== 'active') throw new GitOpsTransitionError('target is tombstoned');
+      const before = { pauseAt: target.pause_at };
+      target.pause_at = envelope.at;
+      target.pause_reason = reason;
+      return { before, after: { pauseAt: envelope.at, pauseReason: reason } };
+    });
+  }
+
+  rolloutUnpaused(applicationId: string, nodeId: number | null, envelope: EventEnvelope): TransitionResult {
+    if (nodeId === null) {
+      return this.mutateApp(applicationId, envelope, 'rollout_unpaused', 'committed', (app) => {
+        if (!app.pause_at) throw new GitOpsTransitionError('application is not paused');
+        app.pause_at = null;
+        app.pause_reason = null;
+      });
+    }
+    return this.mutateTarget(applicationId, nodeId, envelope, 'rollout_unpaused', null, (target) => {
+      if (!target.pause_at) throw new GitOpsTransitionError('target is not paused');
+      const before = { pauseAt: target.pause_at };
+      target.pause_at = null;
+      target.pause_reason = null;
+      return { before, after: { pauseAt: null } };
+    });
+  }
+
+  /**
+   * Record that a rollout reached some targets and not others.
+   *
+   * The partial record is descriptive only. It never stands in for a deployed
+   * pointer: those move per target, from the deploy events, or not at all.
+   */
+  partiallyRolledOut(
+    applicationId: string,
+    nodeId: number | null,
+    partialJson: string,
+    envelope: EventEnvelope,
+  ): TransitionResult {
+    decodeGitOpsJson(partialJson);
+    if (nodeId === null) {
+      return this.mutateApp(applicationId, envelope, 'partially_rolled_out', 'committed', (app) => {
+        app.partial_json = partialJson;
+      });
+    }
+    return this.mutateTarget(applicationId, nodeId, envelope, 'partially_rolled_out', null, (target) => {
+      const before = { partial: target.partial_json !== null };
+      target.partial_json = partialJson;
+      return { before, after: { partial: true } };
+    });
+  }
+
+  partialCleared(applicationId: string, nodeId: number | null, envelope: EventEnvelope): TransitionResult {
+    if (nodeId === null) {
+      return this.mutateApp(applicationId, envelope, 'partial_cleared', 'committed', (app) => {
+        if (!app.partial_json) throw new GitOpsTransitionError('application has no partial state');
+        app.partial_json = null;
+      });
+    }
+    return this.mutateTarget(applicationId, nodeId, envelope, 'partial_cleared', null, (target) => {
+      if (!target.partial_json) throw new GitOpsTransitionError('target has no partial state');
+      const before = { partial: true };
+      target.partial_json = null;
+      return { before, after: { partial: false } };
     });
   }
 
