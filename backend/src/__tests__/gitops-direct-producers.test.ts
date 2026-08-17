@@ -1,24 +1,31 @@
 /**
  * End-to-end coverage for the Direct Git producers.
  *
- * The transport is the only thing stubbed: `git.clone` writes a real project
- * into the clone directory and `git.log` returns a commit. Everything after
- * that runs for real, so fetch, candidate materialization, change-plan
- * classification, the apply, and the detach all drive the GitOps state model
- * the way they do in production.
+ * Only the two boundaries the host owns are stubbed: `git.clone` writes a real
+ * project into the clone directory and `git.log` returns a commit, and the
+ * compose commands that need a running daemon report an exit code each test
+ * chooses. Compose commands that only parse files, `config` above all, still
+ * shell out for real, so the Compose CLI is a genuine prerequisite here even
+ * though the daemon is not. Everything after that runs for real, so fetch,
+ * candidate materialization, change-plan classification, the apply, the
+ * deploy, and the detach all drive the GitOps state model the way they do in
+ * production.
  *
  * This exists because the producer wiring is the seam between the operational
  * Git path and the revision state, and a mismatch there type-checks and passes
  * transition-level tests.
  */
+import { EventEmitter } from 'events';
 import fsPromises from 'fs/promises';
 import path from 'path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
-const { mockGitClone, mockGitLog } = vi.hoisted(() => ({
+const { mockGitClone, mockGitLog, compose } = vi.hoisted(() => ({
   mockGitClone: vi.fn(),
   mockGitLog: vi.fn(),
+  /** Exit code the next daemon-dependent compose command reports. */
+  compose: { exitCode: 1 },
 }));
 
 vi.mock('isomorphic-git', () => {
@@ -26,6 +33,73 @@ vi.mock('isomorphic-git', () => {
   return { default: api, clone: mockGitClone, log: mockGitLog };
 });
 vi.mock('isomorphic-git/http/node', () => ({ default: {} }));
+
+/**
+ * Compose verbs that need a running daemon and are issued through `spawn`.
+ *
+ * `ps` is deliberately absent: it is issued through `execFile`, which this mock
+ * does not replace, so listing it would advertise coverage that is not there.
+ */
+const DAEMON_COMPOSE_VERBS = new Set(['up', 'down', 'pull', 'build', 'start', 'stop', 'restart']);
+const COMPOSE_FLAGS_WITH_VALUE = new Set([
+  '-f', '--file', '-p', '--project-name', '--env-file', '--project-directory',
+]);
+
+/**
+ * The verb in a `docker compose …` argv, skipping global flags and their
+ * values so a stack or file named after a verb cannot be mistaken for one.
+ */
+function composeVerbOf(args: readonly string[]): string | null {
+  if (args[0] !== 'compose') return null;
+  for (let i = 1; i < args.length; i++) {
+    const token = args[i];
+    if (COMPOSE_FLAGS_WITH_VALUE.has(token)) {
+      i++;
+      continue;
+    }
+    if (token.startsWith('-')) continue;
+    return token;
+  }
+  return null;
+}
+
+function fakeComposeChild(): EventEmitter {
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: EventEmitter;
+    stderr: EventEmitter;
+    kill: () => boolean;
+  };
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = () => true;
+  // The caller attaches its listeners synchronously after spawn returns, so the
+  // exit cannot be announced until the current turn finishes.
+  setImmediate(() => child.emit('close', compose.exitCode));
+  return child;
+}
+
+/**
+ * Only the compose commands that need a daemon are answered here; `config` and
+ * everything else still runs for real.
+ *
+ * That split is the whole point. A deploy failing is otherwise a fact about the
+ * host rather than about the adapter: a workstation with the CLI but no daemon
+ * parses compose files happily and fails `up`, while a CI runner succeeds at
+ * both, so any test that reads "the deploy failed" from the environment says
+ * something different in the two places.
+ */
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return {
+    ...actual,
+    spawn: (command: string, args: readonly string[], options?: unknown) => {
+      if (command === 'docker' && DAEMON_COMPOSE_VERBS.has(composeVerbOf(args) ?? '')) {
+        return fakeComposeChild();
+      }
+      return (actual.spawn as unknown as (...a: unknown[]) => unknown)(command, args, options);
+    },
+  };
+});
 
 // Rollback capture talks to Docker, which is not available here. Stubbing it
 // keeps the apply on its success path so the GitOps wiring is what the test
@@ -94,6 +168,7 @@ describe('Direct Git producers drive the revision state', () => {
   beforeEach(() => {
     mockGitClone.mockReset();
     mockGitLog.mockReset();
+    compose.exitCode = 1;
   });
 
   it('creates, fetches, applies, and detaches a Git stack through the state model', async () => {
@@ -194,6 +269,7 @@ describe('Direct Git producers drive the revision state', () => {
 
   it('binds the deployed generation through the Compose adapter', async () => {
     const { ComposeService } = await import('../services/ComposeService');
+    const { default: DockerController } = await import('../services/DockerController');
     const svc = GitSourceService.getInstance();
     const store = GitOpsStore.getInstance();
     const stackName = 'producers-deploy';
@@ -217,21 +293,57 @@ describe('Direct Git producers drive the revision state', () => {
     expect(applied).not.toBeNull();
     expect(store.getTarget(app.id, 1)?.deployed_generation_id).toBeNull();
 
-    // Docker is unavailable here, so the compose command fails. That is the
-    // failure path the adapter has to classify, and it must not move the
-    // deployed pointer.
-    const compose = ComposeService.getInstance(1);
-    await expect(compose.deployStack(stackName)).rejects.toThrow();
+    // The post-deploy probe asks the daemon what came up. It is not what this
+    // test is about, and `getInstance` hands back a fresh controller each call,
+    // so the stubs go on the prototype. Created inside the try that restores
+    // them: a stub that outlives a failing test would silently change the two
+    // tests after it.
+    const composeSvc = ComposeService.getInstance(1);
+    let orphans: ReturnType<typeof vi.spyOn> | null = null;
+    let docker: ReturnType<typeof vi.spyOn> | null = null;
+    try {
+      orphans = vi.spyOn(DockerController.prototype, 'getLegacyOrphanContainersByStack')
+        .mockResolvedValue([]);
+      docker = vi.spyOn(DockerController.prototype, 'getDocker')
+        .mockReturnValue({ listContainers: async () => [] } as unknown as ReturnType<
+          typeof DockerController.prototype.getDocker
+        >);
 
-    const target = store.getTarget(app.id, 1)!;
-    expect(target.deployed_generation_id).toBeNull();
-    expect(target.failure_stage).toBe('deploy');
-    // Classified conservatively: once the compose command has been handed off,
-    // we cannot prove the workload was untouched, and claiming it was intact
-    // would be the more dangerous error.
-    expect(target.failure_class).toBe('post_mutation');
-    expect(projectOf(app.id).targets[0]?.runtime.status).toBe('failed_after_mutation');
-    expect(target.applied_generation_id).toBe(applied);
+      // ── the compose command fails ──────────────────────────────────────
+      compose.exitCode = 1;
+      await expect(composeSvc.deployStack(stackName)).rejects.toThrow();
+
+      const failed = store.getTarget(app.id, 1)!;
+      expect(failed.deployed_generation_id).toBeNull();
+      expect(failed.failure_stage).toBe('deploy');
+      // Classified conservatively: once the compose command has been handed
+      // off, we cannot prove the workload was untouched, and claiming it was
+      // intact would be the more dangerous error.
+      expect(failed.failure_class).toBe('post_mutation');
+      expect(projectOf(app.id).targets[0]?.runtime.status).toBe('failed_after_mutation');
+      expect(failed.applied_generation_id).toBe(applied);
+
+      // ── the compose command succeeds ───────────────────────────────────
+      compose.exitCode = 0;
+      const result = await composeSvc.deployStack(stackName);
+
+      // The adapter reports the generation it bound, which is what lets the
+      // caller start health against that exact generation rather than against
+      // whatever is applied by the time health runs.
+      expect(result.deployedGenerationId).toBe(applied);
+
+      const bound = store.getTarget(app.id, 1)!;
+      expect(bound.deployed_generation_id).toBe(applied);
+      expect(bound.applied_generation_id).toBe(applied);
+      // A bound deploy clears the earlier failure: the target is no longer in
+      // the state the operator was asked to act on.
+      expect(bound.failure_stage).toBeNull();
+      expect(bound.failure_class).toBeNull();
+      expect(projectOf(app.id).targets[0]?.runtime.status).not.toBe('failed_after_mutation');
+    } finally {
+      orphans?.mockRestore();
+      docker?.mockRestore();
+    }
   });
 
   it('reports the deployed generation from an update so health can bind to it', async () => {
@@ -258,10 +370,12 @@ describe('Direct Git producers drive the revision state', () => {
     const app = store.getLiveDirectApplication(stackName)!;
     const applied = store.getTarget(app.id, 1)!.applied_generation_id;
 
-    // This update fails during preparation, before Compose is handed anything.
-    // The deploy operation is opened only at the compose call, so nothing is
-    // recorded: an update that never touched the workload must not leave a
-    // deploy failure behind for the deriver to report.
+    // The image pull fails, so the update dies during preparation, before the
+    // recreate Compose is handed anything. The deploy operation is opened only
+    // at that recreate, so nothing is recorded: an update that never touched
+    // the workload must not leave a deploy failure behind for the deriver to
+    // report.
+    compose.exitCode = 1;
     await expect(ComposeService.getInstance(1).updateStack(stackName)).rejects.toThrow();
     const target = store.getTarget(app.id, 1)!;
     expect(target.deployed_generation_id).toBeNull();
