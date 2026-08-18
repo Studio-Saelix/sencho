@@ -5,8 +5,27 @@ import { requirePermission } from '../middleware/permissions';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeLabelService } from '../services/NodeLabelService';
 import { parseIntParam } from '../utils/parseIntParam';
+import { BlueprintReconciler } from '../services/BlueprintReconciler';
+import { recordPlacementShift, snapshotPlacementWith } from '../services/gitops/nodePlacementProducers';
 
 export const nodeLabelsRouter = Router();
+
+/**
+ * Placement as it currently resolves, for every Blueprint.
+ *
+ * Taken either side of a label write so the recording covers only the
+ * Blueprints the label actually moved. A label no selector mentions moves
+ * nothing, and minting for it would invalidate acknowledgements fleet-wide over
+ * an edit no node can observe.
+ */
+function snapshotPlacement() {
+    const db = DatabaseService.getInstance();
+    const nodes = db.getNodes();
+    return snapshotPlacementWith(
+        (blueprint) => BlueprintReconciler.getInstance().listDesiredNodes(blueprint, nodes).map(n => n.id),
+        db.listBlueprints(),
+    );
+}
 
 nodeLabelsRouter.use(authMiddleware);
 
@@ -62,7 +81,16 @@ nodeLabelsRouter.post('/:nodeId', (req: Request, res: Response): void => {
             res.status(404).json({ error: 'Node not found' });
             return;
         }
-        const result = NodeLabelService.getInstance().addLabel(nodeId, label);
+        // The label and the placement it moves commit together, so a recording
+        // failure cannot leave a fleet selecting on a label nothing recorded.
+        const result = DatabaseService.getInstance().getDb().transaction(() => {
+            const before = snapshotPlacement();
+            const added = NodeLabelService.getInstance().addLabel(nodeId, label);
+            if (added.ok) {
+                recordPlacementShift(before, snapshotPlacement(), req.user?.username ?? null, 'node_label_add');
+            }
+            return added;
+        })();
         if (!result.ok) {
             res.status(400).json(result.error);
             return;
@@ -85,7 +113,14 @@ nodeLabelsRouter.delete('/:nodeId/:label', (req: Request, res: Response): void =
         return;
     }
     try {
-        const removed = NodeLabelService.getInstance().removeLabel(nodeId, label);
+        const removed = DatabaseService.getInstance().getDb().transaction(() => {
+            const before = snapshotPlacement();
+            const gone = NodeLabelService.getInstance().removeLabel(nodeId, label);
+            if (gone) {
+                recordPlacementShift(before, snapshotPlacement(), req.user?.username ?? null, 'node_label_remove');
+            }
+            return gone;
+        })();
         if (!removed) {
             res.status(404).json({ error: 'Label assignment not found' });
             return;

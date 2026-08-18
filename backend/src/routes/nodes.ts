@@ -24,6 +24,8 @@ import { toPublicNode } from '../helpers/publicNode';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
+import { BlueprintReconciler } from '../services/BlueprintReconciler';
+import { recordPlacementShift, snapshotPlacementWith } from '../services/gitops/nodePlacementProducers';
 
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
 const REMOTE_META_CACHE_TTL = 3 * 60 * 1000;
@@ -116,6 +118,23 @@ function mintPilotEnrollment(nodeId: number, req: Request): { token: string; exp
 }
 
 export const nodesRouter = Router();
+
+/**
+ * Placement as it currently resolves, for every Blueprint.
+ *
+ * Taken either side of a cordon so only the Blueprints it actually moved are
+ * revised. A Blueprint pinned to the node still wants it, since a cordon
+ * governs automatic placement only, and comparing sets is what makes that fall
+ * out rather than needing a special case.
+ */
+function snapshotBlueprintPlacement() {
+  const db = DatabaseService.getInstance();
+  const nodes = db.getNodes();
+  return snapshotPlacementWith(
+    (blueprint) => BlueprintReconciler.getInstance().listDesiredNodes(blueprint, nodes).map(n => n.id),
+    db.listBlueprints(),
+  );
+}
 
 nodesRouter.get('/', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'node:read')) return;
@@ -476,7 +495,15 @@ nodesRouter.post('/:id/cordon', (req: Request, res: Response) => {
       res.status(404).json({ error: 'Node not found' });
       return;
     }
-    const updated = DatabaseService.getInstance().setNodeCordoned(id, true, reason);
+    // The cordon and the placement it moves commit together.
+    const updated = DatabaseService.getInstance().getDb().transaction(() => {
+      const before = snapshotBlueprintPlacement();
+      const node = DatabaseService.getInstance().setNodeCordoned(id, true, reason);
+      if (!existing.cordoned) {
+        recordPlacementShift(before, snapshotBlueprintPlacement(), req.user?.username ?? null, 'node_cordon');
+      }
+      return node;
+    })();
     if (isDebugEnabled()) console.log('[Federation:diag] cordoned node=%s reasonLen=%s', sanitizeForLog(id), sanitizeForLog(reason?.length ?? 0));
     res.set('cache-control', 'no-store').json(updated);
   } catch (error: unknown) {
@@ -500,7 +527,14 @@ nodesRouter.post('/:id/uncordon', (req: Request, res: Response) => {
       res.status(404).json({ error: 'Node not found' });
       return;
     }
-    const updated = DatabaseService.getInstance().setNodeCordoned(id, false, null);
+    const updated = DatabaseService.getInstance().getDb().transaction(() => {
+      const before = snapshotBlueprintPlacement();
+      const node = DatabaseService.getInstance().setNodeCordoned(id, false, null);
+      if (existing.cordoned) {
+        recordPlacementShift(before, snapshotBlueprintPlacement(), req.user?.username ?? null, 'node_uncordon');
+      }
+      return node;
+    })();
     res.set('cache-control', 'no-store').json(updated);
   } catch (error: unknown) {
     console.error('Failed to uncordon node:', error);

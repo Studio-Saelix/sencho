@@ -23,7 +23,7 @@ function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function envelopeFor(actor: string | null, trigger: string): EventEnvelope {
+export function envelopeFor(actor: string | null, trigger: string): EventEnvelope {
   return { operationId: randomUUID(), actor: actor ?? 'system:blueprint', trigger, at: Date.now() };
 }
 
@@ -111,7 +111,7 @@ function prunedUpdates(before: Blueprint, updates: BlueprintUpdates): BlueprintU
   return pruned;
 }
 
-function intentRowFor(
+export function intentRowFor(
   applicationId: string,
   blueprint: Blueprint,
   operationId: string,
@@ -138,7 +138,7 @@ function intentRowFor(
   };
 }
 
-function candidateRowFor(
+export function candidateRowFor(
   applicationId: string,
   intent: GitOpsIntentRevisionRow,
   desiredNodeIds: number[],
