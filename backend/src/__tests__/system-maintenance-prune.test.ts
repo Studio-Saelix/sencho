@@ -191,6 +191,7 @@ describe('Prune plan routes', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.reclaimedBytes).toBe(42);
     expect(res.body.outcomes).toHaveLength(1);
+    expect(res.body).not.toHaveProperty('mutated');
     expect(executePrunePlan).toHaveBeenCalled();
     expect(invalidate).toHaveBeenCalledWith('stats:1');
     expect(invalidate).toHaveBeenCalledWith('stack-statuses:1');
@@ -317,5 +318,32 @@ describe('Prune plan routes', () => {
 
     expect(res.status).toBe(200);
     expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it('legacy no-fingerprint containers prune omits mutated from the JSON body', async () => {
+    stubFsStacks();
+    const executePrunePlan = vi.fn().mockResolvedValue({
+      outcomes: [{ id: 'c1', target: 'containers', status: 'removed' }],
+      reclaimedBytes: 0,
+      success: true,
+      mutated: true,
+    });
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      buildPrunePlan: vi.fn().mockResolvedValue(samplePlan('unused')),
+      executePrunePlan,
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const res = await request(app)
+      .post('/api/system/prune/system')
+      .set('Authorization', authHeader)
+      .send({ target: 'containers', scope: 'managed' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.reclaimedBytes).toBe(0);
+    expect(res.body.outcomes).toEqual([
+      { id: 'c1', target: 'containers', status: 'removed' },
+    ]);
+    expect(res.body).not.toHaveProperty('mutated');
   });
 });

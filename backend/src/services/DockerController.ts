@@ -1216,6 +1216,7 @@ class DockerController {
       for (const img of rawImages) {
         if (selfIdentity.isOwnImage(img.Id)) continue;
         if (isImageHeld?.(img.Id)) continue;
+        if (isFullySyntheticHoldImage(img.RepoTags ?? [])) continue;
         const refs = imageToContainerIds.get(img.Id) ?? [];
         const becomesFree = freeingImages
           && refs.length > 0
@@ -1641,6 +1642,11 @@ class DockerController {
     if (!img) {
       return DockerController.plannedImageResult({
         id: item.id, target: 'images', status: 'skipped', reason: 'Image no longer exists',
+      });
+    }
+    if (isFullySyntheticHoldImage(img.RepoTags ?? [])) {
+      return DockerController.plannedImageResult({
+        id: item.id, target: 'images', status: 'skipped', reason: 'Sencho rollback-hold image',
       });
     }
     if (!pruneImageReferencesEqual(plannedRefs, img.RepoTags)) {

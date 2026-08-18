@@ -659,6 +659,43 @@ describe('DockerController.buildPrunePlan', () => {
 
     expect(plan.items.map((i) => i.id)).toEqual(['img-free']);
   });
+
+  it('excludes a fully synthetic sencho-rb hold image from the plan even without a DB hold', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      {
+        Id: 'img-orphan-hold',
+        RepoTags: ['sencho-rb/abc123456789/web:hold', 'sencho-rb/abc123456789/api:hold'],
+        Size: 50,
+        Containers: 0,
+      },
+      { Id: 'img-free', RepoTags: ['app:2'], Size: 100, Containers: 0 },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1, () => false);
+
+    expect(plan.items.map((i) => i.id)).toEqual(['img-free']);
+  });
+
+  it('still plans a dual-tagged image that carries a registry tag and a sencho-rb hold tag', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      {
+        Id: 'img-dual',
+        RepoTags: ['myregistry/app:1.4', 'sencho-rb/abc123456789/app:hold'],
+        Size: 100,
+        Containers: 0,
+      },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1);
+
+    expect(plan.items.map((i) => i.id)).toEqual(['img-dual']);
+    expect(plan.items[0]?.image?.references).toEqual([
+      'myregistry/app:1.4',
+      'sencho-rb/abc123456789/app:hold',
+    ]);
+  });
 });
 
 describe('DockerController.executePrunePlan', () => {
@@ -880,6 +917,49 @@ describe('DockerController.executePrunePlan', () => {
     expect(imageRemove).not.toHaveBeenCalled();
     expect(result.outcomes).toEqual([
       expect.objectContaining({ id: 'img1', target: 'images', status: 'skipped', reason: expect.stringMatching(/held/i) }),
+    ]);
+  });
+
+  it('skips a fully synthetic hold image even under a forced-fresh plan', async () => {
+    const holdImg = {
+      Id: 'img-orphan-hold',
+      RepoTags: ['sencho-rb/abc123456789/web:hold', 'sencho-rb/abc123456789/api:hold'],
+      Size: 50,
+      Containers: 0,
+    };
+    mockDocker.listImages.mockResolvedValue([holdImg]);
+    const removes = mockImageRemove();
+
+    const dc = DockerController.getInstance(1);
+    const plan = {
+      scope: 'all' as const,
+      targets: ['images' as const],
+      items: [{
+        target: 'images' as const,
+        id: holdImg.Id,
+        name: holdImg.RepoTags[0],
+        sizeBytes: 50,
+        managed: false,
+        reason: 'Image is not used by any container',
+        image: { references: holdImg.RepoTags },
+      }],
+      reclaimableBytes: 50,
+      fingerprint: 'forced-hold',
+      createdAt: Date.now(),
+      nodeId: 1,
+    };
+    vi.spyOn(dc, 'assertPlanFresh').mockResolvedValue(plan);
+    const result = await dc.executePrunePlan(plan, []);
+
+    expect(removes).toEqual([]);
+    expect(result.mutated).toBe(false);
+    expect(result.outcomes).toEqual([
+      expect.objectContaining({
+        id: holdImg.Id,
+        target: 'images',
+        status: 'skipped',
+        reason: 'Sencho rollback-hold image',
+      }),
     ]);
   });
 
