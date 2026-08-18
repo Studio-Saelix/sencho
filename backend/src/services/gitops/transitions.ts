@@ -977,7 +977,14 @@ export class GitOpsTransitions {
         if (target.target_status !== 'active') {
           throw new GitOpsTransitionError('cannot deploy to a tombstoned target');
         }
-        if (target.active_operation_stage && target.active_operation_id !== args.envelope.operationId) {
+        // A newer deploy supersedes an older one, which is how a redeploy of a
+        // stuck request takes over. Anything else in flight is a different
+        // operation, and displacing it would abandon it with no terminal event.
+        if (
+          target.active_operation_stage
+          && target.active_operation_stage !== 'blueprint_deploy_started'
+          && target.active_operation_id !== args.envelope.operationId
+        ) {
           throw new GitOpsTransitionError('conflicting target operation');
         }
         const before = { activeStage: target.active_operation_stage };

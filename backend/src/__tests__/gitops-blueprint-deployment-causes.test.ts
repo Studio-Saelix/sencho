@@ -8,16 +8,17 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
-import type { Blueprint } from '../services/DatabaseService';
+import { DatabaseService, type Blueprint } from '../services/DatabaseService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
-import { commitBlueprintCreate } from '../services/gitops/blueprintProducers';
+import { commitBlueprintCreate, commitBlueprintUpdate } from '../services/gitops/blueprintProducers';
 import {
   commitBlueprintDeploymentCause,
   commitBlueprintDeploymentRemoved,
 } from '../services/gitops/blueprintDeploymentProducers';
 
 const NODE = 1;
+const NEXT_COMPOSE = 'services:\n  web:\n    image: nginx:1.29\n';
 
 describe('gitops blueprint deployment causes', () => {
   let tmpDir: string;
@@ -61,17 +62,49 @@ describe('gitops blueprint deployment causes', () => {
     expect(target.active_operation_stage).toBeNull();
   });
 
-  it('records nothing when the status has not moved', () => {
+  it('records nothing when an observation repeats the state it already reported', () => {
     const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
     const blueprint = create('dc-repeat');
     const app = store.getLiveBlueprintApplication(blueprint.id)!;
     deploying(blueprint);
-    const first = store.getTarget(app.id, NODE)!.active_operation_id;
+    commitBlueprintDeploymentCause('drift_observed', blueprint.id, NODE, {
+      status: 'drifted', last_checked_at: Date.now(), drift_summary: 'moved',
+    }, 'tester');
+    const before = historyCount(db, app.id);
 
     // A reconciler tick re-asserting a state it already reported must not
     // append a second event describing the same fact.
+    commitBlueprintDeploymentCause('drift_observed', blueprint.id, NODE, {
+      status: 'drifted', last_checked_at: Date.now(), drift_summary: 'moved again',
+    }, 'tester');
+    expect(historyCount(db, app.id)).toBe(before);
+  });
+
+  it('supersedes a stuck deploy rather than answering the request it replaced', () => {
+    const store = GitOpsStore.getInstance();
+    const blueprint = create('dc-stuck');
+    const app = store.getLiveBlueprintApplication(blueprint.id)!;
     deploying(blueprint);
-    expect(store.getTarget(app.id, NODE)!.active_operation_id).toBe(first);
+    const stale = store.getTarget(app.id, NODE)!.active_intent_revision_id;
+
+    // The Blueprint changed while the row sat at `deploying`, so a redeploy is
+    // asking for something new. The status does not move, and gating the start
+    // on that would let the later acknowledgement answer the stale request.
+    commitBlueprintUpdate(
+      blueprint.id, { compose_content: NEXT_COMPOSE }, 'tester', () => [NODE],
+    );
+    const revised = store.getLiveBlueprintApplication(blueprint.id)!.intent_revision_id;
+    expect(revised).not.toBe(stale);
+
+    deploying(blueprint);
+    expect(store.getTarget(app.id, NODE)!.active_intent_revision_id).toBe(revised);
+
+    commitBlueprintDeploymentCause('deploy_ack', blueprint.id, NODE, {
+      status: 'active', last_checked_at: Date.now(),
+    }, 'tester');
+    // Converged on what was actually asked for last, not on the superseded one.
+    expect(store.getTarget(app.id, NODE)!.intent_revision_id).toBe(revised);
   });
 
   it('keeps a failed deploy distinct from a failed withdraw', () => {
@@ -147,6 +180,12 @@ describe('gitops blueprint deployment causes', () => {
     expect(target.intent_revision_id).toBeNull();
   });
 });
+
+function historyCount(db: DatabaseService, applicationId: string): number {
+  return (db.getDb()
+    .prepare('SELECT COUNT(*) AS n FROM gitops_history WHERE application_id = ?')
+    .get(applicationId) as { n: number }).n;
+}
 
 function deploying(blueprint: Blueprint): void {
   commitBlueprintDeploymentCause('deploy_start', blueprint.id, NODE, {

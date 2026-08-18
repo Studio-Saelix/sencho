@@ -589,10 +589,10 @@ export class BlueprintService {
             return { status: 'withdrawn' };
         }
         if (result.code === 'name_conflict') {
-            this.setStatus(blueprint.id, node.id, 'name_conflict', 'name_conflict', { last_error: result.error });
+            this.setStatus(blueprint.id, node.id, 'name_conflict', 'withdraw_name_conflict', { last_error: result.error });
             return { status: 'name_conflict' };
         }
-        this.setStatus(blueprint.id, node.id, 'failed', 'deploy_fail', { last_error: result.error });
+        this.setStatus(blueprint.id, node.id, 'failed', 'withdraw_fail', { last_error: result.error });
         return { status: 'failed', error: result.error };
     }
 
@@ -658,7 +658,7 @@ export class BlueprintService {
             );
         } catch (err) {
             const message = BlueprintService.formatError(err);
-            this.setStatus(blueprint.id, node.id, 'failed', 'deploy_fail', { last_error: message });
+            this.setStatus(blueprint.id, node.id, 'failed', 'withdraw_fail', { last_error: message });
             return { status: 'failed', error: message };
         }
 
@@ -674,15 +674,15 @@ export class BlueprintService {
         if (res.status === 409) {
             const error = BlueprintService.extractApiError(res.data) || 'withdraw refused';
             if (BlueprintService.extractApiCode(res.data) === 'name_conflict') {
-                this.setStatus(blueprint.id, node.id, 'name_conflict', 'name_conflict', { last_error: error });
+                this.setStatus(blueprint.id, node.id, 'name_conflict', 'withdraw_name_conflict', { last_error: error });
                 return { status: 'name_conflict' };
             }
             // stack_op_in_progress and any other 409: match local withdraw lock-conflict → failed
-            this.setStatus(blueprint.id, node.id, 'failed', 'deploy_fail', { last_error: error });
+            this.setStatus(blueprint.id, node.id, 'failed', 'withdraw_fail', { last_error: error });
             return { status: 'failed', error };
         }
         const message = `blueprint withdraw: HTTP ${res.status} ${BlueprintService.extractApiError(res.data)}`;
-        this.setStatus(blueprint.id, node.id, 'failed', 'deploy_fail', { last_error: message });
+        this.setStatus(blueprint.id, node.id, 'failed', 'withdraw_fail', { last_error: message });
         return { status: 'failed', error: message };
     }
 

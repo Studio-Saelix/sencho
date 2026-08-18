@@ -14,7 +14,7 @@
  */
 import { DatabaseService, type BlueprintDeployment } from '../DatabaseService';
 import { GitOpsStore, emptyTargetRow } from './store';
-import { GitOpsTransitions } from './transitions';
+import { GitOpsTransitions, GitOpsTransitionError } from './transitions';
 import { envelopeFor } from './blueprintProducers';
 
 /** Why a deployment row moved. */
@@ -26,6 +26,7 @@ export type BlueprintDeploymentCause =
   | 'withdraw_start'
   | 'withdraw_success'
   | 'withdraw_fail'
+  | 'withdraw_name_conflict'
   | 'await_state_review'
   | 'await_evict_confirm'
   | 'drift_observed'
@@ -67,9 +68,14 @@ export function commitBlueprintDeploymentCause(
     } catch (error) {
       // The deployment happened whatever the record says. Failing the write
       // here would turn a bookkeeping problem into a stuck rollout.
+      //
+      // A rejection is louder than an infrastructure error on purpose: it means
+      // the model refused this as invalid, and a target that keeps refusing
+      // holds its active slot and stops recording anything further.
+      const rejected = error instanceof GitOpsTransitionError;
       console.error(
-        '[GitOps] Could not record blueprint %s for blueprint %d on node %d:',
-        cause, blueprintId, nodeId,
+        '[GitOps] %s recording blueprint %s for blueprint %d on node %d:',
+        rejected ? 'Rejected' : 'Could not record', cause, blueprintId, nodeId,
         error instanceof Error ? error.stack ?? error.message : String(error),
       );
     }
@@ -89,11 +95,15 @@ function record(
   const app = store.getLiveBlueprintApplication(blueprintId);
   // A Blueprint that predates the model has nothing to record against.
   if (!app || app.lifecycle_status !== 'active') return;
-  if (!statusMoved) return;
 
   const envelope = envelopeFor(actor, `blueprint_${cause}`);
 
   if (cause in OBSERVATION_STAGE) {
+    // Observations are the only causes the status guard applies to. A start
+    // writes the identity terminals are matched against, so suppressing one
+    // because the row already read `deploying` would let a later
+    // acknowledgement answer a request that had been superseded.
+    if (!statusMoved) return;
     if (!store.getTarget(app.id, nodeId)) return;
     tx.blueprintObservation({
       applicationId: app.id,
@@ -170,7 +180,13 @@ function record(
       tx.blueprintWithdrawn({ applicationId: app.id, nodeId, intentRevisionId: requested, envelope });
       return;
     case 'withdraw_fail':
-      tx.blueprintWithdrawFailed({ applicationId: app.id, nodeId, failureClass: 'post_mutation', envelope });
+    case 'withdraw_name_conflict':
+      tx.blueprintWithdrawFailed({
+        applicationId: app.id,
+        nodeId,
+        failureClass: cause === 'withdraw_name_conflict' ? 'name_conflict' : 'post_mutation',
+        envelope,
+      });
       return;
   }
 }
