@@ -34,7 +34,8 @@ check. Bulk routes must authorize every valid target before starting any work.
 | Security policies, suppressions, and acknowledgements | `stack:read` | n/a | `stack:edit` | n/a | n/a | global collection |
 | Docker resource inventory and orphan reads | `stack:read` | n/a | n/a | n/a | n/a | global read |
 | Network topology and inspection | `node:read` | n/a | n/a | n/a | n/a | global read |
-| `/api/git-sources` and `/api/git-sources/history` | exact `stack:read`, else Admin | n/a | n/a | n/a | n/a | per row: the row's own stack when it is live and present on disk, Admin otherwise |
+| `/api/git-sources` | per row: exact `stack:read`, else Admin | n/a | n/a | n/a | n/a | a row reduces to its own stack when that stack is live and present on disk; otherwise Admin, because the row is live Git configuration rather than a record of events |
+| `/api/git-sources/history` and `/api/stacks/:stackName/git-source/history` | per row: exact `stack:read`, else `system:audit` | n/a | n/a | n/a | n/a | history entries are an audit trail, so an entry that cannot be tied to a readable stack falls to the audit permission rather than Admin. The per-stack route is authorized whole at `stack:read` by suffix rule instead of per row |
 
 ## Preserved system boundaries
 

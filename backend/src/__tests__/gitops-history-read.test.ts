@@ -282,14 +282,26 @@ describe('gitops history read layer', () => {
       })).toEqual({ kind: 'stack_read', stackName: 'web' });
     });
 
-    it('falls back to Admin for every unprovable row', () => {
-      const admin = { kind: 'admin' };
-      expect(classifyHistoryRow({ stackName: null, applicationLifecycleStatus: 'active', stackResourcePresent: true })).toEqual(admin);
-      expect(classifyHistoryRow({ stackName: '', applicationLifecycleStatus: 'active', stackResourcePresent: true })).toEqual(admin);
-      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: undefined, stackResourcePresent: true })).toEqual(admin);
-      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: 'deleted', stackResourcePresent: true })).toEqual(admin);
-      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: 'creating', stackResourcePresent: true })).toEqual(admin);
-      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: 'active', stackResourcePresent: false })).toEqual(admin);
+    it('falls back to the audit audience for every unprovable row', () => {
+      // History entries are an audit trail, so an entry nobody can tie to a
+      // readable stack goes to whoever audits rather than to Admin alone.
+      const audit = { kind: 'audit' };
+      expect(classifyHistoryRow({ stackName: null, applicationLifecycleStatus: 'active', stackResourcePresent: true })).toEqual(audit);
+      expect(classifyHistoryRow({ stackName: '', applicationLifecycleStatus: 'active', stackResourcePresent: true })).toEqual(audit);
+      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: undefined, stackResourcePresent: true })).toEqual(audit);
+      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: 'deleted', stackResourcePresent: true })).toEqual(audit);
+      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: 'creating', stackResourcePresent: true })).toEqual(audit);
+      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: 'active', stackResourcePresent: false })).toEqual(audit);
+    });
+
+    it('keeps source rows on Admin rather than the audit audience', () => {
+      // Git configuration is not a record of events, so an auditing mandate
+      // does not reach it.
+      expect(classifySourceRow({
+        stackName: 'web',
+        gitopsRevision: { schemaVersion: 1, targetMode: 'direct', lifecycleStatus: 'deleted' },
+        stackResourcePresent: true,
+      })).toEqual({ kind: 'admin' });
     });
   });
 

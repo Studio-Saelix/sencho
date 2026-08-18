@@ -1341,20 +1341,24 @@ describe('POST /api/stacks/:stackName/git-source/pull permissions and actor', ()
 
 describe('GitOps additive fields and history routes', () => {
     let viewerCookie: string;
+    let auditorCookie: string;
+
+    async function loginAs(username: string, role: 'viewer' | 'auditor'): Promise<string> {
+        const bcrypt = (await import('bcrypt')).default;
+        const password = `${username}-pass`;
+        DatabaseService.getInstance().addUser({
+            username,
+            password_hash: await bcrypt.hash(password, 1),
+            role,
+        });
+        const login = await request(app).post('/api/auth/login').send({ username, password });
+        const cookies = login.headers['set-cookie'] as string | string[];
+        return Array.isArray(cookies) ? cookies[0] : cookies;
+    }
 
     beforeAll(async () => {
-        const bcrypt = (await import('bcrypt')).default;
-        const hash = await bcrypt.hash('gitopsviewerpass', 1);
-        DatabaseService.getInstance().addUser({
-            username: 'gitops-viewer',
-            password_hash: hash,
-            role: 'viewer',
-        });
-        const login = await request(app)
-            .post('/api/auth/login')
-            .send({ username: 'gitops-viewer', password: 'gitopsviewerpass' });
-        const cookies = login.headers['set-cookie'] as string | string[];
-        viewerCookie = Array.isArray(cookies) ? cookies[0] : cookies;
+        viewerCookie = await loginAs('gitops-viewer', 'viewer');
+        auditorCookie = await loginAs('gitops-auditor', 'auditor');
     });
 
     function makeStackDir(stackName: string): void {
@@ -1474,6 +1478,32 @@ describe('GitOps additive fields and history routes', () => {
         const viewerStacks = asViewer.body.items.map((i: { stackName: string }) => i.stackName);
         expect(viewerStacks).toContain('viewer-hist-stack');
         expect(viewerStacks).not.toContain('absent-hist-stack');
+    });
+
+    it('shows an auditor the history entries a viewer cannot prove', async () => {
+        // 'absent-hist-stack' has no directory, so its entries cannot be tied
+        // to a readable stack. They are still an audit record, so the audit
+        // permission reaches them where a plain stack grant does not.
+        const asAuditor = await request(app)
+            .get('/api/git-sources/history?limit=100')
+            .set('Cookie', auditorCookie);
+        expect(asAuditor.status).toBe(200);
+        const auditorStacks = asAuditor.body.items.map((i: { stackName: string }) => i.stackName);
+        expect(auditorStacks).toContain('absent-hist-stack');
+        expect(auditorStacks).toContain('viewer-hist-stack');
+    });
+
+    it('does not let the audit permission reach Git configuration', async () => {
+        // The source list is live configuration, not a record of events, so an
+        // auditor sees no more of it than any other non-admin.
+        makeStackDir('auditor-config-stack');
+        seedGitSource('auditor-config-stack');
+        const res = await request(app)
+            .get('/api/git-sources')
+            .set('Cookie', auditorCookie);
+        expect(res.status).toBe(200);
+        // Seeded with no GitOps application, so it stays Admin-only.
+        expect(res.body.map((r: { stack_name: string }) => r.stack_name)).not.toContain('auditor-config-stack');
     });
 
     it('advances the cursor past rows the caller may not read', async () => {

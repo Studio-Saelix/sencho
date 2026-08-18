@@ -6,15 +6,26 @@ import type { GitOpsRevisionProjection } from './types';
 /**
  * What a caller must hold to read one GitOps row.
  *
- * Admin is the fail-closed answer, not the privileged one: a row we cannot tie
- * to a readable stack is a row whose audience we cannot narrow, so it stays
- * with the operators who can already see everything.
+ * `stack_read` is the narrow answer, used whenever a row can be tied to a stack
+ * the caller may read. The other two are the fail-closed fallbacks for a row
+ * whose audience cannot be narrowed, and they differ by what the row *is*:
+ *
+ * - `audit` for history entries, which are an audit trail. Auditing is what the
+ *   `system:audit` permission exists for, and the request audit log is already
+ *   gated on it, so an entry nobody can tie to a stack belongs to the same
+ *   audience rather than to Admin alone.
+ * - `admin` for source rows, which are live Git configuration (repository,
+ *   ref, credentials policy, compose paths) rather than a record of events. An
+ *   auditing mandate does not imply reading the configuration of stacks that
+ *   have been deleted or never finished being created.
  */
 export type GitOpsReadRequirement =
   | { readonly kind: 'admin' }
+  | { readonly kind: 'audit' }
   | { readonly kind: 'stack_read'; readonly stackName: string };
 
 const ADMIN: GitOpsReadRequirement = Object.freeze({ kind: 'admin' });
+const AUDIT: GitOpsReadRequirement = Object.freeze({ kind: 'audit' });
 
 /**
  * The projection field the source-row classifier probes.
@@ -101,9 +112,9 @@ export function classifyHistoryRow(input: {
   stackResourcePresent: unknown;
 }): GitOpsReadRequirement {
   const stackName = usableStackName(input.stackName);
-  if (!stackName) return ADMIN;
-  if (!lifecycleAllowsStackRead(input.applicationLifecycleStatus)) return ADMIN;
-  if (!normalizeStackResourcePresent(input.stackResourcePresent)) return ADMIN;
+  if (!stackName) return AUDIT;
+  if (!lifecycleAllowsStackRead(input.applicationLifecycleStatus)) return AUDIT;
+  if (!normalizeStackResourcePresent(input.stackResourcePresent)) return AUDIT;
   return { kind: 'stack_read', stackName };
 }
 
@@ -117,6 +128,8 @@ export function satisfiesGitOpsRead(req: Request, requirement: GitOpsReadRequire
   switch (requirement.kind) {
     case 'admin':
       return req.user?.role === 'admin';
+    case 'audit':
+      return checkPermission(req, 'system:audit');
     case 'stack_read':
       return checkPermission(req, 'stack:read', 'stack', requirement.stackName);
     default: {
