@@ -1,6 +1,7 @@
+import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { DatabaseService, type StackGitSource } from '../DatabaseService';
+import { DatabaseService, type Blueprint, type StackGitSource } from '../DatabaseService';
 import { FileSystemService } from '../FileSystemService';
 import { GitProjectManifestService } from '../GitProjectManifestService';
 import { NodeRegistry } from '../NodeRegistry';
@@ -9,6 +10,8 @@ import { encodeGitOpsEvidenceLimitations, type GitOpsEvidenceLimitation } from '
 import { buildDirectApplicationRow, directSourceIdentity, newGitOpsId } from './directApplication';
 import { emptyTargetRow, GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
+import { blankInlineApplication } from './blueprintProducers';
+import { evaluateEffectiveApproval, intentFingerprint } from '../blueprintApproval';
 import type { GitOpsApplicationRow, GitOpsGenerationRow, GitOpsTargetCurrentRow } from './types';
 
 /** Schema version this migration writes. Bumping it replays every scope. */
@@ -36,6 +39,7 @@ export type MigrationOutcome =
   | 'migrated_accepted'
   | 'migrated_unreconciled'
   | 'tombstoned_missing_stack'
+  | 'migrated_inline'
   | 'failed';
 
 export type MigrationResult = { stackName: string; outcome: MigrationOutcome };
@@ -332,3 +336,135 @@ function stackDirectoryPresent(stackName: string, nodeId: number): boolean {
     return true;
   }
 }
+
+/**
+ * Bring Blueprints that predate the revision state model into it.
+ *
+ * Every Blueprint gets an application, an intent describing what it currently
+ * asks for, and a candidate marked as coming from the legacy inline record.
+ * None of that is an acknowledgement. The Blueprint revision and the
+ * deployment's applied revision are carried as display only, because neither
+ * proves a node is running the intent this pass just minted, and recording them
+ * as agreement would report convergence nobody verified.
+ */
+export function migrateInlineBlueprints(): MigrationResult[] {
+  const db = DatabaseService.getInstance();
+  const results: MigrationResult[] = [];
+  for (const blueprint of db.listBlueprints()) {
+    try {
+      results.push(migrateOneBlueprint(blueprint));
+    } catch (error) {
+      console.error(
+        `[GitOps] Could not migrate the blueprint ${sanitizeForLog(blueprint.name)}; retrying next boot:`,
+        error instanceof Error ? error.stack ?? error.message : String(error),
+      );
+      results.push({ stackName: blueprint.name, outcome: 'failed' });
+    }
+  }
+  return results;
+}
+
+function migrateOneBlueprint(blueprint: Blueprint): MigrationResult {
+  const store = GitOpsStore.getInstance();
+  const fingerprint = intentFingerprint(blueprint);
+  const scope = `inline_blueprint:${blueprint.id}`;
+
+  const checkpoint = store.getMigrationCheckpoint(scope);
+  if (
+    checkpoint
+    && checkpoint.schema_version === MIGRATION_SCHEMA_VERSION
+    && checkpoint.fingerprint === fingerprint
+  ) {
+    return { stackName: blueprint.name, outcome: 'skipped_current' };
+  }
+
+  // A Blueprint created through the new path already describes itself, and its
+  // rows were written with proof this pass does not have.
+  if (store.getLiveBlueprintApplication(blueprint.id)) {
+    store.upsertMigrationCheckpoint(scope, MIGRATION_SCHEMA_VERSION, fingerprint, Date.now());
+    return { stackName: blueprint.name, outcome: 'skipped_live_application' };
+  }
+
+  const at = Date.now();
+  const envelope: EventEnvelope = {
+    operationId: newGitOpsId(),
+    actor: 'system:migration',
+    trigger: 'migrate',
+    at,
+  };
+  const applicationId = newGitOpsId();
+  const intentId = newGitOpsId();
+
+  return DatabaseService.getInstance().getDb().transaction((): MigrationResult => {
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateInlineBlueprint({
+      application: {
+        ...blankInlineApplication(applicationId, blueprint.id, at),
+        evidence_limitations_json: encodeLimitations(inlineApprovalLimitations(blueprint)),
+      },
+      envelope,
+    });
+
+    tx.intentRevised({
+      applicationId,
+      intent: {
+        id: intentId,
+        application_id: applicationId,
+        blueprint_id: blueprint.id,
+        compose_content_sha256: createHash('sha256').update(blueprint.compose_content, 'utf8').digest('hex'),
+        // Display only. A revision is not an acknowledgement: nothing here
+        // proves a node is running what this intent describes.
+        blueprint_revision: blueprint.revision,
+        deploy_stack_name: blueprint.name,
+        selector_json: JSON.stringify(blueprint.selector),
+        pinned_node_id: blueprint.pinned_node_id,
+        cordon_implications_json: JSON.stringify({ pinnedOverridesCordon: blueprint.pinned_node_id !== null }),
+        rollout_strategy_json: JSON.stringify({ driftMode: blueprint.drift_mode, enabled: blueprint.enabled }),
+        runtime_drift_policy: blueprint.drift_mode,
+        stateful_policy_json: null,
+        health_failure_rollback_policy_json: null,
+        operation_id: envelope.operationId,
+        actor: envelope.actor,
+        created_at: at,
+      },
+      envelope,
+    });
+
+    tx.rolloutCandidateOpened({
+      applicationId,
+      candidate: {
+        id: newGitOpsId(),
+        application_id: applicationId,
+        intent_revision_id: intentId,
+        compose_content_sha256: createHash('sha256').update(blueprint.compose_content, 'utf8').digest('hex'),
+        accepted_generation_id: null,
+        artifact_set_id: null,
+        // Placement is not resolved here. Migration records what the Blueprint
+        // asks for, never which nodes currently satisfy it.
+        required_targets_json: JSON.stringify({ nodeIds: [] }),
+        authoritative: 1,
+        provenance: 'legacy_inline',
+        operation_id: envelope.operationId,
+        created_at: at,
+      },
+      envelope,
+    });
+
+    store.upsertMigrationCheckpoint(scope, MIGRATION_SCHEMA_VERSION, fingerprint, at);
+    return { stackName: blueprint.name, outcome: 'migrated_inline' };
+  })();
+}
+
+/**
+ * Why an approval could not be carried across.
+ *
+ * An approval authorizes the intent it was given for. A Blueprint edited since
+ * then, or never approved, has nothing this pass can record as authority, and
+ * saying so is what stops the gap reading as an approval that is simply absent.
+ */
+function inlineApprovalLimitations(blueprint: Blueprint): GitOpsEvidenceLimitation[] {
+  const { effectiveApproval } = evaluateEffectiveApproval(blueprint, []);
+  if (effectiveApproval === 'approved') return [];
+  return [{ code: 'blueprint_reapproval_required', detail: String(blueprint.id) }];
+}
+

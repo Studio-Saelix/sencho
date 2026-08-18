@@ -315,7 +315,8 @@ export function commitBlueprintDelete(blueprintId: number, actor: string | null)
   })();
 }
 
-function blankInlineApplication(id: string, blueprintId: number, at: number) {
+/** A Blueprint application before anything has been asked of it. */
+export function blankInlineApplication(id: string, blueprintId: number, at: number) {
   return {
     id,
     lifecycle_key: `blueprint:${blueprintId}`,

@@ -30,7 +30,7 @@ import { PilotMetrics } from '../services/PilotMetrics';
 import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { sweepStaleTempDirs as sweepStaleGitTempDirs, sweepGitManifestOrphans } from '../services/GitSourceService';
 import { reclassifyInterruptedOperations, resolveInterruptedCreates } from '../services/gitops/createRecovery';
-import { loadMigrationManifests, migrateDirectGitStacks } from '../services/gitops/migrate';
+import { loadMigrationManifests, migrateDirectGitStacks, migrateInlineBlueprints } from '../services/gitops/migrate';
 import { sanitizeForLog } from '../utils/safeLog';
 import { PORT } from '../helpers/constants';
 import { LOW_MEMORY_FLOOR_BYTES } from '../utils/spawnErrors';
@@ -196,6 +196,18 @@ export async function startServer(server: Server): Promise<void> {
     }
   } catch (err) {
     console.error('[GitOps] Migration of pre-existing Git stacks failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+  }
+
+  // Blueprints migrate separately, and a failure in one must not stop the
+  // other: they share nothing, and coupling them would let a single unreadable
+  // Git stack keep every Blueprint outside the model.
+  try {
+    const migratedBlueprints = migrateInlineBlueprints().filter((entry) => entry.outcome !== 'skipped_current');
+    for (const entry of migratedBlueprints) {
+      console.log(`[GitOps] Migrated blueprint ${sanitizeForLog(entry.stackName)}: ${entry.outcome}`);
+    }
+  } catch (err) {
+    console.error('[GitOps] Migration of pre-existing blueprints failed:', err instanceof Error ? err.stack ?? err.message : String(err));
   }
 
   // The managed-area sweep follows. It preserves anything whose ownership it
