@@ -172,7 +172,6 @@ export function commitBlueprintCreate(
   desiredNodeIdsFor: (blueprint: Blueprint) => number[],
 ): Blueprint {
   const db = DatabaseService.getInstance();
-  const store = GitOpsStore.getInstance();
   const tx = GitOpsTransitions.getInstance();
 
   return db.getDb().transaction(() => {
@@ -180,7 +179,10 @@ export function commitBlueprintCreate(
     const envelope = envelopeFor(input.created_by, 'blueprint_create');
     const applicationId = randomUUID();
 
-    store.insertApplication(blankInlineApplication(applicationId, blueprint.id, envelope.at));
+    tx.activateInlineBlueprint({
+      application: blankInlineApplication(applicationId, blueprint.id, envelope.at),
+      envelope,
+    });
 
     const intent = intentRowFor(applicationId, blueprint, envelope.operationId, input.created_by, envelope.at);
     tx.intentRevised({ applicationId, intent, envelope });

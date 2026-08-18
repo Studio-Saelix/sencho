@@ -100,6 +100,36 @@ export class GitOpsTransitions {
     })();
   }
 
+  /**
+   * Bring an Inline Blueprint into the model.
+   *
+   * No target is created. A Blueprint application has no targets until
+   * something is deployed somewhere, unlike a Direct one which always has the
+   * node its stack lives on.
+   */
+  activateInlineBlueprint(args: {
+    application: GitOpsApplicationRow;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.raw().transaction(() => {
+      const blueprintId = args.application.blueprint_id;
+      if (blueprintId === null) {
+        throw new GitOpsTransitionError('an inline blueprint application needs a blueprint id');
+      }
+      if (this.store().getLiveBlueprintApplication(blueprintId)) {
+        throw new GitOpsTransitionError('live blueprint application already exists');
+      }
+      this.store().insertApplication(args.application);
+      const historyId = this.history(args.application, args.envelope, {
+        stage: 'application_activated',
+        outcome: 'committed',
+        before: { lifecycleStatus: null },
+        after: { lifecycleStatus: args.application.lifecycle_status, targetMode: 'inline_blueprint' },
+      });
+      return { historyIds: historyId ? [historyId] : [], replayed: !historyId };
+    })();
+  }
+
   fetched(applicationId: string, commitSha: string, envelope: EventEnvelope): TransitionResult {
     return this.mutateApp(applicationId, envelope, 'fetched', 'committed', (app) => {
       this.requireMatchingFetch(app, envelope);

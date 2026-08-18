@@ -54,6 +54,29 @@ describe('gitops blueprint producers', () => {
     const candidate = store.getRolloutCandidate(app.rollout_candidate_id!)!;
     expect(candidate.intent_revision_id).toBe(intent.id);
     expect(JSON.parse(candidate.required_targets_json)).toEqual({ nodeIds: DESIRED });
+
+    // History starts where the application does. Beginning at the first intent
+    // would describe an application nothing records coming into existence.
+    const stages = DatabaseService.getInstance().getDb().prepare(
+      'SELECT stage FROM gitops_history WHERE application_id = ? ORDER BY rowid ASC',
+    ).all(app.id) as Array<{ stage: string }>;
+    expect(stages.map(row => row.stage))
+      .toEqual(['application_activated', 'intent_revised', 'rollout_candidate_opened']);
+
+    // No targets until something is deployed somewhere.
+    expect(store.listTargets(app.id)).toEqual([]);
+  });
+
+  it('refuses a second live application for the same Blueprint', () => {
+    const store = GitOpsStore.getInstance();
+    const blueprint = create('bp-single');
+    const app = store.getLiveBlueprintApplication(blueprint.id)!;
+    const tx = GitOpsTransitions.getInstance();
+
+    expect(() => tx.activateInlineBlueprint({
+      application: { ...app, id: 'second-app' },
+      envelope: { operationId: 'op-dup', actor: 'tester', trigger: 'manual', at: Date.now() },
+    })).toThrow(/already exists/);
   });
 
   it('mints nothing when an edit changes no value', () => {
