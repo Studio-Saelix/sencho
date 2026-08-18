@@ -455,9 +455,12 @@ export class BlueprintService {
 
     /** Returns whether the stack directory exists. Throws on non-ENOENT I/O. */
     private async stackDirExists(nodeId: number, blueprintName: string): Promise<boolean> {
-        const baseDir = NodeRegistry.getInstance().getComposeDir(nodeId);
-        const stackDir = path.resolve(baseDir, blueprintName);
-        if (!isPathWithinBase(stackDir, baseDir)) {
+        // Inline containment barrier at the stat sink. The scanner does not
+        // credit the wrapped isPathWithinBase helper, so the check has to sit
+        // with the call it protects.
+        const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId));
+        const stackDir = path.resolve(baseResolved, blueprintName);
+        if (!stackDir.startsWith(baseResolved + path.sep)) {
             throw new BlueprintOwnershipProbeError(`Invalid stack path for "${blueprintName}"`);
         }
         try {
