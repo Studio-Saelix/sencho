@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
+import { NodeRegistry } from '../services/NodeRegistry';
 import { GitOpsStore } from '../services/gitops/store';
 import {
   HISTORY_DEFAULT_LIMIT,
@@ -16,7 +17,11 @@ import {
 } from '../services/gitops/history';
 import { classifyHistoryRow, satisfiesGitOpsRead } from '../services/gitops/readAuth';
 import { stackResourceSet } from './gitopsResponse';
-import type { GitOpsApplicationRow, GitOpsHistoryRow } from '../services/gitops/types';
+import type {
+  GitOpsApplicationRow,
+  GitOpsHistoryRow,
+  GitOpsHistoryEvidenceFields,
+} from '../services/gitops/types';
 
 /**
  * Accepted `outcome` values.
@@ -54,7 +59,16 @@ export type HistoryScope =
   | { kind: 'per_row' }
   | { kind: 'authorized_stack'; stackName: string };
 
-export type GitOpsHistoryPageItem = GitOpsHistoryItem & { stackResourcePresent: boolean };
+/**
+ * One history entry as the API returns it.
+ *
+ * The two extra fields are the owning instance's answers to questions only it
+ * can settle, and they exist so a hub can authorize this entry without holding
+ * the instance's database: whether the stack is really on disk, and what its
+ * application's lifecycle currently is. Both are validated fail-closed by the
+ * reader rather than trusted outright.
+ */
+export type GitOpsHistoryPageItem = GitOpsHistoryItem & GitOpsHistoryEvidenceFields;
 
 export type GitOpsHistoryPage = {
   items: GitOpsHistoryPageItem[];
@@ -115,6 +129,35 @@ export function parseHistoryFilters(query: Request['query']): FilterParse {
   return { ok: true, filters };
 }
 
+/**
+ * Resolve the node filter a hub asked this instance to apply.
+ *
+ * A hub cannot name this instance's node ids, so when it wants history for the
+ * node it is talking to it sends `gitopsLocalTarget=1` and this instance
+ * resolves that to its own default node.
+ *
+ * Refused rather than ignored when it arrives without a proxied hop. Dropping
+ * it would answer a request for one node's rows with every node's rows under a
+ * 200, the same superset-reads-as-an-answer problem the filter parser refuses
+ * by name. It is worse here: the hub stamps one node id onto every row it
+ * rewrites, so rows belonging to another node would come back positively
+ * claiming to belong to this one. No legitimate caller sets it, since the hub
+ * strips any caller-supplied value before forwarding.
+ */
+export function resolveLocalTargetNodeId(
+  req: Request,
+): { ok: true; nodeId: number | undefined } | { ok: false; message: string } {
+  if (stringParam(req.query.gitopsLocalTarget) !== '1') return { ok: true, nodeId: undefined };
+  const proxied = req.machineAuthScope === 'node_proxy' || req.machineAuthScope === 'pilot_tunnel';
+  if (!proxied) {
+    console.warn(
+      `[GitOps] Refused gitopsLocalTarget on a direct request (scope=${req.machineAuthScope ?? 'none'}).`,
+    );
+    return { ok: false, message: 'gitopsLocalTarget is not accepted on a direct request' };
+  }
+  return { ok: true, nodeId: NodeRegistry.getInstance().getDefaultNodeId() };
+}
+
 export function parseLimit(value: unknown): number {
   const raw = stringParam(value);
   if (raw === undefined) return HISTORY_DEFAULT_LIMIT;
@@ -166,15 +209,16 @@ function buildHistoryPage(
     }
     lastExamined = row;
     const stackResourcePresent = row.stack_name !== null && present.has(row.stack_name);
+    const applicationLifecycleStatus = applicationFor(row.application_id)?.lifecycle_status ?? null;
     if (scope.kind === 'per_row') {
       const requirement = classifyHistoryRow({
         stackName: row.stack_name,
-        applicationLifecycleStatus: applicationFor(row.application_id)?.lifecycle_status,
+        applicationLifecycleStatus,
         stackResourcePresent,
       });
       if (!satisfiesGitOpsRead(req, requirement)) continue;
     }
-    items.push({ ...toHistoryItem(row), stackResourcePresent });
+    items.push({ ...toHistoryItem(row), stackResourcePresent, applicationLifecycleStatus });
   }
 
   // A full scan window means the table may hold more beyond it, so the caller
@@ -205,9 +249,16 @@ export async function respondWithHistory(
     res.status(400).json({ error: 'Invalid page cursor. Restart from the first page.' });
     return;
   }
-  const filters = scope.kind === 'authorized_stack'
-    ? { ...parsed.filters, stackName: scope.stackName }
-    : parsed.filters;
+  const localTarget = resolveLocalTargetNodeId(req);
+  if (!localTarget.ok) {
+    res.status(400).json({ error: localTarget.message });
+    return;
+  }
+  const filters: GitOpsHistoryFilters = {
+    ...parsed.filters,
+    ...(localTarget.nodeId === undefined ? {} : { nodeId: localTarget.nodeId }),
+    ...(scope.kind === 'authorized_stack' ? { stackName: scope.stackName } : {}),
+  };
   const present = await stackResourceSet(req.nodeId);
   res.json(buildHistoryPage(req, filters, parseLimit(req.query.limit), cursor, present, scope));
 }

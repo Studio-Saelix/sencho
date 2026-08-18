@@ -1,7 +1,7 @@
 import type { Request } from 'express';
 import { checkPermission } from '../../middleware/permissions';
 import { isRecord } from './json';
-import type { GitOpsRevisionProjection } from './types';
+import type { GitOpsHistoryEvidenceFields, GitOpsRevisionProjection } from './types';
 
 /**
  * What a caller must hold to read one GitOps row.
@@ -39,6 +39,22 @@ const AUDIT: GitOpsReadRequirement = Object.freeze({ kind: 'audit' });
 const LIFECYCLE_KEY = 'lifecycleStatus' satisfies keyof Extract<
   GitOpsRevisionProjection,
   { lifecycleStatus: unknown }
+>;
+
+/**
+ * The evidence a history entry must carry to be classified.
+ *
+ * Values stay `unknown` because they may have crossed an instance boundary and
+ * carry no shape guarantee, but the *key names* are bound to the item type the
+ * producer emits. Without that tie, renaming a field on the producer would
+ * leave this probing keys that no longer exist: every row would degrade to the
+ * audit bucket, fail-closed but silent, with nothing failing to compile and no
+ * test noticing. The required (`-?`) mapping also makes the call site fail, not
+ * just this function.
+ */
+type Evidence<T> = { [K in keyof T]-?: unknown };
+export type HistoryRowEvidence = Evidence<
+  Pick<GitOpsHistoryEvidenceFields, 'stackName' | 'applicationLifecycleStatus' | 'stackResourcePresent'>
 >;
 
 /**
@@ -106,11 +122,7 @@ export function classifySourceRow(input: {
  * the audit payload entirely, so a corrupt delta cannot influence who may see
  * it.
  */
-export function classifyHistoryRow(input: {
-  stackName: unknown;
-  applicationLifecycleStatus: unknown;
-  stackResourcePresent: unknown;
-}): GitOpsReadRequirement {
+export function classifyHistoryRow(input: HistoryRowEvidence): GitOpsReadRequirement {
   const stackName = usableStackName(input.stackName);
   if (!stackName) return AUDIT;
   if (!lifecycleAllowsStackRead(input.applicationLifecycleStatus)) return AUDIT;

@@ -714,6 +714,18 @@ export type GitOpsIdentityRef =
   | { kind: 'invocation'; authored: AuthoredInvocationIdentity }
   | { kind: 'health_run'; runId: string; deployedGenerationId: string | null };
 
+/**
+ * Cross-instance evidence a history entry carries so any reader can decide who
+ * may see it. Only the owning instance can answer either question, so both
+ * travel with the row rather than being inferred by a reader that holds none
+ * of that instance's state.
+ */
+export type GitOpsHistoryEvidenceFields = {
+  stackName: string | null;
+  applicationLifecycleStatus: GitOpsLifecycleStatus | null;
+  stackResourcePresent: boolean;
+};
+
 export type GitOpsLimitation = { code: string; message: string; evidence: unknown };
 export type GitOpsAvailableAction = 'fetch' | 'apply' | 'dismiss' | 'deploy' | 'approve_legacy' | 'none';
 
