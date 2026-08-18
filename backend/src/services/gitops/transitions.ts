@@ -2026,7 +2026,7 @@ export class GitOpsTransitions {
     envelope: EventEnvelope,
     stage: string,
     generationId: string | null,
-    mutate: (target: GitOpsTargetCurrentRow) => { before: unknown; after: unknown },
+    mutate: (target: GitOpsTargetCurrentRow) => { before: Record<string, unknown>; after: Record<string, unknown> },
     outcome: HistoryOutcome = 'committed',
   ): TransitionResult {
     return this.raw().transaction(() => {
@@ -2060,8 +2060,8 @@ export class GitOpsTransitions {
     fields: {
       stage: string;
       outcome: HistoryOutcome;
-      before: unknown;
-      after: unknown;
+      before: Record<string, unknown>;
+      after: Record<string, unknown>;
       nodeId?: number;
       generationId?: string | null;
       artifactSetId?: string | null;

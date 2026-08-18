@@ -1,10 +1,14 @@
 import { Router, type Request, type Response } from 'express';
-import { GitSourceService } from '../services/GitSourceService';
+import { GitSourceService, type PublicGitSource } from '../services/GitSourceService';
+import type { GitOpsRevisionProjection } from '../services/gitops/types';
 import { GitProjectManifestService } from '../services/GitProjectManifestService';
 import { FileSystemService } from '../services/FileSystemService';
 import { DatabaseService } from '../services/DatabaseService';
 import { CryptoService } from '../services/CryptoService';
-import { checkPermission, requirePermission } from '../middleware/permissions';
+import { requirePermission } from '../middleware/permissions';
+import { classifySourceRow, satisfiesGitOpsRead } from '../services/gitops/readAuth';
+import { NOT_APPLICABLE_REVISION, projectStackRevision, stackResourceSet } from '../helpers/gitopsResponse';
+import { respondWithHistory } from '../helpers/gitopsHistoryPage';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { triggerPostDeployScan } from '../helpers/policyGate';
 import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
@@ -72,10 +76,44 @@ export const gitSourcesRouter = Router();
 gitSourcesRouter.get('/', async (req: Request, res: Response): Promise<void> => {
   try {
     const all = GitSourceService.getInstance().list();
+    const present = await stackResourceSet(req.nodeId);
     // Filter to the subset of stacks the caller can read. Keeps scoped
-    // Admiral roles from discovering git config for stacks outside their grant.
-    const visible = all.filter(src => checkPermission(req, 'stack:read', 'stack', src.stack_name));
+    // roles from discovering git config for stacks outside their grant.
+    // A row we cannot tie to a live, on-disk stack falls back to Admin, so a
+    // source whose application is missing or half-created is never authorized
+    // by a stack grant that may since have been reassigned.
+    const visible: Array<PublicGitSource & {
+      gitopsRevision: GitOpsRevisionProjection;
+      stackResourcePresent: boolean;
+    }> = [];
+    for (const src of all) {
+      const gitopsRevision = projectStackRevision(src.stack_name);
+      const stackResourcePresent = present.has(src.stack_name);
+      const requirement = classifySourceRow({
+        stackName: src.stack_name,
+        gitopsRevision,
+        stackResourcePresent,
+      });
+      if (!satisfiesGitOpsRead(req, requirement)) continue;
+      visible.push({ ...src, gitopsRevision, stackResourcePresent });
+    }
     res.json(visible);
+  } catch (error) {
+    sendGitSourceError(res, error);
+  }
+});
+
+/**
+ * Cross-stack GitOps history for this instance.
+ *
+ * Every row is authorized on its own, so this returns the operator's own
+ * stacks for a scoped role and every row on this instance for an Admin.
+ * History is instance-local: a remote node's rows are read by proxying this
+ * same route to that node.
+ */
+gitSourcesRouter.get('/history', async (req: Request, res: Response): Promise<void> => {
+  try {
+    await respondWithHistory(req, res, { kind: 'per_row' });
   } catch (error) {
     sendGitSourceError(res, error);
   }
@@ -105,6 +143,10 @@ stackGitSourceRouter.get('/:stackName/git-source', async (req: Request, res: Res
   try {
     const gitSources = GitSourceService.getInstance();
     const source = gitSources.get(stackName);
+    // Only this instance can say whether the stack's directory is really here,
+    // so the answer travels with the response rather than being inferred by a
+    // hub that has never seen the filesystem.
+    const stackResourcePresent = (await stackResourceSet(req.nodeId)).has(stackName);
     if (source) {
       // The managed-project manifest summary rides the source branch; the
       // unlinked {linked:false} shape below is unchanged. Heal-on-read may
@@ -115,6 +157,8 @@ stackGitSourceRouter.get('/:stackName/git-source', async (req: Request, res: Res
         ...refreshed,
         manifest_state: manifest?.state ?? refreshed.manifest_state,
         manifest,
+        gitopsRevision: projectStackRevision(stackName),
+        stackResourcePresent,
       });
       return;
     }
@@ -123,12 +167,30 @@ stackGitSourceRouter.get('/:stackName/git-source', async (req: Request, res: Res
     // dashboard probes this endpoint for every stack, so returning 404 here
     // would paint a console error for every unlinked stack; answer 200 with
     // a discriminator instead and reserve 404 for the stack-not-found case.
-    const stacks = await FileSystemService.getInstance(req.nodeId).getStacks();
-    if (!stacks.includes(stackName)) {
+    if (!stackResourcePresent) {
       res.status(404).json({ error: 'Stack not found' });
       return;
     }
-    res.json({ linked: false });
+    res.json({
+      linked: false,
+      gitopsRevision: NOT_APPLICABLE_REVISION,
+      stackResourcePresent,
+    });
+  } catch (error) {
+    sendGitSourceError(res, error);
+  }
+});
+
+/** GitOps history for one stack, authorized as a whole by the stack read above. */
+stackGitSourceRouter.get('/:stackName/git-source/history', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  try {
+    await respondWithHistory(req, res, { kind: 'authorized_stack', stackName });
   } catch (error) {
     sendGitSourceError(res, error);
   }

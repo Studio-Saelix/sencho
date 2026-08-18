@@ -433,4 +433,11 @@ CREATE INDEX IF NOT EXISTS idx_gitops_history_actor ON gitops_history(actor);
 CREATE INDEX IF NOT EXISTS idx_gitops_history_outcome ON gitops_history(outcome);
 CREATE INDEX IF NOT EXISTS idx_gitops_history_repo_ref
   ON gitops_history(repo_url, configured_ref);
+CREATE INDEX IF NOT EXISTS idx_gitops_history_stack_created
+  ON gitops_history(stack_name, created_at DESC, id DESC);
+-- Serves the cross-stack history page, whose ordering and cursor are on
+-- (created_at, id) with no other filter. Every other index here leads with a
+-- different column, so without this one that route sorts the whole table.
+CREATE INDEX IF NOT EXISTS idx_gitops_history_created
+  ON gitops_history(created_at DESC, id DESC);
 `;

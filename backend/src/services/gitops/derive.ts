@@ -26,6 +26,39 @@ import type {
   SourceIdentityFields,
 } from './types';
 
+/**
+ * The projection for anything that carries no GitOps application.
+ *
+ * One shared instance, so its collections are frozen alongside it: a caller
+ * that pushed a limitation onto this projection would otherwise corrupt every
+ * later response in the process. The separate declaration is what gives the
+ * literal its contextual type; freezing it inline widens the empty tuples to
+ * `never[]` and fails to typecheck.
+ */
+const NOT_APPLICABLE: GitOpsRevisionProjection = {
+  schemaVersion: 1,
+  targetMode: 'not_applicable',
+  applicationId: null,
+  facets: null,
+  targets: [],
+  drift: [],
+  limitations: [],
+  availableActions: [],
+  approvals: null,
+};
+// Frozen after construction rather than inline: the collections stay mutable
+// types so the projection union still matches, while the shared instance
+// refuses writes at runtime.
+for (const collection of [
+  NOT_APPLICABLE.targets,
+  NOT_APPLICABLE.drift,
+  NOT_APPLICABLE.limitations,
+  NOT_APPLICABLE.availableActions,
+]) {
+  Object.freeze(collection);
+}
+export const NOT_APPLICABLE_REVISION: GitOpsRevisionProjection = Object.freeze(NOT_APPLICABLE);
+
 export type DeriveFacts = {
   application: GitOpsApplicationRow | null;
   targets: GitOpsTargetCurrentRow[];
@@ -40,19 +73,7 @@ export function deriveGitOpsRevision(
   // projects only persisted current evidence.
   void futureEvidence;
   const app = facts.application;
-  if (!app) {
-    return {
-      schemaVersion: 1,
-      targetMode: 'not_applicable',
-      applicationId: null,
-      facets: null,
-      targets: [],
-      drift: [],
-      limitations: [],
-      availableActions: [],
-      approvals: null,
-    };
-  }
+  if (!app) return NOT_APPLICABLE_REVISION;
   const limitations: GitOpsLimitation[] = [];
   mergePersistedLimitations(app.evidence_limitations_json, limitations);
   const source = deriveSource(app, limitations);

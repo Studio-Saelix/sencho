@@ -34,6 +34,7 @@ check. Bulk routes must authorize every valid target before starting any work.
 | Security policies, suppressions, and acknowledgements | `stack:read` | n/a | `stack:edit` | n/a | n/a | global collection |
 | Docker resource inventory and orphan reads | `stack:read` | n/a | n/a | n/a | n/a | global read |
 | Network topology and inspection | `node:read` | n/a | n/a | n/a | n/a | global read |
+| `/api/git-sources` and `/api/git-sources/history` | exact `stack:read`, else Admin | n/a | n/a | n/a | n/a | per row: the row's own stack when it is live and present on disk, Admin otherwise |
 
 ## Preserved system boundaries
 
