@@ -1,15 +1,41 @@
-## What does this PR do?
+<!--
+Thanks for contributing to Sencho.
 
-<!-- Brief description of the change -->
+Keep this PR to one concern. Do not include secrets, tokens, credentials,
+private keys, or real hostnames/IPs in the diff, commits, or this description.
+Report security issues privately (see https://github.com/studio-saelix/sencho/blob/main/SECURITY.md),
+not in a public pull request.
+-->
 
-## Related Issue
+## Summary
 
-<!-- Link to issue: Closes #123 -->
+<!-- What changed, and why. A few sentences is enough. -->
+
+## Type of change
+
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Documentation
+- [ ] Tests
+- [ ] Refactor, chore, or CI
+- [ ] Breaking change
+
+## Related issue
+
+<!-- `Closes #123` if this fixes an issue. Optional, but preferred. -->
+
+## Testing performed
+
+<!--
+What you ran or clicked, and what you observed.
+Commands, UI paths, or both. CI passing is not a substitute for this.
+-->
 
 ## Checklist
 
-- [ ] Tests added/updated (if applicable)
-- [ ] Documentation updated (if applicable)
-- [ ] ESLint passes (`npm run lint` in backend/ and frontend/)
-- [ ] Commit messages follow Conventional Commits
-- [ ] Commit message follows Conventional Commits (the CHANGELOG entry is generated from the commit subject by release-please; do not edit `CHANGELOG.md` directly).
+- [ ] CLA check must pass ([CLA.md](https://github.com/studio-saelix/sencho/blob/main/CLA.md); you will be prompted on your first PR)
+- [ ] Tests added or updated, or this change does not need them
+- [ ] Docs updated if user-facing behavior, labels, or defaults changed
+- [ ] Lint and typecheck pass locally (`npm run lint` and `npx tsc --noEmit` in `backend/` and/or `frontend/` as applicable)
+- [ ] Commit messages and the PR title follow [Conventional Commits](https://www.conventionalcommits.org/) (the CHANGELOG line comes from the subject; do not edit `CHANGELOG.md`)
+- [ ] This PR stays on one concern and contains no secrets

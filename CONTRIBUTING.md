@@ -62,11 +62,14 @@ Sencho and Studio Saelix names and logos are trademarks. AGPLv3 does not grant t
 ## Pull Request Process
 
 - All PRs target `main`
+- Fill in the pull request template (summary, type of change, testing performed).
+- The CLA Assistant check must pass. First-time contributors are prompted to sign [CLA.md](CLA.md).
 - Ensure CI passes before requesting review
 - Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages
 - Update documentation if your change affects user-facing behavior
 - Add tests for new functionality
 - Keep PRs focused: one feature or fix per PR
+- Do not include secrets, tokens, credentials, or real hostnames/IPs in the diff, commits, or PR description.
 - Do not edit `CHANGELOG.md` directly. It is generated from conventional-commit subjects by release-please. If a user-facing change needs more context, enrich the auto-opened Release PR description before merging.
 
 ## Reporting Bugs
