@@ -118,7 +118,7 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # fetches modules at build time rather than building fully offline.
 # Base image pinned by digest so the Go toolchain that compiles the static
 # Docker CLI binary cannot change without an explicit Dependabot bump.
-FROM --platform=$BUILDPLATFORM golang:1.27rc2-alpine@sha256:dcbb18cc5fa1082364dc6aa95224b6b55429d09cbb9631a053d8064c1c367300 AS cli-builder
+FROM --platform=$BUILDPLATFORM golang:1.27rc3-alpine@sha256:c5aca77a4d16cb6688dbf3ccade67eff6f05ee208bc854d060e6947f5c27e23c AS cli-builder
 
 ARG TARGETARCH
 
@@ -189,7 +189,7 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # v0.55.0 to v0.56.0 to clear CVE-2026-46600 (dnsmessage denial of service).
 # Base image pinned by digest (same image as cli-builder above) so both
 # source builds share an identical, immutable Go toolchain.
-FROM --platform=$BUILDPLATFORM golang:1.27rc2-alpine@sha256:dcbb18cc5fa1082364dc6aa95224b6b55429d09cbb9631a053d8064c1c367300 AS compose-builder
+FROM --platform=$BUILDPLATFORM golang:1.27rc3-alpine@sha256:c5aca77a4d16cb6688dbf3ccade67eff6f05ee208bc854d060e6947f5c27e23c AS compose-builder
 
 ARG TARGETARCH
 
