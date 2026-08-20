@@ -102,14 +102,17 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # The fetch pulls only the v29.4.1 commit, minimising transfer size.
 # docker/cli uses CalVer and ships vendor.mod instead of go.mod to avoid SemVer
 # compliance requirements. We copy vendor.mod -> go.mod, drop the committed vendor
-# tree, bump golang.org/x/net to v0.56.0, golang.org/x/text to v0.39.0, and
-# google.golang.org/grpc to v1.82.1, and build with -mod=mod so the patched
-# modules are resolved from the module proxy. x/net v0.53.0 is flagged for six
+# tree, bump golang.org/x/net to v0.56.0, golang.org/x/text to v0.39.0,
+# google.golang.org/grpc to v1.82.1, and github.com/moby/go-archive to v0.3.0,
+# and build with -mod=mod so the patched modules are resolved from the module
+# proxy. x/net v0.53.0 is flagged for six
 # HIGH advisories (CVE-2026-25680, -25681, -27136, -39821, -42502, -42506;
 # x/net/html parsing and x/net/idna). x/net v0.55.0 is flagged for
 # CVE-2026-46600 (dnsmessage denial of service). x/text v0.37.0 is flagged for
 # CVE-2026-56852 (norm.Iter infinite loop on crafted input). grpc v1.80.0 is
-# flagged for GHSA-hrxh-6v49-42gf (xDS RBAC / HTTP/2). Removing vendor/ keeps
+# flagged for GHSA-hrxh-6v49-42gf (xDS RBAC / HTTP/2). go-archive v0.2.0 is
+# flagged for CVE-2026-17106 (HIGH), where a crafted tar archive can write
+# outside the extraction directory. Removing vendor/ keeps
 # -mod=mod from reading the stale copy, and avoids `go mod tidy` (which does
 # not run cleanly against docker/cli's vendor.mod manifest). This stage now
 # fetches modules at build time rather than building fully offline.
@@ -138,7 +141,8 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
     rm -rf vendor && \
     go get golang.org/x/net@v0.56.0 \
            golang.org/x/text@v0.39.0 \
-           google.golang.org/grpc@v1.82.1 && \
+           google.golang.org/grpc@v1.82.1 \
+           github.com/moby/go-archive@v0.3.0 && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
       -mod=mod \
       -ldflags "-extldflags=-static \
@@ -163,7 +167,10 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 # Compose v5.1.3 still bundles otel/sdk v1.42.0 transitively via buildkit
 # v0.29.0. The go get step below bumps otel to v1.43.0 to resolve
 # CVE-2026-39883 (BSD kenv) and CVE-2026-39882 (OTLP response OOM) so that
-# the compose binary scans completely clean.
+# the compose binary scans completely clean. It also bumps
+# github.com/moby/go-archive to v0.3.0 for CVE-2026-17106 (HIGH), where a
+# crafted tar archive can write outside the extraction directory; compose
+# pulls the same archive code in transitively through buildkit.
 #
 # Compose v5.1.3 also pins github.com/containerd/containerd/v2 v2.2.3, which
 # carries CVE-2026-46680 (runAsNonRoot evasion in containerd's runtime
@@ -222,7 +229,8 @@ RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
            github.com/containerd/containerd/v2@v2.2.5 \
            google.golang.org/grpc@v1.82.1 \
            golang.org/x/text@v0.39.0 \
-           golang.org/x/net@v0.56.0 && \
+           golang.org/x/net@v0.56.0 \
+           github.com/moby/go-archive@v0.3.0 && \
     go mod tidy
 
 # Build target is ./cmd (the package main with plugin.Run), per docker/compose's
