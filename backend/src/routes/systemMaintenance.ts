@@ -6,7 +6,7 @@ import DockerController, {
   type PruneScope,
   type PruneTarget,
 } from '../services/DockerController';
-import { isPruneTarget } from '../services/prunePlan';
+import { isPruneTarget, type PruneItemOutcome } from '../services/prunePlan';
 import { FileSystemService } from '../services/FileSystemService';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { StackUpdateRecoveryService, shortGenerationId } from '../services/StackUpdateRecoveryService';
@@ -250,7 +250,7 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
           success: result.success,
         });
       }
-      if (result.outcomes.some((outcome) => outcome.status === 'removed')) {
+      if (result.mutated) {
         invalidateNodeCaches(req.nodeId);
       }
       res.json({
@@ -271,7 +271,7 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
     const target = targets[0];
     console.log(`[Resources] System prune: ${sanitizeForLog(target)} (scope: ${pruneScope})`);
     const pruneStartedAt = Date.now();
-    let result: { success: boolean; reclaimedBytes: number };
+    let result: { success: boolean; reclaimedBytes: number; outcomes?: PruneItemOutcome[] };
     if (pruneScope === 'managed' && target !== 'containers') {
       result = await dockerController.pruneManagedOnly(
         target as 'images' | 'volumes' | 'networks',
@@ -296,7 +296,12 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
     if (target === 'containers') {
       invalidateNodeCaches(req.nodeId);
     }
-    res.json({ message: 'Prune completed', ...result });
+    res.json({
+      message: 'Prune completed',
+      success: result.success,
+      reclaimedBytes: result.reclaimedBytes,
+      ...(result.outcomes !== undefined ? { outcomes: result.outcomes } : {}),
+    });
   } catch (error: unknown) {
     if (error instanceof TimeoutError) {
       console.warn('System prune: docker disk usage timed out');

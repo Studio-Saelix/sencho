@@ -1301,6 +1301,7 @@ describe('POST /api/fleet/labels/fleet-prune with dryRun: true', () => {
     executePrunePlan.mockResolvedValue({
       success: true,
       reclaimedBytes: 0,
+      mutated: true,
       outcomes: [{ target: 'images', id: 'image', status: 'removed' }],
     });
     const res = await request(app)
@@ -1337,7 +1338,12 @@ describe('POST /api/fleet/labels/fleet-prune with dryRun: true', () => {
         nodeId: local.id, scope: 'managed', targets: ['images'], items: [...testCase.items],
         reclaimableBytes: 0, fingerprint, createdAt: 1,
       });
-      executePrunePlan.mockResolvedValue({ success: true, reclaimedBytes: 0, outcomes: [...testCase.outcomes] });
+      executePrunePlan.mockResolvedValue({
+        success: true,
+        reclaimedBytes: 0,
+        mutated: false,
+        outcomes: [...testCase.outcomes],
+      });
       invalidateNodeCaches.mockClear();
       const res = await request(app)
         .post('/api/fleet/labels/fleet-prune')

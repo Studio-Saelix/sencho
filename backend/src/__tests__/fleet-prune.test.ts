@@ -3,6 +3,7 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { cleanupTestDb, setupTestDb, TEST_JWT_SECRET, TEST_USERNAME } from './helpers/setupTestDb';
 import type { PruneItemOutcome, PrunePlan, PrunePlanItem } from '../services/prunePlan';
+import { CacheService } from '../services/CacheService';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -62,9 +63,11 @@ function mockLocal(planFactory: (nodeId: number) => PrunePlan = (nodeId) => plan
       success: boolean;
       reclaimedBytes: number;
       outcomes: PruneItemOutcome[];
+      mutated: boolean;
     }> => ({
       success: true,
       reclaimedBytes: reviewedPlan.reclaimableBytes,
+      mutated: reviewedPlan.items.length > 0,
       outcomes: reviewedPlan.items.map((entry) => ({
         id: entry.id,
         target: entry.target,
@@ -210,6 +213,30 @@ describe('POST /api/fleet/labels/fleet-prune', () => {
     expect(fake.executePrunePlan).toHaveBeenCalledTimes(1);
     expect(response.body.results[0].outcomes).toEqual([]);
     expect(activeBulkActions.size).toBe(0);
+  });
+
+  it('invalidates local node caches when a failed image outcome is mutated', async () => {
+    const fake = mockLocal();
+    fake.executePrunePlan.mockResolvedValue({
+      success: false,
+      reclaimedBytes: 0,
+      mutated: true,
+      outcomes: [{ target: 'images', id: 'sha256:image', status: 'failed', error: 'tags remain' }],
+    });
+    const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate');
+    const local = DatabaseService.getInstance().getNodes().find((node) => node.type === 'local')!;
+    const response = await request(app)
+      .post('/api/fleet/labels/fleet-prune')
+      .set('Authorization', authHeader)
+      .send({
+        targets: ['images'], scope: 'managed', dryRun: false,
+        reviewedNodes: [{ nodeId: local.id, reachable: true }],
+        plans: [{ nodeId: local.id, fingerprint: `fingerprint-${local.id}` }],
+      });
+    expect(response.status).toBe(200);
+    expect(response.body.results[0].outcomes[0].status).toBe('failed');
+    expect(invalidate).toHaveBeenCalledWith(`stats:${local.id}`);
+    expect(invalidate).toHaveBeenCalledWith(`stack-statuses:${local.id}`);
   });
 
   it('fails closed when a local prune lock is active', async () => {
@@ -440,6 +467,7 @@ describe('POST /api/fleet/labels/fleet-prune', () => {
     fake.executePrunePlan.mockResolvedValue({
       success: false,
       reclaimedBytes: 100,
+      mutated: true,
       outcomes: [
         { target: 'images', id: 'removed', status: 'removed', sizeBytes: 100 },
         { target: 'images', id: 'skipped', status: 'skipped', reason: 'became active' },
