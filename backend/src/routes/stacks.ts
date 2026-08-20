@@ -1387,7 +1387,7 @@ async function buildDriftPayload(
   // less state than exists. Mutation routes take the opposite side, because
   // there the write has already committed and a decoration must not be able to
   // report it as failed.
-  return { ...report, temporal, ledger, lastCheckedAt, gitopsRevision: projectStackRevision(stackName) };
+  return { ...report, temporal, ledger, lastCheckedAt, gitopsRevision: projectStackRevision(stackName, nodeId) };
 }
 
 stacksRouter.get('/:stackName/drift', async (req: Request, res: Response) => {

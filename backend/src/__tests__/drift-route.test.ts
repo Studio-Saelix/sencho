@@ -100,6 +100,53 @@ describe('drift payload carries the GitOps revision', () => {
     fs.rmSync(stackDir, { recursive: true, force: true });
   });
 
+  it('resolves the Blueprint that owns the stack directory, not just Direct Git', async () => {
+    // A Blueprint application is stored with stack_name NULL, so no lookup by
+    // stack name reaches it, yet the reconciler materializes the Blueprint as a
+    // stack directory of that name. Without the deployment bridge the Drift tab
+    // reports not_applicable for a stack GitOps is actively managing, while the
+    // Blueprint page reports a live application for the very same thing.
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getNodes().find(n => n.is_default)?.id as number;
+    expect(typeof nodeId).toBe('number');
+
+    const blueprint = db.createBlueprint({
+      name: STACK,
+      description: null,
+      compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+      selector: { type: 'nodes', ids: [nodeId] },
+      drift_mode: 'suggest',
+      classification: 'stateless',
+      classification_reasons: [],
+      enabled: true,
+      created_by: 'admin',
+    });
+    db.upsertDeployment({ blueprint_id: blueprint.id, node_id: nodeId, status: 'active', applied_revision: 1 });
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
+    GitOpsTransitions.getInstance().activateInlineBlueprint({
+      application: blankInlineApplication('app-bp-drift', blueprint.id, Date.now()),
+      envelope: { operationId: 'op-bp-drift', actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+
+    const stackDir = makeStack();
+    stubDockerBoundary();
+    const res = await request(app).get(`/api/stacks/${STACK}/drift`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.gitopsRevision).toMatchObject({
+      applicationId: 'app-bp-drift',
+      targetMode: 'inline_blueprint',
+      blueprintId: blueprint.id,
+    });
+
+    vi.restoreAllMocks();
+    fs.rmSync(stackDir, { recursive: true, force: true });
+    db.getDb().prepare('DELETE FROM gitops_applications').run();
+    db.getDb().prepare('DELETE FROM blueprint_deployments').run();
+    db.getDb().prepare('DELETE FROM blueprints').run();
+  });
+
   it('adds the same gitopsRevision to the re-check', async () => {
     const stackDir = makeStack();
     stubDockerBoundary();

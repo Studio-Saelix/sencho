@@ -590,10 +590,44 @@ function decodeObservedSafe(
   }
 }
 
+/**
+ * The not-applicable shape, carrying why an application we expected was absent.
+ *
+ * Distinct from `NOT_APPLICABLE_REVISION` on purpose. That one means "nothing
+ * here", which is the honest answer for a stack or Blueprint the model was
+ * never asked about. This one means "something should have been here and was
+ * not", which is a fault. Returning the shared sentinel for both would make a
+ * vanished row indistinguishable from one that never existed, and the reader
+ * has no third source to tell them apart.
+ */
+export function missingApplicationRevision(applicationId: string): GitOpsRevisionProjection {
+  return {
+    schemaVersion: 1,
+    targetMode: 'not_applicable',
+    applicationId: null,
+    facets: null,
+    targets: [],
+    drift: [],
+    limitations: [{
+      code: 'application_row_missing',
+      message: 'The application this projection was resolved from is no longer present.',
+      evidence: { applicationId },
+    }],
+    availableActions: [],
+    approvals: null,
+  };
+}
+
 export function projectApplication(applicationId: string, healthDisabled: boolean): GitOpsRevisionProjection {
   const store = GitOpsStore.getInstance();
+  const application = store.getApplication(applicationId);
+  // The caller resolved this id from a row it had just read, so a miss here is
+  // not "no application": it is a row that went away between the two reads,
+  // which are deliberately not in one transaction. Say so rather than reporting
+  // the same answer an unmodelled stack gets.
+  if (!application) return missingApplicationRevision(applicationId);
   return deriveGitOpsRevision({
-    application: store.getApplication(applicationId) ?? null,
+    application,
     targets: store.listTargets(applicationId),
     healthDisabled,
   }, null);

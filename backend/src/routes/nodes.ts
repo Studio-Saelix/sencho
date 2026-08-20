@@ -123,10 +123,17 @@ export const nodesRouter = Router();
 /**
  * Placement as it currently resolves, for every Blueprint.
  *
- * Taken either side of a cordon so only the Blueprints it actually moved are
- * revised. A Blueprint pinned to the node still wants it, since a cordon
- * governs automatic placement only, and comparing sets is what makes that fall
- * out rather than needing a special case.
+ * Taken either side of a cordon, and today the two snapshots are always equal,
+ * so a cordon revises nothing and reports no revisions. That is the correct
+ * answer, not a gap: a cordon suppresses *new* placements, while this snapshot
+ * reports what each Blueprint asks for, and those are different questions.
+ * `listDesiredNodes` accordingly does not read `cordoned` at all, and the
+ * reconciler applies the cordon filter later, when it decides what to place.
+ *
+ * The comparison is kept rather than short-circuited because it is the same
+ * shared helper the label routes use, where placement genuinely does move, and
+ * because it is what would start reporting correctly if the desired set ever
+ * became cordon-aware. Cheap either way: two in-memory selector evaluations.
  */
 function snapshotBlueprintPlacement() {
   const db = DatabaseService.getInstance();

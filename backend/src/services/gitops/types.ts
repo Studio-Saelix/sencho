@@ -782,7 +782,16 @@ export type GitOpsRevisionProjection =
       facets: null;
       targets: [];
       drift: [];
-      limitations: [];
+      /**
+       * Why there is nothing to project, when the answer is not simply "no
+       * application".
+       *
+       * Empty for the ordinary case: a stack or Blueprint the model has never
+       * been asked about. Non-empty when the projection could not reach an
+       * application it had reason to believe exists, which is a different fact
+       * and must not read as the ordinary one.
+       */
+      limitations: GitOpsLimitation[];
       availableActions: [];
       approvals: null;
     }

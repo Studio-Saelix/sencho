@@ -1,17 +1,24 @@
 /**
  * Node-side changes that move where Blueprints are allowed to run.
  *
- * A label and a cordon are not statements about any one Blueprint, but both
- * change which nodes a selector matches, so they revise placement for whichever
- * Blueprints the change actually moved. That set is computed by comparing the
- * desired nodes before and after: a label nothing selects on, or a cordon on a
- * node no Blueprint wanted, moves nothing and records nothing.
+ * A label is not a statement about any one Blueprint, but it changes which
+ * nodes a selector matches, so it revises placement for whichever Blueprints
+ * the change actually moved. That set is computed by comparing the desired
+ * nodes before and after: a label nothing selects on moves nothing and records
+ * nothing.
+ *
+ * A cordon goes through the same comparison and, as things stand, never moves
+ * anything. It governs whether new placements may be made, not what a Blueprint
+ * asks for, and the desired-node computation deliberately ignores it. The
+ * comparison is still the right shape for it, so the caller gets a truthful
+ * empty answer instead of a special case.
  *
  * As in the Blueprint producers, the desired-node computation is supplied by
  * the caller. The reconciler that knows how to do it reaches this layer, and
  * importing it back would close a module cycle.
  */
 import { DatabaseService, type Blueprint } from '../DatabaseService';
+import { sanitizeForLog } from '../../utils/safeLog';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions } from './transitions';
 import { candidateRowFor, envelopeFor, intentRowFor } from './blueprintProducers';
@@ -56,7 +63,17 @@ export function recordPlacementShift(
     // brings it in rather than this path inventing a first intent for it.
     if (!app) continue;
     const blueprint = db.getBlueprint(blueprintId);
-    if (!blueprint) continue;
+    if (!blueprint) {
+      // Unlike the skip above, this one is a fault. A live application exists
+      // for a Blueprint whose own row is gone, and with cascade off nothing
+      // else will notice. The placement really did move, no intent or candidate
+      // is minted for it, and the caller goes on to report that nothing moved.
+      console.error(
+        '[GitOps] Placement shift skipped: blueprint %s has a live application but no blueprint row.',
+        sanitizeForLog(blueprintId),
+      );
+      continue;
+    }
 
     const envelope = envelopeFor(actor, trigger);
     const intent = intentRowFor(app.id, blueprint, envelope.operationId, actor, envelope.at);

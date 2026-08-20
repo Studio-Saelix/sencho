@@ -18,28 +18,70 @@ function healthGateDisabled(): boolean {
 }
 
 /**
- * The revision projection for a stack's live Direct application.
+ * The Blueprint application that owns a stack directory on this node, if any.
  *
- * A stack with no live application projects `not_applicable` rather than
- * throwing, so the list route gets a uniform shape across rows whether or not
- * a given stack has Git attached.
+ * A Blueprint application is stored with `stack_name` NULL, because it
+ * describes a Blueprint rather than one placement of it, so no lookup by stack
+ * name can reach it. Meanwhile the reconciler materializes every Blueprint as a
+ * real stack directory named after the Blueprint, on each node it targets. So
+ * a stack surface asked about that directory has to bridge the two, or it
+ * reports "no GitOps here" about a stack GitOps is actively managing.
+ *
+ * The deployment row is what makes the bridge safe. Blueprint names and stack
+ * names share one namespace, so matching on name alone would let a Blueprint
+ * called `web` claim an unrelated hand-made `web` stack on a node it never
+ * targeted. Requiring a deployment on the asking node means the Blueprint
+ * really did put that directory there.
+ *
+ * Returns undefined without a node, which is the correct answer rather than a
+ * missing one: ownership is per placement, and a caller that cannot say which
+ * node it is asking about cannot be told a Blueprint owns the directory there.
  */
-export function projectStackRevision(stackName: string): GitOpsRevisionProjection {
-  const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+function blueprintApplicationOwningStack(stackName: string, nodeId: number | undefined) {
+  if (nodeId === undefined) return undefined;
+  const db = DatabaseService.getInstance();
+  const blueprint = db.getBlueprintByName(stackName);
+  if (!blueprint) return undefined;
+  const deployment = db.getDeployment(blueprint.id, nodeId);
+  if (!deployment || deployment.status === 'withdrawn') return undefined;
+  const store = GitOpsStore.getInstance();
+  return store.getLiveBlueprintApplication(blueprint.id) ?? store.getRetiredBlueprintApplication(blueprint.id);
+}
+
+/**
+ * The revision projection for a stack, from whichever application owns it.
+ *
+ * Resolution order is precedence, not preference. A live Direct application is
+ * the stack's own Git attachment and always wins. Failing that, a Blueprint may
+ * own the directory (see above). Failing both, a retired Direct application can
+ * still say what the stack was before it was detached or deleted, which is a
+ * different fact from never having been modelled.
+ *
+ * Only when none of those exist does the stack project `not_applicable`, and it
+ * does so rather than throwing, so the list route gets a uniform shape across
+ * rows whether or not a given stack has Git attached.
+ */
+export function projectStackRevision(stackName: string, nodeId?: number): GitOpsRevisionProjection {
+  const store = GitOpsStore.getInstance();
+  const app = store.getLiveDirectApplication(stackName)
+    ?? blueprintApplicationOwningStack(stackName, nodeId)
+    ?? store.getRetiredDirectApplication(stackName);
   if (!app) return NOT_APPLICABLE_REVISION;
   return projectApplication(app.id, healthGateDisabled());
 }
 
 /**
- * The revision projection for a Blueprint's live application.
+ * The revision projection for a Blueprint's application.
  *
- * Mirrors projectStackRevision for the Blueprint surface: a Blueprint that
- * predates the model, or one migration has not brought in, projects
- * `not_applicable` rather than throwing, so the catalog gets a uniform shape
- * across rows.
+ * Mirrors projectStackRevision: the live application if there is one, otherwise
+ * the most recently retired one so a detached Blueprint reports what it was
+ * rather than reading as one that never existed. A Blueprint that predates the
+ * model, or one migration has not brought in, projects `not_applicable` rather
+ * than throwing, so the catalog gets a uniform shape across rows.
  */
 export function projectBlueprintRevision(blueprintId: number): GitOpsRevisionProjection {
-  const app = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprintId);
+  const store = GitOpsStore.getInstance();
+  const app = store.getLiveBlueprintApplication(blueprintId) ?? store.getRetiredBlueprintApplication(blueprintId);
   if (!app) return NOT_APPLICABLE_REVISION;
   return projectApplication(app.id, healthGateDisabled());
 }

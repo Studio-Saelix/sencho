@@ -158,6 +158,57 @@ describe('Blueprint routes carry gitopsRevision', () => {
     });
 });
 
+describe('Projection resolution reaches every application that owns a surface', () => {
+    it('reports a detached Blueprint as not_live rather than as never modelled', async () => {
+        const created = await createBlueprint({ type: 'nodes', ids: [] });
+        const applicationId = created.body.gitopsRevision.applicationId;
+        const store = (await import('../services/gitops/store')).GitOpsStore.getInstance();
+        const tx = (await import('../services/gitops/transitions')).GitOpsTransitions.getInstance();
+        tx.applicationTombstoned(applicationId, 'detached', {
+            operationId: 'op-detach-test', actor: 'tester', trigger: 'manual', at: Date.now(),
+        });
+        expect(store.getLiveBlueprintApplication(created.body.id)).toBeUndefined();
+
+        const detail = await request(app).get(`/api/blueprints/${created.body.id}`).set('Cookie', adminCookie);
+        expect(detail.status).toBe(200);
+        // The tombstone keeps the identity as frozen fact so the projection can
+        // still say what this was. Answering not_applicable would report a
+        // Blueprint that was deliberately detached exactly like one that never
+        // had Git at all.
+        expect(detail.body.gitopsRevision).toMatchObject({
+            applicationId,
+            lifecycleStatus: 'detached',
+        });
+    });
+
+    it('says why when the application it resolved has gone missing', async () => {
+        const created = await createBlueprint({ type: 'nodes', ids: [] });
+        const store = (await import('../services/gitops/store')).GitOpsStore.getInstance();
+        const live = store.getLiveBlueprintApplication(created.body.id);
+        // Resolve the row, then delete it before the projection re-reads it by
+        // id. That is the window the two non-transactional reads leave open.
+        vi.spyOn(store, 'getLiveBlueprintApplication').mockImplementation((id: number) => {
+            DatabaseService.getInstance().getDb()
+                .prepare('DELETE FROM gitops_applications WHERE blueprint_id = ?').run(id);
+            return live;
+        });
+
+        const detail = await request(app).get(`/api/blueprints/${created.body.id}`).set('Cookie', adminCookie);
+        expect(detail.status).toBe(200);
+        expect(detail.body.gitopsRevision.targetMode).toBe('not_applicable');
+        // The distinguishing fact: an unmodelled Blueprint carries no limitation.
+        expect(detail.body.gitopsRevision.limitations).toEqual([
+            expect.objectContaining({ code: 'application_row_missing' }),
+        ]);
+    });
+
+    it('leaves an unmodelled Blueprint with no limitation, so the two stay distinguishable', async () => {
+        const bp = seedUnmodelledBlueprint();
+        const detail = await request(app).get(`/api/blueprints/${bp.id}`).set('Cookie', adminCookie);
+        expect(detail.body.gitopsRevision.limitations).toEqual([]);
+    });
+});
+
 describe('Node-label routes report only the Blueprints a label moved', () => {
     it('carries gitopsRevisions for a Blueprint whose selector reacts to the label', async () => {
         const node = seedNode();

@@ -101,6 +101,38 @@ export class GitOpsStore {
     ).get(blueprintId) as GitOpsApplicationRow | undefined;
   }
 
+  /**
+   * The most recently retired Direct application for a stack, if any.
+   *
+   * Consulted only after the live lookup misses. `applicationTombstoned` keeps
+   * the configured identity and SHA pointers as frozen facts precisely so the
+   * projection can still say what an application was, and `deriveSource` has a
+   * `not_live` status for it, but neither could be reached while every entry
+   * point filtered to the live rows. Newest first, because a stack name can be
+   * detached and reattached repeatedly and only the latest retirement describes
+   * what was there last.
+   */
+  getRetiredDirectApplication(stackName: string): GitOpsApplicationRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE stack_name = ? AND target_mode = 'direct' AND lifecycle_status IN ('detached','deleted')
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 1`,
+    ).get(stackName) as GitOpsApplicationRow | undefined;
+  }
+
+  /** The most recently retired application for a Blueprint. Mirrors the Direct getter. */
+  getRetiredBlueprintApplication(blueprintId: number): GitOpsApplicationRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE blueprint_id = ?
+         AND target_mode IN ('inline_blueprint','blueprint')
+         AND lifecycle_status IN ('detached','deleted')
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 1`,
+    ).get(blueprintId) as GitOpsApplicationRow | undefined;
+  }
+
   /** Direct applications that never reached their success boundary. */
   listCreatingDirectApplications(): GitOpsApplicationRow[] {
     return this.db().prepare(
