@@ -192,3 +192,52 @@ test.describe('classified change-plan docs screenshots', () => {
     }, stackName);
   });
 });
+
+test.describe('resources prune confirm docs screenshot', () => {
+  test.use({ viewport: { width: 1920, height: 1080 } });
+
+  test('prune confirm lists extra repository tags', async ({ page }) => {
+    await page.route('**/system/prune/plan', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          scope: 'managed',
+          targets: ['images'],
+          items: [{
+            target: 'images',
+            id: 'sha256:docs-prune-multi-tag',
+            name: 'ghcr.io/example/app:1.5.2',
+            sizeBytes: 48234496,
+            managed: true,
+            reason: 'Image is not used by any container',
+            image: {
+              references: [
+                'ghcr.io/example/app:1.5.2',
+                'ghcr.io/example/app:latest',
+              ],
+            },
+          }],
+          reclaimableBytes: 48234496,
+          fingerprint: 'fp-docs-prune-confirm',
+          createdAt: 1_700_000_000_000,
+          nodeId: 1,
+        }),
+      });
+    });
+
+    await loginAs(page);
+    await page.getByRole('button', { name: /resources/i }).click();
+    await page.getByRole('button', { name: /Prune Unused Images/ }).click();
+    const pruneDialog = page.getByRole('alertdialog').filter({ hasText: 'Prune Sencho-managed images' });
+    await expect(pruneDialog).toBeVisible();
+    await expect(pruneDialog.getByText('ghcr.io/example/app:latest')).toBeVisible();
+    await pruneDialog.screenshot({
+      path: path.join(DOCS_IMAGES, 'resources', 'resources-prune-confirm.png'),
+    });
+  });
+});

@@ -659,9 +659,77 @@ describe('DockerController.buildPrunePlan', () => {
 
     expect(plan.items.map((i) => i.id)).toEqual(['img-free']);
   });
+
+  it('excludes a fully synthetic sencho-rb hold image from the plan even without a DB hold', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      {
+        Id: 'img-orphan-hold',
+        RepoTags: ['sencho-rb/abc123456789/web:hold', 'sencho-rb/abc123456789/api:hold'],
+        Size: 50,
+        Containers: 0,
+      },
+      { Id: 'img-free', RepoTags: ['app:2'], Size: 100, Containers: 0 },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1, () => false);
+
+    expect(plan.items.map((i) => i.id)).toEqual(['img-free']);
+  });
+
+  it('still plans a dual-tagged image that carries a registry tag and a sencho-rb hold tag', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      {
+        Id: 'img-dual',
+        RepoTags: ['myregistry/app:1.4', 'sencho-rb/abc123456789/app:hold'],
+        Size: 100,
+        Containers: 0,
+      },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1);
+
+    expect(plan.items.map((i) => i.id)).toEqual(['img-dual']);
+    expect(plan.items[0]?.image?.references).toEqual([
+      'myregistry/app:1.4',
+      'sencho-rb/abc123456789/app:hold',
+    ]);
+  });
 });
 
 describe('DockerController.executePrunePlan', () => {
+  const multiTagImage = {
+    Id: 'img-multi',
+    RepoTags: ['qa1769/app:v0', 'qa1769-external/keep:v0'],
+    Size: 50,
+    Containers: 0,
+  };
+
+  function mockImageRemove(
+    onRemove?: (name: string, opts?: { force?: boolean }) => void | Promise<void>,
+  ): Array<{ name: string; force?: boolean }> {
+    const removes: Array<{ name: string; force?: boolean }> = [];
+    mockDocker.getImage.mockImplementation((name: string) => ({
+      remove: vi.fn().mockImplementation(async (opts?: { force?: boolean }) => {
+        removes.push({ name, force: opts?.force });
+        await onRemove?.(name, opts);
+      }),
+    }));
+    return removes;
+  }
+
+  async function executeForcedFreshImagePlan(listings: Array<unknown[] | Error>) {
+    for (const listing of listings) {
+      if (listing instanceof Error) mockDocker.listImages.mockRejectedValueOnce(listing);
+      else mockDocker.listImages.mockResolvedValueOnce(listing);
+    }
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1);
+    vi.spyOn(dc, 'assertPlanFresh').mockResolvedValue(plan);
+    return dc.executePrunePlan(plan, []);
+  }
+
   it('throws PrunePlanStaleError when the fingerprint no longer matches', async () => {
     mockDocker.listContainers.mockResolvedValue([
       {
@@ -852,6 +920,49 @@ describe('DockerController.executePrunePlan', () => {
     ]);
   });
 
+  it('skips a fully synthetic hold image even under a forced-fresh plan', async () => {
+    const holdImg = {
+      Id: 'img-orphan-hold',
+      RepoTags: ['sencho-rb/abc123456789/web:hold', 'sencho-rb/abc123456789/api:hold'],
+      Size: 50,
+      Containers: 0,
+    };
+    mockDocker.listImages.mockResolvedValue([holdImg]);
+    const removes = mockImageRemove();
+
+    const dc = DockerController.getInstance(1);
+    const plan = {
+      scope: 'all' as const,
+      targets: ['images' as const],
+      items: [{
+        target: 'images' as const,
+        id: holdImg.Id,
+        name: holdImg.RepoTags[0],
+        sizeBytes: 50,
+        managed: false,
+        reason: 'Image is not used by any container',
+        image: { references: holdImg.RepoTags },
+      }],
+      reclaimableBytes: 50,
+      fingerprint: 'forced-hold',
+      createdAt: Date.now(),
+      nodeId: 1,
+    };
+    vi.spyOn(dc, 'assertPlanFresh').mockResolvedValue(plan);
+    const result = await dc.executePrunePlan(plan, []);
+
+    expect(removes).toEqual([]);
+    expect(result.mutated).toBe(false);
+    expect(result.outcomes).toEqual([
+      expect.objectContaining({
+        id: holdImg.Id,
+        target: 'images',
+        status: 'skipped',
+        reason: 'Sencho rollback-hold image',
+      }),
+    ]);
+  });
+
   it('marks the plan stale when a free image gains a new RepoTag between plan and rebuild', async () => {
     const img = {
       Id: 'img-retag',
@@ -896,29 +1007,177 @@ describe('DockerController.executePrunePlan', () => {
     }));
   });
 
-  it('surfaces multi-repository refuse without a silent partial untag report', async () => {
-    mockDocker.listImages.mockResolvedValue([
-      {
-        Id: 'img-multi',
-        RepoTags: ['qa1769/app:v0', 'qa1769-external/keep:v0'],
-        Size: 50,
-        Containers: 0,
-      },
-    ]);
-    const imageRemove = vi.fn().mockRejectedValue(
-      Object.assign(new Error('conflict: unable to delete (must be forced) - image is referenced in multiple repositories'), { statusCode: 409 }),
-    );
-    mockDocker.getImage.mockReturnValue({ remove: imageRemove });
+  it('untags each reviewed name and reports removed once the image is gone', async () => {
+    const removes = mockImageRemove();
+    const result = await executeForcedFreshImagePlan([[multiTagImage], [multiTagImage], []]);
 
-    const dc = DockerController.getInstance(1);
-    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1);
-    vi.spyOn(dc, 'assertPlanFresh').mockResolvedValue(plan);
-    const result = await dc.executePrunePlan(plan, []);
-    expect(imageRemove).toHaveBeenCalled();
+    expect(removes.map((entry) => entry.name)).toEqual(['qa1769/app:v0', 'qa1769-external/keep:v0']);
+    expect(result.outcomes[0]).toEqual(expect.objectContaining({
+      id: 'img-multi',
+      status: 'removed',
+    }));
+    expect(result.mutated).toBe(true);
+    expect(result.success).toBe(true);
+  });
+
+  it('treats a first-ref 404 as absent and still removes when a later reviewed tag succeeds', async () => {
+    const removes = mockImageRemove(async (name) => {
+      if (name === 'qa1769/app:v0') {
+        throw Object.assign(new Error('No such image: qa1769/app:v0'), { statusCode: 404 });
+      }
+    });
+    const result = await executeForcedFreshImagePlan([[multiTagImage], [multiTagImage], []]);
+
+    expect(removes).toEqual([
+      { name: 'qa1769/app:v0', force: false },
+      { name: 'qa1769-external/keep:v0', force: false },
+    ]);
+    expect(result.outcomes[0]).toEqual(expect.objectContaining({ status: 'removed' }));
+    expect(result.mutated).toBe(true);
+    expect(result.success).toBe(true);
+  });
+
+  it('does not report removed when a later 404 leaves another reviewed tag present', async () => {
+    mockImageRemove(async (name) => {
+      if (name === 'qa1769-external/keep:v0') {
+        throw Object.assign(new Error('No such image'), { statusCode: 404 });
+      }
+    });
+    const result = await executeForcedFreshImagePlan([
+      [multiTagImage],
+      [multiTagImage],
+      [{ ...multiTagImage, RepoTags: ['qa1769/app:v0'] }],
+    ]);
+
     expect(result.outcomes[0]).toEqual(expect.objectContaining({
       status: 'failed',
-      error: expect.stringMatching(/multiple repositories/i),
+      error: expect.stringMatching(/qa1769\/app:v0/),
     }));
-    expect(String(result.outcomes[0] && 'error' in result.outcomes[0] ? result.outcomes[0].error : '')).toMatch(/qa1769\/app:v0/);
+    expect(result.outcomes[0]).not.toEqual(expect.objectContaining({ status: 'removed' }));
+    expect(result.mutated).toBe(true);
+    expect(result.success).toBe(false);
+  });
+
+  it('stops on a hard untag error, lists remaining tags, and marks mutated', async () => {
+    const removes = mockImageRemove(async (name) => {
+      if (name === 'qa1769-external/keep:v0') {
+        throw Object.assign(new Error('conflict: unable to delete (must be forced)'), { statusCode: 409 });
+      }
+    });
+    const result = await executeForcedFreshImagePlan([
+      [multiTagImage],
+      [multiTagImage],
+      [{ ...multiTagImage, RepoTags: ['qa1769-external/keep:v0'] }],
+    ]);
+
+    expect(removes.map((entry) => entry.name)).toEqual(['qa1769/app:v0', 'qa1769-external/keep:v0']);
+    expect(result.outcomes[0]).toEqual(expect.objectContaining({
+      status: 'failed',
+      error: expect.stringMatching(/qa1769-external\/keep:v0/),
+    }));
+    expect(result.mutated).toBe(true);
+    expect(result.success).toBe(false);
+  });
+
+  it('never removes an unexpected tag that appears during execution', async () => {
+    const img = { Id: 'img-multi', RepoTags: ['qa1769/app:v0'], Size: 50, Containers: 0 };
+    const removes = mockImageRemove();
+    const result = await executeForcedFreshImagePlan([
+      [img],
+      [img],
+      [{ ...img, RepoTags: ['qa1769-external/keep:v0'] }],
+    ]);
+
+    expect(removes.map((entry) => entry.name)).toEqual(['qa1769/app:v0']);
+    expect(removes.map((entry) => entry.name)).not.toContain('qa1769-external/keep:v0');
+    expect(result.outcomes[0]).toEqual(expect.objectContaining({
+      status: 'failed',
+      error: expect.stringMatching(/not in the reviewed set/i),
+    }));
+    expect(result.mutated).toBe(true);
+  });
+
+  it('removes a dangling planned image by id with force false', async () => {
+    const img = { Id: 'img-dang', RepoTags: ['<none>:<none>'], Size: 20, Containers: 0 };
+    const removes = mockImageRemove();
+    const result = await executeForcedFreshImagePlan([[img], [img], [img]]);
+
+    expect(removes).toEqual([{ name: 'img-dang', force: false }]);
+    expect(result.outcomes[0]).toEqual(expect.objectContaining({ status: 'removed' }));
+    expect(result.mutated).toBe(true);
+    expect(result.success).toBe(true);
+  });
+
+  it('id-removes leftover none tags after reviewed names are gone', async () => {
+    const img = { Id: 'img-multi', RepoTags: ['qa1769/app:v0'], Size: 50, Containers: 0 };
+    const removes = mockImageRemove();
+    const result = await executeForcedFreshImagePlan([
+      [img],
+      [img],
+      [{ ...img, RepoTags: ['<none>:<none>'] }],
+    ]);
+
+    expect(removes).toEqual([
+      { name: 'qa1769/app:v0', force: false },
+      { name: 'img-multi', force: false },
+    ]);
+    expect(result.outcomes[0]).toEqual(expect.objectContaining({ status: 'removed' }));
+    expect(result.mutated).toBe(true);
+    expect(result.success).toBe(true);
+  });
+
+  it('does not treat a 409 as missing when the conflict text contains 404', async () => {
+    const img = {
+      Id: 'sha256:abc404def',
+      RepoTags: ['qa1769/app:v0', 'qa1769/app:latest'],
+      Size: 50,
+      Containers: 0,
+    };
+    const removes = mockImageRemove(async () => {
+      throw Object.assign(
+        new Error('(HTTP code 409) conflict - image sha256:abc404def is being used by running container'),
+        { statusCode: 409 },
+      );
+    });
+    const result = await executeForcedFreshImagePlan([[img], [img], [img]]);
+
+    expect(removes).toEqual([{ name: 'qa1769/app:v0', force: false }]);
+    expect(result.outcomes[0]).toEqual(expect.objectContaining({
+      status: 'failed',
+      error: expect.stringMatching(/qa1769\/app:v0/),
+    }));
+    expect(result.mutated).toBe(false);
+    expect(result.success).toBe(false);
+  });
+
+  it('does not report dangling id-remove 409 as removed when the message contains 404', async () => {
+    const img = { Id: 'sha256:abc404def', RepoTags: ['<none>:<none>'], Size: 20, Containers: 0 };
+    mockImageRemove(async () => {
+      throw Object.assign(
+        new Error('(HTTP code 409) conflict - unable to delete sha256:abc404def (must be forced)'),
+        { statusCode: 409 },
+      );
+    });
+    const result = await executeForcedFreshImagePlan([[img], [img], [img]]);
+
+    expect(result.outcomes[0]).toEqual(expect.objectContaining({
+      status: 'failed',
+      error: expect.stringMatching(/dangling image could not be removed/i),
+    }));
+    expect(result.mutated).toBe(false);
+    expect(result.success).toBe(false);
+  });
+
+  it('fails honestly when completion re-list throws after a successful untag', async () => {
+    const img = { Id: 'img-multi', RepoTags: ['qa1769/app:v0'], Size: 50, Containers: 0 };
+    mockImageRemove();
+    const result = await executeForcedFreshImagePlan([[img], [img], new Error('daemon busy')]);
+
+    expect(result.outcomes[0]).toEqual(expect.objectContaining({
+      status: 'failed',
+      error: expect.stringMatching(/could not confirm remaining/i),
+    }));
+    expect(result.mutated).toBe(true);
+    expect(result.success).toBe(false);
   });
 });

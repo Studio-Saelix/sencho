@@ -174,6 +174,7 @@ describe('Prune plan routes', () => {
       outcomes: [{ id: 'v1', target: 'volumes', status: 'removed', sizeBytes: 42 }],
       reclaimedBytes: 42,
       success: true,
+      mutated: true,
     });
     vi.spyOn(DockerController, 'getInstance').mockReturnValue({
       buildPrunePlan: vi.fn().mockResolvedValue(plan),
@@ -190,6 +191,7 @@ describe('Prune plan routes', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.reclaimedBytes).toBe(42);
     expect(res.body.outcomes).toHaveLength(1);
+    expect(res.body).not.toHaveProperty('mutated');
     expect(executePrunePlan).toHaveBeenCalled();
     expect(invalidate).toHaveBeenCalledWith('stats:1');
     expect(invalidate).toHaveBeenCalledWith('stack-statuses:1');
@@ -267,5 +269,81 @@ describe('Prune plan routes', () => {
     expect(res.body.fingerprint).toBe('fp-dry');
     expect(res.body.items).toHaveLength(1);
     expect(executePrunePlan).not.toHaveBeenCalled();
+  });
+
+  it('invalidates node caches when a failed image outcome is mutated', async () => {
+    stubFsStacks();
+    const plan = samplePlan('fp-partial');
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      buildPrunePlan: vi.fn().mockResolvedValue(plan),
+      executePrunePlan: vi.fn().mockResolvedValue({
+        outcomes: [{ id: 'img-multi', target: 'images', status: 'failed', error: 'tags remain' }],
+        reclaimedBytes: 0,
+        success: false,
+        mutated: true,
+      }),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+    const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate');
+
+    const res = await request(app)
+      .post('/api/system/prune/system')
+      .set('Authorization', authHeader)
+      .send({ target: 'volumes', scope: 'managed', planFingerprint: 'fp-partial' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(false);
+    expect(res.body.outcomes[0].status).toBe('failed');
+    expect(invalidate).toHaveBeenCalledWith('stats:1');
+    expect(invalidate).toHaveBeenCalledWith('stack-statuses:1');
+  });
+
+  it('does not invalidate node caches when a failed outcome is not mutated', async () => {
+    stubFsStacks();
+    const plan = samplePlan('fp-nomut');
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      buildPrunePlan: vi.fn().mockResolvedValue(plan),
+      executePrunePlan: vi.fn().mockResolvedValue({
+        outcomes: [{ id: 'img-multi', target: 'images', status: 'failed', error: 'references changed' }],
+        reclaimedBytes: 0,
+        success: false,
+        mutated: false,
+      }),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+    const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate');
+
+    const res = await request(app)
+      .post('/api/system/prune/system')
+      .set('Authorization', authHeader)
+      .send({ target: 'volumes', scope: 'managed', planFingerprint: 'fp-nomut' });
+
+    expect(res.status).toBe(200);
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it('legacy no-fingerprint containers prune omits mutated from the JSON body', async () => {
+    stubFsStacks();
+    const executePrunePlan = vi.fn().mockResolvedValue({
+      outcomes: [{ id: 'c1', target: 'containers', status: 'removed' }],
+      reclaimedBytes: 0,
+      success: true,
+      mutated: true,
+    });
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      buildPrunePlan: vi.fn().mockResolvedValue(samplePlan('unused')),
+      executePrunePlan,
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const res = await request(app)
+      .post('/api/system/prune/system')
+      .set('Authorization', authHeader)
+      .send({ target: 'containers', scope: 'managed' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.reclaimedBytes).toBe(0);
+    expect(res.body.outcomes).toEqual([
+      { id: 'c1', target: 'containers', status: 'removed' },
+    ]);
+    expect(res.body).not.toHaveProperty('mutated');
   });
 });
