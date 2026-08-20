@@ -172,4 +172,11 @@ When no unmanaged containers are detected, the tab shows a success state with th
   <Accordion title="The reclaim banner will not go away, or shows a small amount that will not prune">
     The banner starts from what Docker reports as reclaimable on the node, subtracts images Sencho holds as rollback protection points, and counts only the resources a standard prune can actually remove. Held images are never part of that total and never appear in a prune plan, so the residue after a prune is normally the storage driver still reporting a few megabytes that the prune did not free. Held images are listed in the **Rollback** tab and are freed once the hold is released or superseded. To stop the banner drawing attention to a stubborn remainder, dismiss it with the **×** in its top-right corner; it stays hidden until the reclaimable total grows past that point. To turn it off for the node entirely, switch off **Show reclaimable-space banner** in **Settings → Monitoring → Docker & Storage**.
   </Accordion>
+  <Accordion title="A prune plan lists several tags for one image">
+    Unused images often carry more than one name, such as a version tag and `latest`. Sencho includes every reviewed tag in the prune confirmation. Confirming removes those tags one by one, and Docker deletes the image once no names remain.
+
+    <Frame>
+      <img src="/images/resources/resources-prune-confirm.png" alt="Prune confirmation dialog listing an unused image with both a version tag and latest in the reviewed items" />
+    </Frame>
+  </Accordion>
 </AccordionGroup>

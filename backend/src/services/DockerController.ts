@@ -12,6 +12,7 @@ import { FileSystemService } from './FileSystemService';
 import SelfIdentityService from './SelfIdentityService';
 import {
   fingerprintPrunePlan,
+  normalizePruneImageReferences,
   normalizePruneTargets,
   projectPruneOwnershipLabels,
   pruneImageReferencesEqual,
@@ -1019,7 +1020,8 @@ class DockerController {
 
   /**
    * Build an itemized prune plan using the same eligibility predicates that
-   * `executePrunePlan` revalidates before each delete. Never calls remove APIs.
+   * `executePrunePlan` revalidates against live tags before mutation. Never
+   * calls remove APIs.
    */
   public async buildPrunePlan(
     targets: PruneTarget[],
@@ -1214,6 +1216,7 @@ class DockerController {
       for (const img of rawImages) {
         if (selfIdentity.isOwnImage(img.Id)) continue;
         if (isImageHeld?.(img.Id)) continue;
+        if (isFullySyntheticHoldImage(img.RepoTags ?? [])) continue;
         const refs = imageToContainerIds.get(img.Id) ?? [];
         const becomesFree = freeingImages
           && refs.length > 0
@@ -1311,14 +1314,16 @@ class DockerController {
   }
 
   /**
-   * Execute a previously previewed plan: revalidate fingerprint, then delete
-   * each planned item serially with force:false. Never deletes unplanned items.
+   * Execute a previously previewed plan: revalidate fingerprint, then apply each
+   * planned item serially with force:false. Images untag reviewed names, then
+   * re-list to decide removed, remaining-tag failure, or dangling ID-remove.
+   * Never mutates unplanned items.
    */
   public async executePrunePlan(
     plan: PrunePlan,
     knownStackNames: string[],
     isImageHeld?: (imageId: string) => boolean,
-  ): Promise<{ outcomes: PruneItemOutcome[]; reclaimedBytes: number; success: boolean }> {
+  ): Promise<{ outcomes: PruneItemOutcome[]; reclaimedBytes: number; success: boolean; mutated: boolean }> {
     const fresh = await this.assertPlanFresh(plan, knownStackNames, isImageHeld);
     if (!fresh) throw new PrunePlanStaleError();
 
@@ -1330,6 +1335,7 @@ class DockerController {
 
     const outcomes: PruneItemOutcome[] = [];
     let reclaimedBytes = 0;
+    let planMutated = false;
     /** Image IDs whose planned container removal failed or was skipped. */
     const blockedImageIds = new Set<string>();
 
@@ -1415,10 +1421,11 @@ class DockerController {
               continue;
             }
           }
-          const outcome = await this.executePlannedImage(
+          const { outcome, mutated: imageMutated } = await this.executePlannedImage(
             item, selfIdentity,
           );
           outcomes.push(outcome);
+          if (imageMutated) planMutated = true;
           if (outcome.status === 'removed') reclaimedBytes += outcome.sizeBytes ?? item.sizeBytes ?? 0;
         }
       } catch (e) {
@@ -1433,7 +1440,8 @@ class DockerController {
     }
 
     const success = outcomes.every((o) => o.status !== 'failed');
-    return { outcomes, reclaimedBytes, success };
+    const mutated = planMutated || outcomes.some((outcome) => outcome.status === 'removed');
+    return { outcomes, reclaimedBytes, success, mutated };
   }
 
   private async lookupContainerImageId(containerId: string): Promise<string | null> {
@@ -1588,35 +1596,66 @@ class DockerController {
     return { id: item.id, target: 'networks', status: 'removed' };
   }
 
+  private static dockerIsNotFound(error: unknown): boolean {
+    const statusCode = (error as { statusCode?: number }).statusCode;
+    if (statusCode === 404) return true;
+    if (typeof statusCode === 'number') return false;
+    const message = error instanceof Error ? error.message : String(error);
+    return /no such image/i.test(message);
+  }
+
+  private static listedImageMatch<T extends { Id: string }>(images: T[], id: string): T | undefined {
+    return images.find((image) => image.Id === id || image.Id.startsWith(id) || id.startsWith(image.Id));
+  }
+
+  private static plannedImageResult(
+    outcome: PruneItemOutcome,
+    mutated = false,
+  ): { outcome: PruneItemOutcome; mutated: boolean } {
+    return { outcome, mutated };
+  }
+
+  private async listedImageById(id: string): Promise<{ Id: string; RepoTags?: string[] | null } | undefined> {
+    const images = await this.docker.listImages({ all: false }) as Array<{
+      Id: string;
+      RepoTags?: string[] | null;
+    }>;
+    return DockerController.listedImageMatch(images, id);
+  }
+
   private async executePlannedImage(
     item: PrunePlanItem,
     selfIdentity: SelfIdentityService,
-  ): Promise<PruneItemOutcome> {
+  ): Promise<{ outcome: PruneItemOutcome; mutated: boolean }> {
     if (selfIdentity.isOwnImage(item.id)) {
-      return { id: item.id, target: 'images', status: 'skipped', reason: 'Sencho self image' };
+      return DockerController.plannedImageResult({
+        id: item.id, target: 'images', status: 'skipped', reason: 'Sencho self image',
+      });
     }
     if (item.target !== 'images') {
-      return { id: item.id, target: 'images', status: 'failed', error: 'Plan item is not an image target' };
+      return DockerController.plannedImageResult({
+        id: item.id, target: 'images', status: 'failed', error: 'Plan item is not an image target',
+      });
     }
     const plannedRefs = item.image.references;
-    const rawImages = await this.docker.listImages({ all: false }) as Array<{
-      Id: string;
-      Size?: number;
-      RepoTags?: string[] | null;
-    }>;
-    const img = rawImages.find((i) => i.Id === item.id || i.Id.startsWith(item.id) || item.id.startsWith(i.Id));
+    const img = await this.listedImageById(item.id);
     if (!img) {
-      return { id: item.id, target: 'images', status: 'skipped', reason: 'Image no longer exists' };
+      return DockerController.plannedImageResult({
+        id: item.id, target: 'images', status: 'skipped', reason: 'Image no longer exists',
+      });
     }
-    // Defense in depth when fleet preflight/assertPlanFresh already matched:
-    // refuse mutation if live tags drifted from the reviewed reference set.
+    if (isFullySyntheticHoldImage(img.RepoTags ?? [])) {
+      return DockerController.plannedImageResult({
+        id: item.id, target: 'images', status: 'skipped', reason: 'Sencho rollback-hold image',
+      });
+    }
     if (!pruneImageReferencesEqual(plannedRefs, img.RepoTags)) {
-      return {
+      return DockerController.plannedImageResult({
         id: item.id,
         target: 'images',
         status: 'failed',
         error: 'Image references changed since the plan was built; refresh and confirm again',
-      };
+      });
     }
     const allContainers = await this.docker.listContainers({ all: true }) as Array<{
       ImageID?: string;
@@ -1626,51 +1665,87 @@ class DockerController {
       || Boolean(container.ImageID?.startsWith(img.Id))
       || img.Id.startsWith(container.ImageID ?? ''));
     if (containerRefs.length > 0) {
-      return { id: item.id, target: 'images', status: 'skipped', reason: 'Image still has container references' };
+      return DockerController.plannedImageResult({
+        id: item.id, target: 'images', status: 'skipped', reason: 'Image still has container references',
+      });
+    }
+
+    let mutated = false;
+    for (const ref of plannedRefs) {
+      try {
+        await this.docker.getImage(ref).remove({ force: false });
+        mutated = true;
+      } catch (error) {
+        if (!DockerController.dockerIsNotFound(error)) break;
+      }
+    }
+    return this.completePlannedImage(item, plannedRefs, mutated);
+  }
+
+  private static remainingImageFailure(
+    item: PrunePlanItem,
+    plannedRefs: string[],
+    remaining: string[],
+  ): PruneItemOutcome {
+    const prefix = remaining.some((ref) => !plannedRefs.includes(ref))
+      ? 'Image still has repository tags that were not in the reviewed set: '
+      : 'Image still has repository tags after prune: ';
+    return {
+      id: item.id,
+      target: 'images',
+      status: 'failed',
+      error: prefix + remaining.join(', ')
+        + '. Refresh the plan and confirm remaining references before pruning again.',
+    };
+  }
+
+  private async completePlannedImage(
+    item: PrunePlanItem,
+    plannedRefs: string[],
+    mutated: boolean,
+  ): Promise<{ outcome: PruneItemOutcome; mutated: boolean }> {
+    const removed = DockerController.plannedImageResult(
+      { id: item.id, target: 'images', status: 'removed', sizeBytes: item.sizeBytes ?? 0 },
+      true,
+    );
+    let listed: { Id: string; RepoTags?: string[] | null } | undefined;
+    try {
+      listed = await this.listedImageById(item.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(
+        `[executePrunePlan] Could not confirm remaining tags for ${sanitizeForLog(item.id)}:`,
+        sanitizeForLog(message),
+      );
+      return DockerController.plannedImageResult({
+        id: item.id,
+        target: 'images',
+        status: 'failed',
+        error: 'Could not confirm remaining image tags after prune. '
+          + 'Refresh the plan and confirm remaining references before pruning again.',
+      }, mutated);
+    }
+    if (!listed) return removed;
+    const remaining = normalizePruneImageReferences(listed.RepoTags);
+    if (remaining.length > 0) {
+      return DockerController.plannedImageResult(
+        DockerController.remainingImageFailure(item, plannedRefs, remaining),
+        mutated,
+      );
     }
     try {
       await this.docker.getImage(item.id).remove({ force: false });
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      // Re-read tags so a multi-repository conflict that partially untagged is not
-      // reported as a no-op when live names already diverged.
-      let afterTags: string[] | null | undefined;
-      try {
-        const afterList = await this.docker.listImages({ all: false }) as Array<{
-          Id: string;
-          RepoTags?: string[] | null;
-        }>;
-        afterTags = afterList.find((i) => i.Id === img.Id || i.Id.startsWith(img.Id) || img.Id.startsWith(i.Id))
-          ?.RepoTags;
-      } catch {
-        afterTags = undefined;
-      }
-      if (afterTags !== undefined && !pruneImageReferencesEqual(plannedRefs, afterTags)) {
-        return {
-          id: item.id,
-          target: 'images',
-          status: 'failed',
-          error: 'Image delete did not fully remove the reviewed image; some repository tags changed. '
-            + 'Refresh the plan and confirm remaining references before pruning again. '
-            + message,
-        };
-      }
-      const lower = message.toLowerCase();
-      if (lower.includes('multiple repositories') || lower.includes('must be forced') || lower.includes('conflict')) {
-        return {
-          id: item.id,
-          target: 'images',
-          status: 'failed',
-          error: 'Docker refused to delete this image because it is tagged in multiple repositories. '
-            + 'Reviewed tags: ' + (plannedRefs.join(', ') || '(none)') + '. '
-            + 'Resolve tags on the host or re-scope the plan, then dry-run again. '
-            + message,
-        };
-      }
-      throw e;
+      return removed;
+    } catch (error) {
+      if (DockerController.dockerIsNotFound(error)) return removed;
+      const message = error instanceof Error ? error.message : String(error);
+      return DockerController.plannedImageResult({
+        id: item.id,
+        target: 'images',
+        status: 'failed',
+        error: 'Dangling image could not be removed after reviewed tags were cleared. ' + message,
+      }, mutated);
     }
-    // Prefer plan unique-bytes; do not fall back to full Size (shared layers).
-    return { id: item.id, target: 'images', status: 'removed', sizeBytes: item.sizeBytes ?? 0 };
   }
 
   public async getDiskUsageClassified(knownStackNames: string[]): Promise<{
