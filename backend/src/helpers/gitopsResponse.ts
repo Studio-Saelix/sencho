@@ -177,7 +177,7 @@ export function projectBlueprintRevision(blueprintId: number): GitOpsRevisionPro
  * same Blueprint twice would otherwise put two copies of one projection on the
  * wire and let a consumer count the same move twice.
  */
-export function projectBlueprintRevisions(blueprintIds: readonly number[]): GitOpsRevisionProjection[] {
+function projectBlueprintRevisions(blueprintIds: readonly number[]): GitOpsRevisionProjection[] {
   return [...new Set(blueprintIds)].sort((a, b) => a - b).map(projectBlueprintRevision);
 }
 

@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import { directApplicationFixture } from './helpers/gitopsFixtures';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -22,14 +23,14 @@ let LicenseService: typeof import('../services/LicenseService').LicenseService;
 let adminCookie: string;
 let counter = 0;
 
-function seedNode(): { id: number; name: string } {
+/** A fresh non-default node row, so a cordon or delete never touches the default node. */
+function seedNode(): number {
     counter += 1;
-    const name = `additive-node-${counter}`;
     const result = DatabaseService.getInstance().getDb().prepare(
         `INSERT INTO nodes (name, type, mode, compose_dir, is_default, status, created_at)
          VALUES (?, 'local', 'proxy', '/tmp/compose', 0, 'online', ?)`,
-    ).run(name, Date.now());
-    return { id: result.lastInsertRowid as number, name };
+    ).run(`additive-node-${counter}`, Date.now());
+    return result.lastInsertRowid as number;
 }
 
 /** A Blueprint inserted straight into the table, so no GitOps application exists for it. */
@@ -46,67 +47,6 @@ function seedUnmodelledBlueprint() {
         enabled: true,
         created_by: 'admin',
     });
-}
-
-/** A minimal live Direct application row, for the stack-name resolution cases. */
-function directApplication(id: string, stackName: string): import('../services/gitops/types').GitOpsApplicationRow {
-    const now = Date.now();
-    return {
-        id,
-        lifecycle_key: `direct:${stackName}`,
-        lifecycle_status: 'active',
-        target_mode: 'direct',
-        stack_name: stackName,
-        blueprint_id: null,
-        configured_repo_url: 'https://github.com/example/repo.git',
-        repo_identity_json: '{"host":"github.com","pathname":"/example/repo.git"}',
-        configured_ref: 'main',
-        compose_paths_json: '["compose.yaml"]',
-        context_dir: null,
-        sync_env: 0,
-        env_path: null,
-        materialization_fingerprint: 'a'.repeat(64),
-        desired_commit_sha: null,
-        fetched_commit_sha: null,
-        candidate_generation_id: null,
-        accepted_generation_id: null,
-        candidate_plan_blocked: 0,
-        review_required: 0,
-        artifact_set_id: null,
-        latest_artifact_set_id: null,
-        intent_revision_id: null,
-        rollout_candidate_id: null,
-        rollout_generation_id: null,
-        source_acceptance_ref: null,
-        placement_approval_ref: null,
-        rollout_authorization_ref: null,
-        legacy_combined_approval_ref: null,
-        preflight_fingerprint: null,
-        latest_operation_id: null,
-        active_operation_id: null,
-        active_operation_stage: null,
-        active_operation_at: null,
-        active_generation_id: null,
-        pause_at: null,
-        pause_reason: null,
-        partial_json: null,
-        failure_stage: null,
-        failure_class: null,
-        failure_at: null,
-        retry_at: null,
-        retry_count: 0,
-        suspended_at: null,
-        recovery_ref: null,
-        recovery_phase: null,
-        interruption_stage: null,
-        interruption_at: null,
-        interruption_operation_id: null,
-        interruption_generation_id: null,
-        evidence_fresh_at: null,
-        evidence_limitations_json: null,
-        created_at: now,
-        updated_at: now,
-    };
 }
 
 /** Create through the route, which is the path that activates an application. */
@@ -139,14 +79,14 @@ beforeEach(() => {
     vi.restoreAllMocks();
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
     const db = DatabaseService.getInstance().getDb();
-    db.prepare('DELETE FROM blueprint_deployments').run();
-    db.prepare('DELETE FROM gitops_history').run();
-    db.prepare('DELETE FROM gitops_target_current').run();
-    db.prepare('DELETE FROM gitops_rollout_candidates').run();
-    db.prepare('DELETE FROM gitops_intent_revisions').run();
-    db.prepare('DELETE FROM gitops_applications').run();
-    db.prepare('DELETE FROM blueprints').run();
-    db.prepare('DELETE FROM node_labels').run();
+    for (const table of [
+        'blueprint_deployments', 'gitops_history', 'gitops_target_current', 'gitops_rollout_candidates',
+        'gitops_intent_revisions', 'gitops_applications', 'blueprints', 'node_labels',
+    ]) {
+        db.prepare(`DELETE FROM ${table}`).run();
+    }
+    // The default node is the one every stack route resolves against, so only
+    // the seeded ones go.
     db.prepare('DELETE FROM nodes WHERE is_default = 0').run();
 });
 
@@ -189,8 +129,8 @@ describe('Blueprint routes carry gitopsRevision', () => {
     });
 
     it('carries gitopsRevision on update and on pin, and leaves the existing keys alone', async () => {
-        const node = seedNode();
-        const created = await createBlueprint({ type: 'nodes', ids: [node.id] });
+        const nodeId = seedNode();
+        const created = await createBlueprint({ type: 'nodes', ids: [nodeId] });
 
         const updated = await request(app)
             .put(`/api/blueprints/${created.body.id}`)
@@ -204,9 +144,9 @@ describe('Blueprint routes carry gitopsRevision', () => {
         const pinned = await request(app)
             .put(`/api/blueprints/${created.body.id}/pin`)
             .set('Cookie', adminCookie)
-            .send({ nodeId: node.id });
+            .send({ nodeId });
         expect(pinned.status).toBe(200);
-        expect(pinned.body.pinned_node_id).toBe(node.id);
+        expect(pinned.body.pinned_node_id).toBe(nodeId);
         expect(pinned.body.gitopsRevision.applicationId).toBe(created.body.gitopsRevision.applicationId);
     });
 
@@ -242,8 +182,8 @@ describe('Projection resolution reaches every application that owns a surface', 
     it('reports a detached Direct source as not_live, which nothing could reach before', async () => {
         const store = (await import('../services/gitops/store')).GitOpsStore.getInstance();
         const tx = (await import('../services/gitops/transitions')).GitOpsTransitions.getInstance();
-        const application = directApplication('app-direct-detach', 'detached-direct-stack');
-        const nodeId = seedNode().id;
+        const application = directApplicationFixture('app-direct-detach', 'detached-direct-stack');
+        const nodeId = seedNode();
         tx.activateDirect({
             application,
             nodeId,
@@ -272,10 +212,10 @@ describe('Projection resolution reaches every application that owns a surface', 
 
     it('does not resurrect a deleted application for a stack name that gets reused', async () => {
         const tx = (await import('../services/gitops/transitions')).GitOpsTransitions.getInstance();
-        const application = directApplication('app-reuse', 'reused-name-stack');
+        const application = directApplicationFixture('app-reuse', 'reused-name-stack');
         tx.activateDirect({
             application,
-            nodeId: seedNode().id,
+            nodeId: seedNode(),
             envelope: { operationId: 'op-reuse', actor: 'tester', trigger: 'manual', at: Date.now() },
         });
         tx.applicationTombstoned(application.id, 'deleted', {
@@ -319,15 +259,15 @@ describe('Projection resolution reaches every application that owns a surface', 
 
 describe('Node-label routes report only the Blueprints a label moved', () => {
     it('carries gitopsRevisions for a Blueprint whose selector reacts to the label', async () => {
-        const node = seedNode();
+        const nodeId = seedNode();
         const created = await createBlueprint({ type: 'labels', all: ['edge'] });
 
         const res = await request(app)
-            .post(`/api/node-labels/${node.id}`)
+            .post(`/api/node-labels/${nodeId}`)
             .set('Cookie', adminCookie)
             .send({ label: 'edge' });
         expect(res.status).toBe(201);
-        expect(res.body).toMatchObject({ nodeId: node.id, label: 'edge' });
+        expect(res.body).toMatchObject({ nodeId, label: 'edge' });
         expect(res.body.gitopsRevisions).toHaveLength(1);
         expect(res.body.gitopsRevisions[0]).toMatchObject({
             blueprintId: created.body.id,
@@ -336,11 +276,11 @@ describe('Node-label routes report only the Blueprints a label moved', () => {
     });
 
     it('reports an empty list for a label no selector mentions', async () => {
-        const node = seedNode();
+        const nodeId = seedNode();
         await createBlueprint({ type: 'nodes', ids: [] });
 
         const res = await request(app)
-            .post(`/api/node-labels/${node.id}`)
+            .post(`/api/node-labels/${nodeId}`)
             .set('Cookie', adminCookie)
             .send({ label: 'unrelated' });
         expect(res.status).toBe(201);
@@ -348,14 +288,14 @@ describe('Node-label routes report only the Blueprints a label moved', () => {
     });
 
     it('keeps DELETE at 204 with no body', async () => {
-        const node = seedNode();
+        const nodeId = seedNode();
         await request(app)
-            .post(`/api/node-labels/${node.id}`)
+            .post(`/api/node-labels/${nodeId}`)
             .set('Cookie', adminCookie)
             .send({ label: 'edge' });
 
         const res = await request(app)
-            .delete(`/api/node-labels/${node.id}/edge`)
+            .delete(`/api/node-labels/${nodeId}/edge`)
             .set('Cookie', adminCookie);
         expect(res.status).toBe(204);
         expect(res.body).toEqual({});
@@ -365,10 +305,10 @@ describe('Node-label routes report only the Blueprints a label moved', () => {
 
 describe('Node routes carry gitopsRevisions', () => {
     it('carries the field on cordon, empty because a cordon revises no intent', async () => {
-        const node = seedNode();
-        await createBlueprint({ type: 'nodes', ids: [node.id] });
+        const nodeId = seedNode();
+        await createBlueprint({ type: 'nodes', ids: [nodeId] });
 
-        const res = await request(app).post(`/api/nodes/${node.id}/cordon`).set('Cookie', adminCookie).send({});
+        const res = await request(app).post(`/api/nodes/${nodeId}/cordon`).set('Cookie', adminCookie).send({});
         expect(res.status).toBe(200);
         expect(res.body.cordoned).toBe(true);
         // Deliberately empty, and asserted so the reason is not lost. A cordon
@@ -381,23 +321,23 @@ describe('Node routes carry gitopsRevisions', () => {
     });
 
     it('carries the field on uncordon', async () => {
-        const node = seedNode();
-        await createBlueprint({ type: 'nodes', ids: [node.id] });
-        await request(app).post(`/api/nodes/${node.id}/cordon`).set('Cookie', adminCookie).send({});
+        const nodeId = seedNode();
+        await createBlueprint({ type: 'nodes', ids: [nodeId] });
+        await request(app).post(`/api/nodes/${nodeId}/cordon`).set('Cookie', adminCookie).send({});
 
-        const res = await request(app).post(`/api/nodes/${node.id}/uncordon`).set('Cookie', adminCookie).send({});
+        const res = await request(app).post(`/api/nodes/${nodeId}/uncordon`).set('Cookie', adminCookie).send({});
         expect(res.status).toBe(200);
         expect(res.body.cordoned).toBe(false);
         expect(res.body.gitopsRevisions).toEqual([]);
     });
 
     it('orders revisions by blueprintId ascending when a mutation moves several', async () => {
-        const node = seedNode();
+        const nodeId = seedNode();
         const first = await createBlueprint({ type: 'labels', all: ['fleet'] });
         const second = await createBlueprint({ type: 'labels', all: ['fleet'] });
 
         const res = await request(app)
-            .post(`/api/node-labels/${node.id}`)
+            .post(`/api/node-labels/${nodeId}`)
             .set('Cookie', adminCookie)
             .send({ label: 'fleet' });
         expect(res.status).toBe(201);
@@ -408,8 +348,8 @@ describe('Node routes carry gitopsRevisions', () => {
     });
 
     it('reports the Blueprints that lost a target when a node is deleted', async () => {
-        const node = seedNode();
-        const bp = await createBlueprint({ type: 'nodes', ids: [node.id] });
+        const nodeId = seedNode();
+        const bp = await createBlueprint({ type: 'nodes', ids: [nodeId] });
         const applicationId = bp.body.gitopsRevision.applicationId;
         // A target has to exist on the node for the deletion to retire one. The
         // route reads the owners before the tombstone, which is the only moment
@@ -417,17 +357,17 @@ describe('Node routes carry gitopsRevisions', () => {
         DatabaseService.getInstance().getDb().prepare(
             `INSERT INTO gitops_target_current (application_id, node_id, target_status, updated_at)
              VALUES (?, ?, 'active', ?)`,
-        ).run(applicationId, node.id, Date.now());
+        ).run(applicationId, nodeId, Date.now());
 
-        const res = await request(app).delete(`/api/nodes/${node.id}`).set('Cookie', adminCookie);
+        const res = await request(app).delete(`/api/nodes/${nodeId}`).set('Cookie', adminCookie);
         expect(res.status).toBe(200);
         expect(res.body.success).toBe(true);
         expect(res.body.gitopsRevisions.map((r: { blueprintId: number }) => r.blueprintId)).toEqual([bp.body.id]);
     });
 
     it('still reports a node deletion as successful when the revision projection fails', async () => {
-        const node = seedNode();
-        await createBlueprint({ type: 'nodes', ids: [node.id] });
+        const nodeId = seedNode();
+        await createBlueprint({ type: 'nodes', ids: [nodeId] });
         // The write commits before the decoration is built. If a projection
         // fault escaped, the operator would be told a hard delete failed and
         // would retry it, and the retry answers "Node not found": two wrong
@@ -437,16 +377,16 @@ describe('Node routes carry gitopsRevisions', () => {
             throw new Error('projection exploded');
         });
 
-        const res = await request(app).delete(`/api/nodes/${node.id}`).set('Cookie', adminCookie);
+        const res = await request(app).delete(`/api/nodes/${nodeId}`).set('Cookie', adminCookie);
         expect(res.status).toBe(200);
         expect(res.body).toMatchObject({ success: true, gitopsRevisions: [] });
         // And the node really is gone, so the success it reported was true.
-        expect(DatabaseService.getInstance().getNode(node.id)).toBeUndefined();
+        expect(DatabaseService.getInstance().getNode(nodeId)).toBeUndefined();
     });
 
     it('reports an empty list when a deleted node held no Blueprint target', async () => {
-        const node = seedNode();
-        const res = await request(app).delete(`/api/nodes/${node.id}`).set('Cookie', adminCookie);
+        const nodeId = seedNode();
+        const res = await request(app).delete(`/api/nodes/${nodeId}`).set('Cookie', adminCookie);
         expect(res.status).toBe(200);
         expect(res.body).toMatchObject({ success: true, gitopsRevisions: [] });
     });

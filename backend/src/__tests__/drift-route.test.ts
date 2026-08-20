@@ -9,17 +9,20 @@ import path from 'path';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { directApplicationFixture } from './helpers/gitopsFixtures';
 import DockerController from '../services/DockerController';
 
 let tmpDir: string;
 let app: import('express').Express;
 let authHeader: string;
 let LicenseService: typeof import('../services/LicenseService').LicenseService;
+let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ app } = await import('../index'));
   ({ LicenseService } = await import('../services/LicenseService'));
+  ({ DatabaseService } = await import('../services/DatabaseService'));
   const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
   authHeader = `Bearer ${token}`;
 });
@@ -72,75 +75,43 @@ describe('drift payload carries the GitOps revision', () => {
   // application into the next test, which reuses this stack name and
   // asserts not_applicable: one real failure would become two, and the
   // second would point at innocent code.
-  afterEach(async () => {
+  afterEach(() => {
     vi.restoreAllMocks();
     fs.rmSync(path.join(process.env.COMPOSE_DIR as string, STACK), { recursive: true, force: true });
-    const { DatabaseService } = await import('../services/DatabaseService');
     const db = DatabaseService.getInstance().getDb();
     for (const table of ['gitops_applications', 'blueprint_deployments', 'blueprints']) {
       db.prepare(`DELETE FROM ${table}`).run();
     }
   });
 
-  /** A minimal live Direct application row, for the resolution-precedence cases. */
-  function directApplicationFixture(id: string, stackName: string): import('../services/gitops/types').GitOpsApplicationRow {
-    const now = Date.now();
-    return {
-      id,
-      lifecycle_key: `direct:${stackName}`,
-      lifecycle_status: 'active',
-      target_mode: 'direct',
-      stack_name: stackName,
-      blueprint_id: null,
-      configured_repo_url: 'https://github.com/example/stale.git',
-      repo_identity_json: '{"host":"github.com","pathname":"/example/stale.git"}',
-      configured_ref: 'main',
-      compose_paths_json: '["compose.yaml"]',
-      context_dir: null,
-      sync_env: 0,
-      env_path: null,
-      materialization_fingerprint: 'a'.repeat(64),
-      desired_commit_sha: null,
-      fetched_commit_sha: null,
-      candidate_generation_id: null,
-      accepted_generation_id: null,
-      candidate_plan_blocked: 0,
-      review_required: 0,
-      artifact_set_id: null,
-      latest_artifact_set_id: null,
-      intent_revision_id: null,
-      rollout_candidate_id: null,
-      rollout_generation_id: null,
-      source_acceptance_ref: null,
-      placement_approval_ref: null,
-      rollout_authorization_ref: null,
-      legacy_combined_approval_ref: null,
-      preflight_fingerprint: null,
-      latest_operation_id: null,
-      active_operation_id: null,
-      active_operation_stage: null,
-      active_operation_at: null,
-      active_generation_id: null,
-      pause_at: null,
-      pause_reason: null,
-      partial_json: null,
-      failure_stage: null,
-      failure_class: null,
-      failure_at: null,
-      retry_at: null,
-      retry_count: 0,
-      suspended_at: null,
-      recovery_ref: null,
-      recovery_phase: null,
-      interruption_stage: null,
-      interruption_at: null,
-      interruption_operation_id: null,
-      interruption_generation_id: null,
-      evidence_fresh_at: null,
-      evidence_limitations_json: null,
-      created_at: now,
-      updated_at: now,
-    };
+  function defaultNodeId(): number {
+    const id = DatabaseService.getInstance().getNodes().find(n => n.is_default)?.id;
+    if (id === undefined) throw new Error('the test database has no default node');
+    return id;
+  }
+
+  /** A Blueprint named after the stack, which is what makes the directory its work. */
+  function seedBlueprint(nodeId: number): import('../services/DatabaseService').Blueprint {
+    return DatabaseService.getInstance().createBlueprint({
+      name: STACK,
+      description: null,
+      compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+      selector: { type: 'nodes', ids: [nodeId] },
+      drift_mode: 'suggest',
+      classification: 'stateless',
+      classification_reasons: [],
+      enabled: true,
+      created_by: 'admin',
+    });
+  }
+
+  async function activateBlueprintApplication(blueprintId: number, applicationId: string): Promise<void> {
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
+    GitOpsTransitions.getInstance().activateInlineBlueprint({
+      application: blankInlineApplication(applicationId, blueprintId, Date.now()),
+      envelope: { operationId: `op-${applicationId}`, actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
   }
 
   function stubDockerBoundary(): void {
@@ -170,7 +141,6 @@ describe('drift payload carries the GitOps revision', () => {
     expect(Array.isArray(res.body.findings)).toBe(true);
     expect(Array.isArray(res.body.ledger)).toBe(true);
     expect(res.body.temporal).toBeDefined();
-
   });
 
   it('resolves the Blueprint that owns the stack directory, not just Direct Git', async () => {
@@ -179,37 +149,18 @@ describe('drift payload carries the GitOps revision', () => {
     // stack directory of that name. Without the deployment bridge the Drift tab
     // reports not_applicable for a stack GitOps is actively managing, while the
     // Blueprint page reports a live application for the very same thing.
-    const { DatabaseService } = await import('../services/DatabaseService');
-    const db = DatabaseService.getInstance();
-    const nodeId = db.getNodes().find(n => n.is_default)?.id as number;
-    expect(typeof nodeId).toBe('number');
-
-    const blueprint = db.createBlueprint({
-      name: STACK,
-      description: null,
-      compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
-      selector: { type: 'nodes', ids: [nodeId] },
-      drift_mode: 'suggest',
-      classification: 'stateless',
-      classification_reasons: [],
-      enabled: true,
-      created_by: 'admin',
-    });
+    const nodeId = defaultNodeId();
+    const blueprint = seedBlueprint(nodeId);
     // last_deployed_at is what proves this Blueprint actually wrote the
     // directory, which is the predicate the bridge requires.
-    db.upsertDeployment({
+    DatabaseService.getInstance().upsertDeployment({
       blueprint_id: blueprint.id,
       node_id: nodeId,
       status: 'active',
       applied_revision: 1,
       last_deployed_at: Date.now(),
     });
-    const { GitOpsTransitions } = await import('../services/gitops/transitions');
-    const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
-    GitOpsTransitions.getInstance().activateInlineBlueprint({
-      application: blankInlineApplication('app-bp-drift', blueprint.id, Date.now()),
-      envelope: { operationId: 'op-bp-drift', actor: 'tester', trigger: 'manual', at: Date.now() },
-    });
+    await activateBlueprintApplication(blueprint.id, 'app-bp-drift');
 
     makeStack();
     stubDockerBoundary();
@@ -220,7 +171,6 @@ describe('drift payload carries the GitOps revision', () => {
       targetMode: 'inline_blueprint',
       blueprintId: blueprint.id,
     });
-
   });
 
   it('refuses to claim a stack the Blueprint could not deploy onto', async () => {
@@ -229,27 +179,10 @@ describe('drift payload carries the GitOps revision', () => {
     // so a present-row check would treat it as ownership and hand the unrelated
     // stack's operator this Blueprint's repository, ref, and SHA pointers: the
     // exact collision the deployment check is supposed to rule out.
-    const { DatabaseService } = await import('../services/DatabaseService');
-    const db = DatabaseService.getInstance();
-    const nodeId = db.getNodes().find(n => n.is_default)?.id as number;
-    const blueprint = db.createBlueprint({
-      name: STACK,
-      description: null,
-      compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
-      selector: { type: 'nodes', ids: [nodeId] },
-      drift_mode: 'suggest',
-      classification: 'stateless',
-      classification_reasons: [],
-      enabled: true,
-      created_by: 'admin',
-    });
-    db.upsertDeployment({ blueprint_id: blueprint.id, node_id: nodeId, status: 'name_conflict' });
-    const { GitOpsTransitions } = await import('../services/gitops/transitions');
-    const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
-    GitOpsTransitions.getInstance().activateInlineBlueprint({
-      application: blankInlineApplication('app-bp-conflict', blueprint.id, Date.now()),
-      envelope: { operationId: 'op-bp-conflict', actor: 'tester', trigger: 'manual', at: Date.now() },
-    });
+    const nodeId = defaultNodeId();
+    const blueprint = seedBlueprint(nodeId);
+    DatabaseService.getInstance().upsertDeployment({ blueprint_id: blueprint.id, node_id: nodeId, status: 'name_conflict' });
+    await activateBlueprintApplication(blueprint.id, 'app-bp-conflict');
 
     makeStack();
     stubDockerBoundary();
@@ -264,9 +197,7 @@ describe('drift payload carries the GitOps revision', () => {
     // then lost. Falling through the resolution chain would report the old
     // Direct application's repository, ref, and SHA as this directory's state,
     // confidently and wrongly.
-    const { DatabaseService } = await import('../services/DatabaseService');
-    const db = DatabaseService.getInstance();
-    const nodeId = db.getNodes().find(n => n.is_default)?.id as number;
+    const nodeId = defaultNodeId();
     const { GitOpsTransitions } = await import('../services/gitops/transitions');
     const tx = GitOpsTransitions.getInstance();
 
@@ -280,19 +211,9 @@ describe('drift payload carries the GitOps revision', () => {
       operationId: 'op-stale-2', actor: 'tester', trigger: 'manual', at: Date.now(),
     });
 
-    const blueprint = db.createBlueprint({
-      name: STACK,
-      description: null,
-      compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
-      selector: { type: 'nodes', ids: [nodeId] },
-      drift_mode: 'suggest',
-      classification: 'stateless',
-      classification_reasons: [],
-      enabled: true,
-      created_by: 'admin',
-    });
+    const blueprint = seedBlueprint(nodeId);
     // Ownership proven by the deployment row, but no application row exists.
-    db.upsertDeployment({
+    DatabaseService.getInstance().upsertDeployment({
       blueprint_id: blueprint.id,
       node_id: nodeId,
       status: 'active',
@@ -317,27 +238,10 @@ describe('drift payload carries the GitOps revision', () => {
     // A pending or first-deploy-failed row has nothing of ours on the node
     // either, so last_deployed_at is what proves the directory is the
     // Blueprint's work.
-    const { DatabaseService } = await import('../services/DatabaseService');
-    const db = DatabaseService.getInstance();
-    const nodeId = db.getNodes().find(n => n.is_default)?.id as number;
-    const blueprint = db.createBlueprint({
-      name: STACK,
-      description: null,
-      compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
-      selector: { type: 'nodes', ids: [nodeId] },
-      drift_mode: 'suggest',
-      classification: 'stateless',
-      classification_reasons: [],
-      enabled: true,
-      created_by: 'admin',
-    });
-    db.upsertDeployment({ blueprint_id: blueprint.id, node_id: nodeId, status: 'pending' });
-    const { GitOpsTransitions } = await import('../services/gitops/transitions');
-    const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
-    GitOpsTransitions.getInstance().activateInlineBlueprint({
-      application: blankInlineApplication('app-bp-pending', blueprint.id, Date.now()),
-      envelope: { operationId: 'op-bp-pending', actor: 'tester', trigger: 'manual', at: Date.now() },
-    });
+    const nodeId = defaultNodeId();
+    const blueprint = seedBlueprint(nodeId);
+    DatabaseService.getInstance().upsertDeployment({ blueprint_id: blueprint.id, node_id: nodeId, status: 'pending' });
+    await activateBlueprintApplication(blueprint.id, 'app-bp-pending');
 
     makeStack();
     stubDockerBoundary();
@@ -354,6 +258,5 @@ describe('drift payload carries the GitOps revision', () => {
     expect(res.status).toBe(200);
     expect(res.body.gitopsRevision).toMatchObject({ schemaVersion: 1, targetMode: 'not_applicable' });
     expect(Array.isArray(res.body.ledger)).toBe(true);
-
   });
 });
