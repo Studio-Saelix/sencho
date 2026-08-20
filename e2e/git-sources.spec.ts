@@ -582,7 +582,16 @@ test.describe('Git Sources complete-project materialization (local git server)',
       return { sourceStatus: res.status, body: await res.json() };
     }, stackName);
     expect(after.sourceStatus).toBe(200);
-    expect(after.body).toEqual({ linked: false });
+    // Asserted field by field rather than by whole-object equality: the
+    // response also carries the additive GitOps revision fields, and a detached
+    // stack has no application to project while its directory is still on disk.
+    expect(after.body.linked).toBe(false);
+    expect(after.body.stackResourcePresent).toBe(true);
+    expect(after.body.gitopsRevision).toMatchObject({
+      schemaVersion: 1,
+      targetMode: 'not_applicable',
+      applicationId: null,
+    });
     const exported = await page.evaluate(async (name) => {
       const res = await fetch(`/api/stacks/${name}/files/content?path=compose.yaml`, { credentials: 'include' });
       return res.ok ? await res.text() : '';
