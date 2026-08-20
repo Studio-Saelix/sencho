@@ -94,14 +94,16 @@ function lifecycleAllowsStackRead(lifecycleStatus: unknown): boolean {
  * which carries no guarantee of shape. No such caller exists yet; every current
  * one passes a locally derived projection.
  *
- * Both `active` and `detached` are reachable. The projection comes from the
- * Direct lookup, which resolves a live application and then a detached one, so
- * a detached source now states its lifecycle instead of collapsing to the
- * not-applicable shape. That realizes the policy `lifecycleAllowsStackRead`
- * already describes rather than widening it: a detached application's files are
- * still on disk and still the operator's to read. `deleted` stays unreachable
- * and would fall to Admin regardless, since the same name-reuse argument bars
- * it on both sides.
+ * Only `active` is reachable here in practice, and deliberately so. The
+ * projection comes from `projectStackRevision`, which resolves live Direct
+ * applications only. Detach deletes the Git-source row in the same transaction
+ * that tombstones the application, so a source row beside a detached
+ * application is not a producible state anyway. The detached case is reported
+ * through the stack-state surface, which never runs this classifier.
+ *
+ * Keep it that way. This function takes `stackName` from the Git-source row but
+ * lifecycle from whatever the projection resolved, so widening that resolution
+ * to reach another application silently changes who may read this row.
  */
 export function classifySourceRow(input: {
   stackName: unknown;

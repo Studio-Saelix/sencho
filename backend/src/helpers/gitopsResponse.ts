@@ -1,8 +1,9 @@
 import { DatabaseService } from '../services/DatabaseService';
 import { FileSystemService } from '../services/FileSystemService';
 import { GitOpsStore } from '../services/gitops/store';
-import { NOT_APPLICABLE_REVISION, projectApplication } from '../services/gitops/derive';
-import type { GitOpsRevisionProjection } from '../services/gitops/types';
+import { missingBlueprintApplicationRevision, NOT_APPLICABLE_REVISION, projectApplication } from '../services/gitops/derive';
+import { sanitizeForLog } from '../utils/safeLog';
+import type { GitOpsApplicationRow, GitOpsRevisionProjection } from '../services/gitops/types';
 
 export { NOT_APPLICABLE_REVISION };
 
@@ -42,45 +43,54 @@ function healthGateDisabled(): boolean {
  * claim on the directory than anything else, and the Blueprint surface still
  * reports it through projectBlueprintRevision.
  *
+ * Three outcomes, not two, because "no Blueprint owns this" and "a Blueprint
+ * owns this and its application row is gone" must not look alike to the caller.
+ * The guards below establish ownership from the deployment row; reaching the
+ * lookup and missing therefore means a referential fault, and answering
+ * `unowned` there would let the caller fall through and report some older
+ * Direct application's repository and SHA as this directory's GitOps state.
+ *
  * Known limit: this resolves on the instance holding the Blueprint rows, which
  * is the hub. A Blueprint deployed to a remote node is materialized there by a
  * file push, and the drift route for it executes on that remote, which has no
  * blueprint, deployment, or application row of its own. So a Blueprint-owned
  * stack on a remote node still projects not_applicable.
  */
-function blueprintApplicationOwningStack(stackName: string, nodeId: number | undefined) {
-  if (nodeId === undefined) return undefined;
+type BlueprintOwnership =
+  | { kind: 'unowned' }
+  | { kind: 'owned'; application: GitOpsApplicationRow }
+  | { kind: 'owned_application_missing'; blueprintId: number };
+
+function blueprintApplicationOwningStack(stackName: string, nodeId: number | undefined): BlueprintOwnership {
+  if (nodeId === undefined) return { kind: 'unowned' };
   const db = DatabaseService.getInstance();
   const blueprint = db.getBlueprintByName(stackName);
-  if (!blueprint) return undefined;
+  if (!blueprint) return { kind: 'unowned' };
   const deployment = db.getDeployment(blueprint.id, nodeId);
-  if (!deployment) return undefined;
-  if (deployment.last_deployed_at == null) return undefined;
-  if (deployment.status === 'name_conflict' || deployment.status === 'withdrawn') return undefined;
-  return GitOpsStore.getInstance().getLiveBlueprintApplication(blueprint.id);
+  if (!deployment) return { kind: 'unowned' };
+  if (deployment.last_deployed_at == null) return { kind: 'unowned' };
+  if (deployment.status === 'name_conflict' || deployment.status === 'withdrawn') return { kind: 'unowned' };
+  const application = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprint.id);
+  if (!application) return { kind: 'owned_application_missing', blueprintId: blueprint.id };
+  return { kind: 'owned', application };
 }
 
 /**
  * The revision projection for a stack's own Direct Git attachment.
  *
- * The live application if there is one, otherwise a detached one, which can
- * still say what the stack was before it was detached: a different fact from
- * never having been modelled, and one the source deriver has a `not_live`
- * status for.
- *
- * A `deleted` application is deliberately not resolved here. Deletion means the
- * stack was removed, so any directory of that name now is a different stack,
- * and reporting the old application's repository and SHA against it would
- * disclose one stack's Git identity through another's name. `readAuth` excludes
- * `deleted` from stack-grant reads for that same reason.
+ * Live applications only. Detach deletes the Git-source row and writes the
+ * tombstone in one transaction, so a source row beside a detached application
+ * is not a producible state, and the Git-source routes are the only callers.
+ * The detached case is reachable through the stack directory instead, which
+ * survives a detach, and projectManagedStackRevision below is what answers it.
  *
  * Used by the Git-source routes, which answer specifically about Direct
  * attachment. They must not be answered with some other application's identity,
- * so the Blueprint bridge below is deliberately not applied here.
+ * so the Blueprint bridge above is deliberately not applied here. That also
+ * keeps them off the read classifier's lifecycle input.
  */
 export function projectStackRevision(stackName: string): GitOpsRevisionProjection {
-  const store = GitOpsStore.getInstance();
-  const app = store.getLiveDirectApplication(stackName) ?? store.getDetachedDirectApplication(stackName);
+  const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
   if (!app) return NOT_APPLICABLE_REVISION;
   return projectApplication(app.id, healthGateDisabled());
 }
@@ -92,7 +102,15 @@ export function projectStackRevision(stackName: string): GitOpsRevisionProjectio
  * Resolution order is precedence, not preference. A live Direct application is
  * the stack's own Git attachment and always wins. Failing that, a Blueprint may
  * have materialized the directory. Failing both, a detached Direct application
- * still describes what the stack was.
+ * still describes what the stack was before it was detached, which is a
+ * different fact from never having been modelled and is what the source
+ * deriver's `not_live` status exists to report.
+ *
+ * A `deleted` application is deliberately never resolved. Deletion means the
+ * stack was removed, so any directory of that name now is a different stack,
+ * and reporting the old application's repository and SHA against it would
+ * disclose one stack's Git identity through another's name. `readAuth` excludes
+ * `deleted` from stack-grant reads for that same reason.
  *
  * Separate from projectStackRevision because the two answer different
  * questions. "What Git source is attached to this stack" must never be answered
@@ -100,25 +118,52 @@ export function projectStackRevision(stackName: string): GitOpsRevisionProjectio
  */
 export function projectManagedStackRevision(stackName: string, nodeId: number | undefined): GitOpsRevisionProjection {
   const store = GitOpsStore.getInstance();
-  const app = store.getLiveDirectApplication(stackName)
-    ?? blueprintApplicationOwningStack(stackName, nodeId)
-    ?? store.getDetachedDirectApplication(stackName);
-  if (!app) return NOT_APPLICABLE_REVISION;
-  return projectApplication(app.id, healthGateDisabled());
+  const direct = store.getLiveDirectApplication(stackName);
+  if (direct) return projectApplication(direct.id, healthGateDisabled());
+
+  const owned = blueprintApplicationOwningStack(stackName, nodeId);
+  if (owned.kind === 'owned_application_missing') {
+    // Proven ownership with nothing to project. Falling through would answer
+    // with an unrelated application; the sentinel alone would call a fault a
+    // normal absence. Say both.
+    console.error(
+      '[GitOps] Blueprint %s deployed stack %s on node %s but has no live application row.',
+      sanitizeForLog(owned.blueprintId), sanitizeForLog(stackName), sanitizeForLog(nodeId ?? 'unknown'),
+    );
+    return missingBlueprintApplicationRevision(owned.blueprintId, stackName);
+  }
+  if (owned.kind === 'owned') return scopeToNode(projectApplication(owned.application.id, healthGateDisabled()), nodeId);
+
+  const detached = store.getDetachedDirectApplication(stackName);
+  if (!detached) return NOT_APPLICABLE_REVISION;
+  return projectApplication(detached.id, healthGateDisabled());
+}
+
+/**
+ * Narrow a Blueprint projection to the node being asked about.
+ *
+ * A Blueprint application's targets span every node it is placed on, and this
+ * route is authorized by a grant on one stack name, not by the fleet-wide read
+ * the Blueprint catalog requires. Reporting the whole roster here would answer
+ * a stack-scoped question with fleet-scoped placement. Scoping is also simply
+ * the right answer: the question is what manages this directory on this node.
+ */
+function scopeToNode(projection: GitOpsRevisionProjection, nodeId: number | undefined): GitOpsRevisionProjection {
+  if (projection.targetMode === 'not_applicable' || nodeId === undefined) return projection;
+  return { ...projection, targets: projection.targets.filter(target => target.nodeId === nodeId) };
 }
 
 /**
  * The revision projection for a Blueprint's application.
  *
- * Mirrors projectStackRevision: the live application if there is one, otherwise
- * a detached one so a detached Blueprint reports what it was rather than
- * reading as one that never existed. A Blueprint that predates the model, or
- * one migration has not brought in, projects `not_applicable` rather than
- * throwing, so the catalog gets a uniform shape across rows.
+ * Live applications only. Blueprint retirement writes `deleted`, never
+ * `detached`, so there is no detached Blueprint state to report; a Blueprint
+ * that predates the model, or one migration has not brought in, projects
+ * `not_applicable` rather than throwing, so the catalog gets a uniform shape
+ * across rows.
  */
 export function projectBlueprintRevision(blueprintId: number): GitOpsRevisionProjection {
-  const store = GitOpsStore.getInstance();
-  const app = store.getLiveBlueprintApplication(blueprintId) ?? store.getDetachedBlueprintApplication(blueprintId);
+  const app = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprintId);
   if (!app) return NOT_APPLICABLE_REVISION;
   return projectApplication(app.id, healthGateDisabled());
 }

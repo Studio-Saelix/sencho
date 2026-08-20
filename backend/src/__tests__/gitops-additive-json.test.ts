@@ -220,39 +220,33 @@ describe('Blueprint routes carry gitopsRevision', () => {
 });
 
 describe('Projection resolution reaches every application that owns a surface', () => {
-    it('reports a detached Blueprint as detached rather than as never modelled', async () => {
+    it('retires a deleted Blueprint to the plain not-applicable shape', async () => {
+        // Driven through the real delete route rather than a hand-made
+        // tombstone. Blueprint retirement writes `deleted`, never `detached`,
+        // which is why no detached-Blueprint lookup exists: one would index and
+        // query a state the product cannot produce. Asserting it here keeps
+        // that fact tied to the path that decides it.
         const created = await createBlueprint({ type: 'nodes', ids: [] });
         const applicationId = created.body.gitopsRevision.applicationId;
+        const del = await request(app).delete(`/api/blueprints/${created.body.id}`).set('Cookie', adminCookie);
+        expect(del.status).toBe(204);
+
         const store = (await import('../services/gitops/store')).GitOpsStore.getInstance();
-        const tx = (await import('../services/gitops/transitions')).GitOpsTransitions.getInstance();
-        tx.applicationTombstoned(applicationId, 'detached', {
-            operationId: 'op-detach-test', actor: 'tester', trigger: 'manual', at: Date.now(),
-        });
+        expect(store.getApplication(applicationId)?.lifecycle_status).toBe('deleted');
         expect(store.getLiveBlueprintApplication(created.body.id)).toBeUndefined();
 
-        const detail = await request(app).get(`/api/blueprints/${created.body.id}`).set('Cookie', adminCookie);
-        expect(detail.status).toBe(200);
-        // The tombstone keeps the identity as frozen fact so the projection can
-        // still say what this was. Answering not_applicable would report a
-        // Blueprint that was deliberately detached exactly like one that never
-        // had Git at all.
-        expect(detail.body.gitopsRevision).toMatchObject({
-            applicationId,
-            lifecycleStatus: 'detached',
-        });
-        // An inline Blueprint has no Git source, so its source facet is
-        // not_applicable regardless of lifecycle. The Direct case below is what
-        // exercises not_live.
-        expect(detail.body.gitopsRevision.facets.source.status).toBe('not_applicable');
+        const { projectBlueprintRevision } = await import('../helpers/gitopsResponse');
+        expect(projectBlueprintRevision(created.body.id)).toMatchObject({ targetMode: 'not_applicable' });
     });
 
     it('reports a detached Direct source as not_live, which nothing could reach before', async () => {
         const store = (await import('../services/gitops/store')).GitOpsStore.getInstance();
         const tx = (await import('../services/gitops/transitions')).GitOpsTransitions.getInstance();
         const application = directApplication('app-direct-detach', 'detached-direct-stack');
+        const nodeId = seedNode().id;
         tx.activateDirect({
             application,
-            nodeId: seedNode().id,
+            nodeId,
             envelope: { operationId: 'op-direct-detach', actor: 'tester', trigger: 'manual', at: Date.now() },
         });
         tx.applicationTombstoned(application.id, 'detached', {
@@ -265,11 +259,15 @@ describe('Projection resolution reaches every application that owns a surface', 
         // so the projection can still say what was there. Before this lookup
         // existed, the source deriver's not_live branch had no way to be
         // reached and a deliberate detach read as "never had Git".
-        const { projectStackRevision } = await import('../helpers/gitopsResponse');
-        const projection = projectStackRevision('detached-direct-stack');
+        const { projectManagedStackRevision, projectStackRevision } = await import('../helpers/gitopsResponse');
+        const projection = projectManagedStackRevision('detached-direct-stack', nodeId);
         expect(projection).toMatchObject({ applicationId: application.id, lifecycleStatus: 'detached' });
         if (projection.targetMode === 'not_applicable') throw new Error('expected an application');
         expect(projection.facets.source).toMatchObject({ status: 'not_live', lifecycleStatus: 'detached' });
+
+        // The Git-source resolver stays live-only, so it cannot feed a detached
+        // lifecycle to the row classifier that decides who may read the row.
+        expect(projectStackRevision('detached-direct-stack')).toMatchObject({ targetMode: 'not_applicable' });
     });
 
     it('does not resurrect a deleted application for a stack name that gets reused', async () => {
@@ -287,8 +285,8 @@ describe('Projection resolution reaches every application that owns a surface', 
         // Deletion means the stack is gone, so a directory of that name now is
         // a different stack. Reporting the old repository and SHA against it
         // would disclose one stack's Git identity through another's name.
-        const { projectStackRevision } = await import('../helpers/gitopsResponse');
-        expect(projectStackRevision('reused-name-stack')).toMatchObject({ targetMode: 'not_applicable' });
+        const { projectManagedStackRevision } = await import('../helpers/gitopsResponse');
+        expect(projectManagedStackRevision('reused-name-stack', 1)).toMatchObject({ targetMode: 'not_applicable' });
     });
 
     it('says why when the application it resolved has gone missing', async () => {

@@ -600,7 +600,7 @@ function decodeObservedSafe(
  * vanished row indistinguishable from one that never existed, and the reader
  * has no third source to tell them apart.
  */
-function missingApplicationRevision(applicationId: string): GitOpsRevisionProjection {
+function unreachableApplicationRevision(limitation: GitOpsLimitation): GitOpsRevisionProjection {
   return {
     schemaVersion: 1,
     targetMode: 'not_applicable',
@@ -608,14 +608,33 @@ function missingApplicationRevision(applicationId: string): GitOpsRevisionProjec
     facets: null,
     targets: [],
     drift: [],
-    limitations: [{
-      code: 'application_row_missing',
-      message: 'The application this projection was resolved from is no longer present.',
-      evidence: { applicationId },
-    }],
+    limitations: [limitation],
     availableActions: [],
     approvals: null,
   };
+}
+
+function missingApplicationRevision(applicationId: string): GitOpsRevisionProjection {
+  return unreachableApplicationRevision({
+    code: 'application_row_missing',
+    message: 'The application this projection was resolved from is no longer present.',
+    evidence: { applicationId },
+  });
+}
+
+/**
+ * A Blueprint proven to manage a stack directory, with no application row.
+ *
+ * Its own code, not `application_row_missing`, because the evidence differs:
+ * there is no application id to name, only the Blueprint and the stack whose
+ * deployment row proved the ownership.
+ */
+export function missingBlueprintApplicationRevision(blueprintId: number, stackName: string): GitOpsRevisionProjection {
+  return unreachableApplicationRevision({
+    code: 'blueprint_application_missing',
+    message: 'A Blueprint deployed this stack but has no live application to describe it.',
+    evidence: { blueprintId, stackName },
+  });
 }
 
 export function projectApplication(applicationId: string, healthDisabled: boolean): GitOpsRevisionProjection {

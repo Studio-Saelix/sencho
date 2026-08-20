@@ -131,18 +131,6 @@ export class GitOpsStore {
     ).get(stackName) as GitOpsApplicationRow | undefined;
   }
 
-  /** The most recently detached application for a Blueprint. Mirrors the Direct getter. */
-  getDetachedBlueprintApplication(blueprintId: number): GitOpsApplicationRow | undefined {
-    return this.db().prepare(
-      `SELECT * FROM gitops_applications
-       WHERE blueprint_id = ?
-         AND target_mode IN ('inline_blueprint','blueprint')
-         AND lifecycle_status = 'detached'
-       ORDER BY updated_at DESC, rowid DESC
-       LIMIT 1`,
-    ).get(blueprintId) as GitOpsApplicationRow | undefined;
-  }
-
   /** Direct applications that never reached their success boundary. */
   listCreatingDirectApplications(): GitOpsApplicationRow[] {
     return this.db().prepare(
