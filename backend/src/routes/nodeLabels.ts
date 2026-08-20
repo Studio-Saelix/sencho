@@ -7,6 +7,7 @@ import { NodeLabelService } from '../services/NodeLabelService';
 import { parseIntParam } from '../utils/parseIntParam';
 import { BlueprintReconciler } from '../services/BlueprintReconciler';
 import { recordPlacementShift, snapshotPlacementWith } from '../services/gitops/nodePlacementProducers';
+import { projectCommittedRevisions } from '../helpers/gitopsResponse';
 
 export const nodeLabelsRouter = Router();
 
@@ -83,19 +84,22 @@ nodeLabelsRouter.post('/:nodeId', (req: Request, res: Response): void => {
         }
         // The label and the placement it moves commit together, so a recording
         // failure cannot leave a fleet selecting on a label nothing recorded.
-        const result = DatabaseService.getInstance().getDb().transaction(() => {
+        const { added, moved } = DatabaseService.getInstance().getDb().transaction(() => {
             const before = snapshotPlacement();
             const added = NodeLabelService.getInstance().addLabel(nodeId, label);
-            if (added.ok) {
-                recordPlacementShift(before, snapshotPlacement(), req.user?.username ?? null, 'node_label_add');
-            }
-            return added;
+            const moved = added.ok
+                ? recordPlacementShift(before, snapshotPlacement(), req.user?.username ?? null, 'node_label_add')
+                : [];
+            return { added, moved };
         })();
-        if (!result.ok) {
-            res.status(400).json(result.error);
+        if (!added.ok) {
+            res.status(400).json(added.error);
             return;
         }
-        res.status(201).json({ nodeId, label: result.label });
+        // Projected after the commit, so the revisions describe what the label
+        // write actually left behind. A label no selector mentions moves nothing
+        // and reports an empty list rather than every Blueprint in the fleet.
+        res.status(201).json({ nodeId, label: added.label, gitopsRevisions: projectCommittedRevisions(moved, 'node label add') });
     } catch (error) {
         console.error('[NodeLabels] Add error:', error);
         res.status(500).json({ error: 'Failed to add label' });

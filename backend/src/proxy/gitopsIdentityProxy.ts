@@ -10,10 +10,16 @@ import { sanitizeForLog } from '../utils/safeLog';
 /**
  * Ceiling on one decompressed identity response, in bytes.
  *
- * These four routes return configuration and audit pages, not payloads. A
- * remote answering with more than this is either misbehaving or not the
- * endpoint we think it is, and buffering it whole to rewrite node ids would
- * hand a remote instance a way to exhaust hub memory.
+ * These routes return configuration pages, audit pages, and one drift report,
+ * not bulk payloads. A remote answering with more than this is either
+ * misbehaving or not the endpoint we think it is, and buffering it whole to
+ * rewrite node ids would hand a remote instance a way to exhaust hub memory.
+ *
+ * The drift pair is the one entry whose size scales with the stack rather than
+ * being bounded by configuration: it carries a finding per drifted service plus
+ * a capped 20-row ledger. That is still far short of this ceiling, but it is
+ * the reason the ceiling is a real bound here and a sanity check elsewhere, so
+ * raising it needs a drift report that genuinely outgrew it, not a hunch.
  */
 export const IDENTITY_PROXY_MAX_BYTES = 1048576;
 
@@ -32,27 +38,34 @@ const HISTORY_ROUTES = [
 ];
 
 /**
- * Paths whose JSON carries node identities this hub has to correct.
+ * Paths whose JSON carries node identities this hub has to correct, each with
+ * the methods that reach them.
  *
- * The history pair is spread in rather than repeated, so the two lists
- * cannot drift into disagreeing about what counts as history.
+ * Per route rather than one blanket verb check because the drift pair is a GET
+ * and a POST over the same payload. A re-check that answered with the remote's
+ * own numbering while the GET beside it answered with the hub's would make the
+ * same object mean two different things depending on how it was asked for.
+ *
+ * The history pair is spread in rather than repeated, so the two lists cannot
+ * drift into disagreeing about what counts as history.
  */
-const IDENTITY_ROUTES = [
-  /^\/git-sources\/?$/,
-  /^\/stacks\/[^/]+\/git-source\/?$/,
-  ...HISTORY_ROUTES,
+const IDENTITY_ROUTES: readonly { pattern: RegExp; method: string }[] = [
+  { pattern: /^\/git-sources\/?$/, method: 'GET' },
+  { pattern: /^\/stacks\/[^/]+\/git-source\/?$/, method: 'GET' },
+  ...HISTORY_ROUTES.map(pattern => ({ pattern, method: 'GET' })),
+  { pattern: /^\/stacks\/[^/]+\/drift\/?$/, method: 'GET' },
+  { pattern: /^\/stacks\/[^/]+\/drift\/recheck\/?$/, method: 'POST' },
 ];
 
 /**
- * Whether this request is one of the four GETs the hub rewrites.
+ * Whether this request is one the hub buffers and rewrites.
  *
  * Deliberately narrow. Logs, downloads, and event streams must keep flowing
  * through the streaming hop: buffering them to rewrite identities they do not
  * carry would break streaming and cap responses that are legitimately large.
  */
 export function isGitOpsIdentityJsonRoute(pathname: string, method: string): boolean {
-  if (method !== 'GET') return false;
-  return IDENTITY_ROUTES.some(pattern => pattern.test(pathname));
+  return IDENTITY_ROUTES.some(route => route.method === method && route.pattern.test(pathname));
 }
 
 export function isGitOpsHistoryRoute(pathname: string): boolean {
@@ -567,7 +580,7 @@ export function handleIdentityResponse(
     try {
       parsed = JSON.parse(raw.toString('utf8'));
     } catch (error) {
-      // Not passed through. These four routes answer with JSON on success, so a
+      // Not passed through. Every intercepted route answers with JSON on success, so a
       // 200 that will not parse is a body the hub could not read, exactly like
       // one it could not decompress. Relaying it under the remote's success
       // status would hand the client an unrewritten, unauthorized payload and

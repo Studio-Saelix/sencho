@@ -582,13 +582,38 @@ export class DeployedStackDeletionService {
    * leave targets pointing at a node that is gone. Applications are left live:
    * a Direct application still describes a real stack, and a Blueprint one may
    * have targets on other nodes.
+   *
+   * Returns the Blueprints that lost a target here, so the caller can report
+   * what the deletion moved. Read inside the transaction and before the
+   * tombstone, because afterwards no active target row remains to trace back to
+   * an application. Direct applications contribute nothing: they carry no
+   * `blueprint_id`.
    */
   public deleteNodeWithGitOps(
     nodeId: number,
     localCleanup?: { tombstoneId: string; tags: string[]; overridePaths: string[] },
-  ): void {
+  ): number[] {
     const db = DatabaseService.getInstance();
-    db.getDb().transaction(() => {
+    return db.getDb().transaction(() => {
+      const store = GitOpsStore.getInstance();
+      const blueprintIds: number[] = [];
+      for (const target of store.listActiveTargetsForNode(nodeId)) {
+        const application = store.getApplication(target.application_id);
+        if (!application) {
+          // No foreign key backs this column and the database runs without
+          // cascade, so an orphaned target is possible, and this is the only
+          // path that would ever look at one. Collapsing it into the Direct
+          // case below would make a referential fault read as the normal
+          // outcome. The tombstone still retires the row either way.
+          console.error(
+            '[DeployedStackDeletion] Orphaned GitOps target on node %s: application %s is missing.',
+            sanitizeForLog(nodeId),
+            sanitizeForLog(target.application_id),
+          );
+          continue;
+        }
+        if (application.blueprint_id !== null) blueprintIds.push(application.blueprint_id);
+      }
       GitOpsTransitions.getInstance().tombstoneNodeTargets(nodeId, {
         operationId: localCleanup?.tombstoneId ?? randomUUID(),
         actor: 'system:node-deletion',
@@ -596,6 +621,7 @@ export class DeployedStackDeletionService {
         at: Date.now(),
       });
       db.deleteNode(nodeId, localCleanup);
+      return blueprintIds;
     })();
   }
 
@@ -603,13 +629,12 @@ export class DeployedStackDeletionService {
    * Delete a local-socket node with an atomic ready tombstone, then sweep.
    * Remote node records call DatabaseService.deleteNode without cleanup.
    */
-  public async deleteLocalNode(nodeId: number): Promise<void> {
+  public async deleteLocalNode(nodeId: number): Promise<number[]> {
     const db = DatabaseService.getInstance();
     const node = db.getNode(nodeId);
     if (!node) throw new Error('Node not found');
     if (node.type !== 'local') {
-      this.deleteNodeWithGitOps(nodeId);
-      return;
+      return this.deleteNodeWithGitOps(nodeId);
     }
     // Preserve Docker + compose dir before the row disappears so sweep never
     // targets a remote default node.
@@ -617,7 +642,7 @@ export class DeployedStackDeletionService {
     const composeDir = FileSystemService.getInstance(nodeId).getBaseDir();
     const { tags, overridePaths } = this.collectNodeArtifacts(nodeId);
     const tombstoneId = randomUUID();
-    this.deleteNodeWithGitOps(nodeId, { tombstoneId, tags, overridePaths });
+    const blueprintIds = this.deleteNodeWithGitOps(nodeId, { tombstoneId, tags, overridePaths });
     NodeRegistry.getInstance().evictConnection(nodeId);
     try {
       await this.sweepReadyIntent(tombstoneId, { docker, composeDir });
@@ -629,6 +654,7 @@ export class DeployedStackDeletionService {
         sanitizeForLog(getErrorMessage(error, 'unknown')),
       );
     }
+    return blueprintIds;
   }
 
   /**

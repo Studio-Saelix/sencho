@@ -87,6 +87,8 @@ import {
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { classifyStackApiPath } from '../helpers/stackRouteAuth';
+import { projectStackRevision } from '../helpers/gitopsResponse';
+import type { GitOpsRevisionProjection } from '../services/gitops/types';
 
 // Authenticated users with edit permission can write arbitrarily large compose
 // files. Refuse to YAML.parse anything beyond this bound so a malformed (or
@@ -1338,7 +1340,12 @@ async function buildDriftPayload(
   nodeId: number,
   stackName: string,
   reconcile: boolean,
-): Promise<StackDriftReport & { temporal: DriftTemporal; ledger: DriftLedgerEntry[]; lastCheckedAt: number | null }> {
+): Promise<StackDriftReport & {
+  temporal: DriftTemporal;
+  ledger: DriftLedgerEntry[];
+  lastCheckedAt: number | null;
+  gitopsRevision: GitOpsRevisionProjection;
+}> {
   const report = await buildStackDriftReport(nodeId, stackName);
   // Only the on-disk read is best-effort: an unreadable compose is already surfaced
   // by the report as a parse error, so temporal degrades to neutral. computeTemporal
@@ -1370,7 +1377,17 @@ async function buildDriftPayload(
   // not this passive read, so surface when that was: the Drift tab labels the history
   // "checked {time ago}" and a stale finding reads as history, not current truth.
   const lastCheckedAt = DatabaseService.getInstance().getStackDossier(nodeId, stackName)?.last_drift_check_at ?? null;
-  return { ...report, temporal, ledger, lastCheckedAt };
+  // Additive and separate on purpose. The ledger above is the compose-versus-runtime
+  // record this tab has always shown; the revision carries the GitOps drift classes,
+  // which are derived state and are never written into stack_drift_findings.
+  //
+  // Deliberately not guarded, matching computeTemporal above: on a read, the
+  // revision is part of the answer rather than decoration on one, so a fault
+  // reading it surfaces as a 500 instead of a projection that quietly reports
+  // less state than exists. Mutation routes take the opposite side, because
+  // there the write has already committed and a decoration must not be able to
+  // report it as failed.
+  return { ...report, temporal, ledger, lastCheckedAt, gitopsRevision: projectStackRevision(stackName) };
 }
 
 stacksRouter.get('/:stackName/drift', async (req: Request, res: Response) => {

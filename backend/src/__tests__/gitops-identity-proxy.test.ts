@@ -17,15 +17,26 @@ import {
 
 describe('gitops identity proxy', () => {
   describe('route matching', () => {
-    it('intercepts exactly the four identity GETs', () => {
+    it('intercepts the identity GETs', () => {
       for (const path of [
         '/git-sources',
         '/git-sources/history',
         '/stacks/web/git-source',
         '/stacks/web/git-source/history',
+        '/stacks/web/drift',
       ]) {
         expect(isGitOpsIdentityJsonRoute(path, 'GET')).toBe(true);
       }
+    });
+
+    it('intercepts the drift re-check, the one mutation that answers with a revision', () => {
+      // The GET beside it is rewritten, and both return the same projection
+      // object. Leaving the re-check on the streaming hop would make one object
+      // carry the hub's node numbering or the remote's depending only on how it
+      // was asked for.
+      expect(isGitOpsIdentityJsonRoute('/stacks/web/drift/recheck', 'POST')).toBe(true);
+      expect(isGitOpsIdentityJsonRoute('/stacks/web/drift/recheck', 'GET')).toBe(false);
+      expect(isGitOpsIdentityJsonRoute('/stacks/web/drift', 'POST')).toBe(false);
     });
 
     it('leaves streaming and unrelated routes to the streaming hop', () => {
@@ -43,9 +54,10 @@ describe('gitops identity proxy', () => {
       }
     });
 
-    it('never intercepts a mutation', () => {
+    it('never intercepts a mutation of a git-source route', () => {
       for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
         expect(isGitOpsIdentityJsonRoute('/stacks/web/git-source', method)).toBe(false);
+        expect(isGitOpsIdentityJsonRoute('/git-sources', method)).toBe(false);
       }
     });
 
@@ -162,6 +174,29 @@ describe('gitops identity proxy', () => {
       expect(payload.nextCursor).toBe('100.abc');
     });
 
+    it('rewrites the revision on a drift payload without touching the ledger', () => {
+      // The drift payload is a single object whose GitOps content hangs off
+      // `gitopsRevision`. Its own `findings` and `ledger` are the compose vs
+      // runtime record and carry no node identity, so they must come back byte
+      // for byte.
+      const payload = {
+        stack: 'web',
+        status: 'drifted',
+        findings: [{ service: 'app', kind: 'image-mismatch' }],
+        ledger: [{ service: 'app', kind: 'image-mismatch', detectedAt: 5 }],
+        gitopsRevision: {
+          targets: [{ nodeId: 1 }],
+          drift: [{ affectedTargets: [{ nodeId: 1 }] }],
+        },
+      };
+      rewriteIdentityPayload(payload, 42);
+      expect(payload.gitopsRevision.targets[0]?.nodeId).toBe(42);
+      expect(payload.gitopsRevision.drift[0]?.affectedTargets[0]?.nodeId).toBe(42);
+      expect(payload.findings).toEqual([{ service: 'app', kind: 'image-mismatch' }]);
+      expect(payload.ledger).toEqual([{ service: 'app', kind: 'image-mismatch', detectedAt: 5 }]);
+      expect(payload.stack).toBe('web');
+    });
+
     it('leaves strings and unlisted keys untouched', () => {
       const payload = {
         applicationId: 'app-1',
@@ -239,6 +274,16 @@ describe('gitops identity proxy', () => {
       const items = (filtered as { items: Array<{ stackName: string }> }).items;
       expect(items.map(i => i.stackName)).toEqual(['web']);
       expect((filtered as { nextCursor: string }).nextCursor).toBe('100.abc');
+    });
+
+    it('leaves a drift payload unfiltered', () => {
+      // The drift routes are per-stack, authorized by name before the hop, and
+      // return one object rather than a cross-stack collection. Re-filtering
+      // them would hide a stack's own drift from the operator who just proved
+      // they may read it.
+      const payload = { stack: 'gone', gitopsRevision: { schemaVersion: 1, targetMode: 'direct', lifecycleStatus: 'deleted' } };
+      expect(filterRemoteIdentityPayload('/stacks/gone/drift', payload, asViewer, 7)).toEqual(payload);
+      expect(filterRemoteIdentityPayload('/stacks/gone/drift/recheck', payload, asViewer, 7)).toEqual(payload);
     });
 
     it('does not match the rewritten path, which is why the hop stashes the original', () => {

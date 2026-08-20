@@ -31,6 +31,81 @@ export function projectStackRevision(stackName: string): GitOpsRevisionProjectio
 }
 
 /**
+ * The revision projection for a Blueprint's live application.
+ *
+ * Mirrors projectStackRevision for the Blueprint surface: a Blueprint that
+ * predates the model, or one migration has not brought in, projects
+ * `not_applicable` rather than throwing, so the catalog gets a uniform shape
+ * across rows.
+ */
+export function projectBlueprintRevision(blueprintId: number): GitOpsRevisionProjection {
+  const app = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprintId);
+  if (!app) return NOT_APPLICABLE_REVISION;
+  return projectApplication(app.id, healthGateDisabled());
+}
+
+/**
+ * Revisions for the Blueprints a mutation actually moved, `blueprintId` ascending.
+ *
+ * Sorted here rather than at each call site because the callers hand over ids
+ * in the order their producer happened to visit them, which is a Map iteration
+ * order, not a contract. Duplicates are collapsed: a caller that reports the
+ * same Blueprint twice would otherwise put two copies of one projection on the
+ * wire and let a consumer count the same move twice.
+ */
+export function projectBlueprintRevisions(blueprintIds: readonly number[]): GitOpsRevisionProjection[] {
+  return [...new Set(blueprintIds)].sort((a, b) => a - b).map(projectBlueprintRevision);
+}
+
+/**
+ * Revisions to decorate a mutation that has already committed.
+ *
+ * Best effort on purpose, and the one place in this file that swallows
+ * anything. The write is done by the time this runs, so letting a projection
+ * fault escape would land in the route's own catch and answer a successful
+ * cordon, label, or node deletion with a 500. The operator would then retry a
+ * deletion that already happened and be told the node does not exist, or retry
+ * a create and be told the name is taken. A field the response can live without
+ * must not be able to invert what the response means.
+ *
+ * The failure is logged with the operation that produced it rather than
+ * dropped, and the field degrades to an empty list, which every consumer
+ * already handles: it is what a mutation that moved nothing returns.
+ *
+ * Read routes deliberately do not use this. There the revision is part of the
+ * answer, not a decoration on one, so a fault there should surface.
+ */
+export function projectCommittedRevisions(
+  blueprintIds: readonly number[],
+  operation: string,
+): GitOpsRevisionProjection[] {
+  try {
+    return projectBlueprintRevisions(blueprintIds);
+  } catch (error) {
+    console.error('[GitOps] Revision projection failed after %s committed:', operation, error);
+    return [];
+  }
+}
+
+/**
+ * One revision to decorate a mutation that has already committed.
+ *
+ * Same contract as projectCommittedRevisions, degrading to the not-applicable
+ * shape so the response keeps one field shape across every mutation.
+ */
+export function projectCommittedRevision(
+  blueprintId: number,
+  operation: string,
+): GitOpsRevisionProjection {
+  try {
+    return projectBlueprintRevision(blueprintId);
+  } catch (error) {
+    console.error('[GitOps] Revision projection failed after %s committed:', operation, error);
+    return NOT_APPLICABLE_REVISION;
+  }
+}
+
+/**
  * Stack directories that exist on this instance right now.
  *
  * Read once per request. The list and history routes share one probe across

@@ -63,3 +63,53 @@ describe('GET /api/stacks/:stackName/drift', () => {
     fs.rmSync(stackDir, { recursive: true, force: true });
   });
 });
+
+describe('drift payload carries the GitOps revision', () => {
+  const STACK = 'driftgitopstest';
+
+  function stubDockerBoundary(): void {
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [], networks: [], volumes: [] }),
+    } as unknown as DockerController);
+  }
+
+  function makeStack(): string {
+    const stackDir = path.join(process.env.COMPOSE_DIR as string, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx:1.27\n');
+    return stackDir;
+  }
+
+  it('adds gitopsRevision to the GET without disturbing the ledger fields', async () => {
+    const stackDir = makeStack();
+    stubDockerBoundary();
+
+    const res = await request(app).get(`/api/stacks/${STACK}/drift`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    // A stack with no Git source has no application, so the uniform
+    // not-applicable shape is what a reader gets rather than a missing key.
+    expect(res.body.gitopsRevision).toMatchObject({ schemaVersion: 1, targetMode: 'not_applicable' });
+    expect(res.body.gitopsRevision.drift).toEqual([]);
+    // The ledger surface is untouched: this field is additive, not a rewrite.
+    expect(res.body).toMatchObject({ stack: STACK });
+    expect(Array.isArray(res.body.findings)).toBe(true);
+    expect(Array.isArray(res.body.ledger)).toBe(true);
+    expect(res.body.temporal).toBeDefined();
+
+    vi.restoreAllMocks();
+    fs.rmSync(stackDir, { recursive: true, force: true });
+  });
+
+  it('adds the same gitopsRevision to the re-check', async () => {
+    const stackDir = makeStack();
+    stubDockerBoundary();
+
+    const res = await request(app).post(`/api/stacks/${STACK}/drift/recheck`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.gitopsRevision).toMatchObject({ schemaVersion: 1, targetMode: 'not_applicable' });
+    expect(Array.isArray(res.body.ledger)).toBe(true);
+
+    vi.restoreAllMocks();
+    fs.rmSync(stackDir, { recursive: true, force: true });
+  });
+});
