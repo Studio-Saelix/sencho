@@ -87,7 +87,7 @@ gitSourcesRouter.get('/', async (req: Request, res: Response): Promise<void> => 
       stackResourcePresent: boolean;
     }> = [];
     for (const src of all) {
-      const gitopsRevision = projectStackRevision(src.stack_name, req.nodeId);
+      const gitopsRevision = projectStackRevision(src.stack_name);
       const stackResourcePresent = present.has(src.stack_name);
       const requirement = classifySourceRow({
         stackName: src.stack_name,
@@ -157,7 +157,7 @@ stackGitSourceRouter.get('/:stackName/git-source', async (req: Request, res: Res
         ...refreshed,
         manifest_state: manifest?.state ?? refreshed.manifest_state,
         manifest,
-        gitopsRevision: projectStackRevision(stackName, req.nodeId),
+        gitopsRevision: projectStackRevision(stackName),
         stackResourcePresent,
       });
       return;

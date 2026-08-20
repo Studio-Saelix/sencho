@@ -48,6 +48,67 @@ function seedUnmodelledBlueprint() {
     });
 }
 
+/** A minimal live Direct application row, for the stack-name resolution cases. */
+function directApplication(id: string, stackName: string): import('../services/gitops/types').GitOpsApplicationRow {
+    const now = Date.now();
+    return {
+        id,
+        lifecycle_key: `direct:${stackName}`,
+        lifecycle_status: 'active',
+        target_mode: 'direct',
+        stack_name: stackName,
+        blueprint_id: null,
+        configured_repo_url: 'https://github.com/example/repo.git',
+        repo_identity_json: '{"host":"github.com","pathname":"/example/repo.git"}',
+        configured_ref: 'main',
+        compose_paths_json: '["compose.yaml"]',
+        context_dir: null,
+        sync_env: 0,
+        env_path: null,
+        materialization_fingerprint: 'a'.repeat(64),
+        desired_commit_sha: null,
+        fetched_commit_sha: null,
+        candidate_generation_id: null,
+        accepted_generation_id: null,
+        candidate_plan_blocked: 0,
+        review_required: 0,
+        artifact_set_id: null,
+        latest_artifact_set_id: null,
+        intent_revision_id: null,
+        rollout_candidate_id: null,
+        rollout_generation_id: null,
+        source_acceptance_ref: null,
+        placement_approval_ref: null,
+        rollout_authorization_ref: null,
+        legacy_combined_approval_ref: null,
+        preflight_fingerprint: null,
+        latest_operation_id: null,
+        active_operation_id: null,
+        active_operation_stage: null,
+        active_operation_at: null,
+        active_generation_id: null,
+        pause_at: null,
+        pause_reason: null,
+        partial_json: null,
+        failure_stage: null,
+        failure_class: null,
+        failure_at: null,
+        retry_at: null,
+        retry_count: 0,
+        suspended_at: null,
+        recovery_ref: null,
+        recovery_phase: null,
+        interruption_stage: null,
+        interruption_at: null,
+        interruption_operation_id: null,
+        interruption_generation_id: null,
+        evidence_fresh_at: null,
+        evidence_limitations_json: null,
+        created_at: now,
+        updated_at: now,
+    };
+}
+
 /** Create through the route, which is the path that activates an application. */
 async function createBlueprint(selector: { type: string; ids?: number[]; all?: string[]; any?: string[] }) {
     counter += 1;
@@ -159,7 +220,7 @@ describe('Blueprint routes carry gitopsRevision', () => {
 });
 
 describe('Projection resolution reaches every application that owns a surface', () => {
-    it('reports a detached Blueprint as not_live rather than as never modelled', async () => {
+    it('reports a detached Blueprint as detached rather than as never modelled', async () => {
         const created = await createBlueprint({ type: 'nodes', ids: [] });
         const applicationId = created.body.gitopsRevision.applicationId;
         const store = (await import('../services/gitops/store')).GitOpsStore.getInstance();
@@ -179,6 +240,55 @@ describe('Projection resolution reaches every application that owns a surface', 
             applicationId,
             lifecycleStatus: 'detached',
         });
+        // An inline Blueprint has no Git source, so its source facet is
+        // not_applicable regardless of lifecycle. The Direct case below is what
+        // exercises not_live.
+        expect(detail.body.gitopsRevision.facets.source.status).toBe('not_applicable');
+    });
+
+    it('reports a detached Direct source as not_live, which nothing could reach before', async () => {
+        const store = (await import('../services/gitops/store')).GitOpsStore.getInstance();
+        const tx = (await import('../services/gitops/transitions')).GitOpsTransitions.getInstance();
+        const application = directApplication('app-direct-detach', 'detached-direct-stack');
+        tx.activateDirect({
+            application,
+            nodeId: seedNode().id,
+            envelope: { operationId: 'op-direct-detach', actor: 'tester', trigger: 'manual', at: Date.now() },
+        });
+        tx.applicationTombstoned(application.id, 'detached', {
+            operationId: 'op-direct-detach-2', actor: 'tester', trigger: 'manual', at: Date.now(),
+        });
+        expect(store.getLiveDirectApplication('detached-direct-stack')).toBeUndefined();
+        expect(store.getDetachedDirectApplication('detached-direct-stack')?.id).toBe(application.id);
+
+        // The tombstone keeps repository, ref, and SHA pointers as frozen facts
+        // so the projection can still say what was there. Before this lookup
+        // existed, the source deriver's not_live branch had no way to be
+        // reached and a deliberate detach read as "never had Git".
+        const { projectStackRevision } = await import('../helpers/gitopsResponse');
+        const projection = projectStackRevision('detached-direct-stack');
+        expect(projection).toMatchObject({ applicationId: application.id, lifecycleStatus: 'detached' });
+        if (projection.targetMode === 'not_applicable') throw new Error('expected an application');
+        expect(projection.facets.source).toMatchObject({ status: 'not_live', lifecycleStatus: 'detached' });
+    });
+
+    it('does not resurrect a deleted application for a stack name that gets reused', async () => {
+        const tx = (await import('../services/gitops/transitions')).GitOpsTransitions.getInstance();
+        const application = directApplication('app-reuse', 'reused-name-stack');
+        tx.activateDirect({
+            application,
+            nodeId: seedNode().id,
+            envelope: { operationId: 'op-reuse', actor: 'tester', trigger: 'manual', at: Date.now() },
+        });
+        tx.applicationTombstoned(application.id, 'deleted', {
+            operationId: 'op-reuse-2', actor: 'tester', trigger: 'manual', at: Date.now(),
+        });
+
+        // Deletion means the stack is gone, so a directory of that name now is
+        // a different stack. Reporting the old repository and SHA against it
+        // would disclose one stack's Git identity through another's name.
+        const { projectStackRevision } = await import('../helpers/gitopsResponse');
+        expect(projectStackRevision('reused-name-stack')).toMatchObject({ targetMode: 'not_applicable' });
     });
 
     it('says why when the application it resolved has gone missing', async () => {

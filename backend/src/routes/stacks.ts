@@ -87,7 +87,7 @@ import {
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { classifyStackApiPath } from '../helpers/stackRouteAuth';
-import { projectStackRevision } from '../helpers/gitopsResponse';
+import { projectManagedStackRevision } from '../helpers/gitopsResponse';
 import type { GitOpsRevisionProjection } from '../services/gitops/types';
 
 // Authenticated users with edit permission can write arbitrarily large compose
@@ -1387,7 +1387,7 @@ async function buildDriftPayload(
   // less state than exists. Mutation routes take the opposite side, because
   // there the write has already committed and a decoration must not be able to
   // report it as failed.
-  return { ...report, temporal, ledger, lastCheckedAt, gitopsRevision: projectStackRevision(stackName, nodeId) };
+  return { ...report, temporal, ledger, lastCheckedAt, gitopsRevision: projectManagedStackRevision(stackName, nodeId) };
 }
 
 stacksRouter.get('/:stackName/drift', async (req: Request, res: Response) => {

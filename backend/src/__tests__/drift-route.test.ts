@@ -3,7 +3,7 @@
  * read-only report is reachable on the Community tier (no tier gate). Deep diff
  * behaviour is covered by drift-detection.test.ts.
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import request from 'supertest';
@@ -67,21 +67,35 @@ describe('GET /api/stacks/:stackName/drift', () => {
 describe('drift payload carries the GitOps revision', () => {
   const STACK = 'driftgitopstest';
 
+  // Cleanup belongs here, not at the end of each test body. A failing
+  // assertion would otherwise leak a blueprint, a deployment, and an
+  // application into the next test, which reuses this stack name and
+  // asserts not_applicable: one real failure would become two, and the
+  // second would point at innocent code.
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    fs.rmSync(path.join(process.env.COMPOSE_DIR as string, STACK), { recursive: true, force: true });
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance().getDb();
+    for (const table of ['gitops_applications', 'blueprint_deployments', 'blueprints']) {
+      db.prepare(`DELETE FROM ${table}`).run();
+    }
+  });
+
   function stubDockerBoundary(): void {
     vi.spyOn(DockerController, 'getInstance').mockReturnValue({
       getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [], networks: [], volumes: [] }),
     } as unknown as DockerController);
   }
 
-  function makeStack(): string {
+  function makeStack(): void {
     const stackDir = path.join(process.env.COMPOSE_DIR as string, STACK);
     fs.mkdirSync(stackDir, { recursive: true });
     fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx:1.27\n');
-    return stackDir;
   }
 
   it('adds gitopsRevision to the GET without disturbing the ledger fields', async () => {
-    const stackDir = makeStack();
+    makeStack();
     stubDockerBoundary();
 
     const res = await request(app).get(`/api/stacks/${STACK}/drift`).set('Authorization', authHeader);
@@ -96,8 +110,6 @@ describe('drift payload carries the GitOps revision', () => {
     expect(Array.isArray(res.body.ledger)).toBe(true);
     expect(res.body.temporal).toBeDefined();
 
-    vi.restoreAllMocks();
-    fs.rmSync(stackDir, { recursive: true, force: true });
   });
 
   it('resolves the Blueprint that owns the stack directory, not just Direct Git', async () => {
@@ -122,7 +134,15 @@ describe('drift payload carries the GitOps revision', () => {
       enabled: true,
       created_by: 'admin',
     });
-    db.upsertDeployment({ blueprint_id: blueprint.id, node_id: nodeId, status: 'active', applied_revision: 1 });
+    // last_deployed_at is what proves this Blueprint actually wrote the
+    // directory, which is the predicate the bridge requires.
+    db.upsertDeployment({
+      blueprint_id: blueprint.id,
+      node_id: nodeId,
+      status: 'active',
+      applied_revision: 1,
+      last_deployed_at: Date.now(),
+    });
     const { GitOpsTransitions } = await import('../services/gitops/transitions');
     const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
     GitOpsTransitions.getInstance().activateInlineBlueprint({
@@ -130,7 +150,7 @@ describe('drift payload carries the GitOps revision', () => {
       envelope: { operationId: 'op-bp-drift', actor: 'tester', trigger: 'manual', at: Date.now() },
     });
 
-    const stackDir = makeStack();
+    makeStack();
     stubDockerBoundary();
     const res = await request(app).get(`/api/stacks/${STACK}/drift`).set('Authorization', authHeader);
     expect(res.status).toBe(200);
@@ -140,15 +160,78 @@ describe('drift payload carries the GitOps revision', () => {
       blueprintId: blueprint.id,
     });
 
-    vi.restoreAllMocks();
-    fs.rmSync(stackDir, { recursive: true, force: true });
-    db.getDb().prepare('DELETE FROM gitops_applications').run();
-    db.getDb().prepare('DELETE FROM blueprint_deployments').run();
-    db.getDb().prepare('DELETE FROM blueprints').run();
+  });
+
+  it('refuses to claim a stack the Blueprint could not deploy onto', async () => {
+    // name_conflict is written precisely when a stack of that name already
+    // exists on the node and Sencho does not own it. A deployment row exists,
+    // so a present-row check would treat it as ownership and hand the unrelated
+    // stack's operator this Blueprint's repository, ref, and SHA pointers: the
+    // exact collision the deployment check is supposed to rule out.
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getNodes().find(n => n.is_default)?.id as number;
+    const blueprint = db.createBlueprint({
+      name: STACK,
+      description: null,
+      compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+      selector: { type: 'nodes', ids: [nodeId] },
+      drift_mode: 'suggest',
+      classification: 'stateless',
+      classification_reasons: [],
+      enabled: true,
+      created_by: 'admin',
+    });
+    db.upsertDeployment({ blueprint_id: blueprint.id, node_id: nodeId, status: 'name_conflict' });
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
+    GitOpsTransitions.getInstance().activateInlineBlueprint({
+      application: blankInlineApplication('app-bp-conflict', blueprint.id, Date.now()),
+      envelope: { operationId: 'op-bp-conflict', actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+
+    makeStack();
+    stubDockerBoundary();
+    const res = await request(app).get(`/api/stacks/${STACK}/drift`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.gitopsRevision).toMatchObject({ targetMode: 'not_applicable', applicationId: null });
+  });
+
+  it('refuses to claim a stack the Blueprint has never deployed', async () => {
+    // A pending or first-deploy-failed row has nothing of ours on the node
+    // either, so last_deployed_at is what proves the directory is the
+    // Blueprint's work.
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getNodes().find(n => n.is_default)?.id as number;
+    const blueprint = db.createBlueprint({
+      name: STACK,
+      description: null,
+      compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+      selector: { type: 'nodes', ids: [nodeId] },
+      drift_mode: 'suggest',
+      classification: 'stateless',
+      classification_reasons: [],
+      enabled: true,
+      created_by: 'admin',
+    });
+    db.upsertDeployment({ blueprint_id: blueprint.id, node_id: nodeId, status: 'pending' });
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
+    GitOpsTransitions.getInstance().activateInlineBlueprint({
+      application: blankInlineApplication('app-bp-pending', blueprint.id, Date.now()),
+      envelope: { operationId: 'op-bp-pending', actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+
+    makeStack();
+    stubDockerBoundary();
+    const res = await request(app).get(`/api/stacks/${STACK}/drift`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.gitopsRevision).toMatchObject({ targetMode: 'not_applicable', applicationId: null });
   });
 
   it('adds the same gitopsRevision to the re-check', async () => {
-    const stackDir = makeStack();
+    makeStack();
     stubDockerBoundary();
 
     const res = await request(app).post(`/api/stacks/${STACK}/drift/recheck`).set('Authorization', authHeader);
@@ -156,7 +239,5 @@ describe('drift payload carries the GitOps revision', () => {
     expect(res.body.gitopsRevision).toMatchObject({ schemaVersion: 1, targetMode: 'not_applicable' });
     expect(Array.isArray(res.body.ledger)).toBe(true);
 
-    vi.restoreAllMocks();
-    fs.rmSync(stackDir, { recursive: true, force: true });
   });
 });

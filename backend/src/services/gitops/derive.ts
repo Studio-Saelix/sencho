@@ -600,7 +600,7 @@ function decodeObservedSafe(
  * vanished row indistinguishable from one that never existed, and the reader
  * has no third source to tell them apart.
  */
-export function missingApplicationRevision(applicationId: string): GitOpsRevisionProjection {
+function missingApplicationRevision(applicationId: string): GitOpsRevisionProjection {
   return {
     schemaVersion: 1,
     targetMode: 'not_applicable',

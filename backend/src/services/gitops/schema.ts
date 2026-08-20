@@ -134,6 +134,16 @@ CREATE INDEX IF NOT EXISTS idx_gitops_app_lifecycle_key
   ON gitops_applications(lifecycle_key);
 CREATE INDEX IF NOT EXISTS idx_gitops_app_status
   ON gitops_applications(lifecycle_status);
+-- The two unique indexes above are partial on the live rows, so neither serves
+-- a lookup for a detached one, and the git-sources list route asks per row.
+-- Without these the fallback is a full scan and a sort, once per stack.
+CREATE INDEX IF NOT EXISTS idx_gitops_app_detached_direct
+  ON gitops_applications(stack_name, updated_at DESC)
+  WHERE lifecycle_status = 'detached' AND target_mode = 'direct';
+CREATE INDEX IF NOT EXISTS idx_gitops_app_detached_blueprint
+  ON gitops_applications(blueprint_id, updated_at DESC)
+  WHERE lifecycle_status = 'detached'
+    AND target_mode IN ('inline_blueprint','blueprint');
 
 CREATE TABLE IF NOT EXISTS gitops_generations (
   id TEXT PRIMARY KEY,

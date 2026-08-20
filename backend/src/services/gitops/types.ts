@@ -790,8 +790,12 @@ export type GitOpsRevisionProjection =
        * been asked about. Non-empty when the projection could not reach an
        * application it had reason to believe exists, which is a different fact
        * and must not read as the ordinary one.
+       *
+       * `readonly` because the shared frozen NOT_APPLICABLE_REVISION is this
+       * variant: a caller pushing onto it would corrupt every later response,
+       * and this keeps that a compile error rather than a runtime throw.
        */
-      limitations: GitOpsLimitation[];
+      limitations: readonly GitOpsLimitation[];
       availableActions: [];
       approvals: null;
     }

@@ -102,33 +102,43 @@ export class GitOpsStore {
   }
 
   /**
-   * The most recently retired Direct application for a stack, if any.
+   * The most recently detached Direct application for a stack, if any.
    *
    * Consulted only after the live lookup misses. `applicationTombstoned` keeps
    * the configured identity and SHA pointers as frozen facts precisely so the
    * projection can still say what an application was, and `deriveSource` has a
    * `not_live` status for it, but neither could be reached while every entry
-   * point filtered to the live rows. Newest first, because a stack name can be
-   * detached and reattached repeatedly and only the latest retirement describes
-   * what was there last.
+   * point filtered to the live rows.
+   *
+   * `detached` only, never `deleted`. A detached application's files are still
+   * on disk and still describe that stack. A deleted one means the stack is
+   * gone, so any directory of that name now belongs to something else, and
+   * `readAuth` refuses stack-grant reads on deleted rows for the same
+   * name-reuse reason.
+   *
+   * Newest first, because a stack name can be detached and reattached
+   * repeatedly and only the latest detachment describes what was there last.
+   * `rowid` breaks a tie rather than `id`, which is a random UUID and orders
+   * arbitrarily; ties are reachable because a transaction stamps every row it
+   * touches with one `envelope.at`.
    */
-  getRetiredDirectApplication(stackName: string): GitOpsApplicationRow | undefined {
+  getDetachedDirectApplication(stackName: string): GitOpsApplicationRow | undefined {
     return this.db().prepare(
       `SELECT * FROM gitops_applications
-       WHERE stack_name = ? AND target_mode = 'direct' AND lifecycle_status IN ('detached','deleted')
-       ORDER BY updated_at DESC, id DESC
+       WHERE stack_name = ? AND target_mode = 'direct' AND lifecycle_status = 'detached'
+       ORDER BY updated_at DESC, rowid DESC
        LIMIT 1`,
     ).get(stackName) as GitOpsApplicationRow | undefined;
   }
 
-  /** The most recently retired application for a Blueprint. Mirrors the Direct getter. */
-  getRetiredBlueprintApplication(blueprintId: number): GitOpsApplicationRow | undefined {
+  /** The most recently detached application for a Blueprint. Mirrors the Direct getter. */
+  getDetachedBlueprintApplication(blueprintId: number): GitOpsApplicationRow | undefined {
     return this.db().prepare(
       `SELECT * FROM gitops_applications
        WHERE blueprint_id = ?
          AND target_mode IN ('inline_blueprint','blueprint')
-         AND lifecycle_status IN ('detached','deleted')
-       ORDER BY updated_at DESC, id DESC
+         AND lifecycle_status = 'detached'
+       ORDER BY updated_at DESC, rowid DESC
        LIMIT 1`,
     ).get(blueprintId) as GitOpsApplicationRow | undefined;
   }
