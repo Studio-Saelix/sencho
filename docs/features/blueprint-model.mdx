@@ -25,6 +25,10 @@ Three moving parts cooperate per blueprint.
 
 The marker is the trust root. If a directory by the blueprint's name already exists on a node and does not carry a matching marker, the reconciler refuses to touch it and surfaces a **Name conflict** on the deployment row. A Blueprint named `nginx` will never overwrite an existing user-authored `nginx` stack on any node.
 
+<Note>
+  The revision number counts compose edits. It is a label on the spec, not a statement about the fleet: two nodes can both sit at revision 7 with one of them still deploying it. What Sencho has established per node is reported separately as GitOps state, on the Drift tab and in the **GitOps** section of the detail sheet. Where the two seem to disagree, the GitOps state is the one that has been proven.
+</Note>
+
 Statelessness vs statefulness is decided at author time by parsing the compose file. Stateless blueprints (no persistent volumes, or only `tmpfs` mounts) deploy and evict freely. Stateful blueprints (named volumes or bind mounts) get explicit operator-confirmation prompts on the first deploy to a fresh node and on eviction from any node. Blueprints with `external: true` volumes are classified as **unknown** and treated as stateful for safety.
 
 Drift detection runs on every tick for every Active deployment regardless of policy. The policy only governs what Sencho does next: surface the drift silently, notify, or auto-redeploy.
