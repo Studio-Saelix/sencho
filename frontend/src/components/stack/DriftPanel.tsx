@@ -8,8 +8,8 @@ import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/toast-store';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
-import GitOpsStateCard from '@/components/gitops/GitOpsStateCard';
-import { RUNTIME_STATE, SOURCE_STATE, absentFault, identityRefLabel } from '@/lib/gitopsState';
+import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
+import { RUNTIME_STATE, SOURCE_STATE, absentFault, identityRefLabel, liveSourceFacet } from '@/lib/gitopsState';
 import type { GitOpsDriftItem, GitOpsRevisionProjection } from '@/types/gitops';
 
 // Mirrors the backend payload shape (the frontend never imports backend).
@@ -278,11 +278,9 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
   const revision = report?.gitopsRevision ?? null;
   const gitopsFaults = revision ? absentFault(revision) : [];
   const gitopsLive = revision && revision.targetMode !== 'not_applicable' ? revision : null;
-  // Suppressed for a Blueprint-owned stack: this route resolves through whatever
+  // Null for a Blueprint-owned stack: this route resolves through whatever
   // manages the directory, and a Blueprint application has no Git source facet.
-  const gitopsSource = gitopsLive && gitopsLive.facets.source.status !== 'not_applicable'
-    ? gitopsLive.facets.source
-    : null;
+  const gitopsSource = liveSourceFacet(revision);
   const gitopsTargets = gitopsLive?.targets ?? [];
   const gitopsDrift = gitopsLive?.drift ?? [];
   // A target can name a node this client has no record of, so fall back to the
@@ -345,18 +343,7 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
             </div>
           )}
 
-          {gitopsFaults.length > 0 && (
-            <GitOpsStateCard
-              data-testid="gitops-fault"
-              stateKey="unreachable"
-              state={{
-                label: 'gitops state unavailable',
-                tone: 'destructive',
-                line: gitopsFaults[0].message,
-                icon: TriangleAlert,
-              }}
-            />
-          )}
+          {gitopsFaults.length > 0 && <GitOpsFaultCard message={gitopsFaults[0].message} />}
 
           {(gitopsSource || gitopsTargets.length > 0) && (
             <section>

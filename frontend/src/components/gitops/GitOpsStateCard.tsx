@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { TriangleAlert } from 'lucide-react';
 
 import { GITOPS_TONE_CLASS, type GitOpsStateMeta } from '@/lib/gitopsState';
 import { cn } from '@/lib/utils';
@@ -44,5 +45,26 @@ export default function GitOpsStateCard(
         {action}
       </div>
     </div>
+  );
+}
+
+/**
+ * An application the projection had reason to believe exists and could not
+ * reach. A fault is a limitation rather than a facet status, so it has no entry
+ * in the state maps; its copy lives here so the Git source panel, the Drift tab
+ * and the Blueprint sheet cannot report the same failure three different ways.
+ */
+export function GitOpsFaultCard({ message }: { message: string }) {
+  return (
+    <GitOpsStateCard
+      data-testid="gitops-fault"
+      stateKey="unreachable"
+      state={{
+        label: 'gitops state unavailable',
+        tone: 'destructive',
+        line: message,
+        icon: TriangleAlert,
+      }}
+    />
   );
 }

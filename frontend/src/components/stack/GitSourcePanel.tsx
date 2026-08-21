@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { GitBranch, Loader2, Trash2, RefreshCw, Save, AlertCircle } from 'lucide-react';
+import { GitBranch, Loader2, Trash2, RefreshCw, Save } from 'lucide-react';
 import { Modal, ModalHeader, ConfirmModal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -12,9 +12,9 @@ import { GitSourceDiffDialog, type PullResult, type PublicPendingPlan } from './
 import { GitSourceFields, type ApplyMode } from './GitSourceFields';
 import { GitManifestSummary, type ManifestSummary } from './GitManifestSummary';
 import type { GitBrowseResult } from './GitComposeFilePicker';
-import GitOpsStateCard from '@/components/gitops/GitOpsStateCard';
-import { SOURCE_STATE, absentFault } from '@/lib/gitopsState';
-import type { GitOpsRevisionCarrier, GitOpsRevisionProjection } from '@/types/gitops';
+import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
+import { SOURCE_STATE, absentFault, liveSourceFacet, type LiveSourceFacet } from '@/lib/gitopsState';
+import type { GitOpsRevisionCarrier, GitOpsRevisionProjection, GitOpsSourceStatus } from '@/types/gitops';
 
 export interface GitSource {
   id: number;
@@ -64,6 +64,36 @@ function deriveApplyMode(source: GitSource | null, pendingMode: ApplyMode | null
   return source.auto_deploy_on_apply ? 'auto-deploy' : 'auto-write';
 }
 
+/** The commit the pending banner announces, or null when there is nothing to announce. */
+interface PendingCommit {
+  status: GitOpsSourceStatus;
+  /** Short-sha detail line; null when the state is known but the commit is not. */
+  sha: string | null;
+}
+
+/**
+ * What the pending banner shows, from the projection when one answered and from
+ * the flat pointer when none did.
+ *
+ * The fallback is reachable when a GitOps write failed and was swallowed while
+ * the pending commit still committed, and it is what this banner read before the
+ * projection existed. A fault suppresses it: that means an application was
+ * expected and could not be read, so the pointer is not evidence a candidate is
+ * ready. The sidebar applies the same rule, so the two surfaces cannot disagree.
+ */
+function derivePendingCommit(
+  facet: LiveSourceFacet | null,
+  faultCount: number,
+  flatPendingSha: string | null,
+): PendingCommit | null {
+  if (facet) {
+    if (facet.candidateGenerationId === null) return null;
+    return { status: facet.status, sha: facet.fetchedCommitSha };
+  }
+  if (faultCount > 0 || !flatPendingSha) return null;
+  return { status: 'candidate_ready', sha: flatPendingSha };
+}
+
 export function GitSourcePanel({
   open,
   onOpenChange,
@@ -99,18 +129,9 @@ export function GitSourcePanel({
   const { activeNode } = useNodes();
   const applyMode = deriveApplyMode(source, applyModeOverride);
 
-  const live = revision && revision.targetMode !== 'not_applicable' ? revision : null;
-  const sourceFacet = live && live.facets.source.status !== 'not_applicable' ? live.facets.source : null;
-  // The waiting candidate, if there is one. Same rule the sidebar uses.
-  const candidate = sourceFacet && sourceFacet.candidateGenerationId !== null ? sourceFacet : null;
+  const sourceFacet = liveSourceFacet(revision);
   const faults = revision ? absentFault(revision) : [];
-  // Nothing answered, and the flat pointer says a commit is waiting. Reachable
-  // when a GitOps write failed and was swallowed while the pending commit still
-  // committed, and it is what this banner read before the projection existed.
-  // The sidebar applies the same rule, so the two surfaces cannot disagree.
-  const unanswered = !sourceFacet && faults.length === 0;
-  const pendingSha = candidate ? candidate.fetchedCommitSha : (unanswered ? source?.pending_commit_sha ?? null : null);
-  const pendingStatus = candidate ? candidate.status : (unanswered && source?.pending_commit_sha ? 'candidate_ready' : null);
+  const pending = derivePendingCommit(sourceFacet, faults.length, source?.pending_commit_sha ?? null);
 
   const resetToUnlinked = useCallback(() => {
     setSource(null);
@@ -415,24 +436,13 @@ export function GitSourcePanel({
                 </div>
               ) : (
                 <>
-                  {faults.length > 0 && (
-                    <GitOpsStateCard
-                      data-testid="gitops-fault"
-                      stateKey="unreachable"
-                      state={{
-                        label: 'gitops state unavailable',
-                        tone: 'destructive',
-                        line: faults[0].message,
-                        icon: AlertCircle,
-                      }}
-                    />
-                  )}
+                  {faults.length > 0 && <GitOpsFaultCard message={faults[0].message} />}
 
-                  {pendingStatus && (
+                  {pending && (
                     <GitOpsStateCard
                       data-testid="git-pending"
-                      stateKey={pendingStatus}
-                      state={SOURCE_STATE[pendingStatus]}
+                      stateKey={pending.status}
+                      state={SOURCE_STATE[pending.status]}
                       action={(
                         <Button
                           size="sm"
@@ -445,9 +455,9 @@ export function GitSourcePanel({
                         </Button>
                       )}
                     >
-                      {pendingSha && (
+                      {pending.sha && (
                         <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
-                          Commit <span className="tabular-nums text-foreground/80">{pendingSha.slice(0, 7)}</span>
+                          Commit <span className="tabular-nums text-foreground/80">{pending.sha.slice(0, 7)}</span>
                         </div>
                       )}
                     </GitOpsStateCard>

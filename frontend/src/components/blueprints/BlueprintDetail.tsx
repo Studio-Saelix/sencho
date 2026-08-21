@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Pencil, Pin, Play, Power, Trash2, TriangleAlert } from 'lucide-react';
+import { Pencil, Pin, Play, Power, Trash2 } from 'lucide-react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
-import GitOpsStateCard from '@/components/gitops/GitOpsStateCard';
+import { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import { absentFault } from '@/lib/gitopsState';
 import { Modal, ModalDestructiveHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Input } from '@/components/ui/input';
@@ -308,16 +308,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
 
                         {gitopsFaults.length > 0 && (
                             <SheetSection title="GitOps">
-                                <GitOpsStateCard
-                                    data-testid="gitops-fault"
-                                    stateKey="unreachable"
-                                    state={{
-                                        label: 'gitops state unavailable',
-                                        tone: 'destructive',
-                                        line: gitopsFaults[0].message,
-                                        icon: TriangleAlert,
-                                    }}
-                                />
+                                <GitOpsFaultCard message={gitopsFaults[0].message} />
                             </SheetSection>
                         )}
 

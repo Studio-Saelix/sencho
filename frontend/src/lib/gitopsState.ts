@@ -40,6 +40,7 @@ import type {
   GitOpsRevisionProjection,
   GitOpsRuntimeStatus,
   GitOpsSourceStatus,
+  SourceFacet,
 } from '@/types/gitops';
 
 /** The five semantic slots the design system defines. Fuchsia is reserved for image updates. */
@@ -358,6 +359,23 @@ export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
  */
 export type GitSourcePendingMap = Record<string, GitOpsSourceStatus | undefined>;
 
+/** A source facet that is actually describing a Git source, so it carries the identity fields. */
+export type LiveSourceFacet = Exclude<SourceFacet, { status: 'not_applicable' }>;
+
+/**
+ * The Git source facet of a live application, or null when there is none to show.
+ *
+ * Two exclusions, and both mean "this surface has nothing to say", not "an
+ * error": the absent arm carries no facets at all, and a live application whose
+ * source facet is `not_applicable` is Blueprint-owned, where naming a source
+ * state would be a claim the model never made.
+ */
+export function liveSourceFacet(revision: GitOpsRevisionProjection | null): LiveSourceFacet | null {
+  if (!revision || revision.targetMode === 'not_applicable') return null;
+  const source = revision.facets.source;
+  return source.status === 'not_applicable' ? null : source;
+}
+
 /**
  * The source status when a fetched candidate is waiting, else null.
  *
@@ -373,9 +391,8 @@ export type GitSourcePendingMap = Record<string, GitOpsSourceStatus | undefined>
  * update on a stack Git no longer manages.
  */
 export function pendingSourceStatus(revision: GitOpsRevisionProjection): GitOpsSourceStatus | null {
-  if (revision.targetMode === 'not_applicable') return null;
-  const source = revision.facets.source;
-  if (source.status === 'not_applicable' || source.status === 'not_live') return null;
+  const source = liveSourceFacet(revision);
+  if (!source || source.status === 'not_live') return null;
   return source.candidateGenerationId === null ? null : source.status;
 }
 

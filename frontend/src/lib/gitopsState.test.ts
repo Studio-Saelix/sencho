@@ -14,6 +14,7 @@ import {
   SOURCE_STATE,
   absentFault,
   identityRefLabel,
+  liveSourceFacet,
   pendingSourceStatus,
   type GitOpsTone,
 } from '@/lib/gitopsState';
@@ -157,6 +158,40 @@ describe('pendingSourceStatus', () => {
       }),
     });
     expect(pendingSourceStatus(revision)).toBe('applying');
+  });
+});
+
+describe('liveSourceFacet', () => {
+  it('is null when there is no revision to read', () => {
+    expect(liveSourceFacet(null)).toBeNull();
+  });
+
+  it('is null when there is no application to ask', () => {
+    expect(liveSourceFacet(absentRevision())).toBeNull();
+  });
+
+  it('is null for a Blueprint-owned application, which has no Git source', () => {
+    const revision = liveRevision({
+      targetMode: 'inline_blueprint',
+      facets: facets({
+        source: { status: 'not_applicable' },
+        placement: { status: 'blueprint_bound', completion: 'unknown' },
+      }),
+    });
+    expect(liveSourceFacet(revision)).toBeNull();
+  });
+
+  it('returns the facet, identity fields and all, for a live Git source', () => {
+    const source = plainSource('source_review_pending');
+    expect(liveSourceFacet(liveRevision({ facets: facets({ source }) }))).toEqual(source);
+  });
+
+  it('returns a retired source facet, which is a state to name rather than hide', () => {
+    // not_live is in SOURCE_STATE and reads as "the identity shown is what it
+    // was". Only pendingSourceStatus excludes it, because it is not an update
+    // waiting to be applied.
+    const source = { ...sourceIdentity(), status: 'not_live' as const, lifecycleStatus: 'detached' as const };
+    expect(liveSourceFacet(liveRevision({ facets: facets({ source }) }))).toEqual(source);
   });
 });
 

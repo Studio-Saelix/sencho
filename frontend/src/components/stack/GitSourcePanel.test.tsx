@@ -75,7 +75,7 @@ import {
   facets,
   liveRevision,
   missingApplicationLimitation,
-  plainSource,
+  sourceRevision,
 } from '@/__tests__/gitopsFixtures';
 import { SOURCE_STATE } from '@/lib/gitopsState';
 
@@ -102,9 +102,7 @@ const LINKED_SOURCE = {
   updated_at: 0,
   manifest_state: 'absent' as const,
   manifest: null,
-  gitopsRevision: liveRevision({
-    facets: facets({ source: plainSource('application_generation_accepted', { candidateGenerationId: null }) }),
-  }),
+  gitopsRevision: sourceRevision('application_generation_accepted', { candidateGenerationId: null }),
 };
 
 /** The linked source with its GitOps projection swapped for a specific state. */
@@ -305,7 +303,7 @@ describe('GitSourcePanel manifest summary', () => {
 describe('GitSourcePanel GitOps state', () => {
   it('names the waiting state rather than a generic pending update', async () => {
     vi.mocked(apiFetch).mockResolvedValue(
-      jsonRes(linkedWith(liveRevision({ facets: facets({ source: plainSource('source_conflict_blocker') }) }))),
+      jsonRes(linkedWith(sourceRevision('source_conflict_blocker'))),
     );
 
     render(panel());
@@ -319,7 +317,7 @@ describe('GitSourcePanel GitOps state', () => {
 
   it('offers apply wording for a candidate that needs no review', async () => {
     vi.mocked(apiFetch).mockResolvedValue(
-      jsonRes(linkedWith(liveRevision({ facets: facets({ source: plainSource('candidate_ready') }) }))),
+      jsonRes(linkedWith(sourceRevision('candidate_ready'))),
     );
 
     render(panel());
@@ -369,7 +367,7 @@ describe('GitSourcePanel GitOps state', () => {
     // longer manages, behind a Review button that does nothing.
     vi.mocked(apiFetch).mockImplementation(async (url: string) => {
       if (String(url).endsWith('/git-source') && !String(url).includes('?')) {
-        return jsonRes(linkedWith(liveRevision({ facets: facets({ source: plainSource('candidate_ready') }) })));
+        return jsonRes(linkedWith(sourceRevision('candidate_ready')));
       }
       return jsonRes({ ok: true });
     });
@@ -387,7 +385,7 @@ describe('GitSourcePanel GitOps state', () => {
     // one has to clear the projection, or stack A's pending commit renders
     // under stack B's header.
     vi.mocked(apiFetch).mockResolvedValue(
-      jsonRes(linkedWith(liveRevision({ facets: facets({ source: plainSource('candidate_ready') }) }))),
+      jsonRes(linkedWith(sourceRevision('candidate_ready'))),
     );
     const { rerender } = render(
       <GitSourcePanel open onOpenChange={vi.fn()} stackName="web" canEdit isDarkMode={false} />,
@@ -406,7 +404,7 @@ describe('GitSourcePanel GitOps state', () => {
 
   it('drops the revision after a save, which clears the staged candidate server side', async () => {
     vi.mocked(apiFetch).mockResolvedValue(
-      jsonRes(linkedWith(liveRevision({ facets: facets({ source: plainSource('candidate_ready') }) }))),
+      jsonRes(linkedWith(sourceRevision('candidate_ready'))),
     );
     render(panel());
     await screen.findByTestId('git-pending');
@@ -462,7 +460,7 @@ describe('GitSourcePanel GitOps state', () => {
 
   it('routes the pending card Review button to the pull endpoint', async () => {
     vi.mocked(apiFetch).mockResolvedValue(
-      jsonRes(linkedWith(liveRevision({ facets: facets({ source: plainSource('candidate_ready') }) }))),
+      jsonRes(linkedWith(sourceRevision('candidate_ready'))),
     );
     render(panel());
     const banner = await screen.findByTestId('git-pending');

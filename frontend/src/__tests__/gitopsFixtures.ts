@@ -24,7 +24,7 @@ import type {
  * `never_reconciled` and `checking_fetching` cannot be in. Building those from
  * here would produce a fixture no backend could emit.
  */
-type PlainSourceStatus =
+export type PlainSourceStatus =
   | 'application_generation_accepted'
   | 'candidate_ready'
   | 'source_review_pending'
@@ -134,6 +134,18 @@ export function liveRevision(overrides: Partial<GitOpsRevisionLive> = {}): GitOp
     availableActions: ['apply', 'dismiss'],
     ...overrides,
   };
+}
+
+/**
+ * The common case in the consumer suites: a live Direct application whose Git
+ * source sits in one named state. Pass `candidateGenerationId: null` for the
+ * variants that must have no candidate waiting behind that state.
+ */
+export function sourceRevision(
+  status: PlainSourceStatus,
+  overrides: Partial<SourceIdentityFields> = {},
+): GitOpsRevisionLive {
+  return liveRevision({ facets: facets({ source: plainSource(status, overrides) }) });
 }
 
 /** Nothing to project. Pass limitations for the fault case; empty is the ordinary one. */

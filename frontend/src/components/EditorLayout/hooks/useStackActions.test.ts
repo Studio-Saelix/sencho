@@ -21,10 +21,8 @@ vi.mock('@/components/ui/toast-store', () => ({
 import { apiFetch } from '@/lib/api';
 import {
   absentRevision,
-  facets,
-  liveRevision,
   missingApplicationLimitation,
-  plainSource,
+  sourceRevision,
 } from '@/__tests__/gitopsFixtures';
 import { toast } from '@/components/ui/toast-store';
 
@@ -2413,7 +2411,6 @@ describe('useStackActions reactive external-network retry ownership', () => {
   });
 });
 
-
 describe('useStackActions.refreshGitSourcePending', () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
@@ -2425,10 +2422,10 @@ describe('useStackActions.refreshGitSourcePending', () => {
 
   it('records the derived state of each waiting candidate', async () => {
     vi.mocked(apiFetch).mockResolvedValue(okJson([
-      gitSourceRow('web', liveRevision({ facets: facets({ source: plainSource('candidate_ready') }) })),
-      gitSourceRow('api', liveRevision({ facets: facets({ source: plainSource('source_conflict_blocker') }) })),
+      gitSourceRow('web', sourceRevision('candidate_ready')),
+      gitSourceRow('api', sourceRevision('source_conflict_blocker')),
     ]));
-    const { result, editorState } = setup({});
+    const { result, editorState } = setup();
     await result.current.refreshGitSourcePending();
     expect(editorState.setGitSourcePendingMap).toHaveBeenCalledWith({
       web: 'candidate_ready',
@@ -2440,13 +2437,9 @@ describe('useStackActions.refreshGitSourcePending', () => {
     // The raw pointer is set, but the model says the candidate is gone. The
     // model wins: this is the conflation the derived read exists to remove.
     vi.mocked(apiFetch).mockResolvedValue(okJson([
-      gitSourceRow(
-        'web',
-        liveRevision({ facets: facets({ source: plainSource('source_reconcile_required', { candidateGenerationId: null }) }) }),
-        'a1b2c3d',
-      ),
+      gitSourceRow('web', sourceRevision('source_reconcile_required', { candidateGenerationId: null }), 'a1b2c3d'),
     ]));
-    const { result, editorState } = setup({});
+    const { result, editorState } = setup();
     await result.current.refreshGitSourcePending();
     expect(editorState.setGitSourcePendingMap).toHaveBeenCalledWith({});
   });
@@ -2456,7 +2449,7 @@ describe('useStackActions.refreshGitSourcePending', () => {
       gitSourceRow('web', absentRevision(), 'a1b2c3d'),
       gitSourceRow('api', absentRevision(), null),
     ]));
-    const { result, editorState } = setup({});
+    const { result, editorState } = setup();
     await result.current.refreshGitSourcePending();
     expect(editorState.setGitSourcePendingMap).toHaveBeenCalledWith({ web: 'candidate_ready' });
   });
@@ -2466,9 +2459,9 @@ describe('useStackActions.refreshGitSourcePending', () => {
     // projection at all. Throwing on one row would abandon the whole map.
     vi.mocked(apiFetch).mockResolvedValue(okJson([
       { stack_name: 'legacy', pending_commit_sha: 'a1b2c3d' },
-      gitSourceRow('web', liveRevision({ facets: facets({ source: plainSource('candidate_ready') }) })),
+      gitSourceRow('web', sourceRevision('candidate_ready')),
     ]));
-    const { result, editorState } = setup({});
+    const { result, editorState } = setup();
     await result.current.refreshGitSourcePending();
     expect(editorState.setGitSourcePendingMap).toHaveBeenCalledWith({
       legacy: 'candidate_ready',
@@ -2482,21 +2475,21 @@ describe('useStackActions.refreshGitSourcePending', () => {
     vi.mocked(apiFetch).mockResolvedValue(okJson([
       gitSourceRow('web', absentRevision([missingApplicationLimitation]), 'a1b2c3d'),
     ]));
-    const { result, editorState } = setup({});
+    const { result, editorState } = setup();
     await result.current.refreshGitSourcePending();
     expect(editorState.setGitSourcePendingMap).toHaveBeenCalledWith({});
   });
 
   it('leaves the prior map alone when the request fails', async () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response('boom', { status: 500 }));
-    const { result, editorState } = setup({});
+    const { result, editorState } = setup();
     await result.current.refreshGitSourcePending();
     expect(editorState.setGitSourcePendingMap).not.toHaveBeenCalled();
   });
 
   it('leaves the prior map alone when the request throws', async () => {
     vi.mocked(apiFetch).mockRejectedValue(new Error('offline'));
-    const { result, editorState } = setup({});
+    const { result, editorState } = setup();
     await result.current.refreshGitSourcePending();
     expect(editorState.setGitSourcePendingMap).not.toHaveBeenCalled();
   });
