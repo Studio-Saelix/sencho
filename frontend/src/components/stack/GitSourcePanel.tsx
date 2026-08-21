@@ -228,16 +228,17 @@ export function GitSourcePanel({
         body: JSON.stringify(body),
       });
       if (res.ok) {
-        const data: GitSource = await res.json();
-        setSource(data);
-        // A material configuration change clears the staged candidate server
-        // side, and this response carries no revision to replace the one held
-        // here, so drop it rather than keep rendering a state that has moved.
-        setRevision(null);
         setToken('');
         setApplyModeOverride(null);
         toast.success('Git source saved.');
         onSourceChanged?.();
+        // Re-read rather than trust the save response, which carries the source
+        // row without a revision. A material configuration change clears the
+        // staged candidate server side, so the state held here has genuinely
+        // moved; dropping it left the panel blank until the next open, which
+        // reads as "this stack has no GitOps state" rather than as a state that
+        // was just invalidated.
+        await load();
       } else {
         const err = await res.json().catch(() => ({}));
         toast.error(err?.error || 'Failed to save Git source.');

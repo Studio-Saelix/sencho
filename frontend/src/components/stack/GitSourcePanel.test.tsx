@@ -402,18 +402,51 @@ describe('GitSourcePanel GitOps state', () => {
     expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
   });
 
-  it('drops the revision after a save, which clears the staged candidate server side', async () => {
+  it('re-reads after a save and shows the state the server reports', async () => {
+    // The save answers with a bare source row and no revision, so the panel
+    // cannot learn the new state from it. Keeping the old one would report a
+    // candidate the save has just invalidated; showing nothing would report
+    // "no GitOps here" for a stack that has it.
     vi.mocked(apiFetch).mockResolvedValue(
       jsonRes(linkedWith(sourceRevision('candidate_ready'))),
     );
     render(panel());
     await screen.findByTestId('git-pending');
 
-    // The PUT answers with a bare source and no revision.
-    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...LINKED_SOURCE, gitopsRevision: undefined }));
+    vi.mocked(apiFetch)
+      // The PUT.
+      .mockResolvedValueOnce(jsonRes({ ...LINKED_SOURCE, gitopsRevision: undefined }))
+      // The re-read, which is where the state actually comes from.
+      .mockResolvedValueOnce(jsonRes(linkedWith(
+        sourceRevision('source_reconcile_required', { candidateGenerationId: null }),
+      )));
     fireEvent.click(screen.getByRole('button', { name: /update/i }));
 
-    await waitFor(() => expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('git-source-state'))
+      .toHaveTextContent(SOURCE_STATE.source_reconcile_required.label));
+    // The staged candidate is gone, so nothing is offered to review.
+    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
+  });
+
+  it('does not go blank after a save', async () => {
+    // The save response carries no revision. Before the re-read, the panel
+    // dropped its copy and rendered nothing until the next open, which reads
+    // as a stack the model knows nothing about.
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(sourceRevision('application_generation_accepted', { candidateGenerationId: null }))),
+    );
+    render(panel());
+    await screen.findByTestId('git-source-state');
+
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes({ ...LINKED_SOURCE, gitopsRevision: undefined }))
+      .mockResolvedValueOnce(jsonRes(linkedWith(
+        sourceRevision('application_generation_accepted', { candidateGenerationId: null }),
+      )));
+    fireEvent.click(screen.getByRole('button', { name: /update/i }));
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    expect(screen.getByTestId('git-source-state')).toBeInTheDocument();
   });
 
   it('shows no source card for an application that has no Git source', async () => {
