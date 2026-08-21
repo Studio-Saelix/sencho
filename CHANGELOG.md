@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.98.0](https://github.com/Studio-Saelix/sencho/compare/v0.97.1...v0.98.0) (2026-08-21)
+
+
+### Added
+
+* **git:** classify managed-file changes before apply ([#1832](https://github.com/Studio-Saelix/sencho/issues/1832)) ([3c4c057](https://github.com/Studio-Saelix/sencho/commit/3c4c05746701729785cbcd48d5277be032c332aa))
+* **git:** complete-project materialization with a managed-project manifest ([#1786](https://github.com/Studio-Saelix/sencho/issues/1786)) ([578ce76](https://github.com/Studio-Saelix/sencho/commit/578ce7684d6823bfcdeccd6c849d205566daac04))
+* **notifications:** customizable per-channel JSON payload templates ([#1805](https://github.com/Studio-Saelix/sencho/issues/1805)) ([866d784](https://github.com/Studio-Saelix/sencho/commit/866d7843161f014108fb246c18d36d2207afa0e2))
+* **recovery:** complete authored-project atomic rollback generations ([#1819](https://github.com/Studio-Saelix/sencho/issues/1819)) ([f517888](https://github.com/Studio-Saelix/sencho/commit/f5178889ebabf8dbf9ea4a64fdd4141e45ebc084))
+* **resources:** add search, filters, and sort to Rollback generations ([#1788](https://github.com/Studio-Saelix/sencho/issues/1788)) ([9798700](https://github.com/Studio-Saelix/sencho/commit/9798700401ef590cbbeacd1c7cefc54ab440807f))
+
+
+### Fixed
+
+* **auth:** honor SSO-only CLI recovery without restart ([#1810](https://github.com/Studio-Saelix/sencho/issues/1810)) ([27fe0ae](https://github.com/Studio-Saelix/sencho/commit/27fe0ae83734d47983a488237a8d14583f64810f))
+* bump golang.org/x/net to v0.56.0 in Docker CLI and Compose builds ([#1829](https://github.com/Studio-Saelix/sencho/issues/1829)) ([6d57147](https://github.com/Studio-Saelix/sencho/commit/6d571473300478510055e4907b4ea38163e5d938))
+* bump moby/go-archive to v0.3.0 in Docker CLI and Compose builds ([#1845](https://github.com/Studio-Saelix/sencho/issues/1845)) ([a07401f](https://github.com/Studio-Saelix/sencho/commit/a07401f56447e640335c573b3cbf5c3d51eb1c10))
+* **editor:** dispose compose DiffEditor models after widget reset ([#1828](https://github.com/Studio-Saelix/sencho/issues/1828)) ([93a5ba9](https://github.com/Studio-Saelix/sencho/commit/93a5ba9f21f4900acabf37f39ec2efffff469d3e))
+* **frontend:** coalesce concurrent stack statuses fetches ([#1816](https://github.com/Studio-Saelix/sencho/issues/1816)) ([017ac57](https://github.com/Studio-Saelix/sencho/commit/017ac57654834962c7066e6167d2d666edc63479))
+* **frontend:** overlap stack list and status hydration requests ([#1820](https://github.com/Studio-Saelix/sencho/issues/1820)) ([c47b8eb](https://github.com/Studio-Saelix/sencho/commit/c47b8eb8e9eb087aef20184c9d4a786cf189b1ec))
+* **hydration-timing:** report list hydration relative to the foreground attempt ([#1813](https://github.com/Studio-Saelix/sencho/issues/1813)) ([88fc547](https://github.com/Studio-Saelix/sencho/commit/88fc5470e83b1ec823208d085a5788e4ab23de66))
+* **pilot:** preserve tunnel JWT across upgrade 401 reconnects ([#1818](https://github.com/Studio-Saelix/sencho/issues/1818)) ([2d35013](https://github.com/Studio-Saelix/sencho/commit/2d35013671e522fe114e206f50feb2de02a86514)), closes [#1817](https://github.com/Studio-Saelix/sencho/issues/1817)
+* **security:** refresh overview when image-update checks toggle ([#1827](https://github.com/Studio-Saelix/sencho/issues/1827)) ([cb1f6b1](https://github.com/Studio-Saelix/sencho/commit/cb1f6b116617d33eff99f3a54aead0266d40b0b2))
+* **security:** tie fixable CVE posture to image-update evidence ([#1815](https://github.com/Studio-Saelix/sencho/issues/1815)) ([fcd44f5](https://github.com/Studio-Saelix/sencho/commit/fcd44f56934ed038080c5832b45062809472a3a4))
+* **stacks:** remove repeated self-identity discovery from statuses hot path ([#1811](https://github.com/Studio-Saelix/sencho/issues/1811)) ([600367e](https://github.com/Studio-Saelix/sencho/commit/600367e66cc85dd99bdda86f1d2e3f94389b95ff))
+* **statuses:** align stack-status cache TTL and invalidation with polling ([#1814](https://github.com/Studio-Saelix/sencho/issues/1814)) ([55ca82a](https://github.com/Studio-Saelix/sencho/commit/55ca82abb27fadae8609a07c5b1b12967d68367d))
+* stop compose-ps spam after deleting a stack ([#1831](https://github.com/Studio-Saelix/sencho/issues/1831)) ([4c93947](https://github.com/Studio-Saelix/sencho/commit/4c93947004ff0e141c4a3aa96356106430e97888))
+* untag reviewed image names during prune ([#1836](https://github.com/Studio-Saelix/sencho/issues/1836)) ([01ffbdb](https://github.com/Studio-Saelix/sencho/commit/01ffbdbfc7f1b8886e6653300556b5a835f9b98f))
+* **whats-new:** add RBAC entry and a zoomable screenshot lightbox ([#1806](https://github.com/Studio-Saelix/sencho/issues/1806)) ([e9901aa](https://github.com/Studio-Saelix/sencho/commit/e9901aa24bf3ddc1b00816a3a7e2fcfc2226c7b8))
+
 ## [0.97.1](https://github.com/Studio-Saelix/sencho/compare/v0.97.0...v0.97.1) (2026-08-09)
 
 
