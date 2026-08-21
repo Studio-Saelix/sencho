@@ -64,4 +64,24 @@ describe('deriveHealth', () => {
     expect(deriveHealth(stats(), null, []).level).toBe('healthy');
     expect(deriveHealth(stats(), sys('10', '20', null), []).level).toBe('healthy');
   });
+
+  it('uses working-set usagePercent for health even when balloon-adjusted percent is low', () => {
+    const system = sys('10', '90', '30');
+    const r = deriveHealth(
+      stats(),
+      {
+        ...system,
+        memory: {
+          ...system.memory,
+          ballooned: 76,
+          effectiveUsed: 14,
+          effectiveTotal: 100,
+          effectiveUsagePercent: '14',
+        },
+      },
+      [],
+    );
+    expect(r.level).toBe('critical');
+    expect(r.reasons).toContain('RAM 90%');
+  });
 });
