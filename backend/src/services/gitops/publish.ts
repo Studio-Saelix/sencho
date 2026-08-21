@@ -51,6 +51,18 @@ export type GitOpsInvalidateEvent = {
   ts: number;
 };
 
+/**
+ * Pins the requirement the alias above exists to satisfy.
+ *
+ * Without this, switching `type` to `interface` compiles here and fails at the
+ * startup wiring in another module, as an index-signature complaint that says
+ * nothing about the cause. The failure belongs at the declaration.
+ */
+type AssertsOpenEnvelope =
+  GitOpsInvalidateEvent extends { type: string; [key: string]: unknown } ? true : never;
+const _openEnvelope: AssertsOpenEnvelope = true;
+void _openEnvelope;
+
 export type GitOpsEventSink = (event: GitOpsInvalidateEvent) => void;
 
 /** What the drain needs to know, captured while it is still typed. */

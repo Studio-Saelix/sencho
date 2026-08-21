@@ -7,6 +7,20 @@ import type { GitOpsLimitation } from '@/types/gitops';
 
 const limitation = (code: string): GitOpsLimitation => ({ code, message: 'log wording', evidence: null });
 
+/**
+ * The operator wording for a code, insisting it exists.
+ *
+ * The map is typed with an optional value so a lookup miss is visible to the
+ * compiler rather than only to a comment. These cases are about codes that do
+ * have copy, so a miss here means the fixture is wrong and should say so
+ * loudly instead of comparing against undefined.
+ */
+function copyFor(code: string): string {
+  const copy = GITOPS_LIMITATION_COPY[code];
+  if (!copy) throw new Error(`no operator copy for ${code}`);
+  return copy;
+}
+
 describe('GitOpsCaveats', () => {
   it('renders nothing when the state has nothing to qualify', () => {
     render(<GitOpsCaveats revision={liveRevision({ limitations: [] })} />);
@@ -23,8 +37,8 @@ describe('GitOpsCaveats', () => {
       limitations: [limitation('legacy_pending'), limitation('lkg_generation_missing')],
     })} />);
 
-    expect(screen.getByText(GITOPS_LIMITATION_COPY.legacy_pending)).toBeInTheDocument();
-    expect(screen.getByText(GITOPS_LIMITATION_COPY.lkg_generation_missing)).toBeInTheDocument();
+    expect(screen.getByText(copyFor('legacy_pending'))).toBeInTheDocument();
+    expect(screen.getByText(copyFor('lkg_generation_missing'))).toBeInTheDocument();
     expect(screen.queryByText('log wording')).toBeNull();
   });
 
@@ -49,7 +63,7 @@ describe('GitOpsCaveats', () => {
     })} />);
 
     expect(screen.getByText('one thing could not be proven')).toBeInTheDocument();
-    expect(screen.getAllByText(GITOPS_LIMITATION_COPY.lkg_generation_missing)).toHaveLength(1);
+    expect(screen.getAllByText(copyFor('lkg_generation_missing'))).toHaveLength(1);
   });
 
   it('says nothing for a fault on the absent arm', () => {

@@ -72,10 +72,23 @@ describe('gitops limitation copy', () => {
   it('states a condition in each sentence, ending it properly', () => {
     for (const code of LIVE_ARM_CODES) {
       const copy = GITOPS_LIMITATION_COPY[code];
+      // Narrowed rather than asserted: the coverage case above is what proves
+      // every code has copy, so a miss here would otherwise be reported as a
+      // property access on undefined instead of as the missing entry it is.
+      expect(copy, `no operator copy for ${code}`).toBeDefined();
+      if (!copy) continue;
       expect(copy.length).toBeGreaterThan(40);
       expect(copy.endsWith('.')).toBe(true);
       expect(copy).not.toMatch(/—/);
     }
+  });
+
+  it('carries no copy for a code the backend cannot emit', () => {
+    // The reverse of the coverage case above: a retired code leaving stale
+    // wording behind is invisible without this, because the fallback only
+    // fires for codes that are missing rather than for ones that linger.
+    const documented = Object.keys(GITOPS_LIMITATION_COPY).sort();
+    expect(documented).toEqual([...LIVE_ARM_CODES].sort());
   });
 
   it('collapses the same caveat arriving from several places', () => {

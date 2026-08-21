@@ -353,6 +353,22 @@ export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
 };
 
 /**
+ * Read views over the two maps for a status that crossed the wire.
+ *
+ * The maps above are total over the closed unions, so indexing them yields a
+ * non-optional value and a miss is invisible to the compiler. That is right
+ * for a status this build derived and wrong for one a proxied node sent, which
+ * may belong to a vocabulary this build has never seen. Reading through these
+ * makes the miss a fact TypeScript produces, so the guard on it cannot be
+ * mistaken for dead code and deleted.
+ *
+ * Same objects, no copy, no cast: a total record over string-literal keys is
+ * assignable to a partial record over `string`.
+ */
+export const SOURCE_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = SOURCE_STATE;
+export const RUNTIME_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = RUNTIME_STATE;
+
+/**
  * Frontend view state: stack name to the source status of its waiting candidate.
  * A key being present is what "this stack has a Git update waiting" means, so
  * the value is optional: a miss is a stack with nothing waiting, not a status.

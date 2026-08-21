@@ -28,8 +28,14 @@ import type { GitOpsLimitation } from '@/types/gitops';
  * and merged into the projection later, so a node running a newer build can
  * legitimately send a code this build has never heard of. Closing the type here
  * would only move that surprise to a type assertion.
+ *
+ * The value is optional so a lookup miss is a fact the compiler produces
+ * rather than one a comment asserts. This project does not set
+ * `noUncheckedIndexedAccess`, so a plain `Record<string, string>` would type
+ * every miss as a `string` and make the fallback below look like dead code to
+ * anything that trusts the types.
  */
-export const GITOPS_LIMITATION_COPY: Record<string, string> = {
+export const GITOPS_LIMITATION_COPY: Record<string, string | undefined> = {
   // --- derived while projecting -------------------------------------------
   repo_identity_invalid:
     'The stored repository identity could not be read, so this state cannot be tied back to a specific repository.',

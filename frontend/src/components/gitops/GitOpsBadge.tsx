@@ -1,4 +1,4 @@
-import { GITOPS_TONE_CLASS, SOURCE_STATE, RUNTIME_STATE, type GitOpsStateMeta } from '@/lib/gitopsState';
+import { GITOPS_TONE_CLASS, SOURCE_STATE_LOOKUP, RUNTIME_STATE_LOOKUP } from '@/lib/gitopsState';
 import type { GitOpsRuntimeStatus, GitOpsSourceStatus } from '@/types/gitops';
 import { cn } from '@/lib/utils';
 
@@ -37,15 +37,17 @@ type GitOpsBadgeProps = GitOpsBadgeFacet & {
  */
 export default function GitOpsBadge(props: GitOpsBadgeProps) {
   const { compact = false, className } = props;
-  // Looked up into an optional, because the status arrives over a proxy from a
-  // node that may run a newer vocabulary than this build knows. The maps are
-  // closed at compile time, which says nothing about what is on the wire, and
-  // an unmapped key would otherwise dereference undefined inside a stack row
-  // and take the whole list down with it. Rendering nothing matches what the
-  // join already does for a stack it has no state for.
-  const state: GitOpsStateMeta | undefined = props.facet === 'source'
-    ? SOURCE_STATE[props.status]
-    : RUNTIME_STATE[props.status];
+  // Read through the partial views, because the status arrives over a proxy
+  // from a node that may run a newer vocabulary than this build knows. The maps
+  // are total over the closed unions, which says nothing about what is on the
+  // wire, and an unmapped key would otherwise dereference undefined inside a
+  // stack row and take the whole list down with it. Going through the views
+  // rather than annotating the result means the miss is a fact the compiler
+  // derives, so this guard cannot read as dead code. Rendering nothing matches
+  // what the join already does for a stack it has no state for.
+  const state = props.facet === 'source'
+    ? SOURCE_STATE_LOOKUP[props.status]
+    : RUNTIME_STATE_LOOKUP[props.status];
   if (!state) return null;
   const Icon = state.icon;
 
