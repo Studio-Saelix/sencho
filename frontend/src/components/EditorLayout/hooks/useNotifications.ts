@@ -9,6 +9,14 @@ interface UseNotificationsOptions {
   nodes: Node[];
   onStateInvalidate: () => void;
   onImageUpdatesChange: () => void;
+  /**
+   * A GitOps transition committed somewhere. Every stage is worth a refetch,
+   * so unlike image updates there is no action filter: the surfaces that read
+   * GitOps state derive it from the projection, and any stage can move it.
+   * The callback is expected to coalesce, since a single operation commits
+   * several transitions in a row.
+   */
+  onGitOpsChange: () => void;
 }
 
 /** Local stack-updated and preview-reconcile clears both refresh the update map. */
@@ -16,7 +24,7 @@ function isImageUpdatesRefreshAction(action: unknown): boolean {
   return action === 'stack-updated' || action === 'update-status-reconciled';
 }
 
-export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChange }: UseNotificationsOptions) {
+export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChange, onGitOpsChange }: UseNotificationsOptions) {
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [tickerConnected, setTickerConnected] = useState(false);
 
@@ -29,6 +37,8 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
   onStateInvalidateRef.current = onStateInvalidate;
   const onImageUpdatesChangeRef = useRef(onImageUpdatesChange);
   onImageUpdatesChangeRef.current = onImageUpdatesChange;
+  const onGitOpsChangeRef = useRef(onGitOpsChange);
+  onGitOpsChangeRef.current = onGitOpsChange;
   // One-shot: the notifications_ready milestone reflects the first local settle.
   // Its spans instrument only that first fetch so later polls do not pollute the
   // report.
@@ -196,6 +206,8 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
               reconcileNotificationsInvalidateRef.current(msg);
             } else if (msg.scope === 'image-updates' && isImageUpdatesRefreshAction(msg.action)) {
               onImageUpdatesChangeRef.current();
+            } else if (msg.scope === 'gitops') {
+              onGitOpsChangeRef.current();
             }
           }
         } catch (e) {
@@ -278,6 +290,11 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
                 reconcileNotificationsInvalidateRef.current({ ...msg, nodeId: rn.id });
               } else if (msg.scope === 'image-updates' && isImageUpdatesRefreshAction(msg.action)) {
                 onImageUpdatesChangeRef.current();
+              } else if (msg.scope === 'gitops') {
+                // The payload's own nodeId is the remote's numbering, which is
+                // meaningless here. The refresh is fleet-wide anyway, so it is
+                // dropped rather than translated.
+                onGitOpsChangeRef.current();
               }
             }
           } catch (e) {

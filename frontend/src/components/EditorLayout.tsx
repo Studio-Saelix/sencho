@@ -293,6 +293,25 @@ export default function EditorLayout() {
       .filter((item): item is NonNullable<typeof item> => item !== null);
   }, [quickLinkIds, navModel.quickLinkCandidates]);
 
+  // Coalesce a burst of GitOps transitions into one refetch of the derived
+  // state. One operation commits several transitions in a row, and a boot-time
+  // migration commits a great many, so refetching per event would thrash the
+  // API for a picture that only settles at the end. Same 250ms window the stack
+  // refresh uses. The ref indirection is needed because stackActions is built
+  // below this point.
+  const refreshGitOpsRef = useRef<() => void>(() => {});
+  const gitopsRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleGitOpsRefresh = useCallback(() => {
+    if (gitopsRefreshTimerRef.current) clearTimeout(gitopsRefreshTimerRef.current);
+    gitopsRefreshTimerRef.current = setTimeout(() => {
+      gitopsRefreshTimerRef.current = null;
+      refreshGitOpsRef.current();
+    }, 250);
+  }, []);
+  useEffect(() => () => {
+    if (gitopsRefreshTimerRef.current) clearTimeout(gitopsRefreshTimerRef.current);
+  }, []);
+
   const {
     notifications,
     tickerConnected,
@@ -304,6 +323,7 @@ export default function EditorLayout() {
     nodes,
     onStateInvalidate: scheduleStateInvalidateRefresh,
     onImageUpdatesChange: fetchImageUpdates,
+    onGitOpsChange: scheduleGitOpsRefresh,
   });
 
   const { stats: containerStats, error: containerStatsError } = useContainerStats(
@@ -337,6 +357,10 @@ export default function EditorLayout() {
     isAdmin,
     canReapplyCompose,
   });
+
+  // Close the loop opened above: the debounced GitOps refresh now has something
+  // to call. Assigned every render so it never holds a stale stackActions.
+  refreshGitOpsRef.current = () => { void stackActions.refreshGitSourcePending(); };
 
   // Wire the ref now that stackActions is available
   resetEditorStateRef.current = stackActions.resetEditorState;

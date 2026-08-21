@@ -31,6 +31,8 @@ import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { sweepStaleTempDirs as sweepStaleGitTempDirs, sweepGitManifestOrphans } from '../services/GitSourceService';
 import { reclassifyInterruptedOperations, resolveInterruptedCreates } from '../services/gitops/createRecovery';
 import { loadMigrationManifests, migrateDirectGitStacks, migrateInlineBlueprints } from '../services/gitops/migrate';
+import { setGitOpsEventSink } from '../services/gitops/publish';
+import { NotificationService } from '../services/NotificationService';
 import { sanitizeForLog } from '../utils/safeLog';
 import { PORT } from '../helpers/constants';
 import { LOW_MEMORY_FLOOR_BYTES } from '../utils/spawnErrors';
@@ -148,6 +150,14 @@ export async function startServer(server: Server): Promise<void> {
   } catch (err) {
     console.error('[Startup] Deployed stack deletion reconcile failed:', (err as Error).message);
   }
+  // Announce committed GitOps transitions from here on. Installed before the
+  // startup reconciles and the migration passes, all of which write history:
+  // no client is connected this early, so those rows cost nothing to announce,
+  // and installing later would mean a boot-time transition was counted but
+  // never signalled, which is a harder thing to reason about than a broadcast
+  // nobody is listening to.
+  setGitOpsEventSink((event) => NotificationService.getInstance().broadcastEvent(event));
+
   // Interrupted rollback restores must finish before mutation-capable services
   // or HTTP accept traffic. Fail closed: rethrow so unresolved intents never
   // leave mutators or HTTP accepting writes.

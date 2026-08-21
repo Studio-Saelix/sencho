@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
 import { decodeGitOpsJson, encodeGitOpsJson, isRecord, GitOpsJsonError } from './json';
+import { enqueueHistoryPublication } from './publish';
 import { sanitizeForLog } from '../../utils/safeLog';
 import type {
   GitOpsApplicationRow,
@@ -12,12 +13,73 @@ import type {
 
 export type HistoryOutcome = GitOpsHistoryRow['outcome'];
 
+/**
+ * Every stage a transition can record.
+ *
+ * The column itself is open TEXT, because a stage is an audit label rather than
+ * a state and a future producer must be able to add one without a migration.
+ * This union constrains the *writers*: it is what makes the set finite at
+ * compile time, so the metrics keyspace is bounded by the type rather than by
+ * whatever strings happen to reach the insert. Adding a producer stage without
+ * adding it here fails the build, which is the point.
+ */
+export type GitOpsHistoryStage =
+  | 'application_activated'
+  | 'application_tombstoned'
+  | 'applied'
+  | 'apply_failed'
+  | 'apply_started'
+  | 'artifact_evidence_recorded'
+  | 'artifact_expectation_accepted'
+  | 'blueprint_ack_recorded'
+  | 'blueprint_correcting'
+  | 'blueprint_deploy_failed'
+  | 'blueprint_deploy_started'
+  | 'blueprint_drifted'
+  | 'blueprint_evict_blocked'
+  | 'blueprint_state_review'
+  | 'blueprint_withdraw_failed'
+  | 'blueprint_withdraw_started'
+  | 'blueprint_withdrawn'
+  | 'candidate_ready'
+  | 'candidate_superseded'
+  | 'config_changed_pending_cleared'
+  | 'create_failed'
+  | 'deploy_bound'
+  | 'deploy_failed'
+  | 'deploy_started'
+  | 'deploy_unbound'
+  | 'dismissed'
+  | 'fetch_failed'
+  | 'fetch_started'
+  | 'fetched'
+  | 'fetched_invalid'
+  | 'health_finalized'
+  | 'intent_revised'
+  | 'operation_interrupted'
+  | 'partial_cleared'
+  | 'partially_rolled_out'
+  | 'recovery_failed'
+  | 'recovery_started'
+  | 'recovery_succeeded'
+  | 'rollback_completed'
+  | 'rollback_in_progress'
+  | 'rollback_partial_failed'
+  | 'rollout_candidate_opened'
+  | 'rollout_paused'
+  | 'rollout_unpaused'
+  | 'source_conflict_blocker'
+  | 'source_retry_scheduled'
+  | 'source_suspended'
+  | 'source_unsuspended'
+  | 'target_tombstoned';
+
 export type HistoryInsert = {
   application: GitOpsApplicationRow;
   nodeId: number | null;
   dedupeTarget: string;
   operationId: string;
-  stage: string;
+  stage: GitOpsHistoryStage;
   outcome: HistoryOutcome;
   trigger: string;
   actor: string | null;
@@ -51,6 +113,11 @@ export type HistoryInsert = {
  * tolerated here; every other constraint failure throws and rolls the
  * transaction back. Callers turn a null return into `replayed: true`, so the
  * dedupe index is load-bearing for idempotency, not just for storage hygiene.
+ *
+ * An inserted row is also queued for announcement here rather than at the
+ * transition call sites, because this is the only place that can tell an
+ * insert from a replay: the callers see a null and turn it into `replayed`,
+ * by which point the distinction has already been made once.
  */
 export function insertHistory(db: Database.Database, row: HistoryInsert): string | null {
   const id = randomUUID();
@@ -104,7 +171,20 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
     row.recoveryRef ?? null,
     row.redactedReasonClass ?? null,
   );
-  return result.changes === 1 ? id : null;
+  if (result.changes !== 1) return null;
+  enqueueHistoryPublication({
+    db,
+    id,
+    stage: row.stage,
+    outcome: row.outcome,
+    applicationId: row.application.id,
+    targetMode: row.application.target_mode as GitOpsTargetMode,
+    stackName: row.application.stack_name,
+    blueprintId: row.application.blueprint_id,
+    nodeId: row.nodeId,
+    at: row.at,
+  });
+  return id;
 }
 
 /** Page size when the caller does not ask for one. */

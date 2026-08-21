@@ -6,7 +6,7 @@ import {
   encodeArtifactEvidenceJson,
   encodeGitOpsEvidenceLimitations,
 } from './json';
-import { insertHistory, type HistoryOutcome } from './history';
+import { insertHistory, type GitOpsHistoryStage, type HistoryOutcome } from './history';
 import { emptyTargetRow, GitOpsStore } from './store';
 import type {
   ArtifactQualification,
@@ -1983,7 +1983,7 @@ export class GitOpsTransitions {
   private mutateApp(
     applicationId: string,
     envelope: EventEnvelope,
-    stage: string,
+    stage: GitOpsHistoryStage,
     outcome: HistoryOutcome,
     mutate: (app: GitOpsApplicationRow, extras: { historyIds: string[] }) => void,
     extraHistory: {
@@ -2024,7 +2024,7 @@ export class GitOpsTransitions {
     applicationId: string,
     nodeId: number,
     envelope: EventEnvelope,
-    stage: string,
+    stage: GitOpsHistoryStage,
     generationId: string | null,
     mutate: (target: GitOpsTargetCurrentRow) => { before: Record<string, unknown>; after: Record<string, unknown> },
     outcome: HistoryOutcome = 'committed',
@@ -2058,7 +2058,7 @@ export class GitOpsTransitions {
     app: GitOpsApplicationRow,
     envelope: EventEnvelope,
     fields: {
-      stage: string;
+      stage: GitOpsHistoryStage;
       outcome: HistoryOutcome;
       before: Record<string, unknown>;
       after: Record<string, unknown>;

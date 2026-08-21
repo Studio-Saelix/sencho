@@ -72,7 +72,7 @@ describe('useNotifications', () => {
 
   it('starts with empty notifications and disconnected state', () => {
     const { result } = renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
     );
     expect(result.current.notifications).toEqual([]);
     expect(result.current.tickerConnected).toBe(false);
@@ -80,7 +80,7 @@ describe('useNotifications', () => {
 
   it('opens a local notification WebSocket on mount', () => {
     renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
     );
     expect(MockWS.instances.length).toBeGreaterThanOrEqual(1);
     expect(MockWS.instances[0]).toBeDefined();
@@ -88,7 +88,7 @@ describe('useNotifications', () => {
 
   it('sets tickerConnected true when local WS opens', () => {
     const { result } = renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
     );
     act(() => { MockWS.instances[0]?.onopen?.(); });
     expect(result.current.tickerConnected).toBe(true);
@@ -96,7 +96,7 @@ describe('useNotifications', () => {
 
   it('adds notification when local WS receives notification message', () => {
     const { result } = renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
     );
     act(() => { MockWS.instances[0]?.onopen?.(); });
     act(() => {
@@ -110,7 +110,7 @@ describe('useNotifications', () => {
 
   it('clearAllNotifications empties the local state', async () => {
     const { result } = renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
     );
     act(() => { MockWS.instances[0]?.onopen?.(); });
     act(() => {
@@ -127,7 +127,7 @@ describe('useNotifications', () => {
     const onStateInvalidate = vi.fn();
     const onImageUpdatesChange = vi.fn();
     renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate, onImageUpdatesChange }),
+      useNotifications({ nodes: [localNode], onStateInvalidate, onImageUpdatesChange, onGitOpsChange: vi.fn() }),
     );
     act(() => { MockWS.instances[0]?.onopen?.(); });
     act(() => {
@@ -145,7 +145,7 @@ describe('useNotifications', () => {
   it('fires onImageUpdatesChange on update-status-reconciled', () => {
     const onImageUpdatesChange = vi.fn();
     renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange }),
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange, onGitOpsChange: vi.fn() }),
     );
     act(() => { MockWS.instances[0]?.onopen?.(); });
     act(() => {
@@ -162,7 +162,7 @@ describe('useNotifications', () => {
   it('ignores unrelated image-updates actions for the refresh callback', () => {
     const onImageUpdatesChange = vi.fn();
     renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange }),
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange, onGitOpsChange: vi.fn() }),
     );
     act(() => { MockWS.instances[0]?.onopen?.(); });
     act(() => {
@@ -180,7 +180,7 @@ describe('useNotifications', () => {
     const onStateInvalidate = vi.fn();
     const onImageUpdatesChange = vi.fn();
     renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate, onImageUpdatesChange }),
+      useNotifications({ nodes: [localNode], onStateInvalidate, onImageUpdatesChange, onGitOpsChange: vi.fn() }),
     );
     act(() => { MockWS.instances[0]?.onopen?.(); });
     act(() => {
@@ -195,9 +195,83 @@ describe('useNotifications', () => {
     expect(onImageUpdatesChange).not.toHaveBeenCalled();
   });
 
+  it('fires onGitOpsChange for any gitops stage on the local socket', () => {
+    const onGitOpsChange = vi.fn();
+    renderHook(() =>
+      useNotifications({
+        nodes: [localNode],
+        onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange,
+      }),
+    );
+    act(() => { MockWS.instances[0]?.onopen?.(); });
+    // Two unrelated stages. Unlike image updates there is no action filter, so
+    // both count: any transition can move the state the surfaces derive.
+    act(() => {
+      MockWS.instances[0]?.onmessage?.({
+        data: JSON.stringify({
+          type: 'state-invalidate', scope: 'gitops', action: 'fetch_started',
+          applicationId: 'app-1', targetMode: 'direct', stackName: 'foo',
+          blueprintId: null, nodeId: 1, ts: 1000,
+        }),
+      });
+      MockWS.instances[0]?.onmessage?.({
+        data: JSON.stringify({
+          type: 'state-invalidate', scope: 'gitops', action: 'applied',
+          applicationId: 'app-1', targetMode: 'direct', stackName: 'foo',
+          blueprintId: null, nodeId: 1, ts: 1001,
+        }),
+      });
+    });
+    expect(onGitOpsChange).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not fire onGitOpsChange for another scope', () => {
+    const onGitOpsChange = vi.fn();
+    renderHook(() =>
+      useNotifications({
+        nodes: [localNode],
+        onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange,
+      }),
+    );
+    act(() => { MockWS.instances[0]?.onopen?.(); });
+    act(() => {
+      MockWS.instances[0]?.onmessage?.({
+        data: JSON.stringify({
+          type: 'state-invalidate', scope: 'stack', nodeId: 1,
+          stackName: 'foo', action: 'start', ts: 1000,
+        }),
+      });
+    });
+    expect(onGitOpsChange).not.toHaveBeenCalled();
+  });
+
+  it('fires onGitOpsChange for a remote node transition', async () => {
+    const onGitOpsChange = vi.fn();
+    const remote = makeRemoteNode('online', { id: 2 });
+    renderHook(() =>
+      useNotifications({
+        nodes: [localNode, remote],
+        onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange,
+      }),
+    );
+    await waitFor(() => expect(MockWS.instances).toHaveLength(2));
+    act(() => { MockWS.instances[1]?.onopen?.(); });
+    act(() => {
+      MockWS.instances[1]?.onmessage?.({
+        data: JSON.stringify({
+          type: 'state-invalidate', scope: 'gitops', action: 'deploy_started',
+          applicationId: 'app-2', targetMode: 'direct', stackName: 'bar',
+          // The remote's own numbering, which the hub never adopts.
+          blueprintId: null, nodeId: 7, ts: 1000,
+        }),
+      });
+    });
+    expect(onGitOpsChange).toHaveBeenCalledTimes(1);
+  });
+
   it('deleteNotification removes the matching item', async () => {
     const { result } = renderHook(() =>
-      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
     );
     act(() => { MockWS.instances[0]?.onopen?.(); });
     const notif = makeNotif({ id: 5, nodeId: localNode.id });
@@ -212,7 +286,7 @@ describe('useNotifications', () => {
 
   it('does not open a WS or poll an offline remote node', async () => {
     renderHook(() =>
-      useNotifications({ nodes: [localNode, makeRemoteNode('offline')], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode, makeRemoteNode('offline')], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
     );
     // Only the local notification socket is created; the offline node is skipped.
     expect(MockWS.instances).toHaveLength(1);
@@ -223,7 +297,7 @@ describe('useNotifications', () => {
 
   it('opens a WS and polls an online remote node', async () => {
     renderHook(() =>
-      useNotifications({ nodes: [localNode, makeRemoteNode('online')], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode, makeRemoteNode('online')], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
     );
     // Local socket plus a per-node socket for the online remote.
     expect(MockWS.instances).toHaveLength(2);
@@ -241,7 +315,7 @@ describe('useNotifications', () => {
     });
 
     const { result } = renderHook(() =>
-      useNotifications({ nodes: [localNode, remote], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode, remote], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
     );
 
     await waitFor(() => expect(result.current.notifications).toHaveLength(1));
@@ -255,7 +329,7 @@ describe('useNotifications', () => {
     renderHook(() =>
       useNotifications({
         nodes: [localNode, makeRemoteNode('online', { id: 2 }), makeRemoteNode('offline', { id: 3, name: 'Dead' })],
-        onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(),
+        onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn(),
       }),
     );
     // Local + online remote only; the offline node gets no socket.
@@ -266,7 +340,7 @@ describe('useNotifications', () => {
 
   it('closes the socket when a subscribed node transitions to offline', () => {
     const { rerender } = renderHook(
-      ({ nodes }) => useNotifications({ nodes, onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      ({ nodes }) => useNotifications({ nodes, onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
       { initialProps: { nodes: [localNode, makeRemoteNode('online')] } },
     );
     // instances[0] is the local socket; instances[1] is the online remote's socket.
@@ -281,7 +355,7 @@ describe('useNotifications', () => {
 
   it('still subscribes to and polls a remote node with unknown status', async () => {
     renderHook(() =>
-      useNotifications({ nodes: [localNode, makeRemoteNode('unknown')], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode, makeRemoteNode('unknown')], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
     );
     // 'unknown' is not yet probed, so it is treated as reachable (not filtered out)
     // on both the WS and the REST-poll surfaces.
@@ -293,7 +367,7 @@ describe('useNotifications', () => {
     (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => [] });
     const remote = makeRemoteNode('online', { id: 2, name: 'Remote-B' });
     const { result } = renderHook(() =>
-      useNotifications({ nodes: [localNode, remote], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes: [localNode, remote], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
     );
     await waitFor(() => expect(apiFetch).toHaveBeenCalled());
 
@@ -348,7 +422,7 @@ describe('useNotifications', () => {
     const onStateInvalidate = vi.fn();
     const onImageUpdatesChange = vi.fn();
     renderHook(() =>
-      useNotifications({ nodes, onStateInvalidate, onImageUpdatesChange }),
+      useNotifications({ nodes, onStateInvalidate, onImageUpdatesChange, onGitOpsChange: vi.fn() }),
     );
     await waitFor(() => expect(apiFetch).toHaveBeenCalled());
     const afterMount = (apiFetch as ReturnType<typeof vi.fn>).mock.calls.filter(
@@ -387,7 +461,7 @@ describe('useNotifications', () => {
     });
 
     const { result } = renderHook(() =>
-      useNotifications({ nodes, onStateInvalidate, onImageUpdatesChange }),
+      useNotifications({ nodes, onStateInvalidate, onImageUpdatesChange, onGitOpsChange: vi.fn() }),
     );
     await waitFor(() => expect(fetchForNode).toHaveBeenCalledWith('/notifications', 2));
     const afterMount = (fetchForNode as ReturnType<typeof vi.fn>).mock.calls.filter(
@@ -418,7 +492,7 @@ describe('useNotifications', () => {
     (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => [] });
     const nodes = [localNode];
     renderHook(() =>
-      useNotifications({ nodes, onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes, onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
     );
     await waitFor(() => expect(apiFetch).toHaveBeenCalled());
     const afterMount = (apiFetch as ReturnType<typeof vi.fn>).mock.calls.filter(
@@ -449,7 +523,7 @@ describe('useNotifications', () => {
     const remote = makeRemoteNode('online', { id: 7, name: 'Remote-7' });
     const nodes = [localNode, remote];
     const { result } = renderHook(() =>
-      useNotifications({ nodes, onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes, onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
     );
     await waitFor(() => expect(fetchForNode).toHaveBeenCalledWith('/notifications', 7));
 
@@ -512,7 +586,7 @@ describe('useNotifications', () => {
     });
 
     const { result } = renderHook(() =>
-      useNotifications({ nodes, onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+      useNotifications({ nodes, onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
     );
     await waitFor(() => expect(result.current.notifications.some((n) => n.message === 'remote-web')).toBe(true));
     expect(nodeMessageKeys(result.current.notifications)).toEqual([
@@ -580,7 +654,7 @@ describe('useNotifications', () => {
     const onStateInvalidate = vi.fn();
     const onImageUpdatesChange = vi.fn();
     const { result } = renderHook(() =>
-      useNotifications({ nodes, onStateInvalidate, onImageUpdatesChange }),
+      useNotifications({ nodes, onStateInvalidate, onImageUpdatesChange, onGitOpsChange: vi.fn() }),
     );
     await waitFor(() => expect(apiFetch).toHaveBeenCalled());
     const afterMount = call;
