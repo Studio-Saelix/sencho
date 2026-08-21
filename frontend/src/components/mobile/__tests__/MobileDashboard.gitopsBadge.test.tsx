@@ -65,8 +65,11 @@ describe('MobileDashboard GitOps badge', () => {
     const badge = screen.getByTestId('gitops-badge');
     expect(badge).toHaveAttribute('data-state', 'candidate_ready');
     // Touch has no hover, so the word has to be on screen rather than only in
-    // the title.
-    expect(badge).toHaveTextContent('pending update');
+    // the title. `toHaveTextContent` also matches sr-only text, so it would
+    // stay green if the badge were rendered compact, which is the thing this
+    // is here to rule out: assert against the visible node instead.
+    const visible = badge.querySelector(':scope > span:not(.sr-only)');
+    expect(visible?.textContent).toBe('pending update');
   });
 
   it('renders no badge for a stack the model says nothing about', () => {

@@ -72,11 +72,17 @@ describe('useGitOpsSourceStates', () => {
     apiFetch.mockResolvedValue(ok([
       { stack_name: 'bookstack', gitopsRevision: sourceRevision('candidate_ready') },
     ]));
-    renderHook(() => useGitOpsSourceStates());
+    const { result } = renderHook(() => useGitOpsSourceStates());
     await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
 
+    // `candidateGenerationId: null` because the deriver returns from the
+    // candidate branch before it can reach an accepted status, so the pair
+    // without it is a state no backend can emit.
     apiFetch.mockResolvedValue(ok([
-      { stack_name: 'bookstack', gitopsRevision: sourceRevision('application_generation_accepted') },
+      {
+        stack_name: 'bookstack',
+        gitopsRevision: sourceRevision('application_generation_accepted', { candidateGenerationId: null }),
+      },
     ]));
     act(() => {
       announceGitOps();
@@ -88,6 +94,37 @@ describe('useGitOpsSourceStates', () => {
     expect(apiFetch).toHaveBeenCalledTimes(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(300); });
     expect(apiFetch).toHaveBeenCalledTimes(2);
+    // The refetch's answer has to land, not just be requested.
+    await waitFor(() => expect(result.current).toEqual({ bookstack: 'application_generation_accepted' }));
+  });
+
+  it('blanks the map on a node switch before the new node answers', async () => {
+    apiFetch.mockResolvedValue(ok([
+      { stack_name: 'bookstack', gitopsRevision: sourceRevision('candidate_ready') },
+    ]));
+    const { result, rerender } = renderHook(() => useGitOpsSourceStates());
+    await waitFor(() => expect(result.current).toEqual({ bookstack: 'candidate_ready' }));
+
+    // Never resolves, so the only thing that can clear the old node's map is
+    // the blanking itself.
+    apiFetch.mockImplementation(() => new Promise(() => {}));
+    activeNode.current = { id: 2, name: 'Remote' };
+    rerender();
+
+    await waitFor(() => expect(result.current).toEqual({}));
+  });
+
+  it('skips a row it cannot read and keeps the rest', async () => {
+    // A proxied node is free to answer with a shape this build does not
+    // assume. One bad row must not abandon the loop and freeze every badge.
+    apiFetch.mockResolvedValue(ok([
+      { stack_name: 'broken', gitopsRevision: { targetMode: 'direct' } },
+      { stack_name: 'bookstack', gitopsRevision: sourceRevision('candidate_ready') },
+    ]));
+
+    const { result } = renderHook(() => useGitOpsSourceStates());
+
+    await waitFor(() => expect(result.current).toEqual({ bookstack: 'candidate_ready' }));
   });
 
   it('ignores an announcement from another scope', async () => {

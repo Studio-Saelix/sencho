@@ -40,6 +40,18 @@ describe('GitOpsCaveats', () => {
     expect(screen.getByText('2 things could not be proven')).toBeInTheDocument();
   });
 
+  it('shows one condition once however many times it was recorded', () => {
+    // The same condition is recorded per target and again per application, so
+    // both the heading count and the list keys depend on the dedup happening
+    // here rather than only in the map builder.
+    render(<GitOpsCaveats revision={liveRevision({
+      limitations: [limitation('lkg_generation_missing'), limitation('lkg_generation_missing')],
+    })} />);
+
+    expect(screen.getByText('one thing could not be proven')).toBeInTheDocument();
+    expect(screen.getAllByText(GITOPS_LIMITATION_COPY.lkg_generation_missing)).toHaveLength(1);
+  });
+
   it('says nothing for a fault on the absent arm', () => {
     // A fault means the state could not be reported at all, so rendering it
     // here would present an unavailable projection as a qualified one. The

@@ -31,14 +31,20 @@ export function envelopeFor(actor: string | null, trigger: string): EventEnvelop
  * Whether an application can be recorded against.
  *
  * `getLiveBlueprintApplication` answers with `active` or `creating`, because
- * its other callers ask "does this Blueprint already hold the live slot", where
- * a half-built row counts. The transitions that mint intents and candidates
- * accept only `active` and reject anything else by throwing, and they run
- * inside the caller's transaction, so a `creating` row reaching one of them
+ * its other callers ask "does this Blueprint already hold the live slot",
+ * where a half-built row counts. The transitions that mint intents and
+ * candidates accept only `active` and reject anything else by throwing, and
+ * they run inside the caller's transaction, so a `creating` row reaching one
  * would fail the operator's edit and roll back the Blueprint write with it.
  *
- * Narrowing here rather than in the getter keeps the slot check honest while
- * giving the producers the stricter set they actually require.
+ * **No current path produces that row.** Every Blueprint-mode application is
+ * inserted through `blankInlineApplication`, which hardcodes `active`, and
+ * `creating` is reachable only in `direct` mode. So this narrowing excludes
+ * nothing today and is deliberately defensive: it exists because the getter's
+ * slot-check semantics and the transitions' stricter requirement have already
+ * drifted apart once, and the Git-backed `blueprint` mode is what will insert
+ * a Blueprint application that is still being created. Narrowing here rather
+ * than in the getter keeps the slot check correct for its own callers.
  */
 export function recordableApplication(
   app: GitOpsApplicationRow | undefined,

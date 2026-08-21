@@ -1,15 +1,20 @@
-import { GITOPS_TONE_CLASS, SOURCE_STATE, RUNTIME_STATE } from '@/lib/gitopsState';
+import { GITOPS_TONE_CLASS, SOURCE_STATE, RUNTIME_STATE, type GitOpsStateMeta } from '@/lib/gitopsState';
 import type { GitOpsRuntimeStatus, GitOpsSourceStatus } from '@/types/gitops';
 import { cn } from '@/lib/utils';
 
-interface GitOpsBadgeProps {
-  /**
-   * Which vocabulary the status belongs to. The two unions overlap on several
-   * names (`recovery_required`, `recovery_failed`) with different copy, so the
-   * caller has to say which one it is holding rather than let a lookup guess.
-   */
-  facet: 'source' | 'runtime';
-  status: GitOpsSourceStatus | GitOpsRuntimeStatus;
+/**
+ * Which vocabulary the status belongs to, paired with a status from it.
+ *
+ * A discriminated union rather than two loose fields: the two status unions
+ * overlap on several names (`recovery_required`, `recovery_failed`) with
+ * different copy, so pairing them at the type level is what stops a runtime
+ * status being rendered with source wording.
+ */
+type GitOpsBadgeFacet =
+  | { facet: 'source'; status: GitOpsSourceStatus }
+  | { facet: 'runtime'; status: GitOpsRuntimeStatus };
+
+type GitOpsBadgeProps = GitOpsBadgeFacet & {
   /**
    * Drops the label to an icon and a tooltip title, for rows too narrow to
    * carry words. The title still states the whole sentence, so the state is
@@ -17,7 +22,7 @@ interface GitOpsBadgeProps {
    */
   compact?: boolean;
   className?: string;
-}
+};
 
 /**
  * One GitOps state as a small inline chip.
@@ -30,16 +35,24 @@ interface GitOpsBadgeProps {
  * Presentation only. Whether a stack has GitOps state worth showing is the
  * caller's decision, because the answer differs per surface.
  */
-export default function GitOpsBadge({ facet, status, compact = false, className }: GitOpsBadgeProps) {
-  const state = facet === 'source'
-    ? SOURCE_STATE[status as GitOpsSourceStatus]
-    : RUNTIME_STATE[status as GitOpsRuntimeStatus];
+export default function GitOpsBadge(props: GitOpsBadgeProps) {
+  const { compact = false, className } = props;
+  // Looked up into an optional, because the status arrives over a proxy from a
+  // node that may run a newer vocabulary than this build knows. The maps are
+  // closed at compile time, which says nothing about what is on the wire, and
+  // an unmapped key would otherwise dereference undefined inside a stack row
+  // and take the whole list down with it. Rendering nothing matches what the
+  // join already does for a stack it has no state for.
+  const state: GitOpsStateMeta | undefined = props.facet === 'source'
+    ? SOURCE_STATE[props.status]
+    : RUNTIME_STATE[props.status];
+  if (!state) return null;
   const Icon = state.icon;
 
   return (
     <span
       data-testid="gitops-badge"
-      data-state={status}
+      data-state={props.status}
       data-tone={state.tone}
       title={state.line}
       className={cn(

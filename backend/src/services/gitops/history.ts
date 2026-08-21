@@ -178,7 +178,7 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
     stage: row.stage,
     outcome: row.outcome,
     applicationId: row.application.id,
-    targetMode: row.application.target_mode as GitOpsTargetMode,
+    targetMode: row.application.target_mode,
     stackName: row.application.stack_name,
     blueprintId: row.application.blueprint_id,
     nodeId: row.nodeId,

@@ -174,5 +174,6 @@ function survived(row: PendingRow): boolean {
 export function resetGitOpsPublicationsForTests(): void {
   pending = [];
   sink = null;
+  scheduled = false;
   warnedUnannounced = false;
 }

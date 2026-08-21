@@ -109,17 +109,20 @@ function record(
     // here is the same first-contact write `deploy_start` does below: the
     // node has been asked to hold this Blueprint, which is exactly what the
     // observation is about. Every other observation follows a deploy, so its
-    // target already exists and this is a no-op.
-    if (!store.getTarget(app.id, nodeId)) {
-      if (cause !== 'await_state_review') return;
-      store.upsertTarget(emptyTargetRow(app.id, nodeId, envelope.at));
-    }
-    tx.blueprintObservation({
-      applicationId: app.id,
-      nodeId,
-      stage: OBSERVATION_STAGE[cause as keyof typeof OBSERVATION_STAGE],
-      envelope,
-    });
+    // target already exists and the branch is skipped.
+    const firstPlacement = !store.getTarget(app.id, nodeId);
+    if (firstPlacement && cause !== 'await_state_review') return;
+    const stage = OBSERVATION_STAGE[cause as keyof typeof OBSERVATION_STAGE];
+    // Both writes in one transaction so they succeed or fail together. The
+    // observation can refuse (a tombstoned target, a missing application), and
+    // it runs in its own savepoint, so creating the target outside this would
+    // leave an active target with no generation, no stage and no history
+    // behind a refusal: a placement relationship the model never established,
+    // which the delete path would later tombstone as if it were real.
+    DatabaseService.getInstance().getDb().transaction(() => {
+      if (firstPlacement) store.upsertTarget(emptyTargetRow(app.id, nodeId, envelope.at));
+      tx.blueprintObservation({ applicationId: app.id, nodeId, stage, envelope });
+    })();
     return;
   }
 

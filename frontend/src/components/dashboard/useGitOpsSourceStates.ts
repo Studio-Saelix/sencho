@@ -56,15 +56,31 @@ export function useGitOpsSourceStates(): GitOpsSourceStateMap {
       }
       const rows = await res.json() as GitSourceRow[];
       const next: GitOpsSourceStateMap = {};
+      let unreadable = 0;
       for (const row of rows) {
-        const source = row.gitopsRevision ? liveSourceFacet(row.gitopsRevision) : null;
-        if (source) next[row.stack_name] = source.status;
+        // Per row, because the derivation reaches into a shape this build
+        // assumes and a proxied node is free to answer with another one. An
+        // uncaught throw here would abandon the whole loop and land in the
+        // catch below, freezing every badge on the dashboard at its last value
+        // with nothing on screen to say so: the same swallowed-throw failure
+        // that once froze the sidebar's pending map.
+        try {
+          const source = row.gitopsRevision ? liveSourceFacet(row.gitopsRevision) : null;
+          if (source) next[row.stack_name] = source.status;
+        } catch {
+          unreadable += 1;
+        }
+      }
+      if (unreadable > 0) {
+        console.error(`[GitOps] ${unreadable} source row(s) could not be read; those stacks show no state.`);
       }
       if (current !== generation.current) return;
       setStates(next);
-    } catch {
-      // Non-critical decoration. Leave the previous map rather than blanking
-      // every badge on one failed poll.
+    } catch (e) {
+      // The request itself failed. Keep the previous map rather than blanking
+      // every badge on one bad poll, but say so: silence here and a quiet
+      // fleet look identical.
+      console.error('[GitOps] source-state fetch failed:', e);
     }
   }, []);
 

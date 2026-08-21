@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react';
 import { StackHealthTable } from '../StackHealthTable';
 import type { GitOpsSourceStateMap } from '../useGitOpsSourceStates';
 import type { StackStatusEntry } from '../types';
+import type { GitOpsSourceStatus } from '@/types/gitops';
 
 const stackStatuses: Record<string, StackStatusEntry> = {
   'app.yml': { status: 'running', source: 'git' },
@@ -36,13 +37,28 @@ describe('StackHealthTable GitOps badge', () => {
     renderTable({ app: 'source_conflict_blocker' });
 
     const badge = screen.getByTestId('gitops-badge');
-    // The label is the short name; the title carries the whole sentence, so
-    // the state survives a reader who cannot see the tone.
-    expect(badge).toHaveTextContent('pending update blocked');
+    // Asserted against the visible node and by equality, not containment:
+    // `toHaveTextContent` also matches sr-only text, and "pending update" is a
+    // prefix of this label, so a substring match could not tell a blocked plan
+    // apart from an ordinary one.
+    const visible = badge.querySelector(':scope > span:not(.sr-only)');
+    expect(visible?.textContent).toBe('pending update blocked');
+    // The title carries the whole sentence, so the state survives a reader who
+    // cannot see the tone.
     expect(badge).toHaveAttribute(
       'title',
       'The change plan has local conflicts. Apply stays disabled until they are resolved.',
     );
+  });
+
+  it('renders nothing for a status this build does not know', () => {
+    // The value crosses a proxy from a node that may run a newer vocabulary.
+    // The map is closed at compile time, which says nothing about the wire, so
+    // an unmapped key must render nothing rather than dereference undefined
+    // inside a row and take the whole table down with it.
+    renderTable({ app: 'a_status_from_a_newer_build' as GitOpsSourceStatus });
+    expect(screen.queryByTestId('gitops-badge')).toBeNull();
+    expect(screen.getByText('app')).toBeInTheDocument();
   });
 
   it('renders no badge when the join is empty', () => {

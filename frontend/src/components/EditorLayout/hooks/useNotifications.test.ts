@@ -225,6 +225,36 @@ describe('useNotifications', () => {
     expect(onGitOpsChange).toHaveBeenCalledTimes(2);
   });
 
+  it('re-dispatches a gitops invalidate as a window event', () => {
+    // The dashboard badges refetch off the window event, not off the callback
+    // below, so narrowing this dispatch into one scope branch would leave them
+    // permanently stale while every callback assertion stayed green.
+    const seen: Array<{ scope?: string }> = [];
+    const onWindow = (e: Event) => seen.push((e as CustomEvent<{ scope?: string }>).detail);
+    window.addEventListener('sencho:state-invalidate', onWindow);
+    try {
+      renderHook(() =>
+        useNotifications({
+          nodes: [localNode],
+          onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn(),
+        }),
+      );
+      act(() => { MockWS.instances[0]?.onopen?.(); });
+      act(() => {
+        MockWS.instances[0]?.onmessage?.({
+          data: JSON.stringify({
+            type: 'state-invalidate', scope: 'gitops', action: 'applied',
+            applicationId: 'app-1', targetMode: 'direct', stackName: 'foo',
+            blueprintId: null, nodeId: 1, ts: 1000,
+          }),
+        });
+      });
+      expect(seen.filter((d) => d?.scope === 'gitops')).toHaveLength(1);
+    } finally {
+      window.removeEventListener('sencho:state-invalidate', onWindow);
+    }
+  });
+
   it('does not fire onGitOpsChange for another scope', () => {
     const onGitOpsChange = vi.fn();
     renderHook(() =>

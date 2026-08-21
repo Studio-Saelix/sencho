@@ -142,6 +142,18 @@ export async function startServer(server: Server): Promise<void> {
   // Initialize the license service before any tier-gated code can run.
   LicenseService.getInstance().initialize();
 
+  // Announce committed GitOps transitions from here on. This has to precede
+  // every reconcile and migration pass below, because all of them write
+  // history: the deletion reconcile tombstones applications and targets, and
+  // it awaits inside its loop, so a drain would otherwise land while the sink
+  // was still absent. Those rows would then be counted and never signalled,
+  // and the unannounced warning would fire on every boot that has a prepared
+  // deletion intent, which is the fastest way to teach an operator to ignore
+  // it when it means something. Nothing is connected this early, so announcing
+  // costs nothing; the closure resolves the notification service lazily, so it
+  // can be installed as soon as the database is up.
+  setGitOpsEventSink((event) => NotificationService.getInstance().broadcastEvent(event));
+
   // Deletion-intent reconciliation must finish before mutation-capable
   // background services or HTTP accept traffic that could recreate a stack
   // name still covered by a prepared/ready tombstone.
@@ -150,13 +162,6 @@ export async function startServer(server: Server): Promise<void> {
   } catch (err) {
     console.error('[Startup] Deployed stack deletion reconcile failed:', (err as Error).message);
   }
-  // Announce committed GitOps transitions from here on. Installed before the
-  // startup reconciles and the migration passes, all of which write history:
-  // no client is connected this early, so those rows cost nothing to announce,
-  // and installing later would mean a boot-time transition was counted but
-  // never signalled, which is a harder thing to reason about than a broadcast
-  // nobody is listening to.
-  setGitOpsEventSink((event) => NotificationService.getInstance().broadcastEvent(event));
 
   // Interrupted rollback restores must finish before mutation-capable services
   // or HTTP accept traffic. Fail closed: rethrow so unresolved intents never

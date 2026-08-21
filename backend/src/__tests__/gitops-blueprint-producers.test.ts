@@ -281,6 +281,13 @@ describe('gitops blueprint producers', () => {
     // intents accept only `active` and reject anything else by throwing, inside
     // the caller's own transaction, so a `creating` row reaching one would fail
     // the operator's edit and roll the Blueprint write back with it.
+    //
+    // The state is written directly here because no production path creates a
+    // Blueprint-mode application in `creating`: they all go through
+    // `blankInlineApplication`, which hardcodes `active`. These cases pin a
+    // deliberately defensive guard rather than a reachable behaviour, and are
+    // marked as such so nobody later reads them as live coverage. The Git
+    // backed `blueprint` mode is what makes the state producible.
     const toCreating = (blueprintId: number): void => {
       DatabaseService.getInstance().getDb()
         .prepare('UPDATE gitops_applications SET lifecycle_status = ? WHERE blueprint_id = ?')
