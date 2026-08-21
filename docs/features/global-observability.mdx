@@ -160,6 +160,9 @@ The page is built from several independent loops so the masthead and the sparkli
   <Accordion title="The masthead reads 'Offline' and a 'Failed to fetch logs. Retrying...' banner is visible">
     The polling fallback got an HTTP error when it tried to read `/api/logs/global`. Check that the host's Docker daemon is reachable on the socket Sencho is configured to use. The page retries the request every five seconds; once it succeeds, the banner clears on its own.
   </Accordion>
+  <Accordion title="The Logs feed stays empty while managed containers are running">
+    The page can stay connected (Streaming or Idle, no Offline masthead, no Failed to fetch logs banner) while the feed shows **Awaiting events** and container lines never arrive. A Docker socket proxy is allowing list and inspect but blocking `/containers/{id}/logs`. On `linuxserver/socket-proxy`, set `ALLOW_LOGS=1` in addition to `CONTAINERS=1`. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#linuxserver-socket-proxy-extras).
+  </Accordion>
   <Accordion title="The masthead rail is gray and the state reads 'Idle' even though logs are appearing further down the page">
     `Idle` only checks whether an event has arrived in the last ten seconds. If your fleet is genuinely quiet (a maintenance window, a single low-traffic container), the rail rests gray and the band headers in the feed roll up to `2M AGO`, `5M AGO`, and so on. The next event flips the rail back to a shimmering brand cyan and the state word back to `Streaming` on the next one-second tick.
   </Accordion>

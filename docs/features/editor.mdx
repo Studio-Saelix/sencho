@@ -231,6 +231,9 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
   <Accordion title="The .env tab is greyed out">
     The stack has no env file to edit. Add an `env_file:` entry to a service in `compose.yaml` and save, or create a `.env` file in the stack directory through the **Files** tab.
   </Accordion>
+  <Accordion title='Log viewer shows "Request forbidden by administrative rules"'>
+    The container list can still load while log viewing fails. The **View logs** stream can show `[Sencho] Error fetching logs:` followed by an HTTP 403 and `Request forbidden by administrative rules`. A Docker socket proxy is blocking `/containers/{id}/logs`. On `linuxserver/socket-proxy`, set `ALLOW_LOGS=1` in addition to `CONTAINERS=1`. Tecnativa-style profiles include logs under `CONTAINERS`. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#linuxserver-socket-proxy-extras).
+  </Accordion>
   <Accordion title="I can't edit compose from my phone">
     Open the **Compose** segment in the stack detail and tap **Edit compose**. If that affordance is missing, your role lacks the `stack:edit` permission; ask an admin to grant it. The phone editor is intended for small corrections; for large compose rewrites, open the stack on a desktop.
   </Accordion>
