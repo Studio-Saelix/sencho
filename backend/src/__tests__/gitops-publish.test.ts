@@ -147,16 +147,27 @@ describe('gitops transition announcements', () => {
     ]);
   });
 
-  it('counts even when no sink is installed', async () => {
+  it('counts even when no sink is installed, and says so once', async () => {
     events = [];
     setGitOpsEventSink(null);
-    write('op-nosink', 'deploy_started');
-    await settle();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      write('op-nosink', 'deploy_started');
+      write('op-nosink', 'deploy_bound', 'committed', { dedupeTarget: 'node:4' });
+      await settle();
 
-    expect(events).toEqual([]);
-    expect(GitOpsMetricsService.getInstance().snapshot()).toEqual([
-      { stage: 'deploy_started', outcome: 'committed', count: 1 },
-    ]);
+      expect(events).toEqual([]);
+      expect(GitOpsMetricsService.getInstance().snapshot()).toEqual([
+        { stage: 'deploy_bound', outcome: 'committed', count: 1 },
+        { stage: 'deploy_started', outcome: 'committed', count: 1 },
+      ]);
+      // Once for the batch, not once per row: an unwired sink is one fact, and
+      // a boot migration would otherwise fill the log with it.
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('no event sink installed');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('keeps announcing the batch when one broadcast throws', async () => {

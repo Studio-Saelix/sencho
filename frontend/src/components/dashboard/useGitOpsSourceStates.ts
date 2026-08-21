@@ -47,7 +47,13 @@ export function useGitOpsSourceStates(): GitOpsSourceStateMap {
     const current = ++generation.current;
     try {
       const res = await apiFetch('/git-sources');
-      if (!res.ok) return;
+      if (!res.ok) {
+        // Says which kind of refusal it was. A 403 here means the badges are
+        // frozen because this account may no longer read Git sources, which
+        // looks identical on screen to a fleet where nothing has changed.
+        console.error(`[GitOps] source-state fetch HTTP ${res.status}`);
+        return;
+      }
       const rows = await res.json() as GitSourceRow[];
       const next: GitOpsSourceStateMap = {};
       for (const row of rows) {

@@ -70,6 +70,24 @@ interface PendingRow {
 let sink: GitOpsEventSink | null = null;
 let pending: PendingRow[] = [];
 let scheduled = false;
+let warnedUnannounced = false;
+
+/**
+ * Say once that transitions are committing with nobody to announce them to.
+ *
+ * A server that never installs the sink still counts every transition and
+ * still writes every history row, so the only symptom is that no client ever
+ * refreshes: the UI silently goes back to being as stale as it was before any
+ * of this existed. That is precisely the kind of unwired producer this branch
+ * has already shipped once, so it says so rather than being inferred from an
+ * absence. Once, not per row: a boot migration would otherwise fill the log,
+ * and the second occurrence tells a reader nothing the first did not.
+ */
+function warnUnannounced(): void {
+  if (warnedUnannounced) return;
+  warnedUnannounced = true;
+  console.warn('[GitOps] Transitions are committing with no event sink installed; no client will be told about them.');
+}
 
 /**
  * Install the broadcaster. Called once at startup, and with null by tests that
@@ -103,7 +121,10 @@ function drain(): void {
   for (const row of batch) {
     if (!survived(row)) continue;
     metrics.record(row.stage, row.outcome);
-    if (!sink) continue;
+    if (!sink) {
+      warnUnannounced();
+      continue;
+    }
     try {
       sink({
         type: 'state-invalidate',
@@ -153,4 +174,5 @@ function survived(row: PendingRow): boolean {
 export function resetGitOpsPublicationsForTests(): void {
   pending = [];
   sink = null;
+  warnedUnannounced = false;
 }
