@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useNodes } from '@/context/NodeContext';
 import { useDashboardData } from '@/components/dashboard';
 import { deriveHealth } from '@/components/dashboard/deriveHealth';
+import { useGitOpsSourceStates } from '@/components/dashboard/useGitOpsSourceStates';
+import GitOpsBadge from '@/components/gitops/GitOpsBadge';
 import type { HealthLevel, NotificationItem, StackCpuSeries, StackStatusEntry } from '@/components/dashboard/types';
 import { Bar, Kicker, Masthead, MSparkline, SectionHead, StateDot } from './mobile-ui';
 import { NodeSwitcher } from '@/components/NodeSwitcher';
@@ -79,6 +81,7 @@ function StripCell({ label, value, bar }: { label: string; value: string; bar?: 
 export function MobileDashboard({ notifications, headerActions, onNavigateToStack, onViewAllStacks, onManageNodes }: MobileDashboardProps) {
   const { activeNode } = useNodes();
   const data = useDashboardData();
+  const gitopsSourceStates = useGitOpsSourceStates();
   const activeNodeName = activeNode?.name || 'Local';
 
   // Re-render every few seconds so the "sync Xs" freshness label advances
@@ -168,7 +171,9 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
   } else {
     stackHealthBody = (
       <div className="flex flex-col gap-px">
-        {visibleRows.map(row => (
+        {visibleRows.map(row => {
+          const gitopsSourceState = gitopsSourceStates[row.name];
+          return (
           <button
             key={row.file}
             type="button"
@@ -178,7 +183,15 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
             <StateDot tone={ROW_TONE[row.state]} size={7} glow={row.state !== 'healthy'} />
             <span className="min-w-0 flex-1">
               <span className="block truncate font-mono text-[13px] text-stat-value">{row.name}</span>
-              <span className="block truncate font-mono text-[10px] text-stat-icon">{activeNodeName}</span>
+              {/* The GitOps state joins the node name on the sub-line, where
+                  there is room for a word. Touch has no hover, so the badge's
+                  title tooltip cannot be the only carrier of the state. */}
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate font-mono text-[10px] text-stat-icon">{activeNodeName}</span>
+                {gitopsSourceState && (
+                  <GitOpsBadge facet="source" status={gitopsSourceState} className="min-w-0" />
+                )}
+              </span>
             </span>
             <span className="block h-[18px] w-[60px] shrink-0">
               {row.points.length > 1 ? (
@@ -193,7 +206,8 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
               {`${row.cpu.toFixed(0)}%`}
             </span>
           </button>
-        ))}
+          );
+        })}
       </div>
     );
   }
