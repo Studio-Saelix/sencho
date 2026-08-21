@@ -3,6 +3,7 @@ import { Check, Copy, AlertTriangle, Globe, Monitor, RefreshCw } from 'lucide-re
 import { useNodes, type Node, type NodeMode } from '@/context/NodeContext';
 import { apiFetch } from '@/lib/api';
 import { copyToClipboard } from '@/lib/clipboard';
+import type { GitOpsRevisionsCarrier } from '@/types/gitops';
 import { toast } from '@/components/ui/toast-store';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
@@ -195,7 +196,14 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
         const err = await res.json();
         throw new Error(err.error || 'Failed to delete node');
       }
-      toast.success(`Node "${deletingNode.name}" deleted`);
+      const body = (await res.json()) as GitOpsRevisionsCarrier;
+      // Report the count only when there is one. An empty list means both
+      // "nothing moved" and "the projection faulted after the delete
+      // committed", so it can never be reported as the former.
+      const moved = body.gitopsRevisions.length;
+      toast.success(moved > 0
+        ? `Node "${deletingNode.name}" deleted. ${moved} blueprint${moved === 1 ? '' : 's'} re-placed.`
+        : `Node "${deletingNode.name}" deleted`);
       await refresh();
     } catch (error) {
       toast.error((error as Error).message || 'Failed to delete node');
