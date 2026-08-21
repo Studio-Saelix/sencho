@@ -10,7 +10,7 @@ import { sidebarRowActive, sidebarRowBase, sidebarRowCheckboxSlot } from './side
 import { statusText, statusColor } from './stack-status-utils';
 import type { StackRowStatus } from './stack-status-utils';
 import { updateAvailableLabel } from '@/lib/updateAvailableLabel';
-import { SOURCE_STATE } from '@/lib/gitopsState';
+import { SOURCE_STATE_LOOKUP } from '@/lib/gitopsState';
 import type { GitOpsSourceStatus } from '@/types/gitops';
 
 interface StackRowProps {
@@ -189,7 +189,7 @@ export function StackRow(props: StackRowProps) {
         ) : gitPending ? (
           <RowTooltip
             trigger={<span data-testid="stack-trailing-git-pending"><GitBranch className="w-3 h-3 text-brand" strokeWidth={1.5} /></span>}
-            label={SOURCE_STATE[gitPending].line}
+            label={SOURCE_STATE_LOOKUP[gitPending]?.line ?? 'A Git update is waiting on this stack.'}
           />
         ) : null}
       </span>

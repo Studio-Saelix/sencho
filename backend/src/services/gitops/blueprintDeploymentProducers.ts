@@ -108,14 +108,17 @@ function record(
     // so there is no target yet and nothing to observe against. Creating it
     // here is the same first-contact write `deploy_start` does below: the
     // node has been asked to hold this Blueprint, which is exactly what the
-    // observation is about. Every other observation follows a deploy, so its
-    // target already exists and the branch is skipped.
+    // observation is about. Any other cause arriving without a target is
+    // dropped, which is also what happens to a drift or evict report for a
+    // Blueprint that migration brought in: migration records the application,
+    // its intent and its candidate, but no targets, so a fleet that predates
+    // this model reports nothing here until its next deploy creates one.
     const firstPlacement = !store.getTarget(app.id, nodeId);
     if (firstPlacement && cause !== 'await_state_review') return;
     const stage = OBSERVATION_STAGE[cause as keyof typeof OBSERVATION_STAGE];
     // Both writes in one transaction so they succeed or fail together. The
-    // observation can refuse (a tombstoned target, a missing application), and
-    // it runs in its own savepoint, so creating the target outside this would
+    // observation refuses a tombstoned target, and it runs in its own
+    // savepoint, so creating the target outside this would
     // leave an active target with no generation, no stage and no history
     // behind a refusal: a placement relationship the model never established,
     // which the delete path would later tombstone as if it were real.

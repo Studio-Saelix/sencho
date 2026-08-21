@@ -17,7 +17,7 @@ import { type AnatomyMarkdownInput, type PortRow, type VolumeRow } from '@/lib/a
 import { usePreflightDismiss } from '@/hooks/usePreflightDismiss';
 import { useScanBannerDismiss } from '@/hooks/useScanBannerDismiss';
 import { parseAnatomy, parseEnvKeys, formatGitSource, imageName, primaryPublishedHostPort, type GitSourceInfo } from '@/lib/anatomy';
-import { SOURCE_STATE } from '@/lib/gitopsState';
+import { SOURCE_STATE_LOOKUP } from '@/lib/gitopsState';
 import type { GitOpsSourceStatus } from '@/types/gitops';
 import { buildServiceUrl } from '@/lib/serviceUrl';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
@@ -620,7 +620,7 @@ export default function StackAnatomyPanel({
                         stale against the configuration, or mid-apply. */}
                     {gitSourcePending !== 'candidate_ready' && (
                       <span className="shrink-0 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">
-                        {SOURCE_STATE[gitSourcePending].label}
+                        {SOURCE_STATE_LOOKUP[gitSourcePending]?.label ?? gitSourcePending}
                       </span>
                     )}
                   </>

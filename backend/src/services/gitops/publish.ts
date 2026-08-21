@@ -1,10 +1,11 @@
 /**
  * Announcing transitions after they commit.
  *
- * Every history row that is actually inserted produces one metric increment and
- * one `state-invalidate` event. Both have to happen *after* the transaction
- * that wrote the row, and neither may happen for a transaction that rolled
- * back, which is why nothing here runs inline.
+ * A history row that is inserted and still present when the drain runs produces
+ * one metric increment and, when a sink is installed, one `state-invalidate`
+ * event. Both have to happen *after* the transaction that wrote the row, and
+ * neither may happen for a transaction that rolled back, which is why nothing
+ * here runs inline.
  *
  * The mechanism is a buffer drained on `setImmediate`. better-sqlite3 is fully
  * synchronous, so by the time a macrotask runs, the transaction that enqueued

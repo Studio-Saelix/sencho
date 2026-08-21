@@ -79,11 +79,11 @@ The table paginates at eight rows; chevrons appear in the header along with an `
 
 ### GitOps state chip
 
-A stack managed by a [Git source](/features/git-sources) or a [Blueprint](/features/blueprint-model) carries a small chip beside its name naming its current source state: **pending update**, **review required**, **applying**, **source failed**, and so on. The wording is the same one the Git Source panel and the Drift tab use, so a stack reads the same way wherever you look at it.
+A stack linked to a [Git source](/features/git-sources) carries a small chip beside its name naming its current source state: **pending update**, **review required**, **applying**, **source failed**, and so on. The wording is the same one the Git Source panel and the Drift tab use, so a stack reads the same way wherever you look at it.
 
 The chip and the row tint answer different questions and are independent. The tint is about containers and load right now. The chip is about what Sencho has reconciled and accepted, so a healthy row can carry **pending update** (containers fine, a new commit waiting) and a red row can carry **accepted** (the current generation is the right one and something has since crashed).
 
-Hover the chip for the full sentence. A stack with no Git source and no Blueprint carries no chip, and the **SOURCE** column still says where its files come from either way. The chip updates as soon as Sencho records a change, without waiting for the next refresh.
+Hover the chip for the full sentence. A stack with no Git source carries no chip, including one delivered by a [Blueprint](/features/blueprint-model): a Blueprint stack has no Git source of its own, so there is no source state to name. The **SOURCE** column still says where the files come from either way. The chip updates as soon as Sencho records a change, without waiting for the next refresh.
 
 The phone dashboard shows the same chip on its stack rows, beside the node name.
 

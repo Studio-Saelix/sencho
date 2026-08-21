@@ -14,7 +14,7 @@ import { GitManifestSummary, type ManifestSummary } from './GitManifestSummary';
 import type { GitBrowseResult } from './GitComposeFilePicker';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
-import { SOURCE_STATE, absentFault, liveSourceFacet, type LiveSourceFacet } from '@/lib/gitopsState';
+import { SOURCE_STATE_LOOKUP, absentFault, liveSourceFacet, type LiveSourceFacet } from '@/lib/gitopsState';
 import type { GitOpsRevisionCarrier, GitOpsRevisionProjection, GitOpsSourceStatus } from '@/types/gitops';
 
 export interface GitSource {
@@ -444,7 +444,7 @@ export function GitSourcePanel({
                     <GitOpsStateCard
                       data-testid="git-pending"
                       stateKey={pending.status}
-                      state={SOURCE_STATE[pending.status]}
+                      state={SOURCE_STATE_LOOKUP[pending.status]}
                       action={(
                         <Button
                           size="sm"
@@ -501,7 +501,7 @@ export function GitSourcePanel({
                       {sourceFacet && (
                         <div className="flex justify-between gap-2">
                           <span>Source state</span>
-                          <span data-testid="git-source-state">{SOURCE_STATE[sourceFacet.status].label}</span>
+                          <span data-testid="git-source-state">{SOURCE_STATE_LOOKUP[sourceFacet.status]?.label ?? sourceFacet.status}</span>
                         </div>
                       )}
                       <div className="flex justify-between gap-2">

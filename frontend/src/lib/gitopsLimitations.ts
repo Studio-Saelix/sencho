@@ -16,8 +16,9 @@
 //
 // A backend code with no entry here degrades to the fallback below rather than
 // vanishing, so drift is safe rather than silent. The accompanying test lists
-// every code the backend can currently emit; adding one there without adding
-// copy fails it.
+// every code the live arm can carry, which is narrower than every code the
+// backend emits: the absent-arm faults and the history-row defect are handled
+// elsewhere and deliberately have no copy here.
 
 import type { GitOpsLimitation } from '@/types/gitops';
 
@@ -48,7 +49,7 @@ export const GITOPS_LIMITATION_COPY: Record<string, string | undefined> = {
   lkg_generation_missing:
     'The generation recorded as last known good is gone, so there is nothing to fall back to.',
   lkg_artifact_invalid:
-    'The artifact captured with the last known good does not belong to it, so that fallback is no longer fully qualified.',
+    'The artifact captured with the last known good is missing or does not belong to it, so that fallback is no longer fully qualified.',
   evidence_limitations_invalid:
     'The record of what could not be proven is itself unreadable, so there may be further caveats that cannot be shown.',
   artifact_observation_invalid:
@@ -70,7 +71,7 @@ export const GITOPS_LIMITATION_COPY: Record<string, string | undefined> = {
   manifest_corrupt:
     'The managed manifest could not be read, so the commit recorded before Sencho tracked it is kept only as evidence and not treated as current.',
   manifest_identity_invalid:
-    'The managed manifest describes a different repository or branch than the one configured now, so its commit is kept only as evidence.',
+    'The managed manifest does not identify this stack on this node from the repository configured now, so its commit is kept only as evidence.',
   legacy_pending:
     'A pending commit was recorded before Sencho tracked this stack and carries no proof of which repository or branch it came from. Fetch again to rebuild it.',
   blueprint_reapproval_required:

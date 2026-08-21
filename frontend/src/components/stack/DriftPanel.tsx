@@ -10,7 +10,7 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
-import { RUNTIME_STATE, SOURCE_STATE, absentFault, identityRefLabel, liveSourceFacet } from '@/lib/gitopsState';
+import { RUNTIME_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, identityRefLabel, liveSourceFacet } from '@/lib/gitopsState';
 import type { GitOpsDriftItem, GitOpsRevisionProjection } from '@/types/gitops';
 
 // Mirrors the backend payload shape (the frontend never imports backend).
@@ -354,7 +354,7 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
                   <GitOpsStateCard
                     data-testid="gitops-source"
                     stateKey={gitopsSource.status}
-                    state={SOURCE_STATE[gitopsSource.status]}
+                    state={SOURCE_STATE_LOOKUP[gitopsSource.status]}
                   />
                 )}
                 {gitopsTargets.map(t => (
@@ -362,7 +362,7 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
                     key={t.nodeId}
                     data-testid="gitops-target"
                     stateKey={t.runtime.status}
-                    state={RUNTIME_STATE[t.runtime.status]}
+                    state={RUNTIME_STATE_LOOKUP[t.runtime.status]}
                   >
                     <div className="mt-1 font-mono text-[10px] text-stat-subtitle">
                       {nodeLabel(t.nodeId)}{t.stackName ? ` · ${t.stackName}` : ''}

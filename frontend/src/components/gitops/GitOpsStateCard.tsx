@@ -7,10 +7,15 @@ import { cn } from '@/lib/utils';
 interface GitOpsStateCardProps {
   /**
    * The whole state as one concept: label, tone, line and icon together. From
-   * SOURCE_STATE or RUNTIME_STATE, or built inline for the projection faults,
-   * which are limitations rather than facet statuses.
+   * SOURCE_STATE_LOOKUP or RUNTIME_STATE_LOOKUP, or built inline for the
+   * projection faults, which are limitations rather than facet statuses.
+   *
+   * Optional because a status that crossed the wire may belong to a vocabulary
+   * this build has never seen, and the lookups answer `undefined` for one.
+   * Taking it here rather than at each caller means a new surface cannot
+   * reintroduce the unguarded dereference by rendering a card the usual way.
    */
-  state: GitOpsStateMeta;
+  state: GitOpsStateMeta | undefined;
   /** Rendered as data-state so a test can assert the state without matching copy. */
   stateKey: string;
   /** Trailing slot on the header row, for a single small action. */
@@ -28,6 +33,7 @@ interface GitOpsStateCardProps {
 export default function GitOpsStateCard(
   { state, stateKey, action, children, 'data-testid': testId }: GitOpsStateCardProps,
 ) {
+  if (!state) return null;
   const Icon = state.icon;
   return (
     <div

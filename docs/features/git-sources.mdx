@@ -26,7 +26,7 @@ Writes land in the stack's existing directory using the same storage Sencho uses
 
 The panel groups four regions:
 
-- **Pending update banner.** Appears at the top when a webhook in **Review only** mode has fetched a new commit. Click **Review** to re-fetch the incoming commit and open the change plan. If local files conflict with the incoming commit, the banner says the update is blocked.
+- **Pending update banner.** Appears at the top whenever a fetched commit is staged, however it was fetched. Its heading is the source state, so it says whether the commit is ready to apply, waiting on review, or blocked by local conflicts. Click **Review** to re-fetch the incoming commit and open the change plan.
 - **Form fields.** Repository URL, branch, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication toggle, and the apply behavior radio group.
 - **Last applied stat strip.** Shows the short SHA of the last commit Sencho applied to disk, the source state (see below), and the timestamp of the most recent successful save or pull.
 - **Footer actions.** **Remove** disconnects the source by exporting the effective compose model into a single `compose.yaml` and removing auto-discovered override files; the remaining materialized files are kept. **Pull now** fetches the configured branch's HEAD; **Save** or **Update** persists form changes after a reachability check passes.
@@ -55,12 +55,12 @@ These are the states you will see most often.
 The last two matter most. Sencho reports an interrupted operation as unknown rather than guessing, so a stack whose pull was cut short by a restart says so instead of quietly reading as up to date.
 
 <Note>
-  Changing the repository, the branch, the compose files, the project directory, or the `.env` sync clears any staged commit, because the plan was built against the settings you just replaced. The state moves to **Reconcile required**; pull again to rebuild it. Changing only the token or the apply behavior leaves a staged commit alone, since neither changes what would be materialized.
+  Changing the repository, the branch, the compose files, the project directory, or the `.env` sync clears any staged commit, because the plan was built against the settings you just replaced. Pull again to rebuild it. The state moves to **Reconcile required** if a commit had already been accepted, and to **Never reconciled** if none ever was. Changing only the token or the apply behavior leaves a staged commit alone, since neither changes what would be materialized.
 </Note>
 
 ### When part of the state could not be proven
 
-Under the state, the panel sometimes lists one or more things it could not prove. A managed manifest that names a different branch than the one configured now, an approval that could not be restored after a recovery, a record that has gone: each is reported as its own line.
+The panel sometimes lists one or more things it could not prove, at the top above the form fields. A managed manifest that does not identify this stack on this node from the repository configured now, an approval that could not be restored after a recovery, a record that has gone: each is reported as its own line.
 
 These are qualifications, not failures. The state above them is real, and the lines tell you which part of it to treat with less confidence. That is deliberate: a stack whose evidence is partly missing looks identical to one with complete evidence unless Sencho says otherwise, and the safer wrong answer is never the quiet one.
 
