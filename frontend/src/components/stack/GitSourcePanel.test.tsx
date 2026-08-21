@@ -5,7 +5,7 @@
  * treating the sentinel as a configured source.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 
 // Mutable controls so a deploy-mode test can set the active node and capture the
 // runWithLog params, while the load tests keep the default (no active node).
@@ -70,6 +70,14 @@ import { apiFetch } from '@/lib/api';
 import { GitSourcePanel } from './GitSourcePanel';
 import { toast } from '@/components/ui/toast-store';
 import type { PullResult } from './GitSourceDiffDialog';
+import {
+  absentRevision,
+  facets,
+  liveRevision,
+  missingApplicationLimitation,
+  plainSource,
+} from '@/__tests__/gitopsFixtures';
+import { SOURCE_STATE } from '@/lib/gitopsState';
 
 function jsonRes(body: unknown, ok = true, status = 200) {
   return { ok, status, json: async () => body, text: async () => '' } as unknown as Response;
@@ -94,7 +102,15 @@ const LINKED_SOURCE = {
   updated_at: 0,
   manifest_state: 'absent' as const,
   manifest: null,
+  gitopsRevision: liveRevision({
+    facets: facets({ source: plainSource('application_generation_accepted', { candidateGenerationId: null }) }),
+  }),
 };
+
+/** The linked source with its GitOps projection swapped for a specific state. */
+function linkedWith(revision: unknown) {
+  return { ...LINKED_SOURCE, gitopsRevision: revision };
+}
 
 function panel() {
   return (
@@ -283,5 +299,67 @@ describe('GitSourcePanel manifest summary', () => {
     // has not been materialized yet.
     expect(screen.getByText('Managed project')).toBeTruthy();
     expect(screen.getByText('Not materialized')).toBeTruthy();
+  });
+});
+
+describe('GitSourcePanel GitOps state', () => {
+  it('names the waiting state rather than a generic pending update', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(liveRevision({ facets: facets({ source: plainSource('source_conflict_blocker') }) }))),
+    );
+
+    render(panel());
+
+    const banner = await screen.findByTestId('git-pending');
+    expect(banner).toHaveAttribute('data-state', 'source_conflict_blocker');
+    expect(within(banner).getByText(SOURCE_STATE.source_conflict_blocker.line)).toBeInTheDocument();
+    // The short sha stays, so the operator can still see which commit it is.
+    expect(within(banner).getByText('a1b2c3d')).toBeInTheDocument();
+  });
+
+  it('offers apply wording for a candidate that needs no review', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(liveRevision({ facets: facets({ source: plainSource('candidate_ready') }) }))),
+    );
+
+    render(panel());
+
+    const banner = await screen.findByTestId('git-pending');
+    expect(within(banner).getByText(SOURCE_STATE.candidate_ready.line)).toBeInTheDocument();
+  });
+
+  it('shows no banner when the accepted generation has no candidate behind it', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(LINKED_SOURCE));
+
+    render(panel());
+
+    await screen.findByRole('button', { name: /pull now/i });
+    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
+    expect(screen.getByTestId('git-source-state')).toHaveTextContent(
+      SOURCE_STATE.application_generation_accepted.label,
+    );
+  });
+
+  it('reports an application the projection could not reach', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(absentRevision([missingApplicationLimitation]))),
+    );
+
+    render(panel());
+
+    const fault = await screen.findByTestId('gitops-fault');
+    expect(fault).toHaveTextContent(missingApplicationLimitation.message);
+  });
+
+  it('stays silent for a stack the model was never asked about', async () => {
+    // Empty limitations is the ordinary case and must not read as a failure.
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ linked: false, gitopsRevision: absentRevision() }));
+
+    render(panel());
+
+    await screen.findByRole('button', { name: /^save$/i });
+    expect(screen.queryByTestId('gitops-fault')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('git-source-state')).not.toBeInTheDocument();
   });
 });

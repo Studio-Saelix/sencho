@@ -8,6 +8,9 @@ import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/toast-store';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
+import GitOpsStateCard from '@/components/gitops/GitOpsStateCard';
+import { RUNTIME_STATE, SOURCE_STATE, absentFault, identityRefLabel } from '@/lib/gitopsState';
+import type { GitOpsDriftItem, GitOpsRevisionProjection } from '@/types/gitops';
 
 // Mirrors the backend payload shape (the frontend never imports backend).
 type StackDriftStatus = 'in-sync' | 'drifted' | 'missing-runtime' | 'unreachable';
@@ -50,6 +53,10 @@ interface StackDriftReport {
   // When the ledger was last reconciled (re-check, deploy, or background scan); null
   // if never. The history is "as of" this time, not the live status above it.
   lastCheckedAt?: number | null;
+  // Optional for the same reason as temporal and ledger above: a report proxied
+  // from an older remote node predates the revision model. Absent means that
+  // node cannot answer, which is not the same as it answering "nothing here".
+  gitopsRevision?: GitOpsRevisionProjection;
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
@@ -171,8 +178,30 @@ function LedgerRow({ entry }: { entry: DriftLedgerEntry }) {
   );
 }
 
+/**
+ * One classified divergence between intent and observation, in the same
+ * expected-to-observed idiom the compose findings above it use.
+ */
+function GitOpsDriftRow({ item }: { item: GitOpsDriftItem }) {
+  return (
+    <div className="border-t border-muted py-2 first:border-t-0">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">{item.class}</span>
+        <span className="font-mono text-[10px] uppercase tracking-wide text-stat-subtitle">{item.owner}</span>
+      </div>
+      <div className="mt-1 text-[12px] text-foreground/90">{item.reason}</div>
+      <div className="mt-1 flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
+        <span className="text-stat-subtitle">expected</span>
+        <span className="text-foreground/90">{identityRefLabel(item.expected)}</span>
+        <span className="text-stat-subtitle">→ observed</span>
+        <span className="font-semibold text-foreground">{identityRefLabel(item.observed)}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function DriftPanel({ stackName }: { stackName: string }) {
-  const { activeNode } = useNodes();
+  const { activeNode, nodes } = useNodes();
   const nodeId = activeNode?.id;
   const [report, setReport] = useState<StackDriftReport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -245,6 +274,20 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
   const lastChecked = report?.lastCheckedAt != null ? formatTimeAgo(report.lastCheckedAt) : null;
   const busy = loading || rechecking;
 
+  const revision = report?.gitopsRevision ?? null;
+  const gitopsFaults = revision ? absentFault(revision) : [];
+  const gitopsLive = revision && revision.targetMode !== 'not_applicable' ? revision : null;
+  // Suppressed for a Blueprint-owned stack: this route resolves through whatever
+  // manages the directory, and a Blueprint application has no Git source facet.
+  const gitopsSource = gitopsLive && gitopsLive.facets.source.status !== 'not_applicable'
+    ? gitopsLive.facets.source
+    : null;
+  const gitopsTargets = gitopsLive?.targets ?? [];
+  const gitopsDrift = gitopsLive?.drift ?? [];
+  // A target can name a node this client has no record of, so fall back to the
+  // id rather than rendering an empty cell.
+  const nodeLabel = (id: number) => nodes.find(n => n.id === id)?.name ?? `node ${id}`;
+
   return (
     <div data-testid="drift-panel" className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-2">
@@ -299,6 +342,57 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
               </div>
               <div className="mt-1 font-mono text-[11px] leading-relaxed text-foreground/80">{temporal.line}</div>
             </div>
+          )}
+
+          {gitopsFaults.length > 0 && (
+            <GitOpsStateCard
+              data-testid="gitops-fault"
+              stateKey="unreachable"
+              state={{
+                label: 'gitops state unavailable',
+                tone: 'destructive',
+                line: gitopsFaults[0].message,
+                icon: TriangleAlert,
+              }}
+            />
+          )}
+
+          {(gitopsSource || gitopsTargets.length > 0) && (
+            <section>
+              <div className={cn(LABEL_CLASS, 'mb-1.5')}>gitops</div>
+              <div className="flex flex-col gap-2">
+                {gitopsSource && (
+                  <GitOpsStateCard
+                    data-testid="gitops-source"
+                    stateKey={gitopsSource.status}
+                    state={SOURCE_STATE[gitopsSource.status]}
+                  />
+                )}
+                {gitopsTargets.map(t => (
+                  <GitOpsStateCard
+                    key={t.nodeId}
+                    data-testid="gitops-target"
+                    stateKey={t.runtime.status}
+                    state={RUNTIME_STATE[t.runtime.status]}
+                  >
+                    <div className="mt-1 font-mono text-[10px] text-stat-subtitle">
+                      {nodeLabel(t.nodeId)}{t.stackName ? ` · ${t.stackName}` : ''}
+                    </div>
+                  </GitOpsStateCard>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {gitopsDrift.length > 0 && (
+            <section>
+              <div className={cn(LABEL_CLASS, 'mb-1.5')}>gitops drift</div>
+              <div className="rounded-lg border border-muted bg-card/40 px-3 py-1">
+                {gitopsDrift.map((d, i) => (
+                  <GitOpsDriftRow key={`${d.class}-${d.owner}-${i}`} item={d} />
+                ))}
+              </div>
+            </section>
           )}
 
           {report.parseError && (

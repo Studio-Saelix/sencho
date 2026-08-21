@@ -12,6 +12,9 @@ import { GitSourceDiffDialog, type PullResult, type PublicPendingPlan } from './
 import { GitSourceFields, type ApplyMode } from './GitSourceFields';
 import { GitManifestSummary, type ManifestSummary } from './GitManifestSummary';
 import type { GitBrowseResult } from './GitComposeFilePicker';
+import GitOpsStateCard from '@/components/gitops/GitOpsStateCard';
+import { SOURCE_STATE, absentFault } from '@/lib/gitopsState';
+import type { GitOpsRevisionCarrier, GitOpsRevisionProjection } from '@/types/gitops';
 
 export interface GitSource {
   id: number;
@@ -38,6 +41,11 @@ export interface GitSource {
   manifest_state: ManifestSummary['state'] | null;
   manifest: ManifestSummary | null;
 }
+
+// The GET carries the revision on both of its 200 shapes. The PUT does not,
+// which is why GitSource itself stays free of it.
+type GitSourceRead = GitSource & GitOpsRevisionCarrier;
+type GitSourceUnlinked = { linked: false } & GitOpsRevisionCarrier;
 
 interface GitSourcePanelProps {
   open: boolean;
@@ -69,6 +77,10 @@ export function GitSourcePanel({
   const [pulling, setPulling] = useState(false);
   const [applying, setApplying] = useState(false);
   const [source, setSource] = useState<GitSource | null>(null);
+  // Kept out of `source` on purpose: the PUT that saves this panel answers with
+  // a bare Git source and no revision, so carrying it on that type would make
+  // the save path a lie.
+  const [revision, setRevision] = useState<GitOpsRevisionProjection | null>(null);
 
   const [repoUrl, setRepoUrl] = useState('');
   const [branch, setBranch] = useState('main');
@@ -87,6 +99,12 @@ export function GitSourcePanel({
   const { activeNode } = useNodes();
   const applyMode = deriveApplyMode(source, applyModeOverride);
 
+  const live = revision && revision.targetMode !== 'not_applicable' ? revision : null;
+  const sourceFacet = live && live.facets.source.status !== 'not_applicable' ? live.facets.source : null;
+  // The waiting candidate, if there is one. Same rule the sidebar uses.
+  const candidate = sourceFacet && sourceFacet.candidateGenerationId !== null ? sourceFacet : null;
+  const faults = revision ? absentFault(revision) : [];
+
   const resetToUnlinked = useCallback(() => {
     setSource(null);
     setRepoUrl('');
@@ -104,7 +122,8 @@ export function GitSourcePanel({
     try {
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`);
       if (res.ok) {
-        const data: GitSource | { linked: false } = await res.json();
+        const data: GitSourceRead | GitSourceUnlinked = await res.json();
+        setRevision(data.gitopsRevision);
         // An existing stack with no Git source attached answers 200 { linked: false }.
         if ('linked' in data) {
           resetToUnlinked();
@@ -121,10 +140,13 @@ export function GitSourcePanel({
         }
       } else if (res.status === 404) {
         resetToUnlinked();
+        setRevision(null);
       } else if (res.status === 403) {
         setSource(null);
+        setRevision(null);
         toast.error('You do not have permission to view this stack\'s Git source.');
       } else {
+        setRevision(null);
         const err = await res.json().catch(() => ({}));
         toast.error(err?.error || 'Failed to load Git source.');
       }
@@ -175,6 +197,10 @@ export function GitSourcePanel({
       if (res.ok) {
         const data: GitSource = await res.json();
         setSource(data);
+        // A material configuration change clears the staged candidate server
+        // side, and this response carries no revision to replace the one held
+        // here, so drop it rather than keep rendering a state that has moved.
+        setRevision(null);
         setToken('');
         setApplyModeOverride(null);
         toast.success('Git source saved.');
@@ -373,34 +399,42 @@ export function GitSourcePanel({
                 </div>
               ) : (
                 <>
-                  {source?.pending_commit_sha && (
-                    <div className={`flex items-start gap-2 rounded-md border px-3 py-2 text-xs shadow-card-bevel ${
-                      source.pending_plan?.blocked
-                        ? 'border-warning/30 bg-warning/10'
-                        : 'border-brand/30 bg-brand/5'
-                    }`}>
-                      <AlertCircle className={`w-4 h-4 shrink-0 mt-0.5 ${source.pending_plan?.blocked ? 'text-warning' : 'text-brand'}`} strokeWidth={1.5} />
-                      <div className="flex-1">
-                        <p className="font-medium">
-                          {source.pending_plan?.blocked ? 'Pending update blocked' : 'Pending update'}
-                        </p>
-                        <p className="text-stat-subtitle mt-0.5">
-                          Commit <span className="font-mono tabular-nums">{source.pending_commit_sha.slice(0, 7)}</span>
-                          {source.pending_plan?.blocked
-                            ? ' has local conflicts. Review the plan; apply stays disabled until they are resolved.'
-                            : ' is ready to review.'}
-                        </p>
-                      </div>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7"
-                        onClick={() => pullNow()}
-                        disabled={pulling}
-                      >
-                        Review
-                      </Button>
-                    </div>
+                  {faults.length > 0 && (
+                    <GitOpsStateCard
+                      data-testid="gitops-fault"
+                      stateKey="unreachable"
+                      state={{
+                        label: 'gitops state unavailable',
+                        tone: 'destructive',
+                        line: faults[0].message,
+                        icon: AlertCircle,
+                      }}
+                    />
+                  )}
+
+                  {candidate && (
+                    <GitOpsStateCard
+                      data-testid="git-pending"
+                      stateKey={candidate.status}
+                      state={SOURCE_STATE[candidate.status]}
+                      action={(
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7"
+                          onClick={() => pullNow()}
+                          disabled={pulling}
+                        >
+                          Review
+                        </Button>
+                      )}
+                    >
+                      {candidate.fetchedCommitSha && (
+                        <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
+                          Commit <span className="tabular-nums text-foreground/80">{candidate.fetchedCommitSha.slice(0, 7)}</span>
+                        </div>
+                      )}
+                    </GitOpsStateCard>
                   )}
 
                   <GitSourceFields
@@ -434,6 +468,12 @@ export function GitSourcePanel({
                           {source.last_applied_commit_sha ? source.last_applied_commit_sha.slice(0, 7) : 'never'}
                         </span>
                       </div>
+                      {sourceFacet && (
+                        <div className="flex justify-between gap-2">
+                          <span>Source state</span>
+                          <span data-testid="git-source-state">{SOURCE_STATE[sourceFacet.status].label}</span>
+                        </div>
+                      )}
                       <div className="flex justify-between gap-2">
                         <span>Updated</span>
                         <span className="font-mono tabular-nums">
