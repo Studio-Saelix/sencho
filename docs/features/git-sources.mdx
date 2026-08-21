@@ -55,7 +55,7 @@ These are the states you will see most often.
 The last two matter most. Sencho reports an interrupted operation as unknown rather than guessing, so a stack whose pull was cut short by a restart says so instead of quietly reading as up to date.
 
 <Note>
-  Saving the form clears any staged commit, because the plan was built against the settings you just changed. The state moves to **Reconcile required** and the panel says so. Pull again to rebuild it.
+  Changing the repository, the branch, the compose files, the project directory, or the `.env` sync clears any staged commit, because the plan was built against the settings you just replaced. The state moves to **Reconcile required**; pull again to rebuild it. Changing only the token or the apply behavior leaves a staged commit alone, since neither changes what would be materialized.
 </Note>
 
 ### When part of the state could not be proven
