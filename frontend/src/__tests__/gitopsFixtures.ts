@@ -6,6 +6,7 @@
 
 import type {
   GitOpsApprovalRefs,
+  GitOpsDriftItem,
   GitOpsFacets,
   GitOpsLimitation,
   GitOpsRevisionAbsent,
@@ -15,10 +16,15 @@ import type {
   SourceIdentityFields,
 } from '@/types/gitops';
 
-/** The source statuses that carry identity fields and nothing else. Covers every state this slice renders. */
+/**
+ * The candidate-bearing source statuses, which are the ones this slice renders.
+ *
+ * Narrower than the set that structurally fits: the identity defaults below
+ * describe a stack that has fetched and accepted a commit, which is a state
+ * `never_reconciled` and `checking_fetching` cannot be in. Building those from
+ * here would produce a fixture no backend could emit.
+ */
 type PlainSourceStatus =
-  | 'never_reconciled'
-  | 'checking_fetching'
   | 'application_generation_accepted'
   | 'candidate_ready'
   | 'source_review_pending'
@@ -80,6 +86,22 @@ export function target(overrides: Partial<GitOpsTargetProjection> = {}): GitOpsT
     health: { status: 'not_applicable' },
     lkg: { status: 'none' },
     tombstoned: false,
+    ...overrides,
+  };
+}
+
+/** One classified divergence. Nothing populates these yet, so every field is a default. */
+export function driftItem(overrides: Partial<GitOpsDriftItem> = {}): GitOpsDriftItem {
+  return {
+    class: 'runtime',
+    expected: { kind: 'generation', id: 'gen-accepted' },
+    observed: { kind: 'runtime_artifact', identity: 'nginx@sha256:abc', observedAt: 1 },
+    freshnessAt: 1,
+    owner: 'observed_artifact_identity',
+    reason: 'The running image is not the one this generation expects.',
+    configuredPolicy: null,
+    affectedTargets: [{ nodeId: 1, stackName: 'bookstack' }],
+    action: 'deploy',
     ...overrides,
   };
 }

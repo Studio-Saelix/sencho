@@ -177,7 +177,9 @@ describe('StackRow', () => {
     const { container: blocked } = render(<StackRow {...base({ gitPending: 'source_conflict_blocker' })} />);
     const { container: ready } = render(<StackRow {...base({ gitPending: 'candidate_ready' })} />);
     const markup = (root: HTMLElement) =>
-      root.querySelector('[data-testid="stack-trailing-git-pending"]')?.innerHTML;
+      root.querySelector('[data-testid="stack-row-trailing"]')?.outerHTML;
+    // Non-empty first: two missing indicators would otherwise compare equal.
+    expect(markup(blocked)).toContain('stack-trailing-git-pending');
     expect(markup(blocked)).toBe(markup(ready));
   });
 

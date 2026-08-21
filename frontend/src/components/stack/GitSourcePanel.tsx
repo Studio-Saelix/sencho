@@ -104,6 +104,13 @@ export function GitSourcePanel({
   // The waiting candidate, if there is one. Same rule the sidebar uses.
   const candidate = sourceFacet && sourceFacet.candidateGenerationId !== null ? sourceFacet : null;
   const faults = revision ? absentFault(revision) : [];
+  // Nothing answered, and the flat pointer says a commit is waiting. Reachable
+  // when a GitOps write failed and was swallowed while the pending commit still
+  // committed, and it is what this banner read before the projection existed.
+  // The sidebar applies the same rule, so the two surfaces cannot disagree.
+  const unanswered = !sourceFacet && faults.length === 0;
+  const pendingSha = candidate ? candidate.fetchedCommitSha : (unanswered ? source?.pending_commit_sha ?? null : null);
+  const pendingStatus = candidate ? candidate.status : (unanswered && source?.pending_commit_sha ? 'candidate_ready' : null);
 
   const resetToUnlinked = useCallback(() => {
     setSource(null);
@@ -151,6 +158,10 @@ export function GitSourcePanel({
         toast.error(err?.error || 'Failed to load Git source.');
       }
     } catch (e) {
+      // Clear alongside the other failure branches: the panel is reused across
+      // stacks, so a revision left behind would render one stack's state under
+      // another stack's header.
+      setRevision(null);
       toast.error((e as Error)?.message || 'Network error.');
     } finally {
       setLoading(false);
@@ -257,6 +268,11 @@ export function GitSourcePanel({
       if (res.ok) {
         toast.success('Git source removed.');
         setSource(null);
+        // Detaching is a stronger invalidation than a save: the projection now
+        // describes a source that is gone, and the pending card is derived from
+        // the revision alone, so leaving it would advertise a waiting commit on
+        // a stack Git no longer manages.
+        setRevision(null);
         onSourceChanged?.();
       } else {
         const err = await res.json().catch(() => ({}));
@@ -412,11 +428,11 @@ export function GitSourcePanel({
                     />
                   )}
 
-                  {candidate && (
+                  {pendingStatus && (
                     <GitOpsStateCard
                       data-testid="git-pending"
-                      stateKey={candidate.status}
-                      state={SOURCE_STATE[candidate.status]}
+                      stateKey={pendingStatus}
+                      state={SOURCE_STATE[pendingStatus]}
                       action={(
                         <Button
                           size="sm"
@@ -429,9 +445,9 @@ export function GitSourcePanel({
                         </Button>
                       )}
                     >
-                      {candidate.fetchedCommitSha && (
+                      {pendingSha && (
                         <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
-                          Commit <span className="tabular-nums text-foreground/80">{candidate.fetchedCommitSha.slice(0, 7)}</span>
+                          Commit <span className="tabular-nums text-foreground/80">{pendingSha.slice(0, 7)}</span>
                         </div>
                       )}
                     </GitOpsStateCard>

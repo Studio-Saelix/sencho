@@ -1,6 +1,7 @@
 import type React from 'react';
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { SOURCE_STATE } from '@/lib/gitopsState';
 import { StackList } from '../StackList';
 import { Command } from '@/components/ui/command';
 import { isStacksListSettled, isStacksListLoading } from '../stacksLoadUi';
@@ -200,7 +201,7 @@ describe('StackList hydration display', () => {
     expect(row.textContent).toContain('UP');
   });
 
-  it('passes a waiting Git state through to the row it belongs to', () => {
+  it('passes a waiting Git state through to the row it belongs to', async () => {
     render(
       <Command shouldFilter={false}>
         <StackList
@@ -215,6 +216,12 @@ describe('StackList hydration display', () => {
         />
       </Command>,
     );
-    expect(screen.getAllByTestId('stack-trailing-git-pending')).toHaveLength(1);
+    const indicators = screen.getAllByTestId('stack-trailing-git-pending');
+    expect(indicators).toHaveLength(1);
+    // The state has to survive the trip, not just the fact that one is waiting.
+    fireEvent.pointerMove(indicators[0]);
+    expect(
+      (await screen.findAllByText(SOURCE_STATE.source_conflict_blocker.line)).length,
+    ).toBeGreaterThan(0);
   });
 });

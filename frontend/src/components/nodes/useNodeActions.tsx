@@ -196,11 +196,13 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
         const err = await res.json();
         throw new Error(err.error || 'Failed to delete node');
       }
-      const body = (await res.json()) as GitOpsRevisionsCarrier;
-      // Report the count only when there is one. An empty list means both
-      // "nothing moved" and "the projection faulted after the delete
-      // committed", so it can never be reported as the former.
-      const moved = body.gitopsRevisions.length;
+      // The delete has already committed, so nothing about reading this body may
+      // be able to report it as a failure. Report the count only when there is
+      // one: an empty list means both "nothing moved" and "the projection
+      // faulted after the delete committed", so it can never be reported as the
+      // former.
+      const body = (await res.json().catch(() => null)) as GitOpsRevisionsCarrier | null;
+      const moved = body?.gitopsRevisions?.length ?? 0;
       toast.success(moved > 0
         ? `Node "${deletingNode.name}" deleted. ${moved} blueprint${moved === 1 ? '' : 's'} re-placed.`
         : `Node "${deletingNode.name}" deleted`);

@@ -19,7 +19,13 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
-import { absentRevision, facets, liveRevision, plainSource } from '@/__tests__/gitopsFixtures';
+import {
+  absentRevision,
+  facets,
+  liveRevision,
+  missingApplicationLimitation,
+  plainSource,
+} from '@/__tests__/gitopsFixtures';
 import { toast } from '@/components/ui/toast-store';
 
 type EditorState = ReturnType<typeof useEditorViewState>;
@@ -2453,6 +2459,32 @@ describe('useStackActions.refreshGitSourcePending', () => {
     const { result, editorState } = setup({});
     await result.current.refreshGitSourcePending();
     expect(editorState.setGitSourcePendingMap).toHaveBeenCalledWith({ web: 'candidate_ready' });
+  });
+
+  it('keeps reading the rest of the list when a row predates the revision model', async () => {
+    // /git-sources is proxied, so an older node answers rows with no
+    // projection at all. Throwing on one row would abandon the whole map.
+    vi.mocked(apiFetch).mockResolvedValue(okJson([
+      { stack_name: 'legacy', pending_commit_sha: 'a1b2c3d' },
+      gitSourceRow('web', liveRevision({ facets: facets({ source: plainSource('candidate_ready') }) })),
+    ]));
+    const { result, editorState } = setup({});
+    await result.current.refreshGitSourcePending();
+    expect(editorState.setGitSourcePendingMap).toHaveBeenCalledWith({
+      legacy: 'candidate_ready',
+      web: 'candidate_ready',
+    });
+  });
+
+  it('does not fabricate a ready candidate when the projection reports a fault', async () => {
+    // A fault means an application was expected and could not be read, so the
+    // flat pointer is not evidence that anything is ready to apply.
+    vi.mocked(apiFetch).mockResolvedValue(okJson([
+      gitSourceRow('web', absentRevision([missingApplicationLimitation]), 'a1b2c3d'),
+    ]));
+    const { result, editorState } = setup({});
+    await result.current.refreshGitSourcePending();
+    expect(editorState.setGitSourcePendingMap).toHaveBeenCalledWith({});
   });
 
   it('leaves the prior map alone when the request fails', async () => {

@@ -362,4 +362,115 @@ describe('GitSourcePanel GitOps state', () => {
     expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
     expect(screen.queryByTestId('git-source-state')).not.toBeInTheDocument();
   });
+
+  it('drops the pending card once the source is detached', async () => {
+    // The card is derived from the revision alone, so a detach that only
+    // cleared the source would keep advertising a commit for a stack Git no
+    // longer manages, behind a Review button that does nothing.
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (String(url).endsWith('/git-source') && !String(url).includes('?')) {
+        return jsonRes(linkedWith(liveRevision({ facets: facets({ source: plainSource('candidate_ready') }) })));
+      }
+      return jsonRes({ ok: true });
+    });
+    render(panel());
+    await screen.findByTestId('git-pending');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^detach/i }));
+
+    await waitFor(() => expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument());
+  });
+
+  it('drops the revision when a later read fails, so one stack cannot report another stack state', async () => {
+    // The panel is reused across stacks. A read that throws after a successful
+    // one has to clear the projection, or stack A's pending commit renders
+    // under stack B's header.
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(liveRevision({ facets: facets({ source: plainSource('candidate_ready') }) }))),
+    );
+    const { rerender } = render(
+      <GitSourcePanel open onOpenChange={vi.fn()} stackName="web" canEdit isDarkMode={false} />,
+    );
+    await screen.findByTestId('git-pending');
+
+    vi.mocked(apiFetch).mockRejectedValue(new Error('offline'));
+    rerender(<GitSourcePanel open onOpenChange={vi.fn()} stackName="api" canEdit isDarkMode={false} />);
+
+    // Wait for the load to settle before asserting: the body is skeletons while
+    // it is in flight, so an assertion there would pass without the fix.
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    await screen.findByLabelText(/repository url/i);
+    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
+  });
+
+  it('drops the revision after a save, which clears the staged candidate server side', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(liveRevision({ facets: facets({ source: plainSource('candidate_ready') }) }))),
+    );
+    render(panel());
+    await screen.findByTestId('git-pending');
+
+    // The PUT answers with a bare source and no revision.
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...LINKED_SOURCE, gitopsRevision: undefined }));
+    fireEvent.click(screen.getByRole('button', { name: /update/i }));
+
+    await waitFor(() => expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument());
+  });
+
+  it('shows no source card for an application that has no Git source', async () => {
+    // Guards the panel against a projection whose source facet is not
+    // applicable: without it the card renders "no git source" with a live
+    // Review button.
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(liveRevision({
+      targetMode: 'inline_blueprint',
+      facets: facets({
+        source: { status: 'not_applicable' },
+        placement: { status: 'blueprint_bound', completion: 'unknown' },
+      }),
+    }))));
+    render(panel());
+
+    await screen.findByRole('button', { name: /pull now/i });
+    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('git-source-state')).not.toBeInTheDocument();
+  });
+
+  it('still reports a waiting commit when no projection answered', async () => {
+    // A swallowed GitOps write leaves the flat pointer as the only evidence.
+    // The sidebar keeps showing it, so the panel has to agree.
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({
+      ...LINKED_SOURCE,
+      pending_commit_sha: 'f00ba12345',
+      gitopsRevision: absentRevision(),
+    }));
+    render(panel());
+
+    const banner = await screen.findByTestId('git-pending');
+    expect(within(banner).getByText('f00ba12')).toBeInTheDocument();
+  });
+
+  it('does not treat a live application caveat as a fault', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(liveRevision({
+      limitations: [{ code: 'repo_identity_invalid', message: 'Repository identity could not be read.', evidence: null }],
+    }))));
+    render(panel());
+
+    await screen.findByTestId('git-source-state');
+    expect(screen.queryByTestId('gitops-fault')).not.toBeInTheDocument();
+  });
+
+  it('routes the pending card Review button to the pull endpoint', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(liveRevision({ facets: facets({ source: plainSource('candidate_ready') }) }))),
+    );
+    render(panel());
+    const banner = await screen.findByTestId('git-pending');
+
+    fireEvent.click(within(banner).getByRole('button', { name: 'Review' }));
+
+    await waitFor(() => expect(
+      vi.mocked(apiFetch).mock.calls.some(c => String(c[0]).includes('/git-source/pull')),
+    ).toBe(true));
+  });
 });

@@ -198,9 +198,10 @@ describe('StackAnatomyPanel git source state', () => {
     expect(screen.queryByText(SOURCE_STATE.candidate_ready.label)).not.toBeInTheDocument();
   });
 
-  it('names a state the dot cannot express', () => {
-    render(withPending('source_conflict_blocker'));
+  it('names a state the dot cannot express, without losing the dot', () => {
+    const { container } = render(withPending('source_conflict_blocker'));
     expect(screen.getByText(SOURCE_STATE.source_conflict_blocker.label)).toBeInTheDocument();
+    expect(container.querySelector('.animate-pulse')).not.toBeNull();
   });
 
   it('shows neither when nothing is waiting', () => {

@@ -14,7 +14,7 @@ import { toast } from '@/components/ui/toast-store';
 import { buildServiceUrl, openServiceUrl } from '@/lib/serviceUrl';
 import { requestServiceUpdate as postServiceUpdate, requestServiceRestore as postServiceRestore } from '@/lib/serviceUpdate';
 import type { EffectiveServiceModelResult } from '@/types/effectiveServices';
-import { pendingSourceStatus, type GitSourcePendingMap } from '@/lib/gitopsState';
+import { absentFault, pendingSourceStatus, type GitSourcePendingMap } from '@/lib/gitopsState';
 import type { GitOpsRevisionCarrier } from '@/types/gitops';
 import type { useEditorViewState } from './useEditorViewState';
 import type { useStackListState } from './useStackListState';
@@ -829,22 +829,32 @@ export function useStackActions(options: UseStackActionsOptions) {
     try {
       const res = await apiFetch('/git-sources');
       if (!res.ok) return;
+      // The revision is optional because this route is proxied: a node that
+      // predates the revision model answers rows without one.
       const sources: Array<
-        { stack_name: string; pending_commit_sha: string | null } & GitOpsRevisionCarrier
+        { stack_name: string; pending_commit_sha: string | null } & Partial<GitOpsRevisionCarrier>
       > = await res.json();
       const map: GitSourcePendingMap = {};
       for (const s of sources) {
-        const status = pendingSourceStatus(s.gitopsRevision);
+        const revision = s.gitopsRevision;
+        const status = revision ? pendingSourceStatus(revision) : null;
         if (status) {
           map[s.stack_name] = status;
           continue;
         }
-        // No projection to read, which is reachable: a failed GitOps write is
-        // logged and swallowed while the pending commit still commits. The flat
-        // pointer is then the only thing that can answer, and going quiet on a
-        // stack that genuinely has an update waiting would be a regression.
-        // Whenever a projection does exist it stays the sole authority.
-        if (s.gitopsRevision.targetMode === 'not_applicable' && s.pending_commit_sha) {
+        // Nothing answered. Either the row predates the model, or a GitOps write
+        // failed and was swallowed while the pending commit still committed. The
+        // flat pointer is the only thing left that can answer, and going quiet on
+        // a stack that genuinely has an update waiting would be a regression.
+        //
+        // A projection that reports a fault is excluded: it means an application
+        // was expected and could not be read, so the pointer is not evidence that
+        // a candidate is ready, and naming a state here would be a guess. The
+        // panels surface that fault properly; this indicator only ever claims
+        // that an update is waiting.
+        const unanswered = !revision
+          || (revision.targetMode === 'not_applicable' && absentFault(revision).length === 0);
+        if (unanswered && s.pending_commit_sha) {
           map[s.stack_name] = 'candidate_ready';
         }
       }

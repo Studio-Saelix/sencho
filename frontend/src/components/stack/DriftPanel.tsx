@@ -54,8 +54,9 @@ interface StackDriftReport {
   // if never. The history is "as of" this time, not the live status above it.
   lastCheckedAt?: number | null;
   // Optional for the same reason as temporal and ledger above: a report proxied
-  // from an older remote node predates the revision model. Absent means that
-  // node cannot answer, which is not the same as it answering "nothing here".
+  // from an older remote node predates the revision model and omits it. That is
+  // rendered the same as an answer of "nothing here", because the alternative is
+  // telling an operator their node is out of date on a tab about drift.
   gitopsRevision?: GitOpsRevisionProjection;
 }
 
