@@ -9,6 +9,7 @@ import { toast } from '@/components/ui/toast-store';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
+import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
 import { RUNTIME_STATE, SOURCE_STATE, absentFault, identityRefLabel, liveSourceFacet } from '@/lib/gitopsState';
 import type { GitOpsDriftItem, GitOpsRevisionProjection } from '@/types/gitops';
 
@@ -368,6 +369,7 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
                     </div>
                   </GitOpsStateCard>
                 ))}
+                <GitOpsCaveats revision={revision} />
               </div>
             </section>
           )}

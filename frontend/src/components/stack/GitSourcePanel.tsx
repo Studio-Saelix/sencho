@@ -13,6 +13,7 @@ import { GitSourceFields, type ApplyMode } from './GitSourceFields';
 import { GitManifestSummary, type ManifestSummary } from './GitManifestSummary';
 import type { GitBrowseResult } from './GitComposeFilePicker';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
+import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
 import { SOURCE_STATE, absentFault, liveSourceFacet, type LiveSourceFacet } from '@/lib/gitopsState';
 import type { GitOpsRevisionCarrier, GitOpsRevisionProjection, GitOpsSourceStatus } from '@/types/gitops';
 
@@ -462,6 +463,8 @@ export function GitSourcePanel({
                       )}
                     </GitOpsStateCard>
                   )}
+
+                  <GitOpsCaveats revision={revision} />
 
                   <GitSourceFields
                     variant="edit"

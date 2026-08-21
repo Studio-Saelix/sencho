@@ -408,6 +408,19 @@ export function absentFault(revision: GitOpsRevisionProjection): readonly GitOps
   return revision.targetMode === 'not_applicable' ? revision.limitations : [];
 }
 
+/**
+ * Caveats on state that is being reported, the exact complement of `absentFault`.
+ *
+ * A live limitation qualifies the answer rather than replacing it: the state
+ * shown is real, and one piece of evidence behind it could not be proven. The
+ * two arms are read through separate functions on purpose, because rendering a
+ * caveat as a fault would claim the state is unavailable when it is not, and
+ * rendering a fault as a caveat would claim a state nobody derived.
+ */
+export function liveCaveats(revision: GitOpsRevisionProjection): readonly GitOpsLimitation[] {
+  return revision.targetMode === 'not_applicable' ? [] : revision.limitations;
+}
+
 /** One short line naming what an identity reference points at, for a drift comparison row. */
 export function identityRefLabel(ref: GitOpsIdentityRef): string {
   switch (ref.kind) {
