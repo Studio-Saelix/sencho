@@ -79,7 +79,7 @@ The second option matters because Sencho talks to Docker through two paths, and 
 
 The last row is the exception to everything above. See [Self-update behind a proxy](#self-update-behind-a-proxy).
 
-The profiles below use `tecnativa/docker-socket-proxy` style flags as a worked example. Other proxies (for example `linuxserver/socket-proxy`) expose similar API-group flags, and the exact lifecycle allow flags vary by implementation, so check the flag names against the proxy image and version you run. Profile values are the literal strings `1` and `0`.
+The profiles below use `tecnativa/docker-socket-proxy` style flags as a worked example. Other proxies (for example `linuxserver/socket-proxy`) expose similar API-group flags; check the names against the image and version you run. Profile values are the literal strings `1` and `0`. If you run `linuxserver/socket-proxy`, add the [LinuxServer socket-proxy extras](#linuxserver-socket-proxy-extras) on top of any profile. Log viewing on that image requires `ALLOW_LOGS=1` in addition to `CONTAINERS=1`.
 
 Compose Doctor classifies socket-proxy topologies in-app and flags risky configurations such as a proxy that allows mutating API access, publishes a host port, or joins a non-internal network. See [Compose Doctor](/features/compose-doctor).
 
@@ -154,6 +154,26 @@ GRPC=1
 
 This profile supports the full Sencho surface: the interactive shell, build-backed stacks, helper containers, cleanup actions, and self-update where a usable host Docker socket path is available to helpers (see the caveat below).
 
+### LinuxServer socket-proxy extras
+
+When the proxy image is `linuxserver/socket-proxy` (or `lscr.io/linuxserver/socket-proxy`), add these flags on top of **any** profile above. All three profiles include log viewing.
+
+```env
+ALLOW_LOGS=1
+ALLOW_ARCHIVE=0
+ALLOW_CHANGES=0
+ALLOW_EXPORT=0
+ALLOW_TOP=0
+```
+
+On this image, `CONTAINERS=1` lists and inspects containers; it does not open `/containers/{id}/logs`. Sencho log viewing (the Editor **View logs** modal, stack log streams, and the hub Logs tab) requires `ALLOW_LOGS=1`. Enabling `POST` does not grant log access.
+
+If inventory still works but log viewing does not, the proxy is blocking that endpoint. A typical denial body is `403 Forbidden` with `Request forbidden by administrative rules`.
+
+Keep the other four flags at `0`. Sencho does not use the container archive, filesystem-diff, export, or `top` Engine endpoints.
+
+Tecnativa profiles do not use these keys. On `tecnativa/docker-socket-proxy`, logs stay under `CONTAINERS`.
+
 ### Keep these disabled
 
 Sencho does not use these API groups today. Keep them disabled unless a future feature adds a direct dependency:
@@ -175,7 +195,7 @@ DISTRIBUTION=0
 
 | Capability | What the proxy must allow |
 |------------|---------------------------|
-| Dashboard inventory, topology, logs, stats | CONTAINERS (list, inspect, logs, stats), IMAGES, NETWORKS, VOLUMES, INFO, SYSTEM (disk usage), EVENTS, PING, VERSION |
+| Dashboard inventory, topology, logs, stats | CONTAINERS (list, inspect, logs, stats), IMAGES, NETWORKS, VOLUMES, INFO, SYSTEM (disk usage), EVENTS, PING, VERSION. On `linuxserver/socket-proxy`, add `ALLOW_LOGS=1`. |
 | Container start, stop, restart, auto-heal | CONTAINERS plus POST plus the lifecycle allow flags |
 | Compose deploy, update, down, pull | POST plus the CONTAINERS, IMAGES, NETWORKS, and VOLUMES groups the Compose Engine uses through the same endpoint |
 | Build-backed stacks | BUILD plus SESSION and GRPC as the BuildKit path requires |
