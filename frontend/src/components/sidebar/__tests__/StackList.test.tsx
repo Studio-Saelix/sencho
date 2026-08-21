@@ -199,4 +199,22 @@ describe('StackList hydration display', () => {
     const row = screen.getByTestId('stack-row');
     expect(row.textContent).toContain('UP');
   });
+
+  it('passes a waiting Git state through to the row it belongs to', () => {
+    render(
+      <Command shouldFilter={false}>
+        <StackList
+          {...baseProps({
+            stacksLoadStatus: 'success',
+            files: ['web.yml', 'api.yml'],
+            stackStatuses: { 'web.yml': 'running', 'api.yml': 'running' },
+            // Keyed by the API's stack_name, read here by the sidebar's file key.
+            gitSourcePendingMap: { 'web.yml': 'source_conflict_blocker' },
+            buildMenuCtx: () => minimalCtx as never,
+          })}
+        />
+      </Command>,
+    );
+    expect(screen.getAllByTestId('stack-trailing-git-pending')).toHaveLength(1);
+  });
 });

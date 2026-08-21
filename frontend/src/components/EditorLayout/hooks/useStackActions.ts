@@ -14,6 +14,8 @@ import { toast } from '@/components/ui/toast-store';
 import { buildServiceUrl, openServiceUrl } from '@/lib/serviceUrl';
 import { requestServiceUpdate as postServiceUpdate, requestServiceRestore as postServiceRestore } from '@/lib/serviceUpdate';
 import type { EffectiveServiceModelResult } from '@/types/effectiveServices';
+import { pendingSourceStatus, type GitSourcePendingMap } from '@/lib/gitopsState';
+import type { GitOpsRevisionCarrier } from '@/types/gitops';
 import type { useEditorViewState } from './useEditorViewState';
 import type { useStackListState } from './useStackListState';
 import type { useViewNavigationState } from './useViewNavigationState';
@@ -827,11 +829,24 @@ export function useStackActions(options: UseStackActionsOptions) {
     try {
       const res = await apiFetch('/git-sources');
       if (!res.ok) return;
-      const sources: Array<{ stack_name: string; pending_commit_sha: string | null }> =
-        await res.json();
-      const map: Record<string, boolean> = {};
+      const sources: Array<
+        { stack_name: string; pending_commit_sha: string | null } & GitOpsRevisionCarrier
+      > = await res.json();
+      const map: GitSourcePendingMap = {};
       for (const s of sources) {
-        if (s.pending_commit_sha) map[s.stack_name] = true;
+        const status = pendingSourceStatus(s.gitopsRevision);
+        if (status) {
+          map[s.stack_name] = status;
+          continue;
+        }
+        // No projection to read, which is reachable: a failed GitOps write is
+        // logged and swallowed while the pending commit still commits. The flat
+        // pointer is then the only thing that can answer, and going quiet on a
+        // stack that genuinely has an update waiting would be a regression.
+        // Whenever a projection does exist it stays the sole authority.
+        if (s.gitopsRevision.targetMode === 'not_applicable' && s.pending_commit_sha) {
+          map[s.stack_name] = 'candidate_ready';
+        }
       }
       editorState.setGitSourcePendingMap(map);
     } catch {

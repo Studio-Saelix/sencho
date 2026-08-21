@@ -19,6 +19,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+import { absentRevision, facets, liveRevision, plainSource } from '@/__tests__/gitopsFixtures';
 import { toast } from '@/components/ui/toast-store';
 
 type EditorState = ReturnType<typeof useEditorViewState>;
@@ -2406,3 +2407,65 @@ describe('useStackActions reactive external-network retry ownership', () => {
   });
 });
 
+
+describe('useStackActions.refreshGitSourcePending', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  function gitSourceRow(stackName: string, revision: unknown, pendingSha: string | null = null) {
+    return { stack_name: stackName, pending_commit_sha: pendingSha, gitopsRevision: revision };
+  }
+
+  it('records the derived state of each waiting candidate', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(okJson([
+      gitSourceRow('web', liveRevision({ facets: facets({ source: plainSource('candidate_ready') }) })),
+      gitSourceRow('api', liveRevision({ facets: facets({ source: plainSource('source_conflict_blocker') }) })),
+    ]));
+    const { result, editorState } = setup({});
+    await result.current.refreshGitSourcePending();
+    expect(editorState.setGitSourcePendingMap).toHaveBeenCalledWith({
+      web: 'candidate_ready',
+      api: 'source_conflict_blocker',
+    });
+  });
+
+  it('skips a stack whose projection has no candidate waiting', async () => {
+    // The raw pointer is set, but the model says the candidate is gone. The
+    // model wins: this is the conflation the derived read exists to remove.
+    vi.mocked(apiFetch).mockResolvedValue(okJson([
+      gitSourceRow(
+        'web',
+        liveRevision({ facets: facets({ source: plainSource('source_reconcile_required', { candidateGenerationId: null }) }) }),
+        'a1b2c3d',
+      ),
+    ]));
+    const { result, editorState } = setup({});
+    await result.current.refreshGitSourcePending();
+    expect(editorState.setGitSourcePendingMap).toHaveBeenCalledWith({});
+  });
+
+  it('falls back to the raw pointer only when there is no projection to read', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(okJson([
+      gitSourceRow('web', absentRevision(), 'a1b2c3d'),
+      gitSourceRow('api', absentRevision(), null),
+    ]));
+    const { result, editorState } = setup({});
+    await result.current.refreshGitSourcePending();
+    expect(editorState.setGitSourcePendingMap).toHaveBeenCalledWith({ web: 'candidate_ready' });
+  });
+
+  it('leaves the prior map alone when the request fails', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('boom', { status: 500 }));
+    const { result, editorState } = setup({});
+    await result.current.refreshGitSourcePending();
+    expect(editorState.setGitSourcePendingMap).not.toHaveBeenCalled();
+  });
+
+  it('leaves the prior map alone when the request throws', async () => {
+    vi.mocked(apiFetch).mockRejectedValue(new Error('offline'));
+    const { result, editorState } = setup({});
+    await result.current.refreshGitSourcePending();
+    expect(editorState.setGitSourcePendingMap).not.toHaveBeenCalled();
+  });
+});

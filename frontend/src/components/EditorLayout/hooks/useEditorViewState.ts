@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ContainerInfo } from '../EditorView';
 import type { EffectiveServiceSpec } from '@/types/effectiveServices';
+import type { GitSourcePendingMap } from '@/lib/gitopsState';
 
 export const LOGS_MODE_STORAGE_KEY = 'sencho.stackView.logsMode';
 
@@ -51,7 +52,10 @@ export function useEditorViewState() {
   }, [logsMode]);
 
   const [gitSourceOpen, setGitSourceOpen] = useState(false);
-  const [gitSourcePendingMap, setGitSourcePendingMap] = useState<Record<string, boolean>>({});
+  // Keyed by the API's stack_name and read by the sidebar's file key, which
+  // coincide for every stack the sidebar can show. A key being present means a
+  // Git candidate is waiting; the value names which state it is waiting in.
+  const [gitSourcePendingMap, setGitSourcePendingMap] = useState<GitSourcePendingMap>({});
   const [isFileLoading, setIsFileLoading] = useState(false);
   const [backupInfo, setBackupInfo] = useState<BackupInfo>({ exists: false, timestamp: null });
   const [isEditing, setIsEditing] = useState(false);

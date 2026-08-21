@@ -20,6 +20,8 @@ vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: nodeSta
 
 import { apiFetch } from '@/lib/api';
 import StackAnatomyPanel from './StackAnatomyPanel';
+import { SOURCE_STATE } from '@/lib/gitopsState';
+import type { GitOpsSourceStatus } from '@/types/gitops';
 
 const COMPOSE = 'services:\n  web:\n    image: nginx:1.25\n';
 
@@ -134,7 +136,7 @@ function panel(applying: boolean, onApplyUpdate: () => void = vi.fn(), stackName
       content={COMPOSE}
       envContent=""
       selectedEnvFile=".env"
-      gitSourcePending={false}
+      gitSourcePending={null}
       onEditCompose={vi.fn()}
       onOpenGitSource={vi.fn()}
       onApplyUpdate={onApplyUpdate}
@@ -158,7 +160,7 @@ describe('StackAnatomyPanel edit affordance', () => {
         content={COMPOSE}
         envContent=""
         selectedEnvFile=".env"
-        gitSourcePending={false}
+        gitSourcePending={null}
         onEditCompose={vi.fn()}
         onOpenGitSource={vi.fn()}
         onApplyUpdate={vi.fn()}
@@ -167,6 +169,43 @@ describe('StackAnatomyPanel edit affordance', () => {
       />,
     );
     expect(screen.queryByTestId('anatomy-edit-compose-btn')).not.toBeInTheDocument();
+  });
+});
+
+describe('StackAnatomyPanel git source state', () => {
+  function withPending(gitSourcePending: GitOpsSourceStatus | null) {
+    return (
+      <StackAnatomyPanel
+        stackName="web"
+        content={COMPOSE}
+        envContent=""
+        selectedEnvFile=".env"
+        gitSourcePending={gitSourcePending}
+        onEditCompose={vi.fn()}
+        onOpenGitSource={vi.fn()}
+        onApplyUpdate={vi.fn()}
+        canEdit
+        applying={false}
+      />
+    );
+  }
+
+  it('shows only the dot for an ordinary waiting update', () => {
+    // The dot already means "an update is waiting", so naming that state would
+    // be saying the same thing twice, and it is the common case.
+    const { container } = render(withPending('candidate_ready'));
+    expect(container.querySelector('.animate-pulse')).not.toBeNull();
+    expect(screen.queryByText(SOURCE_STATE.candidate_ready.label)).not.toBeInTheDocument();
+  });
+
+  it('names a state the dot cannot express', () => {
+    render(withPending('source_conflict_blocker'));
+    expect(screen.getByText(SOURCE_STATE.source_conflict_blocker.label)).toBeInTheDocument();
+  });
+
+  it('shows neither when nothing is waiting', () => {
+    const { container } = render(withPending(null));
+    expect(container.querySelector('.animate-pulse')).toBeNull();
   });
 });
 
@@ -482,7 +521,7 @@ describe('StackAnatomyPanel exposed footer', () => {
         content={content}
         envContent=""
         selectedEnvFile=".env"
-        gitSourcePending={false}
+        gitSourcePending={null}
         onEditCompose={vi.fn()}
         onOpenGitSource={vi.fn()}
         onApplyUpdate={vi.fn()}
@@ -524,7 +563,7 @@ describe('StackAnatomyPanel effective dossier (multi-file Git)', () => {
         content={content}
         envContent=""
         selectedEnvFile=".env"
-        gitSourcePending={false}
+        gitSourcePending={null}
         onEditCompose={vi.fn()}
         onOpenGitSource={vi.fn()}
         onApplyUpdate={vi.fn()}

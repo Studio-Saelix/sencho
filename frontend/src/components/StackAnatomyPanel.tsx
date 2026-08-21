@@ -17,6 +17,8 @@ import { type AnatomyMarkdownInput, type PortRow, type VolumeRow } from '@/lib/a
 import { usePreflightDismiss } from '@/hooks/usePreflightDismiss';
 import { useScanBannerDismiss } from '@/hooks/useScanBannerDismiss';
 import { parseAnatomy, parseEnvKeys, formatGitSource, imageName, primaryPublishedHostPort, type GitSourceInfo } from '@/lib/anatomy';
+import { SOURCE_STATE } from '@/lib/gitopsState';
+import type { GitOpsSourceStatus } from '@/types/gitops';
 import { buildServiceUrl } from '@/lib/serviceUrl';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import StackDossierPanel from './stack/StackDossierPanel';
@@ -35,7 +37,8 @@ interface StackAnatomyPanelProps {
   content: string;
   envContent: string;
   selectedEnvFile: string;
-  gitSourcePending: boolean;
+  /** The source state of a waiting Git candidate, or null when none is waiting. */
+  gitSourcePending: GitOpsSourceStatus | null;
   onEditCompose: () => void;
   onOpenGitSource: () => void;
   onApplyUpdate: () => void;
@@ -610,7 +613,17 @@ export default function StackAnatomyPanel({
                   <span>local</span>
                 )}
                 {gitSourcePending && (
-                  <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-brand animate-pulse" />
+                  <>
+                    <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-brand animate-pulse" />
+                    {/* The dot already says "an update is waiting". Name the state
+                        only when it is something else: blocked, held for review,
+                        stale against the configuration, or mid-apply. */}
+                    {gitSourcePending !== 'candidate_ready' && (
+                      <span className="shrink-0 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">
+                        {SOURCE_STATE[gitSourcePending].label}
+                      </span>
+                    )}
+                  </>
                 )}
               </button>
             </Row>
