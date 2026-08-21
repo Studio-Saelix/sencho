@@ -14,7 +14,7 @@ import { createHash, randomUUID } from 'crypto';
 import { DatabaseService, type Blueprint, type BlueprintSelector } from '../DatabaseService';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
-import type { GitOpsIntentRevisionRow, GitOpsRolloutCandidateRow } from './types';
+import type { GitOpsApplicationRow, GitOpsIntentRevisionRow, GitOpsRolloutCandidateRow } from './types';
 
 /** What an operator changed, which decides whether a new intent is minted. */
 export type BlueprintChangeKind = 'operational' | 'metadata_only' | 'none';
@@ -25,6 +25,25 @@ function sha256(value: string): string {
 
 export function envelopeFor(actor: string | null, trigger: string): EventEnvelope {
   return { operationId: randomUUID(), actor: actor ?? 'system:blueprint', trigger, at: Date.now() };
+}
+
+/**
+ * Whether an application can be recorded against.
+ *
+ * `getLiveBlueprintApplication` answers with `active` or `creating`, because
+ * its other callers ask "does this Blueprint already hold the live slot", where
+ * a half-built row counts. The transitions that mint intents and candidates
+ * accept only `active` and reject anything else by throwing, and they run
+ * inside the caller's transaction, so a `creating` row reaching one of them
+ * would fail the operator's edit and roll back the Blueprint write with it.
+ *
+ * Narrowing here rather than in the getter keeps the slot check honest while
+ * giving the producers the stricter set they actually require.
+ */
+export function recordableApplication(
+  app: GitOpsApplicationRow | undefined,
+): app is GitOpsApplicationRow {
+  return !!app && app.lifecycle_status === 'active';
 }
 
 export type BlueprintUpdates = Parameters<DatabaseService['updateBlueprint']>[1];
@@ -229,7 +248,7 @@ export function commitBlueprintUpdate(
     // A Blueprint that predates the model has no application yet. Migration
     // brings it in; inventing one here would claim a first intent for a
     // Blueprint whose deployments nobody has reconciled.
-    if (!app) return { blueprint, change };
+    if (!recordableApplication(app)) return { blueprint, change };
 
     const envelope = envelopeFor(actor, 'blueprint_update');
     const intent = intentRowFor(app.id, blueprint, envelope.operationId, actor, envelope.at);
@@ -271,7 +290,7 @@ export function commitBlueprintPin(
     if (!blueprint) return { blueprint: undefined, changed: false };
 
     const app = store.getLiveBlueprintApplication(blueprintId);
-    if (!app) return { blueprint, changed: true };
+    if (!recordableApplication(app)) return { blueprint, changed: true };
 
     const envelope = envelopeFor(actor, 'blueprint_pin');
     const intent = intentRowFor(app.id, blueprint, envelope.operationId, actor, envelope.at);

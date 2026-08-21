@@ -21,7 +21,7 @@ import { DatabaseService, type Blueprint } from '../DatabaseService';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions } from './transitions';
-import { candidateRowFor, envelopeFor, intentRowFor } from './blueprintProducers';
+import { candidateRowFor, envelopeFor, intentRowFor, recordableApplication } from './blueprintProducers';
 
 /** Desired node ids per Blueprint id, as placement currently resolves them. */
 export type PlacementSnapshot = Map<number, number[]>;
@@ -61,7 +61,7 @@ export function recordPlacementShift(
     const app = store.getLiveBlueprintApplication(blueprintId);
     // A Blueprint that predates the model has no application yet. Migration
     // brings it in rather than this path inventing a first intent for it.
-    if (!app) continue;
+    if (!recordableApplication(app)) continue;
     const blueprint = db.getBlueprint(blueprintId);
     if (!blueprint) {
       // Unlike the skip above, this one is a fault. A live application exists

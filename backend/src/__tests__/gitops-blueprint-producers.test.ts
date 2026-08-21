@@ -274,6 +274,46 @@ describe('gitops blueprint producers', () => {
     // An operational change alongside a metadata one is still operational.
     expect(classifyBlueprintChange(before, { name: 'b', description: 'other' })).toBe('operational');
   });
+
+  describe('an application that is not yet active', () => {
+    // The live-slot lookup answers with `active` or `creating`, because its
+    // other callers ask whether the slot is taken. The transitions that mint
+    // intents accept only `active` and reject anything else by throwing, inside
+    // the caller's own transaction, so a `creating` row reaching one would fail
+    // the operator's edit and roll the Blueprint write back with it.
+    const toCreating = (blueprintId: number): void => {
+      DatabaseService.getInstance().getDb()
+        .prepare('UPDATE gitops_applications SET lifecycle_status = ? WHERE blueprint_id = ?')
+        .run('creating', blueprintId);
+    };
+
+    it('lets an edit through without minting an intent', () => {
+      const store = GitOpsStore.getInstance();
+      const blueprint = create('bp-creating-update');
+      const app = store.getLiveBlueprintApplication(blueprint.id)!;
+      const intentBefore = app.intent_revision_id;
+      toCreating(blueprint.id);
+
+      const result = commitBlueprintUpdate(blueprint.id, { name: 'bp-creating-renamed' }, 'tester', desiredNodeIdsFor);
+
+      expect(result.blueprint?.name).toBe('bp-creating-renamed');
+      expect(store.getLiveBlueprintApplication(blueprint.id)!.intent_revision_id).toBe(intentBefore);
+    });
+
+    it('lets a pin through without minting an intent', () => {
+      const store = GitOpsStore.getInstance();
+      const blueprint = create('bp-creating-pin');
+      const app = store.getLiveBlueprintApplication(blueprint.id)!;
+      const intentBefore = app.intent_revision_id;
+      toCreating(blueprint.id);
+
+      const result = commitBlueprintPin(blueprint.id, 1, 'tester', desiredNodeIdsFor);
+
+      expect(result.changed).toBe(true);
+      expect(result.blueprint?.pinned_node_id).toBe(1);
+      expect(store.getLiveBlueprintApplication(blueprint.id)!.intent_revision_id).toBe(intentBefore);
+    });
+  });
 });
 
 function create(name: string): Blueprint {

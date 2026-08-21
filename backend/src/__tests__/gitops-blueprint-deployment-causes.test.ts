@@ -179,6 +179,45 @@ describe('gitops blueprint deployment causes', () => {
     // An observation says what was seen, never what was agreed.
     expect(target.intent_revision_id).toBeNull();
   });
+
+  it('records a stateful first placement, which happens before any deploy', () => {
+    const store = GitOpsStore.getInstance();
+    const blueprint = create('dc-first-placement');
+    const app = store.getLiveBlueprintApplication(blueprint.id)!;
+    // No deploy has run, so there is no target: this is the case that used to
+    // drop the observation and leave the hold unrecorded.
+    expect(store.getTarget(app.id, NODE)).toBeUndefined();
+
+    commitBlueprintDeploymentCause('await_state_review', blueprint.id, NODE, {
+      status: 'pending_state_review', last_checked_at: Date.now(),
+    }, 'tester');
+
+    const target = store.getTarget(app.id, NODE)!;
+    expect(target.latest_stage).toBe('blueprint_state_review');
+    // First contact only. Nothing has been sent, applied or agreed.
+    expect(target.intent_revision_id).toBeNull();
+    expect(target.desired_generation_id).toBeNull();
+    expect(target.active_operation_stage).toBeNull();
+    // Unset rather than reachable: a node that has only been asked to hold
+    // something has not been contacted, and claiming reachability here would
+    // make the rollout facet answer for a node nobody has spoken to.
+    expect(target.connectivity).toBeNull();
+  });
+
+  it('still drops an observation for a node with no target and no placement', () => {
+    // Only the first-placement hold creates a target. A drift or evict report
+    // for a node nothing was ever sent to describes a deployment this model
+    // does not have, so it stays dropped.
+    const store = GitOpsStore.getInstance();
+    const blueprint = create('dc-observe-no-target');
+    const app = store.getLiveBlueprintApplication(blueprint.id)!;
+
+    commitBlueprintDeploymentCause('drift_observed', blueprint.id, NODE, {
+      status: 'drifted', last_checked_at: Date.now(), drift_summary: 'image moved',
+    }, 'tester');
+
+    expect(store.getTarget(app.id, NODE)).toBeUndefined();
+  });
 });
 
 function historyCount(db: DatabaseService, applicationId: string): number {

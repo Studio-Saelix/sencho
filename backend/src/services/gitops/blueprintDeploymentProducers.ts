@@ -15,7 +15,7 @@
 import { DatabaseService, type BlueprintDeployment } from '../DatabaseService';
 import { GitOpsStore, emptyTargetRow } from './store';
 import { GitOpsTransitions, GitOpsTransitionError } from './transitions';
-import { envelopeFor } from './blueprintProducers';
+import { envelopeFor, recordableApplication } from './blueprintProducers';
 
 /** Why a deployment row moved. */
 export type BlueprintDeploymentCause =
@@ -94,7 +94,7 @@ function record(
   const tx = GitOpsTransitions.getInstance();
   const app = store.getLiveBlueprintApplication(blueprintId);
   // A Blueprint that predates the model has nothing to record against.
-  if (!app || app.lifecycle_status !== 'active') return;
+  if (!recordableApplication(app)) return;
 
   const envelope = envelopeFor(actor, `blueprint_${cause}`);
 
@@ -104,7 +104,16 @@ function record(
     // because the row already read `deploying` would let a later
     // acknowledgement answer a request that had been superseded.
     if (!statusMoved) return;
-    if (!store.getTarget(app.id, nodeId)) return;
+    // A stateful first placement is held for review before anything deploys,
+    // so there is no target yet and nothing to observe against. Creating it
+    // here is the same first-contact write `deploy_start` does below: the
+    // node has been asked to hold this Blueprint, which is exactly what the
+    // observation is about. Every other observation follows a deploy, so its
+    // target already exists and this is a no-op.
+    if (!store.getTarget(app.id, nodeId)) {
+      if (cause !== 'await_state_review') return;
+      store.upsertTarget(emptyTargetRow(app.id, nodeId, envelope.at));
+    }
     tx.blueprintObservation({
       applicationId: app.id,
       nodeId,
