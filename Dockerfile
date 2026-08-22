@@ -275,13 +275,14 @@ FROM node:26-alpine@sha256:aadf416b2cdce311a8811ba3f0608a61b77dbf997500e2eafe781
 ARG APK_CACHE_BUST=unset
 
 # Upgrade all Alpine system packages and install runtime deps.
-# Docker CLI and Compose are copied from source-built stages below,
+# git is required at runtime: Git Sources clones through the native git
+# client. Docker CLI and Compose are copied from source-built stages below,
 # eliminating the curl dependency and all Go stdlib CVEs from the upstream
 # static binaries. npm is removed because it is not needed at runtime;
 # removing it also eliminates CVE-2026-33671 (picomatch ReDoS in npm).
 RUN echo "apk cache bust: ${APK_CACHE_BUST}" && \
     apk upgrade --no-cache && \
-    apk add --no-cache bash su-exec && \
+    apk add --no-cache bash su-exec git && \
     mkdir -p /usr/local/lib/docker/cli-plugins
 
 # Copy the source-built Docker CLI and Compose plugin from their builder stages.
