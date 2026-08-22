@@ -31,6 +31,30 @@ export type CreateRecoveryResult = {
   outcome: CreateRecoveryOutcome;
 };
 
+/**
+ * Refuse to continue while any create is still unresolved.
+ *
+ * A create that could not be settled leaves a stack directory the deploy path
+ * cannot tell apart from a finished one, so the alternative to stopping is
+ * letting a scheduler, webhook or operator act on a half-built stack. Startup
+ * calls this before the background mutators and the HTTP bind.
+ *
+ * Only `retained` counts. `marker_retained` means the create itself is settled
+ * and a leftover marker file is all that survived, which decides nothing about
+ * ownership and must not cost an operator their instance.
+ */
+export function assertCreatesSettled(settled: readonly CreateRecoveryResult[]): void {
+  const unresolved = settled.filter((entry) => entry.outcome === 'retained');
+  if (unresolved.length === 0) return;
+  const named = unresolved.map((entry) => sanitizeForLog(entry.stackName || entry.applicationId)).join(', ');
+  throw new Error(
+    `${unresolved.length} interrupted create(s) could not be settled: ${named}. `
+    + 'Sencho does not start while a create is unresolved, because a half-built stack '
+    + 'is indistinguishable from a finished one. The cause is logged above; clearing it '
+    + 'lets the next start finish the recovery.',
+  );
+}
+
 function envelopeFor(checkpoint: GitOpsCreateCheckpointRow) {
   return {
     operationId: checkpoint.operation_id,
@@ -310,12 +334,19 @@ async function resolveOne(checkpoint: GitOpsCreateCheckpointRow): Promise<Create
   } else if (stackDir === 'present') {
     await FileSystemService.getInstance().deleteStack(stackName);
   }
-  await removeOperationOwnedPaths({
+  const cleanup = await removeOperationOwnedPaths({
     stackManagedRoot: managedRoot,
     candidateRelPath: generation?.candidate_dir ?? null,
     appliedRelPath: generation?.applied_dir ?? null,
     ownsManagedRoot: checkpoint.created_managed_root === 1,
   });
+  // The staged directories are gone, so nothing deployable survives, but the
+  // marker still claims the name. Keep the checkpoint and report the same
+  // non-fatal outcome the settled path uses, rather than letting one unlink
+  // failure read as an unresolved create and stop the instance booting.
+  if (cleanup === 'marker_retained') {
+    return { stackName, applicationId: checkpoint.application_id, outcome: 'marker_retained' };
+  }
 
   GitOpsTransitions.getInstance().createFailed(
     checkpoint.application_id,

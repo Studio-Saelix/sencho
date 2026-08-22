@@ -1551,17 +1551,82 @@ describe('GitOps additive fields and history routes', () => {
         makeStackDir('creating-stack');
         activateApplication('app-creating', 'creating-stack', 'creating');
 
+        recordFetch('app-creating', 'creating-stack', 'op-creating-1', 'creat111');
         const perStack = await request(app)
             .get('/api/stacks/creating-stack/git-source/history')
             .set('Cookie', viewerCookie);
         expect(perStack.status).toBe(200);
-        expect(perStack.body.items.length).toBeGreaterThan(0);
+        // Asserted by identity, not by count. A non-empty page would also be
+        // satisfied by an exemption that had widened to rows it should not
+        // cover, which is the failure this route's scope exists to prevent.
+        expect(perStack.body.items.map((i: { applicationId: string }) => i.applicationId))
+            .toContain('app-creating');
+        expect(perStack.body.items.map((i: { commitSha: string | null }) => i.commitSha))
+            .toContain('creat111');
 
         const crossStack = await request(app)
             .get('/api/git-sources/history?limit=100')
             .set('Cookie', viewerCookie);
         const stacks = crossStack.body.items.map((i: { stackName: string }) => i.stackName);
         expect(stacks).not.toContain('creating-stack');
+    });
+
+    it('does not expose a predecessor application through a reused stack name', async () => {
+        // A stack name outlives the applications that hold it. A grant on the
+        // one holding it now says nothing about the repository, actors or
+        // commits of the one that held it before, so those rows stay behind
+        // the audit permission on this route exactly as they do cross-stack.
+        makeStackDir('reused-name');
+        activateApplication('app-reused-old', 'reused-name');
+        recordFetch('app-reused-old', 'reused-name', 'op-reused-old', 'old11111');
+        GitOpsTransitions.getInstance().applicationTombstoned('app-reused-old', 'deleted', {
+            operationId: 'op-reused-old', actor: 'tester', trigger: 'manual', at: Date.now(),
+        });
+        activateApplication('app-reused-new', 'reused-name');
+        recordFetch('app-reused-new', 'reused-name', 'op-reused-new', 'new22222');
+
+        const viewer = await request(app)
+            .get('/api/stacks/reused-name/git-source/history?limit=100')
+            .set('Cookie', viewerCookie);
+        expect(viewer.status).toBe(200);
+        const viewerShas = viewer.body.items.map((i: { commitSha: string | null }) => i.commitSha);
+        expect(viewerShas).toContain('new22222');
+        expect(viewerShas).not.toContain('old11111');
+
+        // The audit trail is not lost, only moved behind the permission that
+        // exists for reading it.
+        const auditor = await request(app)
+            .get('/api/stacks/reused-name/git-source/history?limit=100')
+            .set('Cookie', auditorCookie);
+        expect(auditor.status).toBe(200);
+        const auditorShas = auditor.body.items.map((i: { commitSha: string | null }) => i.commitSha);
+        expect(auditorShas).toContain('old11111');
+        expect(auditorShas).toContain('new22222');
+    });
+
+    it('still shows a detached predecessor, which the classifier allows by design', async () => {
+        // The boundary of the fix above, pinned so it cannot move silently. A
+        // detached application is admitted by `lifecycleAllowsStackRead` on the
+        // stated grounds that its files are still on disk and still the
+        // operator's to read, so its rows ride the same stack grant even under
+        // a reused name. Narrowing that is a deliberate decision about detach,
+        // not a side effect of a change to this route.
+        makeStackDir('reused-detached');
+        activateApplication('app-detached-old', 'reused-detached');
+        recordFetch('app-detached-old', 'reused-detached', 'op-detached-old', 'det11111');
+        GitOpsTransitions.getInstance().applicationTombstoned('app-detached-old', 'detached', {
+            operationId: 'op-detached-old', actor: 'tester', trigger: 'manual', at: Date.now(),
+        });
+        activateApplication('app-detached-new', 'reused-detached');
+        recordFetch('app-detached-new', 'reused-detached', 'op-detached-new', 'det22222');
+
+        const viewer = await request(app)
+            .get('/api/stacks/reused-detached/git-source/history?limit=100')
+            .set('Cookie', viewerCookie);
+        expect(viewer.status).toBe(200);
+        const shas = viewer.body.items.map((i: { commitSha: string | null }) => i.commitSha);
+        expect(shas).toContain('det22222');
+        expect(shas).toContain('det11111');
     });
 
     it('rejects a malformed cursor instead of silently restarting', async () => {

@@ -29,7 +29,7 @@ import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { PilotMetrics } from '../services/PilotMetrics';
 import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { sweepStaleTempDirs as sweepStaleGitTempDirs, sweepGitManifestOrphans } from '../services/GitSourceService';
-import { reclassifyInterruptedOperations, resolveInterruptedCreates } from '../services/gitops/createRecovery';
+import { assertCreatesSettled, reclassifyInterruptedOperations, resolveInterruptedCreates } from '../services/gitops/createRecovery';
 import { loadMigrationManifests, migrateDirectGitStacks, migrateInlineBlueprints } from '../services/gitops/migrate';
 import { setGitOpsEventSink } from '../services/gitops/publish';
 import { NotificationService } from '../services/NotificationService';
@@ -174,18 +174,21 @@ export async function startServer(server: Server): Promise<void> {
   }
   StackUpdateRecoveryService.getInstance().start();
 
-  // Interrupted creates are settled here, ahead of every mutation service,
-  // because a scheduler or webhook that fired first could act on a stack whose
-  // ownership is still undecided. Each create is settled independently and a
-  // failure leaves that one checkpoint for the next boot, so a single bad row
-  // does not block startup.
+  // Interrupted creates are settled here, ahead of the background mutators and
+  // the HTTP bind below, because a scheduler or webhook that fired first could
+  // act on a stack whose ownership is still undecided. Fail closed for the same
+  // reason the restore reconcile above does: a create left unresolved can leave
+  // a half-built stack directory that the deploy path cannot tell apart from a
+  // finished one, and starting anyway would let a mutator act on it.
   try {
     const settled = await resolveInterruptedCreates();
     for (const entry of settled) {
       console.log(`[GitOps] Interrupted create for ${sanitizeForLog(entry.stackName)}: ${entry.outcome}`);
     }
+    assertCreatesSettled(settled);
   } catch (err) {
     console.error('[GitOps] Interrupted-create recovery failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+    throw err;
   }
   // Operations the last process never finished are reclassified as unknown.
   // Without this an interrupted fetch or apply reports as still running for

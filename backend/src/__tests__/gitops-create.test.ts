@@ -16,13 +16,14 @@ import {
   appliedRelPathFor,
   candidateRelPathForSha,
   deleteStagingMarker,
+  CREATE_STAGING_MARKER_FILENAME,
   readStagingMarker,
   stagingMarkerPath,
   writeStagingMarker,
   CreateStagingMarkerError,
 } from '../services/gitops/createStagingMarker';
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from '../services/gitops/createCleanup';
-import { managedAreaBase } from '../services/gitops/managedPaths';
+import { MANAGED_ROOT_NAME, managedAreaBase } from '../services/gitops/managedPaths';
 import type {
   GitOpsApplicationRow,
   GitOpsCreateCheckpointRow,
@@ -372,6 +373,146 @@ describe('gitops create cleanup', () => {
       candidateRelPath: '../../outside',
       ownsManagedRoot: false,
     })).rejects.toThrow(/outside the managed root/);
+  });
+
+  /**
+   * A directory link that lands outside the managed area.
+   *
+   * `junction` is what Windows can create without elevation, and Node ignores
+   * the type argument everywhere else, so one call covers both platforms.
+   */
+  async function linkOutside(linkPath: string, name: string, victimRelPath?: string): Promise<string> {
+    const external = path.join(dataDir, 'external', name);
+    await fsPromises.mkdir(external, { recursive: true });
+    await fsPromises.writeFile(path.join(external, 'keepme.txt'), 'not ours', 'utf8');
+    // The path the escaping delete would actually resolve to. Without content
+    // at exactly that path the removal is a no-op even unguarded, and the
+    // survival assertion would pass against the unfixed code too.
+    if (victimRelPath) {
+      const victim = path.join(external, victimRelPath);
+      await fsPromises.mkdir(victim, { recursive: true });
+      await fsPromises.writeFile(path.join(victim, 'victim.txt'), 'would have been deleted', 'utf8');
+    }
+    await fsPromises.mkdir(path.dirname(linkPath), { recursive: true });
+    await fsPromises.symlink(external, linkPath, 'junction');
+    return external;
+  }
+
+  it('refuses to remove a path whose parent links out of the managed area', async () => {
+    // The lexical checks all pass here: `<area>/generations/candidate-*` reads
+    // as contained no matter what `generations` points at. Containment has to
+    // be proven against the real filesystem, because the recursive delete is
+    // what follows the link.
+    const area = path.join(root, 'junction-parent');
+    const candidateRel = candidateRelPathForSha(SHA);
+    const external = await linkOutside(path.join(area, 'generations'), 'parent-escape', `candidate-${SHA}`);
+
+    await expect(removeOperationOwnedPaths({
+      stackManagedRoot: area,
+      candidateRelPath: candidateRel,
+      ownsManagedRoot: false,
+    })).rejects.toThrow(/links outside the managed area/);
+    // The path the escaping delete would have resolved to, not just a bystander
+    // file: this is the data an unguarded removal destroys.
+    expect(fs.existsSync(path.join(external, `candidate-${SHA}`, 'victim.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(external, 'keepme.txt'))).toBe(true);
+  });
+
+  it('refuses to remove a managed root that is itself a link out of the area', async () => {
+    const area = path.join(root, 'junction-root');
+    const external = await linkOutside(area, 'root-escape');
+
+    await expect(removeOperationOwnedPaths({
+      stackManagedRoot: area,
+      candidateRelPath: null,
+      ownsManagedRoot: true,
+    })).rejects.toThrow(/links outside the managed area/);
+    expect(fs.existsSync(path.join(external, 'keepme.txt'))).toBe(true);
+    // The link itself survives too. Unlinking it is the damage an unguarded
+    // delete does here, and it is the operator's own relocation pointer.
+    expect(fs.existsSync(area)).toBe(true);
+
+    // The boot sweep reaches the same root by a different route and must reach
+    // the same answer, reporting rather than throwing as it does everywhere.
+    expect(await cleanupUnclaimedManagedRoot(area, {
+      operationId: 'op-junction',
+      rootPreexisted: false,
+      candidateRelPath: candidateRelPathForSha(SHA),
+    })).toBe('preserved');
+    expect(fs.existsSync(path.join(external, 'keepme.txt'))).toBe(true);
+    expect(fs.existsSync(area)).toBe(true);
+  });
+
+  it('refuses to write a staging marker through a link out of the area', async () => {
+    // The write sink gets the same barrier as the delete. Without it a marker
+    // could be written through a link and then refused by the hardened delete,
+    // wedging the stack name behind a claim nothing could clear.
+    const area = path.join(root, 'junction-write');
+    const external = await linkOutside(area, 'write-escape');
+
+    await expect(writeStagingMarker(area, {
+      schemaVersion: 1,
+      operationId: 'op-write-escape',
+      rootPreexisted: false,
+      candidateRelPath: candidateRelPathForSha(SHA),
+      createdAt: 1,
+    })).rejects.toThrow(/escapes the managed area/);
+    expect(fs.existsSync(path.join(external, CREATE_STAGING_MARKER_FILENAME))).toBe(false);
+  });
+
+  it('refuses to delete a staging marker through a link out of the area', async () => {
+    // Reached only through the real-path barrier: the marker path is lexically
+    // inside the area, so every string check passes.
+    const area = path.join(root, 'junction-marker');
+    const external = await linkOutside(area, 'marker-escape');
+    await fsPromises.writeFile(path.join(external, CREATE_STAGING_MARKER_FILENAME), '{}', 'utf8');
+
+    await expect(deleteStagingMarker(area)).rejects.toThrow(/escapes the managed area/);
+    expect(fs.existsSync(path.join(external, CREATE_STAGING_MARKER_FILENAME))).toBe(true);
+  });
+
+  it('treats a managed area that does not exist as nothing to remove', async () => {
+    // A database restored without its data directory, or a volume that failed
+    // to mount. Every path under the area is absent, so a forced remove is a
+    // no-op. Refusing here instead would make an absent directory look like a
+    // link escape and, with the boot gate, stop the instance starting at all.
+    const missingData = path.join(dataDir, 'no-area-here');
+    const previous = process.env.DATA_DIR;
+    process.env.DATA_DIR = missingData;
+    try {
+      const area = path.join(managedAreaBase(), 'ghost-stack');
+      await expect(removeOperationOwnedPaths({
+        stackManagedRoot: area,
+        candidateRelPath: candidateRelPathForSha(SHA),
+        ownsManagedRoot: false,
+      })).resolves.toBe('cleared');
+    } finally {
+      process.env.DATA_DIR = previous;
+    }
+  });
+
+  it('still cleans up when the managed area itself is relocated onto a link', async () => {
+    // The counterpart to the two tests above: an operator who points the data
+    // directory at another volume has moved the whole area rather than escaped
+    // it, and cleanup must keep working for them.
+    const relocatedData = path.join(dataDir, 'relocated-data');
+    const storage = path.join(dataDir, 'other-volume');
+    await fsPromises.mkdir(relocatedData, { recursive: true });
+    await fsPromises.mkdir(storage, { recursive: true });
+    await fsPromises.symlink(storage, path.join(relocatedData, MANAGED_ROOT_NAME), 'junction');
+
+    const previous = process.env.DATA_DIR;
+    process.env.DATA_DIR = relocatedData;
+    try {
+      const area = path.join(managedAreaBase(), 'relocated-stack');
+      const candidateRel = candidateRelPathForSha(SHA);
+      await fsPromises.mkdir(path.join(area, candidateRel), { recursive: true });
+
+      await removeOperationOwnedPaths({ stackManagedRoot: area, candidateRelPath: candidateRel, ownsManagedRoot: false });
+      expect(fs.existsSync(path.join(area, candidateRel))).toBe(false);
+    } finally {
+      process.env.DATA_DIR = previous;
+    }
   });
 
   it('preserves an unclaimed root whose marker is missing or corrupt', async () => {

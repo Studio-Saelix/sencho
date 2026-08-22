@@ -72,6 +72,10 @@ export const GITOPS_LIMITATION_COPY: Record<string, string | undefined> = {
     'The managed manifest could not be read, so the commit recorded before Sencho tracked it is kept only as evidence and not treated as current.',
   manifest_identity_invalid:
     'The managed manifest does not identify this stack on this node from the repository configured now, so its commit is kept only as evidence.',
+  manifest_commit_unresolved:
+    'The managed manifest records no commit, so the commit recorded before Sencho tracked this stack cannot be confirmed against what is on disk. Fetch to resolve one.',
+  manifest_commit_mismatch:
+    'The managed manifest names a different commit than the one recorded as applied, so neither is treated as current. Fetch again to settle which one is on disk.',
   legacy_pending:
     'A pending commit was recorded before Sencho tracked this stack and carries no proof of which repository or branch it came from. Fetch again to rebuild it.',
   blueprint_reapproval_required:

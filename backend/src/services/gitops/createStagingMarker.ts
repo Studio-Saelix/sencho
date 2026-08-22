@@ -1,7 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { isPathWithinBase } from '../../utils/validation';
-import { GENERATIONS_DIR, managedAreaBase } from './managedPaths';
+import { GENERATIONS_DIR, isRealPathWithinManagedArea, managedAreaBase } from './managedPaths';
 
 export const CREATE_STAGING_MARKER_FILENAME = '.create-staging.v1.json';
 
@@ -176,6 +176,11 @@ export async function writeStagingMarker(
     !root.startsWith(areaBase + path.sep)
     || !target.startsWith(areaBase + path.sep)
     || !temp.startsWith(areaBase + path.sep)
+    // Checked on the write and not only on the delete, so a link cannot be
+    // written through and then refused by the hardened delete below. That
+    // asymmetry would wedge the stack name: a valid marker naming another
+    // operation refuses every later create, and nothing could remove it.
+    || !await isRealPathWithinManagedArea(root)
   ) {
     throw new CreateStagingMarkerError('managed root escapes the managed area');
   }
@@ -189,7 +194,7 @@ export async function deleteStagingMarker(stackManagedRoot: string): Promise<voi
   // Inline containment barrier at the removal sink (see `managedAreaBase`).
   const areaBase = managedAreaBase();
   const markerPath = path.resolve(stackManagedRoot, CREATE_STAGING_MARKER_FILENAME);
-  if (!markerPath.startsWith(areaBase + path.sep)) {
+  if (!markerPath.startsWith(areaBase + path.sep) || !await isRealPathWithinManagedArea(markerPath)) {
     throw new CreateStagingMarkerError('managed root escapes the managed area');
   }
   await fs.rm(markerPath, { force: true });

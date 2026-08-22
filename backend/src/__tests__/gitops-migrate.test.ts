@@ -5,9 +5,10 @@
  * evidence proves that exact generation under the repository and ref configured
  * now. A legacy applied commit is not that proof by itself, so the interesting
  * cases are the ones where it is *not* promoted: a missing manifest, an
- * unreadable one, and one stamped for a repository the stack no longer points
- * at. In each the commit survives as recorded evidence and the projection asks
- * for a fetch instead of asserting something nobody verified.
+ * unreadable one, one stamped for a repository the stack no longer points at,
+ * and one naming a commit the source row disagrees with. In each the commit
+ * survives as recorded evidence and the projection asks for a fetch instead of
+ * asserting something nobody verified.
  */
 import fs from 'fs';
 import path from 'path';
@@ -22,7 +23,10 @@ import { projectApplication } from '../services/gitops/derive';
 const REPO = 'https://github.com/example/legacy.git';
 const SHA = 'legacy01';
 
-type ManifestFixture = { manifestVersion: number; generation: { appliedDir: string } } | { corrupt: string } | null;
+type ManifestFixture =
+  | { manifestVersion: number; generation: { appliedDir: string }; resolvedRevision: { commitSha: string } }
+  | { corrupt: string }
+  | null;
 
 describe('gitops migration of pre-existing Git stacks', () => {
   let tmpDir: string;
@@ -64,7 +68,13 @@ describe('gitops migration of pre-existing Git stacks', () => {
 
   it('accepts the applied commit only when a trusted manifest proves it', () => {
     seedStack('trusted', { lastApplied: SHA });
-    primeManifests({ trusted: { manifestVersion: 3, generation: { appliedDir: `generations/applied-${SHA}-3` } } });
+    primeManifests({
+      trusted: {
+        manifestVersion: 3,
+        generation: { appliedDir: `generations/applied-${SHA}-3` },
+        resolvedRevision: { commitSha: SHA },
+      },
+    });
 
     expect(migrateDirectGitStacks()).toEqual([{ stackName: 'trusted', outcome: 'migrated_accepted' }]);
 
@@ -119,6 +129,68 @@ describe('gitops migration of pre-existing Git stacks', () => {
     }
   });
 
+  it('refuses a valid manifest that names a different commit than the source row', () => {
+    // The manifest validates and belongs to this stack, repository and ref, so
+    // every other check passes. Only the commits disagree, and that alone must
+    // keep the canonical pointers null: the applied directory here materializes
+    // MANIFEST_SHA, so accepting SHA would certify a commit whose files are not
+    // the ones on disk.
+    const manifestSha = 'manifest02';
+    seedStack('commit-drift', { lastApplied: SHA });
+    primeManifests({
+      'commit-drift': {
+        manifestVersion: 4,
+        generation: { appliedDir: `generations/applied-${manifestSha}-4` },
+        resolvedRevision: { commitSha: manifestSha },
+      },
+    });
+
+    expect(migrateDirectGitStacks()).toEqual([{ stackName: 'commit-drift', outcome: 'migrated_unreconciled' }]);
+
+    const app = GitOpsStore.getInstance().getLiveDirectApplication('commit-drift')!;
+    expect(app.desired_commit_sha).toBeNull();
+    expect(app.fetched_commit_sha).toBeNull();
+    expect(app.accepted_generation_id).toBeNull();
+
+    const target = GitOpsStore.getInstance().getTarget(app.id, 1)!;
+    expect(target.applied_generation_id).toBeNull();
+
+    const projection = projectOf(app.id);
+    expect(projection.facets.source.status).toBe('never_reconciled');
+    expect(projection.availableActions).toContain('fetch');
+    // Both commits are named, so an operator can see which two records disagree
+    // rather than only learning that something could not be proven.
+    const mismatch = projection.limitations.find((l) => l.code === 'manifest_commit_mismatch');
+    expect(mismatch).toBeDefined();
+    expect(mismatch!.evidence).toContain(SHA);
+    expect(mismatch!.evidence).toContain(manifestSha);
+  });
+
+  it('separates a manifest with no commit from one that names a conflicting commit', () => {
+    // A manifest adopted from an existing directory is written with an empty
+    // commit and state 'migrated', which the validator permits. Folding that
+    // into the mismatch case would tell an operator the manifest names a
+    // different commit while naming nothing at all.
+    seedStack('adopted', { lastApplied: SHA });
+    primeManifests({
+      adopted: {
+        manifestVersion: 1,
+        generation: { appliedDir: 'generations/applied-adopted-1' },
+        resolvedRevision: { commitSha: '' },
+      },
+    });
+
+    expect(migrateDirectGitStacks()).toEqual([{ stackName: 'adopted', outcome: 'migrated_unreconciled' }]);
+
+    const app = GitOpsStore.getInstance().getLiveDirectApplication('adopted')!;
+    expect(app.desired_commit_sha).toBeNull();
+    expect(app.accepted_generation_id).toBeNull();
+
+    const codes = projectOf(app.id).limitations.map((l) => l.code);
+    expect(codes).toContain('manifest_commit_unresolved');
+    expect(codes).not.toContain('manifest_commit_mismatch');
+  });
+
   it('does not let a pending pull stand in for proof', () => {
     seedStack('pending-only', { lastApplied: null, pending: 'pending99' });
     primeManifests({ 'pending-only': null });
@@ -135,7 +207,13 @@ describe('gitops migration of pre-existing Git stacks', () => {
 
   it('is a no-op on replay and re-runs only when the configuration changes', () => {
     seedStack('replay', { lastApplied: SHA });
-    primeManifests({ replay: { manifestVersion: 1, generation: { appliedDir: `generations/applied-${SHA}-1` } } });
+    primeManifests({
+      replay: {
+        manifestVersion: 1,
+        generation: { appliedDir: `generations/applied-${SHA}-1` },
+        resolvedRevision: { commitSha: SHA },
+      },
+    });
 
     expect(migrateDirectGitStacks()[0].outcome).toBe('migrated_accepted');
     const firstId = GitOpsStore.getInstance().getLiveDirectApplication('replay')!.id;

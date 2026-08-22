@@ -13,8 +13,8 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
-import { resolveInterruptedCreates } from '../services/gitops/createRecovery';
-import { candidateRelPathForSha } from '../services/gitops/createStagingMarker';
+import { assertCreatesSettled, resolveInterruptedCreates } from '../services/gitops/createRecovery';
+import { candidateRelPathForSha, CREATE_STAGING_MARKER_FILENAME } from '../services/gitops/createStagingMarker';
 import { stackManagedRoot } from '../services/gitops/directApplication';
 import type {
   GitOpsApplicationRow,
@@ -172,6 +172,95 @@ describe('gitops interrupted create recovery', () => {
     expect(store.getApplication('app-orphan')?.lifecycle_status).toBe('deleted');
     expect(db.getGitSource('orphan-web')).toBeTruthy();
     expect(store.getLiveDirectApplication('orphan-web')).toBeUndefined();
+  });
+
+  it('retains a create whose files could not be removed, and refuses to start on it', async () => {
+    // A cleanup that cannot finish must not be recorded as a clean failure: the
+    // application stays `creating`, so nothing downstream may treat the stack
+    // name as free. The failure is forced through the containment guard, which
+    // is a real refusal rather than a stubbed one.
+    const store = GitOpsStore.getInstance();
+    seedCreate('app-stuck', 'stuck-web', 'stack_created', { createdManagedRoot: 0 });
+    store.updateCreateCheckpoint('app-stuck', { generationId: 'gen-app-stuck' }, Date.now());
+    const managedRoot = stackManagedRoot('stuck-web');
+    // Outside the managed area, which is what makes the guard refuse.
+    const external = path.join(process.env.DATA_DIR!, 'external-stuck');
+    fs.mkdirSync(external, { recursive: true });
+    fs.mkdirSync(managedRoot, { recursive: true });
+    fs.symlinkSync(external, path.join(managedRoot, 'generations'), 'junction');
+
+    const settled = await resolveInterruptedCreates();
+
+    expect(settled).toEqual([
+      { stackName: 'stuck-web', applicationId: 'app-stuck', outcome: 'retained' },
+    ]);
+    // Still creating, and its checkpoint survives so the next boot retries.
+    expect(store.getApplication('app-stuck')?.lifecycle_status).toBe('creating');
+    expect(store.getCreateCheckpoint('app-stuck')).toBeDefined();
+    expect(fs.existsSync(external)).toBe(true);
+
+    // What startup does with that outcome: stop, before any mutation service
+    // starts or HTTP binds.
+    expect(() => assertCreatesSettled(settled)).toThrow(/stuck-web/);
+  });
+
+  it('reports a settled create whose marker survived, and still starts', async () => {
+    // The counterpart to the test above, driven through the real code rather
+    // than a hand-built outcome list. Ownership is decided here, so a marker
+    // file that could not be deleted decides nothing and must not stop a boot.
+    // The marker path is made a directory so the unlink fails while everything
+    // else about the create is already settled.
+    const store = GitOpsStore.getInstance();
+    seedCreate('app-marker', 'marker-web', 'pointers_committed');
+    DatabaseService.getInstance().getDb().prepare(
+      "UPDATE gitops_applications SET lifecycle_status = 'active' WHERE id = 'app-marker'",
+    ).run();
+    fs.mkdirSync(path.join(stackManagedRoot('marker-web'), CREATE_STAGING_MARKER_FILENAME), { recursive: true });
+
+    const settled = await resolveInterruptedCreates();
+
+    expect(settled).toEqual([
+      { stackName: 'marker-web', applicationId: 'app-marker', outcome: 'marker_retained' },
+    ]);
+    // The checkpoint is what makes the next boot retry the marker. Dropping it
+    // would leave a claim on the name with nothing left to clear it.
+    expect(store.getCreateCheckpoint('app-marker')).toBeDefined();
+    expect(() => assertCreatesSettled(settled)).not.toThrow();
+  });
+
+  it('reports a marker left by a torn-down create without blocking the boot', async () => {
+    // The teardown path reaches the same condition by a different route. Its
+    // staged directories are gone, so nothing deployable survives and the
+    // create is effectively torn down; only the marker is stuck. Treating that
+    // as unresolved would make one failed unlink cost an operator their
+    // instance, which is the opposite of the settled path's answer.
+    const store = GitOpsStore.getInstance();
+    seedCreate('app-tearmark', 'tearmark-web', 'stack_created', { createdManagedRoot: 0 });
+    fs.mkdirSync(path.join(stackManagedRoot('tearmark-web'), CREATE_STAGING_MARKER_FILENAME), { recursive: true });
+
+    const settled = await resolveInterruptedCreates();
+
+    expect(settled[0].outcome).toBe('marker_retained');
+    expect(store.getCreateCheckpoint('app-tearmark')).toBeDefined();
+    expect(() => assertCreatesSettled(settled)).not.toThrow();
+  });
+
+  it('settles a create when the managed area is not on disk at all', async () => {
+    // A database restored without its data directory, or a volume that failed
+    // to mount. Nothing under the area exists, so there is nothing to remove
+    // and the create tears down normally. Reporting this as unresolved would,
+    // with the boot gate, stop the instance starting on every boot over a
+    // directory that is merely absent.
+    const previous = process.env.DATA_DIR;
+    process.env.DATA_DIR = path.join(tmpDir, 'data-without-managed-area');
+    try {
+      seedCreate('app-noarea', 'noarea-web', 'stack_created', { createdManagedRoot: 0 });
+      const settled = await resolveInterruptedCreates();
+      expect(settled[0].outcome).toBe('tombstoned');
+      expect(() => assertCreatesSettled(settled)).not.toThrow();
+    } finally {
+      process.env.DATA_DIR = previous;
+    }
   });
 
   it('is idempotent across repeated boots', async () => {

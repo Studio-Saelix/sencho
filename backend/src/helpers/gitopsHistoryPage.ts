@@ -49,11 +49,19 @@ function isOutcome(value: string): value is HistoryOutcome {
  * query) cannot be written.
  *
  * `authorized_stack` is for a route that proved `stack:read` on one stack up
- * front. Re-running the row classifier there would hide that stack's own
- * entries from the operator who just proved they may read it, for instance
- * while the stack is still being created. It therefore also shows entries from
- * an earlier application on the same stack name; only `per_row` treats name
- * reuse as unprovable.
+ * front. That grant exempts the rows of the application holding the name *now*,
+ * which is what keeps a stack's own entries visible to the operator who just
+ * proved they may read it, including while the stack is still being created and
+ * the row classifier would refuse it. Every other row on that name still goes
+ * through the classifier: a stack name outlives the applications that held it,
+ * and a grant on the current one is not evidence about an earlier one.
+ *
+ * What that closes, precisely: a predecessor that was `deleted`, one still
+ * `creating`, and one whose stack resource is gone all need `system:audit`. A
+ * `detached` predecessor does not. `lifecycleAllowsStackRead` admits it
+ * deliberately, on the grounds that its files are still on disk and still the
+ * operator's to read, and that decision is unchanged here. So the classifier
+ * narrows who may read a reused name; it does not partition the name.
  */
 export type HistoryScope =
   | { kind: 'per_row' }
@@ -184,12 +192,28 @@ function buildHistoryPage(
   present: Set<string>,
   scope: HistoryScope,
 ): GitOpsHistoryPage {
-  // A pinned scope filters nothing, so it never needs to look past the page it
-  // is filling. Only the per-row scope can discard rows and must scan ahead.
-  const scanLimit = scope.kind === 'per_row' ? HISTORY_SCAN_CAP : limit + 1;
-  const rows = queryHistoryRows(DatabaseService.getInstance().getDb(), filters, cursor, scanLimit);
+  // Either scope can discard rows now, so both have to scan ahead of the page
+  // they are filling rather than stopping at it.
+  const rows = queryHistoryRows(DatabaseService.getInstance().getDb(), filters, cursor, HISTORY_SCAN_CAP);
 
   const store = GitOpsStore.getInstance();
+  // The application a stack-read grant on this name covers, read from the store
+  // here beside the rows it authorizes rather than accepted from the route.
+  //
+  // The live lookup spans `active` and `creating`, which is the whole point: a
+  // create still in flight has no other way to show the operator its own
+  // history. Any predecessor is absent from it, so a predecessor's rows go to
+  // the classifier rather than riding this grant. What the classifier then does
+  // with them is its own decision, and it does not refuse all of them: see the
+  // note on `HistoryScope` about `detached`.
+  //
+  // Direct mode only, which is all `getLiveDirectApplication` returns. A
+  // Blueprint-delivered stack therefore resolves to null here and has every row
+  // classified. That is fail-closed and correct while it is `active`, since the
+  // classifier grants those rows on the same `stack:read`.
+  const scopedApplicationId = scope.kind === 'authorized_stack'
+    ? store.getLiveDirectApplication(scope.stackName)?.id ?? null
+    : null;
   // One lookup per application, not per row: a busy stack contributes many
   // rows that all resolve to the same application.
   const applications = new Map<string, GitOpsApplicationRow | undefined>();
@@ -210,7 +234,11 @@ function buildHistoryPage(
     lastExamined = row;
     const stackResourcePresent = row.stack_name !== null && present.has(row.stack_name);
     const applicationLifecycleStatus = applicationFor(row.application_id)?.lifecycle_status ?? null;
-    if (scope.kind === 'per_row') {
+    // Only the application the caller's grant actually names is exempt. A row
+    // from an earlier application on the same stack name is a different
+    // resource, and is classified like any other.
+    const coveredByScope = scopedApplicationId !== null && row.application_id === scopedApplicationId;
+    if (!coveredByScope) {
       const requirement = classifyHistoryRow({
         stackName: row.stack_name,
         applicationLifecycleStatus,
@@ -223,7 +251,7 @@ function buildHistoryPage(
 
   // A full scan window means the table may hold more beyond it, so the caller
   // is handed a cursor even when this page came back short.
-  const moreMayFollow = !exhausted || rows.length === scanLimit;
+  const moreMayFollow = !exhausted || rows.length === HISTORY_SCAN_CAP;
   return {
     items,
     nextCursor: moreMayFollow && lastExamined

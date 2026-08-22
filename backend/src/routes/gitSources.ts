@@ -181,7 +181,13 @@ stackGitSourceRouter.get('/:stackName/git-source', async (req: Request, res: Res
   }
 });
 
-/** GitOps history for one stack, authorized as a whole by the stack read above. */
+/**
+ * GitOps history for one stack.
+ *
+ * The stack read below covers the application holding this name now. Rows from
+ * an application that held it earlier are a different resource and are
+ * authorized per row, so a reused stack name cannot expose its predecessor.
+ */
 stackGitSourceRouter.get('/:stackName/git-source/history', async (req: Request, res: Response): Promise<void> => {
   const stackName = req.params.stackName as string;
   if (!isValidStackName(stackName)) {

@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
+import { projectApplication } from '../services/gitops/derive';
 import type {
   GitOpsApplicationRow,
   GitOpsIntentRevisionRow,
@@ -395,7 +396,85 @@ describe('gitops blueprint transitions', () => {
     expect(after.rollout_candidate_id).toBe(before.rollout_candidate_id);
     expect(store.getTarget('app-obs', 1)?.intent_revision_id).toBeNull();
   });
+
+  it('projects every observation stage as its runtime status', () => {
+    // Recording an observation nothing reads would leave a deployed Blueprint
+    // reporting itself as never applied, which is what the pointers alone say.
+    const tx = GitOpsTransitions.getInstance();
+    const expected = {
+      blueprint_state_review: 'pending_state_review',
+      blueprint_evict_blocked: 'evict_blocked',
+      blueprint_drifted: 'drifted',
+      blueprint_correcting: 'correcting',
+    } as const;
+
+    // One live application per Blueprint, so each case needs its own id.
+    Object.entries(expected).forEach(([stage, status], index) => {
+      const applicationId = `app-proj-${stage}`;
+      seedInline(applicationId, 200 + index, 1);
+      tx.blueprintObservation({
+        applicationId,
+        nodeId: 1,
+        stage: stage as keyof typeof expected,
+        envelope: env(`op-proj-${stage}`),
+      });
+
+      expect(runtimeStatusOf(applicationId), stage).toBe(status);
+    });
+  });
+
+  it('stops projecting an observation once something else happens to the target', () => {
+    // The observation is what was seen last, not a state the target is stuck
+    // in. A deploy after it has to win, or a corrected stack reads as drifting
+    // for ever. A deploy start rather than a tombstone, so the runtime
+    // assertion is load-bearing: the tombstone check sits above the observation
+    // branch and would hold whatever `latest_stage` said.
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-superseded', 210, 1);
+    tx.intentRevised({
+      applicationId: 'app-superseded',
+      intent: intent('int-sup', 'app-superseded', 210),
+      envelope: env('op-sup-int'),
+    });
+    tx.blueprintObservation({
+      applicationId: 'app-superseded', nodeId: 1, stage: 'blueprint_drifted', envelope: env('op-sup-obs'),
+    });
+    expect(runtimeStatusOf('app-superseded')).toBe('drifted');
+
+    tx.blueprintDeployStarted({
+      applicationId: 'app-superseded',
+      nodeId: 1,
+      intentRevisionId: 'int-sup',
+      rolloutCandidateId: null,
+      envelope: env('op-sup-deploy'),
+    });
+
+    expect(store.getTarget('app-superseded', 1)?.latest_stage).toBe('blueprint_deploy_started');
+    expect(runtimeStatusOf('app-superseded')).not.toBe('drifted');
+  });
+
+  it('does not let an observation mask a failure this node actually hit', () => {
+    // The ordering claim in the deriver, asserted at its upper boundary. A
+    // failed mutation describes what this node did; an observation describes
+    // what was seen about it. Reporting the observation instead would hide a
+    // deploy that broke the running workload.
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-failfirst', 211, 1);
+    tx.deployFailed('app-failfirst', 1, 'post_mutation', env('op-fail'));
+    tx.blueprintObservation({
+      applicationId: 'app-failfirst', nodeId: 1, stage: 'blueprint_drifted', envelope: env('op-fail-obs'),
+    });
+
+    expect(runtimeStatusOf('app-failfirst')).toBe('failed_after_mutation');
+  });
 });
+
+function runtimeStatusOf(applicationId: string): string | undefined {
+  const projection = projectApplication(applicationId, false);
+  if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+  return projection.targets[0]?.runtime.status;
+}
 
 function seedInline(applicationId: string, blueprintId: number, nodeId?: number): void {
   const store = GitOpsStore.getInstance();

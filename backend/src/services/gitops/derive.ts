@@ -5,6 +5,7 @@ import {
   GitOpsJsonError,
 } from './json';
 import { GitOpsStore } from './store';
+import type { BlueprintObservationStage } from './transitions';
 import type {
   ArtifactExpectedIdentity,
   ArtifactFacet,
@@ -415,6 +416,34 @@ function deriveTarget(
   };
 }
 
+/**
+ * The runtime status each Blueprint observation stage projects as.
+ *
+ * The reconciler records what it saw against the target rather than acting on
+ * it, so this is the only route those observations have into a derived status.
+ *
+ * Two type obligations, and they pull in opposite directions. The declared type
+ * is keyed on an open string because the value looked up is `latest_stage`,
+ * which holds whichever stage was recorded last: anything that is not an
+ * observation must be absent here and fall through to the states below, which
+ * is exactly how a later transition supersedes an earlier observation. The
+ * `satisfies` closes the other side, making the map total over the stages the
+ * reconciler can actually record, so a new observation stage that nothing
+ * projects fails this build instead of silently reading as never applied.
+ *
+ * The `| undefined` is load-bearing: this project does not set
+ * `noUncheckedIndexedAccess`, so without it a miss would type as a status and
+ * the guard at the call site would look like dead code.
+ */
+type ObservationRuntimeStatus = 'pending_state_review' | 'evict_blocked' | 'drifted' | 'correcting';
+
+const BLUEPRINT_OBSERVATION_STATUS: Record<string, ObservationRuntimeStatus | undefined> = {
+  blueprint_state_review: 'pending_state_review',
+  blueprint_evict_blocked: 'evict_blocked',
+  blueprint_drifted: 'drifted',
+  blueprint_correcting: 'correcting',
+} satisfies Record<BlueprintObservationStage, ObservationRuntimeStatus>;
+
 function deriveRuntime(
   target: GitOpsTargetCurrentRow,
   artifact: ArtifactFacet,
@@ -458,6 +487,15 @@ function deriveRuntime(
   if (target.failure_stage === 'deploy' && target.failure_class === 'post_mutation') {
     return { status: 'failed_after_mutation' };
   }
+  // Placed after every state a live, interrupted or failed mutation puts the
+  // target in, and before the applied and deployed pointer checks. So an
+  // observation cannot mask an in-flight deploy or a failure, but does outrank
+  // pointers that predate it. The case that is easy to miss is the last one: a
+  // target with no applied generation that has been observed now reports what
+  // was seen rather than `never_applied`, which is what a deployed Blueprint
+  // that drifted used to report.
+  const blueprintStage = BLUEPRINT_OBSERVATION_STATUS[target.latest_stage ?? ''];
+  if (blueprintStage) return { status: blueprintStage };
   if (!target.applied_generation_id) return { status: 'never_applied' };
   if (!target.deployed_generation_id) return { status: 'applied_not_deployed' };
   if (artifact.status !== 'not_applicable' && 'expected' in artifact && artifact.expected

@@ -36,6 +36,8 @@ const LIVE_ARM_CODES = [
   'manifest_absent',
   'manifest_corrupt',
   'manifest_identity_invalid',
+  'manifest_commit_unresolved',
+  'manifest_commit_mismatch',
   'legacy_pending',
   'blueprint_reapproval_required',
 ] as const;

@@ -43,6 +43,21 @@ export type TransitionResult = {
 };
 
 /**
+ * The stages the reconciler may record against a target as an observation.
+ *
+ * Exported because the deriver has to project every one of them, and a stage
+ * added here that nothing projects is exactly the defect that made these
+ * observations unreadable. `BLUEPRINT_OBSERVATION_STATUS` in `derive.ts` is
+ * declared total over this union, so widening it fails that build rather than
+ * silently dropping the new stage back into the pointer-derived states.
+ */
+export type BlueprintObservationStage =
+  | 'blueprint_state_review'
+  | 'blueprint_evict_blocked'
+  | 'blueprint_drifted'
+  | 'blueprint_correcting';
+
+/**
  * What a health run claimed inside a recovery transaction reported back.
  *
  * `replayed` means the recovery already owned a run, so the caller arms that
@@ -1174,13 +1189,14 @@ export class GitOpsTransitions {
   /**
    * The reconciler observed something worth recording against a target.
    *
-   * History only. None of these mints an intent or a candidate, and none
-   * acknowledges anything: they say what was seen, not what was decided.
+   * History, plus the runtime status derived from the recorded stage. None of
+   * these mints an intent or a candidate, and none acknowledges anything: they
+   * say what was seen, not what was decided.
    */
   blueprintObservation(args: {
     applicationId: string;
     nodeId: number;
-    stage: 'blueprint_state_review' | 'blueprint_evict_blocked' | 'blueprint_drifted' | 'blueprint_correcting';
+    stage: BlueprintObservationStage;
     envelope: EventEnvelope;
   }): TransitionResult {
     return this.mutateTarget(
@@ -1193,11 +1209,12 @@ export class GitOpsTransitions {
         if (target.target_status !== 'active') {
           throw new GitOpsTransitionError('cannot observe a tombstoned target');
         }
+        // The runtime facet projects these four stages, which is the only route
+        // an observation has into the derived status: the reconciler records
+        // what it saw rather than moving any pointer. The history row written
+        // alongside is the separate, unprojected record. `mutateTarget` stamps
+        // the stage.
         const before = { latestStage: target.latest_stage };
-        // The placement facet reads the latest stage to decide whether a
-        // stateful deployment is waiting on confirmation, so an observation
-        // that only wrote history could never reach a reader.
-        target.latest_stage = args.stage;
         return { before, after: { observed: args.stage } };
       },
     );
@@ -2034,6 +2051,22 @@ export class GitOpsTransitions {
       const target = this.store().getTarget(applicationId, nodeId);
       if (!target) throw new GitOpsTransitionError('target not found');
       const snapshots = mutate(target);
+      // Stamped for every target mutation, not just the observations that are
+      // projected from it. That is what makes an observation stop being the
+      // latest thing that happened: a deploy, withdraw or tombstone after it
+      // overwrites the stage, and the projection falls back to the pointers.
+      // Set after `mutate` so a transition can still snapshot the prior value.
+      //
+      // Safe to stamp unconditionally only because a Blueprint target receives
+      // Blueprint transitions and nothing else, so every write that lands here
+      // genuinely answers the observation it replaces. The deploy, health and
+      // recovery producers all resolve their application through
+      // `getLiveDirectApplication`, which filters `target_mode = 'direct'` and
+      // can never return a Blueprint one. A producer that reached a Blueprint
+      // target by some other route would silently erase a drift the reconciler
+      // will not re-record, because it only records an observation when the
+      // deployment status moves.
+      target.latest_stage = stage;
       target.updated_at = envelope.at;
       this.store().upsertTarget(target);
       const historyId = this.history(app, envelope, {

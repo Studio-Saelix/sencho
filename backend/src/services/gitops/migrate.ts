@@ -21,17 +21,28 @@ const MIGRATION_SCHEMA_VERSION = 1;
  * What the on-disk manifest proves about a stack.
  *
  * `trusted` is the only classification that licenses a canonical commit
- * pointer, and it means the manifest parsed, validated, and carries an identity
- * stamp matching the repository and ref the source row configures *now*. The
- * three failure kinds are kept apart because they tell an operator different
- * things: nothing was ever written, something was written and is unreadable, or
- * something was written for a different repository.
+ * pointer, and it means the manifest parsed, validated, carries an identity
+ * stamp matching the repository and ref the source row configures *now*, and
+ * names the same commit the source row records as applied. The five failure
+ * kinds are kept apart because they tell an operator different things, and
+ * each implies a different next step: nothing was ever written, something was
+ * written and is unreadable, something was written for a different repository,
+ * the manifest records no commit at all, or the two records name different
+ * commits.
+ *
+ * The last two are deliberately separate. A manifest adopted from an existing
+ * directory is written with an empty commit and `state: 'migrated'`, which the
+ * validator permits, so "no commit yet" is an ordinary state for a stack that
+ * has never been fetched. Reporting it as a disagreement would name a commit
+ * the manifest does not contain.
  */
 type ManifestTrust =
   | { kind: 'trusted'; commitSha: string; manifestVersion: number; appliedDir: string }
   | { kind: 'absent' }
   | { kind: 'corrupt'; reason: string }
-  | { kind: 'identity_invalid'; reason: string };
+  | { kind: 'identity_invalid'; reason: string }
+  | { kind: 'commit_unresolved' }
+  | { kind: 'commit_mismatch'; manifestCommitSha: string };
 
 export type MigrationOutcome =
   | 'skipped_current'
@@ -50,7 +61,8 @@ export type MigrationResult = { stackName: string; outcome: MigrationOutcome };
  * The governing rule is that a pointer is written only when the evidence proves
  * that exact generation under the repository and ref configured now. A legacy
  * applied commit is not that proof on its own: the manifest may be gone, may be
- * unreadable, or may be stamped for a repository the stack no longer points at.
+ * unreadable, may be stamped for a repository the stack no longer points at, or
+ * may name a different commit than the one the source row records as applied.
  * In every one of those cases the canonical pointers stay null and the legacy
  * commit survives as recorded limitation evidence, so the projection asks for a
  * fetch instead of asserting a state nobody verified.
@@ -245,6 +257,16 @@ function classifyManifest(stackName: string, source: StackGitSource): ManifestTr
       ? { kind: 'identity_invalid', reason: read.corrupt }
       : { kind: 'corrupt', reason: read.corrupt };
   }
+  // The two records must name the same commit. The applied directory comes from
+  // the manifest and the commit from the source row, so trusting them together
+  // while they disagree would mint a generation that claims one commit and
+  // points at another's files, which is the exact false proof this migration
+  // exists to avoid. An adopted manifest carries no commit at all, which is a
+  // different fact about a different situation and gets its own answer.
+  if (read.resolvedRevision.commitSha.length === 0) return { kind: 'commit_unresolved' };
+  if (read.resolvedRevision.commitSha !== source.last_applied_commit_sha) {
+    return { kind: 'commit_mismatch', manifestCommitSha: read.resolvedRevision.commitSha };
+  }
   return {
     kind: 'trusted',
     commitSha: source.last_applied_commit_sha,
@@ -261,7 +283,10 @@ function classifyManifest(stackName: string, source: StackGitSource): ManifestTr
  * opens and passed in.
  */
 let manifestReader: (stackName: string, source: StackGitSource) => ManifestReadResult = () => null;
-type ManifestReadResult = { manifestVersion: number; generation: { appliedDir: string } } | { corrupt: string } | null;
+type ManifestReadResult =
+  | { manifestVersion: number; generation: { appliedDir: string }; resolvedRevision: { commitSha: string } }
+  | { corrupt: string }
+  | null;
 
 export function primeMigrationManifests(
   read: (stackName: string, source: StackGitSource) => ManifestReadResult,
@@ -302,6 +327,17 @@ function collectLimitations(source: StackGitSource, trust: ManifestTrust): GitOp
     if (trust.kind === 'absent') limitations.push({ code: 'manifest_absent', detail: legacySha });
     if (trust.kind === 'corrupt') limitations.push({ code: 'manifest_corrupt', detail: legacySha });
     if (trust.kind === 'identity_invalid') limitations.push({ code: 'manifest_identity_invalid', detail: legacySha });
+    if (trust.kind === 'commit_unresolved') {
+      limitations.push({ code: 'manifest_commit_unresolved', detail: legacySha });
+    }
+    // Both commits are named: which record is right cannot be decided here, and
+    // an operator reading one of them alone has no way to see the disagreement.
+    if (trust.kind === 'commit_mismatch') {
+      limitations.push({
+        code: 'manifest_commit_mismatch',
+        detail: `${legacySha} (recorded) vs ${trust.manifestCommitSha} (manifest)`,
+      });
+    }
   }
   // A pending pull proves nothing about the current repository or ref: the blob
   // predates any configuration change and carries no identity stamp.
@@ -467,4 +503,3 @@ function inlineApprovalLimitations(blueprint: Blueprint): GitOpsEvidenceLimitati
   if (effectiveApproval === 'approved') return [];
   return [{ code: 'blueprint_reapproval_required', detail: String(blueprint.id) }];
 }
-

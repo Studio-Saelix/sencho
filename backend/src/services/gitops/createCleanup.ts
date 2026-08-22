@@ -3,7 +3,7 @@ import path from 'path';
 import { isPathWithinBase } from '../../utils/validation';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { deleteStagingMarker, validateCandidateRelPath } from './createStagingMarker';
-import { managedAreaBase } from './managedPaths';
+import { isRealPathWithinManagedArea, managedAreaBase } from './managedPaths';
 
 export type OperationOwnedCleanup = {
   /** Absolute path of the stack's managed root. */
@@ -29,11 +29,19 @@ export type OperationOwnedCleanup = {
  * the operation staged, resolved and containment-checked against the root
  * before anything is removed.
  *
- * Throws on the first failed removal rather than continuing, because the caller
- * uses success here as the precondition for tombstoning: a partially cleaned
- * area must keep its checkpoint so the next boot can retry.
+ * Throws on the first failed *directory* removal rather than continuing, because
+ * the caller uses success here as the precondition for tombstoning: a partially
+ * cleaned area must keep its checkpoint so the next boot can retry.
+ *
+ * The staging marker is reported rather than thrown. Once the directories are
+ * gone the create is torn down, and a marker file nobody could delete is the
+ * same condition the settled path already treats as non-fatal. Throwing here
+ * would make one unlink failure the difference between an instance that boots
+ * and one that does not.
  */
-export async function removeOperationOwnedPaths(input: OperationOwnedCleanup): Promise<void> {
+export async function removeOperationOwnedPaths(
+  input: OperationOwnedCleanup,
+): Promise<'cleared' | 'marker_retained'> {
   const base = path.resolve(input.stackManagedRoot);
   // Inline containment barrier at the removal sink (see `managedAreaBase`).
   const areaBase = managedAreaBase();
@@ -42,8 +50,11 @@ export async function removeOperationOwnedPaths(input: OperationOwnedCleanup): P
   }
 
   if (input.ownsManagedRoot) {
+    if (!await isRealPathWithinManagedArea(base)) {
+      throw new Error('refusing to remove a managed root that links outside the managed area');
+    }
     await fs.rm(base, { recursive: true, force: true });
-    return;
+    return 'cleared';
   }
 
   for (const relPath of [input.candidateRelPath, input.appliedRelPath ?? null]) {
@@ -67,10 +78,25 @@ export async function removeOperationOwnedPaths(input: OperationOwnedCleanup): P
     if (!resolved.startsWith(areaBase + path.sep)) {
       throw new Error('refusing to remove a path outside the managed area');
     }
+    // The checks above are lexical, so a link above this path would still pass
+    // them while the delete below followed it out of the managed area.
+    if (!await isRealPathWithinManagedArea(resolved)) {
+      throw new Error('refusing to remove a path that links outside the managed area');
+    }
     await fs.rm(resolved, { recursive: true, force: true });
   }
 
-  await deleteStagingMarker(base);
+  try {
+    await deleteStagingMarker(base);
+  } catch (error) {
+    console.warn(
+      '[GitOps] Removed the staged directories under %s but could not clear its staging marker: %s',
+      sanitizeForLog(base),
+      error instanceof Error ? error.message : String(error),
+    );
+    return 'marker_retained';
+  }
+  return 'cleared';
 }
 
 /**
@@ -106,7 +132,7 @@ export async function cleanupUnclaimedManagedRoot(
     // outcome; the warning is what says this one is anomalous rather than
     // merely unproven.
     const root = path.resolve(stackManagedRoot);
-    if (!root.startsWith(managedAreaBase() + path.sep)) {
+    if (!root.startsWith(managedAreaBase() + path.sep) || !await isRealPathWithinManagedArea(root)) {
       console.warn(
         '[GitOps] Refusing to reap a managed root outside the managed area: %s',
         sanitizeForLog(stackManagedRoot),
@@ -117,6 +143,9 @@ export async function cleanupUnclaimedManagedRoot(
     return 'removed_root';
   }
 
+  // The marker outcome is not reported onward: this sweep has no checkpoint to
+  // keep, so a marker it could not clear is already said out loud by the
+  // warning inside the call and there is nothing further for a caller to do.
   await removeOperationOwnedPaths({
     stackManagedRoot,
     candidateRelPath: marker.candidateRelPath,
