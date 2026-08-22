@@ -22,15 +22,9 @@ export interface GitOpsMetricEntry {
   count: number;
 }
 
-interface Bucket {
-  stage: GitOpsHistoryStage;
-  outcome: HistoryOutcome;
-  count: number;
-}
-
 export class GitOpsMetricsService {
   private static instance: GitOpsMetricsService;
-  private readonly buckets = new Map<string, Bucket>();
+  private readonly buckets = new Map<string, GitOpsMetricEntry>();
 
   public static getInstance(): GitOpsMetricsService {
     if (!GitOpsMetricsService.instance) {
@@ -64,7 +58,9 @@ export class GitOpsMetricsService {
    * Every bucket that has been touched, ordered by stage then outcome.
    *
    * Untouched pairs are absent rather than zero. Ordering is stable so an
-   * operator pulling this twice can diff the two responses directly.
+   * operator pulling this twice can diff the two responses directly. Each
+   * bucket is copied, so a reader cannot edit the counters through the
+   * snapshot it was handed.
    */
   public snapshot(): GitOpsMetricEntry[] {
     return [...this.buckets.values()]

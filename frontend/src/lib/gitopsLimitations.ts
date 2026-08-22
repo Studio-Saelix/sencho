@@ -98,13 +98,5 @@ export function limitationCaveat(limitation: GitOpsLimitation): string {
  * several separate problems.
  */
 export function limitationCaveats(limitations: readonly GitOpsLimitation[]): string[] {
-  const seen = new Set<string>();
-  const caveats: string[] = [];
-  for (const limitation of limitations) {
-    const caveat = limitationCaveat(limitation);
-    if (seen.has(caveat)) continue;
-    seen.add(caveat);
-    caveats.push(caveat);
-  }
-  return caveats;
+  return [...new Set(limitations.map(limitationCaveat))];
 }

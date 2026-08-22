@@ -20,6 +20,35 @@ export type GitOpsSourceStateMap = Record<string, GitOpsSourceStatus | undefined
 type GitSourceRow = { stack_name: string } & Partial<GitOpsRevisionCarrier>;
 
 /**
+ * Rows to states, keeping a row this build cannot read out of the map.
+ *
+ * Separate from the fetch so the derivation is one readable pass and the
+ * request handling is another.
+ */
+function projectSourceStates(rows: GitSourceRow[]): GitOpsSourceStateMap {
+  const next: GitOpsSourceStateMap = {};
+  let unreadable = 0;
+  for (const row of rows) {
+    // Per row, because the derivation reaches into a shape this build assumes
+    // and a proxied node is free to answer with another one. An uncaught throw
+    // here would abandon the whole loop and land in the caller's catch,
+    // freezing every badge on the dashboard at its last value with nothing on
+    // screen to say so: the same swallowed-throw failure that once froze the
+    // sidebar's pending map.
+    try {
+      const source = row.gitopsRevision ? liveSourceFacet(row.gitopsRevision) : null;
+      if (source) next[row.stack_name] = source.status;
+    } catch {
+      unreadable += 1;
+    }
+  }
+  if (unreadable > 0) {
+    console.error(`[GitOps] ${unreadable} source row(s) could not be read; those stacks show no state.`);
+  }
+  return next;
+}
+
+/**
  * Source state per stack, for the surfaces that list many stacks at once.
  *
  * Keyed on stack name because that is what the dashboards have: they are built
@@ -55,25 +84,7 @@ export function useGitOpsSourceStates(): GitOpsSourceStateMap {
         return;
       }
       const rows = await res.json() as GitSourceRow[];
-      const next: GitOpsSourceStateMap = {};
-      let unreadable = 0;
-      for (const row of rows) {
-        // Per row, because the derivation reaches into a shape this build
-        // assumes and a proxied node is free to answer with another one. An
-        // uncaught throw here would abandon the whole loop and land in the
-        // catch below, freezing every badge on the dashboard at its last value
-        // with nothing on screen to say so: the same swallowed-throw failure
-        // that once froze the sidebar's pending map.
-        try {
-          const source = row.gitopsRevision ? liveSourceFacet(row.gitopsRevision) : null;
-          if (source) next[row.stack_name] = source.status;
-        } catch {
-          unreadable += 1;
-        }
-      }
-      if (unreadable > 0) {
-        console.error(`[GitOps] ${unreadable} source row(s) could not be read; those stacks show no state.`);
-      }
+      const next = projectSourceStates(rows);
       if (current !== generation.current) return;
       setStates(next);
     } catch (e) {

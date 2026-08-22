@@ -65,7 +65,8 @@ export default function GitOpsBadge(props: GitOpsBadgeProps) {
       )}
     >
       <Icon className="h-2.5 w-2.5 shrink-0" strokeWidth={2} aria-hidden />
-      {compact ? <span className="sr-only">{state.label}</span> : <span className="truncate">{state.label}</span>}
+      {/* Compact keeps the label for screen readers and drops it visually. */}
+      <span className={compact ? 'sr-only' : 'truncate'}>{state.label}</span>
     </span>
   );
 }

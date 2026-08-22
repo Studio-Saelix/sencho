@@ -40,6 +40,16 @@ const OBSERVATION_STAGE = {
   drift_enforce_start: 'blueprint_correcting',
 } as const;
 
+type ObservationCause = keyof typeof OBSERVATION_STAGE;
+
+/**
+ * Narrows to the observation causes, so the stage lookup below reads as a fact
+ * the compiler derives rather than one an assertion claims.
+ */
+function isObservation(cause: BlueprintDeploymentCause): cause is ObservationCause {
+  return cause in OBSERVATION_STAGE;
+}
+
 type DeploymentFields = Omit<Parameters<DatabaseService['upsertDeployment']>[0], 'blueprint_id' | 'node_id'>;
 
 /**
@@ -98,7 +108,7 @@ function record(
 
   const envelope = envelopeFor(actor, `blueprint_${cause}`);
 
-  if (cause in OBSERVATION_STAGE) {
+  if (isObservation(cause)) {
     // Observations are the only causes the status guard applies to. A start
     // writes the identity terminals are matched against, so suppressing one
     // because the row already read `deploying` would let a later
@@ -115,13 +125,13 @@ function record(
     // this model reports nothing here until its next deploy creates one.
     const firstPlacement = !store.getTarget(app.id, nodeId);
     if (firstPlacement && cause !== 'await_state_review') return;
-    const stage = OBSERVATION_STAGE[cause as keyof typeof OBSERVATION_STAGE];
+    const stage = OBSERVATION_STAGE[cause];
     // Both writes in one transaction so they succeed or fail together. The
     // observation refuses a tombstoned target, and it runs in its own
-    // savepoint, so creating the target outside this would
-    // leave an active target with no generation, no stage and no history
-    // behind a refusal: a placement relationship the model never established,
-    // which the delete path would later tombstone as if it were real.
+    // savepoint, so creating the target outside this would leave an active
+    // target with no generation, no stage and no history behind a refusal: a
+    // placement relationship the model never established, which the delete
+    // path would later tombstone as if it were real.
     DatabaseService.getInstance().getDb().transaction(() => {
       if (firstPlacement) store.upsertTarget(emptyTargetRow(app.id, nodeId, envelope.at));
       tx.blueprintObservation({ applicationId: app.id, nodeId, stage, envelope });

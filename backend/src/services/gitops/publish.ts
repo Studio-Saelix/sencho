@@ -138,27 +138,36 @@ function drain(): void {
       warnUnannounced();
       continue;
     }
-    try {
-      sink({
-        type: 'state-invalidate',
-        scope: 'gitops',
-        action: row.stage,
-        applicationId: row.applicationId,
-        targetMode: row.targetMode,
-        stackName: row.stackName,
-        blueprintId: row.blueprintId,
-        nodeId: row.nodeId,
-        ts: row.at,
-      });
-    } catch (error) {
-      // One client's broadcast must not cost the rest of the batch their
-      // events, and none of this is worth failing a committed transition over.
-      console.error(
-        '[GitOps] Could not announce %s for application %s:',
-        row.stage, row.applicationId,
-        error instanceof Error ? error.stack ?? error.message : String(error),
-      );
-    }
+    announce(sink, row);
+  }
+}
+
+/**
+ * Hand one committed transition to the broadcaster.
+ *
+ * A throw is logged and swallowed: one client's broadcast must not cost the
+ * rest of the batch their events, and none of this is worth failing a
+ * committed transition over.
+ */
+function announce(to: GitOpsEventSink, row: PendingRow): void {
+  try {
+    to({
+      type: 'state-invalidate',
+      scope: 'gitops',
+      action: row.stage,
+      applicationId: row.applicationId,
+      targetMode: row.targetMode,
+      stackName: row.stackName,
+      blueprintId: row.blueprintId,
+      nodeId: row.nodeId,
+      ts: row.at,
+    });
+  } catch (error) {
+    console.error(
+      '[GitOps] Could not announce %s for application %s:',
+      row.stage, row.applicationId,
+      error instanceof Error ? error.stack ?? error.message : String(error),
+    );
   }
 }
 
