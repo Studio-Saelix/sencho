@@ -259,7 +259,7 @@ async function resolveCaArgs(layout: WorkspaceLayout): Promise<string[]> {
     try {
         extraPem = await fs.readFile(extraPath as string, 'utf8');
     } catch {
-        console.warn(`[GitSource:transport] could not read NODE_EXTRA_CA_CERTS file ${extraPath}; ignoring custom anchors.`);
+        console.warn('[GitSource:transport] could not read the file configured via NODE_EXTRA_CA_CERTS; ignoring custom anchors.');
         // Windows still has working defaults; fall back to them instead of
         // dropping every anchor.
         return isWindows && winBundle ? ['-c', `http.sslCAInfo=${winBundle}`] : [];

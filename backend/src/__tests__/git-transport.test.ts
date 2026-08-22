@@ -59,11 +59,14 @@ interface ScriptedOutput {
     code?: number;
 }
 
-function fakeChild(): EventEmitter & { pid: number; stdout: EventEmitter; stderr: EventEmitter } {
-    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: EventEmitter; stderr: EventEmitter };
+function fakeChild(): EventEmitter & { pid: number; stdout: EventEmitter; stderr: EventEmitter; kill: () => void } {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: EventEmitter; stderr: EventEmitter; kill: () => void };
     child.pid = 4242;
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
+    // killTree's ESRCH fallback on POSIX reaches this when the scripted PID
+    // does not exist; the real ChildProcess always has this method.
+    child.kill = () => {};
     return child;
 }
 
