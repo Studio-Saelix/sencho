@@ -65,7 +65,7 @@ The row itself carries the health tint (see below); there is no separate status-
 
 | Column | Description |
 |--------|-------------|
-| **STACK** | Stack name with an orange "Update available" badge when a newer image has been detected. When per-service status is known, the badge narrows to the outdated service name or a count (for example `2 updates`); hover for the full breakdown. The badge appears regardless of the sidebar indicator setting. Sortable. |
+| **STACK** | Stack name with an orange "Update available" badge when a newer image has been detected. When per-service status is known, the badge narrows to the outdated service name or a count (for example `2 updates`); hover for the full breakdown. The badge appears regardless of the sidebar indicator setting. Also carries the GitOps source-state chip when Sencho has state for the stack (see below). Sortable. |
 | **SOURCE** | `Git` when the stack is linked to a [Git source](/features/git-sources), `Local` otherwise |
 | **PORT** | The stack's main published port, or `--` when it does not publish one |
 | **UP** | How long the oldest running container has been up, in compact units (`s` / `m` / `h` / `d`); a stopped or never-started stack reads `--`. Sortable. |
@@ -76,6 +76,16 @@ The row itself carries the health tint (see below); there is no separate status-
 By default, rows sort by state (errors → warnings → healthy) and then by 10-minute peak CPU descending, so an exited stack always rises to the top and the noisiest healthy stacks float above the quiet ones (the header reads `sorted by load`). Click the **STACK**, **UP**, **CPU**, or **MEM** column header to sort by that column instead; the `sorted by load` label disappears once you do. Click the same header again to flip between ascending and descending. A row is tinted amber when its 10-minute peak CPU is at or above 80% or the stack is partially down (some but not all containers exited), or rose when the stack is fully exited or its peak CPU is at or above 90%. Click any row, or focus it and press <kbd>Enter</kbd> or <kbd>Space</kbd>, to jump to that stack's editor.
 
 The table paginates at eight rows; chevrons appear in the header along with an `N / M` indicator when there is more than one page. When the active node has no stacks at all the card renders an empty state with a layered-disks glyph and the message `No stacks found. Create one from the sidebar.`
+
+### GitOps state chip
+
+A stack linked to a [Git source](/features/git-sources) carries a small chip beside its name naming its current source state: **pending update**, **review required**, **applying**, **source failed**, and so on. The wording is the same one the Git Source panel and the Drift tab use, so a stack reads the same way wherever you look at it.
+
+The chip and the row tint answer different questions and are independent. The tint is about containers and load right now. The chip is about what Sencho has reconciled and accepted, so a healthy row can carry **pending update** (containers fine, a new commit waiting) and a red row can carry **accepted** (the current generation is the right one and something has since crashed).
+
+Hover the chip for the full sentence. A stack with no Git source carries no chip, including one delivered by a [Blueprint](/features/blueprint-model): a Blueprint stack has no Git source of its own, so there is no source state to name. The **SOURCE** column still says where the files come from either way. The chip updates as soon as Sencho records a change, without waiting for the next refresh.
+
+The phone dashboard shows the same chip on its stack rows, beside the node name.
 
 ## Configuration Status
 

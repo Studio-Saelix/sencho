@@ -21,6 +21,7 @@ import {
     applyClearStaleGuard,
     buildBlueprintPreview,
 } from './blueprintPreviewProjection';
+import { commitBlueprintDeploymentCause } from './gitops/blueprintDeploymentProducers';
 
 const RECONCILER_INTERVAL_MS = 60_000;
 const RECONCILER_INITIAL_DELAY_MS = 5_000;
@@ -324,25 +325,21 @@ export class BlueprintReconciler {
         switch (action) {
             case 'await_state_review': {
                 const existing = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
-                DatabaseService.getInstance().upsertDeployment({
-                    blueprint_id: blueprint.id,
-                    node_id: node.id,
+                commitBlueprintDeploymentCause('await_state_review', blueprint.id, node.id, {
                     status: 'pending_state_review',
                     last_checked_at: Date.now(),
                     drift_summary: existing
                         ? 'Stateful blueprint revision change awaits operator confirmation'
                         : 'Stateful blueprint awaiting operator confirmation before first deploy',
-                });
+                }, null);
                 return { ...base, status: 'ok' };
             }
             case 'await_evict_confirm': {
-                DatabaseService.getInstance().upsertDeployment({
-                    blueprint_id: blueprint.id,
-                    node_id: node.id,
+                commitBlueprintDeploymentCause('await_evict_confirm', blueprint.id, node.id, {
                     status: 'evict_blocked',
                     last_checked_at: Date.now(),
                     drift_summary: 'Stateful blueprint eviction requires operator confirmation',
-                });
+                }, null);
                 return { ...base, status: 'ok' };
             }
             case 'clear_reversed_evict':
@@ -365,14 +362,12 @@ export class BlueprintReconciler {
                 const driftResult = await svc.checkForDrift(blueprint, node);
                 if (!driftResult.drifted) return { ...base, status: 'ok' };
                 const reason = driftResult.reason ?? 'unknown drift';
-                DatabaseService.getInstance().upsertDeployment({
-                    blueprint_id: blueprint.id,
-                    node_id: node.id,
+                commitBlueprintDeploymentCause('drift_observed', blueprint.id, node.id, {
                     status: 'drifted',
                     last_checked_at: Date.now(),
                     last_drift_at: Date.now(),
                     drift_summary: reason,
-                });
+                }, null);
                 // observe/suggest/enforce: notify path via handleDrift still respects drift_mode
                 await this.handleDrift(blueprint, node, reason);
                 return { ...base, status: 'ok' };
@@ -623,12 +618,10 @@ export class BlueprintReconciler {
                         return;
                     }
                 }
-                DatabaseService.getInstance().upsertDeployment({
-                    blueprint_id: blueprint.id,
-                    node_id: node.id,
+                commitBlueprintDeploymentCause('drift_enforce_start', blueprint.id, node.id, {
                     status: 'correcting',
                     last_checked_at: Date.now(),
-                });
+                }, null);
                 const result = await BlueprintService.getInstance().deployToNode(blueprint, node);
                 if (result.status !== 'active') {
                     notifications.dispatchAlert(

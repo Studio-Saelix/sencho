@@ -29,6 +29,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 import { listBlueprints, pinBlueprint } from '@/lib/blueprintsApi';
 import { listNodes } from '@/lib/nodesApi';
 import { FederationTab } from './FederationTab';
+import { absentRevision } from '@/__tests__/gitopsFixtures';
 
 function node(id: number, name: string, overrides: Partial<NodeRecord> = {}): NodeRecord {
     return { id, name, type: 'local', status: 'online', cordoned: false, cordoned_at: null, cordoned_reason: null, ...overrides };
@@ -52,6 +53,7 @@ function blueprint(overrides: Partial<BlueprintListItem> = {}): BlueprintListIte
         pinned_node_id: null,
         deploymentCounts: {},
         deploymentTotal: 0,
+        gitopsRevision: absentRevision(),
         ...overrides,
     };
 }

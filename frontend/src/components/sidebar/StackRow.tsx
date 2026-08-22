@@ -10,6 +10,8 @@ import { sidebarRowActive, sidebarRowBase, sidebarRowCheckboxSlot } from './side
 import { statusText, statusColor } from './stack-status-utils';
 import type { StackRowStatus } from './stack-status-utils';
 import { updateAvailableLabel } from '@/lib/updateAvailableLabel';
+import { SOURCE_STATE_LOOKUP } from '@/lib/gitopsState';
+import type { GitOpsSourceStatus } from '@/types/gitops';
 
 interface StackRowProps {
   file: string;
@@ -31,7 +33,12 @@ interface StackRowProps {
   // use a distinct indicator so they are not mistaken for a confirmed update.
   checkStatus?: CheckStatus;
   lastError?: string;
-  hasGitPending: boolean;
+  /**
+   * The source state of a waiting Git candidate, or null when none is waiting.
+   * The indicator itself is identical for every state; only the tooltip differs,
+   * so a blocked plan reads as blocked instead of as an ordinary update.
+   */
+  gitPending: GitOpsSourceStatus | null;
   onSelect: (file: string) => void;
   kebabSlot: ReactNode;
   bulkMode?: boolean;
@@ -85,7 +92,7 @@ function failedCheckTooltip(hasUpdate: boolean, lastError?: string): string {
 export function StackRow(props: StackRowProps) {
   const {
     file, displayName, status, running, total, isBusy, isActive,
-    hasUpdate, outdatedServices, checkStatus, lastError, hasGitPending, onSelect, kebabSlot,
+    hasUpdate, outdatedServices, checkStatus, lastError, gitPending, onSelect, kebabSlot,
     bulkMode = false, isSelected = false, onToggleSelect,
     hydrationDisplay = 'pending',
   } = props;
@@ -179,10 +186,10 @@ export function StackRow(props: StackRowProps) {
             trigger={<span data-testid="stack-trailing-check-failed"><AlertCircle className="w-3 h-3 text-muted-foreground/70" strokeWidth={1.5} /></span>}
             label={failedCheckTooltip(hasUpdate, lastError)}
           />
-        ) : hasGitPending ? (
+        ) : gitPending ? (
           <RowTooltip
             trigger={<span data-testid="stack-trailing-git-pending"><GitBranch className="w-3 h-3 text-brand" strokeWidth={1.5} /></span>}
-            label="Git source update pending"
+            label={SOURCE_STATE_LOOKUP[gitPending]?.line ?? 'A Git update is waiting on this stack.'}
           />
         ) : null}
       </span>

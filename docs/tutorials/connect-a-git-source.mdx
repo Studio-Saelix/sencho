@@ -67,10 +67,10 @@ This tutorial covers linking an existing stack to a Git source and running one m
 
 Check from two places, since neither alone proves the pull was actually applied and deployed.
 
-**The Git Source panel.** Reopen it. The **Last applied commit** stat strip at the bottom now shows the short SHA of the commit you just pulled, with an updated timestamp.
+**The Git Source panel.** Reopen it. The stat strip at the bottom now shows the short SHA of the commit you just pulled, with an updated timestamp, and a **Source state** of `accepted`, meaning Sencho took that commit as the current generation rather than merely writing its files. Nothing is listed at the top of the panel, which is what a stack with complete evidence looks like.
 
 <Frame>
-  <img src="/images/tutorials/connect-a-git-source/last-applied-commit.png" alt="Git source panel for marketing-site with Apply behavior still on Review only, and a Last applied commit stat strip at the bottom showing a short commit SHA and a just-now timestamp." />
+  <img src="/images/tutorials/connect-a-git-source/last-applied-commit.png" alt="Git source panel for marketing-site with Apply behavior still on Review only, and a stat strip at the bottom showing a short commit SHA, a Source state of accepted, and a just-now timestamp." />
 </Frame>
 
 **The stack itself.** Reopen `marketing-site`. The container recreated on the new image: a fresh uptime, and its logs now start with `nginx/1.28.3` instead of `1.27.5`. The compose editor tab reflects the same change; if it still shows the old tag, reload the page, since the editor buffer doesn't refresh itself after a Git-driven write.

@@ -55,7 +55,15 @@ export function NodeLabelPicker({ nodeId, canEdit = true, onChange }: NodeLabelP
         if (!trimmed) return;
         setBusy(true);
         try {
-            await addNodeLabel(nodeId, trimmed);
+            const result = await addNodeLabel(nodeId, trimmed);
+            // A label add is exactly what makes a selector match a new node, so
+            // this is the common case for a re-placement. Count only, and only
+            // when non-zero: an empty list also means the projection faulted
+            // after the write committed.
+            const moved = result.gitopsRevisions.length;
+            if (moved > 0) {
+                toast.success(`Label added. ${moved} blueprint${moved === 1 ? '' : 's'} re-placed.`);
+            }
             setInput('');
             await refresh();
         } catch (err) {

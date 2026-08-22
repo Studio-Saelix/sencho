@@ -1,4 +1,5 @@
 import { apiFetch } from './api';
+import type { GitOpsRevisionsCarrier } from '@/types/gitops';
 
 export interface NodeRecord {
     id: number;
@@ -13,6 +14,15 @@ export interface NodeRecord {
     cordoned_at: number | null;
     cordoned_reason: string | null;
 }
+
+/**
+ * Cordon and uncordon answer with the node plus a GitOps revision list that is
+ * always empty, by design: a cordon governs whether new placements may be made,
+ * not what a Blueprint asks for, and the reconciler leaves existing deployments
+ * where they are. The field is declared for shape parity with node delete and
+ * label add. Do not build a consumer that expects rows in it.
+ */
+export type NodeCordonResult = NodeRecord & GitOpsRevisionsCarrier;
 
 async function expectJson<T>(res: Response, fallback: string): Promise<T> {
     if (!res.ok) {
@@ -35,19 +45,19 @@ export async function listNodes(): Promise<NodeRecord[]> {
     return expectJson<NodeRecord[]>(res, 'Failed to load nodes');
 }
 
-export async function cordonNode(id: number, reason: string | null): Promise<NodeRecord> {
+export async function cordonNode(id: number, reason: string | null): Promise<NodeCordonResult> {
     const res = await apiFetch(`/nodes/${id}/cordon`, {
         method: 'POST',
         body: JSON.stringify(reason ? { reason } : {}),
         localOnly: true,
     });
-    return expectJson<NodeRecord>(res, 'Failed to cordon node');
+    return expectJson<NodeCordonResult>(res, 'Failed to cordon node');
 }
 
-export async function uncordonNode(id: number): Promise<NodeRecord> {
+export async function uncordonNode(id: number): Promise<NodeCordonResult> {
     const res = await apiFetch(`/nodes/${id}/uncordon`, {
         method: 'POST',
         localOnly: true,
     });
-    return expectJson<NodeRecord>(res, 'Failed to uncordon node');
+    return expectJson<NodeCordonResult>(res, 'Failed to uncordon node');
 }

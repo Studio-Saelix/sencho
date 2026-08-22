@@ -54,6 +54,14 @@ This signal is independent of the runtime status. A stack can be **In sync** wit
 Sencho records two hashes at deploy time: a raw-file hash (catches any text change, including formatting) and a parsed-model hash (only changes when structure changes, ignoring comments and whitespace). The "source changed" signal uses both: if only the raw hash differs, the edit was formatting or comments. If the model hash also differs, a structural change has been made.
 </Note>
 
+## GitOps state
+
+For a stack managed by a Git source or a Blueprint, a **gitops** section sits below the deploy signal. For a Git-backed stack it opens with the source state, the same phrase the Git Source panel shows; a Blueprint-delivered stack has no Git source of its own, so it shows only its per-node lines. Those say what Sencho has established about the stack on each node: whether a generation has been applied, whether it is deployed, whether its health verdict is still outstanding, and whether an operation was interrupted without a confirmed outcome.
+
+This is a different question from the two signals above it. Those compare files and containers as they are right now. The gitops section reports what Sencho has proven and accepted over time, so a stack can be **In sync** at runtime while its GitOps state reads **outcome unknown**, meaning the containers look right but the operation that produced them was never confirmed.
+
+Anything Sencho could not prove is listed underneath, one line per item, in the same form the Git Source panel uses. A stack with no Git source and no Blueprint shows no gitops section at all.
+
 ## Findings
 
 When a stack is drifted, each reason is listed in the **Findings** section against the service it affects.

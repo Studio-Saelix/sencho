@@ -8,11 +8,22 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
-vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 1 } }) }));
+vi.mock('@/context/NodeContext', () => ({
+  useNodes: () => ({ activeNode: { id: 1 }, nodes: [{ id: 1, name: 'local' }, { id: 2, name: 'edge-02' }] }),
+}));
 
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import DriftPanel from './DriftPanel';
+import {
+  absentRevision,
+  driftItem,
+  facets,
+  liveRevision,
+  missingApplicationLimitation,
+  plainSource,
+  target,
+} from '@/__tests__/gitopsFixtures';
 
 interface DriftReport {
   stack: string;
@@ -24,6 +35,7 @@ interface DriftReport {
   temporal?: { hasBaseline: boolean; sourceChanged: boolean; renderedChanged: boolean };
   ledger?: Array<{ service: string; kind: string; message: string; detectedAt: number; resolvedAt: number | null }>;
   lastCheckedAt?: number | null;
+  gitopsRevision?: unknown;
 }
 
 function report(partial: Partial<DriftReport>): DriftReport {
@@ -240,5 +252,122 @@ describe('DriftPanel', () => {
     await screen.findByText('managed path');
     expect(screen.queryByText('deadbeefcafebabe')).not.toBeInTheDocument();
     expect(screen.getByText('compose-primary local-modified')).toBeInTheDocument();
+  });
+});
+
+describe('DriftPanel GitOps state', () => {
+  it('renders the source state and one card per target for a Direct stack', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      gitopsRevision: liveRevision({
+        facets: facets({ source: plainSource('candidate_ready') }),
+        targets: [target({ nodeId: 1, runtime: { status: 'applied_not_deployed' } })],
+      }),
+    })));
+    render(<DriftPanel stackName="web" />);
+
+    const source = await screen.findByTestId('gitops-source');
+    expect(source).toHaveAttribute('data-state', 'candidate_ready');
+    const targets = screen.getAllByTestId('gitops-target');
+    expect(targets).toHaveLength(1);
+    expect(targets[0]).toHaveAttribute('data-state', 'applied_not_deployed');
+    expect(targets[0]).toHaveTextContent('local');
+  });
+
+  it('shows no source card for a Blueprint-owned stack, only its targets', async () => {
+    // The drift route resolves through whatever manages the directory. A
+    // Blueprint application has no Git source, and inventing one would be a
+    // claim the model never made.
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      gitopsRevision: liveRevision({
+        targetMode: 'inline_blueprint',
+        blueprintId: 7,
+        facets: facets({
+          source: { status: 'not_applicable' },
+          placement: { status: 'blueprint_bound', completion: 'unknown' },
+        }),
+        targets: [
+          target({ nodeId: 1, runtime: { status: 'synced_and_healthy' } }),
+          target({ nodeId: 2, runtime: { status: 'drifted' } }),
+        ],
+      }),
+    })));
+    render(<DriftPanel stackName="web" />);
+
+    await waitFor(() => expect(screen.getAllByTestId('gitops-target')).toHaveLength(2));
+    expect(screen.queryByTestId('gitops-source')).not.toBeInTheDocument();
+    expect(screen.getAllByTestId('gitops-target')[1]).toHaveTextContent('edge-02');
+  });
+
+  it('reports an application the projection could not reach', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      gitopsRevision: absentRevision([missingApplicationLimitation]),
+    })));
+    render(<DriftPanel stackName="web" />);
+
+    expect(await screen.findByTestId('gitops-fault')).toHaveTextContent(missingApplicationLimitation.message);
+  });
+
+  it('renders nothing new for a stack the model was never asked about', async () => {
+    // The common case by far: no Git source, no Blueprint. A section header over
+    // an empty block would be worse than silence.
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ gitopsRevision: absentRevision() })));
+    render(<DriftPanel stackName="web" />);
+
+    await screen.findByTestId('drift-status');
+    expect(screen.queryByTestId('gitops-fault')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('gitops-source')).not.toBeInTheDocument();
+    expect(screen.queryByText('gitops')).not.toBeInTheDocument();
+  });
+
+  it('renders exactly today output for a report from a node that predates the model', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ status: 'drifted' })));
+    render(<DriftPanel stackName="web" />);
+
+    expect(await screen.findByTestId('drift-status')).toHaveAttribute('data-status', 'drifted');
+    expect(screen.queryByTestId('gitops-source')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('gitops-fault')).not.toBeInTheDocument();
+  });
+
+  it('does not treat a live application caveat as a fault', async () => {
+    // Live-arm limitations are caveats on state that is being reported. Reading
+    // them as faults would recreate the conflation in the opposite direction.
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      gitopsRevision: liveRevision({
+        limitations: [{ code: 'repo_identity_invalid', message: 'Repository identity could not be read.', evidence: null }],
+      }),
+    })));
+    render(<DriftPanel stackName="web" />);
+
+    await screen.findByTestId('gitops-source');
+    expect(screen.queryByTestId('gitops-fault')).not.toBeInTheDocument();
+  });
+
+  it('renders a drift item as expected against observed', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      gitopsRevision: liveRevision({ drift: [driftItem()] }),
+    })));
+    render(<DriftPanel stackName="web" />);
+
+    expect(await screen.findByText('gitops drift')).toBeInTheDocument();
+    expect(screen.getByText('The running image is not the one this generation expects.')).toBeInTheDocument();
+    expect(screen.getByText('generation gen-acce')).toBeInTheDocument();
+    expect(screen.getByText('nginx@sha256:abc')).toBeInTheDocument();
+  });
+
+  it('names a target on a node this client has no record of', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      gitopsRevision: liveRevision({ targets: [target({ nodeId: 9 })] }),
+    })));
+    render(<DriftPanel stackName="web" />);
+
+    expect(await screen.findByTestId('gitops-target')).toHaveTextContent('node 9');
+  });
+
+  it('renders no drift section while the backend derives no items', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({ gitopsRevision: liveRevision({ drift: [] }) })));
+    render(<DriftPanel stackName="web" />);
+
+    await screen.findByTestId('gitops-source');
+    expect(screen.queryByText('gitops drift')).not.toBeInTheDocument();
   });
 });

@@ -4,6 +4,7 @@ import { requireBody } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
 import {
     DatabaseService,
+    type Blueprint,
     type BlueprintSelector,
     type DriftMode,
 } from '../services/DatabaseService';
@@ -26,6 +27,13 @@ import {
     parseConfirmableActionsBody,
     serializeApprovedBlast,
 } from '../services/blueprintApproval';
+import {
+    commitBlueprintCreate,
+    commitBlueprintDelete,
+    commitBlueprintPin,
+    commitBlueprintUpdate,
+} from '../services/gitops/blueprintProducers';
+import { projectBlueprintRevision, projectCommittedRevision } from '../helpers/gitopsResponse';
 import { isValidStackName } from '../utils/validation';
 import { parseIntParam } from '../utils/parseIntParam';
 import { isDebugEnabled } from '../utils/debug';
@@ -49,6 +57,18 @@ interface BlueprintBody {
     selector?: unknown;
     drift_mode?: unknown;
     enabled?: unknown;
+}
+
+/**
+ * Nodes a Blueprint currently asks for, as the reconciler computes them.
+ *
+ * Passed into the revision-state producers rather than imported by them: the
+ * reconciler reaches that layer, so importing it back would close a cycle.
+ */
+function desiredNodeIdsFor(blueprint: Blueprint): number[] {
+    return BlueprintReconciler.getInstance()
+        .listDesiredNodes(blueprint, DatabaseService.getInstance().getNodes())
+        .map(node => node.id);
 }
 
 function parseSelector(raw: unknown): { ok: true; selector: BlueprintSelector } | { ok: false; error: string } {
@@ -132,6 +152,7 @@ function summarizeBlueprint(blueprintId: number) {
         statusCounts: counts,
         effectiveApproval: auth?.effectiveApproval ?? 'pending',
         unauthorizedActions: auth?.unauthorizedActions ?? [],
+        gitopsRevision: projectBlueprintRevision(blueprintId),
     };
 }
 
@@ -150,6 +171,7 @@ blueprintsRouter.get('/', (req: Request, res: Response): void => {
                 deploymentTotal: deployments.length,
                 effectiveApproval: auth?.effectiveApproval ?? 'pending',
                 unauthorizedActions: auth?.unauthorizedActions ?? [],
+                gitopsRevision: projectBlueprintRevision(b.id),
             };
         });
         res.json(summaries);
@@ -176,7 +198,7 @@ blueprintsRouter.post('/', (req: Request, res: Response): void => {
     try {
         const composeContent = body.compose_content as string;
         const analysis = BlueprintAnalyzer.analyze(composeContent);
-        const blueprint = DatabaseService.getInstance().createBlueprint({
+        const blueprint = commitBlueprintCreate({
             name: (body.name as string).trim(),
             description: typeof body.description === 'string' ? body.description : null,
             compose_content: composeContent,
@@ -186,8 +208,8 @@ blueprintsRouter.post('/', (req: Request, res: Response): void => {
             classification_reasons: analysis.reasons,
             enabled: body.enabled === undefined ? true : Boolean(body.enabled),
             created_by: req.user?.username ?? null,
-        });
-        res.status(201).json(blueprint);
+        }, desiredNodeIdsFor);
+        res.status(201).json({ ...blueprint, gitopsRevision: projectCommittedRevision(blueprint.id, 'blueprint create') });
     } catch (error) {
         if (isSqliteUniqueViolation(error)) {
             res.status(409).json({ error: 'A blueprint with that name already exists' });
@@ -281,9 +303,9 @@ blueprintsRouter.put('/:id', (req: Request, res: Response): void => {
         updates.enabled = next;
     }
     try {
-        const updated = DatabaseService.getInstance().updateBlueprint(id, updates);
+        const { blueprint: updated } = commitBlueprintUpdate(id, updates, req.user?.username ?? null, desiredNodeIdsFor);
         if (!updated) { res.status(404).json({ error: 'Blueprint not found' }); return; }
-        res.json(updated);
+        res.json({ ...updated, gitopsRevision: projectCommittedRevision(id, 'blueprint update') });
     } catch (error) {
         if (isSqliteUniqueViolation(error)) {
             res.status(409).json({ error: 'A blueprint with that name already exists' });
@@ -351,7 +373,7 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
                 return;
             }
         }
-        DatabaseService.getInstance().deleteBlueprint(id);
+        commitBlueprintDelete(id, req.user?.username ?? null);
         res.status(204).end();
     } catch (error) {
         console.error('[Blueprints] Delete error:', error);
@@ -703,18 +725,23 @@ blueprintsRouter.put('/:id/pin', async (req: Request, res: Response): Promise<vo
             const node = DatabaseService.getInstance().getNode(nodeId);
             if (!node) { res.status(404).json({ error: 'Node not found' }); return; }
         }
-        const updated = DatabaseService.getInstance().setBlueprintPinnedNode(id, nodeId);
+        const { blueprint: updated } = commitBlueprintPin(id, nodeId, req.user?.username ?? null, desiredNodeIdsFor);
         if (!updated) { res.status(404).json({ error: 'Blueprint not found' }); return; }
         if (isDebugEnabled()) console.log('[Federation:diag] pinned blueprint=%s node=%s', sanitizeForLog(id), sanitizeForLog(nodeId));
-        // Pin clears approval, so reconcileOne cannot mutate until Confirm Apply.
-        // Still call it so the fail-closed pending state is evaluated immediately
-        // instead of waiting for the next tick.
+        // Projected before the reconcile is kicked off, so the response describes
+        // the state this request committed rather than whatever the background
+        // pass has reached by the time it is serialized.
+        const gitopsRevision = projectCommittedRevision(id, 'blueprint pin');
+        // A pin that moved clears approval, so reconcileOne cannot mutate until
+        // Confirm Apply. Re-pinning the node already pinned changes nothing and
+        // leaves approval intact. Called either way so the resulting state is
+        // evaluated immediately instead of waiting for the next tick.
         if (updated.enabled) {
             BlueprintReconciler.getInstance().reconcileOne(id).catch(err => {
                 console.warn('[Blueprints] post-pin reconcileOne failed:', err);
             });
         }
-        res.json(updated);
+        res.json({ ...updated, gitopsRevision });
     } catch (error) {
         console.error('[Blueprints] Pin error:', error);
         res.status(500).json({ error: 'Failed to update blueprint pin' });

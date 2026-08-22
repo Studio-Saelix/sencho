@@ -38,7 +38,7 @@ function panel() {
       content={'services:\n  web:\n    image: nginx:1.25\n'}
       envContent=""
       selectedEnvFile=".env"
-      gitSourcePending={false}
+      gitSourcePending={null}
       onEditCompose={vi.fn()}
       onOpenGitSource={vi.fn()}
       onApplyUpdate={vi.fn()}

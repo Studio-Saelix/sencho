@@ -11,6 +11,7 @@ import {
   useDashboardData,
 } from './dashboard';
 import { DashboardActivityCard } from './dashboard/DashboardActivityCard';
+import { useGitOpsSourceStates } from './dashboard/useGitOpsSourceStates';
 
 interface HomeDashboardProps {
   onNavigateToStack?: (stackFile: string) => void;
@@ -25,6 +26,7 @@ const NOOP = () => {};
 export default function HomeDashboard({ onNavigateToStack, onOpenSettingsSection, notifications, onClearNotifications, stackUpdates = {} }: HomeDashboardProps) {
   const { activeNode, nodes } = useNodes();
   const data = useDashboardData();
+  const gitopsSourceStates = useGitOpsSourceStates();
   const activeNodeName = activeNode?.name || 'Local';
 
   return (
@@ -55,6 +57,7 @@ export default function HomeDashboard({ onNavigateToStack, onOpenSettingsSection
         stackCpuSeries={data.stackCpuSeries}
         onNavigateToStack={onNavigateToStack ?? NOOP}
         stackUpdates={stackUpdates}
+        gitopsSourceStates={gitopsSourceStates}
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
