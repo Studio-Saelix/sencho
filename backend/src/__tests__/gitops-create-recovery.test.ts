@@ -228,6 +228,45 @@ describe('gitops interrupted create recovery', () => {
     expect(() => assertCreatesSettled(settled)).not.toThrow();
   });
 
+  it('clears the marker before the checkpoint for a create that is no longer creating', async () => {
+    // An application tombstoned on some other path leaves a stale checkpoint
+    // behind. It settles like any other finished create, and it has to clear the
+    // marker on the way out: dropping the checkpoint first would leave a claim
+    // on the stack name with nothing left to retry it, and every later create
+    // for that name would be refused by a marker nothing could remove.
+    const store = GitOpsStore.getInstance();
+    seedCreate('app-gone', 'gone-web', 'stack_created', { createdManagedRoot: 0 });
+    DatabaseService.getInstance().getDb().prepare(
+      "UPDATE gitops_applications SET lifecycle_status = 'deleted' WHERE id = 'app-gone'",
+    ).run();
+    // A directory at the marker path, so the unlink fails the way a permission
+    // error would and the ordering becomes observable.
+    fs.mkdirSync(path.join(stackManagedRoot('gone-web'), CREATE_STAGING_MARKER_FILENAME), { recursive: true });
+
+    const settled = await resolveInterruptedCreates();
+
+    expect(settled).toEqual([
+      { stackName: 'gone-web', applicationId: 'app-gone', outcome: 'marker_retained' },
+    ]);
+    expect(store.getCreateCheckpoint('app-gone')).toBeDefined();
+    expect(() => assertCreatesSettled(settled)).not.toThrow();
+  });
+
+  it('drops the checkpoint for a create that is no longer creating once its marker is clear', async () => {
+    // The same route with nothing blocking the marker: this is the ordinary
+    // outcome, and it must still end with the checkpoint gone.
+    const store = GitOpsStore.getInstance();
+    seedCreate('app-gone-ok', 'gone-ok-web', 'stack_created', { createdManagedRoot: 0 });
+    DatabaseService.getInstance().getDb().prepare(
+      "UPDATE gitops_applications SET lifecycle_status = 'deleted' WHERE id = 'app-gone-ok'",
+    ).run();
+
+    const settled = await resolveInterruptedCreates();
+
+    expect(settled[0].outcome).toBe('checkpoint_cleared');
+    expect(store.getCreateCheckpoint('app-gone-ok')).toBeUndefined();
+  });
+
   it('reports a marker left by a torn-down create without blocking the boot', async () => {
     // The teardown path reaches the same condition by a different route. Its
     // staged directories are gone, so nothing deployable survives and the

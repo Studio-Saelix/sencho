@@ -3,7 +3,16 @@ import path from 'path';
 import { isPathWithinBase } from '../../utils/validation';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { deleteStagingMarker, validateCandidateRelPath } from './createStagingMarker';
-import { isRealPathWithinManagedArea, managedAreaBase } from './managedPaths';
+import { isRealPathAtManagedLocation, managedAreaBase } from './managedPaths';
+
+/**
+ * Appended to positional-containment refusals so an operator staring at one
+ * knows there is no override to flip: something under the managed area is not
+ * where its own name says it is, and the fix is repairing or removing that
+ * directory, not relocating the data directory (a whole-area move resolves
+ * cleanly and never trips this).
+ */
+const RELOCATION_REMEDIATION = 'repair or remove the redirected directory under DATA_DIR/git-managed, then retry';
 
 export type OperationOwnedCleanup = {
   /** Absolute path of the stack's managed root. */
@@ -50,8 +59,11 @@ export async function removeOperationOwnedPaths(
   }
 
   if (input.ownsManagedRoot) {
-    if (!await isRealPathWithinManagedArea(base)) {
-      throw new Error('refusing to remove a managed root that links outside the managed area');
+    if (!await isRealPathAtManagedLocation(base)) {
+      throw new Error(
+        'refusing to remove a managed root that links outside its managed location. '
+        + RELOCATION_REMEDIATION,
+      );
     }
     await fs.rm(base, { recursive: true, force: true });
     return 'cleared';
@@ -79,9 +91,13 @@ export async function removeOperationOwnedPaths(
       throw new Error('refusing to remove a path outside the managed area');
     }
     // The checks above are lexical, so a link above this path would still pass
-    // them while the delete below followed it out of the managed area.
-    if (!await isRealPathWithinManagedArea(resolved)) {
-      throw new Error('refusing to remove a path that links outside the managed area');
+    // them while the delete below followed it somewhere else, including into
+    // another stack's generations directory inside this same managed area.
+    if (!await isRealPathAtManagedLocation(resolved)) {
+      throw new Error(
+        'refusing to remove a path that links outside its managed location. '
+        + RELOCATION_REMEDIATION,
+      );
     }
     await fs.rm(resolved, { recursive: true, force: true });
   }
@@ -132,9 +148,9 @@ export async function cleanupUnclaimedManagedRoot(
     // outcome; the warning is what says this one is anomalous rather than
     // merely unproven.
     const root = path.resolve(stackManagedRoot);
-    if (!root.startsWith(managedAreaBase() + path.sep) || !await isRealPathWithinManagedArea(root)) {
+    if (!root.startsWith(managedAreaBase() + path.sep) || !await isRealPathAtManagedLocation(root)) {
       console.warn(
-        '[GitOps] Refusing to reap a managed root outside the managed area: %s',
+        '[GitOps] Refusing to reap a managed root that links outside its managed location: %s',
         sanitizeForLog(stackManagedRoot),
       );
       return 'preserved';

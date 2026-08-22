@@ -23,7 +23,7 @@ import {
   CreateStagingMarkerError,
 } from '../services/gitops/createStagingMarker';
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from '../services/gitops/createCleanup';
-import { MANAGED_ROOT_NAME, managedAreaBase } from '../services/gitops/managedPaths';
+import { GENERATIONS_DIR, MANAGED_ROOT_NAME, managedAreaBase } from '../services/gitops/managedPaths';
 import type {
   GitOpsApplicationRow,
   GitOpsCreateCheckpointRow,
@@ -411,7 +411,7 @@ describe('gitops create cleanup', () => {
       stackManagedRoot: area,
       candidateRelPath: candidateRel,
       ownsManagedRoot: false,
-    })).rejects.toThrow(/links outside the managed area/);
+    })).rejects.toThrow(/links outside its managed location/);
     // The path the escaping delete would have resolved to, not just a bystander
     // file: this is the data an unguarded removal destroys.
     expect(fs.existsSync(path.join(external, `candidate-${SHA}`, 'victim.txt'))).toBe(true);
@@ -426,7 +426,7 @@ describe('gitops create cleanup', () => {
       stackManagedRoot: area,
       candidateRelPath: null,
       ownsManagedRoot: true,
-    })).rejects.toThrow(/links outside the managed area/);
+    })).rejects.toThrow(/links outside its managed location/);
     expect(fs.existsSync(path.join(external, 'keepme.txt'))).toBe(true);
     // The link itself survives too. Unlinking it is the damage an unguarded
     // delete does here, and it is the operator's own relocation pointer.
@@ -443,6 +443,89 @@ describe('gitops create cleanup', () => {
     expect(fs.existsSync(area)).toBe(true);
   });
 
+  /**
+   * A directory link that stays *inside* the managed area but lands in another
+   * stack's subtree.
+   *
+   * The area-membership check cannot see this: the link's target is a real path
+   * under the managed area, so "is this inside the area" answers yes while the
+   * delete walks into a generation that belongs to someone else. Containment has
+   * to be proven against the path's own place in the area, not the area itself.
+   */
+  it('refuses to remove a candidate reached through a junction into a sibling stack', async () => {
+    const victim = await seedArea('sibling-victim');
+    const attacker = path.join(root, 'sibling-attacker');
+    await fsPromises.mkdir(attacker, { recursive: true });
+    await fsPromises.symlink(
+      path.join(victim.area, GENERATIONS_DIR),
+      path.join(attacker, GENERATIONS_DIR),
+      'junction',
+    );
+
+    await expect(removeOperationOwnedPaths({
+      stackManagedRoot: attacker,
+      candidateRelPath: candidateRelPathForSha(SHA),
+      ownsManagedRoot: false,
+    })).rejects.toThrow(/links outside its managed location/);
+    // The other stack's staged generation, which an area-only guard removes.
+    expect(fs.existsSync(path.join(victim.area, victim.candidateRel))).toBe(true);
+    expect(fs.existsSync(victim.sentinel)).toBe(true);
+  });
+
+  it('refuses to remove a managed root that junctions into another node subtree', async () => {
+    // Mirrors the production layout `<area>/<nodeId>/<stackName>`, because the
+    // node segment is the one an area-only guard also fails to pin.
+    const victimRoot = path.join(root, 'node-2', 'shared-name');
+    const victimGeneration = path.join(victimRoot, candidateRelPathForSha(SHA));
+    await fsPromises.mkdir(victimGeneration, { recursive: true });
+
+    const attackerRoot = path.join(root, 'node-1', 'shared-name');
+    await fsPromises.mkdir(path.dirname(attackerRoot), { recursive: true });
+    await fsPromises.symlink(victimRoot, attackerRoot, 'junction');
+
+    await expect(removeOperationOwnedPaths({
+      stackManagedRoot: attackerRoot,
+      candidateRelPath: null,
+      ownsManagedRoot: true,
+    })).rejects.toThrow(/links outside its managed location/);
+    expect(fs.existsSync(victimGeneration)).toBe(true);
+
+    // The boot sweep reaches the same root by another route and must agree.
+    expect(await cleanupUnclaimedManagedRoot(attackerRoot, {
+      operationId: 'op-sibling-node',
+      rootPreexisted: false,
+      candidateRelPath: candidateRelPathForSha(SHA),
+    })).toBe('preserved');
+    expect(fs.existsSync(victimGeneration)).toBe(true);
+  });
+
+  it('refuses to write or delete a staging marker through a junction into a sibling stack', async () => {
+    // The write sink needs the same rule as the delete: a marker written into
+    // another stack's root would hand this operation deletion authority there,
+    // and would overwrite the claim that stack is relying on.
+    const victim = path.join(root, 'sibling-marker-victim');
+    await fsPromises.mkdir(victim, { recursive: true });
+    const attacker = path.join(root, 'sibling-marker-attacker');
+    await fsPromises.symlink(victim, attacker, 'junction');
+
+    // No marker at the victim yet, so the write reaches the containment check
+    // rather than being turned back by the "someone already owns this" guard.
+    await expect(writeStagingMarker(attacker, {
+      schemaVersion: 1,
+      operationId: 'op-sibling-marker',
+      rootPreexisted: false,
+      candidateRelPath: candidateRelPathForSha(SHA),
+      createdAt: 1,
+    })).rejects.toThrow(/links outside its managed location/);
+    expect(fs.existsSync(path.join(victim, CREATE_STAGING_MARKER_FILENAME))).toBe(false);
+
+    // Now the victim holds its own claim, and the delete must not clear it:
+    // that claim is what stops a second create racing this stack.
+    await fsPromises.writeFile(path.join(victim, CREATE_STAGING_MARKER_FILENAME), 'theirs', 'utf8');
+    await expect(deleteStagingMarker(attacker)).rejects.toThrow(/links outside its managed location/);
+    expect(fs.readFileSync(path.join(victim, CREATE_STAGING_MARKER_FILENAME), 'utf8')).toBe('theirs');
+  });
+
   it('refuses to write a staging marker through a link out of the area', async () => {
     // The write sink gets the same barrier as the delete. Without it a marker
     // could be written through a link and then refused by the hardened delete,
@@ -456,7 +539,7 @@ describe('gitops create cleanup', () => {
       rootPreexisted: false,
       candidateRelPath: candidateRelPathForSha(SHA),
       createdAt: 1,
-    })).rejects.toThrow(/escapes the managed area/);
+    })).rejects.toThrow(/links outside its managed location/);
     expect(fs.existsSync(path.join(external, CREATE_STAGING_MARKER_FILENAME))).toBe(false);
   });
 
@@ -467,7 +550,7 @@ describe('gitops create cleanup', () => {
     const external = await linkOutside(area, 'marker-escape');
     await fsPromises.writeFile(path.join(external, CREATE_STAGING_MARKER_FILENAME), '{}', 'utf8');
 
-    await expect(deleteStagingMarker(area)).rejects.toThrow(/escapes the managed area/);
+    await expect(deleteStagingMarker(area)).rejects.toThrow(/links outside its managed location/);
     expect(fs.existsSync(path.join(external, CREATE_STAGING_MARKER_FILENAME))).toBe(true);
   });
 

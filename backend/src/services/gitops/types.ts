@@ -716,9 +716,9 @@ export type GitOpsIdentityRef =
 
 /**
  * Cross-instance evidence a history entry carries so any reader can decide who
- * may see it. Only the owning instance can answer either question, so both
- * travel with the row rather than being inferred by a reader that holds none
- * of that instance's state.
+ * may see it. Only the owning instance can answer any of these questions, so
+ * they all travel with the row rather than being inferred by a reader that
+ * holds none of that instance's state.
  */
 export type GitOpsHistoryEvidenceFields = {
   stackName: string | null;

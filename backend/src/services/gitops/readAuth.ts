@@ -73,14 +73,15 @@ function usableStackName(value: unknown): string | null {
 }
 
 /**
- * Lifecycle states whose rows a stack grant can authorize.
+ * Lifecycle states whose source rows a stack grant can authorize.
  *
  * A deleted application no longer has a stack whose grant could authorize it,
  * and a creating one does not yet have a stack that survived. In both cases a
  * later application may hold the same stack name, so honouring a grant here
- * would let one application's rows be read through another's name. A detached
- * application has the same name-reuse property, and is allowed anyway: its
- * files are still on disk and still the operator's to read.
+ * would let one application's rows be read through another's name.
+ *
+ * History rows do not use this. They require `active`, for the reason given on
+ * `classifyHistoryRow`.
  */
 function lifecycleAllowsStackRead(lifecycleStatus: unknown): boolean {
   return lifecycleStatus === 'active' || lifecycleStatus === 'detached';
@@ -132,7 +133,25 @@ export function classifySourceRow(input: {
 export function classifyHistoryRow(input: HistoryRowEvidence): GitOpsReadRequirement {
   const stackName = usableStackName(input.stackName);
   if (!stackName) return AUDIT;
-  if (!lifecycleAllowsStackRead(input.applicationLifecycleStatus)) return AUDIT;
+  // Only a live application, never a `detached` one, even though a detached
+  // application's files are usually still the stack standing at its name.
+  //
+  // A stack grant is a grant on whatever occupies that name today, so the
+  // allowance is only sound while the detached application is still what
+  // occupies it, and nothing here can establish that. A later Direct
+  // application is visible in these tables, but a Blueprint deploying under the
+  // same name records it as `deploy_stack_name` on its intent revision rather
+  // than as an application `stack_name`, and a plain Compose stack recreated at
+  // that name leaves no GitOps trace at all. Since the last case cannot be
+  // detected in principle, the allowance cannot be made sound by detecting
+  // harder, and a rule that holds only for the successors we happen to see is
+  // worse than not having one.
+  //
+  // Detach therefore moves a stack's trail to the audit audience, the same
+  // answer `deleted` and `creating` predecessors already get. A create still in
+  // flight shows its own history through the scope exemption in
+  // `helpers/gitopsHistoryPage.ts`, which never reaches this classifier.
+  if (input.applicationLifecycleStatus !== 'active') return AUDIT;
   if (!normalizeStackResourcePresent(input.stackResourcePresent)) return AUDIT;
   return { kind: 'stack_read', stackName };
 }

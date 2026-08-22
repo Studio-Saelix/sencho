@@ -286,12 +286,29 @@ describe('gitops history read layer', () => {
       // History entries are an audit trail, so an entry nobody can tie to a
       // readable stack goes to whoever audits rather than to Admin alone.
       const audit = { kind: 'audit' };
-      expect(classifyHistoryRow({ stackName: null, applicationLifecycleStatus: 'active', stackResourcePresent: true })).toEqual(audit);
-      expect(classifyHistoryRow({ stackName: '', applicationLifecycleStatus: 'active', stackResourcePresent: true })).toEqual(audit);
-      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: undefined, stackResourcePresent: true })).toEqual(audit);
-      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: 'deleted', stackResourcePresent: true })).toEqual(audit);
-      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: 'creating', stackResourcePresent: true })).toEqual(audit);
-      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: 'active', stackResourcePresent: false })).toEqual(audit);
+      const held = { stackResourcePresent: true };
+      expect(classifyHistoryRow({ stackName: null, applicationLifecycleStatus: 'active', ...held })).toEqual(audit);
+      expect(classifyHistoryRow({ stackName: '', applicationLifecycleStatus: 'active', ...held })).toEqual(audit);
+      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: undefined, ...held })).toEqual(audit);
+      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: 'deleted', ...held })).toEqual(audit);
+      expect(classifyHistoryRow({ stackName: 'web', applicationLifecycleStatus: 'creating', ...held })).toEqual(audit);
+      expect(classifyHistoryRow({
+        stackName: 'web',
+        applicationLifecycleStatus: 'active',
+        stackResourcePresent: false,
+      })).toEqual(audit);
+    });
+
+    it('sends every detached predecessor to the audit audience', () => {
+      // Detach leaves the files on disk, but a stack grant covers whatever
+      // occupies the name today, and nothing in these tables can prove the
+      // detached application still does: a Blueprint successor records the
+      // name off-row (`deploy_stack_name`) and a plain Compose stack recreated
+      // at the name leaves no trace at all. An allowance that holds only for
+      // the successors this classifier happens to see is worse than none, so
+      // detach joins `deleted` and `creating`.
+      const detached = { stackName: 'web', applicationLifecycleStatus: 'detached', stackResourcePresent: true };
+      expect(classifyHistoryRow({ ...detached })).toEqual({ kind: 'audit' });
     });
 
     it('keeps source rows on Admin rather than the audit audience', () => {

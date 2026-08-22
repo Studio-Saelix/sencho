@@ -56,12 +56,12 @@ function isOutcome(value: string): value is HistoryOutcome {
  * through the classifier: a stack name outlives the applications that held it,
  * and a grant on the current one is not evidence about an earlier one.
  *
- * What that closes, precisely: a predecessor that was `deleted`, one still
- * `creating`, and one whose stack resource is gone all need `system:audit`. A
- * `detached` predecessor does not. `lifecycleAllowsStackRead` admits it
- * deliberately, on the grounds that its files are still on disk and still the
- * operator's to read, and that decision is unchanged here. So the classifier
- * narrows who may read a reused name; it does not partition the name.
+ * What that closes, precisely: every predecessor needs `system:audit`, whether
+ * it was `deleted`, `detached`, still `creating`, or has lost its stack
+ * resource. So the classifier partitions a stack name between the application
+ * holding it now, whose rows the grant covers, and everyone who held it before,
+ * whose rows belong to the audit audience. `classifyHistoryRow` says why
+ * `detached` is in that second group rather than riding its files.
  */
 export type HistoryScope =
   | { kind: 'per_row' }
@@ -203,9 +203,7 @@ function buildHistoryPage(
   // The live lookup spans `active` and `creating`, which is the whole point: a
   // create still in flight has no other way to show the operator its own
   // history. Any predecessor is absent from it, so a predecessor's rows go to
-  // the classifier rather than riding this grant. What the classifier then does
-  // with them is its own decision, and it does not refuse all of them: see the
-  // note on `HistoryScope` about `detached`.
+  // the classifier, which refuses every one of them on a stack grant.
   //
   // Direct mode only, which is all `getLiveDirectApplication` returns. A
   // Blueprint-delivered stack therefore resolves to null here and has every row

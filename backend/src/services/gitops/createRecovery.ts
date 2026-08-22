@@ -219,21 +219,19 @@ async function resolveOne(checkpoint: GitOpsCreateCheckpointRow): Promise<Create
   const stackName = checkpoint.stack_name;
   const managedRoot = stackManagedRoot(stackName);
 
-  // The checkpoint outlived its application, or the create already reached its
-  // success boundary. Either way there is nothing to decide: drop the
-  // bookkeeping and clear any marker the last process could not.
-  if (!app || app.lifecycle_status === 'active' || checkpoint.phase === 'pointers_committed') {
+  // Nothing left to decide: the checkpoint outlived its application, the create
+  // already reached its success boundary, or the application has since moved out
+  // of `creating` on some other path. Every one of them means this row is stale
+  // bookkeeping, so they settle identically and share one exit, which is what
+  // keeps the marker ordering below true of all of them rather than of whichever
+  // branch last remembered it.
+  if (!app || checkpoint.phase === 'pointers_committed' || app.lifecycle_status !== 'creating') {
     // Marker first: clearing it can fail, and dropping the checkpoint before
     // that would leave a marker that makes the stack name uncreatable with
     // nothing left to retry it.
     if (!await clearSettledMarker(stackName, managedRoot)) {
       return { stackName, applicationId: checkpoint.application_id, outcome: 'marker_retained' };
     }
-    store.deleteCreateCheckpoint(checkpoint.application_id);
-    return { stackName, applicationId: checkpoint.application_id, outcome: 'checkpoint_cleared' };
-  }
-
-  if (app.lifecycle_status !== 'creating') {
     store.deleteCreateCheckpoint(checkpoint.application_id);
     return { stackName, applicationId: checkpoint.application_id, outcome: 'checkpoint_cleared' };
   }

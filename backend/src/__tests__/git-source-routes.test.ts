@@ -1604,13 +1604,41 @@ describe('GitOps additive fields and history routes', () => {
         expect(auditorShas).toContain('new22222');
     });
 
-    it('still shows a detached predecessor, which the classifier allows by design', async () => {
-        // The boundary of the fix above, pinned so it cannot move silently. A
-        // detached application is admitted by `lifecycleAllowsStackRead` on the
-        // stated grounds that its files are still on disk and still the
-        // operator's to read, so its rows ride the same stack grant even under
-        // a reused name. Narrowing that is a deliberate decision about detach,
-        // not a side effect of a change to this route.
+    it('moves a detached application behind system:audit even with no successor', async () => {
+        // Detach leaves the files on disk, which once justified reading its
+        // trail on a stack grant. A grant covers whatever occupies the name
+        // today, and nothing in these tables can prove the detached
+        // application still does: some successors hide from every lookup this
+        // route could run, so detach joins `deleted` as an audit-only
+        // predecessor.
+        makeStackDir('detached-kept');
+        activateApplication('app-detached-kept', 'detached-kept');
+        recordFetch('app-detached-kept', 'detached-kept', 'op-detached-kept', 'kept1111');
+        GitOpsTransitions.getInstance().applicationTombstoned('app-detached-kept', 'detached', {
+            operationId: 'op-detached-kept', actor: 'tester', trigger: 'manual', at: Date.now(),
+        });
+
+        const viewer = await request(app)
+            .get('/api/stacks/detached-kept/git-source/history?limit=100')
+            .set('Cookie', viewerCookie);
+        expect(viewer.status).toBe(200);
+        const shas = viewer.body.items.map((i: { commitSha: string | null }) => i.commitSha);
+        expect(shas).not.toContain('kept1111');
+
+        // Moved behind the audit permission, not lost.
+        const auditor = await request(app)
+            .get('/api/stacks/detached-kept/git-source/history?limit=100')
+            .set('Cookie', auditorCookie);
+        expect(auditor.status).toBe(200);
+        const auditorShas = auditor.body.items.map((i: { commitSha: string | null }) => i.commitSha);
+        expect(auditorShas).toContain('kept1111');
+    });
+
+    it('keeps a detached predecessor behind system:audit once a successor takes the name', async () => {
+        // The successor makes the reuse visible, but the answer does not depend
+        // on detecting it: a detached trail is audit-only on its own. This pins
+        // that a successor neither restores nor widens what the stack grant
+        // reaches.
         makeStackDir('reused-detached');
         activateApplication('app-detached-old', 'reused-detached');
         recordFetch('app-detached-old', 'reused-detached', 'op-detached-old', 'det11111');
@@ -1626,7 +1654,16 @@ describe('GitOps additive fields and history routes', () => {
         expect(viewer.status).toBe(200);
         const shas = viewer.body.items.map((i: { commitSha: string | null }) => i.commitSha);
         expect(shas).toContain('det22222');
-        expect(shas).toContain('det11111');
+        expect(shas).not.toContain('det11111');
+
+        // Moved behind the audit permission, not lost.
+        const auditor = await request(app)
+            .get('/api/stacks/reused-detached/git-source/history?limit=100')
+            .set('Cookie', auditorCookie);
+        expect(auditor.status).toBe(200);
+        const auditorShas = auditor.body.items.map((i: { commitSha: string | null }) => i.commitSha);
+        expect(auditorShas).toContain('det11111');
+        expect(auditorShas).toContain('det22222');
     });
 
     it('rejects a malformed cursor instead of silently restarting', async () => {
