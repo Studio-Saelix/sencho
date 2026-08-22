@@ -268,13 +268,7 @@ describe('git binary probe', () => {
 
 describe('transport argv hardening', () => {
     beforeEach(() => {
-        gitBinary.resetGitBinaryProbeForTests();
-        mockExecFile.mockReset();
-        mockExecFile.mockImplementation(
-            (_cmd: string, _args: string[], _opts: unknown, cb: (e: Error | null, out: string) => void) => cb(null, 'git version 2.45.2'),
-        );
-        // Keep the exec-path lookup out of the scripted spawn queue.
-        vi.spyOn(gitBinary, 'getGitExecPath').mockResolvedValue(GIT_EXEC_PATH_STUB);
+        stubHealthyGitBinary();
     });
 
     it('hardens every invocation and keeps the token out of argv', async () => {
@@ -437,12 +431,7 @@ describe('transport argv hardening', () => {
 
 describe('resolve/fetch/verify flow', () => {
     beforeEach(() => {
-        gitBinary.resetGitBinaryProbeForTests();
-        mockExecFile.mockReset();
-        mockExecFile.mockImplementation(
-            (_cmd: string, _args: string[], _opts: unknown, cb: (e: Error | null, out: string) => void) => cb(null, 'git version 2.45.2'),
-        );
-        vi.spyOn(gitBinary, 'getGitExecPath').mockResolvedValue(GIT_EXEC_PATH_STUB);
+        stubHealthyGitBinary();
     });
 
     it('clones shallow/single-branch and verifies the checkout against the resolved SHA', async () => {
@@ -587,12 +576,7 @@ describe('startSizeWatchdog', () => {
 
 describe('clone failure classification and final size gate', () => {
     beforeEach(() => {
-        gitBinary.resetGitBinaryProbeForTests();
-        mockExecFile.mockReset();
-        mockExecFile.mockImplementation(
-            (_cmd: string, _args: string[], _opts: unknown, cb: (e: Error | null, out: string) => void) => cb(null, 'git version 2.45.2'),
-        );
-        vi.spyOn(gitBinary, 'getGitExecPath').mockResolvedValue(GIT_EXEC_PATH_STUB);
+        stubHealthyGitBinary();
     });
 
     it('maps a failing ls-remote exit into an exit failure carrying stderr and argv', async () => {
