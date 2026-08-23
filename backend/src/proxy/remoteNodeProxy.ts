@@ -10,6 +10,7 @@ import {
   isGitOpsIdentityJsonRoute,
   prepareIdentityQuery,
   rewriteIdentityPayload,
+  stripConditionalRequestHeaders,
 } from './gitopsIdentityProxy';
 import { satisfiesGitOpsRead } from '../services/gitops/readAuth';
 import { NodeRegistry } from '../services/NodeRegistry';
@@ -188,6 +189,12 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         // the generic strip below cannot undo that decision.
         const [pathname] = proxyReq.path.split('?');
         proxyReq.path = pathname + (req.gitopsIdentity.query ? `?${req.gitopsIdentity.query}` : '');
+        // A remote answering a conditional request with 304 would bypass the
+        // hub's rewrite and per-row filtering entirely, so the client is never
+        // allowed to ask the remote to revalidate. Identity-hop only: the
+        // streaming forwards keep client conditionals, which optimistic-
+        // concurrency file writes depend on.
+        stripConditionalRequestHeaders(proxyReq);
       } else if (proxyReq.path.includes('nodeId=')) {
         const [pathname, qs] = proxyReq.path.split('?');
         const params = new URLSearchParams(qs || '');

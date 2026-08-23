@@ -378,9 +378,10 @@ export type ConfiguredPolicy =
 /**
  * A classified divergence between what was intended and what was observed.
  *
- * The backend derives this type but emits an empty array on every response
- * today, so a renderer must expect no rows and must not read an empty list as
- * "in sync": it means "not computed yet".
+ * The backend currently emits one class of item on its own evidence, a runtime
+ * artifact mismatch; every other class still needs a producer. An empty list
+ * therefore means "no confirmed drift", never "in sync": a state the model was
+ * never asked about also answers empty.
  */
 export interface GitOpsDriftItem {
   class: 'source' | 'managed_project' | 'invocation' | 'placement' | 'rollout' | 'runtime' | 'health';

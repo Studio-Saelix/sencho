@@ -312,11 +312,37 @@ const HOP_BY_HOP_HEADERS = [
   'keep-alive', 'proxy-connection', 'te', 'trailer', 'upgrade',
 ];
 
-/** End-to-end headers that stay meaningful after the body is rewritten. */
+/**
+ * End-to-end headers that stay meaningful after the body is rewritten.
+ *
+ * Deliberately excludes every cache validator and cacheability header. The
+ * upstream validators describe the remote's unfiltered representation, while
+ * the body the hub sends is rewritten and filtered for one caller; letting a
+ * client pair the two would let a cached page outlive the authorization it was
+ * filtered under. This hop answers `no-store` instead, so nothing downstream
+ * retains a filtered page to revalidate with.
+ */
 const FORWARDED_HEADERS = [
-  'cache-control', 'etag', 'last-modified', 'expires', 'vary',
   'location', 'retry-after', 'x-sencho-proxy',
 ];
+
+/**
+ * Request headers that ask an upstream to answer from its cache.
+ *
+ * Stripped before forwarding on every identity route. A remote answering 304
+ * would hand back a status the hub relays without a body, and the client would
+ * keep serving the page it cached under the remote's validator, which was
+ * never filtered by this hub. Without the strip, a permission revoked between
+ * two reads would not take effect until the remote's content actually changed.
+ */
+export const CONDITIONAL_REQUEST_HEADERS = [
+  'if-none-match', 'if-modified-since', 'if-match', 'if-unmodified-since',
+] as const;
+
+/** Remove every conditional request header from one outgoing request. */
+export function stripConditionalRequestHeaders(target: { removeHeader(name: string): unknown }): void {
+  for (const header of CONDITIONAL_REQUEST_HEADERS) target.removeHeader(header);
+}
 
 export type IdentityTerminalKind =
   | 'rewrite'
@@ -441,6 +467,10 @@ export function writeTerminal(
     const value = proxyRes.headers[header];
     if (value !== undefined) res.setHeader(header, value);
   }
+  // Every answer this hop writes is rewritten or filtered for one caller, so
+  // nothing downstream may retain it: a stored page keyed to no validator is
+  // exactly how a stale authorized view survives its own permission change.
+  res.setHeader('cache-control', 'no-store');
 
   if (disposition.respond === 'generated') {
     // A hub-generated failure never borrows the upstream status: reporting our
@@ -456,8 +486,9 @@ export function writeTerminal(
 
   const status = proxyRes.statusCode ?? 502;
   res.statusCode = status;
-  // 204 and 304 carry no body by definition, and 304 keeps the validators
-  // copied above so a conditional request still revalidates correctly.
+  // 204 and 304 carry no body by definition. A 304 still gets the no-store
+  // answer above rather than the remote's validators: relaying them would let
+  // a client keep serving a cached page this hub never re-filtered.
   if (status === 204 || status === 304 || body === undefined || body.length === 0) {
     res.end();
     return;

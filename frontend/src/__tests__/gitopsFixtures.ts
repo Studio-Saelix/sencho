@@ -90,15 +90,19 @@ export function target(overrides: Partial<GitOpsTargetProjection> = {}): GitOpsT
   };
 }
 
-/** One classified divergence. Nothing populates these yet, so every field is a default. */
+/**
+ * One classified divergence. The backend emits the runtime class from a
+ * comparable artifact mismatch, so this fixture shapes itself after that item;
+ * the other classes still have no producer.
+ */
 export function driftItem(overrides: Partial<GitOpsDriftItem> = {}): GitOpsDriftItem {
   return {
     class: 'runtime',
-    expected: { kind: 'generation', id: 'gen-accepted' },
+    expected: { kind: 'artifact_set', id: 'art-accepted', qualification: 'exact', evidenceVersion: 1 },
     observed: { kind: 'runtime_artifact', identity: 'nginx@sha256:abc', observedAt: 1 },
     freshnessAt: 1,
     owner: 'observed_artifact_identity',
-    reason: 'The running image is not the one this generation expects.',
+    reason: 'the running workload reports an artifact identity other than the expected artifact set',
     configuredPolicy: null,
     affectedTargets: [{ nodeId: 1, stackName: 'bookstack' }],
     action: 'deploy',

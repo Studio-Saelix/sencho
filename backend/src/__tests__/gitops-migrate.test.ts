@@ -18,6 +18,7 @@ import { DatabaseService, type StackGitSource } from '../services/DatabaseServic
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
 import { migrateDirectGitStacks, primeMigrationManifests } from '../services/gitops/migrate';
+import { directSourceIdentity, migrationDirectSourceIdentity } from '../services/gitops/directApplication';
 import { projectApplication } from '../services/gitops/derive';
 
 const REPO = 'https://github.com/example/legacy.git';
@@ -249,6 +250,82 @@ describe('gitops migration of pre-existing Git stacks', () => {
     ]);
     expect(GitOpsStore.getInstance().getLiveDirectApplication('vanished')).toBeUndefined();
   });
+
+  it('accepts the applied commit through a trusted manifest even on a legacy URL', () => {
+    // The worst real-world instance of the strict-parser bug: a stack whose
+    // manifest proves its applied commit would have failed migration every
+    // boot and never entered the model at all.
+    const legacyUrl = `${REPO}?token=legacy-secret`;
+    seedStack('legacy-trusted-url', { lastApplied: SHA, repoUrl: legacyUrl });
+    primeManifests({
+      'legacy-trusted-url': {
+        manifestVersion: 3,
+        generation: { appliedDir: `generations/applied-${SHA}-3` },
+        resolvedRevision: { commitSha: SHA },
+      },
+    });
+
+    expect(migrateDirectGitStacks()).toEqual([{ stackName: 'legacy-trusted-url', outcome: 'migrated_accepted' }]);
+
+    const store = GitOpsStore.getInstance();
+    const app = store.getLiveDirectApplication('legacy-trusted-url')!;
+    expect(app.desired_commit_sha).toBe(SHA);
+    expect(app.accepted_generation_id).not.toBeNull();
+    expect(app.configured_repo_url).toBe(REPO);
+    expect(DatabaseService.getInstance().getGitSource('legacy-trusted-url')?.repo_url).toBe(legacyUrl);
+    expect(projectOf(app.id).facets.source.status).toBe('application_generation_accepted');
+  });
+
+  it('derives the same identity as strict ingress once the legacy decoration is stripped', () => {
+    const config = {
+      repoUrl: REPO,
+      branch: 'main',
+      composePaths: ['compose.yaml'],
+      contextDir: null,
+      syncEnv: false,
+      envPath: null,
+    };
+    const noisy = { ...config, repoUrl: `${REPO}?token=x` };
+    const lenient = migrationDirectSourceIdentity(noisy);
+    const strict = directSourceIdentity(config);
+    expect(lenient.repoUrl).toBe(strict.repoUrl);
+    expect(lenient.identity).toEqual(strict.identity);
+    // A migrated stack must be replay-recognizable against one linked fresh
+    // through the user path for the same repository.
+    expect(lenient.fingerprint).toBe(strict.fingerprint);
+  });
+
+  it('migrates a legacy operational URL that still carries a query string', () => {
+    const legacyUrl = `${REPO}?token=legacy-secret`;
+    seedStack('legacy-query-url', { lastApplied: null, repoUrl: legacyUrl });
+    primeManifests({ 'legacy-query-url': null });
+
+    expect(migrateDirectGitStacks()).toEqual([{ stackName: 'legacy-query-url', outcome: 'migrated_unreconciled' }]);
+
+    const app = GitOpsStore.getInstance().getLiveDirectApplication('legacy-query-url')!;
+    expect(app.configured_repo_url).toBe(REPO);
+    // The operational row keeps its query: fetch may still need it.
+    expect(DatabaseService.getInstance().getGitSource('legacy-query-url')?.repo_url).toBe(legacyUrl);
+  });
+
+  it('migrates a legacy URL carrying userinfo to the identity of its clean form', () => {
+    seedStack('legacy-userinfo-url', { lastApplied: null, repoUrl: 'https://deploy:pat@github.com/example/legacy.git' });
+    seedStack('clean-url', { lastApplied: null });
+    primeManifests({ 'legacy-userinfo-url': null, 'clean-url': null });
+
+    migrateDirectGitStacks();
+
+    const store = GitOpsStore.getInstance();
+    const legacy = store.getLiveDirectApplication('legacy-userinfo-url')!;
+    const clean = store.getLiveDirectApplication('clean-url')!;
+    expect(legacy.configured_repo_url).toBe(REPO);
+    expect(legacy.repo_identity_json).toBe(clean.repo_identity_json);
+    // The same repository under the same configuration must produce the same
+    // fingerprint, or a later replay could not recognize the stack it
+    // already migrated.
+    expect(legacy.materialization_fingerprint).toBe(clean.materialization_fingerprint);
+    expect(DatabaseService.getInstance().getGitSource('legacy-userinfo-url')?.repo_url).toContain('deploy:pat@');
+  });
 });
 
 function projectOf(applicationId: string) {
@@ -263,7 +340,7 @@ function primeManifests(fixtures: Record<string, ManifestFixture>): void {
 
 function seedStack(
   stackName: string,
-  options: { lastApplied: string | null; pending?: string; composePaths?: string[]; createDir?: boolean },
+  options: { lastApplied: string | null; pending?: string; composePaths?: string[]; createDir?: boolean; repoUrl?: string },
 ): void {
   if (options.createDir !== false) {
     const composeDir = process.env.COMPOSE_DIR!;
@@ -272,7 +349,7 @@ function seedStack(
   }
   const row: Parameters<DatabaseService['upsertGitSource']>[0] = {
     stack_name: stackName,
-    repo_url: REPO,
+    repo_url: options.repoUrl ?? REPO,
     branch: 'main',
     compose_path: 'compose.yaml',
     compose_paths: options.composePaths ?? ['compose.yaml'],

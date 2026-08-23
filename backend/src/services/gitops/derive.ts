@@ -16,6 +16,7 @@ import type {
   GitOpsAvailableAction,
   GitOpsLimitation,
   GitOpsRevisionProjection,
+  GitOpsDriftItem,
   GitOpsTargetCurrentRow,
   GitOpsTargetProjection,
   HealthFacet,
@@ -102,10 +103,56 @@ export function deriveGitOpsRevision(
     },
     facets: { source, artifact, placement, rollout },
     targets,
-    drift: [],
+    drift: collectRuntimeDrift(app, targets),
     limitations,
     availableActions,
   };
+}
+
+/**
+ * The one drift class current evidence can confirm on its own.
+ *
+ * Most of the seven classes need producers this model deliberately defers, but
+ * a comparable runtime artifact mismatch rests entirely on rows that exist
+ * now. Leaving `drift` empty while the facet says `runtime_artifact_drift`
+ * would report one fault twice with only one copy readable.
+ *
+ * Emitted only for an exact or qualified expectation against an exact or
+ * qualified observation whose identity strings differ. Every other observation
+ * kind stays `artifact_verification_pending`, and equal identities emit
+ * nothing. Policy composition has no producer yet, so the item carries null
+ * rather than a policy nothing wrote.
+ */
+function collectRuntimeDrift(app: GitOpsApplicationRow, targets: GitOpsTargetProjection[]): GitOpsDriftItem[] {
+  const items: GitOpsDriftItem[] = [];
+  for (const target of targets) {
+    if (target.runtime.status !== 'runtime_artifact_drift') continue;
+    const expected = target.artifact.status !== 'not_applicable' && 'expected' in target.artifact
+      ? target.artifact.expected
+      : null;
+    if (!expected || expected.identity === null) continue;
+    const observed = target.observedArtifactIdentity;
+    if ((observed.kind !== 'exact' && observed.kind !== 'qualified') || observed.identity === expected.identity) {
+      continue;
+    }
+    items.push({
+      class: 'runtime',
+      expected: {
+        kind: 'artifact_set',
+        id: expected.artifactSetId,
+        qualification: expected.qualification,
+        evidenceVersion: expected.evidenceVersion,
+      },
+      observed: { kind: 'runtime_artifact', identity: observed.identity, observedAt: observed.observedAt },
+      freshnessAt: observed.observedAt,
+      owner: 'observed_artifact_identity',
+      reason: 'the running workload reports an artifact identity other than the expected artifact set',
+      configuredPolicy: null,
+      affectedTargets: [{ nodeId: target.nodeId, stackName: app.stack_name }],
+      action: 'none',
+    });
+  }
+  return items;
 }
 
 function deriveSource(app: GitOpsApplicationRow, limitations: GitOpsLimitation[]): SourceFacet {
@@ -498,6 +545,18 @@ function deriveRuntime(
   if (blueprintStage) return { status: blueprintStage };
   if (!target.applied_generation_id) return { status: 'never_applied' };
   if (!target.deployed_generation_id) return { status: 'applied_not_deployed' };
+  // The target's contract is its desired generation, so a populated deployed
+  // pointer alone proves nothing: a newer applied generation with the old one
+  // still running stays deploy-pending, or a stack awaiting its deploy would
+  // read as synced and healthy off the previous workload's pointers. A null
+  // desired id is the unknown case (legacy rows, recovered targets), where the
+  // deployed pointer remains the only basis to judge.
+  if (
+    target.desired_generation_id !== null
+    && target.deployed_generation_id !== target.desired_generation_id
+  ) {
+    return { status: 'applied_not_deployed' };
+  }
   if (artifact.status !== 'not_applicable' && 'expected' in artifact && artifact.expected
     && (artifact.expected.qualification === 'exact' || artifact.expected.qualification === 'qualified')) {
     if (
@@ -526,7 +585,13 @@ function deriveRuntime(
 function deriveHealth(target: GitOpsTargetCurrentRow, healthDisabled: boolean): HealthFacet {
   if (healthDisabled) return { status: 'not_applicable' };
   if (!target.deployed_generation_id) return { status: 'unbound' };
-  if (target.healthy_generation_id === target.deployed_generation_id) {
+  // A passing run answers for the generation the target was asked to run, so
+  // it is judged against the desired id and only falls back to the deployed
+  // pointer when no desired id is recorded. Judging against whatever is
+  // deployed would let the previous workload's green run vouch for a newer
+  // generation nobody has watched.
+  const expectedGeneration = target.desired_generation_id ?? target.deployed_generation_id;
+  if (target.healthy_generation_id === expectedGeneration) {
     return { status: 'passed', runId: '', deployedGenerationId: target.deployed_generation_id };
   }
   return { status: 'pending', runId: null };

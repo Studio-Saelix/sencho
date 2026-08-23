@@ -4,7 +4,7 @@ import { NodeRegistry } from '../NodeRegistry';
 import { MANAGED_ROOT_NAME } from './managedPaths';
 import { encodeGitOpsJson } from './json';
 import { materializationFingerprint } from './fingerprint';
-import { parseHttpsRepoUrl, secretFreeRepoUrl, serializeRepoIdentity, type RepoIdentity } from './repoIdentity';
+import { parseHttpsRepoUrl, parseLegacyRepoUrl, secretFreeRepoUrl, serializeRepoIdentity, type RepoIdentity } from './repoIdentity';
 import type {
   GitOpsApplicationRow,
   GitOpsCreateCheckpointRow,
@@ -45,7 +45,25 @@ export class GitOpsIdentityError extends Error {
 export function directSourceIdentity(config: DirectSourceConfig): DirectSourceIdentity {
   const parsed = parseHttpsRepoUrl(config.repoUrl);
   if (!parsed.ok) throw new GitOpsIdentityError(`repository URL is not storable: ${parsed.reason}`);
-  const identity = serializeRepoIdentity(parsed.url);
+  return directSourceIdentityFromUrl(config, parsed.url);
+}
+
+/**
+ * The same derivation, for URLs that predate strict ingress.
+ *
+ * Migration is its only caller. A legacy operational row may still carry
+ * userinfo or a query string that fetch needs, so the storable identity strips
+ * them instead of refusing the stack; the strict helper above stays the gate
+ * for every path a user can drive.
+ */
+export function migrationDirectSourceIdentity(config: DirectSourceConfig): DirectSourceIdentity {
+  const parsed = parseLegacyRepoUrl(config.repoUrl);
+  if (!parsed.ok) throw new GitOpsIdentityError(`repository URL is not storable: ${parsed.reason}`);
+  return directSourceIdentityFromUrl(config, parsed.url);
+}
+
+function directSourceIdentityFromUrl(config: DirectSourceConfig, url: URL): DirectSourceIdentity {
+  const identity = serializeRepoIdentity(url);
   const material = {
     repoIdentity: identity,
     configuredRef: config.branch,

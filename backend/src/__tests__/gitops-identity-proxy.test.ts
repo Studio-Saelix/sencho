@@ -9,6 +9,7 @@ import {
   isGitOpsIdentityJsonRoute,
   prepareIdentityQuery,
   rewriteIdentityPayload,
+  stripConditionalRequestHeaders,
   filterIdentityCollection,
   filterRemoteIdentityPayload,
   type IdentityResponseSink,
@@ -124,6 +125,57 @@ describe('gitops identity proxy', () => {
 
     it('strips a forged local-target even when it refuses', () => {
       expect(prep('nodeId=7&gitopsLocalTarget=1', '/git-sources/history', 3).kind).toBe('refuse');
+    });
+  });
+
+  describe('conditional requests', () => {
+    it('strips every conditional request header before forwarding', () => {
+      const removed: string[] = [];
+      stripConditionalRequestHeaders({ removeHeader: (name) => removed.push(name) });
+      expect(removed).toEqual(['if-none-match', 'if-modified-since', 'if-match', 'if-unmodified-since']);
+    });
+
+    it('reruns the hub filter when a caller revalidates after a permission change', async () => {
+      // First read: the caller may see both rows. The answer is filtered for
+      // them and carries no validator to cache against.
+      const row = (name: string): unknown => ({
+        nodeId: 1,
+        stack_name: name,
+        gitopsRevision: { lifecycleStatus: 'active' },
+        stackResourcePresent: true,
+      });
+      const first = await runResponse({
+        status: 200,
+        headers: { etag: 'W/"upstream-1"' },
+        body: JSON.stringify([row('kept'), row('revoked')]),
+      });
+      expect(first.kind).toBe('rewrite');
+      expect(JSON.parse(first.body.toString())).toHaveLength(2);
+      expect(first.headers.etag).toBeUndefined();
+      expect(first.headers['cache-control']).toBe('no-store');
+
+      // The revalidation attempt: a conditional request is stripped on its way
+      // up, so the remote cannot answer 304 and the hub must classify every
+      // row again under the grants in force now.
+      const outbound: Record<string, string> = { 'if-none-match': 'W/"upstream-1"', accept: 'application/json' };
+      stripConditionalRequestHeaders({ removeHeader: (name) => { delete outbound[name]; } });
+      expect(outbound['if-none-match']).toBeUndefined();
+      expect(outbound.accept).toBe('application/json');
+
+      // The fresh answer reflects the revocation: one row survives.
+      const second = await runResponse({
+        status: 200,
+        body: JSON.stringify([row('kept'), row('revoked')]),
+        transform: (payload) => (filterRemoteIdentityPayload(
+          '/git-sources',
+          payload,
+          // The caller may still prove every row except the revoked stack.
+          (requirement) => !(requirement.kind === 'stack_read' && requirement.stackName === 'revoked'),
+          1,
+        )),
+      });
+      expect(second.kind).toBe('rewrite');
+      expect(JSON.parse(second.body.toString())).toHaveLength(1);
     });
   });
 
@@ -386,20 +438,46 @@ describe('gitops identity proxy', () => {
       expect(result.statusCode).toBe(502);
     });
 
-    it('writes no body for 204 and keeps validators on 304', async () => {
+    it('writes no body for 204 and answers a 304 without the upstream validators', async () => {
       const noContent = await runResponse({ status: 204, body: '' });
       expect(noContent.statusCode).toBe(204);
       expect(noContent.body.length).toBe(0);
+      expect(noContent.headers['cache-control']).toBe('no-store');
 
       const notModified = await runResponse({
         status: 304,
         body: '',
-        headers: { etag: 'W/"abc"', 'last-modified': 'Mon, 18 Aug 2026 00:00:00 GMT' },
+        headers: { etag: 'W/"abc"', 'last-modified': 'Mon, 18 Aug 2026 00:00:00 GMT', 'cache-control': 'max-age=60' },
       });
       expect(notModified.statusCode).toBe(304);
       expect(notModified.body.length).toBe(0);
-      expect(notModified.headers.etag).toBe('W/"abc"');
-      expect(notModified.headers['last-modified']).toBe('Mon, 18 Aug 2026 00:00:00 GMT');
+      // The upstream validators describe the remote's unfiltered
+      // representation, not the page this hub sends, so relaying them would
+      // let a cached page outlive the authorization it was filtered under.
+      expect(notModified.headers.etag).toBeUndefined();
+      expect(notModified.headers['last-modified']).toBeUndefined();
+      expect(notModified.headers['cache-control']).toBe('no-store');
+    });
+
+    it('answers a rewritten page with no-store and no cache validators', async () => {
+      const result = await runResponse({
+        status: 200,
+        body: JSON.stringify([{ nodeId: 1, stackName: 'web' }]),
+        headers: {
+          etag: 'W/"upstream-1"',
+          'last-modified': 'Mon, 18 Aug 2026 00:00:00 GMT',
+          expires: 'Mon, 18 Aug 2026 01:00:00 GMT',
+          vary: 'Accept-Encoding',
+          'cache-control': 'max-age=60',
+        },
+      });
+      expect(result.kind).toBe('rewrite');
+      expect(result.statusCode).toBe(200);
+      expect(result.headers['cache-control']).toBe('no-store');
+      expect(result.headers.etag).toBeUndefined();
+      expect(result.headers['last-modified']).toBeUndefined();
+      expect(result.headers.expires).toBeUndefined();
+      expect(result.headers.vary).toBeUndefined();
     });
 
     it('preserves the location on a redirect', async () => {
@@ -410,6 +488,8 @@ describe('gitops identity proxy', () => {
       });
       expect(result.statusCode).toBe(302);
       expect(result.headers.location).toBe('/api/git-sources');
+      // Every answer this hop writes is uncacheable, redirects included.
+      expect(result.headers['cache-control']).toBe('no-store');
     });
 
     it('refuses a body past the ceiling with its own status', async () => {
@@ -419,6 +499,7 @@ describe('gitops identity proxy', () => {
       // Not the upstream 200: the hub could not read the answer.
       expect(result.statusCode).toBe(502);
       expect(JSON.parse(result.body.toString()).code).toBe('gitops_proxy_too_large');
+      expect(result.headers['cache-control']).toBe('no-store');
     });
 
     it('reports an undecodable body as a decode failure', async () => {

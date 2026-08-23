@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   parseHttpsRepoUrl,
+  parseLegacyRepoUrl,
   secretFreeRepoUrl,
   serializeRepoIdentity,
 } from '../services/gitops/repoIdentity';
@@ -24,6 +25,36 @@ describe('secret-free repository identity', () => {
     const identity = serializeRepoIdentity(parsed.url);
     expect(identity).toEqual({ host: 'github.com', pathname: '/org/repo.git' });
     expect(secretFreeRepoUrl(identity)).toBe('https://github.com/org/repo.git');
+  });
+
+  describe('legacy operational urls (migration only)', () => {
+    it('strips userinfo, query, and fragment instead of refusing the stack', () => {
+      for (const raw of [
+        'https://user:pass@github.com/org/repo.git',
+        'https://github.com/org/repo.git?token=secret',
+        'https://github.com/org/repo.git#frag',
+        'https://user:pass@github.com/org/repo.git?token=secret#frag',
+      ]) {
+        const parsed = parseLegacyRepoUrl(raw);
+        if (!parsed.ok) throw new Error(`expected legacy parse success for ${raw}`);
+        expect({ host: parsed.url.host, pathname: parsed.url.pathname }).toEqual({
+          host: 'github.com',
+          pathname: '/org/repo.git',
+        });
+        expect(parsed.url.username).toBe('');
+        expect(parsed.url.password).toBe('');
+        expect(parsed.url.search).toBe('');
+        expect(parsed.url.hash).toBe('');
+        expect(secretFreeRepoUrl(serializeRepoIdentity(parsed.url))).toBe('https://github.com/org/repo.git');
+      }
+    });
+
+    it('still refuses what has no storable identity', () => {
+      expect(parseLegacyRepoUrl('http://github.com/org/repo.git').ok).toBe(false);
+      expect(parseLegacyRepoUrl('not a url at all').ok).toBe(false);
+      expect(parseLegacyRepoUrl('').ok).toBe(false);
+      expect(parseLegacyRepoUrl(`https://github.com/${'x'.repeat(2100)}`).ok).toBe(false);
+    });
   });
 
   it('fingerprints material config in the fixed key order', () => {

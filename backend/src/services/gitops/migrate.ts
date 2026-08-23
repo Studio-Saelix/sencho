@@ -7,7 +7,7 @@ import { GitProjectManifestService } from '../GitProjectManifestService';
 import { NodeRegistry } from '../NodeRegistry';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { encodeGitOpsEvidenceLimitations, type GitOpsEvidenceLimitation } from './json';
-import { buildDirectApplicationRow, directSourceIdentity, newGitOpsId } from './directApplication';
+import { buildDirectApplicationRow, migrationDirectSourceIdentity, newGitOpsId } from './directApplication';
 import { emptyTargetRow, GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import { blankInlineApplication } from './blueprintProducers';
@@ -90,7 +90,10 @@ export function migrateDirectGitStacks(): MigrationResult[] {
 function migrateOne(source: StackGitSource): MigrationResult {
   const store = GitOpsStore.getInstance();
   const stackName = source.stack_name;
-  const identity = directSourceIdentity({
+  // Migration-only identity derivation: a legacy operational URL may still
+  // carry userinfo or a query string that fetch needs, so the storable
+  // identity strips them and the source row is never rewritten.
+  const identity = migrationDirectSourceIdentity({
     repoUrl: source.repo_url,
     branch: source.branch,
     composePaths: source.compose_paths,
