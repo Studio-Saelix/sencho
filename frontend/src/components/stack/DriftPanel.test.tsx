@@ -349,8 +349,12 @@ describe('DriftPanel GitOps state', () => {
     render(<DriftPanel stackName="web" />);
 
     expect(await screen.findByText('gitops drift')).toBeInTheDocument();
-    expect(screen.getByText('The running image is not the one this generation expects.')).toBeInTheDocument();
-    expect(screen.getByText('generation gen-acce')).toBeInTheDocument();
+    // The backend now emits the runtime artifact drift item with artifact_set
+    // expected identity and the reason describes the artifact mismatch.
+    expect(screen.getByText('the running workload reports an artifact identity other than the expected artifact set')).toBeInTheDocument();
+    // identityRefLabel formats artifact_set as "artifact <id> · <qualification>"
+    expect(screen.getByText('artifact art-acce · exact')).toBeInTheDocument();
+    // runtime_artifact identity is rendered as-is
     expect(screen.getByText('nginx@sha256:abc')).toBeInTheDocument();
   });
 
