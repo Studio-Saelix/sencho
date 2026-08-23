@@ -110,22 +110,61 @@ export function deriveGitOpsRevision(
 }
 
 /**
- * The one drift class current evidence can confirm on its own.
+ * The two drift classes current evidence can confirm on its own.
  *
  * Most of the seven classes need producers this model deliberately defers, but
- * a comparable runtime artifact mismatch rests entirely on rows that exist
- * now. Leaving `drift` empty while the facet says `runtime_artifact_drift`
+ * a comparable runtime artifact mismatch and a desired-versus-deployed
+ * generation mismatch rest entirely on rows that exist now. Leaving `drift`
+ * empty while a facet says `runtime_artifact_drift` or `applied_not_deployed`
  * would report one fault twice with only one copy readable.
  *
- * Emitted only for an exact or qualified expectation against an exact or
- * qualified observation whose identity strings differ. Every other observation
- * kind stays `artifact_verification_pending`, and equal identities emit
- * nothing. Policy composition has no producer yet, so the item carries null
- * rather than a policy nothing wrote.
+ * The generation-mismatch item carries the desired generation as expected and
+ * the deployed generation as observed, owned by ComposeService. It clears
+ * once the desired generation is deployed.
+ *
+ * The artifact item is emitted only for an exact or qualified expectation
+ * against an exact or qualified observation whose identity strings differ.
+ * Every other observation kind stays `artifact_verification_pending`, and
+ * equal identities emit nothing. Policy composition has no producer yet, so
+ * items carry null rather than a policy nothing wrote.
  */
 function collectRuntimeDrift(app: GitOpsApplicationRow, targets: GitOpsTargetProjection[]): GitOpsDriftItem[] {
   const items: GitOpsDriftItem[] = [];
+  // Mirrors the states deriveActions withholds deploy for, so the drift item's
+  // action never contradicts availableActions in the same payload: an
+  // application-level operation in flight or a recovery in progress blocks
+  // deploying even though the per-target pointer state wants one.
+  const deployWithheld = app.active_operation_stage === 'fetch_started'
+    || app.active_operation_stage === 'apply_started'
+    || app.recovery_phase === 'restoring'
+    || app.recovery_phase === 'compensating'
+    || app.recovery_phase === 'failed'
+    || app.failure_stage === 'recovery';
   for (const target of targets) {
+    // Generation mismatch: the target's contract is its desired generation,
+    // and something older is running. This is the `applied_not_deployed`
+    // state, which deriveRuntime only reaches after every paused, failed,
+    // recovering, interrupted, and in-flight per-target state has returned
+    // earlier, so the status itself never masks a blocked deploy; only the
+    // application-level gates above can withhold the action.
+    if (
+      target.runtime.status === 'applied_not_deployed'
+      && target.desiredGenerationId !== null
+      && target.deployedGenerationId !== null
+    ) {
+      items.push({
+        class: 'runtime',
+        expected: { kind: 'generation', id: target.desiredGenerationId },
+        observed: { kind: 'generation', id: target.deployedGenerationId },
+        freshnessAt: null,
+        owner: 'ComposeService',
+        reason: 'the target is running a different generation than the one it was asked to run',
+        configuredPolicy: null,
+        affectedTargets: [{ nodeId: target.nodeId, stackName: app.stack_name }],
+        action: deployWithheld ? 'none' : 'deploy',
+      });
+    }
+    // Artifact mismatch: comparable exact/qualified expectation vs observation.
     if (target.runtime.status !== 'runtime_artifact_drift') continue;
     const expected = target.artifact.status !== 'not_applicable' && 'expected' in target.artifact
       ? target.artifact.expected

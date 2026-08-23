@@ -105,7 +105,7 @@ export function driftItem(overrides: Partial<GitOpsDriftItem> = {}): GitOpsDrift
     reason: 'the running workload reports an artifact identity other than the expected artifact set',
     configuredPolicy: null,
     affectedTargets: [{ nodeId: 1, stackName: 'bookstack' }],
-    action: 'deploy',
+    action: 'none',
     ...overrides,
   };
 }

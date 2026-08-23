@@ -112,21 +112,38 @@ describe('gitops derivation', () => {
     expect(projection.targets[0]?.runtime.status).toBe('applied_not_deployed');
     expect(projection.targets[0]?.health.status).toBe('pending');
     expect(projection.availableActions).toContain('deploy');
+    // The mismatch is a confirmed drift item, not only a facet status: the
+    // canonical drift list must not contradict what the runtime facet says.
+    expect(projection.drift).toHaveLength(1);
+    expect(projection.drift[0]).toEqual({
+      class: 'runtime',
+      expected: { kind: 'generation', id: 'gen-b-stale' },
+      observed: { kind: 'generation', id: 'gen-a-stale' },
+      freshnessAt: null,
+      owner: 'ComposeService',
+      reason: 'the target is running a different generation than the one it was asked to run',
+      configuredPolicy: null,
+      affectedTargets: [{ nodeId: 1, stackName: 'stale-deploy-web' }],
+      action: 'deploy',
+    });
 
     // Re-derived from the store rows rather than any carried-over state, so a
-    // restart reads the same answer.
+    // restart reads the same answer, item included.
     expect(GitOpsStore.getInstance().getTarget('app-stale-deploy', 1)?.deployed_generation_id).toBe('gen-a-stale');
     projection = projectApplication('app-stale-deploy', false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
     expect(projection.targets[0]?.runtime.status).toBe('applied_not_deployed');
+    expect(projection.drift).toHaveLength(1);
 
     // Once the deploy lands the target awaits its own health run instead of
-    // inheriting generation A's green verdict.
+    // inheriting generation A's green verdict, and the mismatch item clears:
+    // desired and deployed now agree, so there is nothing left to report.
     store.upsertTarget({ ...target, deployed_generation_id: 'gen-b-stale' });
     projection = projectApplication('app-stale-deploy', false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
     expect(projection.targets[0]?.runtime.status).toBe('fully_deployed_health_pending');
     expect(projection.targets[0]?.health.status).toBe('pending');
+    expect(projection.drift).toHaveLength(0);
 
     // A passing run recorded against the desired generation answers for it
     // even while a different generation is deployed. No producer reaches this
@@ -228,8 +245,8 @@ describe('gitops derivation', () => {
 
     // Ordering pin: a stale deployment outranks artifact verification. With
     // the desired generation applied but an older one deployed, the deploy
-    // question comes first and no drift item is emitted for an observation
-    // that describes the workload about to be replaced.
+    // question comes first, so the mismatch item is emitted while the artifact
+    // observation describing the workload about to be replaced is not.
     store.insertGeneration(gen('gen-b-drift', 'app-drift-item'));
     store.upsertTarget({
       ...emptyTargetRow('app-drift-item', 1, 1),
@@ -243,7 +260,29 @@ describe('gitops derivation', () => {
     projection = projectApplication('app-drift-item', false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
     expect(projection.targets[0]?.runtime.status).toBe('applied_not_deployed');
-    expect(projection.drift).toHaveLength(0);
+    expect(projection.drift).toHaveLength(1);
+    expect(projection.drift[0]).toEqual({
+      class: 'runtime',
+      expected: { kind: 'generation', id: 'gen-drift' },
+      observed: { kind: 'generation', id: 'gen-b-drift' },
+      // Pointer-to-pointer comparison carries no observation timestamp.
+      freshnessAt: null,
+      owner: 'ComposeService',
+      reason: 'the target is running a different generation than the one it was asked to run',
+      configuredPolicy: null,
+      affectedTargets: [{ nodeId: 1, stackName: 'drift-item-web' }],
+      action: 'deploy',
+    });
+
+    // An application-level gate withholds the action without removing the
+    // fact: a fetch in flight makes availableActions none, so the item must
+    // say none too rather than contradicting the payload it travels in.
+    tx.fetchStarted('app-drift-item', env('op-f-drift'));
+    projection = projectApplication('app-drift-item', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.availableActions).toEqual(['none']);
+    expect(projection.drift).toHaveLength(1);
+    expect(projection.drift[0].action).toBe('none');
   });
 });
 
