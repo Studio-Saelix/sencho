@@ -292,6 +292,14 @@ To re-test connectivity after making changes, open **Settings · Infrastructure 
 
 ---
 
+## Network deletion is refused while a stack fails to render
+
+**Symptom:** Deleting an external network returns "Cannot verify stack declarations while one or more stacks failed to render." The delete button may also be disabled with a message about render failures.
+
+**Cause:** Sencho checks every stack's effective Compose model before allowing a network delete, so it never removes a network a stack declares as `external:`. When any stack on the node cannot be rendered (usually a YAML error, an unresolved variable, or a broken include), Sencho cannot prove the network is undeclared and refuses the deletion rather than risk removing a network your stacks depend on.
+
+**Fix:** Find which stack cannot render on the Networking page (the Overview tab lists how many stacks failed), then open that stack and check its Anatomy panels: the Networking panel and the deploy preflight check show the Compose error itself. Fix the YAML (an unresolved variable or a broken include produces the same failure) until the model renders again, then retry the deletion. This is a deliberate safety stop, not a malfunction.
+
 ## Cannot delete a system network (bridge, host, none)
 
 **Symptom:** The delete button is missing or disabled for certain networks.

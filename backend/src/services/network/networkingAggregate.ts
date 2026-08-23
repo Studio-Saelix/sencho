@@ -19,8 +19,38 @@ import { getErrorMessage } from '../../utils/errors';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { mapWithConcurrency } from '../../utils/mapWithConcurrency';
 import { withComposeRenderSlot } from './composeRenderSemaphore';
+import { fetchNodeNetworkingAggregateWithMeta as fetchMemoized, NETWORKING_AGGREGATE_TTL_MS } from './networkingAggregateCache';
+import { isDebugEnabled } from '../../utils/debug';
 
 export async function buildNodeNetworkingAggregate(
+  nodeId: number,
+  options: { includeTopology?: boolean; includeSystem?: boolean },
+): Promise<NodeNetworkingAggregate> {
+  const startedAt = Date.now();
+  const { value: aggregate, outcome } = await fetchMemoized(nodeId, options, () => computeNodeNetworkingAggregate(nodeId, options));
+  if (outcome === 'stale') {
+    // Stale-on-error fallback: the recompute threw and the memo served the
+    // last good aggregate. Mark it so the UI can say so instead of
+    // presenting confidently stale data as fresh.
+    aggregate.overview.degradedCache = true;
+  }
+  if (isDebugEnabled()) {
+    console.debug('[Networking:debug] Aggregate served', {
+      nodeId,
+      outcome,
+      ms: Date.now() - startedAt,
+      stackCount: aggregate.stackFacts.length,
+      networkCount: aggregate.overview.networkCount,
+      findingCount: aggregate.findings.length,
+      renderFailedStacks: aggregate.overview.renderFailedStacks.length,
+      ttlMs: NETWORKING_AGGREGATE_TTL_MS,
+      variant: options.includeTopology === true ? 'topology' : 'base',
+    });
+  }
+  return aggregate;
+}
+
+async function computeNodeNetworkingAggregate(
   nodeId: number,
   options: { includeTopology?: boolean; includeSystem?: boolean },
 ): Promise<NodeNetworkingAggregate> {
@@ -138,6 +168,7 @@ function buildOverview(
       f.kind === 'network-name-collision' || f.kind === 'alias-collision' || f.kind === 'service-name-collision',
     ).length,
     findingCount: findings.length,
+    degradedCache: false,
     renderFailedStacks,
   };
 }

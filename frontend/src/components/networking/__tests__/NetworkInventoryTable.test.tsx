@@ -29,6 +29,7 @@ describe('NetworkInventoryTable', () => {
         onDelete={vi.fn()}
         onOpenStack={vi.fn()}
         onFilterTopology={vi.fn()}
+        renderVerificationUnavailable={false}
       />,
     );
     // Default sort is name ascending, independent of input row order.
@@ -53,6 +54,7 @@ describe('NetworkInventoryTable', () => {
         onDelete={vi.fn()}
         onOpenStack={vi.fn()}
         onFilterTopology={vi.fn()}
+        renderVerificationUnavailable={false}
       />,
     );
     const actionButtons = screen.getAllByRole('button').filter((b) =>
@@ -61,5 +63,41 @@ describe('NetworkInventoryTable', () => {
     expect(actionButtons.map((b) => b.getAttribute('aria-label'))).toEqual([
       'Open app', 'Inspect a-net', 'Show a-net in topology', 'Delete a-net',
     ]);
+  });
+
+  it('holds the delete affordance while render verification is unavailable', () => {
+    const unlabeledExternal = row({ id: '1', name: 'shared_ext', composeProject: null, stack: null });
+    render(
+      <NetworkInventoryTable
+        rows={[unlabeledExternal]}
+        findings={[]}
+        loading={false}
+        isAdmin
+        onInspect={vi.fn()}
+        onDelete={vi.fn()}
+        onOpenStack={vi.fn()}
+        onFilterTopology={vi.fn()}
+        renderVerificationUnavailable
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Delete shared_ext' })).toBeDisabled();
+  });
+
+  it('keeps delete enabled for the same network when renders succeed', () => {
+    const unlabeledExternal = row({ id: '1', name: 'shared_ext', composeProject: null, stack: null });
+    render(
+      <NetworkInventoryTable
+        rows={[unlabeledExternal]}
+        findings={[]}
+        loading={false}
+        isAdmin
+        onInspect={vi.fn()}
+        onDelete={vi.fn()}
+        onOpenStack={vi.fn()}
+        onFilterTopology={vi.fn()}
+        renderVerificationUnavailable={false}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Delete shared_ext' })).toBeEnabled();
   });
 });

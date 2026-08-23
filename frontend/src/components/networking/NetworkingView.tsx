@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   LayoutDashboard, Network, GitBranch, AlertTriangle, RefreshCw, Plus, Unplug,
 } from 'lucide-react';
@@ -14,6 +14,7 @@ import { toast } from '@/components/ui/toast-store';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
+import { useDeveloperMode } from '@/hooks/useDeveloperMode';
 import { Masthead, MobileSubTabs, type Tone } from '@/components/mobile/mobile-ui';
 import { springs } from '@/lib/motion';
 import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog';
@@ -86,6 +87,11 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   const { isAdmin, can } = useAuth();
   const { activeNode } = useNodes();
   const isMobile = useIsMobile();
+  const developerMode = useDeveloperMode(activeNode?.id);
+  // Read the flag through a ref inside the load effect so flipping it does not
+  // retrigger the overview fetch (the flag only gates debug logging).
+  const developerModeRef = useRef(developerMode);
+  developerModeRef.current = developerMode;
   const nodeId = activeNode?.id;
 
   const [tab, setTab] = useState<NetworkingTab>('overview');
@@ -140,6 +146,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
     setFindings([]);
     setRecentActivity([]);
     setIsLegacy(false);
+    const startedAt = Date.now();
     const load = async () => {
       try {
         const response = await apiFetch('/networking/overview', { nodeId, signal: controller.signal });
@@ -150,6 +157,13 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
         if (!response.ok) throw new Error('Failed to load networking data.');
         const body = await response.json() as Partial<NetworkingOverviewEnvelope>;
         if (stale) return;
+        if (developerModeRef.current) {
+          console.debug('[Networking:debug] overview loaded', {
+            nodeId,
+            ms: Date.now() - startedAt,
+            schemaVersion: body.schemaVersion ?? null,
+          });
+        }
         const adapted = adaptNetworkingOverview(body);
         setIsLegacy(adapted.isLegacy);
         setRuntimeAvailable(adapted.runtimeAvailable);
@@ -290,6 +304,11 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
       {!runtimeAvailable && !isLegacy && (
         <Card className="border-warning/40 bg-warning/5">
           <CardContent className="p-3 text-sm text-warning">Docker runtime is unavailable. Compose-model signals remain available.</CardContent>
+        </Card>
+      )}
+      {overview.degradedCache && (
+        <Card className="border-warning/40 bg-warning/5">
+          <CardContent className="p-3 text-sm text-warning">Showing cached results from the last successful refresh; a live refresh failed.</CardContent>
         </Card>
       )}
       <div className="grid overflow-hidden rounded-lg border border-card-border bg-card shadow-card-bevel sm:grid-cols-2 xl:grid-cols-4">
@@ -526,6 +545,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
               setPendingTopologyFilter(networkName);
               setTab('topology');
             }}
+            renderVerificationUnavailable={(overview?.renderFailedStacks.length ?? 0) > 0 || !runtimeAvailable}
           />
         </TabsContent>
 
@@ -547,7 +567,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
         </TabsContent>
 
         <TabsContent value="findings" className="mt-4">
-          <NetworkingFindingsList findings={findings} loading={loading} canEdit={can} isAdmin={isAdmin} onAction={dispatchAction} disabled={isLegacy} />
+          <NetworkingFindingsList findings={findings} loading={loading} canEdit={can} isAdmin={isAdmin} onAction={dispatchAction} disabled={isLegacy} nodeId={nodeId} />
         </TabsContent>
       </Tabs>
 

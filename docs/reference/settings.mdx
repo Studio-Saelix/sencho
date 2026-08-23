@@ -709,7 +709,7 @@ Node-level safety checks and post-deploy observation used during stack deploys a
 | **Observe health after updates** | On | After a stack deploy or update succeeds, watch its containers for the observation window and record a passed or failed verdict on the stack timeline. Observational only: nothing is restarted or rolled back automatically. |
 | **Observation window** | 90 s | How long to watch containers before declaring the update healthy. Raise it for stacks that take a while to settle. Range 15 to 600 seconds. |
 | **Block deploy on missing required env vars** | Off | When on, a deploy or update is refused before it starts if a required `${VAR:?message}` variable is unset or empty, so the stack fails fast with a clear message instead of mid-deploy. |
-| **Automatically create missing external networks during deploy** | Off | When on, safe missing external bridge networks are created automatically before deploy continues. When off, interactive deploy prompts first. Advanced drivers and custom options are never auto-created. |
+| **Automatically create missing external networks during deploy** | Off | When on, safe missing external bridge networks are created automatically before deploy continues. When off, interactive deploy prompts first. Advanced drivers and custom options are never auto-created. Any deploy that triggers an auto-creation records a `network_auto_created` entry in Recent activity, including deploys started by non-admin operators. |
 
 Click **Save settings** to apply.
 
