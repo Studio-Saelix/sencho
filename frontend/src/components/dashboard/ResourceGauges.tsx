@@ -50,13 +50,20 @@ function GaugeBar({ value, warn = 80, crit = 90 }: { value: number; warn?: numbe
 export function ResourceGauges({ systemStats, cpuHistory, netHistory, historyEndAt }: ResourceGaugesProps) {
   const cpuVal = parseFloat(systemStats?.cpu.usage || '0');
   const memory = systemStats?.memory;
-  // Balloon-adjusted percent so hero, tone, and bar match used/total.
-  // Health and host RAM alerts still read working-set usagePercent.
+  // Balloon-adjusted percent so hero, tone, bar, and used/total agree with the
+  // shared health verdict. Host RAM alerts still read working-set usagePercent.
   const ramVal = parseFloat(memory?.effectiveUsagePercent ?? memory?.usagePercent ?? '0');
   const ramUsed = memory?.effectiveUsed ?? memory?.used ?? 0;
   const ramTotal = memory?.effectiveTotal ?? memory?.total ?? 0;
   const ramBallooned = memory?.ballooned ?? 0;
   const ramArcReclaimable = memory?.arcReclaimable ?? 0;
+  // Memory retained by the guest after hypervisor reclaim, with pressure as
+  // effective used over that retained amount. The retained line needs a
+  // positive value; pressure additionally needs the balloon-adjusted numerator
+  // (never raw used).
+  const vmRetained = ramTotal - ramBallooned;
+  // Call sites are already inside the ramBallooned > 0 block.
+  const showVmRetained = vmRetained > 0;
   const diskVal = parseFloat(systemStats?.disk?.usagePercent || '0');
 
   const cpuPeak = cpuHistory.length > 0 ? Math.max(...cpuHistory) : 0;
@@ -113,12 +120,19 @@ export function ResourceGauges({ systemStats, cpuHistory, netHistory, historyEnd
         </div>
         {ramBallooned > 0 ? (
           <div className="mt-1 font-mono text-[10px] text-stat-subtitle/70">
-            Ballooned to host: {formatBytes(ramBallooned)}
+            {showVmRetained ? (
+              <div>Current VM Memory: {formatBytes(vmRetained)}</div>
+            ) : null}
+            {showVmRetained && memory?.effectiveUsed !== undefined ? (
+              <div>Current pressure: {((memory.effectiveUsed / vmRetained) * 100).toFixed(0)}%</div>
+            ) : null}
+            <div>Balloon reclaimable: {formatBytes(ramBallooned)}</div>
           </div>
         ) : null}
-        {ramArcReclaimable > 0 ? (
+        {memory && ramArcReclaimable > 0 ? (
           <div className="mt-1 font-mono text-[10px] text-stat-subtitle/70">
-            ZFS ARC reclaimable: {formatBytes(ramArcReclaimable)}
+            <div>Current memory in use: {formatBytes(memory.used + ramArcReclaimable)}</div>
+            <div>ZFS ARC reclaimable: {formatBytes(ramArcReclaimable)}</div>
           </div>
         ) : null}
         {systemStats ? <GaugeBar value={ramVal} /> : null}

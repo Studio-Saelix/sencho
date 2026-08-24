@@ -6,7 +6,8 @@ const stats = (over: Partial<Stats> = {}): Stats => ({
   active: 5, managed: 5, unmanaged: 0, exited: 0, total: 5, ...over,
 });
 
-// deriveHealth only reads cpu.usage, memory.usagePercent and disk?.usagePercent.
+// deriveHealth only reads cpu.usage, memory.effectiveUsagePercent (falling back
+// to memory.usagePercent) and disk?.usagePercent.
 const sys = (cpu: string, ram: string, disk: string | null): SystemStats => ({
   cpu: { usage: cpu, cores: 8 },
   memory: { total: 100, used: 50, free: 50, usagePercent: ram },
@@ -65,7 +66,7 @@ describe('deriveHealth', () => {
     expect(deriveHealth(stats(), sys('10', '20', null), []).level).toBe('healthy');
   });
 
-  it('uses working-set usagePercent for health even when balloon-adjusted percent is low', () => {
+  it('prefers the balloon-adjusted percent so health matches the Memory tile', () => {
     const system = sys('10', '90', '30');
     const r = deriveHealth(
       stats(),
@@ -81,6 +82,32 @@ describe('deriveHealth', () => {
       },
       [],
     );
+    expect(r.level).toBe('healthy');
+    expect(r.reasons).toEqual(['All systems nominal']);
+  });
+
+  it('escalates on a high balloon-adjusted percent and reports the adjusted number', () => {
+    const system = sys('10', '20', '30');
+    const r = deriveHealth(
+      stats(),
+      {
+        ...system,
+        memory: {
+          ...system.memory,
+          ballooned: 10,
+          effectiveUsed: 95,
+          effectiveTotal: 100,
+          effectiveUsagePercent: '95',
+        },
+      },
+      [],
+    );
+    expect(r.level).toBe('critical');
+    expect(r.reasons).toContain('RAM 95%');
+  });
+
+  it('falls back to raw usagePercent when balloon fields are absent', () => {
+    const r = deriveHealth(stats(), sys('10', '90', '30'), []);
     expect(r.level).toBe('critical');
     expect(r.reasons).toContain('RAM 90%');
   });
