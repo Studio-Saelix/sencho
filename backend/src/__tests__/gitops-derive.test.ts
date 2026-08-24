@@ -559,6 +559,22 @@ describe('gitops derivation', () => {
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
     expect(projection.facets.source.status).toBe('source_unknown');
     expect(projection.availableActions).not.toContain('apply');
+
+    // Blocked: the recorded apply still names the current candidate, but a
+    // later classification blocked that candidate, so finishing it is refused
+    // even though every identity still lines up.
+    store.insertApplication(rawApp('app-int-ap-block', {
+      stack_name: 'int-ap-block-web',
+      interruption_stage: 'apply_started',
+      interruption_at: 1,
+      interruption_operation_id: 'op-ap-b',
+      interruption_generation_id: 'gen-ap-b',
+      candidate_generation_id: 'gen-ap-b',
+      candidate_plan_blocked: 1,
+    }));
+    projection = projectApplication('app-int-ap-block', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.availableActions).toEqual(['dismiss']);
   });
 
   it('offers approve_legacy while Inline placement review is pending', () => {

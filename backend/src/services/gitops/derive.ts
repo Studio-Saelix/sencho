@@ -739,14 +739,18 @@ function deriveActions(
   }
   if (source.status === 'candidate_ready') actions.add('apply');
   // An interrupted apply may be finished only while its recorded generation is
-  // still the current candidate and nothing suspends the source in the
-  // meantime, both of which applyStarted would refuse.
+  // still the current candidate and nothing has since suspended the source or
+  // blocked that candidate, all of which applyStarted would refuse. No shipped
+  // producer pairs blockage with a matching interruption today, because
+  // blocking always mints a fresh candidate id; these clauses hold the gate to
+  // the transition table's contract regardless of what future producers do.
   if (
     source.status === 'source_unknown'
     && source.interruptedStage === 'apply_started'
     && source.interruptedGenerationId !== null
     && source.interruptedGenerationId === app.candidate_generation_id
     && !app.suspended_at
+    && app.candidate_plan_blocked !== 1
   ) {
     actions.add('apply');
   }
