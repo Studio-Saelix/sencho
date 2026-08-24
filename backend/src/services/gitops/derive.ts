@@ -252,7 +252,20 @@ function deriveSource(app: GitOpsApplicationRow, limitations: GitOpsLimitation[]
   const store = GitOpsStore.getInstance();
   if (app.candidate_generation_id) {
     const generation = store.getGeneration(app.candidate_generation_id);
-    if (generation && generation.materialization_fingerprint !== app.materialization_fingerprint) {
+    // A candidate only counts as ready when its generation row exists under
+    // this application and the application's materialization fingerprint is
+    // still the one the generation was built from; applyStarted refuses
+    // anything else, so a dangling or foreign row is a reconcile problem,
+    // not a ready one.
+    if (!generation || generation.application_id !== app.id) {
+      limitations.push({
+        code: 'candidate_generation_invalid',
+        message: 'candidate generation row is missing or belongs to another application',
+        evidence: app.candidate_generation_id,
+      });
+      return { ...identity, status: 'source_reconcile_required' };
+    }
+    if (generation.materialization_fingerprint !== app.materialization_fingerprint) {
       return { ...identity, status: 'source_reconcile_required' };
     }
     if (app.candidate_plan_blocked === 1) return { ...identity, status: 'source_conflict_blocker' };

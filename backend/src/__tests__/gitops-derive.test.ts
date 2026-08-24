@@ -428,7 +428,9 @@ describe('gitops derivation', () => {
 
     let projection = projectApplication('app-bp-r-vac', false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
-    expect(projection.targets[0]?.runtime.status).toBe('completion_unknown');
+    const vacRuntime = projection.targets[0]?.runtime;
+    if (!vacRuntime || vacRuntime.status !== 'completion_unknown') throw new Error('expected completion_unknown');
+    expect(vacRuntime.interruptedStage).toBe('blueprint_deploy_started');
     expect(projection.availableActions).toContain('deploy');
 
     // With a candidate in play, both recorded identities must equal what the
@@ -445,12 +447,26 @@ describe('gitops derivation', () => {
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
     expect(projection.availableActions).toContain('deploy');
 
+    // Candidate-only mismatch: the intent still matches but the recorded
+    // rollout candidate was superseded. Both persisted identities are
+    // contractually significant, so either one drifting alone suppresses
+    // the retry.
+    store.upsertTarget({
+      ...store.getTarget('app-bp-r-match', 1)!,
+      interruption_rollout_candidate_id: 'rc-superseded',
+    });
+    projection = projectApplication('app-bp-r-match', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.availableActions).not.toContain('deploy');
+    expect(projection.drift[0]?.action).toBe('none');
+
     // A superseded intent revision means the recorded operation names an
     // identity nobody requires anymore, so the retry disappears even though
     // the divergence itself still reports.
     store.upsertTarget({
       ...store.getTarget('app-bp-r-match', 1)!,
       interruption_intent_revision_id: 'ir-superseded',
+      interruption_rollout_candidate_id: 'rc-m',
     });
     projection = projectApplication('app-bp-r-match', false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
@@ -613,6 +629,54 @@ describe('gitops derivation', () => {
     projection = projectApplication('app-int-ap-block', false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
     expect(projection.availableActions).toEqual(['dismiss']);
+  });
+
+  it('offers ordinary apply only when the candidate generation is present, owned, and current', () => {
+    const store = GitOpsStore.getInstance();
+    // Valid: an owned, fingerprint-matched candidate reads ready and offers
+    // apply exactly as the transition would accept it.
+    store.insertGeneration(gen('gen-cr-valid', 'app-cr-valid'));
+    store.insertApplication(rawApp('app-cr-valid', { stack_name: 'cr-valid-web', candidate_generation_id: 'gen-cr-valid' }));
+    let projection = projectApplication('app-cr-valid', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('candidate_ready');
+    expect(projection.availableActions).toContain('apply');
+
+    // Missing: the candidate names a generation that does not exist, so
+    // ready would recommend an apply the transition refuses; the source must
+    // fail closed to reconcile-required instead, naming what was lost, and
+    // fetch stays on offer as the way out.
+    store.insertApplication(rawApp('app-cr-missing', { stack_name: 'cr-missing-web', candidate_generation_id: 'gen-cr-gone' }));
+    projection = projectApplication('app-cr-missing', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('source_reconcile_required');
+    expect(projection.limitations.map((item) => item.code)).toContain('candidate_generation_invalid');
+    expect(projection.limitations.some((item) => item.evidence === 'gen-cr-gone')).toBe(true);
+    expect(projection.availableActions).not.toContain('apply');
+    expect(projection.availableActions).toContain('fetch');
+
+    // Foreign: the candidate row exists but belongs to another application,
+    // which applyStarted refuses just as surely as a missing one.
+    store.insertGeneration(gen('gen-cr-foreign', 'app-not-the-owner'));
+    store.insertApplication(rawApp('app-cr-foreign', { stack_name: 'cr-foreign-web', candidate_generation_id: 'gen-cr-foreign' }));
+    projection = projectApplication('app-cr-foreign', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('source_reconcile_required');
+    expect(projection.availableActions).not.toContain('apply');
+
+    // Fingerprint mismatch: the generation's recorded fingerprint no longer
+    // equals the application's current one. No shipped producer leaves a
+    // candidate pointer across a configuration change today, so this pins
+    // the derivation's fail-safe side of that refusal.
+    store.insertGeneration({
+      ...gen('gen-cr-stalefp', 'app-cr-fp'),
+      materialization_fingerprint: 'b'.repeat(64),
+    });
+    store.insertApplication(rawApp('app-cr-fp', { stack_name: 'cr-fp-web', candidate_generation_id: 'gen-cr-stalefp' }));
+    projection = projectApplication('app-cr-fp', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('source_reconcile_required');
+    expect(projection.availableActions).not.toContain('apply');
   });
 
   it('limits fetch to live Direct applications', () => {

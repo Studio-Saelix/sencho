@@ -40,6 +40,8 @@ export const GITOPS_LIMITATION_COPY: Record<string, string | undefined> = {
   // --- derived while projecting -------------------------------------------
   repo_identity_invalid:
     'The stored repository identity could not be read, so this state cannot be tied back to a specific repository.',
+  candidate_generation_invalid:
+    'The pending change points at a generation that is missing or belongs to another application, so it must be fetched again before it can be applied.',
   artifact_pointer_missing:
     'An artifact record this state refers to is no longer present, so what was built for this generation cannot be described.',
   artifact_evidence_json_invalid:
