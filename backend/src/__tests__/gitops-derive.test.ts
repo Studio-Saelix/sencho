@@ -156,6 +156,165 @@ describe('gitops derivation', () => {
     expect(projection.targets[0]?.health.status).toBe('passed');
   });
 
+  it('keeps the generation-mismatch drift item after a failed redeploy', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-fail-drift', 'fail-drift-web'), nodeId: 1, envelope: env('op-fd-act') });
+    store.insertGeneration(gen('gen-fd-a', 'app-fail-drift'));
+    store.insertGeneration(gen('gen-fd-b', 'app-fail-drift'));
+    // Generation A ships and binds, then B is applied as the new desired
+    // state while A keeps serving.
+    tx.fetchStarted('app-fail-drift', env('op-fd-f1'));
+    tx.fetched('app-fail-drift', 'abc123', env('op-fd-f1'));
+    tx.candidateReady('app-fail-drift', 'gen-fd-a', false, env('op-fd-c1'));
+    tx.applied({
+      applicationId: 'app-fail-drift',
+      generationId: 'gen-fd-a',
+      artifactSetId: 'art-fd-a',
+      sourceAcceptanceId: 'acc-fd-a',
+      authority: 'operator',
+      envelope: env('op-fd-a1'),
+    });
+    tx.deployStarted('app-fail-drift', 1, 'gen-fd-a', env('op-fd-d1'));
+    tx.deployBound('app-fail-drift', 1, 'gen-fd-a', env('op-fd-d1'));
+    tx.fetchStarted('app-fail-drift', env('op-fd-f2'));
+    tx.fetched('app-fail-drift', 'def456', env('op-fd-f2'));
+    tx.candidateReady('app-fail-drift', 'gen-fd-b', false, env('op-fd-c2'));
+    tx.applied({
+      applicationId: 'app-fail-drift',
+      generationId: 'gen-fd-b',
+      artifactSetId: 'art-fd-b',
+      sourceAcceptanceId: 'acc-fd-b',
+      authority: 'operator',
+      envelope: env('op-fd-a2'),
+    });
+
+    // Sanity: the clean mismatch reports one item offering deploy.
+    let projection = projectApplication('app-fail-drift', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.targets[0]?.runtime.status).toBe('applied_not_deployed');
+    expect(projection.drift).toHaveLength(1);
+    expect(projection.drift[0].action).toBe('deploy');
+
+    // Mid-deploy the divergence is factual while nothing can offer deploying
+    // again: one item, action none, gone the moment B binds.
+    tx.deployStarted('app-fail-drift', 1, 'gen-fd-b', env('op-fd-d2'));
+    projection = projectApplication('app-fail-drift', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.targets[0]?.runtime.status).toBe('deploying');
+    expect(projection.drift).toHaveLength(1);
+    expect(projection.drift[0].action).toBe('none');
+
+    // The deploy of B fails before mutating anything; A keeps serving and the
+    // deployed pointer stays on it. The runtime facet now shows the failure,
+    // but the mismatch between what was asked for and what is running did not
+    // go anywhere, so the drift item must survive the presentation change.
+    tx.deployStarted('app-fail-drift', 1, 'gen-fd-b', env('op-fd-d2'));
+    tx.deployFailed('app-fail-drift', 1, 'pre_mutation', env('op-fd-d2'));
+    projection = projectApplication('app-fail-drift', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(store.getTarget('app-fail-drift', 1)?.deployed_generation_id).toBe('gen-fd-a');
+    expect(projection.targets[0]?.runtime.status).toBe('failed_previous_workload_intact');
+    // No target reads applied_not_deployed here, so availableActions withholds
+    // deploy and the item must agree instead of advertising an absent action.
+    expect(projection.availableActions).not.toContain('deploy');
+    expect(projection.drift).toHaveLength(1);
+    expect(projection.drift[0]).toEqual({
+      class: 'runtime',
+      expected: { kind: 'generation', id: 'gen-fd-b' },
+      observed: { kind: 'generation', id: 'gen-fd-a' },
+      freshnessAt: null,
+      owner: 'ComposeService',
+      reason: 'the target is running a different generation than the one it was asked to run',
+      configuredPolicy: null,
+      affectedTargets: [{ nodeId: 1, stackName: 'fail-drift-web' }],
+      action: 'none',
+    });
+
+    // Re-derived from the same rows, the report is stable.
+    projection = projectApplication('app-fail-drift', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift).toHaveLength(1);
+    expect(projection.drift[0].expected).toEqual({ kind: 'generation', id: 'gen-fd-b' });
+    expect(projection.drift[0].action).toBe('none');
+
+    // The artifact observation describing the workload that is being replaced
+    // stays suppressed while the generation question stands.
+    // Version 2 because the apply already seeded an unresolved v1 row for
+    // this generation and the table is unique per generation and version.
+    store.insertArtifactSet({
+      id: 'art-fd-b-expected',
+      generation_id: 'gen-fd-b',
+      evidence_version: 2,
+      authoritative: 0,
+      qualification: 'exact',
+      evidence_json: JSON.stringify({ kind: 'exact', identity: 'sha256:wanted' }),
+      created_at: 1,
+    });
+    const failed = store.getTarget('app-fail-drift', 1)!;
+    store.upsertTarget({
+      ...failed,
+      expected_artifact_set_id: 'art-fd-b-expected',
+      observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:serving', observedAt: 7 }),
+    });
+    projection = projectApplication('app-fail-drift', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.drift).toHaveLength(1);
+    expect(projection.drift[0].expected.kind).toBe('generation');
+
+    // The post-mutation variant reports the same way. Even when Compose was
+    // handed off, the deployed pointer stays on the old generation until a
+    // successful bind proves the new one, so the report stays anchored to
+    // whatever is actually serving.
+    tx.deployStarted('app-fail-drift', 1, 'gen-fd-b', env('op-fd-d4'));
+    tx.deployFailed('app-fail-drift', 1, 'post_mutation', env('op-fd-d4'));
+    projection = projectApplication('app-fail-drift', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.targets[0]?.runtime.status).toBe('failed_after_mutation');
+    expect(projection.drift).toHaveLength(1);
+    expect(projection.drift[0].observed).toEqual({ kind: 'generation', id: 'gen-fd-a' });
+    expect(projection.drift[0].action).toBe('none');
+
+    // Binding B clears the item along with the failure. The artifact probe
+    // from the suppression check goes with it, so the converged target is
+    // judged on pointers and health alone.
+    tx.deployStarted('app-fail-drift', 1, 'gen-fd-b', env('op-fd-d3'));
+    tx.deployBound('app-fail-drift', 1, 'gen-fd-b', env('op-fd-d3'));
+    store.upsertTarget({
+      ...store.getTarget('app-fail-drift', 1)!,
+      expected_artifact_set_id: null,
+      observed_artifact_identity_json: null,
+    });
+    projection = projectApplication('app-fail-drift', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.targets[0]?.runtime.status).toBe('fully_deployed_health_pending');
+    expect(projection.drift).toHaveLength(0);
+  });
+
+  it('does not report generation mismatch on a retired target', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-tomb-drift', 'tomb-drift-web'), nodeId: 1, envelope: env('op-td-act') });
+    store.insertGeneration(gen('gen-td-a', 'app-tomb-drift'));
+    store.insertGeneration(gen('gen-td-b', 'app-tomb-drift'));
+    // Retirement clears failure and LKG state but leaves the pointers alone,
+    // so a target retired mid-pending-deploy keeps divergent pointers. No
+    // transition can rebind it afterwards, so the mismatch must stay silent
+    // instead of becoming an item nothing could ever clear.
+    store.upsertTarget({
+      ...emptyTargetRow('app-tomb-drift', 1, 1),
+      target_status: 'tombstoned',
+      desired_generation_id: 'gen-td-b',
+      applied_generation_id: 'gen-td-b',
+      deployed_generation_id: 'gen-td-a',
+    });
+
+    const projection = projectApplication('app-tomb-drift', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.targets[0]?.runtime.status).toBe('tombstoned');
+    expect(projection.drift).toHaveLength(0);
+  });
+
   it('still judges a target with no desired id against its deployed pointer', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();

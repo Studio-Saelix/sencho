@@ -103,7 +103,7 @@ export function deriveGitOpsRevision(
     },
     facets: { source, artifact, placement, rollout },
     targets,
-    drift: collectRuntimeDrift(app, targets),
+    drift: collectRuntimeDrift(app, targets, availableActions),
     limitations,
     availableActions,
   };
@@ -115,8 +115,9 @@ export function deriveGitOpsRevision(
  * Most of the seven classes need producers this model deliberately defers, but
  * a comparable runtime artifact mismatch and a desired-versus-deployed
  * generation mismatch rest entirely on rows that exist now. Leaving `drift`
- * empty while a facet says `runtime_artifact_drift` or `applied_not_deployed`
- * would report one fault twice with only one copy readable.
+ * empty while a facet says `runtime_artifact_drift` would report one fault
+ * twice with only one copy readable; the same holds whenever the known
+ * pointers disagree, whatever presentation status outranks them.
  *
  * The generation-mismatch item carries the desired generation as expected and
  * the deployed generation as observed, owned by ComposeService. It clears
@@ -128,7 +129,11 @@ export function deriveGitOpsRevision(
  * equal identities emit nothing. Policy composition has no producer yet, so
  * items carry null rather than a policy nothing wrote.
  */
-function collectRuntimeDrift(app: GitOpsApplicationRow, targets: GitOpsTargetProjection[]): GitOpsDriftItem[] {
+function collectRuntimeDrift(
+  app: GitOpsApplicationRow,
+  targets: GitOpsTargetProjection[],
+  availableActions: GitOpsAvailableAction[],
+): GitOpsDriftItem[] {
   const items: GitOpsDriftItem[] = [];
   // Mirrors the states deriveActions withholds deploy for, so the drift item's
   // action never contradicts availableActions in the same payload: an
@@ -142,15 +147,19 @@ function collectRuntimeDrift(app: GitOpsApplicationRow, targets: GitOpsTargetPro
     || app.failure_stage === 'recovery';
   for (const target of targets) {
     // Generation mismatch: the target's contract is its desired generation,
-    // and something older is running. This is the `applied_not_deployed`
-    // state, which deriveRuntime only reaches after every paused, failed,
-    // recovering, interrupted, and in-flight per-target state has returned
-    // earlier, so the status itself never masks a blocked deploy; only the
-    // application-level gates above can withhold the action.
+    // and a different generation is running. Judged from the pointers
+    // themselves, not from any one runtime status: paused, failed, recovering,
+    // interrupted, and in-flight states all outrank the pointer comparison in
+    // deriveRuntime, so keying the item to `applied_not_deployed` would drop
+    // the report exactly when a failed deploy leaves the old workload serving.
+    // A retired target is excluded: its pointers survive retirement on
+    // purpose, but nothing can ever rebind it, so its mismatch would be a
+    // permanently unresolvable item rather than a live divergence.
     if (
-      target.runtime.status === 'applied_not_deployed'
+      !target.tombstoned
       && target.desiredGenerationId !== null
       && target.deployedGenerationId !== null
+      && target.desiredGenerationId !== target.deployedGenerationId
     ) {
       items.push({
         class: 'runtime',
@@ -161,7 +170,11 @@ function collectRuntimeDrift(app: GitOpsApplicationRow, targets: GitOpsTargetPro
         reason: 'the target is running a different generation than the one it was asked to run',
         configuredPolicy: null,
         affectedTargets: [{ nodeId: target.nodeId, stackName: app.stack_name }],
-        action: deployWithheld ? 'none' : 'deploy',
+        // Deploy only when it is genuinely on offer: no application-level
+        // withhold, and availableActions lists it. A target whose own status
+        // hides the divergence keeps the fact of the mismatch, with the action
+        // following what the payload actually offers rather than its status.
+        action: !deployWithheld && availableActions.includes('deploy') ? 'deploy' : 'none',
       });
     }
     // Artifact mismatch: comparable exact/qualified expectation vs observation.
