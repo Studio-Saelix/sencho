@@ -274,9 +274,24 @@ function deriveSource(app: GitOpsApplicationRow, limitations: GitOpsLimitation[]
   }
   if (app.accepted_generation_id) {
     const accepted = store.getGeneration(app.accepted_generation_id);
-    const fingerprintMismatch = !!accepted && accepted.materialization_fingerprint !== app.materialization_fingerprint;
-    const shaMismatch = !!accepted && !!app.desired_commit_sha && accepted.commit_sha !== app.desired_commit_sha;
-    if (!app.desired_commit_sha || fingerprintMismatch || shaMismatch) {
+    // An acceptance only counts when its generation row exists under this
+    // application; missing evidence cannot establish the fingerprint and sha
+    // agreement (the latter when a desired commit is configured) that the
+    // success claim rests on, so a dangling or foreign pointer is a reconcile
+    // problem, not an accepted one.
+    if (!accepted || accepted.application_id !== app.id) {
+      limitations.push({
+        code: 'accepted_generation_invalid',
+        message: 'accepted generation row is missing or belongs to another application',
+        evidence: app.accepted_generation_id,
+      });
+      return { ...identity, status: 'source_reconcile_required' };
+    }
+    if (
+      !app.desired_commit_sha
+      || accepted.materialization_fingerprint !== app.materialization_fingerprint
+      || accepted.commit_sha !== app.desired_commit_sha
+    ) {
       return { ...identity, status: 'source_reconcile_required' };
     }
     return { ...identity, status: 'application_generation_accepted' };

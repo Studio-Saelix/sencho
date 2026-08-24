@@ -22,6 +22,7 @@ const limitation = (code: string, evidence: unknown = null): GitOpsLimitation =>
 const LIVE_ARM_CODES = [
   'repo_identity_invalid',
   'candidate_generation_invalid',
+  'accepted_generation_invalid',
   'artifact_pointer_missing',
   'artifact_evidence_json_invalid',
   'connectivity_invalid',

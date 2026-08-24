@@ -679,6 +679,72 @@ describe('gitops derivation', () => {
     expect(projection.availableActions).not.toContain('apply');
   });
 
+  it('reports an accepted generation only when its evidence is present, owned, and current', () => {
+    const store = GitOpsStore.getInstance();
+    const acceptedApp = (id: string, overrides: Partial<GitOpsApplicationRow> = {}) =>
+      rawApp(id, {
+        stack_name: `${id}-web`,
+        accepted_generation_id: `gen-${id}`,
+        desired_commit_sha: 'abc123',
+        ...overrides,
+      });
+
+    // Valid: the accepted row exists under this application with the
+    // materialization fingerprint it was built from and the commit the
+    // configuration asks for, so success is the honest answer.
+    store.insertGeneration(gen('gen-app-acc-valid', 'app-acc-valid'));
+    store.insertApplication(acceptedApp('app-acc-valid'));
+    let projection = projectApplication('app-acc-valid', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('application_generation_accepted');
+    expect(projection.availableActions).toEqual(['none']);
+
+    // Missing: the accepted pointer names a generation that is gone, so
+    // neither the fingerprint nor the sha comparison can run and success
+    // would be claimed without any evidence behind it.
+    store.insertApplication(acceptedApp('app-acc-missing'));
+    projection = projectApplication('app-acc-missing', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('source_reconcile_required');
+    expect(projection.limitations.map((item) => item.code)).toContain('accepted_generation_invalid');
+    expect(projection.limitations.some((item) => item.evidence === 'gen-app-acc-missing')).toBe(true);
+    expect(projection.availableActions).toContain('fetch');
+
+    // Foreign: the row exists but belongs to another application, which is
+    // the same refusal with the same recovery path.
+    store.insertGeneration(gen('gen-app-acc-foreign', 'app-not-the-owner'));
+    store.insertApplication(acceptedApp('app-acc-foreign'));
+    projection = projectApplication('app-acc-foreign', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('source_reconcile_required');
+    expect(projection.limitations.map((item) => item.code)).toContain('accepted_generation_invalid');
+    expect(projection.availableActions).toContain('fetch');
+
+    // Fingerprint mismatch: the accepted row is present and owned but its
+    // materialization fingerprint differs from the application's current one.
+    store.insertGeneration({
+      ...gen('gen-app-acc-fp', 'app-acc-fp'),
+      materialization_fingerprint: 'b'.repeat(64),
+    });
+    store.insertApplication(acceptedApp('app-acc-fp'));
+    projection = projectApplication('app-acc-fp', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('source_reconcile_required');
+    expect(projection.availableActions).toContain('fetch');
+
+    // Sha mismatch: built from the right configuration but not the commit the
+    // configuration currently names.
+    store.insertGeneration({
+      ...gen('gen-app-acc-sha', 'app-acc-sha'),
+      commit_sha: 'def456',
+    });
+    store.insertApplication(acceptedApp('app-acc-sha', { desired_commit_sha: '789abc' }));
+    projection = projectApplication('app-acc-sha', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('source_reconcile_required');
+    expect(projection.availableActions).toContain('fetch');
+  });
+
   it('limits fetch to live Direct applications', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
