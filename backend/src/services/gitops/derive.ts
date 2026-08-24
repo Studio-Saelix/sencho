@@ -86,7 +86,7 @@ export function deriveGitOpsRevision(
     .sort((a, b) => a.node_id - b.node_id)
     .map((target) => deriveTarget(app, target, facts.healthDisabled, limitations));
   const rollout = deriveRollout(app, targets);
-  const availableActions = deriveActions(app, source, targets);
+  const availableActions = deriveActions(app, source, placement, targets);
   return {
     schemaVersion: 1,
     targetMode: app.target_mode,
@@ -103,7 +103,7 @@ export function deriveGitOpsRevision(
     },
     facets: { source, artifact, placement, rollout },
     targets,
-    drift: collectRuntimeDrift(app, targets, availableActions),
+    drift: collectRuntimeDrift(app, targets),
     limitations,
     availableActions,
   };
@@ -132,19 +132,8 @@ export function deriveGitOpsRevision(
 function collectRuntimeDrift(
   app: GitOpsApplicationRow,
   targets: GitOpsTargetProjection[],
-  availableActions: GitOpsAvailableAction[],
 ): GitOpsDriftItem[] {
   const items: GitOpsDriftItem[] = [];
-  // Mirrors the states deriveActions withholds deploy for, so the drift item's
-  // action never contradicts availableActions in the same payload: an
-  // application-level operation in flight or a recovery in progress blocks
-  // deploying even though the per-target pointer state wants one.
-  const deployWithheld = app.active_operation_stage === 'fetch_started'
-    || app.active_operation_stage === 'apply_started'
-    || app.recovery_phase === 'restoring'
-    || app.recovery_phase === 'compensating'
-    || app.recovery_phase === 'failed'
-    || app.failure_stage === 'recovery';
   for (const target of targets) {
     // Generation mismatch: the target's contract is its desired generation,
     // and a different generation is running. Judged from the pointers
@@ -170,11 +159,11 @@ function collectRuntimeDrift(
         reason: 'the target is running a different generation than the one it was asked to run',
         configuredPolicy: null,
         affectedTargets: [{ nodeId: target.nodeId, stackName: app.stack_name }],
-        // Deploy only when it is genuinely on offer: no application-level
-        // withhold, and availableActions lists it. A target whose own status
-        // hides the divergence keeps the fact of the mismatch, with the action
-        // following what the payload actually offers rather than its status.
-        action: !deployWithheld && availableActions.includes('deploy') ? 'deploy' : 'none',
+        // The action answers for this affected target alone, using the same
+        // legality predicate that puts deploy into availableActions, so a
+        // sibling's clean convergence can never recommend deploying this one
+        // while it is paused, failed, or otherwise unable to act.
+        action: targetDeployLegal(app, target) ? 'deploy' : 'none',
       });
     }
     // Artifact mismatch: comparable exact/qualified expectation vs observation.
@@ -673,9 +662,67 @@ function deriveLkg(target: GitOpsTargetCurrentRow, limitations: GitOpsLimitation
   return { status: 'available', generationId: target.lkg_generation_id!, artifactSetId: null };
 }
 
+/**
+ * Application-level conditions under which deploying is withheld outright: an
+ * operation or recovery already owns the stack, so nothing may start a deploy
+ * even where a target's own state would make one legal.
+ */
+function appDeployWithheld(app: GitOpsApplicationRow): boolean {
+  return app.active_operation_stage === 'fetch_started'
+    || app.active_operation_stage === 'apply_started'
+    || app.recovery_phase === 'restoring'
+    || app.recovery_phase === 'compensating'
+    || app.recovery_phase === 'failed'
+    || app.failure_stage === 'recovery';
+}
+
+/**
+ * Whether deploying this exact target is legal right now, per the revision-state
+ * plan's available-action rules. Deliberately per target: the application-wide
+ * action list is a union across targets, so keying an item to it would tell a
+ * paused or failed sibling to deploy because a healthy sibling diverged.
+ *
+ * Direct targets converge a known divergence outright; an interrupted deploy is
+ * retried only against the generation still applied, exactly what deployStarted
+ * will demand. Writers keep applied and desired equal today, so keying on
+ * applied can never advertise an action the transition would refuse.
+ *
+ * Targets of Blueprint modes have no Direct deploy at all: their sole retry
+ * repeats an interrupted deploy or withdraw, legal only while both persisted
+ * identities equal what the application currently requires. An absent pair
+ * counts as matching: rollout candidates come from a later-phase producer, so
+ * inline Blueprints carry no candidate id on either side yet, and demanding one
+ * here would leave every interrupted inline deploy permanently unactionable. A
+ * superseded value on either side fails the comparison.
+ *
+ * disk_invocation_drift is deliberately absent: no producer reaches that
+ * status in this slice, and until one lands the predicate fails safe to a
+ * reported mismatch with no deploy recommendation.
+ */
+function targetDeployLegal(app: GitOpsApplicationRow, target: GitOpsTargetProjection): boolean {
+  if (appDeployWithheld(app) || target.tombstoned) return false;
+  if (app.target_mode !== 'direct') {
+    if (target.runtime.status !== 'completion_unknown') return false;
+    const stage = target.runtime.interruptedStage;
+    if (stage !== 'blueprint_deploy_started' && stage !== 'blueprint_withdraw_started') return false;
+    return (
+      target.runtime.interruptedIntentRevisionId === app.intent_revision_id
+      && target.runtime.interruptedRolloutCandidateId === app.rollout_candidate_id
+    );
+  }
+  if (target.runtime.status === 'applied_not_deployed') return true;
+  return (
+    target.runtime.status === 'completion_unknown'
+    && target.runtime.interruptedStage === 'deploy_started'
+    && target.runtime.interruptedGenerationId !== null
+    && target.runtime.interruptedGenerationId === target.appliedGenerationId
+  );
+}
+
 function deriveActions(
   app: GitOpsApplicationRow,
   source: SourceFacet,
+  placement: PlacementFacet,
   targets: GitOpsTargetProjection[],
 ): GitOpsAvailableAction[] {
   if (source.status === 'applying' || source.status === 'checking_fetching') return ['none'];
@@ -691,9 +738,21 @@ function deriveActions(
     actions.add('fetch');
   }
   if (source.status === 'candidate_ready') actions.add('apply');
-  if (source.status === 'source_unknown' && source.interruptedStage === 'apply_started') actions.add('apply');
+  // An interrupted apply may be finished only while its recorded generation is
+  // still the current candidate and nothing suspends the source in the
+  // meantime, both of which applyStarted would refuse.
+  if (
+    source.status === 'source_unknown'
+    && source.interruptedStage === 'apply_started'
+    && source.interruptedGenerationId !== null
+    && source.interruptedGenerationId === app.candidate_generation_id
+    && !app.suspended_at
+  ) {
+    actions.add('apply');
+  }
   if (app.candidate_generation_id && !app.active_operation_stage) actions.add('dismiss');
-  if (targets.some((target) => target.runtime.status === 'applied_not_deployed')) actions.add('deploy');
+  if (targets.some((target) => targetDeployLegal(app, target))) actions.add('deploy');
+  if (placement.status === 'placement_review_pending') actions.add('approve_legacy');
   if (actions.size === 0) return ['none'];
   return Array.from(actions);
 }
