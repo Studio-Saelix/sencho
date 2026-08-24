@@ -728,12 +728,17 @@ function deriveActions(
   if (source.status === 'applying' || source.status === 'checking_fetching') return ['none'];
   if (source.status === 'recovery_required' || source.status === 'recovery_failed') return ['none'];
   const actions = new Set<GitOpsAvailableAction>();
+  // Fetch is offered only to live Direct applications: Blueprint Git-source
+  // integration ships later, until then no Blueprint mode advertises fetch.
   if (
-    source.status === 'never_reconciled'
-    || source.status === 'source_reconcile_required'
-    || source.status === 'source_retry_scheduled'
-    || (source.status === 'source_unknown' && source.interruptedStage === 'fetch_started')
-    || (source.status === 'source_failed' && (source.failureStage === 'fetch' || source.failureStage === 'validation'))
+    app.target_mode === 'direct'
+    && (
+      source.status === 'never_reconciled'
+      || source.status === 'source_reconcile_required'
+      || source.status === 'source_retry_scheduled'
+      || (source.status === 'source_unknown' && source.interruptedStage === 'fetch_started')
+      || (source.status === 'source_failed' && (source.failureStage === 'fetch' || source.failureStage === 'validation'))
+    )
   ) {
     actions.add('fetch');
   }
@@ -752,7 +757,17 @@ function deriveActions(
     && !app.suspended_at
     && app.candidate_plan_blocked !== 1
   ) {
-    actions.add('apply');
+    // applyStarted also demands the candidate generation exist under this
+    // application with an unchanged materialization fingerprint; prove all of
+    // it here rather than recommend a transition that would refuse.
+    const candidate = GitOpsStore.getInstance().getGeneration(app.candidate_generation_id);
+    if (
+      candidate !== undefined
+      && candidate.application_id === app.id
+      && candidate.materialization_fingerprint === app.materialization_fingerprint
+    ) {
+      actions.add('apply');
+    }
   }
   if (app.candidate_generation_id && !app.active_operation_stage) actions.add('dismiss');
   if (targets.some((target) => targetDeployLegal(app, target))) actions.add('deploy');

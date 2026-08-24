@@ -528,30 +528,75 @@ describe('gitops derivation', () => {
     expect(projection.drift[0].action).toBe('none');
   });
 
-  it('offers apply after an interrupted apply only while the candidate still matches', () => {
+  it('offers apply after an interrupted apply only when every apply precondition holds', () => {
     const store = GitOpsStore.getInstance();
-    // Matching: the crash interrupted an apply whose generation is still the
-    // current candidate, so finishing the apply remains legal.
-    store.insertApplication(rawApp('app-int-ap-match', {
-      interruption_stage: 'apply_started',
-      interruption_at: 1,
-      interruption_operation_id: 'op-ap-m',
-      interruption_generation_id: 'gen-ap-m',
-      candidate_generation_id: 'gen-ap-m',
-    }));
+    const tx = GitOpsTransitions.getInstance();
+    const interruptedApp = (id: string, overrides: Partial<GitOpsApplicationRow> = {}) =>
+      rawApp(id, {
+        stack_name: `${id}-web`,
+        interruption_stage: 'apply_started',
+        interruption_at: 1,
+        interruption_operation_id: `op-${id}`,
+        interruption_generation_id: `gen-${id}`,
+        candidate_generation_id: `gen-${id}`,
+        ...overrides,
+      });
+
+    // Transition-legal positive: the recorded generation exists under this
+    // application with an unchanged materialization fingerprint, remains the
+    // current candidate, and neither suspension nor blockage intervenes, so
+    // finishing the apply is exactly what applyStarted would accept.
+    store.insertGeneration(gen('gen-app-int-ap-match', 'app-int-ap-match'));
+    store.insertApplication(interruptedApp('app-int-ap-match'));
     let projection = projectApplication('app-int-ap-match', false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
     if (projection.facets.source.status !== 'source_unknown') throw new Error('expected source_unknown');
     expect(projection.facets.source.interruptedStage).toBe('apply_started');
     expect(projection.availableActions).toContain('apply');
+    // The recommendation is only as good as the transition it names, so the
+    // projected action is executed rather than trusted: this must not throw.
+    tx.applyStarted('app-int-ap-match', 'gen-app-int-ap-match', env('op-ap-resume'));
+
+    // Missing row: the recorded generation is gone, so applyStarted would
+    // refuse and the recommendation must fail closed.
+    store.insertApplication(interruptedApp('app-int-ap-missing'));
+    projection = projectApplication('app-int-ap-missing', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.availableActions).not.toContain('apply');
+
+    // Foreign owner: the candidate row exists but belongs to another
+    // application, which applyStarted refuses just the same.
+    store.insertGeneration(gen('gen-app-int-ap-foreign', 'app-not-the-owner'));
+    store.insertApplication(interruptedApp('app-int-ap-foreign'));
+    projection = projectApplication('app-int-ap-foreign', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.availableActions).not.toContain('apply');
+
+    // Fingerprint mismatch: finishing the recorded apply would use bytes built
+    // from different configuration. Defensive today, since shipped producers
+    // clear the candidate when configuration changes; the gate mirrors the
+    // transition's refusal either way.
+    store.insertGeneration({
+      ...gen('gen-app-int-ap-fp', 'app-int-ap-fp'),
+      materialization_fingerprint: 'b'.repeat(64),
+    });
+    store.insertApplication(interruptedApp('app-int-ap-fp'));
+    projection = projectApplication('app-int-ap-fp', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.availableActions).not.toContain('apply');
+
+    // Suspended: identities line up, but the source was suspended after the
+    // crash and applyStarted refuses suspended sources outright.
+    store.insertGeneration(gen('gen-app-int-ap-susp', 'app-int-ap-susp'));
+    store.insertApplication(interruptedApp('app-int-ap-susp', { suspended_at: 1 }));
+    projection = projectApplication('app-int-ap-susp', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.availableActions).not.toContain('apply');
 
     // Stale: the candidate moved on after the crash, so the recorded apply
     // can no longer prove what it was applying and apply must not be offered.
-    store.insertApplication(rawApp('app-int-ap-stale', {
-      stack_name: 'int-ap-stale-web',
-      interruption_stage: 'apply_started',
-      interruption_at: 1,
-      interruption_operation_id: 'op-ap-s',
+    store.insertGeneration(gen('gen-ap-new', 'app-int-ap-stale'));
+    store.insertApplication(interruptedApp('app-int-ap-stale', {
       interruption_generation_id: 'gen-ap-old',
       candidate_generation_id: 'gen-ap-new',
     }));
@@ -563,18 +608,34 @@ describe('gitops derivation', () => {
     // Blocked: the recorded apply still names the current candidate, but a
     // later classification blocked that candidate, so finishing it is refused
     // even though every identity still lines up.
-    store.insertApplication(rawApp('app-int-ap-block', {
-      stack_name: 'int-ap-block-web',
-      interruption_stage: 'apply_started',
-      interruption_at: 1,
-      interruption_operation_id: 'op-ap-b',
-      interruption_generation_id: 'gen-ap-b',
-      candidate_generation_id: 'gen-ap-b',
-      candidate_plan_blocked: 1,
-    }));
+    store.insertGeneration(gen('gen-ap-b', 'app-int-ap-block'));
+    store.insertApplication(interruptedApp('app-int-ap-block', { candidate_plan_blocked: 1 }));
     projection = projectApplication('app-int-ap-block', false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
     expect(projection.availableActions).toEqual(['dismiss']);
+  });
+
+  it('limits fetch to live Direct applications', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    // Direct control: a never-reconciled stack is offered fetch.
+    tx.activateDirect({ application: app('app-fetch-direct', 'fetch-direct-web'), nodeId: 1, envelope: env('op-fd') });
+    const direct = projectApplication('app-fetch-direct', false);
+    if (direct.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(direct.availableActions).toContain('fetch');
+
+    // A Git-backed Blueprint application with the same unreconciled source
+    // state gets no fetch: the revision-state action rules reserve fetch for
+    // Direct applications, and Blueprint source integration ships later.
+    store.insertApplication(rawApp('app-fetch-bp', {
+      target_mode: 'blueprint',
+      blueprint_id: 21,
+      lifecycle_key: 'blueprint:21',
+      stack_name: null,
+    }));
+    const bp = projectApplication('app-fetch-bp', false);
+    if (bp.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(bp.availableActions).not.toContain('fetch');
   });
 
   it('offers approve_legacy while Inline placement review is pending', () => {
