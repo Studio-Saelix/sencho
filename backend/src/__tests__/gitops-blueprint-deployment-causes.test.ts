@@ -165,6 +165,31 @@ describe('gitops blueprint deployment causes', () => {
     expect(target.target_status).toBe('tombstoned');
   });
 
+  it('re-opens a severed target when a deploy starts again', () => {
+    // After a withdraw the reconciler must not redeploy onto the severed
+    // placement unrecorded, while an explicit deploy must land in the model
+    // instead of being refused and ignored.
+    const store = GitOpsStore.getInstance();
+    const blueprint = create('dc-revive');
+    deploying(blueprint);
+    commitBlueprintDeploymentCause('deploy_ack', blueprint.id, NODE, {
+      status: 'active', last_checked_at: Date.now(),
+    }, 'tester');
+    commitBlueprintDeploymentCause('withdraw_start', blueprint.id, NODE, {
+      status: 'withdrawing', last_checked_at: Date.now(),
+    }, 'tester');
+    commitBlueprintDeploymentRemoved(blueprint.id, NODE, 'tester');
+
+    const appId = store.getLiveBlueprintApplication(blueprint.id)!.id;
+    expect(store.getTarget(appId, NODE)!.target_status).toBe('tombstoned');
+
+    deploying(blueprint);
+
+    const revived = store.getTarget(appId, NODE)!;
+    expect(revived.target_status).toBe('active');
+    expect(revived.active_operation_stage).toBe('blueprint_deploy_started');
+  });
+
   it('observes without acknowledging anything', () => {
     const store = GitOpsStore.getInstance();
     const blueprint = create('dc-observe');

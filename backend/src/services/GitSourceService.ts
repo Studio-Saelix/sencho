@@ -29,7 +29,7 @@ import type { GitChangePlan, PublicGitChangePlan, GitChangePlanCounts, PublicGit
 import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
 import type { NotificationCategory } from './NotificationService';
 import { GitOpsStore } from './gitops/store';
-import { GitOpsTransitions } from './gitops/transitions';
+import { GitOpsTransitions, GitOpsTransitionError } from './gitops/transitions';
 import {
     buildCreateCheckpointRow,
     buildDirectApplicationRow,
@@ -194,7 +194,8 @@ export type GitSourceErrorCode =
     | 'PLAN_FINGERPRINT_REQUIRED'
     | 'PLAN_BLOCKED'
     | 'LEGACY_PENDING'
-    | 'PLAN_UNAVAILABLE';
+    | 'PLAN_UNAVAILABLE'
+    | 'OPERATION_IN_FLIGHT';
 
 export class GitSourceError extends Error {
     constructor(
@@ -2059,20 +2060,39 @@ export class GitSourceService {
                 }
                 tx.fetched(gitopsApp.id, fetched.commitSha, gitopsEnv);
                 if (!materialization.value) return;
+                const identity = directSourceIdentity({
+                    repoUrl: src.repo_url,
+                    branch: src.branch,
+                    composePaths: src.compose_paths,
+                    contextDir: src.context_dir,
+                    syncEnv: src.sync_env,
+                    envPath: src.env_path,
+                });
+                // A pull that resolves to exactly what the live candidate
+                // already proposes (same commit, source fingerprint, plan
+                // verdict) must not mint a lookalike generation and rewrite the
+                // candidate pointers. The staged generation stands; only the
+                // fetch above is new. A candidate for a different commit, or no
+                // candidate at all, mints anew: staging after an apply is a new
+                // dispatch cycle and needs its own generation to accept.
+                const staged = gitopsApp.candidate_generation_id
+                    ? GitOpsStore.getInstance().getGeneration(gitopsApp.candidate_generation_id)
+                    : undefined;
+                if (
+                    staged &&
+                    staged.commit_sha === fetched.commitSha &&
+                    staged.materialization_fingerprint === identity.fingerprint &&
+                    staged.plan_blocked === (plan?.blocked === true ? 1 : 0)
+                ) {
+                    return;
+                }
                 const generationId = newGitOpsId();
                 const nextManifestVersion = (prior?.manifestVersion ?? 0) + 1;
                 GitOpsStore.getInstance().insertGeneration(buildGenerationRow({
                     id: generationId,
                     applicationId: gitopsApp.id,
                     commitSha: fetched.commitSha,
-                    identity: directSourceIdentity({
-                        repoUrl: src.repo_url,
-                        branch: src.branch,
-                        composePaths: src.compose_paths,
-                        contextDir: src.context_dir,
-                        syncEnv: src.sync_env,
-                        envPath: src.env_path,
-                    }),
+                    identity,
                     configuredRef: src.branch,
                     candidateRelPath: materialization.value.candidateRelPath,
                     appliedRelPath: appliedRelPathFor(fetched.commitSha, nextManifestVersion),
@@ -2703,7 +2723,28 @@ export class GitSourceService {
         return { applied: true, deployed: false, recoveryId };
     }
 
-    public dismissPending(stackName: string): void {
+    public dismissPending(stackName: string, actor?: string): void {
+        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        if (app?.candidate_generation_id) {
+            try {
+                GitOpsTransitions.getInstance().dismissed(
+                    app.id,
+                    this.gitopsEnvelope(crypto.randomUUID(), actor ?? 'system:git-source', 'dismiss'),
+                );
+            } catch (error) {
+                // The refusal is the outcome the operator must see. Swallowing it
+                // here would leave the projection offering a candidate they just
+                // declined, which is exactly the stale state dismissal exists to
+                // prevent.
+                if (error instanceof GitOpsTransitionError) {
+                    throw new GitSourceError(
+                        'OPERATION_IN_FLIGHT',
+                        `Cannot dismiss the pending update for ${stackName}: ${error.message}`,
+                    );
+                }
+                throw error;
+            }
+        }
         DatabaseService.getInstance().clearGitSourcePending(stackName);
     }
 

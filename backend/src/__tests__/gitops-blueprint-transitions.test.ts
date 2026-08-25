@@ -213,6 +213,49 @@ describe('gitops blueprint transitions', () => {
     expect(target.active_operation_stage).toBeNull();
   });
 
+  it('re-opens a severed placement when a deploy starts again', () => {
+    // Withdrawal is terminal for the placement, not for the node. A later
+    // explicit deploy re-activates the target and records the revival in the
+    // same event, so the projection and the workload cannot disagree about
+    // whether this node runs the Blueprint.
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-revive', 220, 1);
+    tx.intentRevised({
+      applicationId: 'app-revive',
+      intent: intent('int-rev', 'app-revive', 220),
+      envelope: env('op-rev-int'),
+    });
+    tx.blueprintDeployStarted({
+      applicationId: 'app-revive', nodeId: 1, intentRevisionId: 'int-rev',
+      rolloutCandidateId: null, envelope: env('op-rev-d1'),
+    });
+    tx.blueprintAckRecorded({
+      applicationId: 'app-revive', nodeId: 1, intentRevisionId: 'int-rev',
+      rolloutCandidateId: null, legacyAppliedRevision: null, envelope: env('op-rev-a1'),
+    });
+    tx.blueprintWithdrawStarted({
+      applicationId: 'app-revive', nodeId: 1, intentRevisionId: 'int-rev',
+      envelope: env('op-rev-w1'),
+    });
+    tx.blueprintWithdrawn({
+      applicationId: 'app-revive', nodeId: 1, intentRevisionId: 'int-rev',
+      envelope: env('op-rev-w2'),
+    });
+    expect(store.getTarget('app-revive', 1)?.target_status).toBe('tombstoned');
+
+    tx.blueprintDeployStarted({
+      applicationId: 'app-revive', nodeId: 1, intentRevisionId: 'int-rev',
+      rolloutCandidateId: null, envelope: env('op-rev-d2'),
+    });
+
+    const revived = store.getTarget('app-revive', 1)!;
+    expect(revived.target_status).toBe('active');
+    expect(revived.active_operation_stage).toBe('blueprint_deploy_started');
+    // The acknowledged intent survives severance; only a fresh ack rewrites it.
+    expect(revived.intent_revision_id).toBe('int-rev');
+  });
+
   it('keeps a failed withdraw distinct from a failed deploy', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();

@@ -22,6 +22,7 @@ import {
     buildBlueprintPreview,
 } from './blueprintPreviewProjection';
 import { commitBlueprintDeploymentCause } from './gitops/blueprintDeploymentProducers';
+import { GitOpsStore } from './gitops/store';
 
 const RECONCILER_INTERVAL_MS = 60_000;
 const RECONCILER_INITIAL_DELAY_MS = 5_000;
@@ -135,6 +136,8 @@ export interface ReconcileDecision {
     check: Node[];
     stateReview: Node[];
     evictBlocked: Node[];
+    /** Nodes whose canonical target is severed; no automatic action may run. */
+    severedNodeIds: number[];
 }
 
 /**
@@ -506,18 +509,34 @@ export class BlueprintReconciler {
         const deploymentByNode = new Map<number, BlueprintDeployment>();
         for (const dep of existingDeployments) deploymentByNode.set(dep.node_id, dep);
 
+        // A tombstoned target is a placement the model has severed (withdraw,
+        // node delete). Redeploying onto one would run the workload while the
+        // projection insists the target is gone, so automatic placement skips
+        // it. Only an explicit deploy re-opens the placement, and that revival
+        // is recorded by the transition itself.
+        const gitopsApp = GitOpsStore.getInstance().getLiveBlueprintApplication(blueprint.id);
+        const severedNodes = new Set<number>(
+            gitopsApp
+                ? GitOpsStore.getInstance().listTargets(gitopsApp.id)
+                    .filter((t) => t.target_status === 'tombstoned')
+                    .map((t) => t.node_id)
+                : [],
+        );
+
         const decision: ReconcileDecision = {
             deploy: [],
             withdraw: [],
             check: [],
             stateReview: [],
             evictBlocked: [],
+            severedNodeIds: [...severedNodes],
         };
 
         // Desired but not active or stale
         for (const node of desiredNodes) {
             const dep = deploymentByNode.get(node.id);
             if (!dep) {
+                if (severedNodes.has(node.id)) continue;
                 // Cordon filter: skip new placements onto cordoned nodes.
                 // Pin always wins, so the pinned node is exempt. Existing
                 // deployments below are untouched: cordon does not evict.
@@ -548,6 +567,7 @@ export class BlueprintReconciler {
                 continue;
             }
             if (dep.applied_revision !== blueprint.revision) {
+                if (severedNodes.has(node.id)) continue;
                 if (blueprint.classification === 'stateful' || blueprint.classification === 'unknown') {
                     decision.stateReview.push(node);
                 } else {
@@ -556,6 +576,7 @@ export class BlueprintReconciler {
                 continue;
             }
             if (dep.status === 'failed' || dep.status === 'pending') {
+                if (severedNodes.has(node.id)) continue;
                 decision.deploy.push(node);
                 continue;
             }

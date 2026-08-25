@@ -989,9 +989,16 @@ export class GitOpsTransitions {
       'blueprint_deploy_started',
       null,
       (target) => {
-        if (target.target_status !== 'active') {
-          throw new GitOpsTransitionError('cannot deploy to a tombstoned target');
-        }
+        // An explicit deploy re-opens a placement the model had severed. The
+        // reconciler never starts one of these (it skips severed nodes), so a
+        // start arriving here for a tombstoned target is a deliberate request
+        // for this node, and the revival rides the same recorded event rather
+        // than surfacing as a refusal the physical deploy would ignore.
+        const before = {
+          activeStage: target.active_operation_stage,
+          targetStatus: target.target_status,
+        };
+        target.target_status = 'active';
         // A newer deploy supersedes an older one, which is how a redeploy of a
         // stuck request takes over. Anything else in flight is a different
         // operation, and displacing it would abandon it with no terminal event.
@@ -1002,7 +1009,6 @@ export class GitOpsTransitions {
         ) {
           throw new GitOpsTransitionError('conflicting target operation');
         }
-        const before = { activeStage: target.active_operation_stage };
         target.active_operation_id = args.envelope.operationId;
         target.active_operation_stage = 'blueprint_deploy_started';
         target.active_operation_at = args.envelope.at;
@@ -1013,7 +1019,11 @@ export class GitOpsTransitions {
         this.clearTargetInterruption(target, 'blueprint_deploy_started');
         return {
           before,
-          after: { activeStage: 'blueprint_deploy_started', intentRevisionId: args.intentRevisionId },
+          after: {
+            activeStage: 'blueprint_deploy_started',
+            intentRevisionId: args.intentRevisionId,
+            targetStatus: 'active',
+          },
         };
       },
     );

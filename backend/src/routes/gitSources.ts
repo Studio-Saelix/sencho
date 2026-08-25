@@ -466,7 +466,7 @@ stackGitSourceRouter.post('/:stackName/git-source/dismiss-pending', async (req: 
   }
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   try {
-    GitSourceService.getInstance().dismissPending(stackName);
+    GitSourceService.getInstance().dismissPending(stackName, req.user?.username ?? 'unknown');
     res.json({ success: true });
   } catch (error) {
     sendGitSourceError(res, error);

@@ -70,7 +70,7 @@ describe('gitops history read layer', () => {
   describe('queryHistoryRows', () => {
     it('returns newest first', () => {
       const rows = query({ stackName: 'history-web' });
-      expect(rows.map(r => r.commit_sha)).toEqual(['sha-c', 'sha-b', 'sha-a']);
+      expect(rows.map(r => r.commit_sha)).toEqual(['sha-c', 'sha-b', 'sha-a', null]);
     });
 
     // Every filter is asserted to reach the right column. A wrong column name
@@ -101,9 +101,13 @@ describe('gitops history read layer', () => {
       expect(query({ rolloutGenerationId: 'rollout-gen-absent' })).toHaveLength(0);
     });
 
-    it('narrows to the requested row rather than merely returning one', () => {
+    it('narrows node rows while keeping application-level rows', () => {
+      // A proxied hub view filters by its own node id, but activation and
+      // similar stages carry no node. Dropping them under `node_id = ?`
+      // would make the history read as if the application never came into
+      // being.
       const byNode = query({ nodeId: 7 });
-      expect(byNode).toHaveLength(1);
+      expect(byNode.map(r => r.node_id)).toEqual([7, null]);
       expect(byNode[0]?.commit_sha).toBe('sha-b');
       expect(query({ stackName: 'no-such-stack' })).toHaveLength(0);
     });
@@ -121,7 +125,7 @@ describe('gitops history read layer', () => {
       expect(first).toHaveLength(2);
       const last = first[1] as GitOpsHistoryRow;
       const second = query({ stackName: 'history-web' }, { createdAt: last.created_at, id: last.id }, 2);
-      expect(second).toHaveLength(1);
+      expect(second).toHaveLength(2);
       expect(second[0]?.id).not.toBe(last.id);
       expect(second[0]?.commit_sha).toBe('sha-a');
     });
@@ -193,6 +197,8 @@ describe('gitops history read layer', () => {
         applicationId: row.application_id,
         targetMode: row.target_mode,
         stackName: row.stack_name,
+        repoIdentity: 'https://github.com/org/repo.git',
+        configuredRef: 'main',
         blueprintId: 11,
         nodeId: row.node_id,
         commitSha: row.commit_sha,
@@ -406,17 +412,33 @@ function query(
 function seedHistory(): void {
   const db = DatabaseService.getInstance().getDb();
   const base = application();
+  // The activation event belongs to the application, not to a node, so it
+  // carries no node id. This is the row shape every application-level stage
+  // writes and the one a `node_id = ?` filter silently drops.
   insertHistory(db, {
     application: base,
-    nodeId: 1,
+    nodeId: null,
     dedupeTarget: 'app',
-    operationId: 'op-a',
+    operationId: 'op-app-level',
     stage: 'application_activated',
     outcome: 'committed',
     trigger: 'manual',
     actor: 'operator-1',
     before: { lifecycleStatus: null },
     after: { lifecycleStatus: 'active', targetMode: 'direct' },
+    at: 500,
+  });
+  insertHistory(db, {
+    application: base,
+    nodeId: 1,
+    dedupeTarget: 'app',
+    operationId: 'op-a',
+    stage: 'fetched',
+    outcome: 'committed',
+    trigger: 'manual',
+    actor: 'operator-1',
+    before: { desiredCommitSha: null },
+    after: { desiredCommitSha: 'sha-a' },
     commitSha: 'sha-a',
     at: 1000,
   });

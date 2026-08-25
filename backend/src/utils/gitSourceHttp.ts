@@ -28,6 +28,7 @@ export function gitSourceStatus(code: GitSourceErrorCode): number {
     case 'PLAN_BLOCKED':
     case 'LEGACY_PENDING':
     case 'PLAN_UNAVAILABLE':
+    case 'OPERATION_IN_FLIGHT':
       return 409;
     case 'NETWORK_TIMEOUT':
       return 504;

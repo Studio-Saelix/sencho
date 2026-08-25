@@ -236,6 +236,10 @@ export type GitOpsHistoryItem = {
   applicationId: string;
   targetMode: GitOpsTargetMode;
   stackName: string | null;
+  /** Secret-free repository URL as recorded with the event, matching the `repoIdentity` filter. */
+  repoIdentity: string | null;
+  /** Ref as configured when the event ran, matching the `configuredRef` filter. */
+  configuredRef: string | null;
   blueprintId: number | null;
   nodeId: number | null;
   commitSha: string | null;
@@ -338,6 +342,8 @@ export function toHistoryItem(row: GitOpsHistoryRow): GitOpsHistoryItem {
     applicationId: row.application_id,
     targetMode: row.target_mode,
     stackName: row.stack_name,
+    repoIdentity: row.repo_url,
+    configuredRef: row.configured_ref,
     blueprintId: row.blueprint_id,
     nodeId: row.node_id,
     commitSha: row.commit_sha,
@@ -398,7 +404,13 @@ export function queryHistoryRows(
   // rollout that ran. Answering one filter from the other's column would report
   // a proposal as executed.
   eq('rollout_generation_id', filters.rolloutGenerationId);
-  eq('node_id', filters.nodeId);
+  // A node-scoped page keeps application-level rows: activation and similar
+  // stages carry no node, and a plain `node_id = ?` would make a proxied hub
+  // view read as if the application never came into being.
+  if (filters.nodeId !== undefined) {
+    clauses.push('(node_id = ? OR node_id IS NULL)');
+    params.push(filters.nodeId);
+  }
   eq('trigger', filters.trigger);
   eq('actor', filters.actor);
   eq('outcome', filters.outcome);
