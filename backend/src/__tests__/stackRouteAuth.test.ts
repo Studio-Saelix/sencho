@@ -27,6 +27,9 @@ describe('classifyStackApiPath', () => {
       expect(classifyStackApiPath('GET', '/stacks/web/git-source/history')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:read',
       });
+      expect(classifyStackApiPath('GET', '/stacks/web/git-source/manifest')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:read',
+      });
       expect(classifyStackApiPath('POST', '/stacks/web/drift/recheck')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:read',
       });

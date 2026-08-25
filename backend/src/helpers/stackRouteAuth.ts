@@ -60,6 +60,7 @@ const EXACT_SUFFIX_RULES: readonly SuffixRule[] = [
   { method: 'GET', suffix: '/activity', action: 'stack:read' },
   { method: 'GET', suffix: '/git-source', action: 'stack:read' },
   { method: 'GET', suffix: '/git-source/history', action: 'stack:read' },
+  { method: 'GET', suffix: '/git-source/manifest', action: 'stack:read' },
 
   // Edit
   { method: 'PUT', suffix: '', action: 'stack:edit' },
