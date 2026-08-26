@@ -29,6 +29,6 @@
     "@commitlint/config-conventional": "^21.0.2",
     "@playwright/test": "^1.62.1",
     "husky": "^9.1.7",
-    "otplib": "^13.4.1"
+    "otplib": "^13.5.0"
   }
 }
