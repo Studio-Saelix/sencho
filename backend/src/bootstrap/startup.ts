@@ -29,6 +29,11 @@ import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { PilotMetrics } from '../services/PilotMetrics';
 import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
 import { sweepStaleTempDirs as sweepStaleGitTempDirs, sweepGitManifestOrphans } from '../services/GitSourceService';
+import { assertCreatesSettled, reclassifyInterruptedOperations, resolveInterruptedCreates } from '../services/gitops/createRecovery';
+import { loadMigrationManifests, migrateDirectGitStacks, migrateInlineBlueprints } from '../services/gitops/migrate';
+import { setGitOpsEventSink } from '../services/gitops/publish';
+import { NotificationService } from '../services/NotificationService';
+import { sanitizeForLog } from '../utils/safeLog';
 import { PORT } from '../helpers/constants';
 import { LOW_MEMORY_FLOOR_BYTES } from '../utils/spawnErrors';
 
@@ -137,6 +142,18 @@ export async function startServer(server: Server): Promise<void> {
   // Initialize the license service before any tier-gated code can run.
   LicenseService.getInstance().initialize();
 
+  // Announce committed GitOps transitions from here on. This has to precede
+  // every reconcile and migration pass below, because all of them write
+  // history: the deletion reconcile tombstones applications and targets, and
+  // it awaits inside its loop, so a drain would otherwise land while the sink
+  // was still absent. Those rows would then be counted and never signalled,
+  // and the unannounced warning would fire on every boot that has a prepared
+  // deletion intent, which is the fastest way to teach an operator to ignore
+  // it when it means something. Nothing is connected this early, so announcing
+  // costs nothing; the closure resolves the notification service lazily, so it
+  // can be installed as soon as the database is up.
+  setGitOpsEventSink((event) => NotificationService.getInstance().broadcastEvent(event));
+
   // Deletion-intent reconciliation must finish before mutation-capable
   // background services or HTTP accept traffic that could recreate a stack
   // name still covered by a prepared/ready tombstone.
@@ -145,6 +162,7 @@ export async function startServer(server: Server): Promise<void> {
   } catch (err) {
     console.error('[Startup] Deployed stack deletion reconcile failed:', (err as Error).message);
   }
+
   // Interrupted rollback restores must finish before mutation-capable services
   // or HTTP accept traffic. Fail closed: rethrow so unresolved intents never
   // leave mutators or HTTP accepting writes.
@@ -155,6 +173,69 @@ export async function startServer(server: Server): Promise<void> {
     throw err;
   }
   StackUpdateRecoveryService.getInstance().start();
+
+  // Interrupted creates are settled here, ahead of the background mutators and
+  // the HTTP bind below, because a scheduler or webhook that fired first could
+  // act on a stack whose ownership is still undecided. Fail closed for the same
+  // reason the restore reconcile above does: a create left unresolved can leave
+  // a half-built stack directory that the deploy path cannot tell apart from a
+  // finished one, and starting anyway would let a mutator act on it.
+  try {
+    const settled = await resolveInterruptedCreates();
+    for (const entry of settled) {
+      console.log(`[GitOps] Interrupted create for ${sanitizeForLog(entry.stackName)}: ${entry.outcome}`);
+    }
+    assertCreatesSettled(settled);
+  } catch (err) {
+    console.error('[GitOps] Interrupted-create recovery failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+    throw err;
+  }
+  // Operations the last process never finished are reclassified as unknown.
+  // Without this an interrupted fetch or apply reports as still running for
+  // ever and the stack is offered no actions at all.
+  try {
+    const reclassified = reclassifyInterruptedOperations();
+    if (reclassified > 0) {
+      console.log(`[GitOps] Reclassified ${reclassified} interrupted operation(s) as unknown`);
+    }
+  } catch (err) {
+    console.error('[GitOps] Interrupted-operation reclassification failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+  }
+
+  // Git stacks that predate the revision state model are brought into it here,
+  // after interrupted work is settled so migration never races a half-finished
+  // create, and before any mutation service can act on a stack the model does
+  // not yet describe.
+  try {
+    await loadMigrationManifests();
+    const migrated = migrateDirectGitStacks().filter((entry) => entry.outcome !== 'skipped_current');
+    for (const entry of migrated) {
+      console.log(`[GitOps] Migrated Git stack ${sanitizeForLog(entry.stackName)}: ${entry.outcome}`);
+    }
+  } catch (err) {
+    console.error('[GitOps] Migration of pre-existing Git stacks failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+  }
+
+  // Blueprints migrate separately, and a failure in one must not stop the
+  // other: they share nothing, and coupling them would let a single unreadable
+  // Git stack keep every Blueprint outside the model.
+  try {
+    const migratedBlueprints = migrateInlineBlueprints().filter((entry) => entry.outcome !== 'skipped_current');
+    for (const entry of migratedBlueprints) {
+      console.log(`[GitOps] Migrated blueprint ${sanitizeForLog(entry.stackName)}: ${entry.outcome}`);
+    }
+  } catch (err) {
+    console.error('[GitOps] Migration of pre-existing blueprints failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+  }
+
+  // The managed-area sweep follows. It preserves anything whose ownership it
+  // cannot prove, so a failure here can only leave files behind, never remove
+  // the wrong ones, and retrying next boot is safe.
+  try {
+    await sweepGitManifestOrphans();
+  } catch (err) {
+    console.warn('[GitManifest] Managed-area sweep failed:', err instanceof Error ? err.message : String(err));
+  }
 
   // Synchronous starts: schedule background timers and continue. None of
   // these fire their first tick for at least a few seconds, so they
@@ -202,9 +283,6 @@ export async function startServer(server: Server): Promise<void> {
   // Fire-and-forget housekeeping; logged but never awaited.
   sweepStaleGitTempDirs().catch((err) => {
     console.warn('[GitSource] Temp dir sweep failed:', (err as Error).message);
-  });
-  sweepGitManifestOrphans().catch((err) => {
-    console.warn('[GitManifest] Managed-area sweep failed:', (err as Error).message);
   });
   sweepStaleTrivyTempDirs().catch((err) => {
     console.warn('[Trivy] Temp dir sweep failed:', (err as Error).message);

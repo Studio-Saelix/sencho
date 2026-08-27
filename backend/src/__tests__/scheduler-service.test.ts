@@ -55,7 +55,7 @@ const {
   mockStartContainer: vi.fn().mockResolvedValue(undefined),
   mockStopContainer: vi.fn().mockResolvedValue(undefined),
   mockPruneSystem: vi.fn().mockResolvedValue({ success: true, reclaimedBytes: 0 }),
-  mockUpdateStack: vi.fn().mockResolvedValue({ recoveryId: null }),
+  mockUpdateStack: vi.fn().mockResolvedValue({ recoveryId: null, deployedGenerationId: null }),
   mockGetStacks: vi.fn().mockResolvedValue([]),
   mockGetStackContent: vi.fn().mockResolvedValue(''),
   mockGetEnvContent: vi.fn().mockResolvedValue(''),
@@ -912,7 +912,7 @@ describe('SchedulerService - executeUpdate', () => {
 
       await SchedulerService.getInstance().triggerTask(83);
 
-      expect(beginSpy).toHaveBeenCalledWith(1, 'web-app', 'update', 'system:scheduler');
+      expect(beginSpy).toHaveBeenCalledWith(1, 'web-app', 'update', 'system:scheduler', { deployedGenerationId: null });
       expect(mockRecheckStack).toHaveBeenCalledWith(1, 'web-app');
       expect(callOrder.indexOf('beginStack')).toBeLessThan(callOrder.indexOf('recheckStack'));
     } finally {

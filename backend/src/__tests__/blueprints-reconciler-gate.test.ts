@@ -125,6 +125,84 @@ describe('reconcileOne approval gate (real path)', () => {
         expect(DatabaseService.getInstance().listDeployments(bp.id)).toEqual([]);
     });
 
+    /** Approve `bp` for placement on `nodeId`, then sever that placement in
+     *  the canonical model so every auto-decision path sees it as tombstoned. */
+    async function seedSeveredPlacement(bpId: number, nodeId: number): Promise<void> {
+        const db = DatabaseService.getInstance().getDb();
+        const bp = DatabaseService.getInstance().getBlueprint(bpId)!;
+        db.prepare(
+            `UPDATE blueprints SET approval_status = 'approved',
+                approved_intent_fingerprint = ?,
+                approved_blast_json = ?
+             WHERE id = ?`,
+        ).run(
+            intentFingerprint(bp),
+            serializeApprovedBlast([{ nodeId, outcome: 'place' as const }]),
+            bpId,
+        );
+
+        const { migrateInlineBlueprints } = await import('../services/gitops/migrate');
+        const { GitOpsStore, emptyTargetRow } = await import('../services/gitops/store');
+        migrateInlineBlueprints();
+        const gitopsApp = GitOpsStore.getInstance().getLiveBlueprintApplication(bpId)!;
+        GitOpsStore.getInstance().upsertTarget({
+            ...emptyTargetRow(gitopsApp.id, nodeId, Date.now()),
+            target_status: 'tombstoned',
+        });
+    }
+
+    function seedDeployment(bpId: number, nodeId: number, status: string, appliedRevision: number | null): void {
+        DatabaseService.getInstance().getDb().prepare(
+            `INSERT INTO blueprint_deployments (blueprint_id, node_id, status, applied_revision, last_deployed_at)
+             VALUES (?, ?, ?, ?, ?)`,
+        ).run(bpId, nodeId, status, appliedRevision, Date.now());
+    }
+
+    it('does not auto-place onto a tombstoned target', async () => {
+        // A withdraw (or node delete) severs the placement in the model. The
+        // tick must treat that as authoritative instead of resurrecting the
+        // workload behind the projection's back; only an explicit deploy
+        // re-opens the placement.
+        const node = seedNode();
+        const bp = createBp({ nodeIds: [node.id] });
+        await seedSeveredPlacement(bp.id, node.id);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+
+        expect(deploySpy).not.toHaveBeenCalled();
+    });
+
+    it('does not auto-redeploy a stale revision onto a tombstoned target', async () => {
+        // Severance also blocks the update path: an existing deployment that
+        // lagged behind the blueprint must wait for an explicit deploy, never
+        // catch up on its own while the model says the placement is gone.
+        const node = seedNode();
+        const bp = createBp({ nodeIds: [node.id] });
+        await seedSeveredPlacement(bp.id, node.id);
+        seedDeployment(bp.id, node.id, 'active', bp.revision - 1);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+
+        expect(deploySpy).not.toHaveBeenCalled();
+    });
+
+    it('does not redeploy a failed placement onto a tombstoned target', async () => {
+        // A failed run on a severed placement is evidence of the severance, not
+        // a retry request. Redeploying here would undo the withdraw the model
+        // already recorded.
+        const node = seedNode();
+        const bp = createBp({ nodeIds: [node.id] });
+        await seedSeveredPlacement(bp.id, node.id);
+        seedDeployment(bp.id, node.id, 'failed', bp.revision);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+
+        expect(deploySpy).not.toHaveBeenCalled();
+    });
+
     it('does not mutate when approval_status is approved but blast JSON is malformed', async () => {
         const node = seedNode();
         const bp = createBp({ nodeIds: [node.id] });

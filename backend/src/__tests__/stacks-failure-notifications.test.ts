@@ -142,10 +142,10 @@ afterAll(() => {
 });
 
 beforeEach(() => {
-  mockDeployStack.mockReset().mockResolvedValue({ recoveryId: null });
+  mockDeployStack.mockReset().mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
   mockRunCommand.mockReset();
   mockRunDown.mockReset();
-  mockUpdateStack.mockReset().mockResolvedValue({ recoveryId: null });
+  mockUpdateStack.mockReset().mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
   mockGetContainersByStack.mockReset();
   mockRestartContainer.mockReset();
   mockStopContainer.mockReset();
@@ -234,7 +234,7 @@ describe('deploy_failure notification on /deploy error', () => {
   });
 
   it('uses trusted proxy tier headers for remote atomic deploys', async () => {
-    mockDeployStack.mockResolvedValue({ recoveryId: null });
+    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
     const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
 
     const res = await request(app)
@@ -260,18 +260,18 @@ describe('health gate begin call sites', () => {
   });
 
   it('begins a gate after a manual deploy and returns its id', async () => {
-    mockDeployStack.mockResolvedValue({ recoveryId: null });
+    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
     const res = await request(app)
       .post('/api/stacks/myapp/deploy')
       .set('Cookie', authCookie)
       .send({ skip_scan: true });
     expect(res.status).toBe(200);
-    expect(beginSpy).toHaveBeenCalledWith(expect.any(Number), 'myapp', 'deploy', 'testadmin');
+    expect(beginSpy).toHaveBeenCalledWith(expect.any(Number), 'myapp', 'deploy', 'testadmin', { deployedGenerationId: null });
     expect(res.body.healthGateId).toBe('gate-123');
   });
 
   it('links the deploy recovery generation to the observing gate', async () => {
-    mockDeployStack.mockResolvedValue({ recoveryId: 'rec-deploy' });
+    mockDeployStack.mockResolvedValue({ deployedGenerationId: null, recoveryId: 'rec-deploy' });
     const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
     const linkSpy = vi.spyOn(StackUpdateRecoveryService.getInstance(), 'linkGateOrRetain');
     const res = await request(app)
@@ -284,25 +284,25 @@ describe('health gate begin call sites', () => {
   });
 
   it('begins a gate after a manual update and returns its id', async () => {
-    mockUpdateStack.mockResolvedValue({ recoveryId: null });
+    mockUpdateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
     const res = await request(app)
       .post('/api/stacks/myapp/update')
       .set('Cookie', authCookie)
       .send({ skip_scan: true });
     expect(res.status).toBe(200);
-    expect(beginSpy).toHaveBeenCalledWith(expect.any(Number), 'myapp', 'update', 'testadmin');
+    expect(beginSpy).toHaveBeenCalledWith(expect.any(Number), 'myapp', 'update', 'testadmin', { deployedGenerationId: null });
     expect(res.body.healthGateId).toBe('gate-123');
   });
 
   it('begins a gate per stack in a bulk update and carries ids in the results', async () => {
-    mockUpdateStack.mockResolvedValue({ recoveryId: null });
+    mockUpdateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
     const res = await request(app)
       .post('/api/stacks/bulk')
       .set('Cookie', authCookie)
       .send({ action: 'update', stackNames: ['myapp', 'webapp'] });
     expect(res.status).toBe(200);
-    expect(beginSpy).toHaveBeenCalledWith(expect.any(Number), 'myapp', 'update', 'testadmin');
-    expect(beginSpy).toHaveBeenCalledWith(expect.any(Number), 'webapp', 'update', 'testadmin');
+    expect(beginSpy).toHaveBeenCalledWith(expect.any(Number), 'myapp', 'update', 'testadmin', { deployedGenerationId: null });
+    expect(beginSpy).toHaveBeenCalledWith(expect.any(Number), 'webapp', 'update', 'testadmin', { deployedGenerationId: null });
     const items = res.body.results as Array<{ stackName: string; ok: boolean; healthGateId?: string | null }>;
     expect(items).toHaveLength(2);
     for (const item of items) {
@@ -318,7 +318,7 @@ describe('health gate begin call sites', () => {
   });
 
   it('never begins a gate for the rollback recovery path', async () => {
-    mockDeployStack.mockResolvedValue({ recoveryId: null });
+    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
     const res = await request(app)
       .post('/api/stacks/myapp/rollback')
       .set('Cookie', authCookie);
@@ -416,7 +416,7 @@ describe('failure classification on deploy/update error responses', () => {
 
 describe('post-deploy scan opt-out', () => {
   it('does not trigger a post-deploy scan when skip_scan is true', async () => {
-    mockDeployStack.mockResolvedValue({ recoveryId: null });
+    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
 
     const res = await request(app)
       .post('/api/stacks/myapp/deploy')
@@ -530,7 +530,7 @@ describe('deploy_failure notification on /update error', () => {
   });
 
   it('uses trusted proxy tier headers for remote atomic updates', async () => {
-    mockUpdateStack.mockResolvedValue({ recoveryId: null });
+    mockUpdateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
     const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
 
     const res = await request(app)

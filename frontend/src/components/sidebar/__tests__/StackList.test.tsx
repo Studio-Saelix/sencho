@@ -1,6 +1,7 @@
 import type React from 'react';
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { SOURCE_STATE } from '@/lib/gitopsState';
 import { StackList } from '../StackList';
 import { Command } from '@/components/ui/command';
 import { isStacksListSettled, isStacksListLoading } from '../stacksLoadUi';
@@ -198,5 +199,29 @@ describe('StackList hydration display', () => {
     );
     const row = screen.getByTestId('stack-row');
     expect(row.textContent).toContain('UP');
+  });
+
+  it('passes a waiting Git state through to the row it belongs to', async () => {
+    render(
+      <Command shouldFilter={false}>
+        <StackList
+          {...baseProps({
+            stacksLoadStatus: 'success',
+            files: ['web.yml', 'api.yml'],
+            stackStatuses: { 'web.yml': 'running', 'api.yml': 'running' },
+            // Keyed by the API's stack_name, read here by the sidebar's file key.
+            gitSourcePendingMap: { 'web.yml': 'source_conflict_blocker' },
+            buildMenuCtx: () => minimalCtx as never,
+          })}
+        />
+      </Command>,
+    );
+    const indicators = screen.getAllByTestId('stack-trailing-git-pending');
+    expect(indicators).toHaveLength(1);
+    // The state has to survive the trip, not just the fact that one is waiting.
+    fireEvent.pointerMove(indicators[0]);
+    expect(
+      (await screen.findAllByText(SOURCE_STATE.source_conflict_blocker.line)).length,
+    ).toBeGreaterThan(0);
   });
 });

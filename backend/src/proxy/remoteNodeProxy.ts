@@ -1,5 +1,18 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
+import type { OnProxyEvent } from 'http-proxy-middleware';
+import {
+  IDENTITY_PROXY_TIMEOUT_MS,
+  isIdentityFailure,
+  filterRemoteIdentityPayload,
+  handleIdentityResponse,
+  hubNodeIdFor,
+  isGitOpsIdentityJsonRoute,
+  prepareIdentityQuery,
+  rewriteIdentityPayload,
+  stripConditionalRequestHeaders,
+} from './gitopsIdentityProxy';
+import { satisfiesGitOpsRead } from '../services/gitops/readAuth';
 import { NodeRegistry } from '../services/NodeRegistry';
 import {
   PROXY_TIER_HEADER,
@@ -109,174 +122,251 @@ function finalizeProxyTiming(req: Request, outcome: ProxyTimingOutcome): void {
  * Per-request target resolution is handled via the `router` option.
  */
 export function createRemoteProxyMiddleware(): RequestHandler {
-  const proxy = createProxyMiddleware<Request, Response>({
+  // Shared by both hops. The identity hop replaces only `proxyRes`, so
+  // credential stripping, role and tier assertion, and error handling stay
+  // identical however a request is forwarded.
+  const sharedOn: OnProxyEvent<Request, Response> = {
+    proxyReq: (proxyReq, req) => {
+      // Strip headers that must not reach the remote instance:
+      // - x-node-id: remote Sencho treats all requests as local
+      // - cookie: the browser's sencho_token is signed with THIS instance's JWT secret;
+      //   the remote would try to verify it with its own secret and return 401.
+      //   Authentication is handled exclusively via the Bearer token below.
+      proxyReq.removeHeader('x-node-id');
+      proxyReq.removeHeader('cookie');
+      // Pilot-agent targets carry an empty token; see NodeRegistry.getProxyTarget.
+      if (req.proxyTarget?.apiToken) {
+        proxyReq.setHeader('Authorization', `Bearer ${req.proxyTarget.apiToken}`);
+      }
+      // Distributed License Enforcement: assert the main instance's license
+      // tier to the remote node so tier-gated routes honor the main's
+      // license instead of the node's local (likely Community) tier. The
+      // remote's authMiddleware only trusts these headers when the request
+      // carries a valid node_proxy JWT. The cached snapshot here invalidates
+      // on activate / deactivate / validate so the headers track license
+      // state changes within one proxy call.
+      const headers = LicenseService.getInstance().getProxyHeaders();
+      proxyReq.setHeader(PROXY_TIER_HEADER, headers.tier);
+      // Forward the signed-in user's role so the remote enforces their RBAC
+      // rather than treating every proxied request as admin. Strip first so a
+      // browser/API client cannot smuggle the header through the gateway, then
+      // re-set from the authenticated session (authGate runs before this proxy,
+      // so req.user is always resolved here).
+      proxyReq.removeHeader(PROXY_ROLE_HEADER);
+      if (req.proxyElevatedRole) {
+        proxyReq.setHeader(PROXY_ROLE_HEADER, req.proxyElevatedRole);
+      } else if (req.user?.role) {
+        proxyReq.setHeader(PROXY_ROLE_HEADER, req.user.role);
+      }
+      // Deploy provenance: always strip client-supplied values, then set
+      // interactive manual + authenticated username for proxied browser/API
+      // deploys. Background machine callers do not go through this gateway
+      // with browser credentials; they set headers on direct machine HTTP.
+      proxyReq.removeHeader(PROXY_DEPLOY_SOURCE_HEADER);
+      proxyReq.removeHeader(PROXY_DEPLOY_ACTOR_HEADER);
+      proxyReq.setHeader(PROXY_DEPLOY_SOURCE_HEADER, 'manual');
+      if (req.user?.username) {
+        proxyReq.setHeader(PROXY_DEPLOY_ACTOR_HEADER, req.user.username);
+      }
+      // Scoped stack evidence: always strip client-supplied values, then
+      // attach hub-built evidence when the gate stashed elevation for this hop.
+      proxyReq.removeHeader(PROXY_SCOPED_STACK_NAME_HEADER);
+      proxyReq.removeHeader(PROXY_SCOPED_STACK_ACTIONS_HEADER);
+      if (req.proxyScopedStackEvidence) {
+        proxyReq.setHeader(PROXY_SCOPED_STACK_NAME_HEADER, req.proxyScopedStackEvidence.stackName);
+        proxyReq.setHeader(
+          PROXY_SCOPED_STACK_ACTIONS_HEADER,
+          formatScopedStackActionsHeader(req.proxyScopedStackEvidence.actions),
+        );
+      }
+      // Strip the ?nodeId= query param so the remote's nodeContextMiddleware
+      // doesn't reject the request with 404 ("Node X not found") - the remote
+      // has no record of the gateway's node IDs and should treat the request
+      // as local. This affects endpoints like EventSource /api/containers/:id/logs
+      // that pass nodeId as a query param rather than the x-node-id header.
+      if (req.gitopsIdentity !== undefined) {
+        // The identity hop already decided this query, including whether the
+        // remote is being asked to filter to its own node. Apply it whole so
+        // the generic strip below cannot undo that decision.
+        const [pathname] = proxyReq.path.split('?');
+        proxyReq.path = pathname + (req.gitopsIdentity.query ? `?${req.gitopsIdentity.query}` : '');
+        // A remote answering a conditional request with 304 would bypass the
+        // hub's rewrite and per-row filtering entirely, so the client is never
+        // allowed to ask the remote to revalidate. Identity-hop only: the
+        // streaming forwards keep client conditionals, which optimistic-
+        // concurrency file writes depend on.
+        stripConditionalRequestHeaders(proxyReq);
+      } else if (proxyReq.path.includes('nodeId=')) {
+        const [pathname, qs] = proxyReq.path.split('?');
+        const params = new URLSearchParams(qs || '');
+        params.delete('nodeId');
+        // Hub-synthesized only; a caller must never smuggle one to a remote.
+        params.delete('gitopsLocalTarget');
+        const newQs = params.toString();
+        proxyReq.path = pathname + (newQs ? `?${newQs}` : '');
+      }
+      // Body forwarding: conditionalJsonParser skips parsing for remote
+      // requests (see middleware/jsonParser.ts), so req's raw stream is
+      // usually intact and http-proxy's req.pipe(proxyReq) forwards it.
+      // When a gate must inspect JSON (POST /alerts), we buffer into
+      // req.rawBody first; rewrite that buffer here because the stream is
+      // already consumed.
+      if (req.rawBody) {
+        proxyReq.removeHeader('Transfer-Encoding');
+        proxyReq.removeHeader('Content-Length');
+        if (!proxyReq.getHeader('Content-Type')) {
+          proxyReq.setHeader('Content-Type', 'application/json');
+        }
+        proxyReq.setHeader('Content-Length', req.rawBody.length);
+        proxyReq.write(req.rawBody);
+      }
+    },
+    proxyRes: (proxyRes, req) => {
+      // Mark every response forwarded from a remote node with a sentinel
+      // header. The frontend (apiFetch / fetchForNode) checks this before
+      // firing the global 'sencho-unauthorized' event: a 401 from a remote
+      // means the stored api_token for that node is invalid, not that the
+      // user's own session expired. Without this distinction, any node with
+      // a bad token causes an immediate logout loop.
+      proxyRes.headers['x-sencho-proxy'] = '1';
+      // Record upstream status and time-to-first-byte only; the log is
+      // finalized on the downstream finish/close so an abort mid-body is not
+      // mislabeled as success.
+      const timing = proxyTimings.get(req);
+      if (timing) {
+        timing.upstreamStatus = proxyRes.statusCode;
+        timing.ttfbMs = Date.now() - timing.startedAt;
+      }
+      // Hub fleet aggregation is local-only. A successful remote full-stack
+      // Apply or update-preview reconcile must drop the hub cache so the next
+      // fleet poll does not revive a verified-cleared card from a stale entry.
+      const status = proxyRes.statusCode ?? 0;
+      if (
+        req.method === 'POST'
+        && status >= 200
+        && status < 300
+        && (isFullStackUpdatePath(req.path) || isUpdatePreviewPath(req.path))
+      ) {
+        invalidateFleetUpdateCache();
+      }
+      // Successful remote stack DELETE: clear hub grants for this (node, stack)
+      // only. Failed / non-2xx responses must preserve assignments. Use the
+      // gate-stashed classification: pathRewrite mutates req.url before this
+      // callback, so re-running classifyStackApiPath(req.path) would miss.
+      if (req.method === 'DELETE' && status >= 200 && status < 300) {
+        const route = req.proxyNamedStackRoute;
+        if (route?.action === 'stack:delete') {
+          try {
+            DatabaseService.getInstance().deleteRoleAssignmentsByStack(req.nodeId, route.stackName);
+          } catch (cleanupErr) {
+            console.warn(
+              '[Proxy] Failed to clear role assignments after remote stack delete:',
+              getErrorMessage(cleanupErr, 'unknown'),
+            );
+          }
+        }
+      }
+    },
+    error: (err, req, proxyRes) => {
+      // Finalize the hop timing with an error outcome before the existing
+      // 502 handling; the logged guard keeps the later finish/close a no-op.
+      finalizeProxyTiming(req, 'error');
+      console.error('[Proxy] Remote node error:', getErrorMessage(err, 'unknown'));
+      const path = req.originalUrl || req.url;
+      if (req.method === 'POST' && /^\/api\/stacks\/[^/]+\/(?:deploy|update|services\/[^/]+\/(?:update|restore))(?:\?|$)/.test(path)) {
+        try {
+          DatabaseService.getInstance().insertAuditLog({
+            timestamp: Date.now(),
+            username: req.user?.username ?? 'unknown',
+            method: req.method,
+            path,
+            status_code: 502,
+            node_id: req.nodeId,
+            ip_address: req.ip ?? '',
+            summary: `remote deploy proxy error: ${redactSensitiveText(getErrorMessage(err, 'unknown'))}`,
+          });
+        } catch (auditErr) {
+          console.warn('[Proxy] Failed to record remote deploy proxy error:', getErrorMessage(auditErr, 'unknown'));
+        }
+      }
+      // proxyRes can be either a ServerResponse (HTTP) or a raw Socket
+      // (WS/TCP errors). Only attempt to send an HTTP 502 if it is a
+      // proper ServerResponse with a headersSent flag; otherwise silently
+      // drop (the socket will be destroyed).
+      const res = proxyRes as { headersSent?: boolean; status?: (n: number) => { json: (b: unknown) => void } };
+      if (typeof res?.headersSent === 'boolean' && !res.headersSent && typeof res.status === 'function') {
+        res.status(502).json({
+          error: 'Remote node is unreachable. Check the API URL and ensure Sencho is running on that host.',
+        });
+      }
+    },
+};
+
+  const baseOptions = {
     target: 'http://localhost:0', // placeholder - overridden per-request by router
     changeOrigin: true,
-    router: (req) => req.proxyTarget?.apiUrl.replace(/\/$/, ''),
+    router: (req: Request) => req.proxyTarget?.apiUrl.replace(/\/$/, ''),
     // When mounted at app.use('/api/', ...), Express strips the '/api/' prefix from
     // req.url before the middleware sees it. Re-add it so the remote Sencho instance
     // receives the full path (e.g. '/stats' becomes '/api/stats').
-    pathRewrite: (path) => '/api' + path,
+    pathRewrite: (path: string) => '/api' + path,
+  };
+
+  const proxy = createProxyMiddleware<Request, Response>({ ...baseOptions, on: sharedOn });
+
+  /**
+   * The identity hop: buffers the response so node ids inside it can be
+   * corrected to this hub's numbering before the client sees them.
+   *
+   * Separate from the streaming hop rather than a mode of it, because
+   * buffering is exactly what the streaming hop must never do. Logs, event
+   * streams, and downloads keep flowing through that one untouched.
+   */
+  const identityProxy = createProxyMiddleware<Request, Response>({
+    ...baseOptions,
+    selfHandleResponse: true,
+    // Bounded so a remote that sends headers and then stalls cannot pin the
+    // buffered body and both sockets indefinitely. No pathFilter: the
+    // dispatcher already gated the route, and a second predicate derived from
+    // a normalized pathname could disagree and hand a remote request to a
+    // local handler.
+    proxyTimeout: IDENTITY_PROXY_TIMEOUT_MS,
     on: {
-      proxyReq: (proxyReq, req) => {
-        // Strip headers that must not reach the remote instance:
-        // - x-node-id: remote Sencho treats all requests as local
-        // - cookie: the browser's sencho_token is signed with THIS instance's JWT secret;
-        //   the remote would try to verify it with its own secret and return 401.
-        //   Authentication is handled exclusively via the Bearer token below.
-        proxyReq.removeHeader('x-node-id');
-        proxyReq.removeHeader('cookie');
-        // Pilot-agent targets carry an empty token; see NodeRegistry.getProxyTarget.
-        if (req.proxyTarget?.apiToken) {
-          proxyReq.setHeader('Authorization', `Bearer ${req.proxyTarget.apiToken}`);
-        }
-        // Distributed License Enforcement: assert the main instance's license
-        // tier to the remote node so tier-gated routes honor the main's
-        // license instead of the node's local (likely Community) tier. The
-        // remote's authMiddleware only trusts these headers when the request
-        // carries a valid node_proxy JWT. The cached snapshot here invalidates
-        // on activate / deactivate / validate so the headers track license
-        // state changes within one proxy call.
-        const headers = LicenseService.getInstance().getProxyHeaders();
-        proxyReq.setHeader(PROXY_TIER_HEADER, headers.tier);
-        // Forward the signed-in user's role so the remote enforces their RBAC
-        // rather than treating every proxied request as admin. Strip first so a
-        // browser/API client cannot smuggle the header through the gateway, then
-        // re-set from the authenticated session (authGate runs before this proxy,
-        // so req.user is always resolved here).
-        proxyReq.removeHeader(PROXY_ROLE_HEADER);
-        if (req.proxyElevatedRole) {
-          proxyReq.setHeader(PROXY_ROLE_HEADER, req.proxyElevatedRole);
-        } else if (req.user?.role) {
-          proxyReq.setHeader(PROXY_ROLE_HEADER, req.user.role);
-        }
-        // Deploy provenance: always strip client-supplied values, then set
-        // interactive manual + authenticated username for proxied browser/API
-        // deploys. Background machine callers do not go through this gateway
-        // with browser credentials; they set headers on direct machine HTTP.
-        proxyReq.removeHeader(PROXY_DEPLOY_SOURCE_HEADER);
-        proxyReq.removeHeader(PROXY_DEPLOY_ACTOR_HEADER);
-        proxyReq.setHeader(PROXY_DEPLOY_SOURCE_HEADER, 'manual');
-        if (req.user?.username) {
-          proxyReq.setHeader(PROXY_DEPLOY_ACTOR_HEADER, req.user.username);
-        }
-        // Scoped stack evidence: always strip client-supplied values, then
-        // attach hub-built evidence when the gate stashed elevation for this hop.
-        proxyReq.removeHeader(PROXY_SCOPED_STACK_NAME_HEADER);
-        proxyReq.removeHeader(PROXY_SCOPED_STACK_ACTIONS_HEADER);
-        if (req.proxyScopedStackEvidence) {
-          proxyReq.setHeader(PROXY_SCOPED_STACK_NAME_HEADER, req.proxyScopedStackEvidence.stackName);
-          proxyReq.setHeader(
-            PROXY_SCOPED_STACK_ACTIONS_HEADER,
-            formatScopedStackActionsHeader(req.proxyScopedStackEvidence.actions),
-          );
-        }
-        // Strip the ?nodeId= query param so the remote's nodeContextMiddleware
-        // doesn't reject the request with 404 ("Node X not found") - the remote
-        // has no record of the gateway's node IDs and should treat the request
-        // as local. This affects endpoints like EventSource /api/containers/:id/logs
-        // that pass nodeId as a query param rather than the x-node-id header.
-        if (proxyReq.path.includes('nodeId=')) {
-          const [pathname, qs] = proxyReq.path.split('?');
-          const params = new URLSearchParams(qs || '');
-          params.delete('nodeId');
-          const newQs = params.toString();
-          proxyReq.path = pathname + (newQs ? `?${newQs}` : '');
-        }
-        // Body forwarding: conditionalJsonParser skips parsing for remote
-        // requests (see middleware/jsonParser.ts), so req's raw stream is
-        // usually intact and http-proxy's req.pipe(proxyReq) forwards it.
-        // When a gate must inspect JSON (POST /alerts), we buffer into
-        // req.rawBody first; rewrite that buffer here because the stream is
-        // already consumed.
-        if (req.rawBody) {
-          proxyReq.removeHeader('Transfer-Encoding');
-          proxyReq.removeHeader('Content-Length');
-          if (!proxyReq.getHeader('Content-Type')) {
-            proxyReq.setHeader('Content-Type', 'application/json');
-          }
-          proxyReq.setHeader('Content-Length', req.rawBody.length);
-          proxyReq.write(req.rawBody);
-        }
-      },
-      proxyRes: (proxyRes, req) => {
-        // Mark every response forwarded from a remote node with a sentinel
-        // header. The frontend (apiFetch / fetchForNode) checks this before
-        // firing the global 'sencho-unauthorized' event: a 401 from a remote
-        // means the stored api_token for that node is invalid, not that the
-        // user's own session expired. Without this distinction, any node with
-        // a bad token causes an immediate logout loop.
+      ...sharedOn,
+      proxyRes: (proxyRes, req, res) => {
         proxyRes.headers['x-sencho-proxy'] = '1';
-        // Record upstream status and time-to-first-byte only; the log is
-        // finalized on the downstream finish/close so an abort mid-body is not
-        // mislabeled as success.
         const timing = proxyTimings.get(req);
         if (timing) {
           timing.upstreamStatus = proxyRes.statusCode;
           timing.ttfbMs = Date.now() - timing.startedAt;
         }
-        // Hub fleet aggregation is local-only. A successful remote full-stack
-        // Apply or update-preview reconcile must drop the hub cache so the next
-        // fleet poll does not revive a verified-cleared card from a stale entry.
-        const status = proxyRes.statusCode ?? 0;
-        if (
-          req.method === 'POST'
-          && status >= 200
-          && status < 300
-          && (isFullStackUpdatePath(req.path) || isUpdatePreviewPath(req.path))
-        ) {
-          invalidateFleetUpdateCache();
-        }
-        // Successful remote stack DELETE: clear hub grants for this (node, stack)
-        // only. Failed / non-2xx responses must preserve assignments. Use the
-        // gate-stashed classification: pathRewrite mutates req.url before this
-        // callback, so re-running classifyStackApiPath(req.path) would miss.
-        if (req.method === 'DELETE' && status >= 200 && status < 300) {
-          const route = req.proxyNamedStackRoute;
-          if (route?.action === 'stack:delete') {
-            try {
-              DatabaseService.getInstance().deleteRoleAssignmentsByStack(req.nodeId, route.stackName);
-            } catch (cleanupErr) {
-              console.warn(
-                '[Proxy] Failed to clear role assignments after remote stack delete:',
-                getErrorMessage(cleanupErr, 'unknown'),
-              );
-            }
-          }
-        }
-      },
-      error: (err, req, proxyRes) => {
-        // Finalize the hop timing with an error outcome before the existing
-        // 502 handling; the logged guard keeps the later finish/close a no-op.
-        finalizeProxyTiming(req, 'error');
-        console.error('[Proxy] Remote node error:', getErrorMessage(err, 'unknown'));
-        const path = req.originalUrl || req.url;
-        if (req.method === 'POST' && /^\/api\/stacks\/[^/]+\/(?:deploy|update|services\/[^/]+\/(?:update|restore))(?:\?|$)/.test(path)) {
-          try {
-            DatabaseService.getInstance().insertAuditLog({
-              timestamp: Date.now(),
-              username: req.user?.username ?? 'unknown',
-              method: req.method,
-              path,
-              status_code: 502,
-              node_id: req.nodeId,
-              ip_address: req.ip ?? '',
-              summary: `remote deploy proxy error: ${redactSensitiveText(getErrorMessage(err, 'unknown'))}`,
-            });
-          } catch (auditErr) {
-            console.warn('[Proxy] Failed to record remote deploy proxy error:', getErrorMessage(auditErr, 'unknown'));
-          }
-        }
-        // proxyRes can be either a ServerResponse (HTTP) or a raw Socket
-        // (WS/TCP errors). Only attempt to send an HTTP 502 if it is a
-        // proper ServerResponse with a headersSent flag; otherwise silently
-        // drop (the socket will be destroyed).
-        const res = proxyRes as { headersSent?: boolean; status?: (n: number) => { json: (b: unknown) => void } };
-        if (typeof res?.headersSent === 'boolean' && !res.headersSent && typeof res.status === 'function') {
-          res.status(502).json({
-            error: 'Remote node is unreachable. Check the API URL and ensure Sencho is running on that host.',
-          });
-        }
+        const nodeId = hubNodeIdFor(req);
+        handleIdentityResponse(proxyRes, res, {
+          transform: (payload) => {
+            // Without an id there is nothing to rewrite the remote's numbering
+            // to, and passing its ids through unchanged is the exact defect
+            // this hop exists to prevent. Refuse rather than answer with
+            // identities from another instance's namespace.
+            if (nodeId === undefined) throw new Error('proxied request has no node id to rewrite identities to');
+            const identity = req.gitopsIdentity;
+            if (identity === undefined) throw new Error('identity hop ran without a stashed pre-rewrite path');
+            // Correct identities first so the collection filter classifies
+            // against this hub's node ids rather than the remote's.
+            rewriteIdentityPayload(payload, nodeId);
+            return filterRemoteIdentityPayload(
+              // No fallback to `req.path`: pathRewrite has already prefixed
+              // `/api` by now, so falling back would match no collection and
+              // ship every remote row unfiltered under a 200.
+              identity.preRewritePath,
+              payload,
+              (requirement) => satisfiesGitOpsRead(req, requirement),
+              nodeId,
+            );
+          },
+          finalizeTiming: (kind) => {
+            finalizeProxyTiming(req, isIdentityFailure(kind) ? 'error' : 'ok');
+          },
+        });
       },
     },
   });
@@ -610,6 +700,27 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       }
 
       req.proxyTarget = target;
+
+      // Identity routes are reworked before the hop, not during it: a request
+      // naming a node this instance cannot answer for is refused here rather
+      // than forwarded, so the remote never answers about itself a question
+      // that was asked about somebody else.
+      if (isGitOpsIdentityJsonRoute(req.path, req.method)) {
+        const prepared = prepareIdentityQuery(
+          new URLSearchParams(req.url.split('?')[1] ?? ''),
+          req.path,
+          hubNodeIdFor(req),
+        );
+        if (prepared.kind === 'refuse') {
+          res.status(400).json({ error: prepared.error, code: 'gitops_history_node_mismatch' });
+          return;
+        }
+        req.gitopsIdentity = { query: prepared.search.toString(), preRewritePath: req.path };
+        beginProxyTiming(req, res);
+        identityProxy(req, res, next);
+        return;
+      }
+
       beginProxyTiming(req, res);
       proxy(req, res, next);
     };

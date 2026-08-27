@@ -150,7 +150,7 @@ describe('OrchestratorResult to HTTP mapping', () => {
     const res = await request(app)
       .post('/api/stacks/web/services/app/restore')
       .set('Cookie', adminCookie)
-      .send({ recoveryId: 'rec-2' });
+      .send({ deployedGenerationId: null, recoveryId: 'rec-2' });
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ serviceName: 'app', healthGateId: 'hg-2', recoveryId: 'rec-2' });
     expect(mockExecute).toHaveBeenCalledTimes(1);

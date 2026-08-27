@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Pencil, Pin, Play, Power, Trash2 } from 'lucide-react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
+import { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
+import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
+import { absentFault, liveCaveats } from '@/lib/gitopsState';
 import { Modal, ModalDestructiveHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -82,6 +85,14 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
     if (!open) return null;
 
     const blueprint = summary?.blueprint;
+    // A Blueprint with no live application row is a fact nothing else in the
+    // product can express. Everything else a Blueprint projection carries is
+    // rollout surface, which is not this sheet's job.
+    const gitopsFaults = summary ? absentFault(summary.gitopsRevision) : [];
+    // Caveats are the exception to the note above: an approval that no longer
+    // covers what the Blueprint asks for is a fact about this Blueprint, not
+    // about a rollout, and nothing else on the sheet says it.
+    const gitopsCaveats = summary ? liveCaveats(summary.gitopsRevision) : [];
     const canApply = !!blueprint && (can ? can('stack:create') && can('stack:deploy') : canEdit);
     const canDeleteBlueprint = !!blueprint && (can ? can('stack:delete') : canEdit);
     const canDeployOnNode = (nodeId: number) => !!blueprint
@@ -297,6 +308,13 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                         {blueprint.description && (
                             <SheetSection title="Description" hideHeader>
                                 <p className="text-xs text-stat-subtitle">{blueprint.description}</p>
+                            </SheetSection>
+                        )}
+
+                        {(gitopsFaults.length > 0 || gitopsCaveats.length > 0) && (
+                            <SheetSection title="GitOps">
+                                {gitopsFaults.length > 0 && <GitOpsFaultCard message={gitopsFaults[0].message} />}
+                                {summary && <GitOpsCaveats revision={summary.gitopsRevision} />}
                             </SheetSection>
                         )}
 

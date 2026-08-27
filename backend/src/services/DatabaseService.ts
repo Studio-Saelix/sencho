@@ -20,6 +20,7 @@ import { sanitizeForLog } from '../utils/safeLog';
 import type { GitSourceManifestState } from '../types/gitProjectManifest';
 import type { RollbackOperationKind } from '../types/rollbackGeneration';
 import { collectImageIds, parseServicesJsonStrict } from './recoveryServicesJson';
+import { GITOPS_SCHEMA_SQL } from './gitops/schema';
 
 export type { SnapshotFileReadResult } from '../helpers/snapshotFileDecrypt';
 export type { RollbackOperationKind } from '../types/rollbackGeneration';
@@ -220,13 +221,13 @@ export interface StackExposureRow {
     computed_at: number;
 }
 
-/** One post-update health gate observation run. */
+/** One health-gate observation run, keyed by `trigger_action`. */
 export interface HealthGateRunRow {
     id: string;
     node_id: number;
     stack_name: string;
     /** Named trigger_action because TRIGGER is reserved in SQLite. */
-    trigger_action: 'update' | 'deploy' | 'service_update' | 'service_restore';
+    trigger_action: 'update' | 'deploy' | 'service_update' | 'service_restore' | 'recovery';
     status: 'observing' | 'passed' | 'failed' | 'unknown';
     reason: string | null;
     window_seconds: number;
@@ -239,6 +240,11 @@ export interface HealthGateRunRow {
     target_scope: 'stack' | 'service';
     service_name: string | null;
     failure_source: 'primary' | 'collateral' | null;
+    /**
+     * Reserved for the GitOps deploy path: the generation live when this run
+     * started. No writer populates it yet, so it is currently always null.
+     */
+    deployed_generation_id?: string | null;
 }
 
 /** Pre-update image snapshot enabling a manual per-service restore after a service-scoped update. */
@@ -269,6 +275,9 @@ export interface StackUpdateRecoveryGenerationRow {
     /** Set when an operator manually released rollback protection early (see releaseStackUpdateRecoveryGeneration). */
     released_at: number | null;
     released_by: string | null;
+    gitops_generation_id?: string | null;
+    gitops_artifact_set_id?: string | null;
+    gitops_source_acceptance_ref?: string | null;
 }
 
 /** Durable cleanup tombstone for stack/node deletion artifact sweep. */
@@ -1161,6 +1170,7 @@ export class DatabaseService {
         this.migrateGitSourceMultiFile();
         this.migrateGitSourceManifest();
         this.migrateGitSourceChangePlan();
+        this.migrateGitOpsRecoveryColumns();
         this.migrateNodeUpdateSkips();
         this.migrateStackAlertServiceScope();
 
@@ -1777,7 +1787,7 @@ export class DatabaseService {
         id TEXT PRIMARY KEY,
         node_id INTEGER NOT NULL,
         stack_name TEXT NOT NULL,
-        trigger_action TEXT NOT NULL CHECK (trigger_action IN ('update','deploy','service_update','service_restore')),
+        trigger_action TEXT NOT NULL CHECK (trigger_action IN ('update','deploy','service_update','service_restore','recovery')),
         status TEXT NOT NULL CHECK (status IN ('observing','passed','failed','unknown')),
         reason TEXT,
         window_seconds INTEGER NOT NULL,
@@ -1905,6 +1915,8 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_secret_pushes_secret_version ON secret_pushes(secret_id, version);
       CREATE INDEX IF NOT EXISTS idx_secret_pushes_node ON secret_pushes(node_id, stack_name);
     `);
+
+        this.db.exec(GITOPS_SCHEMA_SQL);
 
         // Apply migrations safely (ignore if columns already exist)
         const maybeAddCol = (table: string, col: string, def: string) => {
@@ -2098,6 +2110,7 @@ export class DatabaseService {
         // behave); admins who want a strict absolute session ceiling can turn
         // it off in Settings > Users.
         stmt.run('session_sliding_refresh', '1');
+stmt.run('gitops_schema_version', '1');
         // SSO role sync defaults off: admin-set roles persist across SSO sign-ins;
         // operators who want IdP group membership to drive roles opt in via Settings > SSO.
         stmt.run('sso_role_sync', '0');
@@ -2180,10 +2193,11 @@ export class DatabaseService {
     }
 
     /**
-     * Rebuild health_gate_runs when the installed CHECK still only allows
-     * update|deploy or target/failure columns are missing. Idempotent and
-     * restart-safe: drops a stale temporary table, then rebuilds in one
-     * better-sqlite3 transaction so an interrupted startup cannot leave
+     * Rebuild health_gate_runs when the CHECK lacks service_update,
+     * service_restore, or recovery, or when target/failure columns are missing.
+     * After the CHECK is current, ensure deployed_generation_id exists.
+     * Idempotent and restart-safe: drops a stale temporary table, then rebuilds
+     * in one better-sqlite3 transaction so an interrupted startup cannot leave
      * CREATE TABLE health_gate_runs_new blocking the next boot.
      */
     private migrateHealthGateTargetSchema(): void {
@@ -2195,7 +2209,11 @@ export class DatabaseService {
         const hasTarget = colNames.has('target_scope');
         const hasFailure = colNames.has('failure_source');
         const hasWideTrigger = tableSql.includes('service_update') && tableSql.includes('service_restore');
-        if (hasTarget && hasFailure && hasWideTrigger) return;
+        const hasRecoveryTrigger = tableSql.includes("'recovery'");
+        if (hasTarget && hasFailure && hasWideTrigger && hasRecoveryTrigger) {
+            this.ensureHealthGateDeployedGenerationColumn();
+            return;
+        }
 
         // A previous crash between CREATE and RENAME leaves this temp table behind.
         this.db.exec('DROP TABLE IF EXISTS health_gate_runs_new');
@@ -2203,6 +2221,7 @@ export class DatabaseService {
         const targetExpr = hasTarget ? 'target_scope' : "'stack'";
         const serviceExpr = colNames.has('service_name') ? 'service_name' : 'NULL';
         const failureExpr = hasFailure ? 'failure_source' : 'NULL';
+        const deployedExpr = colNames.has('deployed_generation_id') ? 'deployed_generation_id' : 'NULL';
 
         this.db.transaction(() => {
             this.db.exec(`
@@ -2210,7 +2229,7 @@ export class DatabaseService {
                   id TEXT PRIMARY KEY,
                   node_id INTEGER NOT NULL,
                   stack_name TEXT NOT NULL,
-                  trigger_action TEXT NOT NULL CHECK (trigger_action IN ('update','deploy','service_update','service_restore')),
+                  trigger_action TEXT NOT NULL CHECK (trigger_action IN ('update','deploy','service_update','service_restore','recovery')),
                   status TEXT NOT NULL CHECK (status IN ('observing','passed','failed','unknown')),
                   reason TEXT,
                   window_seconds INTEGER NOT NULL,
@@ -2220,23 +2239,36 @@ export class DatabaseService {
                   created_by TEXT,
                   target_scope TEXT NOT NULL DEFAULT 'stack' CHECK (target_scope IN ('stack','service')),
                   service_name TEXT,
-                  failure_source TEXT CHECK (failure_source IS NULL OR failure_source IN ('primary','collateral'))
+                  failure_source TEXT CHECK (failure_source IS NULL OR failure_source IN ('primary','collateral')),
+                  deployed_generation_id TEXT NULL
                 );
                 INSERT INTO health_gate_runs_new (
                   id, node_id, stack_name, trigger_action, status, reason, window_seconds,
-                  containers_json, started_at, ended_at, created_by, target_scope, service_name, failure_source
+                  containers_json, started_at, ended_at, created_by, target_scope, service_name,
+                  failure_source, deployed_generation_id
                 )
                 SELECT
                   id, node_id, stack_name, trigger_action, status, reason, window_seconds,
                   containers_json, started_at, ended_at, created_by,
-                  ${targetExpr}, ${serviceExpr}, ${failureExpr}
+                  ${targetExpr}, ${serviceExpr}, ${failureExpr}, ${deployedExpr}
                 FROM health_gate_runs;
                 DROP TABLE health_gate_runs;
                 ALTER TABLE health_gate_runs_new RENAME TO health_gate_runs;
                 CREATE INDEX IF NOT EXISTS idx_health_gate_runs_node_stack
                   ON health_gate_runs(node_id, stack_name, started_at);
+                CREATE INDEX IF NOT EXISTS idx_health_gate_runs_deployed_gen
+                  ON health_gate_runs(node_id, stack_name, deployed_generation_id);
             `);
         })();
+        this.ensureHealthGateDeployedGenerationColumn();
+    }
+
+    private ensureHealthGateDeployedGenerationColumn(): void {
+        this.tryAddColumn('health_gate_runs', 'deployed_generation_id', 'TEXT');
+        this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_health_gate_runs_deployed_gen
+              ON health_gate_runs(node_id, stack_name, deployed_generation_id);
+        `);
     }
 
     private migrateEncryptNodeTokens(): void {
@@ -2551,6 +2583,12 @@ export class DatabaseService {
         this.tryAddColumn('stack_git_sources', 'pending_plan_summary', 'TEXT');
         this.tryAddColumn('stack_git_sources', 'last_plan_fingerprint', 'TEXT');
         this.tryAddColumn('stack_git_sources', 'last_plan_outcome', 'TEXT');
+    }
+
+    private migrateGitOpsRecoveryColumns(): void {
+        this.tryAddColumn('stack_update_recovery_generations', 'gitops_generation_id', 'TEXT');
+        this.tryAddColumn('stack_update_recovery_generations', 'gitops_artifact_set_id', 'TEXT');
+        this.tryAddColumn('stack_update_recovery_generations', 'gitops_source_acceptance_ref', 'TEXT');
     }
 
     private migrateGitSourceMultiFile(): void {
@@ -4057,12 +4095,14 @@ export class DatabaseService {
         this.db.prepare(
             `INSERT INTO health_gate_runs
                (id, node_id, stack_name, trigger_action, status, reason, window_seconds, containers_json,
-                started_at, ended_at, created_by, target_scope, service_name, failure_source)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                started_at, ended_at, created_by, target_scope, service_name, failure_source,
+                deployed_generation_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
             run.id, run.node_id, run.stack_name, run.trigger_action, run.status, run.reason,
             run.window_seconds, run.containers_json, run.started_at, run.ended_at, run.created_by,
             run.target_scope, run.service_name, run.failure_source,
+            run.deployed_generation_id ?? null,
         );
         // Bounded history: keep only the 10 most recent runs per stack.
         this.db.prepare(
@@ -4102,11 +4142,17 @@ export class DatabaseService {
     }
 
     /** Finalize runs left observing by a previous process (startup sweep). */
-    public markInterruptedHealthGateRuns(reason: string, endedAt: number): number {
-        const result = this.db.prepare(
-            "UPDATE health_gate_runs SET status = 'unknown', reason = ?, ended_at = ? WHERE status = 'observing'"
-        ).run(reason, endedAt);
-        return result.changes;
+    /**
+     * Runs a previous process left observing.
+     *
+     * Returned as rows rather than swept with one UPDATE because each has to be
+     * finalized individually: the verdict is what the revision state listens
+     * for, and a bulk update moves the rows while telling the model nothing.
+     */
+    public listObservingHealthGateRuns(): HealthGateRunRow[] {
+        return this.db.prepare(
+            "SELECT * FROM health_gate_runs WHERE status = 'observing'"
+        ).all() as HealthGateRunRow[];
     }
 
     // --- Service Update Recovery ---
@@ -4237,14 +4283,17 @@ export class DatabaseService {
                 id, node_id, stack_name, status, phase, is_current, backup_slot_id, content_path,
                 operation_kind, override_path, services_json, health_gate_id, gate_retain_until,
                 artifact_expires_at, operation_lease_expires_at, created_at, updated_at,
-                created_by, artifacts_retired
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                created_by, artifacts_retired, gitops_generation_id, gitops_artifact_set_id,
+                gitops_source_acceptance_ref
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
             row.id, row.node_id, row.stack_name, row.status, row.phase, row.is_current,
             row.backup_slot_id, row.content_path ?? null, row.operation_kind ?? null,
             row.override_path, row.services_json, row.health_gate_id,
             row.gate_retain_until, row.artifact_expires_at, row.operation_lease_expires_at,
             row.created_at, row.updated_at, row.created_by, row.artifacts_retired ?? 0,
+            row.gitops_generation_id ?? null, row.gitops_artifact_set_id ?? null,
+            row.gitops_source_acceptance_ref ?? null,
         );
     }
 

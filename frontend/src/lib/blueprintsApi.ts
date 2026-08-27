@@ -1,4 +1,5 @@
 import { apiFetch } from './api';
+import type { GitOpsRevisionCarrier, GitOpsRevisionsCarrier } from '@/types/gitops';
 
 export type DriftMode = 'observe' | 'suggest' | 'enforce';
 export type BlueprintClassification = 'stateless' | 'stateful' | 'unknown';
@@ -41,7 +42,7 @@ export interface Blueprint {
 
 export type EffectiveApproval = 'pending' | 'approved' | 'reapproval_required';
 
-export interface BlueprintListItem extends Blueprint {
+export interface BlueprintListItem extends Blueprint, GitOpsRevisionCarrier {
     deploymentCounts: Partial<Record<BlueprintDeploymentStatus, number>>;
     deploymentTotal: number;
     effectiveApproval?: EffectiveApproval;
@@ -60,12 +61,23 @@ export interface BlueprintDeployment {
     last_error: string | null;
 }
 
-export interface BlueprintSummary {
+/** Note the GitOps revision sits on the envelope, a sibling of `blueprint`, not inside it. */
+export interface BlueprintSummary extends GitOpsRevisionCarrier {
     blueprint: Blueprint;
     deployments: BlueprintDeployment[];
     statusCounts: Partial<Record<BlueprintDeploymentStatus, number>>;
     effectiveApproval?: EffectiveApproval;
 }
+
+/**
+ * Create, update and pin all answer with the Blueprint plus its revision.
+ *
+ * Declared and deliberately unread: every caller re-reads the catalog or the
+ * detail immediately afterwards and that read carries the same projection. The
+ * field is named here so the next reader does not take these for a bare
+ * Blueprint and quietly drop it.
+ */
+export type BlueprintMutationResult = Blueprint & GitOpsRevisionCarrier;
 
 export interface AnalyzerResult {
     classification: BlueprintClassification;
@@ -200,13 +212,13 @@ export interface CreateBlueprintInput {
     enabled?: boolean;
 }
 
-export async function createBlueprint(input: CreateBlueprintInput): Promise<Blueprint> {
+export async function createBlueprint(input: CreateBlueprintInput): Promise<BlueprintMutationResult> {
     const res = await apiFetch('/blueprints', {
         method: 'POST',
         body: JSON.stringify(input),
         localOnly: true,
     });
-    return expectJson<Blueprint>(res, 'Failed to create blueprint');
+    return expectJson<BlueprintMutationResult>(res, 'Failed to create blueprint');
 }
 
 export interface UpdateBlueprintInput {
@@ -218,13 +230,13 @@ export interface UpdateBlueprintInput {
     enabled?: boolean;
 }
 
-export async function updateBlueprint(id: number, input: UpdateBlueprintInput): Promise<Blueprint> {
+export async function updateBlueprint(id: number, input: UpdateBlueprintInput): Promise<BlueprintMutationResult> {
     const res = await apiFetch(`/blueprints/${id}`, {
         method: 'PUT',
         body: JSON.stringify(input),
         localOnly: true,
     });
-    return expectJson<Blueprint>(res, 'Failed to update blueprint');
+    return expectJson<BlueprintMutationResult>(res, 'Failed to update blueprint');
 }
 
 export async function deleteBlueprint(id: number): Promise<void> {
@@ -268,13 +280,13 @@ export async function applyBlueprint(
     return expectJson(res, 'Failed to apply blueprint');
 }
 
-export async function pinBlueprint(id: number, nodeId: number | null): Promise<Blueprint> {
+export async function pinBlueprint(id: number, nodeId: number | null): Promise<BlueprintMutationResult> {
     const res = await apiFetch(`/blueprints/${id}/pin`, {
         method: 'PUT',
         body: JSON.stringify({ nodeId }),
         localOnly: true,
     });
-    return expectJson<Blueprint>(res, 'Failed to update blueprint pin');
+    return expectJson<BlueprintMutationResult>(res, 'Failed to update blueprint pin');
 }
 
 export async function withdrawDeployment(
@@ -336,7 +348,10 @@ export async function getLabelsForNode(nodeId: number): Promise<string[]> {
     return data.labels;
 }
 
-export async function addNodeLabel(nodeId: number, label: string): Promise<{ nodeId: number; label: string }> {
+export async function addNodeLabel(
+    nodeId: number,
+    label: string,
+): Promise<{ nodeId: number; label: string } & GitOpsRevisionsCarrier> {
     const res = await apiFetch(`/node-labels/${nodeId}`, {
         method: 'POST',
         body: JSON.stringify({ label }),

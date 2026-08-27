@@ -48,6 +48,7 @@ import type { Node } from '@/context/NodeContext';
 import type { useAuth } from '@/context/AuthContext';
 import type { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 import type { EffectiveServiceSpec } from '@/types/effectiveServices';
+import type { GitSourcePendingMap } from '@/lib/gitopsState';
 import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
 
 export interface ContainerInfo {
@@ -142,7 +143,7 @@ export interface EditorViewProps {
     containersSyncStale?: boolean;
     onRetrySync?: () => void;
     backupInfo: { exists: boolean; timestamp: number | null };
-    gitSourcePendingMap: Record<string, boolean>;
+    gitSourcePendingMap: GitSourcePendingMap;
     notifications: NotificationItem[];
 
     // Editor mode
@@ -733,7 +734,7 @@ export function EditorView(props: EditorViewProps) {
                         content={content}
                         envContent={envContent}
                         selectedEnvFile={selectedEnvFile}
-                        gitSourcePending={Boolean(gitSourcePendingMap[stackName])}
+                        gitSourcePending={gitSourcePendingMap[stackName] ?? null}
                         onEditCompose={openComposeEditor}
                         onOpenFiles={canRead ? () => { setEditingCompose(true); setActiveTab('files'); } : undefined}
                         onOpenGitSource={() => setGitSourceOpen(true)}
