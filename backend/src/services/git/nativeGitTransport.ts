@@ -3,7 +3,12 @@ import { promises as fs, existsSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { ensureGitBinary, getGitExecPath } from './gitBinary';
-import { GIT_TOKEN_ENV_VAR, writeCredentialHelper } from './credentialHelper';
+import {
+    CREDENTIAL_HELPER_CONFIG_VALUE,
+    GIT_HELPER_PATH_ENV_VAR,
+    GIT_TOKEN_ENV_VAR,
+    writeCredentialHelper,
+} from './credentialHelper';
 import { isTransportFailure, type TransportFailure } from './errors';
 import type { FetchRequest, FetchResult, GitTransport, ResolveRequest } from './types';
 
@@ -68,36 +73,78 @@ function asTimeoutError<T extends Error>(err: T): T {
 
 /**
  * Kill the whole child tree. POSIX uses the process group; Windows taskkill.
- * Does not itself confirm termination: the caller learns that from the
- * child's own `close` event, which fires whether the process died from this
- * kill, a prior natural exit, or (via the fallback below) a second kill
- * attempt.
+ *
+ * Resolves when the kill OPERATION is finished, which on Windows means
+ * taskkill has itself exited. That matters because taskkill walks the tree in
+ * a separate process: the direct git child can close while taskkill is still
+ * terminating its descendants, so a caller that settled on the child's close
+ * alone could start deleting the workspace out from under processes that are
+ * still running in it. On POSIX the group signal is delivered synchronously,
+ * so there is nothing further to await.
+ *
+ * Never rejects: a kill that cannot be confirmed is reported through the
+ * fallback warning, and the caller's own confirmation timeout bounds the wait.
  */
-function killTree(child: ChildProcess | undefined): void {
-    if (!child?.pid) return;
+function killTree(child: ChildProcess | undefined): Promise<void> {
+    if (!child?.pid) return Promise.resolve();
     if (process.platform === 'win32') {
-        const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
-        // 'error' and 'close' can both fire for one spawn attempt; only the
-        // first should trigger the fallback so a single kill never falls back
-        // (or logs) twice.
-        let fellBack = false;
-        const fallBack = (why: string) => {
-            if (fellBack) return;
-            fellBack = true;
-            console.warn(`[GitSource:transport] taskkill ${why} for pid ${child.pid}; falling back to child.kill() (tree-kill guarantee no longer holds: descendants of ${child.pid} may still be running)`);
-            child.kill();
-        };
-        killer.on('error', (err) => fallBack(`failed to spawn (${err.message})`));
-        killer.on('close', (code) => {
-            if (code !== 0) fallBack(`exited ${code}`);
+        return new Promise<void>((resolve) => {
+            const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
+            // 'error' and 'close' can both fire for one spawn attempt; only the
+            // first should trigger the fallback so a single kill never falls back
+            // (or logs) twice.
+            let finished = false;
+            const finish = (why?: string) => {
+                if (finished) return;
+                finished = true;
+                if (why) {
+                    console.warn(`[GitSource:transport] taskkill ${why} for pid ${child.pid}; falling back to child.kill() (tree-kill guarantee no longer holds: descendants of ${child.pid} may still be running)`);
+                    // This runs in an event callback, where a throw would be an
+                    // uncaught exception rather than a rejection of this promise.
+                    try {
+                        child.kill();
+                    } catch (e) {
+                        console.warn(`[GitSource:transport] fallback kill for pid ${child.pid} failed: ${e instanceof Error ? e.message : String(e)}`);
+                    }
+                }
+                resolve();
+            };
+            killer.on('error', (err) => finish(`failed to spawn (${err.message})`));
+            killer.on('close', (code) => finish(code === 0 ? undefined : `exited ${code}`));
         });
-        return;
     }
     try {
         // The child is spawned detached, so it leads its own process group.
         process.kill(-child.pid, 'SIGKILL');
     } catch {
-        child.kill('SIGKILL');
+        try {
+            child.kill('SIGKILL');
+        } catch (e) {
+            console.warn(`[GitSource:transport] fallback kill for pid ${child.pid} failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+    }
+    return Promise.resolve();
+}
+
+/**
+ * Await a kill that has already been issued, but never longer than
+ * KILL_CONFIRM_TIMEOUT_MS. A platform kill helper that wedges must not turn
+ * into a caller that hangs forever with nothing logged; past the bound we say
+ * so and carry on, exactly as runGit's own confirmation timer does.
+ */
+async function awaitKillConfirmed(kill: Promise<void> | undefined, what: string): Promise<void> {
+    if (!kill) return;
+    let timer: NodeJS.Timeout | undefined;
+    const bound = new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+            console.warn(`[GitSource:transport] ${what} not confirmed within ${KILL_CONFIRM_TIMEOUT_MS}ms; continuing cleanup while it may still be running`);
+            resolve();
+        }, KILL_CONFIRM_TIMEOUT_MS);
+    });
+    try {
+        await Promise.race([kill, bound]);
+    } finally {
+        clearTimeout(timer);
     }
 }
 
@@ -125,12 +172,16 @@ function runGit(args: string[], opts: RunOptions): Promise<RunResult> {
         let settled = false;
         let timedOut = false;
         let killConfirmTimer: NodeJS.Timeout | undefined;
+        // Resolves once the kill operation itself is done (see killTree); a
+        // timed-out run must not settle before BOTH this and the child's own
+        // close event.
+        let killFinished: Promise<void> | undefined;
         const append = (cur: string, chunk: Buffer) => (cur.length < STDERR_CAP ? cur + chunk.toString('utf8') : cur);
 
         const timer = setTimeout(() => {
             if (settled) return;
             timedOut = true;
-            killTree(child);
+            killFinished = killTree(child);
             killConfirmTimer = setTimeout(() => {
                 if (settled) return;
                 settled = true;
@@ -145,27 +196,47 @@ function runGit(args: string[], opts: RunOptions): Promise<RunResult> {
         child.stderr?.on('data', (c: Buffer) => {
             stderr = append(stderr, c);
         });
-        child.on('error', (err) => {
-            if (settled) return;
+        const finishSettle = (): boolean => {
+            if (settled) return false;
             settled = true;
             clearTimeout(timer);
             clearTimeout(killConfirmTimer);
+            return true;
+        };
+
+        /**
+         * Reject a timed-out run, but only once the kill operation has also
+         * finished. The direct child can be gone while the platform kill
+         * helper (taskkill) is still walking its descendants, and settling in
+         * that window releases the caller to delete a workspace those
+         * descendants are still using. Both settle paths below go through
+         * here; the kill-confirmation timer above still bounds the wait.
+         */
+        const rejectAfterKill = (err: Error): void => {
+            void (killFinished ?? Promise.resolve()).then(() => {
+                if (finishSettle()) reject(asTimeoutError(err));
+            });
+        };
+
+        child.on('error', (err) => {
+            if (settled) return;
             // 'error' can also fire after the kill has been issued (e.g. the
             // process could not be killed); preserve the timeout flag so
             // callers still classify this as a timeout rather than a bare
-            // exit failure.
-            reject(timedOut ? asTimeoutError(err) : err);
+            // exit failure, and wait for the kill exactly as 'close' does.
+            if (timedOut) {
+                rejectAfterKill(err);
+                return;
+            }
+            if (finishSettle()) reject(err);
         });
         child.on('close', (code) => {
             if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            clearTimeout(killConfirmTimer);
             if (timedOut) {
-                reject(asTimeoutError(new Error('git timed out')));
-            } else {
-                resolve({ stdout, stderr, exitCode: code ?? -1 });
+                rejectAfterKill(new Error('git timed out'));
+                return;
             }
+            if (finishSettle()) resolve({ stdout, stderr, exitCode: code ?? -1 });
         });
 
         opts.onSpawn?.(child);
@@ -190,7 +261,7 @@ async function prepareWorkspace(root: string): Promise<WorkspaceLayout> {
     return { metaDir, hooksDir, homeDir };
 }
 
-function buildEnv(homeDir: string, token?: string | null): NodeJS.ProcessEnv {
+function buildEnv(homeDir: string, token?: string | null, helperPath?: string | null): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = {
         ...process.env,
         GIT_CONFIG_NOSYSTEM: '1',
@@ -212,6 +283,12 @@ function buildEnv(homeDir: string, token?: string | null): NodeJS.ProcessEnv {
     }
     if (token) {
         env[GIT_TOKEN_ENV_VAR] = token;
+    }
+    if (helperPath) {
+        // The helper's location, kept out of the credential.helper config
+        // value so no workspace path character can change how git's shell
+        // parses it. See credentialHelper.ts.
+        env[GIT_HELPER_PATH_ENV_VAR] = helperPath;
     }
     return env;
 }
@@ -315,10 +392,10 @@ async function resolveCaArgs(layout: WorkspaceLayout): Promise<string[]> {
 }
 
 /**
- * Config shared by every invocation. With no token, credential.helper is
+ * Config shared by every invocation. With no helper, credential.helper is
  * explicitly cleared so nothing from the environment can answer prompts.
  */
-async function commonArgs(layout: WorkspaceLayout, token?: string | null): Promise<string[]> {
+async function commonArgs(layout: WorkspaceLayout, helperPath: string | null): Promise<string[]> {
     const args = [
         '-c', 'protocol.allow=never',
         '-c', 'protocol.https.allow=always',
@@ -334,21 +411,41 @@ async function commonArgs(layout: WorkspaceLayout, token?: string | null): Promi
         args.push('-c', 'http.sslBackend=openssl');
     }
     args.push(...await resolveCaArgs(layout));
-    if (token) {
-        const helperPath = await writeCredentialHelper(layout.metaDir);
-        // Verbatim, no wrapping quotes: per gitcredentials(7) a helper string
-        // counts as an absolute-path command only if it literally begins with
-        // an absolute path. Unlike a gitconfig file value, `-c key=value` on
-        // argv keeps the quotes, so quoting makes the value start with `"`
-        // and git silently degrades to the short-name form
-        // (`git credential-"<path>"`), which does not exist. Residual risk: a
-        // workspace root containing a space still word-splits, as it would
-        // for any unquoted absolute-path helper.
-        args.push('-c', `credential.helper=${helperPath}`);
+    if (helperPath !== null) {
+        // A fixed value: the helper's path reaches git through the child env
+        // instead of being interpolated here, so a workspace path containing
+        // a space (or a quote, `$`, `;`, ...) cannot change how git's shell
+        // parses it. See credentialHelper.ts for the parsing rule.
+        args.push('-c', `credential.helper=${CREDENTIAL_HELPER_CONFIG_VALUE}`);
     } else {
         args.push('-c', 'credential.helper=');
     }
     return args;
+}
+
+/**
+ * Everything one invocation needs: the workspace layout, the child env, and
+ * the shared config argv.
+ *
+ * The credential handoff is assembled in exactly this one place because its
+ * three parts have to agree. If the config named the helper variable but the
+ * env did not export it, git would find nothing to run, fall back to an
+ * anonymous fetch, and a private repo's 401 would then classify as
+ * REPO_NOT_FOUND instead of AUTH_FAILED. That is a silent downgrade, so the
+ * config arg is keyed off the helper actually having been written rather than
+ * off the token being present.
+ */
+async function prepareInvocation(
+    workspaceRoot: string,
+    token?: string | null,
+): Promise<{ layout: WorkspaceLayout; env: NodeJS.ProcessEnv; baseArgs: string[] }> {
+    const layout = await prepareWorkspace(workspaceRoot);
+    const helperPath = token ? await writeCredentialHelper(layout.metaDir) : null;
+    const env = buildEnv(layout.homeDir, token, helperPath);
+    // The same helperPath drives the env export and the config arg, so the two
+    // cannot describe different worlds.
+    const baseArgs = await commonArgs(layout, helperPath);
+    return { layout, env, baseArgs };
 }
 
 // ─── Input validation ────────────────────────────────────────────────────────
@@ -370,7 +467,15 @@ function assertValidRepoUrl(repoUrl: string, hasToken: boolean): URL {
     return url;
 }
 
-const REF_MAX_LEN = 200;
+/**
+ * Ceiling on a ref name. Git itself imposes no branch-length limit worth
+ * matching (`check-ref-format --branch` accepts names into the thousands, up
+ * to the filesystem's own path limits), so this is Sencho's bound, not git's,
+ * and the API and the transport have to agree on it: a name the route accepts
+ * and stores must not be rejected later by the transport that fetches it.
+ * `routes/gitSources.ts` imports this constant for exactly that reason.
+ */
+export const REF_MAX_LEN = 256;
 // ASCII control characters, space, and the characters git's own
 // check-ref-format forbids anywhere in a ref (~^:?*[\). Everything else,
 // including non-ASCII scripts, is a legitimate branch-name character.
@@ -382,7 +487,9 @@ const REF_DISALLOWED_CHARS = /[\x00-\x20\x7f~^:?*[\\]/;
  * or `@{`; no path component starting with `.` or ending in `.lock`; no
  * leading `-` (git's own `--branch` mode already refuses this, since a
  * leading dash makes the name ambiguous with a flag on argv, which is
- * exactly the injection risk this validator exists to close).
+ * exactly the injection risk this validator exists to close). The one rule
+ * that is ours rather than git's is REF_MAX_LEN, shared with the route so the
+ * two cannot disagree.
  */
 function assertValidRef(ref: string, host: string, hasToken: boolean): void {
     const segments = ref.split('/');
@@ -531,9 +638,7 @@ export const nativeGitTransport: GitTransport = {
         const url = assertValidRepoUrl(req.repoUrl, hasToken);
         assertValidRef(req.ref, url.host, hasToken);
 
-        const layout = await prepareWorkspace(req.workspaceRoot);
-        const env = buildEnv(layout.homeDir, req.token);
-        const baseArgs = await commonArgs(layout, req.token);
+        const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token);
         const commitSha = await lsRemoteHead(
             url, req.ref, env, baseArgs,
             req.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasToken,
@@ -547,9 +652,7 @@ export const nativeGitTransport: GitTransport = {
         const url = assertValidRepoUrl(req.repoUrl, hasToken);
         assertValidRef(req.ref, url.host, hasToken);
 
-        const layout = await prepareWorkspace(req.workspaceRoot);
-        const env = buildEnv(layout.homeDir, req.token);
-        const baseArgs = await commonArgs(layout, req.token);
+        const { layout, env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token);
         const checkout = path.join(req.workspaceRoot, 'repo');
         const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -557,9 +660,13 @@ export const nativeGitTransport: GitTransport = {
         // whichever fires first tears the clone down; the other becomes a no-op.
         let sizeExceeded = false;
         let activeChild: ChildProcess | undefined;
+        // A breach kill is subject to the same ordering hazard as a timeout
+        // kill: the caller deletes this workspace as soon as we return, so the
+        // kill has to be finished first, not merely issued.
+        let breachKill: Promise<void> | undefined;
         const watchdog = startSizeWatchdog(req.workspaceRoot, req.maxBytes, () => {
             sizeExceeded = true;
-            killTree(activeChild);
+            breachKill = killTree(activeChild);
         });
 
         try {
@@ -649,6 +756,7 @@ export const nativeGitTransport: GitTransport = {
             return { commitSha: actual, dir: checkout };
         } finally {
             watchdog.stop();
+            await awaitKillConfirmed(breachKill, `size-breach kill for ${url.host}`);
         }
     },
 };

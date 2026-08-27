@@ -165,6 +165,22 @@ describe.skipIf(!gitAvailable())('authenticated native git transport (real git, 
         return dir;
     }
 
+    /**
+     * A workspace nested under a directory whose name contains a space, plus
+     * the other characters git's shell treats specially. Git reads
+     * `credential.helper` as a shell string, so a transport that interpolates
+     * the helper's path into it breaks here (and on any host whose temp dir
+     * sits under something like `C:/Users/Ada Lovelace/...`) while passing
+     * every normal-path test.
+     */
+    async function makeAwkwardWorkspace(): Promise<string> {
+        const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-git-auth-odd-'));
+        workspaces.push(parent);
+        const dir = path.join(parent, "a dir with spaces & 'quotes' $dollar");
+        await fs.mkdir(dir);
+        return dir;
+    }
+
     it('clones a private repo end-to-end with a valid token', async () => {
         const workspaceRoot = await makeWorkspace();
         const resolved = await nativeGitTransport.resolveRef({
@@ -189,6 +205,47 @@ describe.skipIf(!gitAvailable())('authenticated native git transport (real git, 
         expect(fetched.commitSha).toBe(resolved.commitSha);
         const content = await fs.readFile(path.join(fetched.dir, 'hello.txt'), 'utf8');
         expect(content).toBe(FILE_CONTENT);
+    });
+
+    it('clones a private repo end-to-end from a workspace path containing spaces and shell metacharacters', async () => {
+        const workspaceRoot = await makeAwkwardWorkspace();
+        const resolved = await nativeGitTransport.resolveRef({
+            repoUrl,
+            ref: 'main',
+            token: VALID_TOKEN,
+            timeoutMs: 15_000,
+            workspaceRoot,
+        });
+        expect(resolved.commitSha).toMatch(/^[0-9a-f]{40}$/);
+
+        const fetchWorkspace = await makeAwkwardWorkspace();
+        const fetched = await nativeGitTransport.fetchAtCommit({
+            repoUrl,
+            ref: 'main',
+            token: VALID_TOKEN,
+            commitSha: resolved.commitSha,
+            timeoutMs: 15_000,
+            workspaceRoot: fetchWorkspace,
+            maxBytes: 10 * 1024 * 1024,
+        });
+        expect(fetched.commitSha).toBe(resolved.commitSha);
+        expect(await fs.readFile(path.join(fetched.dir, 'hello.txt'), 'utf8')).toBe(FILE_CONTENT);
+    });
+
+    it('still classifies a wrong token as AUTH_FAILED from an awkward workspace path', async () => {
+        // Guards the subtler half of the same defect: when the helper cannot
+        // execute, git sends no credentials at all and the server's 401 reads
+        // like an anonymous request, so the failure silently downgrades to the
+        // private-repo masking classification instead of AUTH_FAILED.
+        const workspaceRoot = await makeAwkwardWorkspace();
+        const failure = await nativeGitTransport
+            .resolveRef({ repoUrl, ref: 'main', token: 'wrong-token', timeoutMs: 15_000, workspaceRoot })
+            .then(() => null, (e: unknown) => e);
+
+        expect(isTransportFailure(failure)).toBe(true);
+        if (!isTransportFailure(failure)) throw new Error('unreachable');
+        expect(failure.hasToken).toBe(true);
+        expect(classifyGitFailure(failure).code).toBe('AUTH_FAILED');
     });
 
     it('fails with the private-repo masking classification when no token is supplied', async () => {

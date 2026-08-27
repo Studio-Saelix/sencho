@@ -31,9 +31,15 @@ beforeEach(() => {
 });
 
 import { classifyGitFailure, isTransportFailure } from '../services/git/errors';
-import { GIT_TOKEN_ENV_VAR, renderCredentialHelper, writeCredentialHelper } from '../services/git/credentialHelper';
+import {
+    CREDENTIAL_HELPER_CONFIG_VALUE,
+    GIT_HELPER_PATH_ENV_VAR,
+    GIT_TOKEN_ENV_VAR,
+    renderCredentialHelper,
+    writeCredentialHelper,
+} from '../services/git/credentialHelper';
 import * as gitBinary from '../services/git/gitBinary';
-import { nativeGitTransport, startSizeWatchdog } from '../services/git/nativeGitTransport';
+import { nativeGitTransport, REF_MAX_LEN, startSizeWatchdog } from '../services/git/nativeGitTransport';
 
 const GIT_EXEC_PATH_STUB = 'C:/Program Files/Git/mingw64/libexec/git-core';
 
@@ -211,17 +217,10 @@ describe('classifyGitFailure (native git stderr corpus)', () => {
 
 describe('credential helper script', () => {
     it('references the env variable name and never a literal secret', () => {
-        const posix = renderCredentialHelper(false);
-        expect(posix).toContain('$SENCHO_GIT_TOKEN');
-        expect(posix).toContain(GIT_TOKEN_ENV_VAR);
-        expect(posix).not.toMatch(/sekrit/);
-
-        const windows = renderCredentialHelper(true);
-        // Delayed expansion (!VAR!) so token characters cannot break out of
-        // the echo line during cmd parsing.
-        expect(windows).toContain(`!${GIT_TOKEN_ENV_VAR}!`);
-        expect(windows).toContain('enabledelayedexpansion');
-        expect(windows).not.toMatch(/sekrit/);
+        const script = renderCredentialHelper();
+        expect(script).toContain('$SENCHO_GIT_TOKEN');
+        expect(script).toContain(GIT_TOKEN_ENV_VAR);
+        expect(script).not.toMatch(/sekrit/);
     });
 
     it('writes the helper into the meta dir and returns a forward-slash path', async () => {
@@ -229,9 +228,17 @@ describe('credential helper script', () => {
         const helperPath = await writeCredentialHelper(meta);
         expect(helperPath).not.toContain('\\');
         const written = await fs.readFile(helperPath.replace(/\//g, path.sep), 'utf8');
-        expect(written).toBe(renderCredentialHelper(process.platform === 'win32'));
+        expect(written).toBe(renderCredentialHelper());
         expect(written).toContain(GIT_TOKEN_ENV_VAR);
         await fs.rm(meta, { recursive: true, force: true });
+    });
+
+    it('names the helper through an env variable so no workspace path can reach the shell string', () => {
+        // Git parses credential.helper as a shell string, so any path
+        // interpolated here would word-split on a space (and worse on a quote).
+        // The value must therefore be a constant that mentions no path at all.
+        expect(CREDENTIAL_HELPER_CONFIG_VALUE).toBe(`!"$${GIT_HELPER_PATH_ENV_VAR}"`);
+        expect(CREDENTIAL_HELPER_CONFIG_VALUE).not.toMatch(/[/\\]/);
     });
 });
 
@@ -305,12 +312,10 @@ describe('transport argv hardening', () => {
             // Hooks disabled via an empty dir we own (portable across OSes).
             expect(joined).toMatch(/core\.hooksPath=[^ ]*\.meta\/hooks/);
 
-            // Credentials flow through our helper, which reads the env var.
-            expect(joined).toMatch(/credential\.helper=[^ ]*\.meta\/credential-helper/);
-            // A quoted value breaks git's own absolute-path detection for
-            // credential.helper (verified against real git; see the comment
-            // at the call site), so the value must reach argv unquoted.
-            expect(joined).not.toContain('credential.helper="');
+            // Credentials flow through our helper, named by env variable so
+            // the config value carries no path that a space could split.
+            expect(args).toContain(`credential.helper=${CREDENTIAL_HELPER_CONFIG_VALUE}`);
+            expect(joined).not.toMatch(/credential\.helper=[^ ]*\.meta/);
             expect(joined).not.toContain('sekrit-token-value');
 
             const env = spawnEnv(0);
@@ -324,6 +329,7 @@ describe('transport argv hardening', () => {
             expect(env.GIT_CONFIG_COUNT).toBe('0');
             expect(env.GIT_TRACE).toBe('');
             expect(env[GIT_TOKEN_ENV_VAR]).toBe('sekrit-token-value');
+            expect(env[GIT_HELPER_PATH_ENV_VAR]).toMatch(/\.meta\/credential-helper\.sh$/);
             expect(env.HOME).toContain('.meta');
         } finally {
             await fs.rm(root, { recursive: true, force: true });
@@ -343,6 +349,36 @@ describe('transport argv hardening', () => {
             });
             expect(spawnArgs(0)).toContain('credential.helper=');
             expect(spawnEnv(0)[GIT_TOKEN_ENV_VAR]).toBeUndefined();
+            // No helper is written at all, so nothing can answer a prompt.
+            expect(spawnEnv(0)[GIT_HELPER_PATH_ENV_VAR]).toBeUndefined();
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('keeps the helper config value and the helper env variable in lockstep', async () => {
+        // These three have to agree: the script on disk, the env variable
+        // naming it, and the config value referencing that variable. If the
+        // config named a variable nothing exported, git would find no helper,
+        // fetch anonymously, and a private repo's 401 would classify as
+        // REPO_NOT_FOUND instead of AUTH_FAILED, with no error to show for it.
+        scriptSpawn([{ stdout: `${SHA_A}\trefs/heads/main\n` }]);
+        const root = await makeWorkspace();
+        try {
+            await nativeGitTransport.resolveRef({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: 'main',
+                token: 'sekrit-token-value',
+                timeoutMs: 5000,
+                workspaceRoot: root,
+            });
+            const referencesHelper = spawnArgs(0).includes(`credential.helper=${CREDENTIAL_HELPER_CONFIG_VALUE}`);
+            const helperPath = spawnEnv(0)[GIT_HELPER_PATH_ENV_VAR];
+            expect(referencesHelper).toBe(true);
+            expect(helperPath).toBeDefined();
+            // And the path the variable names is a script that actually exists.
+            const body = await fs.readFile((helperPath as string).replace(/\//g, path.sep), 'utf8');
+            expect(body).toBe(renderCredentialHelper());
         } finally {
             await fs.rm(root, { recursive: true, force: true });
         }
@@ -476,6 +512,39 @@ describe('transport argv hardening', () => {
         await expect(nativeGitTransport.resolveRef({
             repoUrl: 'https://github.com/example/repo.git',
             ref,
+            workspaceRoot: os.tmpdir(),
+        })).rejects.toMatchObject({ transportFailure: true as const, reason: 'invalid-ref' });
+        expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    // The API accepts branches up to REF_MAX_LEN and stores them; a branch
+    // that survived creation must still be fetchable. Real git imposes no
+    // comparable limit (check-ref-format --branch accepts names into the
+    // thousands), so the only bound that matters is the one both sides share.
+    it.each([
+        ['at the shared limit', REF_MAX_LEN],
+        ['just under the shared limit', REF_MAX_LEN - 1],
+        ['longer than the old transport-only cap', 220],
+    ])('accepts a long but valid branch name %s (%i chars)', async (_label, length) => {
+        const ref = 'b'.repeat(length);
+        scriptSpawn([{ stdout: `${SHA_A}\trefs/heads/${ref}\n` }]);
+        const root = await makeWorkspace();
+        try {
+            await expect(nativeGitTransport.resolveRef({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+            })).resolves.toMatchObject({ commitSha: SHA_A });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('rejects a branch name one character past the shared limit', async () => {
+        await expect(nativeGitTransport.resolveRef({
+            repoUrl: 'https://github.com/example/repo.git',
+            ref: 'b'.repeat(REF_MAX_LEN + 1),
             workspaceRoot: os.tmpdir(),
         })).rejects.toMatchObject({ transportFailure: true as const, reason: 'invalid-ref' });
         expect(mockSpawn).not.toHaveBeenCalled();
@@ -865,6 +934,168 @@ describe('clone failure classification and final size gate', () => {
             await expect(promise).rejects.toMatchObject({ transportFailure: true as const, reason: 'timeout' });
             expect(settled).toBe(true);
         } finally {
+            mockSpawn.mockReset();
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('waits for taskkill to finish even when the direct child closes first (stubbed as win32 so this runs on every CI platform)', async () => {
+        const origPlatform = process.platform;
+        Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+        let taskkillDone = false;
+        let settled = false;
+        mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+            if (args[0] === '/pid') {
+                // taskkill is a separate process walking the tree; it outlives
+                // the direct child it was asked to kill.
+                const killer = fakeChild();
+                killer.kill = () => {};
+                setTimeout(() => {
+                    taskkillDone = true;
+                    killer.emit('close', 0);
+                }, 600);
+                return killer;
+            }
+            const child = fakeChild();
+            // The direct git child dies on its own clock, after the 50ms
+            // budget issues the kill and long before taskkill has finished
+            // with its descendants. Deliberately NOT tied to child.kill():
+            // the successful-taskkill path never calls that, so a mock which
+            // only closed from it would let a transport that ignores taskkill
+            // entirely still look correct here.
+            setTimeout(() => child.emit('close', null), 100);
+            return child;
+        });
+        const root = await makeWorkspace();
+
+        try {
+            const promise = nativeGitTransport.resolveRef({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: 'main',
+                timeoutMs: 50,
+                workspaceRoot: root,
+            });
+            promise.catch(() => {}).finally(() => {
+                settled = true;
+            });
+
+            // Sampled inside the window where the direct child has closed
+            // (100ms) but taskkill has not (600ms). Settling here would
+            // release the caller to delete a workspace that still has live
+            // descendants in it. The margins either side of the 300ms sample
+            // are wide enough to stay meaningful under CI load, and a
+            // mistimed sample can only produce a false failure, never a pass
+            // against a transport that settles early.
+            await new Promise((r) => setTimeout(r, 300));
+            expect(taskkillDone).toBe(false);
+            expect(settled).toBe(false);
+
+            await expect(promise).rejects.toMatchObject({ transportFailure: true as const, reason: 'timeout' });
+            expect(taskkillDone).toBe(true);
+        } finally {
+            Object.defineProperty(process, 'platform', { value: origPlatform, configurable: true });
+            mockSpawn.mockReset();
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('waits for taskkill when the timed-out child reports an error instead of closing (stubbed as win32 so this runs on every CI platform)', async () => {
+        // A killed child can surface an 'error' rather than a 'close'; that
+        // settle path owes the caller the same ordering guarantee as 'close',
+        // or the wait is only as good as which event the OS happened to emit.
+        const origPlatform = process.platform;
+        Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+        let taskkillDone = false;
+        let settled = false;
+        mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+            if (args[0] === '/pid') {
+                const killer = fakeChild();
+                killer.kill = () => {};
+                setTimeout(() => {
+                    taskkillDone = true;
+                    killer.emit('close', 0);
+                }, 600);
+                return killer;
+            }
+            const child = fakeChild();
+            child.kill = () => {};
+            setTimeout(() => child.emit('error', new Error('kill failed: ESRCH')), 100);
+            return child;
+        });
+        const root = await makeWorkspace();
+
+        try {
+            const promise = nativeGitTransport.resolveRef({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: 'main',
+                timeoutMs: 50,
+                workspaceRoot: root,
+            });
+            promise.catch(() => {}).finally(() => {
+                settled = true;
+            });
+
+            await new Promise((r) => setTimeout(r, 300));
+            expect(taskkillDone).toBe(false);
+            expect(settled).toBe(false);
+
+            await expect(promise).rejects.toMatchObject({ transportFailure: true as const, reason: 'timeout' });
+            expect(taskkillDone).toBe(true);
+        } finally {
+            Object.defineProperty(process, 'platform', { value: origPlatform, configurable: true });
+            mockSpawn.mockReset();
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('does not return from a size-breached fetch until the breach kill has finished (stubbed as win32 so this runs on every CI platform)', async () => {
+        // The timeout kill and the watchdog's breach kill are separate code
+        // paths with the same hazard: fetchAtCommit's caller deletes this
+        // workspace as soon as it returns, so a taskkill still walking the
+        // tree must be finished first, not merely issued.
+        const origPlatform = process.platform;
+        Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+        let taskkillDone = false;
+        const root = await makeWorkspace();
+        await fs.writeFile(path.join(root, 'blob.bin'), 'x'.repeat(64));
+
+        // The watchdog polls once a second, so the breach kill is issued at
+        // roughly 1s. The clone child then dies at 1.5s while taskkill runs on
+        // to 2.2s: the window in which an unawaited breach kill would let
+        // fetchAtCommit return early.
+        mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+            if (args[0] === '/pid') {
+                const killer = fakeChild();
+                killer.kill = () => {};
+                setTimeout(() => {
+                    taskkillDone = true;
+                    killer.emit('close', 0);
+                }, 1_200);
+                return killer;
+            }
+            const child = fakeChild();
+            // Not tied to child.kill(): taskkill succeeding here means the
+            // fallback kill is never called, so a mock that only closed from
+            // it would simply hang instead of testing the ordering.
+            child.kill = () => {};
+            setTimeout(() => child.emit('close', null), 1_500);
+            return child;
+        });
+
+        try {
+            await expect(nativeGitTransport.fetchAtCommit({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: 'main',
+                commitSha: SHA_A,
+                timeoutMs: 30_000,
+                workspaceRoot: root,
+                maxBytes: 8,
+            })).rejects.toMatchObject({ transportFailure: true as const, reason: 'size', maxBytes: 8 });
+            // Returning before this is what would let the caller delete the
+            // workspace out from under a live process tree.
+            expect(taskkillDone).toBe(true);
+        } finally {
+            Object.defineProperty(process, 'platform', { value: origPlatform, configurable: true });
             mockSpawn.mockReset();
             await fs.rm(root, { recursive: true, force: true });
         }
