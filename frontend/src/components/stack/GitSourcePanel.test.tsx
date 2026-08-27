@@ -33,12 +33,16 @@ vi.mock('@/context/NodeContext', () => ({
 // diff UI; the panel passes applyPull as onApply.
 vi.mock('./GitSourceDiffDialog', () => ({
   GitSourceDiffDialog: ({
+    open,
     onApply,
+    onDismiss,
     pull,
   }: {
+    open: boolean;
     onApply: (sha: string, deploy: boolean, fp: string) => void;
+    onDismiss: () => void;
     pull: PullResult | null;
-  }) => (
+  }) => open ? (
     <div>
       <span data-testid="plan-fingerprint">{pull?.planFingerprint ?? ''}</span>
       <button
@@ -53,8 +57,11 @@ vi.mock('./GitSourceDiffDialog', () => ({
       >
         apply
       </button>
+      <button data-testid="dismiss" onClick={onDismiss}>
+        dismiss
+      </button>
     </div>
-  ),
+  ) : null,
 }));
 vi.mock('@/components/ui/toast-store', () => ({
   toast: {
@@ -109,6 +116,31 @@ const LINKED_SOURCE = {
 function linkedWith(revision: unknown) {
   return { ...LINKED_SOURCE, gitopsRevision: revision };
 }
+
+const PULL_RESULT: PullResult = {
+  commitSha: 'sha-old',
+  validation: { ok: true },
+  refusals: [],
+  warnings: [],
+  plan: {
+    blocked: false,
+    counts: {
+      add: 0,
+      modify: 0,
+      delete: 0,
+      rename: 0,
+      unchanged: 1,
+      localModified: 0,
+      localMissing: 0,
+      typeChanged: 0,
+      unmanagedCollision: 0,
+      invocation: 0,
+    },
+    operations: [],
+    invocation: { candidateChanged: false, liveDiverged: false },
+  },
+  planFingerprint: 'fp-old',
+};
 
 function panel() {
   return (
@@ -175,6 +207,7 @@ describe('GitSourcePanel deploy-mode apply node binding', () => {
       return jsonRes(LINKED_SOURCE);
     });
     render(panel());
+    fireEvent.click(await screen.findByRole('button', { name: /pull now/i }));
     fireEvent.click(await screen.findByTestId('apply-deploy'));
 
     await waitFor(() => {
@@ -191,31 +224,6 @@ describe('GitSourcePanel deploy-mode apply node binding', () => {
 });
 
 describe('GitSourcePanel stale plan handling', () => {
-  const PULL_RESULT: PullResult = {
-    commitSha: 'sha-old',
-    validation: { ok: true },
-    refusals: [],
-    warnings: [],
-    plan: {
-      blocked: false,
-      counts: {
-        add: 0,
-        modify: 0,
-        delete: 0,
-        rename: 0,
-        unchanged: 1,
-        localModified: 0,
-        localMissing: 0,
-        typeChanged: 0,
-        unmanagedCollision: 0,
-        invocation: 0,
-      },
-      operations: [],
-      invocation: { candidateChanged: false, liveDiverged: false },
-    },
-    planFingerprint: 'fp-old',
-  };
-
   beforeEach(() => {
     vi.mocked(apiFetch).mockImplementation(async (url: string) => {
       if (String(url).includes('/git-source/pull')) {
@@ -246,6 +254,37 @@ describe('GitSourcePanel stale plan handling', () => {
       expect(screen.getByTestId('plan-fingerprint')).toHaveTextContent('fp-new');
     });
     expect(toast.success).not.toHaveBeenCalled();
+  });
+});
+
+describe('GitSourcePanel dismiss handling', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (String(url).includes('/git-source/pull')) {
+        return jsonRes(PULL_RESULT);
+      }
+      if (String(url).includes('/git-source/dismiss-pending')) {
+        return jsonRes({
+          error: 'Cannot dismiss the pending update for web: cannot dismiss while an operation is in flight',
+          code: 'OPERATION_IN_FLIGHT',
+        }, false, 409);
+      }
+      return jsonRes(LINKED_SOURCE);
+    });
+  });
+
+  it('surfaces an error toast and keeps the diff open when dismiss is refused as in-flight', async () => {
+    render(panel());
+    fireEvent.click(await screen.findByRole('button', { name: /pull now/i }));
+    await screen.findByTestId('plan-fingerprint');
+
+    fireEvent.click(screen.getByTestId('dismiss'));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/operation is in flight/i));
+    });
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(screen.getByTestId('plan-fingerprint')).toHaveTextContent('fp-old');
   });
 });
 

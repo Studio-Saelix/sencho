@@ -403,11 +403,14 @@ export function GitSourcePanel({
         method: 'POST',
       });
       if (res.ok) {
+        toast.success('Pending update dismissed.');
         setDiffOpen(false);
         setPull(null);
         await load();
         onSourceChanged?.();
-        toast.success('Pending update dismissed.');
+      } else {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err?.error || 'Failed to dismiss the pending update.');
       }
     } catch (e) {
       toast.error((e as Error)?.message || 'Network error.');
