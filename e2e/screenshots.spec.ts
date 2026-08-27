@@ -52,6 +52,18 @@ test('resources', async ({ page }) => {
   await page.screenshot({ path: path.join(DOCS_IMAGES, 'resources.png'), fullPage: true });
 });
 
+test('sso settings', async ({ page }) => {
+  await loginAs(page);
+  await page.getByRole('button', { name: /profile/i }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByText('SSO', { exact: true }).first().click();
+  // The role-sync control confirms the SSO panel (admin-only) has loaded.
+  await page.getByText('IdP role synchronization').scrollIntoViewIfNeeded();
+  await expect(page.getByText('IdP role synchronization')).toBeVisible();
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: path.join(DOCS_IMAGES, 'sso', 'sso-settings.png'), fullPage: true });
+});
+
 function emptyCounts() {
   return {
     add: 0, modify: 0, delete: 0, rename: 0, unchanged: 0,

@@ -422,6 +422,84 @@ function ProviderCardWithGate(props: {
 
 type AuthMode = 'local_and_sso' | 'sso_only';
 
+function RoleSyncToggle() {
+    // null = loading/unknown/unconfirmed; never present "off" as a confirmed
+    // state during loading or error.
+    const [enabled, setEnabled] = useState<boolean | null>(null);
+    const [saving, setSaving] = useState(false);
+
+    useEffect(() => {
+        let cancelled = false;
+        void (async () => {
+            try {
+                const res = await apiFetch('/sso/config/role-sync');
+                if (!res.ok) {
+                    if (!cancelled) {
+                        const data = await res.json().catch(() => null);
+                        toast.error(data?.error || data?.message || 'Failed to load role sync setting');
+                    }
+                    return;
+                }
+                const data = await res.json() as { enabled: boolean };
+                if (!cancelled) setEnabled(data.enabled);
+            } catch (error: unknown) {
+                if (!cancelled) {
+                    setEnabled(null);
+                    toast.error((error as Error)?.message || 'Failed to load role sync setting');
+                }
+            }
+        })();
+        return () => { cancelled = true; };
+    }, []);
+
+    const handleToggle = async (next: boolean) => {
+        if (saving) return;
+        setSaving(true);
+        try {
+            const res = await apiFetch('/sso/config/role-sync', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: next }),
+            });
+            if (!res.ok) {
+                const data = await res.json().catch(() => null);
+                toast.error(data?.error || data?.message || 'Failed to update role sync');
+                return;
+            }
+            setEnabled(next);
+            toast.success(next ? 'IdP role synchronization enabled' : 'IdP role synchronization disabled');
+        } catch (error: unknown) {
+            toast.error((error as Error)?.message || 'Failed to update role sync');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="flex items-center gap-3 rounded-md border border-card-border bg-card/40 p-4">
+            <div className="flex flex-col flex-1 min-w-0">
+                <Label className="font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
+                    IdP role synchronization
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                    When enabled, SSO sign-in syncs the provider&apos;s role group mapping over any role an admin assigns in Settings → Users. Disable to keep manual role edits persistent across logins.
+                </p>
+            </div>
+            {enabled === null ? (
+                <div className="flex items-center justify-center w-[60px]">
+                    <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                </div>
+            ) : (
+                <TogglePill
+                    checked={enabled}
+                    onChange={handleToggle}
+                    disabled={saving}
+                />
+            )}
+        </div>
+    );
+}
+
 const AUTH_MODE_OPTIONS: Array<{ value: AuthMode; label: string }> = [
     { value: 'local_and_sso', label: 'Local and SSO' },
     { value: 'sso_only', label: 'SSO only' },
@@ -646,6 +724,8 @@ export function SSOSection() {
                         />
                     ))}
                 </div>
+
+                <RoleSyncToggle />
 
                 <div className="text-xs text-muted-foreground space-y-1">
                     <p>SSO users are automatically provisioned on first login and assigned a role based on your identity provider's group membership.</p>

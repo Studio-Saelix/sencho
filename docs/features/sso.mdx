@@ -44,7 +44,7 @@ When a user signs in via SSO for the first time, Sencho creates a local account:
 - **Role** is assigned from [role mapping](#role-mapping); defaults to Viewer if no mapping matches.
 - **Password** is set to an unusable placeholder. SSO users cannot sign in with the password form.
 
-On every subsequent sign-in, the existing account is reused and the user's **email** and **role** are synced from the identity provider. Adding someone to your admin group promotes them to Admin on their next sign-in; removing them demotes them to the default role.
+On every subsequent sign-in, the existing account is reused and the user's **email** is synced from the identity provider. The **role** is assigned at first login and then preserved, so a role you set manually in **Settings · Users** survives later sign-ins. To instead let the identity provider's group mapping drive the role on every login, enable **IdP role synchronization** in **Settings · SSO**. With that on, adding someone to your admin group promotes them to Admin on their next sign-in and removing them demotes them to the default role.
 
 ## Role mapping
 
@@ -102,7 +102,7 @@ docker compose exec sencho node dist/cli/enableLocalLogin.js
 No restart is required; the next login attempt honors the restored mode. The same command is listed under **Settings → Operations → Recovery** and in [Emergency command-line recovery](/operations/emergency-cli).
 
 <Frame>
-  <img src="/images/sso/sso-settings.png" alt="SSO settings panel listing the five identity providers as collapsible cards with enable / disable toggles" />
+  <img src="/images/sso/sso-settings.png" alt="SSO settings panel listing the five identity providers as collapsible cards with enable / disable toggles, followed by the IdP role synchronization toggle" />
 </Frame>
 
 Click a card to expand it. The footer of every expanded form has the same actions:

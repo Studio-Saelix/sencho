@@ -601,8 +601,13 @@ export class SSOService {
                 updates.email = params.email;
             }
 
-            // Sync role from identity provider on every login
-            if (params.role !== existing.role) {
+            // Preserve the stored role by default; IdP role changes are opt-in
+            // (sso_role_sync). By default the role assigned at first provisioning is
+            // preserved so an admin's manual edit in Settings → Users survives
+            // subsequent sign-ins (issue #1851). When sso_role_sync is '1', the
+            // provider-derived role is applied on each login. Email, in contrast, is
+            // synced whenever it changed, regardless of sso_role_sync.
+            if (db.getGlobalSettings()['sso_role_sync'] === '1' && params.role !== existing.role) {
                 updates.role = params.role;
             }
 

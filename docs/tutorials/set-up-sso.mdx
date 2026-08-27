@@ -91,7 +91,7 @@ Check from two places, since either alone only shows one side of provisioning.
   <img src="/images/tutorials/set-up-sso/users-list-provisioned.png" alt="The Users table under Settings, Access, Users, with a row for the newly auto-provisioned SSO user showing role Viewer and today's date under Created." />
 </Frame>
 
-On every later sign-in, this same account is reused. Its email and role are re-synced from the identity provider each time, so promoting or removing someone from your directory takes effect on their next login.
+On every later sign-in, this same account is reused. Its email is re-synced from the identity provider. Its role stays whatever is set on the account, so a manual role edit in **Settings · Users** persists. To have the identity provider reapply the role on each login instead, enable **IdP role synchronization** in **Settings · SSO**; then promoting or removing someone from your directory takes effect on their next login.
 
 ## If something goes wrong
 

@@ -133,6 +133,9 @@ describe('API token blocked endpoints', () => {
     { method: 'put', path: '/api/sso/config/ldap', body: { enabled: true } },
     { method: 'delete', path: '/api/sso/config/ldap' },
     { method: 'post', path: '/api/sso/config/ldap/test' },
+    // SSO role sync configuration
+    { method: 'get', path: '/api/sso/config/role-sync' },
+    { method: 'put', path: '/api/sso/config/role-sync', body: { enabled: true } },
     // Node management
     { method: 'post', path: '/api/nodes', body: { name: 'test', type: 'local' } },
     { method: 'put', path: '/api/nodes/1', body: { name: 'updated' } },

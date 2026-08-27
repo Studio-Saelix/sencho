@@ -46,7 +46,7 @@ import { toast } from '@/components/ui/toast-store';
 import { SSOSection } from '../SSOSection';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
-const mockedToast = toast as unknown as { error: ReturnType<typeof vi.fn> };
+const mockedToast = toast as unknown as { success: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn>; };
 
 function res(ok: boolean, body: unknown): { ok: boolean; json: () => Promise<unknown> } {
   return { ok, json: () => Promise.resolve(body) };
@@ -149,5 +149,243 @@ describe('SSOSection error surfacing', () => {
     );
     expect(onSwitches).toHaveLength(1);
     expect(onSwitches[0]).toHaveTextContent('ON');
+  });
+});
+
+describe('SSOSection role sync toggle', () => {
+  // Helper: mock all the base SSO section loads with an empty provider list
+  function mockBaseSsoLoad(extraMock?: (path: string) => unknown) {
+    mockedFetch.mockImplementation((path: string) => {
+      if (path === '/sso/config') return Promise.resolve(res(true, []));
+      if (path === '/sso/auth-mode') return Promise.resolve(res(true, { authenticationMode: 'local_and_sso', localLoginEnabled: true }));
+      if (extraMock) {
+        const result = extraMock(path);
+        if (result !== undefined) return Promise.resolve(result) as unknown;
+        return Promise.resolve(res(true, {}));
+      }
+      return Promise.resolve(res(true, {}));
+    });
+  }
+
+  // The role-sync TogglePill is the only switch inside the container that also
+  // holds the "IdP role synchronization" label; scope to it so provider-card
+  // and other section switches don't make the lookup ambiguous.
+  function getRoleSyncSwitch(): Element | null {
+    const label = screen.getByText('IdP role synchronization');
+    return label.closest('div')?.parentElement?.querySelector('[role="switch"]') ?? null;
+  }
+
+  it('default-off load: toggle shows OFF and is a confirmed state', async () => {
+    mockBaseSsoLoad((path: string) => {
+      if (path === '/sso/config/role-sync') return res(true, { enabled: false });
+      return undefined;
+    });
+    render(<SSOSection />);
+    await waitFor(() => {
+      expect(mockedFetch).toHaveBeenCalledWith('/sso/config/role-sync');
+    });
+    await waitFor(() => {
+      const roleSyncToggle = getRoleSyncSwitch();
+      expect(roleSyncToggle).not.toBeNull();
+      expect(roleSyncToggle).toHaveTextContent('OFF');
+      expect(roleSyncToggle?.hasAttribute('disabled')).toBeFalsy();
+    });
+  });
+
+  it('enabled load: toggle shows ON', async () => {
+    mockBaseSsoLoad((path: string) => {
+      if (path === '/sso/config/role-sync') return res(true, { enabled: true });
+      return undefined;
+    });
+    render(<SSOSection />);
+    await waitFor(() => {
+      const onToggle = getRoleSyncSwitch();
+      expect(onToggle).not.toBeNull();
+      expect(onToggle).toHaveTextContent('ON');
+    });
+  });
+
+  it('load failure: toasts error, toggle not presented as a confirmed OFF', async () => {
+    mockBaseSsoLoad((path: string) => {
+      if (path === '/sso/config/role-sync') return Promise.reject(new Error('Network timeout'));
+      return undefined;
+    });
+    render(<SSOSection />);
+    await waitFor(() => {
+      expect(mockedToast.error).toHaveBeenCalledWith('Network timeout');
+    });
+    // On load failure the role-sync control stays in its unknown (null) state,
+    // so no role-sync switch is rendered; "off" must not appear as confirmed.
+    expect(getRoleSyncSwitch()).toBeNull();
+  });
+
+  it('load HTTP error: toasts backend message, toggle not presented as confirmed', async () => {
+    mockBaseSsoLoad((path: string) => {
+      if (path === '/sso/config/role-sync') return res(false, { error: 'Role sync unavailable' });
+      return undefined;
+    });
+    render(<SSOSection />);
+    await waitFor(() => {
+      expect(mockedToast.error).toHaveBeenCalledWith('Role sync unavailable');
+    });
+    expect(getRoleSyncSwitch()).toBeNull();
+  });
+
+  it('save success: PUT sends { enabled: true }, toast.success shown', async () => {
+    const user = userEvent.setup();
+    let putBody: unknown;
+    mockBaseSsoLoad((path: string) => {
+      if (path === '/sso/config/role-sync') return res(true, { enabled: false });
+      return undefined;
+    });
+    mockedFetch.mockImplementation((path: string, opts?: { method?: string; body?: string }) => {
+      if (path === '/sso/config') return Promise.resolve(res(true, []));
+      if (path === '/sso/auth-mode') return Promise.resolve(res(true, { authenticationMode: 'local_and_sso', localLoginEnabled: true }));
+      if (path === '/sso/config/role-sync' && (!opts?.method || opts?.method === 'GET')) return Promise.resolve(res(true, { enabled: false }));
+      if (path === '/sso/config/role-sync' && opts?.method === 'PUT') {
+        putBody = opts.body;
+        return Promise.resolve(res(true, { success: true }));
+      }
+      return Promise.resolve(res(true, {}));
+    });
+
+    render(<SSOSection />);
+    await waitFor(() => {
+      expect(mockedFetch).toHaveBeenCalledWith('/sso/config/role-sync');
+    });
+
+    // Wait for the toggle to load, then click it
+    await waitFor(() => {
+      expect(getRoleSyncSwitch()).not.toBeNull();
+    });
+
+    await user.click(getRoleSyncSwitch()!);
+
+    await waitFor(() => {
+      expect(mockedToast.success).toHaveBeenCalledWith('IdP role synchronization enabled');
+    });
+    // Verify exact payload
+    expect(JSON.parse(putBody as string)).toEqual({ enabled: true });
+  });
+
+  it('save failure: reverts to last confirmed value, toast.error shown, control re-enabled', async () => {
+    const user = userEvent.setup();
+    mockBaseSsoLoad((path: string) => {
+      if (path === '/sso/config/role-sync') return res(true, { enabled: false });
+      return undefined;
+    });
+    mockedFetch.mockImplementation((path: string, opts?: { method?: string }) => {
+      if (path === '/sso/config') return Promise.resolve(res(true, []));
+      if (path === '/sso/auth-mode') return Promise.resolve(res(true, { authenticationMode: 'local_and_sso', localLoginEnabled: true }));
+      if (path === '/sso/config/role-sync' && (!opts?.method || opts?.method === 'GET')) return Promise.resolve(res(true, { enabled: false }));
+      if (path === '/sso/config/role-sync' && opts?.method === 'PUT') return Promise.reject(new Error('Save failed'));
+      return Promise.resolve(res(true, {}));
+    });
+
+    render(<SSOSection />);
+    await waitFor(() => {
+      expect(getRoleSyncSwitch()).not.toBeNull();
+    });
+
+    await user.click(getRoleSyncSwitch()!);
+
+    await waitFor(() => {
+      expect(mockedToast.error).toHaveBeenCalledWith('Save failed');
+    });
+    // Should still show OFF (last confirmed value), not ON, and be re-enabled
+    await waitFor(() => {
+      const roleSyncSwitch = getRoleSyncSwitch();
+      expect(roleSyncSwitch).not.toBeNull();
+      expect(roleSyncSwitch).toHaveTextContent('OFF');
+      expect(roleSyncSwitch?.hasAttribute('disabled')).toBeFalsy();
+    });
+  });
+
+  it('save HTTP error: toasts backend message, reverts to last confirmed value', async () => {
+    const user = userEvent.setup();
+    mockBaseSsoLoad((path: string) => {
+      if (path === '/sso/config/role-sync') return res(true, { enabled: false });
+      return undefined;
+    });
+    mockedFetch.mockImplementation((path: string, opts?: { method?: string; body?: string }) => {
+      if (path === '/sso/config') return Promise.resolve(res(true, []));
+      if (path === '/sso/auth-mode') return Promise.resolve(res(true, { authenticationMode: 'local_and_sso', localLoginEnabled: true }));
+      if (path === '/sso/config/role-sync' && (!opts?.method || opts?.method === 'GET')) return Promise.resolve(res(true, { enabled: false }));
+      if (path === '/sso/config/role-sync' && opts?.method === 'PUT') return Promise.resolve(res(false, { error: 'Save rejected' }));
+      return Promise.resolve(res(true, {}));
+    });
+
+    render(<SSOSection />);
+    await waitFor(() => {
+      expect(getRoleSyncSwitch()).not.toBeNull();
+    });
+
+    await user.click(getRoleSyncSwitch()!);
+
+    await waitFor(() => {
+      expect(mockedToast.error).toHaveBeenCalledWith('Save rejected');
+    });
+    await waitFor(() => {
+      const roleSyncSwitch = getRoleSyncSwitch();
+      expect(roleSyncSwitch).not.toBeNull();
+      expect(roleSyncSwitch).toHaveTextContent('OFF');
+      expect(roleSyncSwitch?.hasAttribute('disabled')).toBeFalsy();
+    });
+  });
+
+  it('active-instance targeting: role-sync apiFetch calls do not pass localOnly', async () => {
+    mockBaseSsoLoad((path: string) => {
+      if (path === '/sso/config/role-sync') return res(true, { enabled: false });
+      return undefined;
+    });
+    render(<SSOSection />);
+    await waitFor(() => {
+      // Find the role-sync GET call
+      const calls = mockedFetch.mock.calls;
+      const roleSyncCalls = calls.filter(([path]) => path === '/sso/config/role-sync');
+      expect(roleSyncCalls.length).toBeGreaterThan(0);
+      // Assert no localOnly: true in any role-sync call (opts may be undefined
+      // on the mount GET, which is fine: the point is it never targets the hub)
+      for (const [, opts] of roleSyncCalls) {
+        const rest = opts as { localOnly?: boolean } | undefined;
+        expect(rest?.localOnly).not.toBe(true);
+      }
+    });
+  });
+
+  it('exact payload: PUT sends only { enabled: boolean }', async () => {
+    const user = userEvent.setup();
+    let putBody: string | undefined;
+    mockBaseSsoLoad((path: string) => {
+      if (path === '/sso/config/role-sync') return res(true, { enabled: true });
+      return undefined;
+    });
+    mockedFetch.mockImplementation((path: string, opts?: { method?: string; body?: string }) => {
+      if (path === '/sso/config') return Promise.resolve(res(true, []));
+      if (path === '/sso/auth-mode') return Promise.resolve(res(true, { authenticationMode: 'local_and_sso', localLoginEnabled: true }));
+      if (path === '/sso/config/role-sync' && (!opts?.method || opts?.method === 'GET')) return Promise.resolve(res(true, { enabled: true }));
+      if (path === '/sso/config/role-sync' && opts?.method === 'PUT') {
+        putBody = opts.body;
+        return Promise.resolve(res(true, { success: true }));
+      }
+      return Promise.resolve(res(true, {}));
+    });
+
+    render(<SSOSection />);
+    await waitFor(() => {
+      expect(mockedFetch).toHaveBeenCalledWith('/sso/config/role-sync');
+    });
+
+    // Wait for the ON toggle to load, then click to turn off
+    await waitFor(() => {
+      expect(getRoleSyncSwitch()).not.toBeNull();
+    });
+
+    await user.click(getRoleSyncSwitch()!);
+
+    await waitFor(() => {
+      expect(putBody).toBeDefined();
+      expect(JSON.parse(putBody as string)).toEqual({ enabled: false });
+    });
   });
 });

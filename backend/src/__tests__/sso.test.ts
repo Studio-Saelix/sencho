@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi, type MockInstance } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi, type MockInstance } from 'vitest';
 import { setupTestDb, cleanupTestDb, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import supertest from 'supertest';
 import jwt from 'jsonwebtoken';
@@ -368,56 +368,138 @@ describe('Database migration - SSO columns', () => {
 });
 
 describe('SSO Role Sync on Re-Login', () => {
-  afterAll(() => {
+  afterEach(async () => {
+    // Ensure sso_role_sync is reset to default between tests so the
+    // enabled-case does not leak into subsequent suites.
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().updateGlobalSetting('sso_role_sync', '0');
     vi.restoreAllMocks();
   });
 
-  it('provisionUser promotes user when IdP role changes to admin', async () => {
-    const { SSOService } = await import('../services/SSOService');
-    const sso = SSOService.getInstance();
-
-    // Create a viewer
-    const user1 = sso.provisionUser({
-      authProvider: 'oidc_okta',
-      providerId: 'okta-role-sync-test',
-      preferredUsername: 'rolesync_user',
-      email: 'rolesync@example.com',
-      role: 'viewer',
-    });
-    expect(user1.role).toBe('viewer');
-
-    // Re-login with admin role from IdP
-    const user2 = sso.provisionUser({
-      authProvider: 'oidc_okta',
-      providerId: 'okta-role-sync-test',
-      preferredUsername: 'rolesync_user',
-      email: 'rolesync@example.com',
-      role: 'admin',
-    });
-    expect(user2.id).toBe(user1.id);
-    expect(user2.role).toBe('admin');
-  });
-
-  it('provisionUser demotes user when IdP role changes to viewer', async () => {
+  it('provisionUser preserves existing role when sso_role_sync setting is missing', async () => {
     const { SSOService } = await import('../services/SSOService');
     const { DatabaseService } = await import('../services/DatabaseService');
     const sso = SSOService.getInstance();
     const db = DatabaseService.getInstance();
 
-    // Look up user from previous test (should be admin now)
-    const existing = db.getUserByProviderIdentity('oidc_okta', 'okta-role-sync-test');
-    expect(existing).toBeDefined();
-    expect(existing!.role).toBe('admin');
+    // Spy: return settings without sso_role_sync to simulate a missing key
+    const realSettings = { ...db.getGlobalSettings() };
+    delete realSettings['sso_role_sync'];
+    vi.spyOn(db, 'getGlobalSettings').mockReturnValue(Object.freeze(realSettings));
 
-    // Re-login with viewer role (e.g., removed from admin group)
-    const user = sso.provisionUser({
+    // Create a viewer
+    const user1 = sso.provisionUser({
       authProvider: 'oidc_okta',
-      providerId: 'okta-role-sync-test',
-      preferredUsername: 'rolesync_user',
-      email: 'rolesync@example.com',
+      providerId: 'okta-role-sync-missing',
+      preferredUsername: 'rolesync_missing',
+      email: 'rolesync_missing@example.com',
       role: 'viewer',
     });
-    expect(user.role).toBe('viewer');
+    expect(user1.role).toBe('viewer');
+
+    // Re-login with admin role from IdP - should NOT overwrite when sync is off
+    const user2 = sso.provisionUser({
+      authProvider: 'oidc_okta',
+      providerId: 'okta-role-sync-missing',
+      preferredUsername: 'rolesync_missing',
+      email: 'rolesync_missing_new@example.com',
+      role: 'admin',
+    });
+    expect(user2.id).toBe(user1.id);
+    expect(user2.role).toBe('viewer'); // preserved, not promoted
+    expect(user2.email).toBe('rolesync_missing_new@example.com'); // email still syncs
+  });
+
+  it('provisionUser preserves existing role when sso_role_sync is off', async () => {
+    const { SSOService } = await import('../services/SSOService');
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const sso = SSOService.getInstance();
+    const db = DatabaseService.getInstance();
+
+    // Explicitly set to '0'
+    db.updateGlobalSetting('sso_role_sync', '0');
+
+    // Create a viewer
+    const user1 = sso.provisionUser({
+      authProvider: 'oidc_okta',
+      providerId: 'okta-role-sync-off',
+      preferredUsername: 'rolesync_off',
+      email: 'rolesync_off@example.com',
+      role: 'viewer',
+    });
+    expect(user1.role).toBe('viewer');
+
+    // Re-login with admin role - should NOT overwrite when sync is off
+    const user2 = sso.provisionUser({
+      authProvider: 'oidc_okta',
+      providerId: 'okta-role-sync-off',
+      preferredUsername: 'rolesync_off',
+      email: 'rolesync_off_new@example.com',
+      role: 'admin',
+    });
+    expect(user2.id).toBe(user1.id);
+    expect(user2.role).toBe('viewer'); // preserved
+    expect(user2.email).toBe('rolesync_off_new@example.com'); // email still syncs
+  });
+
+  it('provisionUser applies IdP role when sso_role_sync is enabled', async () => {
+    const { SSOService } = await import('../services/SSOService');
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const sso = SSOService.getInstance();
+    const db = DatabaseService.getInstance();
+
+    // Enable sync
+    db.updateGlobalSetting('sso_role_sync', '1');
+
+    // Create a viewer
+    const user1 = sso.provisionUser({
+      authProvider: 'oidc_okta',
+      providerId: 'okta-role-sync-on',
+      preferredUsername: 'rolesync_on',
+      email: 'rolesync_on@example.com',
+      role: 'viewer',
+    });
+    expect(user1.role).toBe('viewer');
+
+    // Re-login with admin role - SHOULD overwrite when sync is enabled
+    const user2 = sso.provisionUser({
+      authProvider: 'oidc_okta',
+      providerId: 'okta-role-sync-on',
+      preferredUsername: 'rolesync_on',
+      email: 'rolesync_on_new@example.com',
+      role: 'admin',
+    });
+    expect(user2.id).toBe(user1.id);
+    expect(user2.role).toBe('admin'); // promoted
+    expect(user2.email).toBe('rolesync_on_new@example.com'); // email still syncs
+  });
+
+  it('provisionUser applies IdP role demotion when sso_role_sync is enabled', async () => {
+    const { SSOService } = await import('../services/SSOService');
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const sso = SSOService.getInstance();
+    const db = DatabaseService.getInstance();
+    db.updateGlobalSetting('sso_role_sync', '1');
+
+    // Create an admin
+    const user1 = sso.provisionUser({
+      authProvider: 'oidc_okta',
+      providerId: 'okta-role-sync-demote',
+      preferredUsername: 'rolesync_demote',
+      email: 'rolesync_demote@example.com',
+      role: 'admin',
+    });
+    expect(user1.role).toBe('admin');
+
+    // Re-login with viewer role (removed from admin group) - SHOULD demote
+    const user = sso.provisionUser({
+      authProvider: 'oidc_okta',
+      providerId: 'okta-role-sync-demote',
+      preferredUsername: 'rolesync_demote',
+      email: 'rolesync_demote@example.com',
+      role: 'viewer',
+    });
+    expect(user.role).toBe('viewer'); // demoted
   });
 });
 
@@ -630,6 +712,170 @@ describe('SSO Config - API Token Denied', () => {
       .send({ enabled: false });
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('SCOPE_DENIED');
+  });
+});
+
+describe('SSO Role Sync Config Endpoints', () => {
+  let viewerToken: string;
+
+  beforeAll(async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    if (!db.getUserByUsername('sso_test_viewer')) {
+      db.addUser({ username: 'sso_test_viewer', password_hash: '$2b$10$fake', role: 'viewer' });
+    }
+    viewerToken = jwt.sign({ username: 'sso_test_viewer', role: 'viewer' }, TEST_JWT_SECRET, { expiresIn: '1h' });
+  });
+
+  beforeEach(async () => {
+    // Ensure order independence: reset to default before each test
+    const { DatabaseService } = await import('../services/DatabaseService');
+    DatabaseService.getInstance().updateGlobalSetting('sso_role_sync', '0');
+  });
+
+  afterEach(() => {
+    // Restore any spies after each test
+    vi.restoreAllMocks();
+  });
+
+  it('Administrator GET returns { enabled: false } initially', async () => {
+    const res = await supertest(app)
+      .get('/api/sso/config/role-sync')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ enabled: false });
+  });
+
+  it('Administrator PUT persists and returns { success: true }', async () => {
+    const res = await supertest(app)
+      .put('/api/sso/config/role-sync')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ enabled: true });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true });
+  });
+
+  it('Subsequent GET returns { enabled: true } after PUT', async () => {
+    // PUT first
+    await supertest(app)
+      .put('/api/sso/config/role-sync')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ enabled: true });
+    // Then GET
+    const res = await supertest(app)
+      .get('/api/sso/config/role-sync')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ enabled: true });
+  });
+
+  it('PUT with missing body returns 400', async () => {
+    const res = await supertest(app)
+      .put('/api/sso/config/role-sync')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('enabled must be a boolean');
+  });
+
+  it('PUT with non-boolean enabled returns 400', async () => {
+    const res = await supertest(app)
+      .put('/api/sso/config/role-sync')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ enabled: 'yes' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('enabled must be a boolean');
+  });
+
+  it('PUT with null enabled returns 400', async () => {
+    const res = await supertest(app)
+      .put('/api/sso/config/role-sync')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ enabled: null });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('enabled must be a boolean');
+  });
+
+  it('Unauthenticated GET returns 401', async () => {
+    const res = await supertest(app).get('/api/sso/config/role-sync');
+    expect(res.status).toBe(401);
+  });
+
+  it('Unauthenticated PUT returns 401', async () => {
+    const res = await supertest(app)
+      .put('/api/sso/config/role-sync')
+      .send({ enabled: true });
+    expect(res.status).toBe(401);
+  });
+
+  it('Viewer GET returns 403 ADMIN_REQUIRED', async () => {
+    const res = await supertest(app)
+      .get('/api/sso/config/role-sync')
+      .set('Authorization', `Bearer ${viewerToken}`);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('ADMIN_REQUIRED');
+  });
+
+  it('Viewer PUT returns 403 ADMIN_REQUIRED', async () => {
+    const res = await supertest(app)
+      .put('/api/sso/config/role-sync')
+      .set('Authorization', `Bearer ${viewerToken}`)
+      .send({ enabled: true });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('ADMIN_REQUIRED');
+  });
+
+  it('Direct API token GET returns 403 SCOPE_DENIED', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    const rawToken = generateApiToken();
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const admin = db.getUserByUsername('testadmin');
+    db.addApiToken({
+      token_hash: tokenHash, name: `role-sync-test-${Date.now()}`,
+      scope: 'full-admin', user_id: admin!.id, created_at: Date.now(), expires_at: null,
+    });
+
+    const res = await supertest(app)
+      .get('/api/sso/config/role-sync')
+      .set('Authorization', `Bearer ${rawToken}`);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('SCOPE_DENIED');
+  });
+
+  it('Direct API token PUT returns 403 SCOPE_DENIED', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    const rawToken = generateApiToken();
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const admin = db.getUserByUsername('testadmin');
+    db.addApiToken({
+      token_hash: tokenHash, name: `role-sync-put-test-${Date.now()}`,
+      scope: 'full-admin', user_id: admin!.id, created_at: Date.now(), expires_at: null,
+    });
+
+    const res = await supertest(app)
+      .put('/api/sso/config/role-sync')
+      .set('Authorization', `Bearer ${rawToken}`)
+      .send({ enabled: true });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('SCOPE_DENIED');
+  });
+
+  it('Database failure returns controlled 500 response on PUT', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    // Spy on updateGlobalSetting (only called in the route handler, not auth
+    // middleware) to simulate a database write failure.
+    vi.spyOn(db, 'updateGlobalSetting').mockImplementation(() => {
+      throw new Error('DB write failure');
+    });
+    const res = await supertest(app)
+      .put('/api/sso/config/role-sync')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ enabled: true });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to update role-sync setting');
   });
 });
 

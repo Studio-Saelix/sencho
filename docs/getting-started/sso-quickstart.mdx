@@ -176,7 +176,7 @@ By default, all SSO users are assigned the **Viewer** role. To grant Admin to sp
       - SSO_OIDC_ADMIN_CLAIM_VALUE=sencho-admins
 ```
 
-This tells Sencho to check the `groups` claim in the OIDC ID token. If it contains `sencho-admins`, the user gets Admin. Roles are synced on every login, so removing a user from the admin group will demote them on their next sign-in.
+This tells Sencho to check the `groups` claim in the OIDC ID token. If it contains `sencho-admins`, the user gets Admin. Group mapping determines the initial role on first login; local role changes persist by default. Recurring promotion or demotion from directory membership requires enabling **IdP role synchronization** in **Settings · SSO**.
 
 <Note>
   Some providers (e.g., Okta, Zitadel) require custom scopes to include group claims in the ID token. You can configure additional scopes in the **Scopes** field in Settings → Access → SSO, or via environment variable. The default is `openid email profile`.

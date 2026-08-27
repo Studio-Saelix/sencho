@@ -112,10 +112,10 @@ Sencho supports five identity providers split across tiers by delivery model:
 
 All OIDC flows use PKCE (Proof Key for Code Exchange) and a cryptographic state parameter to prevent authorization code interception and cross-site request forgery. SSO credentials (client secrets and LDAP bind passwords) are encrypted at rest with AES-256-GCM.
 
-When a user signs in via SSO for the first time, Sencho automatically provisions a local account with the role mapped from your identity provider's claims. SSO users cannot fall back to password authentication; their access is governed entirely by the identity provider.
+When a user signs in via SSO for the first time, Sencho automatically provisions a local account with the role mapped from your identity provider's claims. That role is preserved on later sign-ins, so an administrator's manual role edit in **Settings · Users** remains authoritative by default. To have the identity provider's group mapping reapply on every login instead, enable **IdP role synchronization** in **Settings · SSO**. SSO users cannot fall back to password authentication; their access is governed by the identity provider's authentication and Sencho's role assignments.
 
 <Frame>
-  <img src="/images/sso/sso-settings.png" alt="SSO settings showing all five identity provider cards" />
+  <img src="/images/sso/sso-settings.png" alt="SSO settings panel listing the five identity providers as collapsible cards, with the IdP role synchronization toggle" />
 </Frame>
 
 For configuration details, see [SSO & LDAP Authentication](/features/sso) or the [SSO Quickstart](/getting-started/sso-quickstart).

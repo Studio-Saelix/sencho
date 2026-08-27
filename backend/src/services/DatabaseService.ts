@@ -2098,6 +2098,9 @@ export class DatabaseService {
         // behave); admins who want a strict absolute session ceiling can turn
         // it off in Settings > Users.
         stmt.run('session_sliding_refresh', '1');
+        // SSO role sync defaults off: admin-set roles persist across SSO sign-ins;
+        // operators who want IdP group membership to drive roles opt in via Settings > SSO.
+        stmt.run('sso_role_sync', '0');
 
         // Seed the default local node if none exists
         const nodeCount = (this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any)?.count || 0;
