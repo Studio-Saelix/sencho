@@ -61,13 +61,35 @@ function isTimeoutError(e: unknown): boolean {
     return typeof e === 'object' && e !== null && (e as { gitTimedOut?: unknown }).gitTimedOut === true;
 }
 
-/** Kill the whole child tree. POSIX uses the process group; Windows taskkill. */
+/** Flag an error as a git timeout so `isTimeoutError` recognises it downstream. */
+function asTimeoutError<T extends Error>(err: T): T {
+    return Object.assign(err, { gitTimedOut: true });
+}
+
+/**
+ * Kill the whole child tree. POSIX uses the process group; Windows taskkill.
+ * Does not itself confirm termination: the caller learns that from the
+ * child's own `close` event, which fires whether the process died from this
+ * kill, a prior natural exit, or (via the fallback below) a second kill
+ * attempt.
+ */
 function killTree(child: ChildProcess | undefined): void {
     if (!child?.pid) return;
     if (process.platform === 'win32') {
         const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
-        killer.on('error', () => {
+        // 'error' and 'close' can both fire for one spawn attempt; only the
+        // first should trigger the fallback so a single kill never falls back
+        // (or logs) twice.
+        let fellBack = false;
+        const fallBack = (why: string) => {
+            if (fellBack) return;
+            fellBack = true;
+            console.warn(`[GitSource:transport] taskkill ${why} for pid ${child.pid}; falling back to child.kill() (tree-kill guarantee no longer holds: descendants of ${child.pid} may still be running)`);
             child.kill();
+        };
+        killer.on('error', (err) => fallBack(`failed to spawn (${err.message})`));
+        killer.on('close', (code) => {
+            if (code !== 0) fallBack(`exited ${code}`);
         });
         return;
     }
@@ -79,10 +101,16 @@ function killTree(child: ChildProcess | undefined): void {
     }
 }
 
+/** Bound on how long to wait for a confirmed close after a kill is issued, so a kill that never reports back cannot hang the caller forever. */
+const KILL_CONFIRM_TIMEOUT_MS = 5_000;
+
 /**
- * Spawn git and collect output. Rejects with a flagged timeout error after
- * `timeoutMs`, having killed the entire child tree; resolves otherwise with
- * whatever exit code git reported.
+ * Spawn git and collect output. On timeout, kills the entire child tree and
+ * waits for its `close` event before rejecting: settling as soon as the kill
+ * is merely issued (rather than confirmed) would let the caller start
+ * cleaning up the workspace while the child tree, or the platform kill
+ * helper (taskkill), is still running. Resolves with whatever exit code git
+ * reported when it closes on its own.
  */
 function runGit(args: string[], opts: RunOptions): Promise<RunResult> {
     return new Promise((resolve, reject) => {
@@ -95,13 +123,20 @@ function runGit(args: string[], opts: RunOptions): Promise<RunResult> {
         let stdout = '';
         let stderr = '';
         let settled = false;
+        let timedOut = false;
+        let killConfirmTimer: NodeJS.Timeout | undefined;
         const append = (cur: string, chunk: Buffer) => (cur.length < STDERR_CAP ? cur + chunk.toString('utf8') : cur);
 
         const timer = setTimeout(() => {
             if (settled) return;
-            settled = true;
+            timedOut = true;
             killTree(child);
-            reject(Object.assign(new Error('git timed out'), { gitTimedOut: true }));
+            killConfirmTimer = setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                console.error(`[GitSource:transport] kill not confirmed within ${KILL_CONFIRM_TIMEOUT_MS}ms for pid ${child.pid}; the process may still be running`);
+                reject(asTimeoutError(new Error('git timed out (kill unconfirmed)')));
+            }, KILL_CONFIRM_TIMEOUT_MS);
         }, opts.timeoutMs);
 
         child.stdout?.on('data', (c: Buffer) => {
@@ -114,13 +149,23 @@ function runGit(args: string[], opts: RunOptions): Promise<RunResult> {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
-            reject(err);
+            clearTimeout(killConfirmTimer);
+            // 'error' can also fire after the kill has been issued (e.g. the
+            // process could not be killed); preserve the timeout flag so
+            // callers still classify this as a timeout rather than a bare
+            // exit failure.
+            reject(timedOut ? asTimeoutError(err) : err);
         });
         child.on('close', (code) => {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
-            resolve({ stdout, stderr, exitCode: code ?? -1 });
+            clearTimeout(killConfirmTimer);
+            if (timedOut) {
+                reject(asTimeoutError(new Error('git timed out')));
+            } else {
+                resolve({ stdout, stderr, exitCode: code ?? -1 });
+            }
         });
 
         opts.onSpawn?.(child);
@@ -291,10 +336,15 @@ async function commonArgs(layout: WorkspaceLayout, token?: string | null): Promi
     args.push(...await resolveCaArgs(layout));
     if (token) {
         const helperPath = await writeCredentialHelper(layout.metaDir);
-        // Quoted once: git strips quotes while parsing helpers, and unquoted
-        // values word-split through the helper shell whenever os.tmpdir()
-        // contains a space.
-        args.push('-c', `credential.helper="${helperPath}"`);
+        // Verbatim, no wrapping quotes: per gitcredentials(7) a helper string
+        // counts as an absolute-path command only if it literally begins with
+        // an absolute path. Unlike a gitconfig file value, `-c key=value` on
+        // argv keeps the quotes, so quoting makes the value start with `"`
+        // and git silently degrades to the short-name form
+        // (`git credential-"<path>"`), which does not exist. Residual risk: a
+        // workspace root containing a space still word-splits, as it would
+        // for any unquoted absolute-path helper.
+        args.push('-c', `credential.helper=${helperPath}`);
     } else {
         args.push('-c', 'credential.helper=');
     }
@@ -320,10 +370,31 @@ function assertValidRepoUrl(repoUrl: string, hasToken: boolean): URL {
     return url;
 }
 
-const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+const REF_MAX_LEN = 200;
+// ASCII control characters, space, and the characters git's own
+// check-ref-format forbids anywhere in a ref (~^:?*[\). Everything else,
+// including non-ASCII scripts, is a legitimate branch-name character.
+const REF_DISALLOWED_CHARS = /[\x00-\x20\x7f~^:?*[\\]/;
 
+/**
+ * Validates a ref name against the rules `git check-ref-format --branch`
+ * applies to a branch: no control characters, space, or `~^:?*[\`; no `..`
+ * or `@{`; no path component starting with `.` or ending in `.lock`; no
+ * leading `-` (git's own `--branch` mode already refuses this, since a
+ * leading dash makes the name ambiguous with a flag on argv, which is
+ * exactly the injection risk this validator exists to close).
+ */
 function assertValidRef(ref: string, host: string, hasToken: boolean): void {
-    if (!REF_PATTERN.test(ref) || ref.includes('..') || ref.includes('//') || ref.endsWith('.lock')) {
+    const segments = ref.split('/');
+    const valid = ref.length > 0
+        && ref.length <= REF_MAX_LEN
+        && !ref.startsWith('-')
+        && !REF_DISALLOWED_CHARS.test(ref)
+        && !ref.includes('..')
+        && !ref.includes('@{')
+        && !ref.endsWith('.')
+        && segments.every((seg) => seg.length > 0 && !seg.startsWith('.') && !seg.endsWith('.lock'));
+    if (!valid) {
         throw { transportFailure: true as const, reason: 'invalid-ref', host, hasToken } satisfies TransportFailure;
     }
 }
@@ -514,6 +585,14 @@ export const nativeGitTransport: GitTransport = {
                 throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), argv: [...baseArgs, 'clone'], host: url.host, hasToken } satisfies TransportFailure;
             }
 
+            // A watchdog-triggered SIGKILL settles runGit's promise via the
+            // child's normal 'close' event (code null -> exitCode -1), not a
+            // rejection, so this branch is the common path for an in-flight
+            // breach and must check sizeExceeded before the generic mapping.
+            if (sizeExceeded) {
+                throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
+            }
+
             // runGit resolves on any exit code: a failed clone (auth, missing
             // repo, TLS) must classify by its real stderr here rather than
             // fall through to rev-parse and surface as a generic GIT_ERROR.
@@ -527,13 +606,6 @@ export const nativeGitTransport: GitTransport = {
                     host: url.host,
                     hasToken,
                 } satisfies TransportFailure;
-            }
-
-            // The watchdog may fire in the window between clone completion
-            // and verification; without this check an oversized workspace
-            // would sail through as a success.
-            if (sizeExceeded) {
-                throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
             }
 
             let actual: string;
@@ -563,9 +635,14 @@ export const nativeGitTransport: GitTransport = {
 
             // Deterministic final measure: a breach landing between the last
             // watchdog tick and successful verification must not slip through
-            // as an over-cap success.
-            const finalSize = await treeSize(req.workspaceRoot).catch(() => -1);
-            if (sizeExceeded || (finalSize >= 0 && finalSize > req.maxBytes)) {
+            // as an over-cap success. A read failure here (permissions,
+            // workspace removed mid-walk) must fail closed rather than treat
+            // an unmeasurable workspace as within budget.
+            const finalSize = await treeSize(req.workspaceRoot).catch((e: unknown) => {
+                console.warn(`[GitSource:transport] final size measurement failed for ${req.workspaceRoot}, failing closed: ${e instanceof Error ? e.message : String(e)}`);
+                return -1;
+            });
+            if (sizeExceeded || finalSize < 0 || finalSize > req.maxBytes) {
                 throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
             }
 

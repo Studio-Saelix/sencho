@@ -9,7 +9,7 @@
  *   flow, and the size watchdog.
  */
 import { EventEmitter } from 'events';
-import { promises as fs } from 'fs';
+import { promises as fs, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -65,8 +65,13 @@ function fakeChild(): EventEmitter & { pid: number; stdout: EventEmitter; stderr
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     // killTree's ESRCH fallback on POSIX reaches this when the scripted PID
-    // does not exist; the real ChildProcess always has this method.
-    child.kill = () => {};
+    // does not exist (the real ChildProcess always has this method). A real
+    // kill eventually produces a 'close' event, which runGit now waits for
+    // before settling; mirror that here so hanging-timeout tests behave like
+    // a real killed process instead of hanging until the safety-net fires.
+    child.kill = () => {
+        queueMicrotask(() => child.emit('close', null));
+    };
     return child;
 }
 
@@ -302,6 +307,10 @@ describe('transport argv hardening', () => {
 
             // Credentials flow through our helper, which reads the env var.
             expect(joined).toMatch(/credential\.helper=[^ ]*\.meta\/credential-helper/);
+            // A quoted value breaks git's own absolute-path detection for
+            // credential.helper (verified against real git; see the comment
+            // at the call site), so the value must reach argv unquoted.
+            expect(joined).not.toContain('credential.helper="');
             expect(joined).not.toContain('sekrit-token-value');
 
             const env = spawnEnv(0);
@@ -423,6 +432,50 @@ describe('transport argv hardening', () => {
         await expect(nativeGitTransport.resolveRef({
             repoUrl: 'https://github.com/example/repo.git',
             ref: '--upload-pack=pwn',
+            workspaceRoot: os.tmpdir(),
+        })).rejects.toMatchObject({ transportFailure: true as const, reason: 'invalid-ref' });
+        expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    // Every case here was checked against the real `git check-ref-format
+    // --branch` on the local git binary; the allow-list regex this replaces
+    // rejected all four even though git accepts them as branch names.
+    it.each([
+        ['leading underscore', '_feature'],
+        ['non-ASCII path segment', 'feature/café'],
+        ['fully non-ASCII', '分支'],
+        ['hash character', 'issue#123'],
+    ])('accepts the git-valid ref name: %s', async (_label, ref) => {
+        scriptSpawn([{ stdout: `${SHA_A}\trefs/heads/${ref}\n` }]);
+        const root = await makeWorkspace();
+        try {
+            await expect(nativeGitTransport.resolveRef({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+            })).resolves.toMatchObject({ commitSha: SHA_A });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it.each([
+        ['leading dash (option injection)', '-flag'],
+        ['embedded double-dot', 'wip..x'],
+        ['trailing dot', 'foo.'],
+        ['.lock suffix', 'foo.lock'],
+        ['mid-path .lock segment', 'a/foo.lock/b'],
+        ['leading dot component', '.hidden'],
+        ['trailing slash', 'foo/'],
+        ['double slash', 'foo//bar'],
+        ['reflog syntax', 'foo@{upstream}'],
+        ['embedded space', 'foo bar'],
+        ['embedded tilde', 'foo~1'],
+    ])('rejects the git-invalid ref name: %s', async (_label, ref) => {
+        await expect(nativeGitTransport.resolveRef({
+            repoUrl: 'https://github.com/example/repo.git',
+            ref,
             workspaceRoot: os.tmpdir(),
         })).rejects.toMatchObject({ transportFailure: true as const, reason: 'invalid-ref' });
         expect(mockSpawn).not.toHaveBeenCalled();
@@ -698,6 +751,157 @@ describe('clone failure classification and final size gate', () => {
                 expect(killer).toBeDefined();
             }
         } finally {
+            mockSpawn.mockReset();
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    // Real timers: the interval watchdog polls the real filesystem once a
+    // second, so this exercises the actual breach-during-active-clone race
+    // rather than a scripted stand-in for it.
+    it('classifies a watchdog breach that kills an in-flight clone as a size failure, not a generic exit', async () => {
+        const root = await makeWorkspace();
+        await fs.writeFile(path.join(root, 'blob.bin'), 'x'.repeat(64));
+
+        let killed = false;
+        mockSpawn.mockImplementation(() => {
+            const child = fakeChild();
+            // Simulates killTree's POSIX SIGKILL path: the child never closes
+            // on its own, only once the watchdog's breach kill reaches it.
+            child.kill = () => {
+                killed = true;
+                queueMicrotask(() => child.emit('close', null));
+            };
+            return child;
+        });
+
+        try {
+            await expect(nativeGitTransport.fetchAtCommit({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: 'main',
+                commitSha: SHA_A,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+                maxBytes: 8,
+            })).rejects.toMatchObject({ transportFailure: true as const, reason: 'size', maxBytes: 8 });
+            expect(killed).toBe(true);
+        } finally {
+            mockSpawn.mockReset();
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('fails closed when the final size measurement cannot be read', async () => {
+        const root = await makeWorkspace();
+        let call = 0;
+        mockSpawn.mockImplementation(() => {
+            const child = fakeChild();
+            const idx = call++;
+            queueMicrotask(() => {
+                if (idx === 0) {
+                    child.emit('close', 0); // clone
+                } else {
+                    child.stdout.emit('data', Buffer.from(`${SHA_A}\n`)); // rev-parse
+                    // Destroy the workspace so the final treeSize measurement
+                    // cannot read it; a real fetch would have the checkout
+                    // vanish out from under it the same way (deleted volume,
+                    // permission change mid-walk).
+                    rmSync(root, { recursive: true, force: true });
+                    child.emit('close', 0);
+                }
+            });
+            return child;
+        });
+
+        try {
+            await expect(nativeGitTransport.fetchAtCommit({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: 'main',
+                commitSha: SHA_A,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+                maxBytes: 100 * 1024 * 1024,
+            })).rejects.toMatchObject({ transportFailure: true as const, reason: 'size', maxBytes: 100 * 1024 * 1024 });
+        } finally {
+            mockSpawn.mockReset();
+        }
+    });
+
+    it('does not settle a timed-out fetch until the child tree confirms termination', async () => {
+        let killInvoked = false;
+        let settled = false;
+        mockSpawn.mockImplementation(() => {
+            const child = fakeChild();
+            child.kill = () => {
+                killInvoked = true;
+                // Simulate a real OS termination confirmation arriving after
+                // a short, non-zero delay rather than synchronously with the
+                // kill call.
+                setTimeout(() => child.emit('close', null), 40);
+            };
+            return child;
+        });
+        const root = await makeWorkspace();
+
+        try {
+            const promise = nativeGitTransport.resolveRef({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: 'main',
+                timeoutMs: 50,
+                workspaceRoot: root,
+            });
+            promise.catch(() => {}).finally(() => {
+                settled = true;
+            });
+
+            // The timeout has fired and the kill has been issued, but the
+            // simulated confirmation has not arrived yet: settling here
+            // would let a caller start cleaning up the workspace while the
+            // child tree is still alive.
+            await new Promise((r) => setTimeout(r, 60));
+            expect(killInvoked).toBe(true);
+            expect(settled).toBe(false);
+
+            await expect(promise).rejects.toMatchObject({ transportFailure: true as const, reason: 'timeout' });
+            expect(settled).toBe(true);
+        } finally {
+            mockSpawn.mockReset();
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('falls back to child.kill() when taskkill exits non-zero (stubbed as win32 so this runs on every CI platform)', async () => {
+        const origPlatform = process.platform;
+        Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+        let fallbackKillInvoked = false;
+        mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+            if (args[0] === '/pid') {
+                // The taskkill child itself: report a failed kill (exit 1).
+                const killer = fakeChild();
+                killer.kill = () => {};
+                queueMicrotask(() => killer.emit('close', 1));
+                return killer;
+            }
+            const child = fakeChild();
+            const originalKill = child.kill;
+            child.kill = () => {
+                fallbackKillInvoked = true;
+                originalKill();
+            };
+            return child;
+        });
+        const root = await makeWorkspace();
+
+        try {
+            await expect(nativeGitTransport.resolveRef({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: 'main',
+                timeoutMs: 50,
+                workspaceRoot: root,
+            })).rejects.toMatchObject({ transportFailure: true as const, reason: 'timeout' });
+            expect(fallbackKillInvoked).toBe(true);
+        } finally {
+            Object.defineProperty(process, 'platform', { value: origPlatform, configurable: true });
             mockSpawn.mockReset();
             await fs.rm(root, { recursive: true, force: true });
         }

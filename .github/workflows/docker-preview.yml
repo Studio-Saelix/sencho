@@ -163,7 +163,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm --entrypoint sh localhost/sencho:preview-scan -c \
-            'docker --version && docker compose version'
+            'docker --version && docker compose version && git --version'
 
           docker run -d --name sencho-preview-smoke -p 1852:1852 localhost/sencho:preview-scan
           trap 'docker logs sencho-preview-smoke 2>&1 || true; docker rm -f sencho-preview-smoke >/dev/null 2>&1 || true' EXIT

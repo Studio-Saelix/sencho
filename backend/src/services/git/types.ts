@@ -17,7 +17,9 @@ export interface ResolveRequest {
     /**
      * Total fetch budget in milliseconds. Note: the resolution round trip
      * (ls-remote) is internally capped at 10s regardless of this value, so
-     * the worst-case wall clock is roughly clamp(resolve) + full clone.
+     * the worst-case wall clock is roughly clamp(resolve) + full clone, plus
+     * up to a further 5s per timed-out invocation while the transport waits
+     * for confirmed child-process termination before giving up.
      */
     timeoutMs?: number;
     /**
