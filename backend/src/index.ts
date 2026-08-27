@@ -52,6 +52,7 @@ import { nodesRouter } from './routes/nodes';
 import { stacksRouter } from './routes/stacks';
 import { stackActivityRouter } from './routes/stackActivity';
 import { stackMetricsRouter } from './routes/stackMetrics';
+import { gitopsMetricsRouter } from './routes/gitopsMetrics';
 import { fileExplorerMetricsRouter } from './routes/fileExplorerMetrics';
 import { stackActivityMetricsRouter } from './routes/stackActivityMetrics';
 import { secretsRouter } from './routes/secrets';
@@ -156,6 +157,7 @@ app.use('/api/nodes', nodesRouter);
 app.use('/api/stacks', stackActivityRouter);
 app.use('/api/stacks', stacksRouter);
 app.use('/api/stack-metrics', stackMetricsRouter);
+app.use('/api/gitops-metrics', gitopsMetricsRouter);
 app.use('/api/file-explorer-metrics', fileExplorerMetricsRouter);
 app.use('/api/stack-activity-metrics', stackActivityMetricsRouter);
 

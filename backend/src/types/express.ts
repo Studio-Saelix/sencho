@@ -24,6 +24,14 @@ declare global {
       sessionRemember?: boolean;
       /** Cached remote-proxy target resolved by `remoteNodeProxy`'s outer gate so the http-proxy router/proxyReq callbacks do not re-resolve. */
       proxyTarget?: { apiUrl: string; apiToken: string };
+      /**
+       * What the GitOps identity hop decided before forwarding: the outbound
+       * query (including whether the remote must filter to its own node) and
+       * the pre-rewrite route. Both are stashed because `pathRewrite` mutates
+       * `req.url` before the response callbacks run, so re-deriving either one
+       * there would silently look at `/api/...` and match nothing.
+       */
+      gitopsIdentity?: { query: string; preRewritePath: string };
       /** Trusted deploy provenance from machine auth or gateway overwrite. */
       deployContext?: import('../services/network/missingExternalNetworksError').DeployInvocationContext;
       /** Verified JWT scope for machine credentials (`node_proxy` / `pilot_tunnel`). */

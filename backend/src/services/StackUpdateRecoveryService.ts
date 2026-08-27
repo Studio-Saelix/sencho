@@ -34,10 +34,20 @@ import {
   type StackRecoveryServiceCapture,
 } from './recoveryServicesJson';
 import { getComposeCommandTimeoutMs } from './ComposeService';
+import type { ComposeMutationResult } from './ComposeService';
+import { HealthGateService } from './HealthGateService';
+import type { HealthRunReservation } from './gitops/transitions';
 import { assessGenerationEligibility } from './rollbackEligibility';
 import { enforcePolicyForImageRefs, type PolicyEnforcementOptions } from './PolicyEnforcement';
 import { describePolicyBlock } from '../helpers/policyGate';
 import type { GitSourceAppliedSpec } from './DatabaseService';
+import {
+    captureGitOpsRecoveryBinding,
+    EMPTY_GITOPS_RECOVERY_CAPTURE,
+    type GitOpsRecoveryCapture,
+} from './gitops/recoveryCapture';
+import { GitOpsStore } from './gitops/store';
+import { GitOpsTransitions } from './gitops/transitions';
 import type { GitSourceManifestState } from '../types/gitProjectManifest';
 import type {
   RollbackGenerationManifest,
@@ -568,6 +578,7 @@ export class StackUpdateRecoveryService {
         artifacts_retired: 0,
         released_at: null,
         released_by: null,
+        ...this.captureGitOpsBindingOrEmpty(stackName, nodeId),
       };
       DatabaseService.getInstance().insertStackUpdateRecoveryGeneration(row);
       return row;
@@ -589,6 +600,29 @@ export class StackUpdateRecoveryService {
         );
       }
       throw error;
+    }
+  }
+
+  /**
+   * Read the GitOps binding for this recovery point, degrading to no binding
+   * if that lookup fails.
+   *
+   * These three columns are advisory: they let a later restore rebind the
+   * generation, artifact, and acceptance pointers instead of guessing. Rollback
+   * protection itself does not depend on them, so a failure here must not abort
+   * the capture and block the update it protects. The failure is logged rather
+   * than swallowed, and the degraded shape is the same one legacy rows carry.
+   */
+  private captureGitOpsBindingOrEmpty(stackName: string, nodeId: number): GitOpsRecoveryCapture {
+    try {
+      return captureGitOpsRecoveryBinding(stackName, nodeId);
+    } catch (error) {
+      console.warn(
+        '[StackUpdateRecovery] Could not capture the GitOps binding for %s; recovery point stored without it: %s',
+        sanitizeForLog(stackName),
+        sanitizeForLog(getErrorMessage(error, 'unknown')),
+      );
+      return { ...EMPTY_GITOPS_RECOVERY_CAPTURE };
     }
   }
 
@@ -892,12 +926,148 @@ export class StackUpdateRecoveryService {
    * Post-handoff compensation: restore files + pinned up, then probe before
    * reporting restored_current / immediate_verified.
    */
+  /**
+   * Open a GitOps recovery for this restore, or nothing when the stack is not
+   * modelled.
+   *
+   * Returns closures rather than ids so a terminal event cannot be recorded for
+   * an operation that was never opened. Recording never fails the restore: the
+   * files and containers are the real work, and the store describes it.
+   *
+   * The proof rule is deliberately strict. Pointers move only when the recovery
+   * point named a generation, that generation still exists, and the manifest
+   * that was actually restored carries the same commit and manifest version. A
+   * restore we cannot tie to a generation is still a real recovery, it just has
+   * nothing to bind, and the transition records it as unproven rather than
+   * guessing.
+   */
+  /**
+   * Start observing a run the recovery transaction reserved.
+   *
+   * Runs after that transaction commits, because arming is in-memory work that
+   * a rollback could not undo. Anything that stops the timer starting writes
+   * the run off immediately: an observing row with nothing behind it would
+   * otherwise report a restore as still being watched for ever.
+   */
+  private armReservedRecoveryRun(
+    reservation: HealthRunReservation | null,
+    row: StackUpdateRecoveryGenerationRow,
+  ): void {
+    if (!reservation?.runId || reservation.outcome === 'disabled') return;
+    const gate = HealthGateService.getInstance();
+    try {
+      gate.armReservedRun(reservation.runId, row.node_id, row.stack_name);
+    } catch (error) {
+      const reason = getErrorMessage(error, 'unknown');
+      console.warn(
+        '[HealthGate] Could not arm the reserved recovery run %s for %s: %s',
+        reservation.runId, sanitizeForLog(row.stack_name), sanitizeForLog(reason),
+      );
+      gate.abandonReservedRun(reservation.runId, row.node_id, row.stack_name, `could not arm: ${reason}`);
+    }
+  }
+
+  private beginGitOpsRecovery(row: StackUpdateRecoveryGenerationRow): {
+    succeeded: (
+      restored: RollbackGenerationManifest | null,
+      binding: 'bound' | 'unbound',
+    ) => HealthRunReservation | null;
+    failed: (failureClass: 'pre_mutation' | 'post_mutation') => void;
+  } | null {
+    // Returns what the write produced, or null when it could not be recorded.
+    // Recording never fails the restore: the store describes what happened, it
+    // does not make it happen.
+    const record = <T>(what: string, write: () => T): T | null => {
+      try {
+        return write();
+      } catch (error) {
+        console.error(
+          '[GitOps] Could not record recovery %s for %s (recovery %s):',
+          what, sanitizeForLog(row.stack_name), row.id,
+          error instanceof Error ? error.stack ?? error.message : String(error),
+        );
+        return null;
+      }
+    };
+    try {
+      const store = GitOpsStore.getInstance();
+      const app = store.getLiveDirectApplication(row.stack_name);
+      if (!app || app.lifecycle_status !== 'active') return null;
+      const target = store.getTarget(app.id, row.node_id);
+      if (!target || target.target_status !== 'active') return null;
+
+      const tx = GitOpsTransitions.getInstance();
+      const envelope = {
+        operationId: row.id,
+        actor: 'system:recovery',
+        trigger: 'recovery',
+        at: Date.now(),
+      };
+      const capturedGenerationId = row.gitops_generation_id ?? null;
+      record('start', () => tx.recoveryStarted({
+        applicationId: app.id,
+        nodeId: row.node_id,
+        recoveryRef: row.id,
+        recoveryGenerationId: capturedGenerationId,
+        envelope,
+      }));
+
+      return {
+        succeeded: (restored, binding) => record('success', () => {
+          const generation = capturedGenerationId
+            ? store.getGeneration(capturedGenerationId)
+            : undefined;
+          const proven = !!generation
+            && !!restored
+            && restored.git?.commitSha === generation.commit_sha
+            && restored.git?.manifestVersion === generation.manifest_version;
+          const result = tx.recoverySucceeded({
+            applicationId: app.id,
+            nodeId: row.node_id,
+            recoveryRef: row.id,
+            recoveryGenerationId: capturedGenerationId,
+            proven,
+            gitopsBinding: binding,
+            capturedArtifactSetId: row.gitops_artifact_set_id ?? null,
+            capturedSourceAcceptanceRef: row.gitops_source_acceptance_ref ?? null,
+            envelope: { ...envelope, at: Date.now() },
+            // Claimed inside the recovery transaction so the run and the
+            // pointers it describes commit together. Arming it is a separate
+            // step once that transaction has landed.
+            reserveHealthRun: (deployedGenerationId) => HealthGateService.getInstance().reserveRecoveryRun({
+              recoveryRef: row.id,
+              nodeId: row.node_id,
+              stackName: row.stack_name,
+              deployedGenerationId,
+              actor: envelope.actor,
+            }),
+          });
+          return result.healthReservation;
+        }),
+        failed: (failureClass) => record('failure', () => tx.recoveryFailed({
+          applicationId: app.id,
+          nodeId: row.node_id,
+          recoveryRef: row.id,
+          failureClass,
+          envelope: { ...envelope, at: Date.now() },
+        })),
+      };
+    } catch (error) {
+      console.error(
+        '[GitOps] Could not open a recovery for %s:',
+        sanitizeForLog(row.stack_name),
+        error instanceof Error ? error.stack ?? error.message : String(error),
+      );
+      return null;
+    }
+  }
+
   public async compensateWithCandidate(
     generationId: string,
     composeUp: (
       overridePath: string,
       invocation: RollbackInvocationRecord | null,
-    ) => Promise<void>,
+    ) => Promise<ComposeMutationResult | void>,
     policyOptions?: PolicyEnforcementOptions,
   ): Promise<boolean> {
     const row = this.get(generationId);
@@ -930,6 +1100,11 @@ export class StackUpdateRecoveryService {
     const transactionMeta = await captureGitSidePreimage(row.stack_name);
     const generationContentPath =
       expectsGenerationContent(row) && row.content_path ? row.content_path : null;
+
+    // Open the recovery in the model before any file moves, so a crash mid
+    // restore leaves a target that says what it was doing rather than one that
+    // merely looks broken.
+    const gitopsRecovery = this.beginGitOpsRecovery(row);
 
     let filesRestored = false;
     try {
@@ -985,7 +1160,10 @@ export class StackUpdateRecoveryService {
       if (!row.override_path) {
         throw new Error('Recovery generation has no override path');
       }
-      await composeUp(row.override_path, restoredInvocation);
+      // Only a callback that reports a Compose mutation licenses the deployed
+      // pointer. A restore driven some other way resolves the same, and binding
+      // on that would claim a workload nobody launched.
+      const composeResult = await composeUp(row.override_path, restoredInvocation);
       const probeOk = await this.probeRecoveredStack(
         row.node_id,
         row.stack_name,
@@ -1023,9 +1201,17 @@ export class StackUpdateRecoveryService {
         is_current: 1,
         artifact_expires_at: null,
       });
+      const reservation = gitopsRecovery?.succeeded(
+        restoredManifest ?? null,
+        composeResult?.mutatedByCompose ? 'bound' : 'unbound',
+      ) ?? null;
+      this.armReservedRecoveryRun(reservation, row);
       return true;
     } catch (error) {
       const code = (error as { code?: string }).code;
+      // Classified by whether the files had already moved. Only a failure
+      // before that leaves the previous workload provably intact.
+      gitopsRecovery?.failed(filesRestored ? 'post_mutation' : 'pre_mutation');
       if (filesRestored && generationContentPath) {
         try {
           await RollbackGenerationStore.reconcileInterruptedRestore(

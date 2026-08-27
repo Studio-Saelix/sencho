@@ -9,6 +9,8 @@ import { isCleanOneShotCompletion } from '../utils/oneShotCompletion';
 import { declaredFromEffectiveModel } from '../helpers/effectiveToDeclaredCompose';
 import { parseEffectiveModel } from './preflight/effectiveModel';
 import type { HealthGateContainer, HealthGateReport } from './updateGuard/types';
+import { GitOpsStore } from './gitops/store';
+import { GitOpsTransitions } from './gitops/transitions';
 import { ComposeService, getComposeCommandTimeoutMs } from './ComposeService';
 
 const POLL_INTERVAL_MS = 5_000;
@@ -79,7 +81,7 @@ interface ActiveGate {
   /** 'stack' for the legacy post-mutation gate, 'service' for prepared gates. */
   targetScope: 'stack' | 'service';
   /** Named trigger persisted on the row. */
-  trigger: 'update' | 'deploy' | 'service_update' | 'service_restore';
+  trigger: 'update' | 'deploy' | 'service_update' | 'service_restore' | 'recovery';
   /** Service gates only. */
   serviceName: string | null;
   /** Single image id every primary replica must converge on (service gates). */
@@ -224,18 +226,40 @@ export class HealthGateService {
     return HealthGateService.instance;
   }
 
-  /** Sweep runs left observing by a previous process, then accept begin() calls. */
+  /**
+   * Sweep runs left observing by a previous process, then accept begin() calls.
+   *
+   * Each row is finalized on its own rather than swept with one UPDATE, so the
+   * revision state hears a verdict for every one of them. A reserved recovery
+   * run is finalized here like any other: a reservation is only ever armed by
+   * the process that made it, so one that survived a restart has no timer and
+   * nothing left to observe.
+   */
   public start(): void {
     this.started = true;
+    let interrupted: HealthGateRunRow[];
     try {
-      const swept = DatabaseService.getInstance().markInterruptedHealthGateRuns(
-        'Sencho restarted during observation', Date.now(),
-      );
-      if (swept > 0) {
-        console.log(`[HealthGate] Marked ${swept} interrupted observation(s) as unknown`);
-      }
+      interrupted = DatabaseService.getInstance().listObservingHealthGateRuns();
     } catch (error) {
       console.error('[HealthGate] Startup sweep failed:', getErrorMessage(error, 'unknown'));
+      return;
+    }
+    let finalized = 0;
+    for (const run of interrupted) {
+      // Per row, so one unreadable row cannot leave every later one observing
+      // for ever.
+      try {
+        this.finalizePersistedRun(run, 'Sencho restarted during observation');
+        finalized++;
+      } catch (error) {
+        console.error(
+          '[HealthGate] Could not finalize interrupted run %s for %s:',
+          run.id, sanitizeForLog(run.stack_name), getErrorMessage(error, 'unknown'),
+        );
+      }
+    }
+    if (finalized > 0) {
+      console.log(`[HealthGate] Marked ${finalized} interrupted observation(s) as unknown`);
     }
   }
 
@@ -303,11 +327,22 @@ export class HealthGateService {
    * every gated update path gets the timeline marker even when the gate
    * itself is disabled.
    */
+  /**
+   * Start a stack-scoped health observation.
+   *
+   * `binding.deployedGenerationId` is the generation the mutation that preceded
+   * this call actually deployed, or null when there was none. It is a required
+   * argument rather than something this method reads from current state,
+   * because a verdict is only meaningful for the generation the run watched:
+   * reading it later could bind a run to whatever happens to be deployed by
+   * then, and a pass would then promote a generation this run never observed.
+   */
   public beginStack(
     nodeId: number,
     stackName: string,
     trigger: 'update' | 'deploy',
     actor: string | null,
+    binding: { deployedGenerationId: string | null },
   ): string | null {
     // Refuses work outside the start()/stop() lifecycle so a late call during
     // shutdown cannot leave a dangling poll timer.
@@ -343,6 +378,7 @@ export class HealthGateService {
         target_scope: 'stack',
         service_name: null,
         failure_source: null,
+        deployed_generation_id: binding.deployedGenerationId,
       };
 
       if (this.active.size >= MAX_CONCURRENT_GATES) {
@@ -386,14 +422,136 @@ export class HealthGateService {
     }
   }
 
+  /**
+   * Claim a health run for a proven, bound recovery, inside the caller's open
+   * transaction.
+   *
+   * Writes the row and links it to the recovery generation, and touches nothing
+   * in memory. Committing the reservation alongside the recovery is the point:
+   * a crash between the two would otherwise leave a restored workload that no
+   * run was ever recorded against. Arming the timer is the caller's separate
+   * step after its transaction commits.
+   *
+   * Idempotent on the recovery generation's `health_gate_id`, so a replayed
+   * recovery reuses its run rather than opening a second one.
+   */
+  public reserveRecoveryRun(args: {
+    recoveryRef: string;
+    nodeId: number;
+    stackName: string;
+    deployedGenerationId: string;
+    actor: string | null;
+  }): { outcome: 'reserved' | 'replayed' | 'disabled'; runId: string | null } {
+    const db = DatabaseService.getInstance();
+    if (!this.readSettings().enabled) return { outcome: 'disabled', runId: null };
+
+    const linked = db.getStackUpdateRecoveryGeneration(args.recoveryRef)?.health_gate_id ?? null;
+    if (linked) return { outcome: 'replayed', runId: linked };
+
+    const runId = randomUUID();
+    db.insertHealthGateRun({
+      id: runId,
+      node_id: args.nodeId,
+      stack_name: args.stackName,
+      trigger_action: 'recovery',
+      status: 'observing',
+      reason: null,
+      window_seconds: this.readSettings().windowSeconds,
+      containers_json: '[]',
+      started_at: Date.now(),
+      ended_at: null,
+      created_by: args.actor,
+      target_scope: 'stack',
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: args.deployedGenerationId,
+    });
+    db.updateStackUpdateRecoveryGeneration(args.recoveryRef, { health_gate_id: runId });
+    return { outcome: 'reserved', runId };
+  }
+
+  /**
+   * Start observing a run that was reserved in a committed transaction.
+   *
+   * Inserts nothing: the row already exists, and creating a second one would
+   * give the same recovery two verdicts. Throws on anything unexpected so the
+   * caller can finalize the reservation unknown rather than leave an observing
+   * row with no timer behind it.
+   *
+   * Same-process only. A reservation that outlived its process is finalized by
+   * `start`, never armed here.
+   */
+  public armReservedRun(runId: string, nodeId: number, stackName: string): void {
+    if (!this.started) throw new Error('health gate service is not started');
+
+    const run = DatabaseService.getInstance().getHealthGateRun(nodeId, stackName, runId);
+    if (!run) throw new Error(`reserved health run ${runId} was not found`);
+    if (run.status !== 'observing' || run.trigger_action !== 'recovery' || run.target_scope !== 'stack') {
+      throw new Error(`health run ${runId} is not a reserved stack recovery observation`);
+    }
+
+    const key = this.gateKey(nodeId, stackName, 'stack', null);
+    if (this.active.get(key)?.runId === runId) return;
+    this.supersedeGatesForStack(nodeId, stackName);
+    if (this.active.size >= MAX_CONCURRENT_GATES) {
+      throw new Error('too many concurrent observations');
+    }
+
+    const gate: ActiveGate = {
+      runId,
+      nodeId,
+      stackName,
+      windowSeconds: run.window_seconds,
+      startedAt: run.started_at,
+      timer: null,
+      expected: null,
+      consecutivePollErrors: 0,
+      missingLastPoll: new Set(),
+      restartingLastPoll: new Set(),
+      finalized: false,
+      targetScope: 'stack',
+      trigger: 'recovery',
+      serviceName: null,
+      expectedImageId: null,
+      expectedReplicas: 0,
+      collateralEligibleNames: new Set(),
+      collateralBaselineByName: new Map(),
+      roleByName: new Map(),
+      declaredRestartByService: null,
+    };
+    this.active.set(key, gate);
+    this.scheduleNextPoll(gate);
+  }
+
+  /**
+   * Write off a reservation this process could not arm.
+   *
+   * Public because the reservation is made inside the recovery transaction and
+   * armed after it commits, so the window where arming can fail belongs to the
+   * caller, not to this service.
+   */
+  public abandonReservedRun(runId: string, nodeId: number, stackName: string, reason: string): void {
+    try {
+      const run = DatabaseService.getInstance().getHealthGateRun(nodeId, stackName, runId);
+      if (!run || run.status !== 'observing') return;
+      this.finalizePersistedRun(run, reason);
+    } catch (error) {
+      console.error(
+        '[HealthGate] Could not finalize unarmed reservation %s for %s:',
+        runId, sanitizeForLog(stackName), getErrorMessage(error, 'unknown'),
+      );
+    }
+  }
+
   /** @deprecated Prefer beginStack; retained as a one-PR alias for callers under migration. */
   public begin(
     nodeId: number,
     stackName: string,
     trigger: 'update' | 'deploy',
     actor: string | null,
+    binding: { deployedGenerationId: string | null },
   ): string | null {
-    return this.beginStack(nodeId, stackName, trigger, actor);
+    return this.beginStack(nodeId, stackName, trigger, actor, binding);
   }
 
   /**
@@ -1018,6 +1176,60 @@ export class HealthGateService {
     });
   }
 
+  /**
+   * Hand a finalized verdict to the GitOps state model.
+   *
+   * The generation is read back from the persisted run row rather than taken
+   * from memory, so the verdict is attributed to what this run was recorded as
+   * observing. The transition decides whether that is still promotable; this
+   * method only reports.
+   *
+   * Never throws: a health gate is an observer, and a bookkeeping failure must
+   * not change the verdict that was just written.
+   */
+  private recordGitOpsHealthVerdict(
+    nodeId: number,
+    stackName: string,
+    runId: string,
+    status: 'passed' | 'failed' | 'unknown',
+  ): void {
+    try {
+      const run = DatabaseService.getInstance().getHealthGateRun(nodeId, stackName, runId);
+      if (!run) return;
+      const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+      if (!app || app.lifecycle_status !== 'active') return;
+      if (!GitOpsStore.getInstance().getTarget(app.id, nodeId)) return;
+      GitOpsTransitions.getInstance().healthFinalized({
+        applicationId: app.id,
+        nodeId,
+        healthRunId: runId,
+        healthStatus: status,
+        deployedGenerationId: run.deployed_generation_id ?? null,
+        targetScope: run.target_scope,
+        envelope: { operationId: runId, actor: 'system:health-gate', trigger: 'health', at: Date.now() },
+      });
+    } catch (error) {
+      console.error(
+        '[GitOps] Could not record the health verdict for %s:',
+        sanitizeForLog(stackName), getErrorMessage(error, 'unknown'),
+      );
+    }
+  }
+
+  /**
+   * Write an unknown verdict for a run this process is not observing.
+   *
+   * Covers a row a previous process left behind and a reservation this process
+   * could not arm. Both are the same situation: an observing row with no timer
+   * behind it, which would otherwise sit unresolved for ever.
+   */
+  private finalizePersistedRun(run: HealthGateRunRow, reason: string): void {
+    DatabaseService.getInstance().finalizeHealthGateRun(
+      run.id, 'unknown', reason, Date.now(), run.containers_json ?? '[]', null,
+    );
+    this.recordGitOpsHealthVerdict(run.node_id, run.stack_name, run.id, 'unknown');
+  }
+
   private finalize(
     gate: ActiveGate,
     status: 'passed' | 'failed' | 'unknown',
@@ -1047,6 +1259,7 @@ export class HealthGateService {
       DatabaseService.getInstance().finalizeHealthGateRun(
         gate.runId, status, reason, Date.now(), JSON.stringify(containers), failureSource,
       );
+      this.recordGitOpsHealthVerdict(gate.nodeId, gate.stackName, gate.runId, status);
     } catch (error) {
       // The verdict is lost from the DB (the startup sweep will later rewrite
       // the row as unknown), so log everything needed to reconstruct it.

@@ -1,0 +1,245 @@
+/**
+ * Blueprint deployment-state writes, recorded by what caused them.
+ *
+ * Every production write to a Blueprint deployment row comes through here, so
+ * the revision state hears one event per real change rather than one per call.
+ * The cause is passed in rather than inferred from the resulting status,
+ * because several causes land on the same status: a deploy that failed and a
+ * withdraw that failed both read `failed`, and telling them apart afterwards is
+ * impossible.
+ *
+ * Preview cleanup deliberately does not come through here. It reverses a
+ * projection nobody deployed, so recording it would report removals that never
+ * happened.
+ */
+import { DatabaseService, type BlueprintDeployment } from '../DatabaseService';
+import { GitOpsStore, emptyTargetRow } from './store';
+import { GitOpsTransitions, GitOpsTransitionError } from './transitions';
+import { envelopeFor, recordableApplication } from './blueprintProducers';
+
+/** Why a deployment row moved. */
+export type BlueprintDeploymentCause =
+  | 'deploy_start'
+  | 'deploy_ack'
+  | 'deploy_fail'
+  | 'name_conflict'
+  | 'withdraw_start'
+  | 'withdraw_success'
+  | 'withdraw_fail'
+  | 'withdraw_name_conflict'
+  | 'await_state_review'
+  | 'await_evict_confirm'
+  | 'drift_observed'
+  | 'drift_enforce_start';
+
+/** Causes that only observe, and must never acknowledge or mint anything. */
+const OBSERVATION_STAGE = {
+  await_state_review: 'blueprint_state_review',
+  await_evict_confirm: 'blueprint_evict_blocked',
+  drift_observed: 'blueprint_drifted',
+  drift_enforce_start: 'blueprint_correcting',
+} as const;
+
+type ObservationCause = keyof typeof OBSERVATION_STAGE;
+
+/**
+ * Narrows to the observation causes, so the stage lookup below reads as a fact
+ * the compiler derives rather than one an assertion claims.
+ */
+function isObservation(cause: BlueprintDeploymentCause): cause is ObservationCause {
+  return cause in OBSERVATION_STAGE;
+}
+
+type DeploymentFields = Omit<Parameters<DatabaseService['upsertDeployment']>[0], 'blueprint_id' | 'node_id'>;
+
+/**
+ * Write a deployment row and record what caused it.
+ *
+ * The write happens either way. Recording is skipped when the effective status
+ * did not move, so a reconciler tick that re-asserts a state it already
+ * reported does not append a second event describing the same fact.
+ */
+export function commitBlueprintDeploymentCause(
+  cause: BlueprintDeploymentCause,
+  blueprintId: number,
+  nodeId: number,
+  fields: DeploymentFields,
+  actor: string | null,
+): BlueprintDeployment {
+  const db = DatabaseService.getInstance();
+
+  return db.getDb().transaction(() => {
+    const previous = db.getDeployment(blueprintId, nodeId);
+    const deployment = db.upsertDeployment({ blueprint_id: blueprintId, node_id: nodeId, ...fields });
+    const statusMoved = previous?.status !== deployment.status;
+
+    try {
+      record(cause, blueprintId, nodeId, statusMoved, actor);
+    } catch (error) {
+      // The deployment happened whatever the record says. Failing the write
+      // here would turn a bookkeeping problem into a stuck rollout.
+      //
+      // A rejection is louder than an infrastructure error on purpose: it means
+      // the model refused this as invalid, and a target that keeps refusing
+      // holds its active slot and stops recording anything further.
+      const rejected = error instanceof GitOpsTransitionError;
+      console.error(
+        '[GitOps] %s recording blueprint %s for blueprint %d on node %d:',
+        rejected ? 'Rejected' : 'Could not record', cause, blueprintId, nodeId,
+        error instanceof Error ? error.stack ?? error.message : String(error),
+      );
+    }
+    return deployment;
+  })();
+}
+
+function record(
+  cause: BlueprintDeploymentCause,
+  blueprintId: number,
+  nodeId: number,
+  statusMoved: boolean,
+  actor: string | null,
+): void {
+  const store = GitOpsStore.getInstance();
+  const tx = GitOpsTransitions.getInstance();
+  const app = store.getLiveBlueprintApplication(blueprintId);
+  // A Blueprint that predates the model has nothing to record against.
+  if (!recordableApplication(app)) return;
+
+  const envelope = envelopeFor(actor, `blueprint_${cause}`);
+
+  if (isObservation(cause)) {
+    // Observations are the only causes the status guard applies to. A start
+    // writes the identity terminals are matched against, so suppressing one
+    // because the row already read `deploying` would let a later
+    // acknowledgement answer a request that had been superseded.
+    if (!statusMoved) return;
+    // A stateful first placement is held for review before anything deploys,
+    // so there is no target yet and nothing to observe against. Creating it
+    // here is the same first-contact write `deploy_start` does below: the
+    // node has been asked to hold this Blueprint, which is exactly what the
+    // observation is about. Any other cause arriving without a target is
+    // dropped, which is also what happens to a drift or evict report for a
+    // Blueprint that migration brought in: migration records the application,
+    // its intent and its candidate, but no targets, so a fleet that predates
+    // this model reports nothing here until its next deploy creates one.
+    const firstPlacement = !store.getTarget(app.id, nodeId);
+    if (firstPlacement && cause !== 'await_state_review') return;
+    const stage = OBSERVATION_STAGE[cause];
+    // Both writes in one transaction so they succeed or fail together. The
+    // observation refuses a tombstoned target, and it runs in its own
+    // savepoint, so creating the target outside this would leave an active
+    // target with no generation, no stage and no history behind a refusal: a
+    // placement relationship the model never established, which the delete
+    // path would later tombstone as if it were real.
+    DatabaseService.getInstance().getDb().transaction(() => {
+      if (firstPlacement) store.upsertTarget(emptyTargetRow(app.id, nodeId, envelope.at));
+      tx.blueprintObservation({ applicationId: app.id, nodeId, stage, envelope });
+    })();
+    return;
+  }
+
+  if (cause === 'deploy_start') {
+    // First deploy to this node: the target is created here, because a
+    // Blueprint application has no targets until something is sent somewhere.
+    if (!store.getTarget(app.id, nodeId)) {
+      store.upsertTarget(emptyTargetRow(app.id, nodeId, envelope.at));
+    }
+    if (!app.intent_revision_id) return;
+    tx.blueprintDeployStarted({
+      applicationId: app.id,
+      nodeId,
+      intentRevisionId: app.intent_revision_id,
+      rolloutCandidateId: app.rollout_candidate_id,
+      envelope,
+    });
+    return;
+  }
+
+  const target = store.getTarget(app.id, nodeId);
+  if (!target) return;
+
+  // Terminals answer the request the target says it was given, not whatever the
+  // Blueprint currently wants. An ack matched against the current intent would
+  // accept work for a revision this node was never sent.
+  const requested = target.active_operation_stage !== null
+    ? target.active_intent_revision_id
+    : target.interruption_intent_revision_id;
+
+  switch (cause) {
+    case 'deploy_ack':
+      if (!requested) return;
+      tx.blueprintAckRecorded({
+        applicationId: app.id,
+        nodeId,
+        intentRevisionId: requested,
+        rolloutCandidateId: target.active_operation_stage !== null
+          ? target.active_rollout_candidate_id
+          : target.interruption_rollout_candidate_id,
+        legacyAppliedRevision: null,
+        envelope,
+      });
+      return;
+    case 'deploy_fail':
+    case 'name_conflict':
+      tx.blueprintDeployFailed({
+        applicationId: app.id,
+        nodeId,
+        failureClass: cause === 'name_conflict' ? 'name_conflict' : 'post_mutation',
+        envelope,
+      });
+      return;
+    case 'withdraw_start':
+      if (!target.intent_revision_id) return;
+      tx.blueprintWithdrawStarted({
+        applicationId: app.id,
+        nodeId,
+        // The intent being removed is the one this node acknowledged, never a
+        // later replacement.
+        intentRevisionId: target.intent_revision_id,
+        envelope,
+      });
+      return;
+    case 'withdraw_success':
+      if (!requested) return;
+      tx.blueprintWithdrawn({ applicationId: app.id, nodeId, intentRevisionId: requested, envelope });
+      return;
+    case 'withdraw_fail':
+    case 'withdraw_name_conflict':
+      tx.blueprintWithdrawFailed({
+        applicationId: app.id,
+        nodeId,
+        failureClass: cause === 'withdraw_name_conflict' ? 'name_conflict' : 'post_mutation',
+        envelope,
+      });
+      return;
+  }
+}
+
+/**
+ * Record a withdraw that removed the deployment row entirely.
+ *
+ * Split from the cause above because the row is deleted rather than updated, so
+ * there is no status to compare.
+ */
+export function commitBlueprintDeploymentRemoved(
+  blueprintId: number,
+  nodeId: number,
+  actor: string | null,
+): void {
+  const db = DatabaseService.getInstance();
+  db.getDb().transaction(() => {
+    const existed = db.getDeployment(blueprintId, nodeId) !== undefined;
+    db.deleteDeployment(blueprintId, nodeId);
+    if (!existed) return;
+    try {
+      record('withdraw_success', blueprintId, nodeId, true, actor);
+    } catch (error) {
+      console.error(
+        '[GitOps] Could not record blueprint withdrawal for blueprint %d on node %d:',
+        blueprintId, nodeId,
+        error instanceof Error ? error.stack ?? error.message : String(error),
+      );
+    }
+  })();
+}

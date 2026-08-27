@@ -118,7 +118,7 @@ beforeEach(() => {
 
   mockExecute.mockImplementation(async () => {
     callOrder.push('execute');
-    return { kind: 'stack_compose_done', recoveryId: null };
+    return { kind: 'stack_compose_done', recoveryId: null, deployedGenerationId: null };
   });
   mockBeginStack.mockImplementation(() => {
     callOrder.push('beginStack');
