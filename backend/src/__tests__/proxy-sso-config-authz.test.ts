@@ -8,10 +8,9 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import http from 'http';
 import request from 'supertest';
-import crypto from 'crypto';
 import { setupTestDb, cleanupTestDb, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import jwt from 'jsonwebtoken';
-import { generateApiToken } from '../utils/apiTokenFormat';
+import { createTestApiToken } from './helpers/apiTokenTestHelper';
 import { PROXY_ROLE_HEADER } from '../services/license-headers';
 
 let tmpDir: string;
@@ -66,15 +65,14 @@ beforeAll(async () => {
 
   adminToken = jwt.sign({ username: 'testadmin', role: 'admin' }, TEST_JWT_SECRET, { expiresIn: '1h' });
 
-  // Create a full-admin API token
-  const rawToken = generateApiToken();
-  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  // Create a full-admin API token via the shared test helper
   const admin = db.getUserByUsername('testadmin');
-  db.addApiToken({
-    token_hash: tokenHash, name: `sso-config-proxy-test-${Date.now()}`,
-    scope: 'full-admin', user_id: admin!.id, created_at: Date.now(), expires_at: null,
+  fullAdminApiToken = createTestApiToken({
+    db: DatabaseService,
+    scope: 'full-admin',
+    userId: admin!.id,
+    name: `sso-config-proxy-test-${Date.now()}`,
   });
-  fullAdminApiToken = rawToken;
 
   // Set up the remote server
   remoteServer = createRemoteServer();

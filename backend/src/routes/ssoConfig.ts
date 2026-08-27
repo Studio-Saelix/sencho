@@ -58,7 +58,7 @@ ssoConfigRouter.put('/role-sync', (req: Request, res: Response): void => {
   }
   try {
     DatabaseService.getInstance().updateGlobalSetting('sso_role_sync', enabled ? '1' : '0');
-    console.log(`[SSO] role-sync updated: ${enabled}`);
+    console.log(`[SSO] role-sync updated: ${enabled ? 'enabled' : 'disabled'}`);
     res.json({ success: true });
   } catch (error) {
     console.error('[SSO] Failed to update role-sync setting:', error);

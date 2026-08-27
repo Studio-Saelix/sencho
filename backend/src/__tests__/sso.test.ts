@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import type { Express } from 'express';
 import { generateApiToken } from '../utils/apiTokenFormat';
+import { createTestApiToken } from './helpers/apiTokenTestHelper';
 
 let tmpDir: string;
 let app: Express;
@@ -828,12 +829,12 @@ describe('SSO Role Sync Config Endpoints', () => {
   it('Direct API token GET returns 403 SCOPE_DENIED', async () => {
     const { DatabaseService } = await import('../services/DatabaseService');
     const db = DatabaseService.getInstance();
-    const rawToken = generateApiToken();
-    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
     const admin = db.getUserByUsername('testadmin');
-    db.addApiToken({
-      token_hash: tokenHash, name: `role-sync-test-${Date.now()}`,
-      scope: 'full-admin', user_id: admin!.id, created_at: Date.now(), expires_at: null,
+    const rawToken = createTestApiToken({
+      db: DatabaseService,
+      scope: 'full-admin',
+      userId: admin!.id,
+      name: `role-sync-test-${Date.now()}`,
     });
 
     const res = await supertest(app)
@@ -846,12 +847,12 @@ describe('SSO Role Sync Config Endpoints', () => {
   it('Direct API token PUT returns 403 SCOPE_DENIED', async () => {
     const { DatabaseService } = await import('../services/DatabaseService');
     const db = DatabaseService.getInstance();
-    const rawToken = generateApiToken();
-    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
     const admin = db.getUserByUsername('testadmin');
-    db.addApiToken({
-      token_hash: tokenHash, name: `role-sync-put-test-${Date.now()}`,
-      scope: 'full-admin', user_id: admin!.id, created_at: Date.now(), expires_at: null,
+    const rawToken = createTestApiToken({
+      db: DatabaseService,
+      scope: 'full-admin',
+      userId: admin!.id,
+      name: `role-sync-put-test-${Date.now()}`,
     });
 
     const res = await supertest(app)
