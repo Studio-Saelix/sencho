@@ -14,6 +14,8 @@ import { toast } from '@/components/ui/toast-store';
 import { buildServiceUrl, openServiceUrl } from '@/lib/serviceUrl';
 import { requestServiceUpdate as postServiceUpdate, requestServiceRestore as postServiceRestore } from '@/lib/serviceUpdate';
 import type { EffectiveServiceModelResult } from '@/types/effectiveServices';
+import { absentFault, pendingSourceStatus, type GitSourcePendingMap } from '@/lib/gitopsState';
+import type { GitOpsRevisionCarrier } from '@/types/gitops';
 import type { useEditorViewState } from './useEditorViewState';
 import type { useStackListState } from './useStackListState';
 import type { useViewNavigationState } from './useViewNavigationState';
@@ -827,11 +829,34 @@ export function useStackActions(options: UseStackActionsOptions) {
     try {
       const res = await apiFetch('/git-sources');
       if (!res.ok) return;
-      const sources: Array<{ stack_name: string; pending_commit_sha: string | null }> =
-        await res.json();
-      const map: Record<string, boolean> = {};
+      // The revision is optional because this route is proxied: a node that
+      // predates the revision model answers rows without one.
+      const sources: Array<
+        { stack_name: string; pending_commit_sha: string | null } & Partial<GitOpsRevisionCarrier>
+      > = await res.json();
+      const map: GitSourcePendingMap = {};
       for (const s of sources) {
-        if (s.pending_commit_sha) map[s.stack_name] = true;
+        const revision = s.gitopsRevision;
+        const status = revision ? pendingSourceStatus(revision) : null;
+        if (status) {
+          map[s.stack_name] = status;
+          continue;
+        }
+        // Nothing answered. Either the row predates the model, or a GitOps write
+        // failed and was swallowed while the pending commit still committed. The
+        // flat pointer is the only thing left that can answer, and going quiet on
+        // a stack that genuinely has an update waiting would be a regression.
+        //
+        // A projection that reports a fault is excluded: it means an application
+        // was expected and could not be read, so the pointer is not evidence that
+        // a candidate is ready, and naming a state here would be a guess. The
+        // panels surface that fault properly; this indicator only ever claims
+        // that an update is waiting.
+        const unanswered = !revision
+          || (revision.targetMode === 'not_applicable' && absentFault(revision).length === 0);
+        if (unanswered && s.pending_commit_sha) {
+          map[s.stack_name] = 'candidate_ready';
+        }
       }
       editorState.setGitSourcePendingMap(map);
     } catch {

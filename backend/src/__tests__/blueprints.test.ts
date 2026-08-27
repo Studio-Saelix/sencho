@@ -410,7 +410,7 @@ describe('BlueprintService per-stack lock', () => {
         vi.spyOn(FileSystemService.prototype, 'createStack').mockResolvedValue(undefined);
         const writeSpy = vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockResolvedValue(undefined);
         const cleanupSpy = vi.spyOn(FileSystemService.prototype, 'removeAlternateRootComposeFiles').mockResolvedValue(undefined);
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
 
         const outcome = await BlueprintService.getInstance().deployToNode(bp, node);
 

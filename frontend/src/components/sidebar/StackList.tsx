@@ -5,6 +5,7 @@ import { CommandItem, CommandList } from '@/components/ui/command';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { Label } from '@/components/label-types';
 import type { StackUpdateInfo } from '@/types/imageUpdates';
+import type { GitSourcePendingMap } from '@/lib/gitopsState';
 import { StackRow } from './StackRow';
 import { statusText, statusColor } from './stack-status-utils';
 import type { StackRowStatus } from './stack-status-utils';
@@ -41,7 +42,7 @@ export interface StackListProps {
   stackStatuses: Record<string, StackRowStatus | undefined>;
   stackCounts: Record<string, { running: number; total: number } | undefined>;
   stackUpdates: Record<string, StackUpdateInfo>;
-  gitSourcePendingMap: Record<string, boolean>;
+  gitSourcePendingMap: GitSourcePendingMap;
   pinnedFiles: string[];
   isCollapsed: (groupKey: string) => boolean;
   toggleCollapse: (groupKey: string) => void;
@@ -273,7 +274,7 @@ export function StackList(props: StackListProps & StackListBulkProps) {
                       .map((s) => s.service)}
                     checkStatus={stackUpdates[file]?.checkStatus}
                     lastError={stackUpdates[file]?.lastError ?? undefined}
-                    hasGitPending={!!gitSourcePendingMap[file]}
+                    gitPending={gitSourcePendingMap[file] ?? null}
                     onSelect={onSelectFile}
                     kebabSlot={<StackKebabMenu file={file} ctx={ctx} />}
                     bulkMode={bulkMode}

@@ -34,6 +34,9 @@ check. Bulk routes must authorize every valid target before starting any work.
 | Security policies, suppressions, and acknowledgements | `stack:read` | n/a | `stack:edit` | n/a | n/a | global collection |
 | Docker resource inventory and orphan reads | `stack:read` | n/a | n/a | n/a | n/a | global read |
 | Network topology and inspection | `node:read` | n/a | n/a | n/a | n/a | global read |
+| `/api/git-sources` | per row: exact `stack:read`, else Admin | n/a | n/a | n/a | n/a | a row reduces to its own stack when that stack is live and present on disk; otherwise Admin, because the row is live Git configuration rather than a record of events |
+| `/api/git-sources/history` and `/api/stacks/:stackName/git-source/history` | per row: exact `stack:read`, else `system:audit` | n/a | n/a | n/a | n/a | history entries are an audit trail, so an entry that cannot be tied to a readable stack falls to the audit permission rather than Admin. The per-stack route is authorized whole at `stack:read` by suffix rule instead of per row |
+| `/api/gitops-metrics` | Admin | n/a | n/a | n/a | n/a | in-process counters keyed only on transition stage and outcome; see the boundary below |
 
 ## Preserved system boundaries
 
@@ -43,6 +46,13 @@ settings. Host-destructive Docker operations also remain Admin-only, including
 image, volume, network, resource, and fleet pruning. Reset-anchor and mesh-wide
 membership cascades remain Admin-only because their effects are broader than one
 ordinary node or stack permission check can safely authorize.
+
+In-process diagnostic counters are Admin-only for a different reason: they
+describe the instance rather than any one stack or node, so there is no resource
+identity to scope an operational grant against. Their payloads are aggregate by
+construction, naming no stack, node, repository, or actor. Anyone wanting to
+know what happened to a particular stack reads the history routes above, which
+authorize per row.
 
 ## Frontend parity
 

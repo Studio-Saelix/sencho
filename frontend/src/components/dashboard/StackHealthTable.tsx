@@ -10,6 +10,8 @@ import { isConfirmedImageUpdate, isConfirmedServiceUpdate } from '@/types/imageU
 import { aggregateCurrentUsage } from './aggregateCurrentUsage';
 import { classifyRow, type RowState } from './classifyRow';
 import { updateAvailableLabel } from '@/lib/updateAvailableLabel';
+import GitOpsBadge from '@/components/gitops/GitOpsBadge';
+import type { GitOpsSourceStateMap } from './useGitOpsSourceStates';
 
 interface StackHealthTableProps {
   stackStatuses: Record<string, StackStatusEntry>;
@@ -20,6 +22,11 @@ interface StackHealthTableProps {
   stackCpuSeries: Record<string, StackCpuSeries>;
   onNavigateToStack: (stackFile: string) => void;
   stackUpdates?: Record<string, StackUpdateInfo>;
+  /**
+   * GitOps source state per stack name. A stack the model says nothing about
+   * is absent, and its SOURCE cell keeps the plain Git or Local label.
+   */
+  gitopsSourceStates?: GitOpsSourceStateMap;
 }
 
 type SortKey = 'stack' | 'up' | 'cpu' | 'mem';
@@ -96,6 +103,7 @@ export function StackHealthTable({
   stackCpuSeries,
   onNavigateToStack,
   stackUpdates = {},
+  gitopsSourceStates = {},
 }: StackHealthTableProps) {
   const [page, setPage] = useState(0);
   // null = the default health-state ordering (worst first); a SortKey switches
@@ -273,6 +281,10 @@ export function StackHealthTable({
       <ul className="divide-y divide-border/40">
         {pagedRows.map((row) => {
           const updateLabel = row.hasUpdate ? updateAvailableLabel(row.outdatedServices) : null;
+          // Looked up here rather than folded into the memoized rows: it is
+          // presentation, and threading it through would make the row memo
+          // recompute on every parent render for no benefit.
+          const gitopsSourceState = gitopsSourceStates[row.name];
           return (
           <li
             key={row.file}
@@ -297,6 +309,9 @@ export function StackHealthTable({
                     aria-label={updateLabel}
                   />
                 </span>
+              )}
+              {gitopsSourceState && (
+                <GitOpsBadge facet="source" status={gitopsSourceState} className="shrink-0" />
               )}
             </span>
             <span className="truncate font-mono text-[11px] uppercase tracking-wide text-stat-subtitle">

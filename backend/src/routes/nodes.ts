@@ -24,6 +24,9 @@ import { toPublicNode } from '../helpers/publicNode';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
+import { BlueprintReconciler } from '../services/BlueprintReconciler';
+import { recordPlacementShift, snapshotPlacementWith } from '../services/gitops/nodePlacementProducers';
+import { projectCommittedRevisions } from '../helpers/gitopsResponse';
 
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
 const REMOTE_META_CACHE_TTL = 3 * 60 * 1000;
@@ -116,6 +119,30 @@ function mintPilotEnrollment(nodeId: number, req: Request): { token: string; exp
 }
 
 export const nodesRouter = Router();
+
+/**
+ * Placement as it currently resolves, for every Blueprint.
+ *
+ * Taken either side of a cordon, and today the two snapshots are always equal,
+ * so a cordon revises nothing and reports no revisions. That is the correct
+ * answer, not a gap: a cordon suppresses *new* placements, while this snapshot
+ * reports what each Blueprint asks for, and those are different questions.
+ * `listDesiredNodes` accordingly does not read `cordoned` at all, and the
+ * reconciler applies the cordon filter later, when it decides what to place.
+ *
+ * The comparison is kept rather than short-circuited because it is the same
+ * shared helper the label routes use, where placement genuinely does move, and
+ * because it is what would start reporting correctly if the desired set ever
+ * became cordon-aware. Cheap either way: two in-memory selector evaluations.
+ */
+function snapshotBlueprintPlacement() {
+  const db = DatabaseService.getInstance();
+  const nodes = db.getNodes();
+  return snapshotPlacementWith(
+    (blueprint) => BlueprintReconciler.getInstance().listDesiredNodes(blueprint, nodes).map(n => n.id),
+    db.listBlueprints(),
+  );
+}
 
 nodesRouter.get('/', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'node:read')) return;
@@ -426,17 +453,15 @@ nodesRouter.delete('/:id', async (req: Request, res: Response) => {
     // Local-socket nodes: ready tombstone + recovery-row retirement in the same
     // transaction as the node delete, then sweep tags/paths. Remote hub records
     // create no Docker cleanup tombstone.
-    if (existing.type === 'local') {
-      await DeployedStackDeletionService.getInstance().deleteLocalNode(id);
-    } else {
-      DatabaseService.getInstance().deleteNode(id);
-    }
+    const movedBlueprints = existing.type === 'local'
+      ? await DeployedStackDeletionService.getInstance().deleteLocalNode(id)
+      : DeployedStackDeletionService.getInstance().deleteNodeWithGitOps(id);
     NodeRegistry.getInstance().evictConnection(id);
     NodeRegistry.getInstance().notifyNodeRemoved(id);
     CacheService.getInstance().invalidate(`${REMOTE_META_NAMESPACE}:${id}`);
     FleetUpdateTrackerService.getInstance().delete(id);
     console.log(`[Nodes] Deleted node ${id} ("${sanitizeForLog(existing.name)}")`);
-    res.json({ success: true });
+    res.json({ success: true, gitopsRevisions: projectCommittedRevisions(movedBlueprints, 'node delete') });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : '';
     if (message.includes('Cannot delete the only local node')) {
@@ -476,9 +501,17 @@ nodesRouter.post('/:id/cordon', (req: Request, res: Response) => {
       res.status(404).json({ error: 'Node not found' });
       return;
     }
-    const updated = DatabaseService.getInstance().setNodeCordoned(id, true, reason);
+    // The cordon and the placement it moves commit together.
+    const { node: updated, moved } = DatabaseService.getInstance().getDb().transaction(() => {
+      const before = snapshotBlueprintPlacement();
+      const node = DatabaseService.getInstance().setNodeCordoned(id, true, reason);
+      const moved = existing.cordoned
+        ? []
+        : recordPlacementShift(before, snapshotBlueprintPlacement(), req.user?.username ?? null, 'node_cordon');
+      return { node, moved };
+    })();
     if (isDebugEnabled()) console.log('[Federation:diag] cordoned node=%s reasonLen=%s', sanitizeForLog(id), sanitizeForLog(reason?.length ?? 0));
-    res.set('cache-control', 'no-store').json(updated);
+    res.set('cache-control', 'no-store').json({ ...updated, gitopsRevisions: projectCommittedRevisions(moved, 'node cordon') });
   } catch (error: unknown) {
     console.error('Failed to cordon node:', error);
     res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to cordon node' });
@@ -500,8 +533,15 @@ nodesRouter.post('/:id/uncordon', (req: Request, res: Response) => {
       res.status(404).json({ error: 'Node not found' });
       return;
     }
-    const updated = DatabaseService.getInstance().setNodeCordoned(id, false, null);
-    res.set('cache-control', 'no-store').json(updated);
+    const { node: updated, moved } = DatabaseService.getInstance().getDb().transaction(() => {
+      const before = snapshotBlueprintPlacement();
+      const node = DatabaseService.getInstance().setNodeCordoned(id, false, null);
+      const moved = existing.cordoned
+        ? recordPlacementShift(before, snapshotBlueprintPlacement(), req.user?.username ?? null, 'node_uncordon')
+        : [];
+      return { node, moved };
+    })();
+    res.set('cache-control', 'no-store').json({ ...updated, gitopsRevisions: projectCommittedRevisions(moved, 'node uncordon') });
   } catch (error: unknown) {
     console.error('Failed to uncordon node:', error);
     res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to uncordon node' });

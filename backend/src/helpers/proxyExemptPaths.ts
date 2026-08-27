@@ -28,6 +28,10 @@ export function isProxyExemptPath(path: string): boolean {
 // the local hub (centralized audit, fleet schedules, notification routing
 // rules, the admin-only aggregated logs feed and its stream counters) and
 // private registry credentials, which are stored and managed per instance.
+// Blueprints and node labels are hub-owned too: the hub is the only instance
+// that holds the desired-state definitions and the label set its placement
+// selectors resolve against, so a proxied request would read or write a remote
+// node's unrelated copy instead of the fleet's actual intent.
 // Routed to the local hub when nodeId resolves to local, but rejected when
 // nodeId resolves to a remote node so a script/curl call cannot trick the proxy
 // into forwarding the request across a node boundary. This matters for the logs
@@ -57,6 +61,8 @@ export const HUB_ONLY_PREFIXES: readonly string[] = [
   '/api/system/log-stream-metrics/',
   '/api/registries/',
   '/api/secrets/',
+  '/api/blueprints/',
+  '/api/node-labels/',
 ];
 
 /** Returns true when the path is hub-only and must not be proxied to a remote node. */

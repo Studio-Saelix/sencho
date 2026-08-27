@@ -3,6 +3,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { StackRow } from '../StackRow';
 import type { Label } from '@/components/label-types';
+import { SOURCE_STATE } from '@/lib/gitopsState';
 
 function base(overrides: Partial<ComponentProps<typeof StackRow>> = {}) {
   return {
@@ -13,7 +14,7 @@ function base(overrides: Partial<ComponentProps<typeof StackRow>> = {}) {
     isActive: false,
     labels: [] as Label[],
     hasUpdate: false,
-    hasGitPending: false,
+    gitPending: null,
     onSelect: vi.fn(),
     kebabSlot: null,
     ...overrides,
@@ -147,6 +148,45 @@ describe('StackRow', () => {
     const { container } = render(<StackRow {...base({ status: 'running', hasUpdate: false, checkStatus: 'ok' })} />);
     expect(container.querySelector('.lucide-alert-circle')).toBeNull();
     expect(container.querySelector('.bg-update')).toBeNull();
+  });
+
+  // ── Git source pending indicator ───────────────────────────────────────
+
+  it('shows no git indicator when no candidate is waiting', () => {
+    render(<StackRow {...base({ gitPending: null })} />);
+    expect(screen.queryByTestId('stack-trailing-git-pending')).not.toBeInTheDocument();
+  });
+
+  it('names the waiting state in the tooltip instead of a generic one', async () => {
+    render(<StackRow {...base({ gitPending: 'source_conflict_blocker' })} />);
+    fireEvent.pointerMove(screen.getByTestId('stack-trailing-git-pending'));
+    expect(
+      (await screen.findAllByText(SOURCE_STATE.source_conflict_blocker.line)).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('names the ordinary waiting state too', async () => {
+    render(<StackRow {...base({ gitPending: 'candidate_ready' })} />);
+    fireEvent.pointerMove(screen.getByTestId('stack-trailing-git-pending'));
+    expect((await screen.findAllByText(SOURCE_STATE.candidate_ready.line)).length).toBeGreaterThan(0);
+  });
+
+  it('renders the same indicator whatever the waiting state is', () => {
+    // The state changes the tooltip, never the pixels. This is what keeps the
+    // sidebar's rendered output unchanged from before the states existed.
+    const { container: blocked } = render(<StackRow {...base({ gitPending: 'source_conflict_blocker' })} />);
+    const { container: ready } = render(<StackRow {...base({ gitPending: 'candidate_ready' })} />);
+    const markup = (root: HTMLElement) =>
+      root.querySelector('[data-testid="stack-row-trailing"]')?.outerHTML;
+    // Non-empty first: two missing indicators would otherwise compare equal.
+    expect(markup(blocked)).toContain('stack-trailing-git-pending');
+    expect(markup(blocked)).toBe(markup(ready));
+  });
+
+  it('keeps a confirmed update above the git indicator in the trailing slot', () => {
+    render(<StackRow {...base({ gitPending: 'candidate_ready', hasUpdate: true, checkStatus: 'ok' })} />);
+    expect(screen.getByTestId('stack-trailing-update')).toBeInTheDocument();
+    expect(screen.queryByTestId('stack-trailing-git-pending')).not.toBeInTheDocument();
   });
 
   it('constrains long stack names so trailing indicators stay in the row', () => {

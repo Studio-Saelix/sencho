@@ -17,6 +17,14 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { GitOpsStore } from '../services/gitops/store';
+import { GitOpsTransitions } from '../services/gitops/transitions';
+import {
+    buildGenerationRow,
+    directSourceIdentity,
+    newGitOpsId,
+    type DirectSourceConfig,
+} from '../services/gitops/directApplication';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
@@ -849,6 +857,98 @@ describe('GitSourceService pending lifecycle', () => {
         expect(db.getGitSource('pending-stack')?.pending_commit_sha).toBeNull();
     });
 
+    it('dismissPending clears the canonical candidate and records a dismissed history row', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const db = DatabaseService.getInstance();
+        const stackName = 'dismiss-canonical';
+        await svc.upsert({
+            stackName,
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        db.setGitSourcePending(stackName, 'sha-xxx', 'services: {}', null);
+        const { appId, generationId } = seedDirectCandidate(stackName);
+        expect(GitOpsStore.getInstance().getApplication(appId)?.candidate_generation_id).toBe(generationId);
+
+        svc.dismissPending(stackName, 'operator-1');
+
+        const app = GitOpsStore.getInstance().getApplication(appId)!;
+        expect(app.candidate_generation_id).toBeNull();
+        expect(app.candidate_plan_blocked).toBe(0);
+        expect(app.review_required).toBe(0);
+        expect(db.getGitSource(stackName)?.pending_commit_sha).toBeNull();
+        const stages = (db.getDb().prepare(
+            'SELECT stage, outcome FROM gitops_history WHERE application_id = ? ORDER BY id',
+        ).all(appId) as Array<{ stage: string; outcome: string }>).map((r) => `${r.stage}:${r.outcome}`);
+        expect(stages).toContain('dismissed:skipped');
+    });
+
+    it('dismissPending refuses while an operation is in flight and mutates nothing', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const db = DatabaseService.getInstance();
+        const stackName = 'dismiss-in-flight';
+        await svc.upsert({
+            stackName,
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        db.setGitSourcePending(stackName, 'sha-yyy', 'services: {}', null);
+        const { appId, generationId } = seedDirectCandidate(stackName);
+        GitOpsTransitions.getInstance().fetchStarted(appId, testEnvelope());
+
+        let caught: unknown;
+        try {
+            svc.dismissPending(stackName, 'operator-1');
+        } catch (error) {
+            caught = error;
+        }
+        expect(caught).toBeInstanceOf(GitSourceError);
+        if (!(caught instanceof GitSourceError)) throw new Error('expected GitSourceError');
+        expect(caught.code).toBe('OPERATION_IN_FLIGHT');
+        // The refusal is the outcome: neither the model nor the legacy columns move.
+        expect(GitOpsStore.getInstance().getApplication(appId)?.candidate_generation_id).toBe(generationId);
+        expect(db.getGitSource(stackName)?.pending_commit_sha).toBe('sha-yyy');
+    });
+
+    it('dismissPending stays a legacy-only no-op without a canonical application', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const db = DatabaseService.getInstance();
+        const stackName = 'dismiss-legacy-only';
+        await svc.upsert({
+            stackName,
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        db.setGitSourcePending(stackName, 'sha-zzz', 'services: {}', null);
+
+        expect(() => svc.dismissPending(stackName, 'operator-1')).not.toThrow();
+        expect(db.getGitSource(stackName)?.pending_commit_sha).toBeNull();
+    });
+
     it('clearGitSourceAppliedRevision clears pending plan columns', async () => {
         mockSuccessfulClone();
         const svc = GitSourceService.getInstance();
@@ -1206,6 +1306,144 @@ describe('GitSourceService.pull', () => {
         const svc = GitSourceService.getInstance();
         await expect(svc.pull('does-not-exist')).rejects.toMatchObject({ code: 'GIT_ERROR' });
     });
+
+    function generationCount(stackName: string): number {
+        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName)!;
+        return (DatabaseService.getInstance().getDb()
+            .prepare('SELECT COUNT(*) AS n FROM gitops_generations WHERE application_id = ?')
+            .get(app.id) as { n: number }).n;
+    }
+
+    async function createFromGit(stackName: string, sha: string, autoApplyOnWebhook = false): Promise<void> {
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        try {
+            await svc.createStackFromGit({
+                stackName,
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                token: null,
+                autoApplyOnWebhook,
+                autoDeployOnApply: false,
+            });
+        } finally {
+            validateSpy.mockRestore();
+        }
+    }
+
+    it('an up-to-date pull against an accepted commit opens a fresh staging generation', async () => {
+        // Deliberate counterpart to the dedupe below: once the candidate was
+        // accepted, nothing is staged, and staging again is a new dispatch
+        // cycle that apply needs as its acceptance target.
+        const svc = GitSourceService.getInstance();
+        await createFromGit('pull-after-apply', '1111111111111111111111111111111111111111');
+        const base = generationCount('pull-after-apply');
+
+        await svc.pull('pull-after-apply');
+        expect(generationCount('pull-after-apply')).toBe(base + 1);
+        const app = GitOpsStore.getInstance().getLiveDirectApplication('pull-after-apply')!;
+        expect(app.candidate_generation_id).toBeTruthy();
+        expect(DatabaseService.getInstance().getGitSource('pull-after-apply')?.pending_commit_sha).toBeTruthy();
+        await cleanupStackDir('pull-after-apply');
+    });
+
+    it('repeat pulls of an unapplied update keep one candidate', async () => {
+        const svc = GitSourceService.getInstance();
+        await createFromGit('pull-repeat', '2222222222222222222222222222222222222222');
+        const base = generationCount('pull-repeat');
+
+        const updatedSha = '3333333333333333333333333333333333333333';
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-repeat');
+        const stagedId = GitOpsStore.getInstance().getLiveDirectApplication('pull-repeat')!.candidate_generation_id;
+        expect(stagedId).toBeTruthy();
+        expect(generationCount('pull-repeat')).toBe(base + 1);
+
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-repeat');
+        expect(generationCount('pull-repeat')).toBe(base + 1);
+        expect(GitOpsStore.getInstance().getLiveDirectApplication('pull-repeat')!.candidate_generation_id).toBe(stagedId);
+        expect(DatabaseService.getInstance().getGitSource('pull-repeat')?.pending_commit_sha).toBe(updatedSha);
+        await cleanupStackDir('pull-repeat');
+    });
+
+    it('a pull whose source fingerprint drifted from the staged candidate mints anew', async () => {
+        const svc = GitSourceService.getInstance();
+        await createFromGit('pull-fp-drift', '4444444444444444444444444444444444444444');
+        const base = generationCount('pull-fp-drift');
+        const updatedSha = '5555555555555555555555555555555555555555';
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-fp-drift');
+        const stagedId = GitOpsStore.getInstance().getLiveDirectApplication('pull-fp-drift')!.candidate_generation_id;
+        expect(stagedId).toBeTruthy();
+
+        // Simulates a standing candidate produced under different source
+        // wiring than the configuration in effect now. Commit and plan
+        // verdict are unchanged, but the fingerprint term alone must defeat
+        // equivalence so the candidate never misrepresents what a pull stages.
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE gitops_generations SET materialization_fingerprint = ? WHERE id = ?')
+            .run('drifted-fingerprint', stagedId);
+
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-fp-drift');
+        expect(generationCount('pull-fp-drift')).toBe(base + 2);
+        expect(GitOpsStore.getInstance().getLiveDirectApplication('pull-fp-drift')!.candidate_generation_id).not.toBe(stagedId);
+        await cleanupStackDir('pull-fp-drift');
+    });
+
+    it('a pull whose plan verdict differs from the staged candidate mints anew', async () => {
+        const svc = GitSourceService.getInstance();
+        await createFromGit('pull-verdict-flip', '6666666666666666666666666666666666666666');
+        const base = generationCount('pull-verdict-flip');
+        const updatedSha = '7777777777777777777777777777777777777777';
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-verdict-flip');
+        const stagedId = GitOpsStore.getInstance().getLiveDirectApplication('pull-verdict-flip')!.candidate_generation_id;
+        expect(stagedId).toBeTruthy();
+        const seeded = DatabaseService.getInstance().getDb()
+            .prepare('SELECT plan_blocked FROM gitops_generations WHERE id = ?')
+            .get(stagedId) as { plan_blocked: number };
+        expect(seeded.plan_blocked).toBe(0);
+
+        // The plan is re-evaluated on every pull and can flip without a new
+        // commit, for example when stack policy changes between pulls.
+        // Simulating a candidate staged under the other verdict proves the
+        // verdict term defeats equivalence on its own.
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE gitops_generations SET plan_blocked = 1 WHERE id = ?')
+            .run(stagedId);
+
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-verdict-flip');
+        expect(generationCount('pull-verdict-flip')).toBe(base + 2);
+        expect(GitOpsStore.getInstance().getLiveDirectApplication('pull-verdict-flip')!.candidate_generation_id).not.toBe(stagedId);
+        await cleanupStackDir('pull-verdict-flip');
+    });
 });
 
 describe('GitSourceService.createStackFromGit', () => {
@@ -1537,7 +1775,7 @@ describe('GitSourceService.apply', () => {
         const { ComposeService } = await import('../services/ComposeService');
         const { HealthGateService } = await import('../services/HealthGateService');
         const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
         const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-git');
         const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
 
@@ -1548,7 +1786,7 @@ describe('GitSourceService.apply', () => {
                 source: 'git_apply',
                 actor: 'system:git-source',
             });
-            expect(beginSpy).toHaveBeenCalledWith(nodeId, 'apply-deploy-gate', 'deploy', 'system:git-source');
+            expect(beginSpy).toHaveBeenCalledWith(nodeId, 'apply-deploy-gate', 'deploy', 'system:git-source', { deployedGenerationId: null });
             expect(mockRecoveryLinkGateOrRetain).toHaveBeenCalledWith('rec-test-1', 'gate-git');
         } finally {
             validateSpy.mockRestore();
@@ -1648,7 +1886,7 @@ describe('GitSourceService.apply', () => {
         const TrivyService = (await import('../services/TrivyService')).default;
         const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
         const listImagesSpy = vi.spyOn(ComposeService.prototype, 'listStackImages').mockResolvedValue(['nginx:bad']);
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
         const trivy = TrivyService.getInstance();
         const trivyAvailableSpy = vi.spyOn(trivy, 'isTrivyAvailable').mockReturnValue(true);
         const scanSpy = vi.spyOn(trivy, 'scanImagePreflight').mockResolvedValue({
@@ -2646,3 +2884,50 @@ describe('GitSourceService classified plan fingerprint', () => {
         }
     });
 });
+
+// ── Canonical dismissal fixtures ───────────────────────────────────────
+
+function testEnvelope(): { operationId: string; actor: string; trigger: string; at: number } {
+    return { operationId: newGitOpsId(), actor: 'test', trigger: 'test', at: Date.now() };
+}
+
+/**
+ * Mint an unblocked candidate for `stackName`, the same shape a pull produces,
+ * without driving a real fetch. Reuses the live application the preceding
+ * `svc.upsert` created; the identity is re-derived from the same configuration
+ * so the generation fingerprint matches the application's.
+ */
+function seedDirectCandidate(stackName: string): { appId: string; generationId: string } {
+    const at = Date.now();
+    const config: DirectSourceConfig = {
+        repoUrl: 'https://github.com/example/repo.git',
+        branch: 'main',
+        composePaths: ['compose.yaml'],
+        contextDir: null,
+        syncEnv: false,
+        envPath: null,
+    };
+    const identity = directSourceIdentity(config);
+    const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+    if (!app) throw new Error(`no live direct application for ${stackName}`);
+    const appId = app.id;
+    const generationId = newGitOpsId();
+    GitOpsStore.getInstance().insertGeneration(buildGenerationRow({
+        id: generationId,
+        applicationId: appId,
+        commitSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        identity,
+        configuredRef: 'main',
+        candidateRelPath: 'generations/cand',
+        appliedRelPath: 'applied/1',
+        manifestVersion: 1,
+        expectedInvocation: null,
+        changePlanFingerprint: 'fp-seed',
+        operationId: newGitOpsId(),
+        trigger: 'test',
+        actor: 'test',
+        at,
+    }));
+    GitOpsTransitions.getInstance().candidateReady(appId, generationId, false, testEnvelope());
+    return { appId, generationId };
+}

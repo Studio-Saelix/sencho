@@ -5,7 +5,7 @@
  * treating the sentinel as a configured source.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 
 // Mutable controls so a deploy-mode test can set the active node and capture the
 // runWithLog params, while the load tests keep the default (no active node).
@@ -33,12 +33,16 @@ vi.mock('@/context/NodeContext', () => ({
 // diff UI; the panel passes applyPull as onApply.
 vi.mock('./GitSourceDiffDialog', () => ({
   GitSourceDiffDialog: ({
+    open,
     onApply,
+    onDismiss,
     pull,
   }: {
+    open: boolean;
     onApply: (sha: string, deploy: boolean, fp: string) => void;
+    onDismiss: () => void;
     pull: PullResult | null;
-  }) => (
+  }) => open ? (
     <div>
       <span data-testid="plan-fingerprint">{pull?.planFingerprint ?? ''}</span>
       <button
@@ -53,8 +57,11 @@ vi.mock('./GitSourceDiffDialog', () => ({
       >
         apply
       </button>
+      <button data-testid="dismiss" onClick={onDismiss}>
+        dismiss
+      </button>
     </div>
-  ),
+  ) : null,
 }));
 vi.mock('@/components/ui/toast-store', () => ({
   toast: {
@@ -70,6 +77,14 @@ import { apiFetch } from '@/lib/api';
 import { GitSourcePanel } from './GitSourcePanel';
 import { toast } from '@/components/ui/toast-store';
 import type { PullResult } from './GitSourceDiffDialog';
+import {
+  absentRevision,
+  facets,
+  liveRevision,
+  missingApplicationLimitation,
+  sourceRevision,
+} from '@/__tests__/gitopsFixtures';
+import { SOURCE_STATE } from '@/lib/gitopsState';
 
 function jsonRes(body: unknown, ok = true, status = 200) {
   return { ok, status, json: async () => body, text: async () => '' } as unknown as Response;
@@ -94,6 +109,37 @@ const LINKED_SOURCE = {
   updated_at: 0,
   manifest_state: 'absent' as const,
   manifest: null,
+  gitopsRevision: sourceRevision('application_generation_accepted', { candidateGenerationId: null }),
+};
+
+/** The linked source with its GitOps projection swapped for a specific state. */
+function linkedWith(revision: unknown) {
+  return { ...LINKED_SOURCE, gitopsRevision: revision };
+}
+
+const PULL_RESULT: PullResult = {
+  commitSha: 'sha-old',
+  validation: { ok: true },
+  refusals: [],
+  warnings: [],
+  plan: {
+    blocked: false,
+    counts: {
+      add: 0,
+      modify: 0,
+      delete: 0,
+      rename: 0,
+      unchanged: 1,
+      localModified: 0,
+      localMissing: 0,
+      typeChanged: 0,
+      unmanagedCollision: 0,
+      invocation: 0,
+    },
+    operations: [],
+    invocation: { candidateChanged: false, liveDiverged: false },
+  },
+  planFingerprint: 'fp-old',
 };
 
 function panel() {
@@ -161,6 +207,7 @@ describe('GitSourcePanel deploy-mode apply node binding', () => {
       return jsonRes(LINKED_SOURCE);
     });
     render(panel());
+    fireEvent.click(await screen.findByRole('button', { name: /pull now/i }));
     fireEvent.click(await screen.findByTestId('apply-deploy'));
 
     await waitFor(() => {
@@ -177,31 +224,6 @@ describe('GitSourcePanel deploy-mode apply node binding', () => {
 });
 
 describe('GitSourcePanel stale plan handling', () => {
-  const PULL_RESULT: PullResult = {
-    commitSha: 'sha-old',
-    validation: { ok: true },
-    refusals: [],
-    warnings: [],
-    plan: {
-      blocked: false,
-      counts: {
-        add: 0,
-        modify: 0,
-        delete: 0,
-        rename: 0,
-        unchanged: 1,
-        localModified: 0,
-        localMissing: 0,
-        typeChanged: 0,
-        unmanagedCollision: 0,
-        invocation: 0,
-      },
-      operations: [],
-      invocation: { candidateChanged: false, liveDiverged: false },
-    },
-    planFingerprint: 'fp-old',
-  };
-
   beforeEach(() => {
     vi.mocked(apiFetch).mockImplementation(async (url: string) => {
       if (String(url).includes('/git-source/pull')) {
@@ -232,6 +254,37 @@ describe('GitSourcePanel stale plan handling', () => {
       expect(screen.getByTestId('plan-fingerprint')).toHaveTextContent('fp-new');
     });
     expect(toast.success).not.toHaveBeenCalled();
+  });
+});
+
+describe('GitSourcePanel dismiss handling', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (String(url).includes('/git-source/pull')) {
+        return jsonRes(PULL_RESULT);
+      }
+      if (String(url).includes('/git-source/dismiss-pending')) {
+        return jsonRes({
+          error: 'Cannot dismiss the pending update for web: cannot dismiss while an operation is in flight',
+          code: 'OPERATION_IN_FLIGHT',
+        }, false, 409);
+      }
+      return jsonRes(LINKED_SOURCE);
+    });
+  });
+
+  it('surfaces an error toast and keeps the diff open when dismiss is refused as in-flight', async () => {
+    render(panel());
+    fireEvent.click(await screen.findByRole('button', { name: /pull now/i }));
+    await screen.findByTestId('plan-fingerprint');
+
+    fireEvent.click(screen.getByTestId('dismiss'));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/operation is in flight/i));
+    });
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(screen.getByTestId('plan-fingerprint')).toHaveTextContent('fp-old');
   });
 });
 
@@ -283,5 +336,211 @@ describe('GitSourcePanel manifest summary', () => {
     // has not been materialized yet.
     expect(screen.getByText('Managed project')).toBeTruthy();
     expect(screen.getByText('Not materialized')).toBeTruthy();
+  });
+});
+
+describe('GitSourcePanel GitOps state', () => {
+  it('names the waiting state rather than a generic pending update', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(sourceRevision('source_conflict_blocker'))),
+    );
+
+    render(panel());
+
+    const banner = await screen.findByTestId('git-pending');
+    expect(banner).toHaveAttribute('data-state', 'source_conflict_blocker');
+    expect(within(banner).getByText(SOURCE_STATE.source_conflict_blocker.line)).toBeInTheDocument();
+    // The short sha stays, so the operator can still see which commit it is.
+    expect(within(banner).getByText('a1b2c3d')).toBeInTheDocument();
+  });
+
+  it('offers apply wording for a candidate that needs no review', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(sourceRevision('candidate_ready'))),
+    );
+
+    render(panel());
+
+    const banner = await screen.findByTestId('git-pending');
+    expect(within(banner).getByText(SOURCE_STATE.candidate_ready.line)).toBeInTheDocument();
+  });
+
+  it('shows no banner when the accepted generation has no candidate behind it', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(LINKED_SOURCE));
+
+    render(panel());
+
+    await screen.findByRole('button', { name: /pull now/i });
+    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
+    expect(screen.getByTestId('git-source-state')).toHaveTextContent(
+      SOURCE_STATE.application_generation_accepted.label,
+    );
+  });
+
+  it('reports an application the projection could not reach', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(absentRevision([missingApplicationLimitation]))),
+    );
+
+    render(panel());
+
+    const fault = await screen.findByTestId('gitops-fault');
+    expect(fault).toHaveTextContent(missingApplicationLimitation.message);
+  });
+
+  it('stays silent for a stack the model was never asked about', async () => {
+    // Empty limitations is the ordinary case and must not read as a failure.
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ linked: false, gitopsRevision: absentRevision() }));
+
+    render(panel());
+
+    await screen.findByRole('button', { name: /^save$/i });
+    expect(screen.queryByTestId('gitops-fault')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('git-source-state')).not.toBeInTheDocument();
+  });
+
+  it('drops the pending card once the source is detached', async () => {
+    // The card is derived from the revision alone, so a detach that only
+    // cleared the source would keep advertising a commit for a stack Git no
+    // longer manages, behind a Review button that does nothing.
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (String(url).endsWith('/git-source') && !String(url).includes('?')) {
+        return jsonRes(linkedWith(sourceRevision('candidate_ready')));
+      }
+      return jsonRes({ ok: true });
+    });
+    render(panel());
+    await screen.findByTestId('git-pending');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^detach/i }));
+
+    await waitFor(() => expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument());
+  });
+
+  it('drops the revision when a later read fails, so one stack cannot report another stack state', async () => {
+    // The panel is reused across stacks. A read that throws after a successful
+    // one has to clear the projection, or stack A's pending commit renders
+    // under stack B's header.
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(sourceRevision('candidate_ready'))),
+    );
+    const { rerender } = render(
+      <GitSourcePanel open onOpenChange={vi.fn()} stackName="web" canEdit isDarkMode={false} />,
+    );
+    await screen.findByTestId('git-pending');
+
+    vi.mocked(apiFetch).mockRejectedValue(new Error('offline'));
+    rerender(<GitSourcePanel open onOpenChange={vi.fn()} stackName="api" canEdit isDarkMode={false} />);
+
+    // Wait for the load to settle before asserting: the body is skeletons while
+    // it is in flight, so an assertion there would pass without the fix.
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    await screen.findByLabelText(/repository url/i);
+    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
+  });
+
+  it('re-reads after a save and shows the state the server reports', async () => {
+    // The save answers with a bare source row and no revision, so the panel
+    // cannot learn the new state from it. Keeping the old one would report a
+    // candidate the save has just invalidated; showing nothing would report
+    // "no GitOps here" for a stack that has it.
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(sourceRevision('candidate_ready'))),
+    );
+    render(panel());
+    await screen.findByTestId('git-pending');
+
+    vi.mocked(apiFetch)
+      // The PUT.
+      .mockResolvedValueOnce(jsonRes({ ...LINKED_SOURCE, gitopsRevision: undefined }))
+      // The re-read, which is where the state actually comes from.
+      .mockResolvedValueOnce(jsonRes(linkedWith(
+        sourceRevision('source_reconcile_required', { candidateGenerationId: null }),
+      )));
+    fireEvent.click(screen.getByRole('button', { name: /update/i }));
+
+    await waitFor(() => expect(screen.getByTestId('git-source-state'))
+      .toHaveTextContent(SOURCE_STATE.source_reconcile_required.label));
+    // The staged candidate is gone, so nothing is offered to review.
+    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
+  });
+
+  it('does not go blank after a save', async () => {
+    // The save response carries no revision. Before the re-read, the panel
+    // dropped its copy and rendered nothing until the next open, which reads
+    // as a stack the model knows nothing about.
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(sourceRevision('application_generation_accepted', { candidateGenerationId: null }))),
+    );
+    render(panel());
+    await screen.findByTestId('git-source-state');
+
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonRes({ ...LINKED_SOURCE, gitopsRevision: undefined }))
+      .mockResolvedValueOnce(jsonRes(linkedWith(
+        sourceRevision('application_generation_accepted', { candidateGenerationId: null }),
+      )));
+    fireEvent.click(screen.getByRole('button', { name: /update/i }));
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    expect(screen.getByTestId('git-source-state')).toBeInTheDocument();
+  });
+
+  it('shows no source card for an application that has no Git source', async () => {
+    // Guards the panel against a projection whose source facet is not
+    // applicable: without it the card renders "no git source" with a live
+    // Review button.
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(liveRevision({
+      targetMode: 'inline_blueprint',
+      facets: facets({
+        source: { status: 'not_applicable' },
+        placement: { status: 'blueprint_bound', completion: 'unknown' },
+      }),
+    }))));
+    render(panel());
+
+    await screen.findByRole('button', { name: /pull now/i });
+    expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('git-source-state')).not.toBeInTheDocument();
+  });
+
+  it('still reports a waiting commit when no projection answered', async () => {
+    // A swallowed GitOps write leaves the flat pointer as the only evidence.
+    // The sidebar keeps showing it, so the panel has to agree.
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({
+      ...LINKED_SOURCE,
+      pending_commit_sha: 'f00ba12345',
+      gitopsRevision: absentRevision(),
+    }));
+    render(panel());
+
+    const banner = await screen.findByTestId('git-pending');
+    expect(within(banner).getByText('f00ba12')).toBeInTheDocument();
+  });
+
+  it('does not treat a live application caveat as a fault', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(liveRevision({
+      limitations: [{ code: 'repo_identity_invalid', message: 'Repository identity could not be read.', evidence: null }],
+    }))));
+    render(panel());
+
+    await screen.findByTestId('git-source-state');
+    expect(screen.queryByTestId('gitops-fault')).not.toBeInTheDocument();
+  });
+
+  it('routes the pending card Review button to the pull endpoint', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(sourceRevision('candidate_ready'))),
+    );
+    render(panel());
+    const banner = await screen.findByTestId('git-pending');
+
+    fireEvent.click(within(banner).getByRole('button', { name: 'Review' }));
+
+    await waitFor(() => expect(
+      vi.mocked(apiFetch).mock.calls.some(c => String(c[0]).includes('/git-source/pull')),
+    ).toBe(true));
   });
 });

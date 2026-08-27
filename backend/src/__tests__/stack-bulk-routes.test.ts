@@ -260,7 +260,7 @@ describe('POST /api/stacks/bulk execution', () => {
   });
 
   it('handles update action (paid tier) by calling ComposeService.updateStack', async () => {
-    mockUpdateStack.mockResolvedValue({ recoveryId: null });
+    mockUpdateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
     const { LicenseService } = await import('../services/LicenseService');
     const tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
     try {
@@ -287,7 +287,7 @@ describe('POST /api/stacks/bulk execution', () => {
       policy: { id: 1, name: 'block-criticals', node_id: null, node_identity: '', stack_pattern: null, max_severity: 'HIGH', block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, enabled: 1, replicated_from_control: 0, created_at: Date.now(), updated_at: Date.now() },
       violations: [{ imageRef: 'nginx:latest', severity: 'CRITICAL', criticalCount: 3, highCount: 0, kevCount: 0, fixableCount: 0, reasons: ['severity'], scanId: 1 }],
     });
-    mockUpdateStack.mockResolvedValue({ recoveryId: null });
+    mockUpdateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
     try {
       const res = await request(app)
         .post('/api/stacks/bulk')
