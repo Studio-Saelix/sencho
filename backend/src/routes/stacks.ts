@@ -24,6 +24,7 @@ import {
 } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
+import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
@@ -1117,7 +1118,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
     if (repoUrlError) {
       return res.status(400).json({ error: repoUrlError });
     }
-    if (branch.length > 256) {
+    if (branch.length > REF_MAX_LEN) {
       return res.status(400).json({ error: 'branch is too long' });
     }
     if (typeof env_path === 'string' && env_path.length > 1024) {
