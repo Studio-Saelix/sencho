@@ -447,7 +447,6 @@ export class ComposeService {
     sendOutput?: (data: string) => void,
   ): Promise<T> {
     const deliveryContext = getRegistryDeliveryContext();
-    const deliverySourceId = RegistryDeliveryService.getInstance().getDeliverySourceId();
 
     const mergedAuths: Record<string, { auth: string }> = {};
 
@@ -483,6 +482,7 @@ export class ComposeService {
       });
     }
 
+    const deliverySourceId = RegistryDeliveryService.getInstance().getDeliverySourceId();
     const handle = createDockerAuthTempDir(
       deliverySourceId,
       deliveryContext ? 'delivered' : 'local',

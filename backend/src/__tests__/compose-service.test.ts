@@ -36,7 +36,11 @@ const {
   mockBuildUnifiedHeldImagePredicate,
   mockGetRecovery,
   mockFsStat,
-} = vi.hoisted(() => ({
+  mockCleanupDockerAuthTempDir,
+  mockCreateDockerAuthTempDir,
+} = vi.hoisted(() => {
+  const mockCleanupDockerAuthTempDir = vi.fn();
+  return {
   mockSpawn: vi.fn(),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
   mockGetLegacyOrphanContainersByStack: vi.fn().mockResolvedValue([]),
@@ -89,6 +93,17 @@ const {
   mockBuildUnifiedHeldImagePredicate: vi.fn().mockReturnValue(() => false),
   mockGetRecovery: vi.fn().mockReturnValue(undefined),
   mockFsStat: vi.fn().mockResolvedValue({ isDirectory: () => true }),
+  mockCleanupDockerAuthTempDir,
+  mockCreateDockerAuthTempDir: vi.fn(() => ({
+    dirPath: '/tmp/sencho-docker-test',
+    kind: 'local' as const,
+    cleanup: mockCleanupDockerAuthTempDir,
+  })),
+  };
+});
+
+vi.mock('../helpers/dockerAuthTempDir', () => ({
+  createDockerAuthTempDir: mockCreateDockerAuthTempDir,
 }));
 
 vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
@@ -1301,6 +1316,7 @@ describe('ComposeService - withRegistryAuth', () => {
   it('creates temp config dir when registries exist', async () => {
     mockGetRegistries.mockReturnValue([{ url: 'https://registry.example.com', username: 'user', password: 'pass' }]);
     mockResolveDockerConfig.mockResolvedValue({ config: { auths: { 'registry.example.com': { auth: 'dXNlcjpwYXNz' } } }, warnings: [] });
+    mockGetGlobalSettings.mockReturnValue({ delivery_source_id: 'test-delivery-source' });
     setupAutoCloseSpawn();
     mockListContainers.mockResolvedValue([]);
 
@@ -1310,10 +1326,8 @@ describe('ComposeService - withRegistryAuth', () => {
     await vi.advanceTimersByTimeAsync(3100);
     await promise;
 
-    expect(mockMkdtempSync).toHaveBeenCalled();
-    expect(mockWriteFileSync).toHaveBeenCalled();
-    expect(mockUnlinkSync).toHaveBeenCalled();
-    expect(mockRmdirSync).toHaveBeenCalled();
+    expect(mockCreateDockerAuthTempDir).toHaveBeenCalled();
+    expect(mockCleanupDockerAuthTempDir).toHaveBeenCalled();
   });
 
   it('surfaces resolveDockerConfig warnings to the WebSocket output', async () => {
@@ -1338,7 +1352,8 @@ describe('ComposeService - withRegistryAuth', () => {
 
   it('cleans up temp dir even on command failure', async () => {
     mockGetRegistries.mockReturnValue([{ url: 'https://registry.example.com' }]);
-    mockResolveDockerConfig.mockResolvedValue({ config: { auths: {} }, warnings: [] });
+    mockResolveDockerConfig.mockResolvedValue({ config: { auths: { 'registry.example.com': { auth: 'dGVzdA==' } } }, warnings: [] });
+    mockGetGlobalSettings.mockReturnValue({ delivery_source_id: 'test-delivery-source' });
 
     // Make spawn fail
     mockSpawn.mockImplementation(() => {
@@ -1356,7 +1371,7 @@ describe('ComposeService - withRegistryAuth', () => {
     await vi.runAllTimersAsync();
     const error = await result;
     expect(error).not.toBeNull();
-    expect(mockUnlinkSync).toHaveBeenCalled();
+    expect(mockCleanupDockerAuthTempDir).toHaveBeenCalled();
   });
 });
 
