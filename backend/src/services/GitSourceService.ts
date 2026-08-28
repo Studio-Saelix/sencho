@@ -1887,7 +1887,6 @@ export class GitSourceService {
             console.log(`[GitSource:diag] pull start stack=${stackName} branch=${src.branch} host=${repoHost(src.repo_url)}`);
         }
 
-        const token = src.encrypted_token ? this.crypto.decrypt(src.encrypted_token) : null;
         const transportAuth = this.resolveTransportAuth(src);
         const manifestSvc = GitProjectManifestService.getInstance();
         // Object holder: property access is not narrowed by control-flow
