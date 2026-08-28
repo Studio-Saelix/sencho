@@ -55,7 +55,7 @@ These are the states you will see most often.
 The last two matter most. Sencho reports an interrupted operation as unknown rather than guessing, so a stack whose pull was cut short by a restart says so instead of quietly reading as up to date.
 
 <Note>
-  Changing the repository, the ref, the compose files, the project directory, or the `.env` sync clears any staged commit, because the plan was built against the settings you just replaced. Pull again to rebuild it. The state moves to **Reconcile required** if a commit had already been accepted, and to **Never reconciled** if none ever was. Changing only the token or the apply behavior leaves a staged commit alone, since neither changes what would be materialized.
+  Changing the repository, the ref, the compose files, the project directory, or the `.env` sync clears any staged commit, because the plan was built against the settings you just replaced. Pull again to rebuild it. The state moves to **Reconcile required** if a commit had already been accepted, and to **Never reconciled** if none ever was. Changing only the token, deploy key, host-key trust, or the apply behavior leaves a staged commit alone, since neither changes what would be materialized.
 </Note>
 
 ### When part of the state could not be proven
@@ -69,7 +69,7 @@ These are qualifications, not failures. The state above them is real, and the li
 Skip the "empty stack then link later" detour and point at a repo from the start. Click **Create Stack** in the sidebar, switch to the **From Git** tab, and fill in the same fields you would on the Git Source panel.
 
 <Frame>
-  <img src="/images/git-sources/create-from-git-tab.png" alt="New stack dialog with the From Git tab selected, showing stack name, repository URL, branch, compose path, sibling .env toggle, authentication toggle, apply behavior radio group, a Deploy after create checkbox, and an HTTPS REPOS ONLY footer hint" />
+  <img src="/images/git-sources/create-from-git-tab.png" alt="New stack dialog with the From Git tab selected, showing stack name, repository URL, branch, compose path, sibling .env toggle, authentication options, apply behavior radio group, and a Deploy after create checkbox" />
 </Frame>
 
 Sencho fetches the compose files, validates the merged result with `docker compose config`, writes them to a fresh stack directory, and links the Git source in one step. The last-applied commit SHA is seeded from the fetch so the first manual pull starts from a clean classified plan.
@@ -89,12 +89,12 @@ Tick **Deploy after create** to run `docker compose up -d` immediately after the
 
 | Field | Description |
 |-------|-------------|
-| **Repository URL** | `https://github.com/your-org/your-repo.git` (HTTPS only) |
+| **Repository URL** | HTTPS (`https://github.com/your-org/your-repo.git`) or SSH (`git@github.com:your-org/your-repo.git`, or `ssh://git@host:port/path` when the server uses a nonstandard port) |
 | **Ref** | Branch, tag, or full commit SHA to track (e.g. `main`, `v1.0`, or a 40-character SHA) |
 | **Compose files** | One or more paths within the repo, merged in the listed order (e.g. `deploy/base.yaml` then `deploy/prod.yaml`). The first file is the primary. Reorder by dragging (or the up/down arrows on a phone) and remove with the **×** button. |
 | **Project directory** | Optional path within the repo passed to `docker compose --project-directory`, so relative build contexts, bind mounts, and `env_file` references resolve from that base. Leave blank to use the stack root. |
 | **Also sync sibling `.env` file** | When enabled, also pulls the `.env` from the same directory as the primary compose file. The form shows the resolved path inline (e.g. `deploy/.env` for a primary at `deploy/compose.yaml`). |
-| **Authentication** | **Public (no auth)** for public repos, **Personal Access Token** for private repos |
+| **Authentication** | **Public (no auth)** for public repos, **Personal Access Token** for private HTTPS repos, or **SSH deploy key** for private SSH repos |
 | **Apply behavior** | See the three modes below |
 
 Saving runs a reachability check against the repository. If the URL is wrong, the token is invalid, the ref does not exist, or a file is missing, Sencho surfaces the error inline and nothing is persisted.
@@ -180,7 +180,9 @@ See the [Webhooks](/features/webhooks) page for the full signing protocol.
 
 ## Private repositories
 
-For private repositories, use a Personal Access Token scoped to read access on the target repo:
+### HTTPS with a personal access token
+
+For private repositories over HTTPS, use a Personal Access Token scoped to read access on the target repo:
 
 - **GitHub**: a fine-grained PAT with **Contents: Read** permission on the repo, or a classic PAT with the `repo` scope.
 - **GitLab**: a project or group access token with the `read_repository` scope.
@@ -189,6 +191,21 @@ For private repositories, use a Personal Access Token scoped to read access on t
 Paste the token into the **Token** field and save. Sencho stores it encrypted at rest and never returns it in API responses or UI. When editing the source later, the token field shows a masked placeholder; leave it blank to keep the stored value, or type a new token to replace it. Switching the auth type back to **Public (no auth)** clears the stored token.
 
 The encryption boundary covers the pending update payload too: every pull caches the fetched compose and env content in the database so the change plan can reopen without a refetch, and that cached content is encrypted at rest in the same way as the token, since compose files routinely embed secrets via env interpolation.
+
+### SSH with a deploy key
+
+For private repositories over SSH, paste a read-only deploy key and confirm the server's host key before saving.
+
+1. Generate an ed25519 key pair on a trusted machine (`ssh-keygen -t ed25519 -f deploy-key -N ""`).
+2. Add the public key to the Git host as a deploy key with read access (GitHub: **Settings → Deploy keys** on the repository).
+3. In Sencho, set **Authentication** to **SSH deploy key**, paste the private key, then click **Fetch host key fingerprint**. Sencho probes the host with `ssh-keyscan`, shows the SHA256 fingerprint, and stores the matching `known_hosts` line.
+4. Save. Sencho stores the private key encrypted at rest and never returns it in API responses or UI.
+
+Sencho verifies the host key on every fetch (`StrictHostKeyChecking=yes` against the stored line). If the server key changes, pulls fail with a host-key error until you review the new fingerprint and update trust deliberately.
+
+Use an `ssh://` URL when the Git server listens on a nonstandard port (for example `ssh://git@git.example.com:2222/org/repo.git`). The familiar `git@host:org/repo.git` form assumes port 22.
+
+Switching authentication back to **Public (no auth)** or to a token clears the stored deploy key and host-key trust.
 
 ## Local edits vs Git
 
@@ -214,7 +231,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
   </Accordion>
 
   <Accordion title="Authentication failed">
-    You supplied a token and the Git host rejected it outright. The token is missing, expired, or lacks read access. Generate a new token and replace the value in the **Token** field. Sencho returns this as a 400 form error rather than a 401, so an upstream auth failure does not sign you out of the dashboard.
+    The Git host rejected the credentials you supplied. For HTTPS, the token may be missing, expired, or lack read access: generate a new token and replace the value in the **Token** field. For SSH, the deploy key may be wrong or not registered on the host: paste the matching private key or add the public key on the Git host. Sencho returns this as a 400 form error rather than a 401, so an upstream auth failure does not sign you out of the dashboard.
   </Accordion>
 
   <Accordion title="Branch or tag not found">
@@ -281,14 +298,18 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
     Git Sources materializes the complete project, including recursive `include:` and `extends.file` dependencies, service env files, file-backed configs and secrets, and build contexts. If a referenced file is still missing, the pull refused it and the refusal message names the path and the reason (out-of-bound path, Git LFS pointer, submodule, symlink, or a size cap). Fix the declaration in the repository and pull again.
   </Accordion>
 
-  <Accordion title="Only HTTPS is supported">
-    Git Sources fetch over HTTPS only. SSH clone URLs (`git@host:org/repo.git`) and custom protocols are rejected with a client-side validation error. Paste the `https://...` URL and use a Personal Access Token for authentication on private repositories.
+  <Accordion title="SSH host key verification failed">
+    The server's SSH host key no longer matches the fingerprint you accepted. This can mean a MITM risk or an intentional key rotation on the host. Click **Fetch host key fingerprint** again, compare the SHA256 value out of band with your operator, and save only if you intend to trust the new key.
+  </Accordion>
+
+  <Accordion title="Only unsupported URL schemes">
+    Git Sources accept `https://` URLs and SSH URLs (`git@host:org/repo.git` or `ssh://git@host:port/path`). Other schemes are rejected at save time.
   </Accordion>
 </AccordionGroup>
 
 ## Known limitations
 
-- **HTTPS only.** SSH URLs and SSH keys are not supported. Use a Personal Access Token for private repos.
+- **HTTPS and SSH.** HTTPS uses tokens; SSH uses deploy keys with strict host-key verification. Custom URL schemes are not supported.
 - **No Git LFS.** Compose and env files stored via LFS are rejected. Commit plain files instead.
 - **No submodules.** Submodule contents are not fetched. Inputs and build contexts that reference submodule contents are refused with an actionable message; a warning is shown when `.gitmodules` is present.
 - **Refs, not arbitrary commits.** Sources follow a branch head, a tag, or a pinned commit SHA. Each pull resolves the configured ref to the exact commit it currently points at and pins that SHA, so apply always materializes the reviewed revision. A commit SHA not advertised by the Git host is refused.

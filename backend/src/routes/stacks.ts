@@ -1084,6 +1084,9 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       env_path,
       auth_type,
       token,
+      deploy_key,
+      ssh_known_hosts_entry,
+      ssh_host_key_fingerprint,
       auto_apply_on_webhook,
       auto_deploy_on_apply,
       deploy_now,
@@ -1113,7 +1116,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
     if (auto_deploy_on_apply !== undefined && typeof auto_deploy_on_apply !== 'boolean') {
       return res.status(400).json({ error: 'auto_deploy_on_apply must be a boolean' });
     }
-    const resolvedAuthType = auth_type === 'token' ? 'token' : 'none';
+    const resolvedAuthType = auth_type === 'token' ? 'token' : auth_type === 'deploy_key' ? 'deploy_key' : 'none';
     const repoUrlError = repoUrlRejectionMessage(repo_url);
     if (repoUrlError) {
       return res.status(400).json({ error: repoUrlError });
@@ -1123,6 +1126,9 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
     }
     if (typeof env_path === 'string' && env_path.length > 1024) {
       return res.status(400).json({ error: 'env_path is too long' });
+    }
+    if (typeof deploy_key === 'string' && deploy_key.length > 16384) {
+      return res.status(400).json({ error: 'deploy_key is too long' });
     }
     if (typeof token === 'string' && token.length > 8192) {
       return res.status(400).json({ error: 'token is too long' });
@@ -1161,6 +1167,13 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       envPath: resolvedEnvPath,
       authType: resolvedAuthType,
       token: resolvedAuthType === 'token' && typeof token === 'string' && token !== '' ? token : null,
+      deployKey: resolvedAuthType === 'deploy_key' && typeof deploy_key === 'string' && deploy_key !== '' ? deploy_key : null,
+      sshKnownHostsEntry: resolvedAuthType === 'deploy_key' && typeof ssh_known_hosts_entry === 'string'
+        ? ssh_known_hosts_entry
+        : null,
+      sshHostKeyFingerprint: resolvedAuthType === 'deploy_key' && typeof ssh_host_key_fingerprint === 'string'
+        ? ssh_host_key_fingerprint
+        : null,
       autoApplyOnWebhook,
       autoDeployOnApply,
     });

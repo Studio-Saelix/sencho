@@ -429,7 +429,7 @@ export interface Webhook {
     updated_at: number;
 }
 
-export type GitSourceAuthType = 'none' | 'token';
+export type GitSourceAuthType = 'none' | 'token' | 'deploy_key';
 
 /**
  * The ordered set of local compose files actually materialized on disk for a
@@ -457,6 +457,9 @@ export interface StackGitSource {
     env_path: string | null;
     auth_type: GitSourceAuthType;
     encrypted_token: string | null;
+    encrypted_deploy_key: string | null;
+    ssh_known_hosts_entry: string | null;
+    ssh_host_key_fingerprint: string | null;
     auto_apply_on_webhook: boolean;
     auto_deploy_on_apply: boolean;
     last_applied_commit_sha: string | null;
@@ -1169,6 +1172,7 @@ export class DatabaseService {
         this.migrateFleetSyncStickyError();
         this.migrateStackDossierHashes();
         this.migrateGitSourceMultiFile();
+        this.migrateGitSourceSshDeployKey();
         this.migrateGitSourceManifest();
         this.migrateGitSourceChangePlan();
         this.migrateGitOpsRecoveryColumns();
@@ -2572,6 +2576,12 @@ stmt.run('gitops_schema_version', '1');
         this.tryAddColumn('stack_dossiers', 'source_hash', 'TEXT');
         this.tryAddColumn('stack_dossiers', 'rendered_hash', 'TEXT');
         this.tryAddColumn('stack_dossiers', 'last_drift_check_at', 'INTEGER');
+    }
+
+    private migrateGitSourceSshDeployKey(): void {
+        this.tryAddColumn('stack_git_sources', 'encrypted_deploy_key', 'TEXT');
+        this.tryAddColumn('stack_git_sources', 'ssh_known_hosts_entry', 'TEXT');
+        this.tryAddColumn('stack_git_sources', 'ssh_host_key_fingerprint', 'TEXT');
     }
 
     private migrateGitSourceManifest(): void {
@@ -6275,6 +6285,9 @@ stmt.run('gitops_schema_version', '1');
             env_path: (row.env_path as string | null) ?? null,
             auth_type: row.auth_type as GitSourceAuthType,
             encrypted_token: (row.encrypted_token as string | null) ?? null,
+            encrypted_deploy_key: (row.encrypted_deploy_key as string | null) ?? null,
+            ssh_known_hosts_entry: (row.ssh_known_hosts_entry as string | null) ?? null,
+            ssh_host_key_fingerprint: (row.ssh_host_key_fingerprint as string | null) ?? null,
             auto_apply_on_webhook: Number(row.auto_apply_on_webhook) === 1,
             auto_deploy_on_apply: Number(row.auto_deploy_on_apply) === 1,
             last_applied_commit_sha: (row.last_applied_commit_sha as string | null) ?? null,
@@ -6315,14 +6328,16 @@ stmt.run('gitops_schema_version', '1');
                 `UPDATE stack_git_sources SET
                     repo_url = ?, branch = ?, compose_path = ?, compose_paths = ?, context_dir = ?,
                     sync_env = ?, env_path = ?,
-                    auth_type = ?, encrypted_token = ?,
+                    auth_type = ?, encrypted_token = ?, encrypted_deploy_key = ?,
+                    ssh_known_hosts_entry = ?, ssh_host_key_fingerprint = ?,
                     auto_apply_on_webhook = ?, auto_deploy_on_apply = ?,
                     updated_at = ?
                  WHERE stack_name = ?`
             ).run(
                 source.repo_url, source.branch, source.compose_path, composePathsJson, source.context_dir,
                 source.sync_env ? 1 : 0, source.env_path,
-                source.auth_type, source.encrypted_token,
+                source.auth_type, source.encrypted_token, source.encrypted_deploy_key,
+                source.ssh_known_hosts_entry, source.ssh_host_key_fingerprint,
                 source.auto_apply_on_webhook ? 1 : 0, source.auto_deploy_on_apply ? 1 : 0,
                 now, source.stack_name
             );
@@ -6331,13 +6346,15 @@ stmt.run('gitops_schema_version', '1');
         const result = this.db.prepare(
             `INSERT INTO stack_git_sources
                 (stack_name, repo_url, branch, compose_path, compose_paths, context_dir, sync_env, env_path,
-                 auth_type, encrypted_token, auto_apply_on_webhook, auto_deploy_on_apply,
+                 auth_type, encrypted_token, encrypted_deploy_key, ssh_known_hosts_entry, ssh_host_key_fingerprint,
+                 auto_apply_on_webhook, auto_deploy_on_apply,
                  created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
             source.stack_name, source.repo_url, source.branch, source.compose_path, composePathsJson, source.context_dir,
             source.sync_env ? 1 : 0, source.env_path,
-            source.auth_type, source.encrypted_token,
+            source.auth_type, source.encrypted_token, source.encrypted_deploy_key,
+            source.ssh_known_hosts_entry, source.ssh_host_key_fingerprint,
             source.auto_apply_on_webhook ? 1 : 0, source.auto_deploy_on_apply ? 1 : 0,
             now, now
         );

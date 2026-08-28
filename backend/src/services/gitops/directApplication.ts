@@ -4,7 +4,7 @@ import { NodeRegistry } from '../NodeRegistry';
 import { MANAGED_ROOT_NAME } from './managedPaths';
 import { encodeGitOpsJson } from './json';
 import { materializationFingerprint } from './fingerprint';
-import { parseHttpsRepoUrl, parseLegacyRepoUrl, secretFreeRepoUrl, serializeRepoIdentity, type RepoIdentity } from './repoIdentity';
+import { parseLegacyRepoUrl, parseStorableRepoUrl, secretFreeRepoUrl, secretFreeRepoUrlFromStorable, serializeRepoIdentity, serializeRepoIdentityFromStorable, type RepoIdentity } from './repoIdentity';
 import type { RefKind } from '../git/types';
 import type {
   GitOpsApplicationRow,
@@ -44,9 +44,19 @@ export class GitOpsIdentityError extends Error {
  * secret-free identity that gets persisted, never from the raw operational URL.
  */
 export function directSourceIdentity(config: DirectSourceConfig): DirectSourceIdentity {
-  const parsed = parseHttpsRepoUrl(config.repoUrl);
+  const parsed = parseStorableRepoUrl(config.repoUrl);
   if (!parsed.ok) throw new GitOpsIdentityError(`repository URL is not storable: ${parsed.reason}`);
-  return directSourceIdentityFromUrl(config, parsed.url);
+  const identity = serializeRepoIdentityFromStorable(parsed);
+  const repoUrl = secretFreeRepoUrlFromStorable(parsed);
+  const fingerprint = materializationFingerprint({
+    repoIdentity: identity,
+    configuredRef: config.branch,
+    composePaths: config.composePaths,
+    contextDir: config.contextDir,
+    syncEnv: config.syncEnv,
+    envPath: config.envPath,
+  });
+  return { repoUrl, identity, fingerprint };
 }
 
 /**

@@ -18,11 +18,18 @@
 
 export type RefKind = 'branch' | 'tag' | 'sha';
 
+/** Deploy-key authentication material for SSH transports. */
+export interface SshDeployKeyAuth {
+    privateKey: string;
+    knownHostsEntry: string;
+}
+
 export interface ResolveRequest {
     repoUrl: string;
     /** Configured ref: a branch name, a tag name, or a full 40/64-hex commit SHA. */
     ref: string;
     token?: string | null;
+    sshAuth?: SshDeployKeyAuth | null;
     /**
      * Total fetch budget in milliseconds. Note: the resolution round trip
      * (ls-remote) is internally capped at 10s regardless of this value, so

@@ -282,7 +282,7 @@ ARG APK_CACHE_BUST=unset
 # removing it also eliminates CVE-2026-33671 (picomatch ReDoS in npm).
 RUN echo "apk cache bust: ${APK_CACHE_BUST}" && \
     apk upgrade --no-cache && \
-    apk add --no-cache bash su-exec git tini && \
+    apk add --no-cache bash su-exec git tini openssh-client && \
     mkdir -p /usr/local/lib/docker/cli-plugins
 
 # Copy the source-built Docker CLI and Compose plugin from their builder stages.

@@ -26,6 +26,7 @@ export function gitSourceStatus(code: GitSourceErrorCode): number {
     case 'FILE_NOT_FOUND':
       return 404;
     case 'UNSUPPORTED_REF':
+    case 'SSH_HOST_KEY_FAILED':
       return 400;
     case 'STALE_PLAN':
     case 'PLAN_BLOCKED':

@@ -64,14 +64,14 @@ test.describe('Git Sources', () => {
     await expect(page.locator('[data-stacks-loaded="true"]')).toBeAttached({ timeout: 15_000 });
   });
 
-  test('rejects non-HTTPS repository URLs client-side', async ({ page }) => {
+  test('rejects unsupported repository URL schemes client-side', async ({ page }) => {
     await openGitSourcePanel(page);
 
-    await page.locator('#git-source-repo').fill('git@github.com:org/repo.git');
+    await page.locator('#git-source-repo').fill('http://github.com/org/repo.git');
     await page.locator('#git-source-branch').fill('main');
     await page.getByRole('dialog').getByRole('button', { name: /^Save$/ }).click();
 
-    await expect(page.getByText(/Only HTTPS repository URLs are supported/i)).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText(/Use an https:\/\/ URL or an SSH URL/i)).toBeVisible({ timeout: 5_000 });
   });
 
   test('surfaces reachability error on save with unreachable repo', async ({ page }) => {
@@ -241,15 +241,15 @@ test.describe('Create stack from Git', () => {
     await expect(page.getByRole('dialog').getByRole('tab', { name: /From Git/i })).toBeVisible();
   });
 
-  test('From Git tab rejects non-HTTPS URLs client-side', async ({ page }) => {
+  test('From Git tab rejects unsupported URL schemes client-side', async ({ page }) => {
     await openCreateStackDialog(page);
     await page.getByRole('dialog').getByRole('tab', { name: /From Git/i }).click();
 
     await page.locator('#create-git-stack-name').fill(CREATE_FROM_GIT_STACK);
-    await page.locator('#git-source-repo').fill('git@github.com:org/repo.git');
+    await page.locator('#git-source-repo').fill('http://github.com/org/repo.git');
     await page.locator('#git-source-branch').fill('main');
     await page.getByRole('dialog').getByRole('button', { name: /Create from Git/i }).click();
-    await expect(page.getByText(/Only HTTPS repository URLs are supported/i)).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText(/Use an https:\/\/ URL or an SSH URL/i)).toBeVisible({ timeout: 5_000 });
   });
 
   test('backend rejects .git/config compose_path on from-git', async ({ page }) => {

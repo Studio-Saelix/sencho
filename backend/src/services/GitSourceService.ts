@@ -29,7 +29,7 @@ import type { GitChangePlan, PublicGitChangePlan, GitChangePlanCounts, PublicGit
 import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
 import type { NotificationCategory } from './NotificationService';
 import { classifyGitFailure, isTransportFailure } from './git/errors';
-import type { RefKind } from './git/types';
+import type { RefKind, SshDeployKeyAuth } from './git/types';
 import { nativeGitTransport, verifyFastForward } from './git/nativeGitTransport';
 import { GitOpsStore } from './gitops/store';
 import { GitOpsTransitions, GitOpsTransitionError } from './gitops/transitions';
@@ -62,6 +62,7 @@ export type GitSourceErrorCode =
     | 'REF_NOT_FOUND'
     | 'REF_DELETED'
     | 'UNSUPPORTED_REF'
+    | 'SSH_HOST_KEY_FAILED'
     | 'FILE_NOT_FOUND'
     | 'NETWORK_TIMEOUT'
     | 'GIT_ERROR'
@@ -107,6 +108,7 @@ export interface FetchParams {
     composePaths: string[];
     envPath?: string | null;
     token?: string | null;
+    sshAuth?: SshDeployKeyAuth | null;
     timeoutMs?: number;
     /**
      * Runs inside the clone lifecycle (before the temp dir is removed) so the
@@ -165,6 +167,9 @@ export interface UpsertInput {
     envPath: string | null;
     authType: GitSourceAuthType;
     token?: string | null;  // undefined = keep existing, '' = clear, non-empty = replace
+    deployKey?: string | null;
+    sshKnownHostsEntry?: string | null;
+    sshHostKeyFingerprint?: string | null;
     autoApplyOnWebhook: boolean;
     autoDeployOnApply: boolean;
 }
@@ -179,6 +184,9 @@ export interface CreateStackFromGitInput {
     envPath: string | null;
     authType: GitSourceAuthType;
     token: string | null;
+    deployKey?: string | null;
+    sshKnownHostsEntry?: string | null;
+    sshHostKeyFingerprint?: string | null;
     autoApplyOnWebhook: boolean;
     autoDeployOnApply: boolean;
 }
@@ -224,6 +232,8 @@ export interface PublicGitSource {
     env_path: string | null;
     auth_type: GitSourceAuthType;
     has_token: boolean;
+    has_deploy_key: boolean;
+    ssh_host_key_fingerprint: string | null;
     auto_apply_on_webhook: boolean;
     auto_deploy_on_apply: boolean;
     last_applied_commit_sha: string | null;
@@ -542,6 +552,8 @@ export class GitSourceService {
             env_path: src.env_path,
             auth_type: src.auth_type,
             has_token: !!src.encrypted_token,
+            has_deploy_key: !!src.encrypted_deploy_key,
+            ssh_host_key_fingerprint: src.ssh_host_key_fingerprint ?? null,
             auto_apply_on_webhook: src.auto_apply_on_webhook,
             auto_deploy_on_apply: src.auto_deploy_on_apply,
             last_applied_commit_sha: src.last_applied_commit_sha,
@@ -567,21 +579,68 @@ export class GitSourceService {
 
     // ─── CRUD ────────────────────────────────────────────────────────────────
 
+    private resolveTransportAuth(src: Pick<StackGitSource, 'auth_type' | 'encrypted_token' | 'encrypted_deploy_key' | 'ssh_known_hosts_entry'>): {
+        token?: string | null;
+        sshAuth?: SshDeployKeyAuth | null;
+    } {
+        if (src.auth_type === 'token') {
+            return { token: src.encrypted_token ? this.crypto.decrypt(src.encrypted_token) : null };
+        }
+        if (src.auth_type === 'deploy_key') {
+            if (!src.encrypted_deploy_key || !src.ssh_known_hosts_entry) {
+                return { sshAuth: null };
+            }
+            return {
+                sshAuth: {
+                    privateKey: this.crypto.decrypt(src.encrypted_deploy_key),
+                    knownHostsEntry: src.ssh_known_hosts_entry,
+                },
+            };
+        }
+        return { token: null };
+    }
+
     public async upsert(input: UpsertInput): Promise<PublicGitSource> {
         const db = DatabaseService.getInstance();
         const existing = db.getGitSource(input.stackName);
 
-        // Determine the stored token.
-        let encryptedToken: string | null;
+        // Determine stored credentials per auth type.
+        let encryptedToken: string | null = null;
+        let encryptedDeployKey: string | null = null;
+        let sshKnownHostsEntry: string | null = null;
+        let sshHostKeyFingerprint: string | null = null;
+
         if (input.authType === 'none') {
-            encryptedToken = null;
-        } else if (input.token === undefined) {
-            // Keep existing
-            encryptedToken = existing?.encrypted_token ?? null;
-        } else if (input.token === null || input.token === '') {
-            encryptedToken = null;
-        } else {
-            encryptedToken = this.crypto.encrypt(input.token);
+            // all null
+        } else if (input.authType === 'token') {
+            if (input.token === undefined) {
+                encryptedToken = existing?.encrypted_token ?? null;
+            } else if (input.token === null || input.token === '') {
+                encryptedToken = null;
+            } else {
+                encryptedToken = this.crypto.encrypt(input.token);
+            }
+        } else if (input.authType === 'deploy_key') {
+            if (input.deployKey === undefined) {
+                encryptedDeployKey = existing?.encrypted_deploy_key ?? null;
+            } else if (input.deployKey === null || input.deployKey === '') {
+                encryptedDeployKey = null;
+            } else {
+                encryptedDeployKey = this.crypto.encrypt(input.deployKey);
+            }
+            if (input.sshKnownHostsEntry === undefined) {
+                sshKnownHostsEntry = existing?.ssh_known_hosts_entry ?? null;
+                sshHostKeyFingerprint = existing?.ssh_host_key_fingerprint ?? null;
+            } else {
+                sshKnownHostsEntry = input.sshKnownHostsEntry?.trim() || null;
+                sshHostKeyFingerprint = input.sshHostKeyFingerprint?.trim() || null;
+            }
+            if (!encryptedDeployKey || !sshKnownHostsEntry) {
+                throw new GitSourceError(
+                    'GIT_ERROR',
+                    'Deploy key authentication requires a private key and a trusted SSH host key.',
+                );
+            }
         }
 
         // Apply-matrix sanity: auto_deploy requires auto_apply.
@@ -609,13 +668,22 @@ export class GitSourceService {
 
         // Dry-run reachability check before persisting. Fetches every configured
         // file so a bad path in the ordered list is caught at save time.
-        const token = encryptedToken ? this.crypto.decrypt(encryptedToken) : null;
+        const fetchAuth = input.authType === 'token'
+            ? { token: encryptedToken ? this.crypto.decrypt(encryptedToken) : null }
+            : input.authType === 'deploy_key'
+                ? {
+                    sshAuth: {
+                        privateKey: this.crypto.decrypt(encryptedDeployKey!),
+                        knownHostsEntry: sshKnownHostsEntry!,
+                    },
+                }
+                : { token: null };
         await this.fetchFromGit({
             repoUrl: input.repoUrl,
             branch: input.branch,
             composePaths: input.composePaths,
             envPath: input.syncEnv ? input.envPath : null,
-            token,
+            ...fetchAuth,
         });
 
         const resolvedEnvPath = input.syncEnv ? input.envPath : null;
@@ -657,6 +725,9 @@ export class GitSourceService {
                 env_path: resolvedEnvPath,
                 auth_type: input.authType,
                 encrypted_token: encryptedToken,
+                encrypted_deploy_key: encryptedDeployKey,
+                ssh_known_hosts_entry: sshKnownHostsEntry,
+                ssh_host_key_fingerprint: sshHostKeyFingerprint,
                 auto_apply_on_webhook: input.autoApplyOnWebhook,
                 auto_deploy_on_apply: input.autoDeployOnApply,
                 last_applied_commit_sha: existing?.last_applied_commit_sha ?? null,
@@ -959,13 +1030,14 @@ export class GitSourceService {
             repoUrl: string;
             branch: string;
             token?: string | null;
+            sshAuth?: SshDeployKeyAuth | null;
             timeoutMs?: number;
             hasPriorHistory?: boolean;
             priorIdentity?: { commitSha: string; kind: RefKind };
         },
         fn: (dir: string, commitSha: string, warnings: string[], resolvedRefKind: RefKind) => Promise<T>,
     ): Promise<T> {
-        const { repoUrl, branch, token } = params;
+        const { repoUrl, branch, token, sshAuth } = params;
         const timeoutMs = params.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
         const root = await createTempDir();
         const hasPriorHistory = params.hasPriorHistory === true || params.priorIdentity != null;
@@ -975,6 +1047,7 @@ export class GitSourceService {
                 repoUrl,
                 ref: branch,
                 token,
+                sshAuth,
                 timeoutMs,
                 workspaceRoot: root,
             });
@@ -989,6 +1062,7 @@ export class GitSourceService {
                         ancestorSha: prior.commitSha,
                         descendantSha: resolved.commitSha,
                         token,
+                        sshAuth,
                         timeoutMs,
                         workspaceRoot: root,
                         maxBytes: maxCloneBytes(),
@@ -1003,6 +1077,7 @@ export class GitSourceService {
                 ref: branch,
                 refKind: resolved.kind,
                 token,
+                sshAuth,
                 timeoutMs,
                 commitSha: resolved.commitSha,
                 workspaceRoot: root,
@@ -1047,7 +1122,7 @@ export class GitSourceService {
     }
 
     public async fetchFromGit(params: FetchParams): Promise<FetchResult> {
-        const { repoUrl, branch, composePaths, envPath, token } = params;
+        const { repoUrl, branch, composePaths, envPath, token, sshAuth } = params;
 
         // Reject any compose/env target that resolves inside the `.git`
         // metadata directory BEFORE we spin up a clone. This blocks a
@@ -1069,6 +1144,7 @@ export class GitSourceService {
                 repoUrl,
                 branch,
                 token,
+                sshAuth,
                 timeoutMs: params.timeoutMs,
                 hasPriorHistory: params.hasPriorHistory,
                 priorIdentity: params.priorIdentity,
@@ -1138,7 +1214,7 @@ export class GitSourceService {
      * same clone size/timeout guards as fetch, plus a file-count cap.
      */
     public async listRepoTree(
-        params: { repoUrl: string; branch: string; token?: string | null; timeoutMs?: number },
+        params: { repoUrl: string; branch: string; token?: string | null; sshAuth?: SshDeployKeyAuth | null; timeoutMs?: number },
     ): Promise<{ files: string[]; truncated: boolean; commitSha: string; warnings: string[] }> {
         return this.withClonedRepo(params, async (dir, commitSha, warnings) => {
             const { files, truncated } = await this.walkRepoFiles(dir);
@@ -1812,6 +1888,7 @@ export class GitSourceService {
         }
 
         const token = src.encrypted_token ? this.crypto.decrypt(src.encrypted_token) : null;
+        const transportAuth = this.resolveTransportAuth(src);
         const manifestSvc = GitProjectManifestService.getInstance();
         // Object holder: property access is not narrowed by control-flow
         // analysis, so the closure assignment below stays visible.
@@ -1824,7 +1901,8 @@ export class GitSourceService {
             branch: src.branch,
             composePaths: src.compose_paths,
             envPath: src.sync_env ? src.env_path : null,
-            token,
+            token: transportAuth.token,
+            sshAuth: transportAuth.sshAuth,
             hasPriorHistory: priorIdentity != null,
             priorIdentity,
             onClone: async (cloneDir, commitSha, envContent) => {
@@ -2613,19 +2691,38 @@ export class GitSourceService {
             });
             const staged: { candidateRelPath: string | null } = { candidateRelPath: null };
 
+            if (input.authType === 'deploy_key') {
+                if (!input.deployKey?.trim() || !input.sshKnownHostsEntry?.trim()) {
+                    throw new GitSourceError(
+                        'GIT_ERROR',
+                        'Deploy key authentication requires a private key and a trusted SSH host key.',
+                    );
+                }
+            }
+
             // 1. Fetch from git BEFORE touching disk or DB. If the fetch
             //    fails there is nothing to clean up. The onClone hook stages
             //    the complete-project candidate inside the clone lifecycle.
             const manifestSvc = GitProjectManifestService.getInstance();
             const materialization: { value: MaterializationResult | null } = { value: null };
             let fetched: FetchResult;
+            const createFetchAuth = input.authType === 'token'
+                ? { token: input.token }
+                : input.authType === 'deploy_key'
+                    ? {
+                        sshAuth: {
+                            privateKey: input.deployKey ?? '',
+                            knownHostsEntry: input.sshKnownHostsEntry ?? '',
+                        },
+                    }
+                    : { token: null };
             try {
                 fetched = await this.fetchFromGit({
                     repoUrl: input.repoUrl,
                     branch: input.branch,
                     composePaths: input.composePaths,
                     envPath: input.syncEnv ? input.envPath : null,
-                    token: input.token,
+                    ...createFetchAuth,
                     onClone: async (cloneDir, commitSha, envContent) => {
                         // The candidate path is recorded before the build that
                         // creates it, so a crash mid-build still names exactly one
@@ -2883,6 +2980,11 @@ export class GitSourceService {
                 const encryptedToken = input.authType === 'token' && input.token
                     ? this.crypto.encrypt(input.token)
                     : null;
+                const encryptedDeployKey = input.authType === 'deploy_key' && input.deployKey
+                    ? this.crypto.encrypt(input.deployKey)
+                    : null;
+                const sshKnownHostsEntry = input.authType === 'deploy_key' ? (input.sshKnownHostsEntry?.trim() || null) : null;
+                const sshHostKeyFingerprint = input.authType === 'deploy_key' ? (input.sshHostKeyFingerprint?.trim() || null) : null;
                 const hash = this.hashContent(fetched.composeFiles, fetched.envContent);
                 // The source row, the applied pointers, and the checkpoint
                 // advance together. This commit is the success boundary: once
@@ -2900,6 +3002,9 @@ export class GitSourceService {
                     env_path: input.syncEnv ? input.envPath : null,
                     auth_type: input.authType,
                     encrypted_token: encryptedToken,
+                    encrypted_deploy_key: encryptedDeployKey,
+                    ssh_known_hosts_entry: sshKnownHostsEntry,
+                    ssh_host_key_fingerprint: sshHostKeyFingerprint,
                     auto_apply_on_webhook: input.autoApplyOnWebhook,
                     auto_deploy_on_apply: input.autoDeployOnApply,
                     last_applied_commit_sha: fetched.commitSha,
