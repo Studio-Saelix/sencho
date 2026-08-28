@@ -221,6 +221,36 @@ describe('gitops schema', () => {
     });
     expect(store.getArtifactSet('art-1')?.qualification).toBe('unresolved');
   });
+
+  it('round-trips resolved_ref_kind for a tag-resolved generation', async () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(directApp('app-tag', 'tag-web'));
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const raw = DatabaseService.getInstance().getDb();
+    raw.prepare("UPDATE gitops_applications SET configured_ref = 'v1' WHERE id = 'app-tag'").run();
+    store.insertGeneration({
+      ...generation('gen-tag', 'app-tag'),
+      commit_sha: 'abc123',
+      configured_ref: 'v1',
+      resolved_ref_kind: 'tag',
+    });
+    const row = store.getGeneration('gen-tag');
+    expect(row?.resolved_ref_kind).toBe('tag');
+    expect(row?.configured_ref).toBe('v1');
+  });
+
+  it('round-trips fetched_resolved_ref_kind on application fetch transitions', async () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(directApp('app-fetch-kind', 'fetch-web'));
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    const tx = GitOpsTransitions.getInstance();
+    const env = { operationId: 'op-fetch-kind', actor: 'tester', trigger: 'manual', at: Date.now() };
+    tx.fetchStarted('app-fetch-kind', env);
+    tx.fetched('app-fetch-kind', 'abc123', env, 'tag');
+    const app = store.getApplication('app-fetch-kind');
+    expect(app?.fetched_commit_sha).toBe('abc123');
+    expect(app?.fetched_resolved_ref_kind).toBe('tag');
+  });
 });
 
 function directApp(id: string, stackName: string): GitOpsApplicationRow {
@@ -241,6 +271,7 @@ function directApp(id: string, stackName: string): GitOpsApplicationRow {
     materialization_fingerprint: 'a'.repeat(64),
     desired_commit_sha: null,
     fetched_commit_sha: null,
+    fetched_resolved_ref_kind: null,
     candidate_generation_id: null,
     accepted_generation_id: null,
     candidate_plan_blocked: 0,
@@ -314,6 +345,7 @@ function generation(id: string, applicationId: string): GitOpsGenerationRow {
     application_id: applicationId,
     commit_sha: 'abc123',
     repo_url: 'https://github.com/org/repo.git',
+    resolved_ref_kind: 'branch',
     configured_ref: 'main',
     repo_identity_json: '{"host":"github.com","pathname":"/org/repo.git"}',
     manifest_version: 0,

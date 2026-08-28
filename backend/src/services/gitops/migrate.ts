@@ -195,6 +195,7 @@ function migrateAccepted(
 
   application.desired_commit_sha = trust.commitSha;
   application.fetched_commit_sha = trust.commitSha;
+  application.fetched_resolved_ref_kind = 'branch';
   application.accepted_generation_id = generationId;
   application.artifact_set_id = artifactSetId;
   application.latest_artifact_set_id = artifactSetId;
@@ -207,6 +208,7 @@ function migrateAccepted(
     application_id: application.id,
     commit_sha: trust.commitSha,
     repo_url: application.configured_repo_url ?? '',
+    resolved_ref_kind: 'branch',
     configured_ref: source.branch,
     repo_identity_json: application.repo_identity_json ?? '{}',
     manifest_version: trust.manifestVersion,

@@ -198,7 +198,7 @@ export function GitSourcePanel({
 
   const save = async () => {
     if (!repoUrl.trim() || !branch.trim() || composePaths.length === 0) {
-      toast.error('Repository URL, branch, and at least one compose file are required.');
+      toast.error('Repository URL, ref, and at least one compose file are required.');
       return;
     }
     if (!/^https:\/\//i.test(repoUrl.trim())) {
@@ -253,7 +253,7 @@ export function GitSourcePanel({
 
   const browseRepo = async (): Promise<GitBrowseResult | null> => {
     if (!repoUrl.trim() || !branch.trim()) {
-      toast.error('Enter a repository URL and branch first.');
+      toast.error('Enter a repository URL and ref first.');
       return null;
     }
     try {

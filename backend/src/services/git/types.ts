@@ -5,13 +5,22 @@
  * configured ref to an immutable commit BEFORE any content is downloaded,
  * and the fetch verifies it landed on exactly that commit. That makes
  * immutable resolution structural rather than a convention callers have to
- * remember. The ref field carries branch names today; widening it to tags and
- * pinned SHAs later does not change either method's shape.
+ * remember.
+ *
+ * The configured ref is a free string: a branch name, a tag name, or a full
+ * commit SHA. Only a full 40/64-hex SHA is unambiguous on its own, so the
+ * transport resolves a bare name by asking the remote which namespace it
+ * lives in (branch, then tag) and returns the concrete kind it resolved
+ * through. That resolved kind is what callers record next to the immutable
+ * SHA, so "tag v1 -> <sha>" and "branch v1 -> <sha>" stay distinguishable in
+ * persisted revision state.
  */
+
+export type RefKind = 'branch' | 'tag' | 'sha';
 
 export interface ResolveRequest {
     repoUrl: string;
-    /** Branch names today; tags and pinned SHAs may widen this later. */
+    /** Configured ref: a branch name, a tag name, or a full 40/64-hex commit SHA. */
     ref: string;
     token?: string | null;
     /**
@@ -37,6 +46,14 @@ export interface FetchRequest extends ResolveRequest {
      * `commitSha` pins what may be trusted.
      */
     commitSha: string;
+    /**
+     * The kind resolveRef resolved `ref` through. It drives the fetch
+     * strategy: a branch or tag both ride `--branch <ref>` (git detaches at the
+     * named ref's commit either way), and a pinned SHA needs a third path
+     * (`git init` + `git fetch <sha>` + detached checkout), because `--branch`
+     * cannot take a bare SHA.
+     */
+    refKind: RefKind;
     /** Ceiling for the on-disk clone; enforced by the size watchdog. */
     maxBytes: number;
 }
@@ -48,7 +65,15 @@ export interface FetchResult {
 }
 
 export interface ResolveResult {
+    /** The immutable commit the configured ref resolved to. */
     commitSha: string;
+    /**
+     * The namespace the configured ref resolved through. A bare name may be a
+     * branch or a tag, so this is resolved by the remote, not guessed. A full
+     * 40/64-hex SHA self-resolves with no network round-trip, so it always
+     * reports `sha`.
+     */
+    kind: RefKind;
 }
 
 export interface GitTransport {
