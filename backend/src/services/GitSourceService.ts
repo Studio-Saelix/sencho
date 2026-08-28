@@ -991,6 +991,7 @@ export class GitSourceService {
                         token,
                         timeoutMs,
                         workspaceRoot: root,
+                        maxBytes: maxCloneBytes(),
                     });
                     if (!fastForward) {
                         throw new GitSourceError('REF_DELETED', REF_DELETED_MESSAGE);

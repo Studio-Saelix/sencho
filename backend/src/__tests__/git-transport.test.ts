@@ -39,7 +39,7 @@ import {
     writeCredentialHelper,
 } from '../services/git/credentialHelper';
 import * as gitBinary from '../services/git/gitBinary';
-import { nativeGitTransport, REF_MAX_LEN, startSizeWatchdog } from '../services/git/nativeGitTransport';
+import { nativeGitTransport, REF_MAX_LEN, startSizeWatchdog, verifyFastForward } from '../services/git/nativeGitTransport';
 
 const GIT_EXEC_PATH_STUB = 'C:/Program Files/Git/mingw64/libexec/git-core';
 
@@ -933,6 +933,38 @@ describe('clone failure classification and final size gate', () => {
                 ref: 'main',
                 refKind: 'branch',
                 commitSha: SHA_A,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+                maxBytes: 8,
+            })).rejects.toMatchObject({
+                transportFailure: true as const,
+                reason: 'size',
+                maxBytes: 8,
+            });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('enforces the size cap during fast-forward verification', async () => {
+        scriptSpawn([
+            { code: 0 },
+            { code: 0 },
+            { stdout: '1\n' },
+            { code: 1 },
+            { code: 0 },
+            { stdout: '2\n' },
+            { code: 0 },
+            { code: 0 },
+        ]);
+        const root = await makeWorkspace();
+        await fs.writeFile(path.join(root, 'blob.bin'), 'x'.repeat(64));
+
+        try {
+            await expect(verifyFastForward({
+                repoUrl: 'https://github.com/example/repo.git',
+                ancestorSha: SHA_B,
+                descendantSha: SHA_A,
                 timeoutMs: 5000,
                 workspaceRoot: root,
                 maxBytes: 8,

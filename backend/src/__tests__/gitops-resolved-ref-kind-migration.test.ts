@@ -7,6 +7,20 @@ import os from 'os';
 import path from 'path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { BASELINE_DB_PATH } from './helpers/testConstants';
+import { DatabaseService } from '../services/DatabaseService';
+
+function resetDatabaseSingleton(): void {
+  const holder = DatabaseService as unknown as { instance?: DatabaseService };
+  const existing = holder.instance;
+  if (existing) {
+    try {
+      existing.getDb().close();
+    } catch {
+      // already closed
+    }
+    holder.instance = undefined;
+  }
+}
 
 let tmpDir: string;
 
@@ -26,17 +40,13 @@ beforeAll(async () => {
   raw.close();
 
   const { DatabaseService } = await import('../services/DatabaseService');
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (DatabaseService as any).instance = undefined;
+  resetDatabaseSingleton();
   DatabaseService.getInstance();
 });
 
 afterAll(() => {
-  try {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  } catch {
-    // best-effort cleanup
-  }
+  resetDatabaseSingleton();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 describe('resolved ref kind schema migration', () => {

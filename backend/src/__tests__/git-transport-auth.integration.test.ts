@@ -25,7 +25,7 @@ import os from 'os';
 import path from 'path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { classifyGitFailure, isTransportFailure } from '../services/git/errors';
-import { nativeGitTransport } from '../services/git/nativeGitTransport';
+import { nativeGitTransport, verifyFastForward } from '../services/git/nativeGitTransport';
 
 function gitAvailable(): boolean {
     return spawnSync('git', ['--version'], { stdio: 'ignore' }).status === 0;
@@ -41,6 +41,7 @@ interface RichFixtureRepo {
     annotatedTagSha: string;
     lightweightTagSha: string;
     pinnedSha: string;
+    rewrittenSha: string;
 }
 
 function buildRichFixtureRepo(): RichFixtureRepo {
@@ -66,16 +67,31 @@ function buildRichFixtureRepo(): RichFixtureRepo {
     run(['-c', 'commit.gpgsign=false', 'commit', '-m', 'second']);
     const pinnedSha = run(['rev-parse', 'HEAD']);
 
+    run(['checkout', '--orphan', 'rewritten']);
+    writeFileSync(path.join(srcDir, 'rewritten.txt'), 'rewritten history\n');
+    run(['add', 'rewritten.txt']);
+    run(['-c', 'commit.gpgsign=false', 'commit', '-m', 'rewritten']);
+    const rewrittenSha = run(['rev-parse', 'HEAD']);
+
     const bareRoot = mkdtempSync(path.join(os.tmpdir(), 'sencho-git-auth-bare-'));
     const bareDir = path.join(bareRoot, 'repo.git');
     const clone = spawnSync('git', ['clone', '--bare', '--quiet', srcDir, bareDir], { encoding: 'utf8' });
     if (clone.status !== 0) throw new Error(`git clone --bare failed: ${clone.stderr}`);
+    const pushRewritten = spawnSync(
+        'git',
+        ['push', bareDir, 'rewritten:refs/heads/rewritten'],
+        { cwd: srcDir, encoding: 'utf8' },
+    );
+    if (pushRewritten.status !== 0) {
+        throw new Error(`git push rewritten main failed: ${pushRewritten.stderr}`);
+    }
     return {
         bare: { bareDir, scratchDirs: [srcDir, bareRoot] },
         mainSha,
         annotatedTagSha,
         lightweightTagSha,
         pinnedSha,
+        rewrittenSha,
     };
 }
 
@@ -373,5 +389,50 @@ describe.skipIf(!gitAvailable())('authenticated native git transport (real git, 
         });
         expect(fetched.commitSha).toBe(fixture.pinnedSha);
         expect(await fs.readFile(path.join(fetched.dir, 'second.txt'), 'utf8')).toBe('second fixture file\n');
+    });
+
+    it('treats a linear branch advance as a fast-forward', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const fastForward = await verifyFastForward({
+            repoUrl,
+            ancestorSha: fixture.mainSha,
+            descendantSha: fixture.pinnedSha,
+            token: VALID_TOKEN,
+            timeoutMs: 15_000,
+            workspaceRoot,
+            maxBytes: 10 * 1024 * 1024,
+        });
+        expect(fastForward).toBe(true);
+    });
+
+    it('rejects rewritten history as non-fast-forward', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const fastForward = await verifyFastForward({
+            repoUrl,
+            ancestorSha: fixture.mainSha,
+            descendantSha: fixture.rewrittenSha,
+            token: VALID_TOKEN,
+            timeoutMs: 15_000,
+            workspaceRoot,
+            maxBytes: 10 * 1024 * 1024,
+        });
+        expect(fastForward).toBe(false);
+    });
+
+    it('classifies verifyFastForward auth failures without collapsing to non-fast-forward', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const failure = await verifyFastForward({
+            repoUrl,
+            ancestorSha: fixture.mainSha,
+            descendantSha: fixture.pinnedSha,
+            token: 'wrong-token',
+            timeoutMs: 15_000,
+            workspaceRoot,
+            maxBytes: 10 * 1024 * 1024,
+        }).then(() => null, (e: unknown) => e);
+
+        expect(isTransportFailure(failure)).toBe(true);
+        if (!isTransportFailure(failure)) throw new Error('unreachable');
+        expect(classifyGitFailure(failure).code).toBe('AUTH_FAILED');
     });
 });

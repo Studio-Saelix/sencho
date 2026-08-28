@@ -782,6 +782,21 @@ describe('GitSourceService error mapping', () => {
         expect(mockFetchAtCommit).not.toHaveBeenCalled();
     });
 
+    it('propagates verifyFastForward transport failures without upgrading to REF_DELETED', async () => {
+        mockResolveRef.mockResolvedValueOnce({ commitSha: 'cccccccccccccccccccccccccccccccccccccccc', kind: 'branch' });
+        mockVerifyFastForward.mockRejectedValueOnce({
+            transportFailure: true as const,
+            reason: 'timeout',
+            host: 'github.com',
+            hasToken: true,
+        });
+        await expect(svc().fetchFromGit({
+            ...fetchParams,
+            priorIdentity: { commitSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', kind: 'branch' },
+        })).rejects.toMatchObject({ code: 'NETWORK_TIMEOUT' });
+        expect(mockFetchAtCommit).not.toHaveBeenCalled();
+    });
+
     it('maps a host refusal to serve a pinned SHA to UNSUPPORTED_REF', async () => {
         // A SHA fetch requires the host to serve unadvertised objects; a
         // refusal (allowAnySHA1InWant off) is a server-capability failure,
