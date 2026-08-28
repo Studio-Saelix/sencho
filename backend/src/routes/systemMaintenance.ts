@@ -27,6 +27,8 @@ import { requirePermission } from '../middleware/permissions';
 import { buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
 import { evaluateNetworkDeleteGuard } from '../services/network/networkDeleteGuards';
 import { loadNetworkingSnapshot } from '../services/network/networkingAggregate';
+import { mapWithConcurrency } from '../utils/mapWithConcurrency';
+import { withComposeRenderSlot } from '../services/network/composeRenderSemaphore';
 
 // The prune estimate and plan paths are bounded at 12 s. `docker system df`
 // cost scales with image-store size (measured ~7.4 s on a 34 GB store), so
@@ -603,16 +605,28 @@ systemMaintenanceRouter.post('/networks/delete', async (req: Request, res: Respo
     }
     if (rejectIfSelf('network', id, res)) return;
 
+    const guardStartedAt = Date.now();
     const { stacks, snapshot } = await loadNetworkingSnapshot(req.nodeId);
     if (!snapshot) {
       return res.status(503).json({ error: 'Docker networking runtime is unavailable' });
     }
-    const stackFacts = await Promise.all(
-      stacks.map(stack => buildStackNetworkFacts(req.nodeId, stack, snapshot)),
-    );
+    const stackFacts = await mapWithConcurrency(stacks, 4, stack => withComposeRenderSlot(
+      req.nodeId,
+      () => buildStackNetworkFacts(req.nodeId, stack, snapshot),
+    ));
     const baseRow = DockerController.classifySnapshotNetworks(snapshot, stacks)
       .find(n => n.id === id);
     const guard = evaluateNetworkDeleteGuard(id, snapshot, stackFacts, baseRow);
+    if (isDebugEnabled()) {
+      console.debug('[Resources:debug] Network delete guard', {
+        id: id.substring(0, 12),
+        ms: Date.now() - guardStartedAt,
+        stackCount: stacks.length,
+        unrenderableStacks: stackFacts.filter(f => !f.renderable).length,
+        blocked: guard.blocked,
+        code: guard.code ?? null,
+      });
+    }
     if (guard.blocked) {
       return res.status(409).json({ error: guard.error, code: guard.code });
     }

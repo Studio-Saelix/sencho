@@ -59,7 +59,10 @@ export function evaluateNetworkDeleteGuard(
     return { blocked: true, code: 'stack-declared', error: 'This network is declared by a Compose stack.' };
   }
 
-  if (hasUnrenderable && (net.composeProject || net.stack)) {
+  // Fail closed while any stack is unrenderable: an external network normally
+  // carries no compose project label, so without this check a broken declaring
+  // stack would let its declared network slip through as "undeclared".
+  if (hasUnrenderable) {
     return {
       blocked: true,
       code: 'stack-declaration-unknown',

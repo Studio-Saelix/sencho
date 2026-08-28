@@ -128,6 +128,8 @@ export interface NodeNetworkingOverview {
   missingExternalCount: number;
   networkCollisionCount: number;
   findingCount: number;
+  /** Served from the backend memo after a recompute failure; data may lag recent changes. */
+  degradedCache?: boolean;
   renderFailedStacks: string[];
 }
 

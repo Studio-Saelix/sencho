@@ -23,6 +23,7 @@ export function NetworkingFindingsList({
   isAdmin,
   onAction,
   disabled = false,
+  nodeId,
 }: {
   findings: NetworkingFinding[];
   loading: boolean;
@@ -30,6 +31,7 @@ export function NetworkingFindingsList({
   isAdmin: boolean;
   onAction: (action: NetworkingRecommendedAction) => void | Promise<void>;
   disabled?: boolean;
+  nodeId: number | null | undefined;
 }) {
   if (loading) return <p className="text-sm text-muted-foreground">Loading findings…</p>;
   if (findings.length === 0) {
@@ -66,7 +68,7 @@ export function NetworkingFindingsList({
                     {items.map((finding, i) => {
                       const sourceLabel = findingSourceLabel(finding);
                       const primary = finding.recommendedActions.find((action) =>
-                        isNetworkingActionVisible(action, isAdmin, (stack) => canEdit('stack:edit', 'stack', stack)),
+                        isNetworkingActionVisible(action, isAdmin, (stack) => canEdit('stack:edit', 'stack', stack, nodeId)),
                       );
                       return (
                         <TableRow

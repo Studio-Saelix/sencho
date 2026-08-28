@@ -57,13 +57,19 @@ function NetworkTableSkeleton({ rows = 5 }: { rows?: number }) {
 /** A network is unsafe to delete without a pre-confirm explanation when it has
  *  connected containers or is declared by a stack's Compose file; the backend
  *  409-guards these, but the UI should explain BEFORE the confirm dialog rather
- *  than let a generic confirmation surprise the user with a rejection. */
-function deleteBlockReason(row: NetworkingNetworkRow): string | null {
+ *  than let a generic confirmation surprise the user with a rejection. When render
+ *  verification is unavailable (a stack failed to render, or the Docker runtime is
+ *  unreachable), declarations cannot be verified at all, so every non-system,
+ *  non-Sencho network is held back the same way the backend does. */
+function deleteBlockReason(row: NetworkingNetworkRow, renderVerificationUnavailable: boolean): string | null {
   if (row.connectedCount > 0) {
     return `Connected to ${row.connectedCount} container${row.connectedCount === 1 ? '' : 's'}; disconnect them first.`;
   }
   if (row.declaredByStacks.length > 0) {
     return `Declared by ${row.declaredByStacks.join(', ')}; remove the declaration first.`;
+  }
+  if (renderVerificationUnavailable) {
+    return 'One or more stacks failed to render; stack declarations cannot be verified right now.';
   }
   return null;
 }
@@ -150,6 +156,7 @@ export function NetworkInventoryTable({
   onDelete,
   onOpenStack,
   onFilterTopology,
+  renderVerificationUnavailable,
 }: {
   rows: NetworkingNetworkRow[];
   findings: NetworkingFinding[];
@@ -159,6 +166,7 @@ export function NetworkInventoryTable({
   onDelete: (id: string, name: string) => void;
   onOpenStack: (stack: string) => void;
   onFilterTopology: (name: string) => void;
+  renderVerificationUnavailable: boolean;
 }) {
   const [filter, setFilter] = useState<NetworkFilter>('all');
   const [search, setSearch] = useState('');
@@ -295,7 +303,7 @@ export function NetworkInventoryTable({
                             <TooltipContent>Show in topology</TooltipContent>
                           </Tooltip>
                           {isAdmin && (() => {
-                            const blockReason = deleteBlockReason(row);
+                            const blockReason = deleteBlockReason(row, renderVerificationUnavailable);
                             const protectedReason = row.isSencho
                               ? 'Protected · running Sencho instance'
                               : row.isSystem

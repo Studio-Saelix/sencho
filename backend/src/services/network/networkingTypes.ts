@@ -138,6 +138,8 @@ export interface NodeNetworkingOverview {
   missingExternalCount: number;
   networkCollisionCount: number;
   findingCount: number;
+  /** True when this aggregate was served from the memo after a recompute failure (stale-on-error fallback). */
+  degradedCache: boolean;
   renderFailedStacks: string[];
 }
 

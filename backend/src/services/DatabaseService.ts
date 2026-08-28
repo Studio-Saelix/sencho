@@ -8,6 +8,7 @@ import { applySuppressions } from '../utils/suppression-filter';
 import { SENCHO_ROLLBACK_HOLD_SQL_LIKE } from '../utils/senchoRollbackHold';
 import type { AuditStatsInput } from './AuditAnomalyService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
+import { invalidateNodeNetworkingAggregate } from './network/networkingAggregateCache';
 import { HIGH_EPSS_THRESHOLD } from './securityPosture';
 import type { BackendScheduledAction } from './scheduledActionRegistry';
 import { stackPatternMatches } from '../helpers/stackPattern';
@@ -3852,11 +3853,13 @@ export class DatabaseService {
             now,
             now
         );
+        invalidateNodeNetworkingAggregate(nodeId);
         return this.getStackDossier(nodeId, stackName) as StackDossier;
     }
 
     public deleteStackDossier(nodeId: number, stackName: string): void {
         this.db.prepare('DELETE FROM stack_dossiers WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+        invalidateNodeNetworkingAggregate(nodeId);
     }
 
     /**
@@ -3947,16 +3950,19 @@ export class DatabaseService {
                 updated_at = excluded.updated_at,
                 updated_by = excluded.updated_by`
         ).run(nodeId, stackName, service, intent, Date.now(), updatedBy);
+        invalidateNodeNetworkingAggregate(nodeId);
     }
 
     /** Clear one intent row, leaving that scope unset; consumers treat a service with no row as inheriting the stack intent. */
     public deleteStackExposureIntent(nodeId: number, stackName: string, service: string): void {
         this.db.prepare('DELETE FROM stack_exposure_intent WHERE node_id = ? AND stack_name = ? AND service = ?').run(nodeId, stackName, service);
+        invalidateNodeNetworkingAggregate(nodeId);
     }
 
     /** Clear every intent row for a stack (used when the stack is deleted). */
     public deleteStackExposureIntents(nodeId: number, stackName: string): void {
         this.db.prepare('DELETE FROM stack_exposure_intent WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+        invalidateNodeNetworkingAggregate(nodeId);
     }
 
     // --- Stack Exposure (Compose reachability descriptor) ---

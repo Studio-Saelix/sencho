@@ -12,6 +12,7 @@ import { ComposeService } from '../services/ComposeService';
 import { DatabaseService } from '../services/DatabaseService';
 import { evaluateNetworkDeleteGuard } from '../services/network/networkDeleteGuards';
 import SelfIdentityService from '../services/SelfIdentityService';
+import { invalidateNodeNetworkingAggregate } from '../services/network/networkingAggregateCache';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -85,6 +86,7 @@ describe('networking operator routes', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    invalidateNodeNetworkingAggregate(1);
     fs.rmSync(stackDir, { recursive: true, force: true });
   });
 
@@ -191,6 +193,19 @@ describe('evaluateNetworkDeleteGuard', () => {
     };
     const guard = evaluateNetworkDeleteGuard('n1', snapshot, [
       { stack: STACK, renderable: false, renderError: 'x', runtime: 'available', networks: [], services: [], drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] }, missingExternalNetworks: [] },
+    ]);
+    expect(guard.blocked).toBe(true);
+    expect(guard.code).toBe('stack-declaration-unknown');
+  });
+
+  it('fails closed for an unlabeled external network while a stack is unrenderable', () => {
+    const snapshot = {
+      containers: [],
+      networks: [{ id: 'n1', name: 'shared_ext', driver: 'bridge', scope: 'local', isSystem: false, composeProject: null, stack: null }],
+      volumes: [],
+    };
+    const guard = evaluateNetworkDeleteGuard('n1', snapshot, [
+      { stack: STACK, renderable: false, renderError: 'compose file invalid', runtime: 'available', networks: [{ key: 'shared_ext', name: 'shared_ext', external: true, internal: false, createdByStack: false }], services: [], drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] }, missingExternalNetworks: [] },
     ]);
     expect(guard.blocked).toBe(true);
     expect(guard.code).toBe('stack-declaration-unknown');

@@ -1,5 +1,6 @@
 import { CacheService } from '../services/CacheService';
 import { StackFileRootsService } from '../services/StackFileRootsService';
+import { invalidateNodeNetworkingAggregate } from '../services/network/networkingAggregateCache';
 
 export const REMOTE_META_NAMESPACE = 'remote-meta';
 
@@ -17,6 +18,11 @@ export function invalidateNodeCaches(nodeId: number): void {
   cache.invalidate(`stats:${nodeId}`);
   cache.invalidate(`stack-statuses:${nodeId}`);
   cache.invalidate('project-name-map');
+  // Stack and container mutations (create/delete/edit/deploy/rename/prune),
+  // auto-created externals during deploy, and network create/delete all reshape
+  // the networking aggregate; drop the memo (every variant) so the next read
+  // reflects the change immediately.
+  invalidateNodeNetworkingAggregate(nodeId);
   StackFileRootsService.invalidateNode(nodeId);
 }
 

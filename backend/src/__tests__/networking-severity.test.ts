@@ -13,6 +13,7 @@ import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './he
 import DockerController from '../services/DockerController';
 import { ComposeService } from '../services/ComposeService';
 import { DatabaseService } from '../services/DatabaseService';
+import { invalidateNodeNetworkingAggregate } from '../services/network/networkingAggregateCache';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -140,6 +141,7 @@ describe('networking collision correctness', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    invalidateNodeNetworkingAggregate(1);
     fs.rmSync(dirA, { recursive: true, force: true });
     fs.rmSync(dirB, { recursive: true, force: true });
   });
