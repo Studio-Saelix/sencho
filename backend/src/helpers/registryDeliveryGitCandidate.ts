@@ -2,12 +2,14 @@ import { promises as fsPromises } from 'fs';
 import path from 'path';
 
 import type { ComposeFile, FetchResult, MaterializationResult } from '../services/GitSourceService';
+import type { RefKind } from '../services/git/types';
 
 export const GIT_CANDIDATE_PREPARED_META_FILE = '.sencho-git-candidate-meta.json';
 
 export interface GitCandidatePreparedMeta {
   version: 1;
   commitSha: string;
+  resolvedRefKind: RefKind;
   candidateRelPath: string;
   composeFiles: ComposeFile[];
   envContent: string | null;
@@ -35,6 +37,7 @@ export async function readGitCandidatePreparedMeta(payloadPath: string): Promise
   if (
     parsed.version !== 1
     || typeof parsed.commitSha !== 'string'
+    || typeof parsed.resolvedRefKind !== 'string'
     || typeof parsed.candidateRelPath !== 'string'
     || !parsed.materialization
     || !Array.isArray(parsed.composeFiles)
@@ -50,6 +53,7 @@ export function fetchResultFromPreparedMeta(meta: GitCandidatePreparedMeta): Fet
     composeFiles: meta.composeFiles,
     envContent: meta.envContent,
     commitSha: meta.commitSha,
+    resolvedRefKind: meta.resolvedRefKind,
     warnings: meta.warnings,
   };
 }

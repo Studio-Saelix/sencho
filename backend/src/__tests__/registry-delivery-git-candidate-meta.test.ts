@@ -37,6 +37,7 @@ describe('registryDeliveryGitCandidate helpers', () => {
     await writeGitCandidatePreparedMeta(payloadDir, {
       version: 1,
       commitSha,
+      resolvedRefKind: 'branch',
       candidateRelPath,
       composeFiles: [{ path: 'compose.yaml', content: 'services:\n  web:\n    image: nginx\n' }],
       envContent: null,

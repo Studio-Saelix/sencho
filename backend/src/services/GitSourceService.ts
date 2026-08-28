@@ -3610,6 +3610,7 @@ export class GitSourceService {
             await writeGitCandidatePreparedMeta(stagingDir, {
                 version: 1,
                 commitSha: fetched.commitSha,
+                resolvedRefKind: fetched.resolvedRefKind,
                 candidateRelPath: materialization.value.candidateRelPath,
                 composeFiles: fetched.composeFiles,
                 envContent: fetched.envContent,
@@ -3657,6 +3658,7 @@ export class GitSourceService {
             await writeGitCandidatePreparedMeta(stagingDir, {
                 version: 1,
                 commitSha: src.pending_commit_sha,
+                resolvedRefKind: priorFetchIdentity(this.gitopsApplicationFor(stackName))?.kind ?? 'branch',
                 candidateRelPath: pending.candidateRelPath,
                 composeFiles: pending.files,
                 envContent,

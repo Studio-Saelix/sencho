@@ -54,6 +54,7 @@ describe('createStackFromGit prepared git candidate consumption', () => {
     await writeGitCandidatePreparedMeta(stagingDir, {
       version: 1,
       commitSha,
+      resolvedRefKind: 'branch',
       candidateRelPath,
       composeFiles: [{ path: 'compose.yaml', content: 'services:\n  app:\n    image: nginx:latest\n' }],
       envContent: null,
@@ -88,6 +89,7 @@ describe('createStackFromGit prepared git candidate consumption', () => {
         composeFiles: [{ path: 'compose.yaml', content: 'services:\n  app:\n    image: nginx:latest\n' }],
         envContent: null,
         commitSha,
+        resolvedRefKind: 'branch',
         warnings: [],
       },
       materialization,

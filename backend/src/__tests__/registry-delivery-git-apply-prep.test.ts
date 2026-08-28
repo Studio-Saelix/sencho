@@ -47,6 +47,7 @@ describe('restoreApplyFromPreparedGitCandidate', () => {
     await writeGitCandidatePreparedMeta(stagingDir, {
       version: 1,
       commitSha,
+      resolvedRefKind: 'branch',
       candidateRelPath,
       composeFiles: [{ path: 'compose.yaml', content: 'services:\n  app:\n    image: nginx:latest\n' }],
       envContent: null,
@@ -107,6 +108,7 @@ describe('restoreApplyFromPreparedGitCandidate', () => {
     await writeGitCandidatePreparedMeta(stagingDir, {
       version: 1,
       commitSha,
+      resolvedRefKind: 'branch',
       candidateRelPath,
       composeFiles: [{ path: 'compose.yaml', content: 'services:\n  app:\n    image: nginx\n' }],
       envContent: null,
