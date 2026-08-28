@@ -1950,6 +1950,10 @@ export class DatabaseService {
         maybeAddCol('stack_update_recovery_generations', 'content_path', 'TEXT');
         maybeAddCol('stack_update_recovery_generations', 'operation_kind', 'TEXT');
         maybeAddCol('stack_update_cleanup_pending', 'required_blueprint_id', 'INTEGER');
+        // Resolved ref kind for existing GitOps generations. New installs get it
+        // from the CREATE TABLE; older DBs need the additive column here.
+        maybeAddCol('gitops_generations', 'resolved_ref_kind', 'TEXT NULL');
+        maybeAddCol('gitops_applications', 'fetched_resolved_ref_kind', 'TEXT NULL');
 
         // Distributed API model columns
         maybeAddCol('nodes', 'api_url', "TEXT DEFAULT ''");

@@ -19,8 +19,13 @@ describe('gitSourceStatus', () => {
 
     it('maps resource-missing codes to 404', () => {
         expect(gitSourceStatus('REPO_NOT_FOUND')).toBe(404);
-        expect(gitSourceStatus('BRANCH_NOT_FOUND')).toBe(404);
+        expect(gitSourceStatus('REF_NOT_FOUND')).toBe(404);
+        expect(gitSourceStatus('REF_DELETED')).toBe(404);
         expect(gitSourceStatus('FILE_NOT_FOUND')).toBe(404);
+    });
+
+    it('maps UNSUPPORTED_REF to 400', () => {
+        expect(gitSourceStatus('UNSUPPORTED_REF')).toBe(400);
     });
 
     it('maps NETWORK_TIMEOUT to 504', () => {

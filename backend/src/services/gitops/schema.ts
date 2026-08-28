@@ -63,6 +63,9 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   materialization_fingerprint TEXT NULL,
   desired_commit_sha TEXT NULL,
   fetched_commit_sha TEXT NULL,
+  fetched_resolved_ref_kind TEXT NULL CHECK (
+    fetched_resolved_ref_kind IS NULL OR fetched_resolved_ref_kind IN ('branch','tag','sha')
+  ),
   candidate_generation_id TEXT NULL,
   accepted_generation_id TEXT NULL,
   candidate_plan_blocked INTEGER NOT NULL DEFAULT 0,
@@ -148,6 +151,9 @@ CREATE TABLE IF NOT EXISTS gitops_generations (
   commit_sha TEXT NOT NULL,
   repo_url TEXT NOT NULL,
   configured_ref TEXT NOT NULL,
+  resolved_ref_kind TEXT NULL CHECK (
+    resolved_ref_kind IS NULL OR resolved_ref_kind IN ('branch','tag','sha')
+  ),
   repo_identity_json TEXT NOT NULL,
   manifest_version INTEGER NOT NULL,
   candidate_dir TEXT NOT NULL,

@@ -39,7 +39,7 @@ async function handleBrowse(req: Request, res: Response, storedToken: string | n
     return;
   }
   if (typeof branch !== 'string' || !branch.trim()) {
-    res.status(400).json({ error: 'branch is required' });
+    res.status(400).json({ error: 'A branch, tag, or commit SHA is required.' });
     return;
   }
   const repoUrlError = repoUrlRejectionMessage(repo_url);
@@ -48,7 +48,7 @@ async function handleBrowse(req: Request, res: Response, storedToken: string | n
     return;
   }
   if (branch.length > MAX_BRANCH_LENGTH) {
-    res.status(400).json({ error: 'branch is too long' });
+    res.status(400).json({ error: 'The branch, tag, or commit SHA is too long.' });
     return;
   }
   if (auth_type !== undefined && auth_type !== 'none' && auth_type !== 'token') {
@@ -229,7 +229,7 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       return;
     }
     if (typeof branch !== 'string' || !branch.trim()) {
-      res.status(400).json({ error: 'branch is required' });
+      res.status(400).json({ error: 'A branch, tag, or commit SHA is required.' });
       return;
     }
     const selection = parseComposeSelection(req.body);
@@ -255,7 +255,7 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       return;
     }
     if (branch.length > MAX_BRANCH_LENGTH) {
-      res.status(400).json({ error: 'branch is too long' });
+      res.status(400).json({ error: 'The branch, tag, or commit SHA is too long.' });
       return;
     }
     if (typeof env_path === 'string' && env_path.length > MAX_ENV_PATH_LENGTH) {

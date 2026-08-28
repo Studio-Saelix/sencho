@@ -61,6 +61,7 @@ describe('gitops create-from-git', () => {
     expect(app.lifecycle_status).toBe('creating');
     expect(app.desired_commit_sha).toBe(SHA);
     expect(app.fetched_commit_sha).toBe(SHA);
+    expect(app.fetched_resolved_ref_kind).toBe('branch');
     expect(app.candidate_generation_id).toBe('gen-create');
     expect(app.accepted_generation_id).toBeNull();
     expect(app.source_acceptance_ref).toBeNull();
@@ -679,6 +680,7 @@ function creatingApp(id: string, stackName: string): GitOpsApplicationRow {
     materialization_fingerprint: 'a'.repeat(64),
     desired_commit_sha: null,
     fetched_commit_sha: null,
+    fetched_resolved_ref_kind: null,
     candidate_generation_id: null,
     accepted_generation_id: null,
     candidate_plan_blocked: 0,
@@ -726,6 +728,7 @@ function gen(id: string, applicationId: string): GitOpsGenerationRow {
     application_id: applicationId,
     commit_sha: SHA,
     repo_url: 'https://github.com/org/repo.git',
+    resolved_ref_kind: 'branch',
     configured_ref: 'main',
     repo_identity_json: '{"host":"github.com","pathname":"/org/repo.git"}',
     manifest_version: 0,
