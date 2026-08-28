@@ -3,6 +3,7 @@ import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
 import { listRegistryDeliveryEvidencePage } from '../helpers/registryDeliveryEvidence';
 import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
 
 export const registryDeliveryRouter = Router();
 
@@ -17,7 +18,7 @@ registryDeliveryRouter.post('/discover', async (req: Request, res: Response) => 
     const result = await service.discoverOnTarget(req.body);
     res.json(result);
   } catch (error) {
-    console.error('[registry-delivery] discover failed:', getErrorMessage(error, 'unknown'));
+    console.error('[registry-delivery] discover failed:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Registry delivery discovery failed' });
   }
 });

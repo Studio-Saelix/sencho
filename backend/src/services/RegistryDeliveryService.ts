@@ -168,10 +168,18 @@ export class RegistryDeliveryService {
       const discovery = discoverRegistryReferences(payloadPath, request.envVars ?? {});
       referencedHosts = discovery.referencedHosts;
     } else if (request.sourceKind === 'body-content' && typeof request.composeContent === 'string') {
+      const MAX_COMPOSE_CONTENT_BYTES = 2 * 1024 * 1024;
+      if (Buffer.byteLength(request.composeContent, 'utf8') > MAX_COMPOSE_CONTENT_BYTES) {
+        throw new Error('Compose content exceeds size limit');
+      }
       const stagingDir = path.join(os.tmpdir(), `sencho-regdisc-${crypto.randomBytes(8).toString('hex')}`);
       try {
         await fsPromises.mkdir(stagingDir, { recursive: true, mode: 0o700 });
-        await fsPromises.writeFile(path.join(stagingDir, 'compose.yaml'), request.composeContent, { mode: 0o600 });
+        const composePath = path.resolve(stagingDir, 'compose.yaml');
+        if (!composePath.startsWith(path.resolve(stagingDir) + path.sep)) {
+          throw new Error('Invalid staging path');
+        }
+        await fsPromises.writeFile(composePath, request.composeContent, { mode: 0o600 });
         sourceHash = hashProjectSource(stagingDir);
         const discovery = discoverRegistryReferences(stagingDir, request.envVars ?? {});
         referencedHosts = discovery.referencedHosts;

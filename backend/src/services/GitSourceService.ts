@@ -3594,15 +3594,11 @@ export class GitSourceService {
                 `Compose validation failed: ${materialization.value?.validation.error ?? 'unknown'}`,
             );
         }
-        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
-        const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-        const candidateAbs = path.join(
-            dataDir,
-            'git-managed',
-            String(nodeId),
-            input.stackName,
-            materialization.value.candidateRelPath,
-        );
+        const managedRoot = path.resolve(stackManagedRoot(input.stackName));
+        const candidateAbs = path.resolve(managedRoot, materialization.value.candidateRelPath);
+        if (!candidateAbs.startsWith(managedRoot + path.sep)) {
+            throw new GitSourceError('GIT_ERROR', 'Invalid candidate path');
+        }
         const stagingDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-regprep-'));
         try {
             await this.copyDirectoryForRegistryDelivery(candidateAbs, stagingDir);
@@ -3630,7 +3626,11 @@ export class GitSourceService {
             await fsPromises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
             throw error;
         } finally {
-            await fsPromises.rm(candidateAbs, { recursive: true, force: true }).catch(() => undefined);
+            const rmTarget = path.resolve(candidateAbs);
+            if (!rmTarget.startsWith(managedRoot + path.sep)) {
+                throw new GitSourceError('GIT_ERROR', 'Invalid candidate path');
+            }
+            await fsPromises.rm(rmTarget, { recursive: true, force: true }).catch(() => undefined);
         }
     }
 
@@ -3648,9 +3648,11 @@ export class GitSourceService {
         const envContent = src.pending_env_content !== null
             ? this.crypto.decrypt(src.pending_env_content)
             : null;
-        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
-        const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-        const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, pending.candidateRelPath);
+        const managedRoot = path.resolve(stackManagedRoot(stackName));
+        const candidateAbs = path.resolve(managedRoot, pending.candidateRelPath);
+        if (!candidateAbs.startsWith(managedRoot + path.sep)) {
+            throw new GitSourceError('GIT_ERROR', 'Invalid candidate path');
+        }
         const stagingDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-regprep-'));
         try {
             await this.copyDirectoryForRegistryDelivery(candidateAbs, stagingDir);
@@ -3686,12 +3688,14 @@ export class GitSourceService {
     }
 
     private async copyDirectoryForRegistryDelivery(srcDir: string, destDir: string): Promise<void> {
-        await fsPromises.mkdir(destDir, { recursive: true, mode: 0o700 });
+        const destRoot = path.resolve(destDir);
+        await fsPromises.mkdir(destRoot, { recursive: true, mode: 0o700 });
         const entries = await fsPromises.readdir(srcDir, { withFileTypes: true });
         for (const entry of entries) {
             if (entry.isSymbolicLink()) continue;
             const src = path.join(srcDir, entry.name);
-            const dest = path.join(destDir, entry.name);
+            const dest = path.resolve(destRoot, entry.name);
+            if (!dest.startsWith(destRoot + path.sep)) continue;
             if (entry.isDirectory()) {
                 await this.copyDirectoryForRegistryDelivery(src, dest);
                 continue;

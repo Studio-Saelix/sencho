@@ -31,15 +31,20 @@ const COMPOSE_FILENAMES = [
 /** Stable hash of the live project file bundle used for live-project delivery. */
 export function hashProjectSource(projectDir: string): string {
   const hash = crypto.createHash('sha256');
+  const baseResolved = path.resolve(projectDir);
   for (const name of COMPOSE_FILENAMES) {
-    const filePath = path.join(projectDir, name);
-    if (!fs.existsSync(filePath)) continue;
-    const stat = fs.statSync(filePath);
-    if (!stat.isFile()) continue;
-    hash.update(name);
-    hash.update('\0');
-    hash.update(fs.readFileSync(filePath));
-    hash.update('\n');
+    const filePath = path.resolve(baseResolved, name);
+    if (!filePath.startsWith(baseResolved + path.sep)) continue;
+    try {
+      const content = fs.readFileSync(filePath);
+      hash.update(name);
+      hash.update('\0');
+      hash.update(content);
+      hash.update('\n');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
   }
   return hash.digest('hex');
 }

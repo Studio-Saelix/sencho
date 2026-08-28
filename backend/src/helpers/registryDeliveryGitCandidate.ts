@@ -67,16 +67,21 @@ export async function installGitCandidatePayloadToManagedRoot(
   managedRoot: string,
   candidateRelPath: string,
 ): Promise<void> {
-  const candidateDest = path.join(managedRoot, candidateRelPath);
+  const managedResolved = path.resolve(managedRoot);
+  const candidateDest = path.resolve(managedResolved, candidateRelPath);
+  if (!candidateDest.startsWith(managedResolved + path.sep)) {
+    throw new Error('Invalid candidate path');
+  }
   await fsPromises.mkdir(candidateDest, { recursive: true, mode: 0o700 });
   const entries = await fsPromises.readdir(payloadPath, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.name === GIT_CANDIDATE_PREPARED_META_FILE) continue;
     if (entry.isSymbolicLink()) continue;
     const src = path.join(payloadPath, entry.name);
-    const dest = path.join(candidateDest, entry.name);
+    const dest = path.resolve(candidateDest, entry.name);
+    if (!dest.startsWith(candidateDest + path.sep)) continue;
     if (entry.isDirectory()) {
-      await copyTree(src, dest);
+      await copyTree(src, dest, candidateDest);
       continue;
     }
     if (entry.isFile()) {
@@ -86,15 +91,16 @@ export async function installGitCandidatePayloadToManagedRoot(
   }
 }
 
-async function copyTree(srcDir: string, destDir: string): Promise<void> {
+async function copyTree(srcDir: string, destDir: string, destRoot: string): Promise<void> {
   await fsPromises.mkdir(destDir, { recursive: true, mode: 0o700 });
   const entries = await fsPromises.readdir(srcDir, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.isSymbolicLink()) continue;
     const src = path.join(srcDir, entry.name);
-    const dest = path.join(destDir, entry.name);
+    const dest = path.resolve(destDir, entry.name);
+    if (!dest.startsWith(destRoot + path.sep)) continue;
     if (entry.isDirectory()) {
-      await copyTree(src, dest);
+      await copyTree(src, dest, destRoot);
       continue;
     }
     if (entry.isFile()) {
