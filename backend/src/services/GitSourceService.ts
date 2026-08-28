@@ -1061,9 +1061,9 @@ export class GitSourceService {
         const startedAt = Date.now();
         const diag = isDebugEnabled();
         if (diag) {
-            console.log(
-                `[GitSource:diag] fetch start host=${sanitizeForLog(repoHost(repoUrl))} branch=${sanitizeForLog(branch)} files=${composePaths.length} envSync=${envPath ? 'true' : 'false'}`
-            );
+            console.log(sanitizeForLog(
+                `[GitSource:diag] fetch start host=${repoHost(repoUrl)} branch=${branch} files=${composePaths.length} envSync=${envPath ? 'true' : 'false'}`,
+            ));
         }
 
         try {
@@ -1384,7 +1384,17 @@ export class GitSourceService {
 
     private runDockerCompose(args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
         return new Promise((resolve) => {
-            const child = spawn('docker', args, { cwd });
+            const resolvedCwd = path.resolve(cwd);
+            const managedBase = path.resolve(managedAreaBase());
+            const tmpBase = path.resolve(os.tmpdir());
+            if (
+                !resolvedCwd.startsWith(managedBase + path.sep)
+                && !resolvedCwd.startsWith(tmpBase + path.sep)
+            ) {
+                resolve({ code: -1, stdout: '', stderr: 'Invalid working directory' });
+                return;
+            }
+            const child = spawn('docker', args, { cwd: resolvedCwd });
             let stdout = '';
             let stderr = '';
             const timer = setTimeout(() => {

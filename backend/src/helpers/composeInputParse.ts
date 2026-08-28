@@ -88,7 +88,8 @@ interface FileContext {
 
 /** True when the path contains a Compose `$VAR` / `${VAR}` interpolation form. */
 export function isDynamicPath(p: string): boolean {
-    return /\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*/.test(p);
+    if (p.includes('${')) return true;
+    return /\$[A-Za-z_][A-Za-z0-9_]*/.test(p);
 }
 
 /** Absolute (POSIX, Windows drive/UNC, drive-relative, root-relative) or home-relative host path. */
