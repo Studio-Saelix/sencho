@@ -53,14 +53,33 @@ test('resources', async ({ page }) => {
 });
 
 test('sso settings', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
   await loginAs(page);
   await page.getByRole('button', { name: /profile/i }).click();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByText('SSO', { exact: true }).first().click();
-  // The role-sync control confirms the SSO panel (admin-only) has loaded.
-  await page.getByText('IdP role synchronization').scrollIntoViewIfNeeded();
-  await expect(page.getByText('IdP role synchronization')).toBeVisible();
-  await page.waitForTimeout(400);
+  // The role-sync switch confirms the SSO panel (admin-only) has loaded; it
+  // only renders once GET /sso/config/role-sync resolves, so wait for the
+  // switch itself, not just the adjacent label text.
+  const roleSyncSwitch = page.getByRole('switch', { name: 'IdP role synchronization' });
+  await expect(roleSyncSwitch).toBeVisible();
+  await roleSyncSwitch.scrollIntoViewIfNeeded();
+  // The SSO panel lives in a fixed-height Radix scroll area, so a plain
+  // fullPage capture clips content below the fold. Expand the viewport (and
+  // its overflow-hidden root) so the whole panel, including the role-sync
+  // control, is captured.
+  await roleSyncSwitch.evaluate((el) => {
+    const viewport = el.closest<HTMLElement>('[data-radix-scroll-area-viewport]');
+    if (!viewport) return;
+    viewport.style.height = 'auto';
+    viewport.style.overflow = 'visible';
+    const root = viewport.parentElement;
+    if (root) {
+      root.style.height = 'auto';
+      root.style.overflow = 'visible';
+    }
+  });
+  await page.waitForTimeout(300);
   await page.screenshot({ path: path.join(DOCS_IMAGES, 'sso', 'sso-settings.png'), fullPage: true });
 });
 

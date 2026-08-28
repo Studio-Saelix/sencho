@@ -383,8 +383,9 @@ export function createRemoteProxyMiddleware(): RequestHandler {
     // rejectApiTokenScope cannot detect the original API token because this
     // proxy replaces incoming credentials with a node-to-node JWT. Reject
     // API-token-authenticated requests here, covering the /sso/config collection
-    // and all descendant paths (req.path is post-/api strip).
-    if (/^\/sso\/config(?:\/|$)/.test(req.path)) {
+    // and all descendant paths (req.path is post-/api strip). Express matches
+    // routes case-insensitively, so this guard must too (the i flag).
+    if (/^\/sso\/config(?:\/|$)/i.test(req.path)) {
       if (rejectApiTokenScope(req, res, 'API tokens cannot access SSO configuration.')) {
         return;
       }

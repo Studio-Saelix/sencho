@@ -167,12 +167,11 @@ describe('SSOSection role sync toggle', () => {
     });
   }
 
-  // The role-sync TogglePill is the only switch inside the container that also
-  // holds the "IdP role synchronization" label; scope to it so provider-card
-  // and other section switches don't make the lookup ambiguous.
+  // The role-sync TogglePill carries aria-label="IdP role synchronization" so
+  // it is discoverable by role and setting name; queryByRole returns null when
+  // the switch is absent (the unknown/loading state).
   function getRoleSyncSwitch(): Element | null {
-    const label = screen.getByText('IdP role synchronization');
-    return label.closest('div')?.parentElement?.querySelector('[role="switch"]') ?? null;
+    return screen.queryByRole('switch', { name: 'IdP role synchronization' });
   }
 
   it('default-off load: toggle shows OFF and is a confirmed state', async () => {

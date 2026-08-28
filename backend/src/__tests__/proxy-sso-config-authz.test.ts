@@ -105,6 +105,12 @@ describe('Hub-side API-token rejection for remote SSO config', () => {
     { method: 'put', path: '/api/sso/config/role-sync', body: { enabled: true } },
     { method: 'get', path: '/api/sso/config/ldap' },
     { method: 'put', path: '/api/sso/config/ldap', body: { enabled: true } },
+    // Case variants: Express routes case-insensitively, so the hub guard must
+    // reject them too (regression for a case-sensitive guard bypass).
+    { method: 'get', path: '/api/SSO/config/role-sync' },
+    { method: 'put', path: '/api/SSO/config/role-sync', body: { enabled: true } },
+    { method: 'get', path: '/api/Sso/Config/Role-Sync' },
+    { method: 'put', path: '/api/Sso/Config/Role-Sync', body: { enabled: true } },
   ];
 
   for (const { method, path, body } of blockedRequests) {

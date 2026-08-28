@@ -494,6 +494,7 @@ function RoleSyncToggle() {
                     checked={enabled}
                     onChange={handleToggle}
                     disabled={saving}
+                    aria-label="IdP role synchronization"
                 />
             )}
         </div>
