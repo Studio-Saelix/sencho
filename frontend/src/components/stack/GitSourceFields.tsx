@@ -130,10 +130,10 @@ export function GitSourceFields({
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="git-source-branch">Branch</Label>
+        <Label htmlFor="git-source-branch">Ref</Label>
         <Input
           id="git-source-branch"
-          placeholder="main"
+          placeholder="main, v1.0, or commit SHA"
           value={branch}
           onChange={(e) => onBranchChange(e.target.value)}
           disabled={disabled}

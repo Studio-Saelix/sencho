@@ -41,25 +41,51 @@ const FILE_CONTENT = 'hello from the authenticated fixture repo\n';
  * directory created along the way, so the caller can remove them all.
  */
 function buildBareFixtureRepo(): { bareDir: string; scratchDirs: string[] } {
+    return buildRichFixtureRepo().bare;
+}
+
+interface RichFixtureRepo {
+    bare: { bareDir: string; scratchDirs: string[] };
+    mainSha: string;
+    annotatedTagSha: string;
+    lightweightTagSha: string;
+    pinnedSha: string;
+}
+
+function buildRichFixtureRepo(): RichFixtureRepo {
     const srcDir = mkdtempSync(path.join(os.tmpdir(), 'sencho-git-auth-src-'));
     writeFileSync(path.join(srcDir, 'hello.txt'), FILE_CONTENT);
     const run = (args: string[]) => {
         const r = spawnSync('git', args, { cwd: srcDir, encoding: 'utf8' });
         if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr}`);
+        return r.stdout.trim();
     };
     run(['init', '-b', 'main']);
     run(['config', 'user.email', 'integration-test@sencho.test']);
     run(['config', 'user.name', 'Sencho Integration Test']);
     run(['add', '-A']);
-    // Explicitly off: a developer machine or CI runner with commit.gpgsign=true
-    // in its global gitconfig would otherwise fail this fixture commit.
     run(['-c', 'commit.gpgsign=false', 'commit', '-m', 'fixture']);
+    const mainSha = run(['rev-parse', 'HEAD']);
+    run(['tag', '-a', 'v-annotated', '-m', 'annotated release']);
+    const annotatedTagSha = run(['rev-parse', 'v-annotated^{commit}']);
+    run(['tag', 'v-light']);
+    const lightweightTagSha = run(['rev-parse', 'v-light']);
+    writeFileSync(path.join(srcDir, 'second.txt'), 'second fixture file\n');
+    run(['add', 'second.txt']);
+    run(['-c', 'commit.gpgsign=false', 'commit', '-m', 'second']);
+    const pinnedSha = run(['rev-parse', 'HEAD']);
 
     const bareRoot = mkdtempSync(path.join(os.tmpdir(), 'sencho-git-auth-bare-'));
     const bareDir = path.join(bareRoot, 'repo.git');
     const clone = spawnSync('git', ['clone', '--bare', '--quiet', srcDir, bareDir], { encoding: 'utf8' });
     if (clone.status !== 0) throw new Error(`git clone --bare failed: ${clone.stderr}`);
-    return { bareDir, scratchDirs: [srcDir, bareRoot] };
+    return {
+        bare: { bareDir, scratchDirs: [srcDir, bareRoot] },
+        mainSha,
+        annotatedTagSha,
+        lightweightTagSha,
+        pinnedSha,
+    };
 }
 
 /** Serve one bare repo over HTTPS smart-HTTP, rejecting any request without a valid Basic Auth token. */
@@ -136,12 +162,13 @@ describe.skipIf(!gitAvailable())('authenticated native git transport (real git, 
     let closeServer: () => void;
     let prevExtraCaCerts: string | undefined;
     let fixtureScratchDirs: string[] = [];
+    let fixture: RichFixtureRepo;
     const workspaces: string[] = [];
 
     beforeAll(async () => {
-        const { bareDir, scratchDirs } = buildBareFixtureRepo();
-        fixtureScratchDirs = scratchDirs;
-        const served = await serveAuthedRepo(bareDir);
+        fixture = buildRichFixtureRepo();
+        fixtureScratchDirs = fixture.bare.scratchDirs;
+        const served = await serveAuthedRepo(fixture.bare.bareDir);
         repoUrl = served.url;
         closeServer = served.close;
         prevExtraCaCerts = process.env.NODE_EXTRA_CA_CERTS;
@@ -278,5 +305,82 @@ describe.skipIf(!gitAvailable())('authenticated native git transport (real git, 
         const serialized = JSON.stringify(failure) + classified.message;
         expect(serialized).not.toContain(wrongToken);
         expect(serialized).not.toContain(VALID_TOKEN);
+    });
+
+    it('resolves and fetches an annotated tag through the peeled commit', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const resolved = await nativeGitTransport.resolveRef({
+            repoUrl,
+            ref: 'v-annotated',
+            token: VALID_TOKEN,
+            timeoutMs: 15_000,
+            workspaceRoot,
+        });
+        expect(resolved).toMatchObject({ commitSha: fixture.annotatedTagSha, kind: 'tag' });
+
+        const fetchWorkspace = await makeWorkspace();
+        const fetched = await nativeGitTransport.fetchAtCommit({
+            repoUrl,
+            ref: 'v-annotated',
+            token: VALID_TOKEN,
+            refKind: 'tag',
+            commitSha: resolved.commitSha,
+            timeoutMs: 15_000,
+            workspaceRoot: fetchWorkspace,
+            maxBytes: 10 * 1024 * 1024,
+        });
+        expect(fetched.commitSha).toBe(fixture.annotatedTagSha);
+        expect(await fs.readFile(path.join(fetched.dir, 'hello.txt'), 'utf8')).toBe(FILE_CONTENT);
+    });
+
+    it('resolves and fetches a lightweight tag', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const resolved = await nativeGitTransport.resolveRef({
+            repoUrl,
+            ref: 'v-light',
+            token: VALID_TOKEN,
+            timeoutMs: 15_000,
+            workspaceRoot,
+        });
+        expect(resolved).toMatchObject({ commitSha: fixture.lightweightTagSha, kind: 'tag' });
+
+        const fetchWorkspace = await makeWorkspace();
+        const fetched = await nativeGitTransport.fetchAtCommit({
+            repoUrl,
+            ref: 'v-light',
+            token: VALID_TOKEN,
+            refKind: 'tag',
+            commitSha: resolved.commitSha,
+            timeoutMs: 15_000,
+            workspaceRoot: fetchWorkspace,
+            maxBytes: 10 * 1024 * 1024,
+        });
+        expect(fetched.commitSha).toBe(fixture.lightweightTagSha);
+    });
+
+    it('resolves and fetches a pinned commit SHA', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const resolved = await nativeGitTransport.resolveRef({
+            repoUrl,
+            ref: fixture.pinnedSha,
+            token: VALID_TOKEN,
+            timeoutMs: 15_000,
+            workspaceRoot,
+        });
+        expect(resolved).toMatchObject({ commitSha: fixture.pinnedSha, kind: 'sha' });
+
+        const fetchWorkspace = await makeWorkspace();
+        const fetched = await nativeGitTransport.fetchAtCommit({
+            repoUrl,
+            ref: fixture.pinnedSha,
+            token: VALID_TOKEN,
+            refKind: 'sha',
+            commitSha: resolved.commitSha,
+            timeoutMs: 15_000,
+            workspaceRoot: fetchWorkspace,
+            maxBytes: 10 * 1024 * 1024,
+        });
+        expect(fetched.commitSha).toBe(fixture.pinnedSha);
+        expect(await fs.readFile(path.join(fetched.dir, 'second.txt'), 'utf8')).toBe('second fixture file\n');
     });
 });

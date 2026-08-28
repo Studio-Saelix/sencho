@@ -1952,6 +1952,7 @@ export class DatabaseService {
         // Resolved ref kind for existing GitOps generations. New installs get it
         // from the CREATE TABLE; older DBs need the additive column here.
         maybeAddCol('gitops_generations', 'resolved_ref_kind', 'TEXT NULL');
+        maybeAddCol('gitops_applications', 'fetched_resolved_ref_kind', 'TEXT NULL');
 
         // Distributed API model columns
         maybeAddCol('nodes', 'api_url', "TEXT DEFAULT ''");

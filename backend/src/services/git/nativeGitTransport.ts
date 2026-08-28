@@ -614,7 +614,7 @@ async function lsRemoteRefs(
     let res: RunResult;
     try {
         res = await runGit(
-            [...baseArgs, 'ls-remote', url.href, `refs/heads/${ref}`, `refs/tags/${ref}`],
+            [...baseArgs, 'ls-remote', url.href, `refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`],
             { env, timeoutMs: Math.min(timeoutMs, LS_REMOTE_MAX_MS) },
         );
     } catch (e) {
@@ -644,6 +644,52 @@ async function lsRemoteRefs(
         }
     }
     return found;
+}
+
+/**
+ * Whether `descendantSha` is a fast-forward from `ancestorSha` on the remote.
+ * Distinguishes a normal branch advance from a force-push after ls-remote has
+ * already resolved the ref to a new tip.
+ */
+export async function verifyFastForward(req: {
+    repoUrl: string;
+    ancestorSha: string;
+    descendantSha: string;
+    token?: string | null;
+    timeoutMs?: number;
+    workspaceRoot: string;
+}): Promise<boolean> {
+    const ancestor = req.ancestorSha.toLowerCase();
+    const descendant = req.descendantSha.toLowerCase();
+    if (ancestor === descendant) return true;
+
+    const hasToken = Boolean(req.token);
+    await ensureBinaryReady(hasToken);
+    const url = assertValidRepoUrl(req.repoUrl, hasToken);
+    const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token);
+    const repoDir = path.join(req.workspaceRoot, 'ff-check');
+    await fs.mkdir(repoDir, { recursive: true });
+
+    const runInRepo = async (args: string[]): Promise<RunResult> => {
+        try {
+            return await runGit(args, { cwd: repoDir, env, timeoutMs });
+        } catch (e) {
+            if (isTimeoutError(e)) {
+                throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+            }
+            throw e;
+        }
+    };
+
+    if ((await runInRepo([...baseArgs, 'init'])).exitCode !== 0) return false;
+    if ((await runInRepo([...baseArgs, 'fetch', '--depth=1', url.href, descendant])).exitCode !== 0) {
+        return false;
+    }
+    if ((await runInRepo([...baseArgs, 'fetch', '--depth=1', url.href, ancestor])).exitCode !== 0) {
+        return false;
+    }
+    return (await runInRepo([...baseArgs, 'merge-base', '--is-ancestor', ancestor, descendant])).exitCode === 0;
 }
 
 export const nativeGitTransport: GitTransport = {

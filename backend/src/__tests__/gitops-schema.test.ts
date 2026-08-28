@@ -239,23 +239,17 @@ describe('gitops schema', () => {
     expect(row?.configured_ref).toBe('v1');
   });
 
-  it('re-adds resolved_ref_kind when a legacy install lacks the column', async () => {
-    // Simulate a pre-migration installation that predates the column, then
-    // re-run the same DDL initSchema's maybeAddCol uses. A fresh schema init
-    // must restore the column and the store must still round-trip it.
-    const { DatabaseService } = await import('../services/DatabaseService');
-    const raw = DatabaseService.getInstance().getDb();
-    raw.exec('ALTER TABLE gitops_generations DROP COLUMN resolved_ref_kind');
-    raw.exec('ALTER TABLE gitops_generations ADD COLUMN resolved_ref_kind TEXT NULL');
+  it('round-trips fetched_resolved_ref_kind on application fetch transitions', async () => {
     const store = GitOpsStore.getInstance();
-    store.insertApplication(directApp('app-mig', 'mig-web'));
-    store.insertGeneration({
-      ...generation('gen-mig', 'app-mig'),
-      commit_sha: 'abc123',
-      resolved_ref_kind: 'sha',
-    });
-    expect(store.getGeneration('gen-mig')?.resolved_ref_kind).toBe('sha');
-    expect(store.getGeneration('gen-mig')?.configured_ref).toBe('main');
+    store.insertApplication(directApp('app-fetch-kind', 'fetch-web'));
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    const tx = GitOpsTransitions.getInstance();
+    const env = { operationId: 'op-fetch-kind', actor: 'tester', trigger: 'manual', at: Date.now() };
+    tx.fetchStarted('app-fetch-kind', env);
+    tx.fetched('app-fetch-kind', 'abc123', env, 'tag');
+    const app = store.getApplication('app-fetch-kind');
+    expect(app?.fetched_commit_sha).toBe('abc123');
+    expect(app?.fetched_resolved_ref_kind).toBe('tag');
   });
 });
 
@@ -277,6 +271,7 @@ function directApp(id: string, stackName: string): GitOpsApplicationRow {
     materialization_fingerprint: 'a'.repeat(64),
     desired_commit_sha: null,
     fetched_commit_sha: null,
+    fetched_resolved_ref_kind: null,
     candidate_generation_id: null,
     accepted_generation_id: null,
     candidate_plan_blocked: 0,

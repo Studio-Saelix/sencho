@@ -586,6 +586,7 @@ function inlineApp(id: string, blueprintId: number): GitOpsApplicationRow {
     materialization_fingerprint: null,
     desired_commit_sha: null,
     fetched_commit_sha: null,
+    fetched_resolved_ref_kind: null,
     candidate_generation_id: null,
     accepted_generation_id: null,
     candidate_plan_blocked: 0,

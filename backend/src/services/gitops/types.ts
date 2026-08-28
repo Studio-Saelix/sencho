@@ -49,6 +49,7 @@ export type GitOpsApplicationRow = {
   materialization_fingerprint: string | null;
   desired_commit_sha: string | null;
   fetched_commit_sha: string | null;
+  fetched_resolved_ref_kind: RefKind | null;
   candidate_generation_id: string | null;
   accepted_generation_id: string | null;
   candidate_plan_blocked: number;

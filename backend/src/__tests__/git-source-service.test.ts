@@ -29,9 +29,10 @@ import {
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
-const { mockResolveRef, mockFetchAtCommit, mockGitClone, mockGitLog } = vi.hoisted(() => ({
+const { mockResolveRef, mockFetchAtCommit, mockVerifyFastForward, mockGitClone, mockGitLog } = vi.hoisted(() => ({
     mockResolveRef: vi.fn(),
     mockFetchAtCommit: vi.fn(),
+    mockVerifyFastForward: vi.fn(),
     mockGitClone: vi.fn(),
     mockGitLog: vi.fn(),
 }));
@@ -44,6 +45,7 @@ vi.mock('../services/git/nativeGitTransport', () => ({
         resolveRef: mockResolveRef,
         fetchAtCommit: mockFetchAtCommit,
     },
+    verifyFastForward: mockVerifyFastForward,
 }));
 
 
@@ -102,6 +104,7 @@ afterAll(() => {
 beforeEach(() => {
     mockResolveRef.mockReset();
     mockFetchAtCommit.mockReset();
+    mockVerifyFastForward.mockReset();
     mockGitClone.mockReset();
     mockGitLog.mockReset();
     wireTransportDefaults();
@@ -136,6 +139,7 @@ beforeEach(() => {
  * at the workspace checkout.
  */
 function wireTransportDefaults(): void {
+    mockVerifyFastForward.mockResolvedValue(true);
     mockResolveRef.mockImplementation(async () => {
         const log = await mockGitLog({});
         const oid = Array.isArray(log) ? log[0]?.oid : undefined;
@@ -757,6 +761,25 @@ describe('GitSourceService error mapping', () => {
         ));
         await expect(svc().fetchFromGit({ ...fetchParams, hasPriorHistory: true }))
             .rejects.toMatchObject({ code: 'REF_DELETED' });
+    });
+
+    it('returns REF_DELETED when a resolved ref changes namespace', async () => {
+        mockResolveRef.mockResolvedValueOnce({ commitSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', kind: 'tag' });
+        await expect(svc().fetchFromGit({
+            ...fetchParams,
+            priorIdentity: { commitSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', kind: 'branch' },
+        })).rejects.toMatchObject({ code: 'REF_DELETED' });
+        expect(mockFetchAtCommit).not.toHaveBeenCalled();
+    });
+
+    it('returns REF_DELETED when a branch tip moves by force-push', async () => {
+        mockResolveRef.mockResolvedValueOnce({ commitSha: 'cccccccccccccccccccccccccccccccccccccccc', kind: 'branch' });
+        mockVerifyFastForward.mockResolvedValueOnce(false);
+        await expect(svc().fetchFromGit({
+            ...fetchParams,
+            priorIdentity: { commitSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', kind: 'branch' },
+        })).rejects.toMatchObject({ code: 'REF_DELETED' });
+        expect(mockFetchAtCommit).not.toHaveBeenCalled();
     });
 
     it('maps a host refusal to serve a pinned SHA to UNSUPPORTED_REF', async () => {

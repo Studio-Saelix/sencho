@@ -729,6 +729,8 @@ describe('resolve/fetch/verify flow', () => {
                 timeoutMs: 5000,
                 workspaceRoot: root,
             })).resolves.toMatchObject({ commitSha: SHA_A, kind: 'tag' });
+            const lsRemoteArgs = mockSpawn.mock.calls[0][1] as string[];
+            expect(lsRemoteArgs).toContain('refs/tags/v1^{}');
         } finally {
             await fs.rm(root, { recursive: true, force: true });
         }

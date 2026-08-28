@@ -356,7 +356,7 @@ export class GitOpsStore {
         id, lifecycle_key, lifecycle_status, target_mode, stack_name, blueprint_id,
         configured_repo_url, repo_identity_json, configured_ref, compose_paths_json,
         context_dir, sync_env, env_path, materialization_fingerprint, desired_commit_sha,
-        fetched_commit_sha, candidate_generation_id, accepted_generation_id,
+        fetched_commit_sha, fetched_resolved_ref_kind, candidate_generation_id, accepted_generation_id,
         candidate_plan_blocked, review_required, artifact_set_id, latest_artifact_set_id,
         intent_revision_id, rollout_candidate_id, rollout_generation_id, source_acceptance_ref,
         placement_approval_ref, rollout_authorization_ref, legacy_combined_approval_ref,
@@ -366,12 +366,12 @@ export class GitOpsStore {
         recovery_ref, recovery_phase, interruption_stage, interruption_at,
         interruption_operation_id, interruption_generation_id, evidence_fresh_at,
         evidence_limitations_json, created_at, updated_at
-      ) VALUES (${Array(54).fill('?').join(', ')})`,
+      ) VALUES (${Array(55).fill('?').join(', ')})`,
     ).run(
       row.id, row.lifecycle_key, row.lifecycle_status, row.target_mode, row.stack_name, row.blueprint_id,
       row.configured_repo_url, row.repo_identity_json, row.configured_ref, row.compose_paths_json,
       row.context_dir, row.sync_env, row.env_path, row.materialization_fingerprint, row.desired_commit_sha,
-      row.fetched_commit_sha, row.candidate_generation_id, row.accepted_generation_id,
+      row.fetched_commit_sha, row.fetched_resolved_ref_kind, row.candidate_generation_id, row.accepted_generation_id,
       row.candidate_plan_blocked, row.review_required, row.artifact_set_id, row.latest_artifact_set_id,
       row.intent_revision_id, row.rollout_candidate_id, row.rollout_generation_id, row.source_acceptance_ref,
       row.placement_approval_ref, row.rollout_authorization_ref, row.legacy_combined_approval_ref,

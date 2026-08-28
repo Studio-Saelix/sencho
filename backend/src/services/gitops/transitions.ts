@@ -1,3 +1,4 @@
+import type { RefKind } from '../git/types';
 import { DatabaseService } from '../DatabaseService';
 import {
   decodeArtifactEvidenceJson,
@@ -145,12 +146,13 @@ export class GitOpsTransitions {
     })();
   }
 
-  fetched(applicationId: string, commitSha: string, envelope: EventEnvelope): TransitionResult {
+  fetched(applicationId: string, commitSha: string, envelope: EventEnvelope, resolvedRefKind: RefKind | null = null): TransitionResult {
     return this.mutateApp(applicationId, envelope, 'fetched', 'committed', (app) => {
       this.requireMatchingFetch(app, envelope);
       this.clearActive(app);
       app.desired_commit_sha = commitSha;
       app.fetched_commit_sha = commitSha;
+      app.fetched_resolved_ref_kind = resolvedRefKind;
       app.retry_count = 0;
       this.clearAppFailure(app, ['fetch', 'validation']);
       this.clearInterruption(app, 'fetch_started');
@@ -193,12 +195,13 @@ export class GitOpsTransitions {
    * from it. Retry count is deliberately not reset, because nothing about this
    * outcome suggests the next attempt will differ.
    */
-  fetchedInvalid(applicationId: string, commitSha: string, envelope: EventEnvelope): TransitionResult {
+  fetchedInvalid(applicationId: string, commitSha: string, envelope: EventEnvelope, resolvedRefKind: RefKind | null = null): TransitionResult {
     return this.mutateApp(applicationId, envelope, 'fetched_invalid', 'failed', (app) => {
       this.requireMatchingFetch(app, envelope);
       this.clearActive(app);
       app.desired_commit_sha = commitSha;
       app.fetched_commit_sha = commitSha;
+      app.fetched_resolved_ref_kind = resolvedRefKind;
       app.failure_stage = 'validation';
       app.failure_class = 'validation';
       app.failure_at = envelope.at;
@@ -295,6 +298,7 @@ export class GitOpsTransitions {
       app.materialization_fingerprint = args.material.fingerprint;
       app.desired_commit_sha = null;
       app.fetched_commit_sha = null;
+      app.fetched_resolved_ref_kind = null;
       app.candidate_generation_id = null;
       app.candidate_plan_blocked = 0;
       app.review_required = 0;
@@ -2235,7 +2239,7 @@ export class GitOpsTransitions {
         lifecycle_status=?, configured_repo_url=?, repo_identity_json=?, configured_ref=?,
         compose_paths_json=?, context_dir=?, sync_env=?, env_path=?,
         materialization_fingerprint=?, desired_commit_sha=?, fetched_commit_sha=?,
-        candidate_generation_id=?, accepted_generation_id=?, candidate_plan_blocked=?,
+        fetched_resolved_ref_kind=?, candidate_generation_id=?, accepted_generation_id=?, candidate_plan_blocked=?,
         review_required=?, artifact_set_id=?, latest_artifact_set_id=?,
         intent_revision_id=?, rollout_candidate_id=?, rollout_generation_id=?,
         source_acceptance_ref=?, placement_approval_ref=?, rollout_authorization_ref=?,
@@ -2252,7 +2256,7 @@ export class GitOpsTransitions {
       app.lifecycle_status, app.configured_repo_url, app.repo_identity_json, app.configured_ref,
       app.compose_paths_json, app.context_dir, app.sync_env, app.env_path,
       app.materialization_fingerprint, app.desired_commit_sha, app.fetched_commit_sha,
-      app.candidate_generation_id, app.accepted_generation_id, app.candidate_plan_blocked,
+      app.fetched_resolved_ref_kind, app.candidate_generation_id, app.accepted_generation_id, app.candidate_plan_blocked,
       app.review_required, app.artifact_set_id, app.latest_artifact_set_id,
       app.intent_revision_id, app.rollout_candidate_id, app.rollout_generation_id,
       app.source_acceptance_ref, app.placement_approval_ref, app.rollout_authorization_ref,

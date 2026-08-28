@@ -124,6 +124,7 @@ export function buildDirectApplicationRow(args: {
     materialization_fingerprint: args.identity.fingerprint,
     desired_commit_sha: null,
     fetched_commit_sha: null,
+    fetched_resolved_ref_kind: null,
     candidate_generation_id: null,
     accepted_generation_id: null,
     candidate_plan_blocked: 0,

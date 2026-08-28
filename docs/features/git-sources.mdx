@@ -3,7 +3,7 @@ title: Git Sources
 description: Link a stack to a Git repository and keep one or more compose files in sync via manual pulls or webhook triggers.
 ---
 
-Git Sources turn any stack into a GitOps target. Point Sencho at a repository and branch, choose one or more compose files to merge in order, pull updates on demand or from CI, and review a classified change plan before applying files to disk. Optional sibling `.env` sync keeps configuration consistent too.
+Git Sources turn any stack into a GitOps target. Point Sencho at a repository and ref (branch, tag, or commit SHA), choose one or more compose files to merge in order, pull updates on demand or from CI, and review a classified change plan before applying files to disk. Optional sibling `.env` sync keeps configuration consistent too.
 
 <Note>
   Git Sources are available on every tier, including Community.
@@ -12,7 +12,7 @@ Git Sources turn any stack into a GitOps target. Point Sencho at a repository an
 ## How it works
 
 1. Open a stack and click the **Git Source** button in the editor toolbar.
-2. Fill in the repository URL and branch, then choose the compose files. Use **Browse** to pick them from the repository tree, or type a path and press Enter. Add a token if the repo is private.
+2. Fill in the repository URL and ref, then choose the compose files. Use **Browse** to pick them from the repository tree, or type a path and press Enter. Add a token if the repo is private.
 3. Click **Pull now** to fetch the latest commit. Sencho opens a classified change plan: adds, modifications, removals, and any local conflicts.
 4. Click **Apply** to write the incoming files to disk. Apply stays disabled while local file conflicts are present. A Compose invocation change (for example a `.env` file added or removed outside Git) is shown in the plan and does not disable Apply. Applying records the incoming invocation as the new baseline and leaves unmanaged files on disk. Tick **Deploy after apply** in the same dialog to redeploy in one step.
 
@@ -21,13 +21,13 @@ Writes land in the stack's existing directory using the same storage Sencho uses
 ## Anatomy of the panel
 
 <Frame>
-  <img src="/images/git-sources/panel.png" alt="Git Source panel for a stack already linked to a repository, showing populated Repository URL, Branch, Compose file path, the Authentication toggle, the Apply behavior radio group, and a Last applied commit row at the bottom" />
+  <img src="/images/git-sources/panel.png" alt="Git Source panel for a stack already linked to a repository, showing populated Repository URL, Ref, Compose file path, the Authentication toggle, the Apply behavior radio group, and a Last applied commit row at the bottom" />
 </Frame>
 
 The panel groups four regions:
 
 - **Pending update banner.** Appears at the top whenever a fetched commit is staged, however it was fetched. Its heading is the source state, so it says whether the commit is ready to apply, waiting on review, or blocked by local conflicts. Click **Review** to re-fetch the incoming commit and open the change plan.
-- **Form fields.** Repository URL, branch, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication toggle, and the apply behavior radio group.
+- **Form fields.** Repository URL, ref, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication toggle, and the apply behavior radio group.
 - **Last applied stat strip.** Shows the short SHA of the last commit Sencho applied to disk, the source state (see below), and the timestamp of the most recent successful save or pull.
 - **Footer actions.** **Remove** disconnects the source by exporting the effective compose model into a single `compose.yaml` and removing auto-discovered override files; the remaining materialized files are kept. **Pull now** fetches the configured branch, tag, or commit's current revision; **Save** or **Update** persists form changes after a reachability check passes.
 
@@ -55,7 +55,7 @@ These are the states you will see most often.
 The last two matter most. Sencho reports an interrupted operation as unknown rather than guessing, so a stack whose pull was cut short by a restart says so instead of quietly reading as up to date.
 
 <Note>
-  Changing the repository, the branch, the compose files, the project directory, or the `.env` sync clears any staged commit, because the plan was built against the settings you just replaced. Pull again to rebuild it. The state moves to **Reconcile required** if a commit had already been accepted, and to **Never reconciled** if none ever was. Changing only the token or the apply behavior leaves a staged commit alone, since neither changes what would be materialized.
+  Changing the repository, the ref, the compose files, the project directory, or the `.env` sync clears any staged commit, because the plan was built against the settings you just replaced. Pull again to rebuild it. The state moves to **Reconcile required** if a commit had already been accepted, and to **Never reconciled** if none ever was. Changing only the token or the apply behavior leaves a staged commit alone, since neither changes what would be materialized.
 </Note>
 
 ### When part of the state could not be proven
@@ -90,14 +90,14 @@ Tick **Deploy after create** to run `docker compose up -d` immediately after the
 | Field | Description |
 |-------|-------------|
 | **Repository URL** | `https://github.com/your-org/your-repo.git` (HTTPS only) |
-| **Branch** | Branch to track (e.g. `main`) |
+| **Ref** | Branch, tag, or full commit SHA to track (e.g. `main`, `v1.0`, or a 40-character SHA) |
 | **Compose files** | One or more paths within the repo, merged in the listed order (e.g. `deploy/base.yaml` then `deploy/prod.yaml`). The first file is the primary. Reorder by dragging (or the up/down arrows on a phone) and remove with the **×** button. |
 | **Project directory** | Optional path within the repo passed to `docker compose --project-directory`, so relative build contexts, bind mounts, and `env_file` references resolve from that base. Leave blank to use the stack root. |
 | **Also sync sibling `.env` file** | When enabled, also pulls the `.env` from the same directory as the primary compose file. The form shows the resolved path inline (e.g. `deploy/.env` for a primary at `deploy/compose.yaml`). |
 | **Authentication** | **Public (no auth)** for public repos, **Personal Access Token** for private repos |
 | **Apply behavior** | See the three modes below |
 
-Saving runs a reachability check against the repository. If the URL is wrong, the token is invalid, the branch does not exist, or a file is missing, Sencho surfaces the error inline and nothing is persisted.
+Saving runs a reachability check against the repository. If the URL is wrong, the token is invalid, the ref does not exist, or a file is missing, Sencho surfaces the error inline and nothing is persisted.
 
 ### Multiple compose files
 
@@ -222,7 +222,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
   </Accordion>
 
   <Accordion title="Branch or tag deleted or force-pushed">
-    The configured ref previously resolved to a commit but no longer does on the remote. It may have been deleted, or force-pushed to a history the old commit is no longer part of. Point the source at a current branch, tag, or commit, or restore the ref upstream, then save again.
+    The configured ref previously resolved to a commit but no longer matches that history. The ref may have been deleted, renamed, superseded by a same-named tag, or force-pushed to a history the old commit is no longer part of. Point the source at a current branch, tag, or commit, or restore the ref upstream, then save again.
   </Accordion>
 
   <Accordion title="Commit not reachable on this host">

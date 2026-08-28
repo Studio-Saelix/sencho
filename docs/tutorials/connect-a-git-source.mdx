@@ -31,11 +31,11 @@ This tutorial covers linking an existing stack to a Git source and running one m
     Open the `marketing-site` stack and select **Git Source** in the editor toolbar. The panel opens empty, since nothing is linked yet.
 
     <Frame>
-      <img src="/images/tutorials/connect-a-git-source/git-source-panel-empty.png" alt="Empty Git source panel for the marketing-site stack, showing blank Repository URL and Branch fields defaulted to main, a compose.yaml entry marked primary in Compose files, Public (no auth) selected under Authentication, and Review only selected under Apply behavior." />
+      <img src="/images/tutorials/connect-a-git-source/git-source-panel-empty.png" alt="Empty Git source panel for the marketing-site stack, showing blank Repository URL and Ref fields defaulted to main, a compose.yaml entry marked primary in Compose files, Public (no auth) selected under Authentication, and Review only selected under Apply behavior." />
     </Frame>
   </Step>
   <Step title="Point it at your repository">
-    Paste your repository's HTTPS URL into **Repository URL** (for example `https://github.com/your-org/your-repo.git`). Leave **Branch** on its default, `main`, unless your repository uses a different one.
+    Paste your repository's HTTPS URL into **Repository URL** (for example `https://github.com/your-org/your-repo.git`). Leave **Ref** on its default, `main`, unless your repository uses a different branch, tag, or pinned commit SHA.
 
     Select **Browse** to confirm Sencho can actually reach the repository and see its files, rather than trusting the URL is correct. The browser lists every file in the repository; `compose.yaml` is already ticked as the primary compose file, since that name matches the picker's default.
 
@@ -46,9 +46,9 @@ This tutorial covers linking an existing stack to a Git source and running one m
     Leave **Authentication** on **Public (no auth)** for a public repository, and **Apply behavior** on **Review only**, the safest default: a pull only stages a change plan for you to review, it never writes or deploys on its own. Select **Save**. Sencho runs a reachability check against the repository before persisting anything; if that check fails, nothing is saved and the panel reports why.
   </Step>
   <Step title="Pull the latest commit">
-    Now make a change the way your team actually would: edit the compose file in your repository (not in Sencho) and push a commit. For this tutorial, bump the pinned tag from `nginx:1.27-alpine` to `nginx:1.28-alpine` and push it to the branch you configured.
+    Now make a change the way your team actually would: edit the compose file in your repository (not in Sencho) and push a commit. For this tutorial, bump the pinned tag from `nginx:1.27-alpine` to `nginx:1.28-alpine` and push it to the ref you configured.
 
-    Back in the Git Source panel, select **Pull now**. Sencho fetches the branch's current commit and opens a classified change plan against what's on disk.
+    Back in the Git Source panel, select **Pull now**. Sencho fetches the ref's current commit and opens a classified change plan against what's on disk.
 
     <Frame>
       <img src="/images/tutorials/connect-a-git-source/pull-preview-diff.png" alt="GIT · CHANGE PLAN dialog for marketing-site, listing a Modify row for compose.yaml (image tag change) with Deploy after apply and Apply in the footer." />
@@ -81,10 +81,10 @@ Check from two places, since neither alone proves the pull was actually applied 
 
 ## If something goes wrong
 
-**Saving the source fails with "The configured branch, tag, or commit was not found," even though the URL is right.** Ref names are case-sensitive, and a typo there (`Main` instead of `main`, for example) surfaces as a distinct not-found error rather than a repository error, because Sencho resolves the ref on the remote before fetching. Double-check the branch name against what your Git host actually shows before assuming the URL itself is wrong.
+**Saving the source fails with "The configured branch, tag, or commit was not found," even though the URL is right.** Ref names are case-sensitive, and a typo there (`Main` instead of `main`, for example) surfaces as a distinct not-found error rather than a repository error, because Sencho resolves the ref on the remote before fetching. Double-check the ref against what your Git host actually shows before assuming the URL itself is wrong.
 
 <Frame>
-  <img src="/images/tutorials/connect-a-git-source/branch-error.png" alt="Git source panel with Branch set to the incorrect value Main, and a red error toast in the corner reading The configured branch, tag, or commit was not found." />
+  <img src="/images/tutorials/connect-a-git-source/branch-error.png" alt="Git source panel with Ref set to the incorrect value Main, and a red error toast in the corner reading The configured branch, tag, or commit was not found." />
 </Frame>
 
 ## Related
