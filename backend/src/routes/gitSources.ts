@@ -16,10 +16,13 @@ import { isValidGitSourcePath, isValidStackName } from '../utils/validation';
 import { sendGitSourceError, webhookPullStatus } from '../utils/gitSourceHttp';
 import { sanitizeForLog } from '../utils/safeLog';
 import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
+import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 
 // Reasonable upper bounds so a caller cannot flood the service with huge
 // payloads. Generous compared to anything a real Git provider emits.
-const MAX_BRANCH_LENGTH = 256;
+// The branch bound comes from the transport that ultimately fetches the ref,
+// so a branch this route accepts can never be refused later as too long.
+const MAX_BRANCH_LENGTH = REF_MAX_LEN;
 const MAX_ENV_PATH_LENGTH = 1024;
 const MAX_TOKEN_LENGTH = 8192;
 

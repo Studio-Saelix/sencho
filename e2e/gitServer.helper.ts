@@ -3,7 +3,7 @@
  *
  * Builds fixture repositories with the system git binary and serves them over
  * HTTPS, so the full clone -> pull -> apply pipeline runs without network
- * egress. Implements the two smart-HTTP endpoints isomorphic-git needs
+ * egress. Implements the two smart-HTTP endpoints the git CLI needs
  * (GET info/refs advertise + POST upload-pack) directly; git-http-backend's
  * stream internals break on modern Node.
  *

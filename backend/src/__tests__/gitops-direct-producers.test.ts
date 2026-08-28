@@ -21,18 +21,25 @@ import path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
-const { mockGitClone, mockGitLog, compose } = vi.hoisted(() => ({
+const { mockResolveRef, mockFetchAtCommit, mockGitClone, mockGitLog, compose } = vi.hoisted(() => ({
+  mockResolveRef: vi.fn(),
+  mockFetchAtCommit: vi.fn(),
   mockGitClone: vi.fn(),
   mockGitLog: vi.fn(),
   /** Exit code the next daemon-dependent compose command reports. */
   compose: { exitCode: 1 },
 }));
 
-vi.mock('isomorphic-git', () => {
-  const api = { clone: mockGitClone, log: mockGitLog };
-  return { default: api, clone: mockGitClone, log: mockGitLog };
-});
-vi.mock('isomorphic-git/http/node', () => ({ default: {} }));
+// The transport boundary is what gets mocked (see git-source-service.test.ts,
+// which established this seam). mockGitClone/mockGitLog remain as the
+// fixture layer so stageRepo() keeps its meaning: clone writes files into
+// the checkout dir, log yields the deterministic sha.
+vi.mock('../services/git/nativeGitTransport', () => ({
+  nativeGitTransport: {
+    resolveRef: mockResolveRef,
+    fetchAtCommit: mockFetchAtCommit,
+  },
+}));
 
 /**
  * Compose verbs that need a running daemon and are issued through `spawn`.
@@ -132,6 +139,33 @@ let GitOpsStore: typeof import('../services/gitops/store').GitOpsStore;
 let GitOpsTransitions: typeof import('../services/gitops/transitions').GitOpsTransitions;
 let projectApplication: typeof import('../services/gitops/derive').projectApplication;
 
+/**
+ * Default transport wiring: resolveRef defers to the log stub so per-test
+ * overrides of mockGitLog keep controlling the final SHA, and fetchAtCommit
+ * delegates to the clone/log fixture fns, handing clone a `dir` that points
+ * at the workspace checkout. Mirrors git-source-service.test.ts's
+ * wireTransportDefaults.
+ */
+function wireTransportDefaults(): void {
+  mockResolveRef.mockImplementation(async () => {
+    const log = await mockGitLog({});
+    const oid = Array.isArray(log) ? log[0]?.oid : undefined;
+    return { commitSha: oid ?? '' };
+  });
+  mockFetchAtCommit.mockImplementation(async (req: { workspaceRoot: string; commitSha: string }) => {
+    const dir = path.join(req.workspaceRoot, 'repo');
+    await fsPromises.mkdir(dir, { recursive: true });
+    await mockGitClone({ ...req, dir });
+    const log = await mockGitLog({ dir });
+    if (!Array.isArray(log) || !log.length) {
+      // An empty branch produces no remote ref; mirror the structured
+      // failure the real transport raises for that case.
+      throw { transportFailure: true as const, reason: 'ref-not-found', host: 'unknown', hasToken: false };
+    }
+    return { commitSha: log[0].oid, dir };
+  });
+}
+
 /** Make the next clone produce a project containing this compose content. */
 function stageRepo(content: string, sha: string, extraFiles: Record<string, string> = {}): void {
   mockGitClone.mockImplementation(async ({ dir }: { dir: string }) => {
@@ -166,8 +200,11 @@ describe('Direct Git producers drive the revision state', () => {
   });
 
   beforeEach(() => {
+    mockResolveRef.mockReset();
+    mockFetchAtCommit.mockReset();
     mockGitClone.mockReset();
     mockGitLog.mockReset();
+    wireTransportDefaults();
     compose.exitCode = 1;
   });
 

@@ -18,6 +18,7 @@ import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import path from 'path';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { DatabaseService } from '../services/DatabaseService';
 import { ComposeService } from '../services/ComposeService';
 import { GitSourceService, GitSourceError } from '../services/GitSourceService';
@@ -242,6 +243,21 @@ describe('PUT /api/stacks/:stackName/git-source — max-length caps', () => {
             });
         expect(res.status).toBe(400);
         expect(res.body.error).toMatch(/branch/i);
+    });
+
+    it('does not reject a branch at the transport limit as too long', async () => {
+        // The route and the transport share one bound, so a branch the route
+        // stores is always one the transport will still fetch. This asserts
+        // the shared side of that: at the limit, length is not the objection.
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                ...baseBody,
+                repo_url: 'https://github.com/example/repo.git',
+                branch: 'b'.repeat(REF_MAX_LEN),
+            });
+        expect(String(res.body?.error ?? '')).not.toMatch(/too long/i);
     });
 
     it('rejects oversized compose_path', async () => {
