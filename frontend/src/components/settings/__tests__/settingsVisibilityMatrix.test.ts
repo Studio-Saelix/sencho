@@ -75,4 +75,9 @@ describe('settings section visibility by role', () => {
       expect(isItemVisible(item, visibilityFor('admin'))).toBe(true);
     }
   });
+
+  it('hides SSO from admins when a remote node is active', () => {
+    const sso = SETTINGS_ITEMS.find(i => i.id === 'sso')!;
+    expect(isItemVisible(sso, visibilityFor('admin', { isRemote: true }))).toBe(false);
+  });
 });

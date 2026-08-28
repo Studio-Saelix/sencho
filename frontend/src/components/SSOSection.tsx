@@ -93,6 +93,7 @@ function ProviderCard({ providerId, type, label, initialConfig, onSave }: {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
+                localOnly: true,
             });
             if (res.ok) {
                 toast.success('SSO configuration saved');
@@ -112,7 +113,7 @@ function ProviderCard({ providerId, type, label, initialConfig, onSave }: {
         setTesting(true);
         setTestResult(null);
         try {
-            const res = await apiFetch(`/sso/config/${providerId}/test`, { method: 'POST' });
+            const res = await apiFetch(`/sso/config/${providerId}/test`, { method: 'POST', localOnly: true });
             const data = await res.json().catch(() => null);
             if (!res.ok) {
                 const message = data?.error || data?.message || 'Connection test failed';
@@ -137,7 +138,7 @@ function ProviderCard({ providerId, type, label, initialConfig, onSave }: {
 
     const handleDelete = async () => {
         try {
-            const res = await apiFetch(`/sso/config/${providerId}`, { method: 'DELETE' });
+            const res = await apiFetch(`/sso/config/${providerId}`, { method: 'DELETE', localOnly: true });
             if (res.ok) {
                 toast.success('SSO provider removed');
                 setConfig({ enabled: false });
@@ -432,7 +433,7 @@ function RoleSyncToggle() {
         let cancelled = false;
         void (async () => {
             try {
-                const res = await apiFetch('/sso/config/role-sync');
+                const res = await apiFetch('/sso/config/role-sync', { localOnly: true });
                 if (!res.ok) {
                     if (!cancelled) {
                         const data = await res.json().catch(() => null);
@@ -460,6 +461,7 @@ function RoleSyncToggle() {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ enabled: next }),
+                localOnly: true,
             });
             if (!res.ok) {
                 const data = await res.json().catch(() => null);
@@ -521,7 +523,7 @@ function AuthenticationModePanel({
 
     const loadMode = async () => {
         try {
-            const res = await apiFetch('/sso/auth-mode');
+            const res = await apiFetch('/sso/auth-mode', { localOnly: true });
             if (!res.ok) {
                 const data = await res.json().catch(() => null);
                 toast.error(data?.error || 'Failed to load authentication mode');
@@ -551,6 +553,7 @@ function AuthenticationModePanel({
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
+                localOnly: true,
             });
             const data = await res.json().catch(() => null);
             if (!res.ok) {
@@ -676,7 +679,7 @@ export function SSOSection() {
 
     const fetchConfigs = async () => {
         try {
-            const res = await apiFetch('/sso/config');
+            const res = await apiFetch('/sso/config', { localOnly: true });
             if (res.ok) {
                 setConfigs(await res.json());
             } else {

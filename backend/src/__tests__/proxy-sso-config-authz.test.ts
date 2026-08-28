@@ -1,9 +1,8 @@
 /**
- * Hub → remote proxy coverage for SSO configuration API-token rejection.
- * The remote proxy replaces incoming credentials with a node-to-node JWT,
- * so destination-side rejectApiTokenScope cannot identify the original API
- * token. This test proves that the hub-side guard in remoteNodeProxy blocks
- * full-admin API tokens targeting /api/sso/config on remote nodes.
+ * Hub → remote proxy coverage for SSO configuration rejection.
+ * API tokens are blocked by the proxy-side rejectApiTokenScope gate (SCOPE_DENIED).
+ * Browser sessions with a remote x-node-id are blocked by hubOnlyGuard (HUB_ONLY_ENDPOINT)
+ * before any upstream hop, since SSO config is control-plane identity state.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import http from 'http';
@@ -98,7 +97,7 @@ beforeEach(() => {
   capturedHops.length = 0;
 });
 
-describe('Hub-side API-token rejection for remote SSO config', () => {
+describe('Hub-side rejection for remote SSO config', () => {
   const blockedRequests: Array<{ method: 'get' | 'put'; path: string; body?: Record<string, unknown> }> = [
     { method: 'get', path: '/api/sso/config/role-sync' },
     { method: 'get', path: '/api/sso/config' },
@@ -114,7 +113,7 @@ describe('Hub-side API-token rejection for remote SSO config', () => {
   ];
 
   for (const { method, path, body } of blockedRequests) {
-    it(`returns 403 SCOPE_DENIED for ${method.toUpperCase()} ${path}, no upstream hop`, async () => {
+    it(`returns 403 HUB_ONLY_ENDPOINT for ${method.toUpperCase()} ${path} (API token), no upstream hop`, async () => {
       let req = request(app)[method](path)
         .set('Authorization', `Bearer ${fullAdminApiToken}`)
         .set('x-node-id', String(remoteNodeId));
@@ -122,35 +121,31 @@ describe('Hub-side API-token rejection for remote SSO config', () => {
       const res = await req;
 
       expect(res.status).toBe(403);
-      expect(res.body.code).toBe('SCOPE_DENIED');
+      expect(res.body.code).toBe('HUB_ONLY_ENDPOINT');
       expect(capturedHops).toHaveLength(0);
     });
   }
 
-  it('Browser admin session reaches upstream for GET /api/sso/config/role-sync', async () => {
+  it('Browser admin session is rejected by hubOnlyGuard for GET /api/sso/config/role-sync', async () => {
     const res = await request(app)
       .get('/api/sso/config/role-sync')
       .set('Authorization', `Bearer ${adminToken}`)
       .set('x-node-id', String(remoteNodeId));
 
-    expect(res.status).toBe(200);
-    const hop = capturedHops.find((h) => h.url?.includes('/sso/config/role-sync'));
-    expect(hop).toBeDefined();
-    expect(hop!.method).toBe('GET');
-    expect(hop!.roleHeader).toBe('admin');
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('HUB_ONLY_ENDPOINT');
+    expect(capturedHops).toHaveLength(0);
   });
 
-  it('Browser admin session reaches upstream for PUT /api/sso/config/role-sync', async () => {
+  it('Browser admin session is rejected by hubOnlyGuard for PUT /api/sso/config/role-sync', async () => {
     const res = await request(app)
       .put('/api/sso/config/role-sync')
       .set('Authorization', `Bearer ${adminToken}`)
       .set('x-node-id', String(remoteNodeId))
       .send({ enabled: true });
 
-    expect(res.status).toBe(200);
-    const hop = capturedHops.find((h) => h.url?.includes('/sso/config/role-sync'));
-    expect(hop).toBeDefined();
-    expect(hop!.method).toBe('PUT');
-    expect(hop!.roleHeader).toBe('admin');
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('HUB_ONLY_ENDPOINT');
+    expect(capturedHops).toHaveLength(0);
   });
 });
