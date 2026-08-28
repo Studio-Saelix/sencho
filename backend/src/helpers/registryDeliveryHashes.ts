@@ -8,7 +8,6 @@ function collectRelativeFiles(rootDir: string, current = ''): string[] {
   const files: string[] = [];
   for (const entry of entries) {
     const rel = current ? path.join(current, entry.name) : entry.name;
-    const full = path.join(rootDir, rel);
     if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
       files.push(...collectRelativeFiles(rootDir, rel));

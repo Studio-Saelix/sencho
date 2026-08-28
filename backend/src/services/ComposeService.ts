@@ -1,6 +1,5 @@
 import { spawn } from 'child_process';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import WebSocket from 'ws';
 import DockerController from './DockerController';
@@ -306,13 +305,37 @@ export class ComposeService {
       let timeout: ReturnType<typeof setTimeout> | null = null;
       let forceKillTimeout: ReturnType<typeof setTimeout> | null = null;
       let idleTimeout: ReturnType<typeof setTimeout> | null = null;
-      let onAbort: (() => void) | undefined;
 
       const sendOutput = (text: string) => {
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(text);
         }
       };
+
+      const terminateChild = (error: Error) => {
+        pendingTerminationError = pendingTerminationError ?? error;
+        if (exited) return;
+        try {
+          child.kill('SIGTERM');
+        } catch (error) {
+          console.warn('[ComposeService] Failed to terminate compose command:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+        }
+        forceKillTimeout = setTimeout(() => {
+          if (exited) return;
+          try {
+            child.kill('SIGKILL');
+          } catch (error) {
+            console.warn('[ComposeService] Failed to force terminate compose command:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+          }
+        }, 5000);
+      };
+
+      const onAbort = effectiveAbortSignal
+        ? () => {
+            sendOutput('=== Operation cancelled (client disconnected) ===\n');
+            terminateChild(new Error('OPERATION_ABORTED: client disconnected'));
+          }
+        : undefined;
 
       const cleanup = () => {
         if (timeout) {
@@ -337,24 +360,6 @@ export class ComposeService {
         settled = true;
         cleanup();
         complete();
-      };
-
-      const terminateChild = (error: Error) => {
-        pendingTerminationError = pendingTerminationError ?? error;
-        if (exited) return;
-        try {
-          child.kill('SIGTERM');
-        } catch (error) {
-          console.warn('[ComposeService] Failed to terminate compose command:', sanitizeForLog(getErrorMessage(error, 'unknown')));
-        }
-        forceKillTimeout = setTimeout(() => {
-          if (exited) return;
-          try {
-            child.kill('SIGKILL');
-          } catch (error) {
-            console.warn('[ComposeService] Failed to force terminate compose command:', sanitizeForLog(getErrorMessage(error, 'unknown')));
-          }
-        }, 5000);
       };
 
       // Idle stall backstop. Armed once below and reset on every output chunk;
@@ -384,13 +389,6 @@ export class ComposeService {
       }, timeoutMs);
 
       armIdleTimeout();
-
-      onAbort = effectiveAbortSignal
-        ? () => {
-            sendOutput('=== Operation cancelled (client disconnected) ===\n');
-            terminateChild(new Error('OPERATION_ABORTED: client disconnected'));
-          }
-        : undefined;
 
       if (effectiveAbortSignal && onAbort) {
         effectiveAbortSignal.addEventListener('abort', onAbort);

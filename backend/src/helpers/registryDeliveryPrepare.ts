@@ -1,4 +1,3 @@
-import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
@@ -14,24 +13,6 @@ import type { CreateStackFromGitInput } from '../services/GitSourceService';
 export interface PreparedSourceResult {
   prepId: string;
   sourceHash: string;
-}
-
-async function copyDirectoryContents(srcDir: string, destDir: string): Promise<void> {
-  await fsPromises.mkdir(destDir, { recursive: true, mode: 0o700 });
-  const entries = await fsPromises.readdir(srcDir, { withFileTypes: true });
-  for (const entry of entries) {
-    const src = path.join(srcDir, entry.name);
-    const dest = path.join(destDir, entry.name);
-    if (entry.isSymbolicLink()) continue;
-    if (entry.isDirectory()) {
-      await copyDirectoryContents(src, dest);
-      continue;
-    }
-    if (entry.isFile()) {
-      await fsPromises.copyFile(src, dest);
-      await fsPromises.chmod(dest, 0o600);
-    }
-  }
 }
 
 export async function prepareRequestGeneratedSource(input: {

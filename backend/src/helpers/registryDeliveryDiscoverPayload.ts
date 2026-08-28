@@ -44,7 +44,7 @@ export function buildRegistryDiscoverPayload(options: {
   const stack = resolveStackName(options.body, classification.stack);
   const stage = classification.stage;
   const isRollback = Boolean(options.apiPath.match(/^\/api\/stacks\/[^/]+\/rollback$/));
-  let sourceKind = isRollback ? 'restore-candidate' : sourceKindForStage(stage);
+  const sourceKind = isRollback ? 'restore-candidate' : sourceKindForStage(stage);
 
   const payload: Record<string, unknown> = {
     stack,

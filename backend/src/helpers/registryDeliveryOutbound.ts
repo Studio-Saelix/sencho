@@ -15,7 +15,6 @@ import {
 } from './registryDeliveryBodyLimits';
 import { classifyRegistryDeliveryOp } from './registryOpClassifier';
 import { buildRegistryDiscoverPayload } from './registryDeliveryDiscoverPayload';
-import { hashActionSet } from './registryDeliveryHashes';
 import { getErrorMessage } from '../utils/errors';
 
 export type RegistryDeliveryAugmentResult =
@@ -33,46 +32,12 @@ export interface AugmentRegistryDeliveryInput {
   prepId?: string;
 }
 
-function requiredActionsForStage(stage: string | undefined): string[] {
-  switch (stage) {
-    case 'stack-deploy':
-    case 'stack-update':
-    case 'stack-pull-update':
-    case 'service-update':
-    case 'service-pull-update':
-    case 'webhook-deploy':
-    case 'scheduler-auto-update':
-    case 'scheduler-auto-start':
-    case 'mesh-redeploy':
-    case 'blueprint-apply':
-    case 'fleet-snapshot':
-    case 'template-deploy':
-    case 'from-git-deploy-now':
-      return ['stack:create', 'stack:deploy'];
-    case 'git-apply-auto-deploy':
-      return ['stack:edit', 'stack:deploy'];
-    case 'fleet-label':
-      return ['stack:deploy'];
-    default:
-      return ['stack:deploy'];
-  }
-}
-
 function isTransportConfidential(nodeId: number, node: Node): boolean {
   const delivery = RegistryDeliveryService.getInstance();
   if (node.mode === 'pilot_agent') {
     return PilotTunnelManager.getInstance().isTunnelConfidential(nodeId);
   }
   return delivery.isProxyTransportConfidential(nodeId);
-}
-
-function resolveStackName(
-  classification: ReturnType<typeof classifyRegistryDeliveryOp>,
-  body: Record<string, unknown>,
-): string | undefined {
-  if (classification.stack) return classification.stack;
-  const stackName = body.stackName;
-  return typeof stackName === 'string' && stackName.length > 0 ? stackName : undefined;
 }
 
 async function callTargetDiscover(
@@ -118,9 +83,6 @@ export async function augmentJsonBodyForRegistryDelivery(
   if (!routeClass) {
     return { ok: true, body: input.body, augmented: false };
   }
-
-  const actions = requiredActionsForStage(classification.stage);
-  const actionSetHash = hashActionSet(actions);
 
   try {
     const discoverBody = buildRegistryDiscoverPayload({
