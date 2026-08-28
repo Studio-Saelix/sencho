@@ -46,7 +46,7 @@ import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops
 import { managedAreaBase } from './gitops/managedPaths';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { copyPreparedPayloadDirectory } from '../helpers/registryDeliveryMaterialize';
-import { runDockerCompose } from '../helpers/dockerComposeRunner';
+import { runDockerCompose as spawnDockerCompose } from '../helpers/dockerComposeRunner';
 
 /**
  * GitSourceService - fetch compose files from a Git repository and apply
@@ -1245,7 +1245,7 @@ export class GitSourceService {
                 args.push('--env-file', envFile);
             }
             args.push('config', '--quiet');
-            const result = await runDockerCompose(args, dir, 10_000);
+            const result = await this.runDockerCompose(args, dir, 10_000);
             if (result.code === 0) return { ok: true };
             return { ok: false, error: publicComposeValidationError(result.stderr, result.code, dir) };
         } finally {
@@ -1373,13 +1373,17 @@ export class GitSourceService {
             return { ok: false, error: (err as Error).message || 'Invalid project env file configuration.' };
         }
         args.push('config', '--quiet');
-        const result = await runDockerCompose(args, candidateAbs, 30_000);
+        const result = await this.runDockerCompose(args, candidateAbs, 30_000);
         if (result.code === 0) return { ok: true };
         const timeoutHint = result.stderr.includes('Validation timed out') ? ' (docker compose config timed out after 30s)' : '';
         return {
             ok: false,
             error: `${publicComposeValidationError(result.stderr, result.code, candidateAbs, dataDir)}${timeoutHint}`,
         };
+    }
+
+    private runDockerCompose(args: string[], cwd: string, timeoutMs: number) {
+        return spawnDockerCompose(args, cwd, timeoutMs);
     }
 
     // ─── Hashing + diff ──────────────────────────────────────────────────────

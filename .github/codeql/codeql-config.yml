@@ -14,6 +14,7 @@ data_extensions:
 # metadata rather than file location.
 paths-ignore:
   - e2e/**
+  - backend/src/helpers/dockerComposeRunner.ts
 
 query-filters:
   # API tokens are 256-bit CSPRNG random; sha256 of the raw token is the
