@@ -35,15 +35,6 @@ const FIXTURES_DIR = path.resolve(__dirname, '..', '..', '..', 'e2e', 'fixtures'
 const VALID_TOKEN = 'sencho-integration-test-token-do-not-leak';
 const FILE_CONTENT = 'hello from the authenticated fixture repo\n';
 
-/**
- * Build a bare repo with one committed file. Mirrors e2e/gitServer.helper.ts's
- * fixture builder. Returns both the served bare dir and every scratch
- * directory created along the way, so the caller can remove them all.
- */
-function buildBareFixtureRepo(): { bareDir: string; scratchDirs: string[] } {
-    return buildRichFixtureRepo().bare;
-}
-
 interface RichFixtureRepo {
     bare: { bareDir: string; scratchDirs: string[] };
     mainSha: string;
