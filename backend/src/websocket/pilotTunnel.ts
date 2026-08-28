@@ -9,6 +9,7 @@ import { PilotMetrics } from '../services/PilotMetrics';
 import { encodeJsonFrame as encodePilotJsonFrame, PROTOCOL_VERSION as PILOT_PROTOCOL_VERSION } from '../pilot/protocol';
 import { getErrorMessage } from '../utils/errors';
 import { rejectUpgrade as rejectSocket } from './reject';
+import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 
 /** Diagnostic reject reason for Pilot agents (never required for enroll fallback). */
 type PilotRejectReason =
@@ -94,6 +95,15 @@ export async function handlePilotTunnel(
 
   const agentVersion = firstHeader(req.headers['x-sencho-agent-version']);
 
+  const socketEncrypted = (req.socket as { encrypted?: boolean }).encrypted === true;
+  const forwardedProto = firstHeader(req.headers['x-forwarded-proto']);
+  const peerAddress = req.socket.remoteAddress ?? undefined;
+  const tunnelConfidential = RegistryDeliveryService.getInstance().isPilotTransportConfidential(
+    socketEncrypted,
+    forwardedProto,
+    peerAddress,
+  );
+
   pilotTunnelWss.handleUpgrade(req, socket, head, async (ws) => {
     try {
       ws.send(encodePilotJsonFrame({
@@ -114,7 +124,12 @@ export async function handlePilotTunnel(
     }
 
     try {
-      await PilotTunnelManager.getInstance().registerTunnel(decoded.nodeId!, ws, agentVersion);
+      await PilotTunnelManager.getInstance().registerTunnel(
+        decoded.nodeId!,
+        ws,
+        agentVersion,
+        tunnelConfidential,
+      );
     } catch (err) {
       if (err instanceof PilotTunnelCapacityError) {
         // 1013 (Try Again Later) signals the agent to back off rather than

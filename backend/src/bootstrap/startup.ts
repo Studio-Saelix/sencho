@@ -35,6 +35,11 @@ import { setGitOpsEventSink } from '../services/gitops/publish';
 import { NotificationService } from '../services/NotificationService';
 import { sanitizeForLog } from '../utils/safeLog';
 import { PORT } from '../helpers/constants';
+import { sweepDockerAuthTempDirs, classifyDockerAuthChildName } from '../helpers/dockerAuthTempDir';
+import { recordRegistryDeliveryEvent } from '../helpers/registryDeliveryEvidence';
+import { PreparedSourceStore } from '../services/preparedSourceStore';
+import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
+import { RegistryDeliveryReconciler } from '../services/RegistryDeliveryReconciler';
 import { LOW_MEMORY_FLOOR_BYTES } from '../utils/spawnErrors';
 
 function isPilotMode(): boolean {
@@ -237,6 +242,41 @@ export async function startServer(server: Server): Promise<void> {
     console.warn('[GitManifest] Managed-area sweep failed:', err instanceof Error ? err.message : String(err));
   }
 
+  // Registry delivery recovery sweeps must settle before any mutation-capable
+  // producer starts (AUD-36).
+  try {
+    const deliverySourceId = RegistryDeliveryService.getInstance().getDeliverySourceId();
+    PreparedSourceStore.getInstance().configure(deliverySourceId);
+    const dockerSweep = await sweepDockerAuthTempDirs(deliverySourceId);
+    for (const basename of dockerSweep.swept) {
+      const kind = classifyDockerAuthChildName(basename);
+      recordRegistryDeliveryEvent({
+        deliverySourceId,
+        eventType: kind === 'delivered' ? 'swept_delivered' : 'swept_local',
+        tempDirId: basename,
+      });
+    }
+    for (const basename of dockerSweep.legacyOrphansObserved) {
+      recordRegistryDeliveryEvent({
+        deliverySourceId,
+        eventType: 'legacy_orphan_observed',
+        tempDirId: basename,
+      });
+    }
+    const preparedSwept = await PreparedSourceStore.getInstance().sweepOrphans(deliverySourceId);
+    for (const basename of preparedSwept) {
+      recordRegistryDeliveryEvent({
+        deliverySourceId,
+        eventType: 'swept_prepared',
+        tempDirId: basename,
+      });
+    }
+    PreparedSourceStore.getInstance().start();
+    RegistryDeliveryReconciler.getInstance().start();
+  } catch (err) {
+    console.warn('[RegistryDelivery] Startup sweep failed:', err instanceof Error ? err.message : String(err));
+  }
+
   // Synchronous starts: schedule background timers and continue. None of
   // these fire their first tick for at least a few seconds, so they
   // safely run alongside the async initializers below.
@@ -262,6 +302,7 @@ export async function startServer(server: Server): Promise<void> {
   PilotTunnelManager.getInstance().on('tunnel-up', (nodeId: number) => {
     invalidateRemoteMetaCache(nodeId);
     void SuppressionRetractionRetryService.getInstance().flushNode(nodeId);
+    void RegistryDeliveryReconciler.getInstance().reconcileNode(nodeId);
   });
 
   // Most async initializers still run in parallel. Docker event monitoring

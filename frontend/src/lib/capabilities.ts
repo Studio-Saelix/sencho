@@ -42,6 +42,7 @@ export const CAPABILITIES = [
   'service-scoped-update',
   'service-scoped-stack-alert',
   'scoped-stack-auth-evidence',
+  'remote-registry-credentials',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -58,3 +59,4 @@ export const GUIDED_EXTERNAL_NETWORK_PREFLIGHT_CAPABILITY = 'guided-external-net
 export const SERVICE_SCOPED_UPDATE_CAPABILITY = 'service-scoped-update' as const satisfies Capability;
 export const SERVICE_SCOPED_STACK_ALERT_CAPABILITY = 'service-scoped-stack-alert' as const satisfies Capability;
 export const SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY = 'scoped-stack-auth-evidence' as const satisfies Capability;
+export const REMOTE_REGISTRY_CREDENTIALS_CAPABILITY = 'remote-registry-credentials' as const satisfies Capability;

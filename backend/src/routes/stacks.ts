@@ -26,6 +26,7 @@ import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../se
 import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
+import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
@@ -143,7 +144,14 @@ function tryAcquireStackOpLock(
   action: StackOpAction,
 ): boolean {
   const user = req.user?.username ?? 'system';
-  const result = StackOpLockService.getInstance().tryAcquire(req.nodeId, stackName, action, user);
+  const lockContext = getRegistryDeliveryLockContext();
+  const result = StackOpLockService.getInstance().tryAcquire(
+    req.nodeId,
+    stackName,
+    action,
+    user,
+    lockContext,
+  );
   if (!result.acquired) {
     res.status(409).json({
       error: `${stackName} is already ${STACK_OP_PRESENT_PARTICIPLE[result.existing.action]}`,
@@ -2577,7 +2585,13 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     // without this a blocked rollback would leave disk rolled back while the
     // deployed state is unchanged.
     revertRestore = await fsSvc.snapshotStackFiles(stackName);
-    await fsSvc.restoreStackFiles(stackName);
+    const deliveryPrepId = getRegistryDeliveryContext()?.envelope.prepId;
+    if (deliveryPrepId) {
+      const { materializePreparedSourceToStack } = await import('../helpers/registryDeliveryMaterialize');
+      await materializePreparedSourceToStack(deliveryPrepId, req.nodeId, stackName);
+    } else {
+      await fsSvc.restoreStackFiles(stackName);
+    }
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) {
       try {
         await revertRestore();

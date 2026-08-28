@@ -368,14 +368,26 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
             if (s) this.teardownStream(s);
             this.removeStream(streamId);
         });
+        req.on('aborted', () => {
+            if (this.streams.has(streamId)) {
+                this.notifyHttpClientAbort(streamId);
+                this.removeStream(streamId);
+            }
+        });
 
         res.on('close', () => {
             // Client disconnected before response finished.
             if (this.streams.has(streamId)) {
+                this.notifyHttpClientAbort(streamId);
                 this.removeStream(streamId);
-                this.sendJson({ t: 'http_err', s: streamId, code: 'tunnel_down', message: 'client aborted' });
             }
         });
+    }
+
+    /** Notify the agent that the loopback HTTP client disconnected mid-request. */
+    private notifyHttpClientAbort(streamId: number): void {
+        this.sendJson({ t: 'http_cancel', s: streamId });
+        this.sendJson({ t: 'http_err', s: streamId, code: 'tunnel_down', message: 'client aborted' });
     }
 
     private handleLoopbackUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): void {

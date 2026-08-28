@@ -1543,6 +1543,39 @@ describe('ComposeService - idle-output stall backstop', () => {
     await promise;
   });
 
+  it('terminates compose when the registry delivery abort signal fires', async () => {
+    const { runWithRegistryDeliveryContext } = await import('../helpers/registryDeliveryContext');
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    const abortController = new AbortController();
+
+    const svc = ComposeService.getInstance(1);
+    const result = runWithRegistryDeliveryContext(
+      {
+        envelope: {
+          attestation: 'unused',
+          auths: [],
+          notAfter: Date.now() + 60_000,
+          deliverySourceId: 'test',
+        },
+        nodeId: 1,
+        stack: 'my-stack',
+        stage: 'stack-deploy',
+        abortSignal: abortController.signal,
+      },
+      () => svc.runCommand('my-stack', 'restart'),
+    ).then(() => null, (e: Error) => e);
+
+    await waitForSpawn();
+    abortController.abort();
+    proc.emit('close', null);
+
+    const error = await result;
+    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(error).not.toBeNull();
+    expect((error as Error).message).toContain('OPERATION_ABORTED');
+  });
+
   it('falls back to the default stall window when the env value is invalid', async () => {
     process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = '0'; // invalid → default (10min)
     mockListContainers.mockResolvedValue([]);

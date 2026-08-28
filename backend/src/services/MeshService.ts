@@ -24,6 +24,7 @@ import { isPathWithinBase, isValidStackName, isValidRelativeStackPath } from '..
 import { getErrorMessage } from '../utils/errors';
 import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
+import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
 
 const ACTIVITY_BUFFER_SIZE = 1000;
 const ALIAS_REFRESH_INTERVAL_MS = 60_000;
@@ -2497,10 +2498,30 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (target.apiToken) headers['Authorization'] = `Bearer ${target.apiToken}`;
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
         headers[PROXY_TIER_HEADER] = proxyHeaders.tier;
+
+        let bodyToSend: unknown = body;
+        if (method === 'POST' || method === 'PUT') {
+            const bodyRecord = body === undefined || body === null
+                ? {}
+                : (typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : null);
+            if (bodyRecord !== null) {
+                const augmented = await prepareOutboundRegistryDeliveryBody({
+                    method,
+                    apiPath,
+                    nodeId,
+                    body: bodyRecord,
+                });
+                if (!augmented.ok) {
+                    throw new MeshError('push_failed', augmented.error);
+                }
+                bodyToSend = augmented.body;
+            }
+        }
+
         return await fetch(url, {
             method,
             headers,
-            body: body === undefined ? undefined : JSON.stringify(body),
+            body: bodyToSend === undefined ? undefined : JSON.stringify(bodyToSend),
             signal: AbortSignal.timeout(timeoutMs),
         });
     }

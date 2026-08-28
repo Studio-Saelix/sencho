@@ -14,6 +14,8 @@ import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import { getRegistryDeliveryContext } from '../helpers/registryDeliveryContext';
+import { materializePreparedSourceToStack } from '../helpers/registryDeliveryMaterialize';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 
 export const templatesRouter = Router();
@@ -118,13 +120,18 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
 
     await fsService.createStack(stackName);
 
-    const composeYaml = templateService.generateComposeFromTemplate(template, stackName);
-    await fsService.saveStackContent(stackName, composeYaml);
+    const deliveryPrepId = getRegistryDeliveryContext()?.envelope.prepId;
+    if (deliveryPrepId) {
+      await materializePreparedSourceToStack(deliveryPrepId, req.nodeId, stackName);
+    } else {
+      const composeYaml = templateService.generateComposeFromTemplate(template, stackName);
+      await fsService.saveStackContent(stackName, composeYaml);
 
-    if (envVars && Object.keys(envVars).length > 0) {
-      const envString = templateService.generateEnvString(envVars);
-      const defaultEnvPath = path.join(stackPath, '.env');
-      await fsPromises.writeFile(defaultEnvPath, envString, 'utf-8');
+      if (envVars && Object.keys(envVars).length > 0) {
+        const envString = templateService.generateEnvString(envVars);
+        const defaultEnvPath = path.join(stackPath, '.env');
+        await fsPromises.writeFile(defaultEnvPath, envString, 'utf-8');
+      }
     }
 
     try {

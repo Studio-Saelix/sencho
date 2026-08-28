@@ -1158,6 +1158,35 @@ export class RollbackGenerationStore {
     }
     return Buffer.from(b64, 'base64');
   }
+
+  /**
+   * Copy present generation compose/project files into destDir for registry-delivery
+   * preparation. Preserves stack-relative paths under destDir.
+   */
+  static async copyPresentFilesToDir(
+    nodeId: number,
+    stackName: string,
+    generationId: string,
+    destDir: string,
+  ): Promise<void> {
+    assertSafeStackName(stackName);
+    assertSafeGenerationId(generationId);
+    const genDir = this.getGenerationDir(nodeId, stackName, generationId);
+    const manifest = await this.readAndVerifyGeneration(genDir);
+    await mkdirPrivate(destDir);
+    for (const entry of manifest.entries) {
+      if (entry.state !== 'present') continue;
+      const rel = posixRel(entry.relativePath);
+      const dest = path.resolve(destDir, rel);
+      const destRoot = path.resolve(destDir);
+      if (!dest.startsWith(destRoot + path.sep) && dest !== destRoot) {
+        throw Object.assign(new Error('Path escapes restore staging directory'), { code: 'INVALID_PATH' });
+      }
+      await mkdirPrivate(path.dirname(dest));
+      const content = await this.readPresentEntryBytes(genDir, entry);
+      await writePrivate(dest, content);
+    }
+  }
 }
 
 export { getBackupBaseDir, getDataDir };

@@ -58,6 +58,10 @@ declare global {
        * passes for a non-admin user. Resets to undefined after the hop.
        */
       proxyElevatedRole?: 'node-admin';
+      /** Verified registry delivery envelope for the current classified operation. */
+      registryDeliveryEnvelope?: import('../helpers/registryDeliveryContext').RegistryDeliveryEnvelope;
+      /** Abort controller wired for registry delivery disconnect handling. */
+      registryDeliveryAbortController?: AbortController;
     }
   }
 }

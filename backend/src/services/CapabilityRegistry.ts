@@ -64,6 +64,7 @@ export const CAPABILITIES = [
   'service-scoped-update',
   'service-scoped-stack-alert',
   'scoped-stack-auth-evidence',
+  'remote-registry-credentials',
 ] as const;
 
 /**
@@ -118,6 +119,10 @@ export const SERVICE_SCOPED_STACK_ALERT_CAPABILITY =
  */
 export const SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY =
   'scoped-stack-auth-evidence' as const satisfies Capability;
+
+/** Remotes that accept hub-delivered registry credentials for Compose operations. */
+export const REMOTE_REGISTRY_CREDENTIALS_CAPABILITY =
+  'remote-registry-credentials' as const satisfies Capability;
 
 /** Returns true when the string is a usable semver version. */
 export function isValidVersion(v: string | null | undefined): v is string {

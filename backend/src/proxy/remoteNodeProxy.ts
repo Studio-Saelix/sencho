@@ -51,6 +51,12 @@ import {
 import type { PermissionAction } from '../middleware/permissions';
 import { SETTING_WRITE_PERMISSIONS } from '../routes/settings';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
+import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
+import {
+  classifyRegistryDeliveryRouteClass,
+  getRegistryDeliveryTotalBodyLimit,
+} from '../helpers/registryDeliveryBodyLimits';
+import { augmentRemoteProxyWithRegistryDelivery } from '../helpers/registryDeliveryProxy';
 
 /**
  * Per-request hop timing for the critical hydration GETs, kept off the Request
@@ -698,6 +704,52 @@ export function createRemoteProxyMiddleware(): RequestHandler {
           return;
         }
         req.proxyElevatedRole = 'node-admin';
+      }
+
+      // Registry credential delivery: when capability and confidential
+      // transport are present, run hop-1 discover and attach the envelope to
+      // the forwarded JSON body. Otherwise forward unchanged (AUD-30).
+      const deliveryApiPath = `/api${req.path}`;
+      if (RegistryDeliveryService.getInstance().isDeliveryEligibleRoute(req.method, deliveryApiPath)) {
+        if (hasNonIdentityContentEncoding(req)) {
+          await drainRequestBody(req);
+          res.status(415).json({
+            error: 'Compressed request bodies are not supported for remote registry delivery',
+            code: 'encoding_unsupported',
+          });
+          return;
+        }
+        const routeClass = classifyRegistryDeliveryRouteClass(req.method, deliveryApiPath);
+        if (routeClass) {
+          const bodyLimit = getRegistryDeliveryTotalBodyLimit(routeClass);
+          try {
+            req.rawBody = await bufferRequestBody(req, bodyLimit);
+          } catch (err) {
+            const status = Number((err as { status?: number }).status);
+            if (status === 413) {
+              res.status(413).json({ error: 'Request body too large for registry delivery' });
+              return;
+            }
+            if (status === 400) {
+              res.status(400).json({ error: 'Incomplete request body' });
+              return;
+            }
+            throw err;
+          }
+          const deliveryResult = await augmentRemoteProxyWithRegistryDelivery(
+            req,
+            req.nodeId,
+            node,
+            target,
+            req.rawBody,
+          );
+          if (!deliveryResult.forward) {
+            res.status(deliveryResult.status ?? 500).json({
+              error: deliveryResult.error ?? 'Registry delivery failed',
+            });
+            return;
+          }
+        }
       }
 
       req.proxyTarget = target;

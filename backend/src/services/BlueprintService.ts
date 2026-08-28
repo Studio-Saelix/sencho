@@ -16,6 +16,7 @@ import { NodeRegistry } from './NodeRegistry';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import { LicenseService } from './LicenseService';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions, describePolicyBlock, triggerPostDeployScan } from '../helpers/policyGate';
+import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -617,14 +618,25 @@ export class BlueprintService {
         const baseUrl = target.apiUrl.replace(/\/$/, '');
         const headers = this.remoteHeaders(target.apiToken);
 
+        const applyBody = {
+            stackName: blueprint.name,
+            composeContent: blueprint.compose_content,
+            markerContent: JSON.stringify(marker, null, 2),
+        };
+        const augmented = await prepareOutboundRegistryDeliveryBody({
+            method: 'POST',
+            apiPath: '/api/blueprints/apply-local',
+            nodeId: node.id,
+            body: applyBody,
+        });
+        if (!augmented.ok) {
+            throw new Error(augmented.error);
+        }
+
         // Atomic apply: the remote validates ownership and writes under its stack lock.
         const res = await axios.post(
             `${baseUrl}/api/blueprints/apply-local`,
-            {
-                stackName: blueprint.name,
-                composeContent: blueprint.compose_content,
-                markerContent: JSON.stringify(marker, null, 2),
-            },
+            augmented.body,
             { headers, timeout: REMOTE_HTTP_TIMEOUT_MS, validateStatus: () => true },
         );
         if (res.status === 404) {
