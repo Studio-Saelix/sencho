@@ -10,6 +10,16 @@ const COMPOSE_FILENAMES = [
   '.env',
 ];
 
+/** Stable hash of inline compose body content (body-content discovery). */
+export function hashComposeBodyContent(composeContent: string): string {
+  const hash = crypto.createHash('sha256');
+  hash.update('compose.yaml');
+  hash.update('\0');
+  hash.update(composeContent);
+  hash.update('\n');
+  return hash.digest('hex');
+}
+
 /** Stable hash of the live project file bundle used for live-project delivery. */
 export function hashProjectSource(projectDir: string): string {
   const hash = crypto.createHash('sha256');

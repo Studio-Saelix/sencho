@@ -94,6 +94,18 @@ function discoverDockerfiles(baseResolved: string): string[] {
   return [...hosts];
 }
 
+export function discoverRegistryReferencesFromComposeContent(
+  composeContent: string,
+  envVars: Record<string, string> = {},
+): RegistryReferenceDiscoveryResult {
+  const hosts = new Set<string>();
+  for (const image of extractImagesFromCompose(composeContent, envVars)) {
+    const host = hostFromImageRef(image);
+    if (host) hosts.add(host);
+  }
+  return { referencedHosts: [...hosts].sort() };
+}
+
 /**
  * Discover registry hosts referenced by compose files and Dockerfiles in a
  * project directory. Returns referenced hosts, not proven-private hosts.

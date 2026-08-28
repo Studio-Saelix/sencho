@@ -86,6 +86,7 @@ query-filters:
       id: js/path-injection
       paths:
         - backend/src/helpers/registryDeliveryGitCandidate.ts
+        - backend/src/helpers/registryDeliveryMaterialize.ts
 
   # hashDeliverySourceDir and Dockerfile discovery read files during the same
   # directory walk that enumerated them. The TOCTOU window is accepted for

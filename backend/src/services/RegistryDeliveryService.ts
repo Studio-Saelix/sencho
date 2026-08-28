@@ -1,15 +1,13 @@
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
-import os from 'os';
 import path from 'path';
-import { promises as fsPromises } from 'fs';
 import { DatabaseService } from './DatabaseService';
 import { NodeRegistry } from './NodeRegistry';
 import {
   RegistryService,
   type DockerConfigHostResolution,
 } from './RegistryService';
-import { discoverRegistryReferences } from './registryReferenceDiscovery';
+import { discoverRegistryReferences, discoverRegistryReferencesFromComposeContent } from './registryReferenceDiscovery';
 import { remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
 import { REMOTE_REGISTRY_CREDENTIALS_CAPABILITY } from './CapabilityRegistry';
 import { isTrustedProxyPeer } from '../helpers/trustedProxyCidrs';
@@ -17,7 +15,7 @@ import type { RegistryDeliveryEnvelope, RegistryDeliveryAuthEntry } from '../hel
 import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
 import { prepareSourceForDiscover } from '../helpers/registryDeliveryPrepare';
 import { PreparedSourceStore } from './preparedSourceStore';
-import { hashProjectSource } from '../helpers/registryDeliveryHashes';
+import { hashComposeBodyContent, hashProjectSource } from '../helpers/registryDeliveryHashes';
 import { isValidStackName } from '../utils/validation';
 
 const ATTESTATION_AUD = 'registry-delivery';
@@ -172,21 +170,12 @@ export class RegistryDeliveryService {
       if (Buffer.byteLength(request.composeContent, 'utf8') > MAX_COMPOSE_CONTENT_BYTES) {
         throw new Error('Compose content exceeds size limit');
       }
-      const stagingDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-regdisc-'));
-      try {
-        await fsPromises.mkdir(stagingDir, { recursive: true, mode: 0o700 });
-        const composePath = path.resolve(stagingDir, 'compose.yaml');
-        if (!composePath.startsWith(path.resolve(stagingDir) + path.sep)) {
-          throw new Error('Invalid staging path');
-        }
-        // Canonical js/path-injection barrier inline with the write sink.
-        await fsPromises.writeFile(composePath, request.composeContent, { mode: 0o600 });
-        sourceHash = hashProjectSource(stagingDir);
-        const discovery = discoverRegistryReferences(stagingDir, request.envVars ?? {});
-        referencedHosts = discovery.referencedHosts;
-      } finally {
-        await fsPromises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
-      }
+      sourceHash = hashComposeBodyContent(request.composeContent);
+      const discovery = discoverRegistryReferencesFromComposeContent(
+        request.composeContent,
+        request.envVars ?? {},
+      );
+      referencedHosts = discovery.referencedHosts;
     } else if (request.stack) {
       if (!isValidStackName(request.stack)) {
         throw new Error('Invalid stack name');

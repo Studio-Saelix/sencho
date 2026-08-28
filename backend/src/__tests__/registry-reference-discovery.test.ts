@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import {
   discoverRegistryReferences,
+  discoverRegistryReferencesFromComposeContent,
   parseDockerfileReferences,
 } from '../services/registryReferenceDiscovery';
 
@@ -22,6 +23,13 @@ describe('registryReferenceDiscovery', () => {
     const result = discoverRegistryReferences(dir);
     expect(result.referencedHosts).toContain('ghcr.io');
     expect(result.referencedHosts).toContain('index.docker.io');
+  });
+
+  it('discovers hosts from inline compose content', () => {
+    const result = discoverRegistryReferencesFromComposeContent(
+      'services:\n  app:\n    image: ghcr.io/org/private-app:latest\n',
+    );
+    expect(result.referencedHosts).toEqual(['ghcr.io']);
   });
 
   it('ignores numeric COPY --from stages in isolation', () => {
