@@ -129,13 +129,7 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
 
       if (envVars && Object.keys(envVars).length > 0) {
         const envString = templateService.generateEnvString(envVars);
-        const defaultEnvPath = path.resolve(stackPath, '.env');
-        const baseResolved = path.resolve(baseDir);
-        if (!defaultEnvPath.startsWith(baseResolved + path.sep)) {
-          return res.status(400).json({ error: 'Invalid stack path' });
-        }
-        // Canonical js/path-injection barrier inline with the write sink.
-        await fsPromises.writeFile(defaultEnvPath, envString, 'utf-8');
+        await fsService.saveEnvContent(stackName, envString);
       }
     }
 

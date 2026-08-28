@@ -46,6 +46,7 @@ import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readSta
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops/createCleanup';
 import { managedAreaBase } from './gitops/managedPaths';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
+import { copyPreparedPayloadDirectory } from '../helpers/registryDeliveryMaterialize';
 
 /**
  * GitSourceService - fetch compose files from a Git repository and apply
@@ -3606,7 +3607,7 @@ export class GitSourceService {
         }
         const stagingDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-regprep-'));
         try {
-            await this.copyDirectoryForRegistryDelivery(candidateAbs, stagingDir);
+            await copyPreparedPayloadDirectory(candidateAbs, stagingDir);
             const { writeGitCandidatePreparedMeta } = await import('../helpers/registryDeliveryGitCandidate');
             await writeGitCandidatePreparedMeta(stagingDir, {
                 version: 1,
@@ -3664,7 +3665,7 @@ export class GitSourceService {
         }
         const stagingDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-regprep-'));
         try {
-            await this.copyDirectoryForRegistryDelivery(candidateAbs, stagingDir);
+            await copyPreparedPayloadDirectory(candidateAbs, stagingDir);
             const { writeGitCandidatePreparedMeta } = await import('../helpers/registryDeliveryGitCandidate');
             await writeGitCandidatePreparedMeta(stagingDir, {
                 version: 1,
@@ -3693,28 +3694,6 @@ export class GitSourceService {
         } catch (error) {
             await fsPromises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
             throw error;
-        }
-    }
-
-    private async copyDirectoryForRegistryDelivery(srcDir: string, destDir: string): Promise<void> {
-        const destRoot = path.resolve(destDir);
-        // Canonical js/path-injection barrier inline with the mkdir sink.
-        await fsPromises.mkdir(destRoot, { recursive: true, mode: 0o700 });
-        const entries = await fsPromises.readdir(srcDir, { withFileTypes: true });
-        for (const entry of entries) {
-            if (entry.isSymbolicLink()) continue;
-            const src = path.join(srcDir, entry.name);
-            const dest = path.resolve(destRoot, entry.name);
-            if (!dest.startsWith(destRoot + path.sep)) continue;
-            if (entry.isDirectory()) {
-                await this.copyDirectoryForRegistryDelivery(src, dest);
-                continue;
-            }
-            if (entry.isFile()) {
-                // Canonical js/path-injection barrier inline with the copy sink.
-                await fsPromises.copyFile(src, dest);
-                await fsPromises.chmod(dest, 0o600);
-            }
         }
     }
 

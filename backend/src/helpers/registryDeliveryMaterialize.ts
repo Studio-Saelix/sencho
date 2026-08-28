@@ -4,6 +4,26 @@ import { FileSystemService } from '../services/FileSystemService';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
 import { isValidStackName } from '../utils/validation';
 
+export async function copyPreparedPayloadDirectory(srcDir: string, destDir: string): Promise<void> {
+  const destRoot = path.resolve(destDir);
+  await fsPromises.mkdir(destRoot, { recursive: true, mode: 0o700 });
+  const entries = await fsPromises.readdir(srcDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue;
+    const src = path.join(srcDir, entry.name);
+    const dest = path.resolve(destRoot, entry.name);
+    if (!dest.startsWith(destRoot + path.sep)) continue;
+    if (entry.isDirectory()) {
+      await copyTree(src, dest, destRoot);
+      continue;
+    }
+    if (entry.isFile()) {
+      await fsPromises.copyFile(src, dest);
+      await fsPromises.chmod(dest, 0o600);
+    }
+  }
+}
+
 /**
  * Copy a prepared payload bundle into a stack directory before compose runs.
  * Used when hop-1 discovery stored the exact bytes the operation will execute.
@@ -26,21 +46,7 @@ export async function materializePreparedSourceToStack(
   }
   await fsPromises.mkdir(stackDir, { recursive: true, mode: 0o700 });
 
-  const entries = await fsPromises.readdir(payloadPath, { withFileTypes: true });
-  for (const entry of entries) {
-    if (entry.isSymbolicLink()) continue;
-    const src = path.join(payloadPath, entry.name);
-    const dest = path.resolve(stackDir, entry.name);
-    if (!dest.startsWith(stackDir + path.sep)) continue;
-    if (entry.isDirectory()) {
-      await copyTree(src, dest, stackDir);
-      continue;
-    }
-    if (entry.isFile()) {
-      await fsPromises.copyFile(src, dest);
-      await fsPromises.chmod(dest, 0o600);
-    }
-  }
+  await copyPreparedPayloadDirectory(payloadPath, stackDir);
 }
 
 async function copyTree(srcDir: string, destDir: string, stackRoot: string): Promise<void> {

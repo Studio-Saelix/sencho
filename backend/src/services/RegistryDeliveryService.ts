@@ -172,7 +172,7 @@ export class RegistryDeliveryService {
       if (Buffer.byteLength(request.composeContent, 'utf8') > MAX_COMPOSE_CONTENT_BYTES) {
         throw new Error('Compose content exceeds size limit');
       }
-      const stagingDir = path.join(os.tmpdir(), `sencho-regdisc-${crypto.randomBytes(8).toString('hex')}`);
+      const stagingDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-regdisc-'));
       try {
         await fsPromises.mkdir(stagingDir, { recursive: true, mode: 0o700 });
         const composePath = path.resolve(stagingDir, 'compose.yaml');
