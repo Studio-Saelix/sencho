@@ -155,9 +155,9 @@ export function classifyGitFailure(
     // A host that refuses to serve an unadvertised object (SHA fetch without
     // allowAnySHA1InWant/allowReachableSHA1InWant) still exits non-zero, but
     // the failure is about server capability, not the SHA existing. Hosts word
-    // the refusal differently (GitHub vs GitLab/Gitea), so match the stable
-    // "unadvertised object" phrase rather than the full sentence.
-    if (/unadvertised object/.test(raw)) {
+    // the refusal differently (GitHub vs GitLab/Gitea), so match stable phrases
+    // rather than one vendor's full sentence.
+    if (/unadvertised object|not our ref/.test(raw)) {
         return { code: 'UNSUPPORTED_REF', message: 'The configured commit is not reachable on this repository host. Use a branch or tag, or a commit the host advertises.' };
     }
     if (/repository[\s\S]*\bnot found\b|not found in upstream/.test(raw)) {

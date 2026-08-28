@@ -882,6 +882,9 @@ export async function verifyFastForward(req: {
     } finally {
         watchdog.stop();
         await awaitKillConfirmed(breachKill, `size-breach kill for ${url.host}`);
+        await fs.rm(repoDir, { recursive: true, force: true }).catch((e: unknown) => {
+            console.warn(`[GitSource:transport] failed to remove fast-forward scratch repo ${repoDir}: ${e instanceof Error ? e.message : String(e)}`);
+        });
     }
 }
 

@@ -9,7 +9,7 @@
  *   flow, and the size watchdog.
  */
 import { EventEmitter } from 'events';
-import { promises as fs, rmSync } from 'fs';
+import { promises as fs, rmSync, existsSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -200,6 +200,18 @@ describe('classifyGitFailure (native git stderr corpus)', () => {
             exitCode: 128,
             host: 'github.com',
             hasToken: false,
+        });
+        expect(c.code).toBe('UNSUPPORTED_REF');
+    });
+
+    it('classifies GitHub not-our-ref SHA refusal as UNSUPPORTED_REF', () => {
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr: 'fatal: remote error: upload-pack: not our ref abcdef0123456789abcdef0123456789abcdef',
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: true,
         });
         expect(c.code).toBe('UNSUPPORTED_REF');
     });
@@ -1167,6 +1179,35 @@ describe('clone failure classification and final size gate', () => {
                 transportFailure: true as const,
                 reason: 'timeout',
             });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('removes the fast-forward scratch repo so shared workspace size checks stay accurate', async () => {
+        scriptSpawn([
+            { code: 0 },
+            { code: 0 },
+            { stdout: '1\n' },
+            { code: 1 },
+            { stdout: 'true\n' },
+            { code: 0 },
+            { stdout: '2\n' },
+            { code: 0 },
+            { code: 0 },
+        ]);
+        const root = await makeWorkspace();
+
+        try {
+            await expect(verifyFastForward({
+                repoUrl: 'https://github.com/example/repo.git',
+                ancestorSha: SHA_B,
+                descendantSha: SHA_A,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+                maxBytes: 100 * 1024 * 1024,
+            })).resolves.toBe(true);
+            expect(existsSync(path.join(root, 'ff-check'))).toBe(false);
         } finally {
             await fs.rm(root, { recursive: true, force: true });
         }

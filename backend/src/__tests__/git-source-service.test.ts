@@ -822,6 +822,15 @@ describe('GitSourceService error mapping', () => {
             .rejects.toMatchObject({ code: 'NETWORK_TIMEOUT' });
     });
 
+    it('maps GitHub not-our-ref SHA refusal to UNSUPPORTED_REF', async () => {
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            'fatal: remote error: upload-pack: not our ref 0123456789abcdef0123456789abcdef01234567',
+            false,
+        ));
+        await expect(svc().fetchFromGit({ ...fetchParams, branch: '0123456789abcdef0123456789abcdef01234567' }))
+            .rejects.toMatchObject({ code: 'UNSUPPORTED_REF' });
+    });
+
     it('leaves a missing pinned SHA as GIT_ERROR, not UNSUPPORTED_REF', async () => {
         // A SHA the host simply has never seen surfaces as "couldn't find
         // remote ref". That is a missing object, not a server-capability

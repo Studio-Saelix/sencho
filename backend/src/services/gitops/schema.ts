@@ -151,7 +151,9 @@ CREATE TABLE IF NOT EXISTS gitops_generations (
   commit_sha TEXT NOT NULL,
   repo_url TEXT NOT NULL,
   configured_ref TEXT NOT NULL,
-  resolved_ref_kind TEXT NULL,
+  resolved_ref_kind TEXT NULL CHECK (
+    resolved_ref_kind IS NULL OR resolved_ref_kind IN ('branch','tag','sha')
+  ),
   repo_identity_json TEXT NOT NULL,
   manifest_version INTEGER NOT NULL,
   candidate_dir TEXT NOT NULL,

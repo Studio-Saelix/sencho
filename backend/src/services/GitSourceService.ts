@@ -428,7 +428,7 @@ const SUBMODULE_WARNING =
     'Repository contains Git submodules. Their contents are not cloned; any paths referenced from them will be missing at deploy time.';
 
 const REF_DELETED_MESSAGE =
-    'The configured branch, tag, or commit existed before but no longer resolves on the remote. It may have been deleted or force-pushed.';
+    'The configured branch, tag, or commit no longer points at the same revision as before. It may have been deleted, force-pushed, or moved to a different commit (for example a retagged release).';
 
 function priorFetchIdentity(app: GitOpsApplicationRow | null | undefined): FetchParams['priorIdentity'] {
     if (!app?.fetched_commit_sha) return undefined;

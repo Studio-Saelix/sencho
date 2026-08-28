@@ -61,6 +61,7 @@ describe('gitops create-from-git', () => {
     expect(app.lifecycle_status).toBe('creating');
     expect(app.desired_commit_sha).toBe(SHA);
     expect(app.fetched_commit_sha).toBe(SHA);
+    expect(app.fetched_resolved_ref_kind).toBe('branch');
     expect(app.candidate_generation_id).toBe('gen-create');
     expect(app.accepted_generation_id).toBeNull();
     expect(app.source_acceptance_ref).toBeNull();

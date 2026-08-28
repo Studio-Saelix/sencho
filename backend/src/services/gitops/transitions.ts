@@ -460,6 +460,7 @@ export class GitOpsTransitions {
 
       app.desired_commit_sha = args.commitSha;
       app.fetched_commit_sha = args.commitSha;
+      app.fetched_resolved_ref_kind = args.generation.resolved_ref_kind;
       app.retry_count = 0;
       pushHistory(this.history(app, args.envelope, {
         stage: 'fetched',
