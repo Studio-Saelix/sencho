@@ -50,6 +50,7 @@ import {
 } from '../middleware/permissions';
 import type { PermissionAction } from '../middleware/permissions';
 import { SETTING_WRITE_PERMISSIONS } from '../routes/settings';
+import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 
 /**
  * Per-request hop timing for the critical hydration GETs, kept off the Request
@@ -376,6 +377,18 @@ export function createRemoteProxyMiddleware(): RequestHandler {
     if (isProxyExemptPath(`/api${req.path}`)) {
       next();
       return;
+    }
+
+    // SSO configuration routes are human-session-only. The destination-side
+    // rejectApiTokenScope cannot detect the original API token because this
+    // proxy replaces incoming credentials with a node-to-node JWT. Reject
+    // API-token-authenticated requests here, covering the /sso/config collection
+    // and all descendant paths (req.path is post-/api strip). Express matches
+    // routes case-insensitively, so this guard must too (the i flag).
+    if (/^\/sso\/config(?:\/|$)/i.test(req.path)) {
+      if (rejectApiTokenScope(req, res, 'API tokens cannot access SSO configuration.')) {
+        return;
+      }
     }
 
     const node = NodeRegistry.getInstance().getNode(req.nodeId);

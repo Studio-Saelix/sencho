@@ -41,6 +41,31 @@ ssoConfigRouter.get('/', (req: Request, res: Response): void => {
   }
 });
 
+ssoConfigRouter.get('/role-sync', (req: Request, res: Response): void => {
+  if (rejectApiTokenScope(req, res, SSO_SCOPE_MESSAGE)) return;
+  if (!requireAdmin(req, res)) return;
+  const enabled = DatabaseService.getInstance().getGlobalSettings()['sso_role_sync'] === '1';
+  res.json({ enabled });
+});
+
+ssoConfigRouter.put('/role-sync', (req: Request, res: Response): void => {
+  if (rejectApiTokenScope(req, res, SSO_SCOPE_MESSAGE)) return;
+  if (!requireAdmin(req, res)) return;
+  const enabled = req.body?.enabled;
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({ error: 'enabled must be a boolean' });
+    return;
+  }
+  try {
+    DatabaseService.getInstance().updateGlobalSetting('sso_role_sync', enabled ? '1' : '0');
+    console.log(`[SSO] role-sync updated: ${enabled ? 'enabled' : 'disabled'}`);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[SSO] Failed to update role-sync setting:', error);
+    res.status(500).json({ error: 'Failed to update role-sync setting' });
+  }
+});
+
 ssoConfigRouter.get('/:provider', (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, SSO_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
