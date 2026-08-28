@@ -185,10 +185,23 @@ describe('classifyGitFailure (native git stderr corpus)', () => {
     it.each([
         ['size', { transportFailure: true as const, reason: 'size', maxBytes: 5 * 1024 * 1024, host: 'h', hasToken: false }, 'Repository exceeds the maximum clone size of 5 MB.'],
         ['tip-changed', { transportFailure: true as const, reason: 'tip-changed', host: 'h', hasToken: false }, 'Repository tip changed during fetch; retry the pull.'],
-        ['ref-not-found', { transportFailure: true as const, reason: 'ref-not-found', host: 'h', hasToken: false }, 'Branch not found in the repository.'],
+        ['ref-not-found', { transportFailure: true as const, reason: 'ref-not-found', host: 'h', hasToken: false }, 'The configured branch, tag, or commit was not found in the repository.'],
+        ['unsupported-ref', { transportFailure: true as const, reason: 'unsupported-ref', host: 'h', hasToken: false }, 'The configured commit is not reachable on this repository host. Use a branch or tag, or a commit the host advertises.'],
         ['timeout', { transportFailure: true as const, reason: 'timeout', host: 'github.com', hasToken: false }, 'Timed out reaching github.com.'],
     ] as const)('maps structured reason %s verbatim', (_label, failure, message) => {
         expect(classifyGitFailure(failure)).toMatchObject({ message });
+    });
+
+    it('classifies a server SHA-fetch refusal as UNSUPPORTED_REF', () => {
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr: "error: Server does not allow request for unadvertised object 3b18e5d",
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: false,
+        });
+        expect(c.code).toBe('UNSUPPORTED_REF');
     });
 
     it('scrubs credentials from the generic fallback tail', () => {
@@ -570,6 +583,7 @@ describe('resolve/fetch/verify flow', () => {
             const result = await nativeGitTransport.fetchAtCommit({
                 repoUrl: 'https://github.com/example/repo.git',
                 ref: 'main',
+                refKind: 'branch',
                 commitSha: SHA_A,
                 timeoutMs: 5000,
                 workspaceRoot: root,
@@ -601,11 +615,70 @@ describe('resolve/fetch/verify flow', () => {
             await expect(nativeGitTransport.fetchAtCommit({
                 repoUrl: 'https://github.com/example/repo.git',
                 ref: 'main',
+                refKind: 'branch',
                 commitSha: SHA_A,
                 timeoutMs: 5000,
                 workspaceRoot: root,
                 maxBytes: 100 * 1024 * 1024,
             })).rejects.toMatchObject({ transportFailure: true as const, reason: 'tip-changed' });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('fetches a tag through a bare --branch name', async () => {
+        scriptSpawn([
+            { code: 0 },              // clone
+            { stdout: `${SHA_A}\n` }, // rev-parse HEAD
+        ]);
+        const root = await makeWorkspace();
+        try {
+            const result = await nativeGitTransport.fetchAtCommit({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: 'v1',
+                refKind: 'tag',
+                commitSha: SHA_A,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+                maxBytes: 100 * 1024 * 1024,
+            });
+            expect(result.commitSha).toBe(SHA_A);
+            const cloneArgs = spawnArgs(0);
+            const branchIdx = cloneArgs.indexOf('--branch');
+            expect(branchIdx).toBeGreaterThan(-1);
+            expect(cloneArgs[branchIdx + 1]).toBe('v1');
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('fetches a pinned SHA via init + fetch + detached checkout', async () => {
+        scriptSpawn([
+            { code: 0 },              // init
+            { code: 0 },              // fetch <sha>
+            { code: 0 },              // checkout --detach
+            { stdout: `${SHA_A}\n` }, // rev-parse HEAD
+        ]);
+        const root = await makeWorkspace();
+        try {
+            const result = await nativeGitTransport.fetchAtCommit({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: SHA_A,
+                refKind: 'sha',
+                commitSha: SHA_A,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+                maxBytes: 100 * 1024 * 1024,
+            });
+            expect(result.commitSha).toBe(SHA_A);
+            const initArgs = spawnArgs(0);
+            expect(initArgs).toContain('init');
+            const fetchArgs = spawnArgs(1);
+            expect(fetchArgs).toContain('fetch');
+            expect(fetchArgs).toContain(SHA_A);
+            const checkoutArgs = spawnArgs(2);
+            expect(checkoutArgs).toContain('checkout');
+            expect(checkoutArgs).toContain('--detach');
         } finally {
             await fs.rm(root, { recursive: true, force: true });
         }
@@ -622,6 +695,71 @@ describe('resolve/fetch/verify flow', () => {
                 timeoutMs: 5000,
                 workspaceRoot: root,
             })).rejects.toMatchObject({ transportFailure: true as const, reason: 'ref-not-found' });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('resolves a branch over a tag of the same name and records kind branch', async () => {
+        scriptSpawn([{
+            stdout: `${SHA_A}\trefs/heads/release\n${SHA_B}\trefs/tags/release\n`,
+        }]);
+        const root = await makeWorkspace();
+        try {
+            await expect(nativeGitTransport.resolveRef({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: 'release',
+                timeoutMs: 5000,
+                workspaceRoot: root,
+            })).resolves.toMatchObject({ commitSha: SHA_A, kind: 'branch' });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('resolves an annotated tag through the peeled ^{} commit', async () => {
+        scriptSpawn([{
+            stdout: `${SHA_B}\trefs/tags/v1\n${SHA_A}\trefs/tags/v1^{}\n`,
+        }]);
+        const root = await makeWorkspace();
+        try {
+            await expect(nativeGitTransport.resolveRef({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: 'v1',
+                timeoutMs: 5000,
+                workspaceRoot: root,
+            })).resolves.toMatchObject({ commitSha: SHA_A, kind: 'tag' });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('resolves a lightweight tag from its raw ref line', async () => {
+        scriptSpawn([{ stdout: `${SHA_A}\trefs/tags/v1\n` }]);
+        const root = await makeWorkspace();
+        try {
+            await expect(nativeGitTransport.resolveRef({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: 'v1',
+                timeoutMs: 5000,
+                workspaceRoot: root,
+            })).resolves.toMatchObject({ commitSha: SHA_A, kind: 'tag' });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('self-resolves a full SHA without a network round trip', async () => {
+        const root = await makeWorkspace();
+        try {
+            await expect(nativeGitTransport.resolveRef({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: SHA_A.toUpperCase(),
+                timeoutMs: 5000,
+                workspaceRoot: root,
+            })).resolves.toMatchObject({ commitSha: SHA_A, kind: 'sha' });
+            // The SHA needs no ls-remote: the identity IS the value.
+            expect(mockSpawn).not.toHaveBeenCalled();
         } finally {
             await fs.rm(root, { recursive: true, force: true });
         }
@@ -733,6 +871,7 @@ describe('clone failure classification and final size gate', () => {
             await expect(nativeGitTransport.fetchAtCommit({
                 repoUrl: 'https://github.com/example/repo.git',
                 ref: 'main',
+                refKind: 'branch',
                 commitSha: SHA_A,
                 timeoutMs: 5000,
                 workspaceRoot: root,
@@ -759,6 +898,7 @@ describe('clone failure classification and final size gate', () => {
             await expect(nativeGitTransport.fetchAtCommit({
                 repoUrl: 'https://github.com/example/repo.git',
                 ref: 'main',
+                refKind: 'branch',
                 commitSha: SHA_A,
                 timeoutMs: 5000,
                 workspaceRoot: root,
@@ -789,6 +929,7 @@ describe('clone failure classification and final size gate', () => {
             await expect(nativeGitTransport.fetchAtCommit({
                 repoUrl: 'https://github.com/example/repo.git',
                 ref: 'main',
+                refKind: 'branch',
                 commitSha: SHA_A,
                 timeoutMs: 5000,
                 workspaceRoot: root,
@@ -811,6 +952,7 @@ describe('clone failure classification and final size gate', () => {
             await expect(nativeGitTransport.fetchAtCommit({
                 repoUrl: 'https://github.com/example/repo.git',
                 ref: 'main',
+                refKind: 'branch',
                 commitSha: SHA_A,
                 timeoutMs: 250,
                 workspaceRoot: root,
@@ -849,6 +991,7 @@ describe('clone failure classification and final size gate', () => {
             await expect(nativeGitTransport.fetchAtCommit({
                 repoUrl: 'https://github.com/example/repo.git',
                 ref: 'main',
+                refKind: 'branch',
                 commitSha: SHA_A,
                 timeoutMs: 5000,
                 workspaceRoot: root,
@@ -887,6 +1030,7 @@ describe('clone failure classification and final size gate', () => {
             await expect(nativeGitTransport.fetchAtCommit({
                 repoUrl: 'https://github.com/example/repo.git',
                 ref: 'main',
+                refKind: 'branch',
                 commitSha: SHA_A,
                 timeoutMs: 5000,
                 workspaceRoot: root,
@@ -1087,6 +1231,7 @@ describe('clone failure classification and final size gate', () => {
             await expect(nativeGitTransport.fetchAtCommit({
                 repoUrl: 'https://github.com/example/repo.git',
                 ref: 'main',
+                refKind: 'branch',
                 commitSha: SHA_A,
                 timeoutMs: 30_000,
                 workspaceRoot: root,

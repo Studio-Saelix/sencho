@@ -387,13 +387,13 @@ export class GitOpsStore {
   insertGeneration(row: GitOpsGenerationRow): void {
     this.db().prepare(
       `INSERT INTO gitops_generations (
-        id, application_id, commit_sha, repo_url, configured_ref, repo_identity_json,
+        id, application_id, commit_sha, repo_url, configured_ref, resolved_ref_kind, repo_identity_json,
         manifest_version, candidate_dir, applied_dir, expected_invocation_json,
         materialization_fingerprint, validation_ok, plan_blocked, change_plan_fingerprint,
         operation_id, trigger, actor, previous_generation_id, redacted_limitations_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      row.id, row.application_id, row.commit_sha, row.repo_url, row.configured_ref, row.repo_identity_json,
+      row.id, row.application_id, row.commit_sha, row.repo_url, row.configured_ref, row.resolved_ref_kind, row.repo_identity_json,
       row.manifest_version, row.candidate_dir, row.applied_dir, row.expected_invocation_json,
       row.materialization_fingerprint, row.validation_ok, row.plan_blocked, row.change_plan_fingerprint,
       row.operation_id, row.trigger, row.actor, row.previous_generation_id, row.redacted_limitations_json,

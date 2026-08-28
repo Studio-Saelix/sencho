@@ -207,6 +207,7 @@ function migrateAccepted(
     application_id: application.id,
     commit_sha: trust.commitSha,
     repo_url: application.configured_repo_url ?? '',
+    resolved_ref_kind: 'branch',
     configured_ref: source.branch,
     repo_identity_json: application.repo_identity_json ?? '{}',
     manifest_version: trust.manifestVersion,

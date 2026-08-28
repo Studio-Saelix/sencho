@@ -29,6 +29,7 @@ import type { GitChangePlan, PublicGitChangePlan, GitChangePlanCounts, PublicGit
 import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
 import type { NotificationCategory } from './NotificationService';
 import { classifyGitFailure, isTransportFailure } from './git/errors';
+import type { RefKind } from './git/types';
 import { nativeGitTransport } from './git/nativeGitTransport';
 import { GitOpsStore } from './gitops/store';
 import { GitOpsTransitions, GitOpsTransitionError } from './gitops/transitions';
@@ -58,7 +59,9 @@ import { managedAreaBase } from './gitops/managedPaths';
 export type GitSourceErrorCode =
     | 'REPO_NOT_FOUND'
     | 'AUTH_FAILED'
-    | 'BRANCH_NOT_FOUND'
+    | 'REF_NOT_FOUND'
+    | 'REF_DELETED'
+    | 'UNSUPPORTED_REF'
     | 'FILE_NOT_FOUND'
     | 'NETWORK_TIMEOUT'
     | 'GIT_ERROR'
@@ -111,12 +114,24 @@ export interface FetchParams {
      * Used by the pull/create paths for complete-project materialization.
      */
     onClone?: (cloneDir: string, commitSha: string, envContent: string | null) => Promise<unknown>;
+    /**
+     * True when this source has fetched successfully before. Turns a ref that
+     * now fails to resolve into REF_DELETED (removed or force-pushed) instead
+     * of a plain REF_NOT_FOUND, which would read as a mis-typed ref.
+     */
+    hasPriorHistory?: boolean;
 }
 
 export interface FetchResult {
     composeFiles: ComposeFile[];
     envContent: string | null;
     commitSha: string;
+    /**
+     * The namespace the configured ref resolved through. Recorded wherever the
+     * commit is persisted so "tag v1 -> <sha>" and "branch v1 -> <sha>" stay
+     * distinguishable in revision state.
+     */
+    resolvedRefKind: RefKind;
     /**
      * Non-fatal issues detected during the fetch (e.g. the repo uses
      * submodules that are not cloned). The stack is still usable but the
@@ -917,8 +932,8 @@ export class GitSourceService {
      * structured transport failures mapped below.
      */
     private async withClonedRepo<T>(
-        params: { repoUrl: string; branch: string; token?: string | null; timeoutMs?: number },
-        fn: (dir: string, commitSha: string, warnings: string[]) => Promise<T>,
+        params: { repoUrl: string; branch: string; token?: string | null; timeoutMs?: number; hasPriorHistory?: boolean },
+        fn: (dir: string, commitSha: string, warnings: string[], resolvedRefKind: RefKind) => Promise<T>,
     ): Promise<T> {
         const { repoUrl, branch, token } = params;
         const timeoutMs = params.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
@@ -935,6 +950,7 @@ export class GitSourceService {
             const fetched = await nativeGitTransport.fetchAtCommit({
                 repoUrl,
                 ref: branch,
+                refKind: resolved.kind,
                 token,
                 timeoutMs,
                 commitSha: resolved.commitSha,
@@ -951,7 +967,7 @@ export class GitSourceService {
                 warnings.push(SUBMODULE_WARNING);
             }
 
-            return await fn(fetched.dir, fetched.commitSha, warnings);
+            return await fn(fetched.dir, fetched.commitSha, warnings, resolved.kind);
         } catch (e) {
             if (isTransportFailure(e)) {
                 // The classified message operators see is deliberately
@@ -966,6 +982,11 @@ export class GitSourceService {
                     console.error(`[GitSource:transport] argv=[${e.argv.map((a) => sanitizeForLog(a)).join(' ')}]`);
                 }
                 const classified = classifyGitFailure(e);
+                // A ref that resolved before but no longer does is a deletion
+                // or force-push, distinct from a mis-typed ref on first link.
+                if (classified.code === 'REF_NOT_FOUND' && params.hasPriorHistory) {
+                    throw new GitSourceError('REF_DELETED', 'The configured branch, tag, or commit existed before but no longer resolves on the remote. It may have been deleted or force-pushed.');
+                }
                 throw new GitSourceError(classified.code, classified.message);
             }
             throw e;
@@ -993,7 +1014,7 @@ export class GitSourceService {
         }
 
         try {
-            return await this.withClonedRepo({ repoUrl, branch, token, timeoutMs: params.timeoutMs }, async (dir, commitSha, warnings) => {
+            return await this.withClonedRepo({ repoUrl, branch, token, timeoutMs: params.timeoutMs, hasPriorHistory: params.hasPriorHistory }, async (dir, commitSha, warnings, resolvedRefKind) => {
                 const composeFiles: ComposeFile[] = [];
                 for (const composePath of composePaths) {
                     const content = await readRepoFile(dir, composePath, 'Compose path');
@@ -1040,7 +1061,7 @@ export class GitSourceService {
                         `[GitSource:diag] fetch ok host=${sanitizeForLog(repoHost(repoUrl))} branch=${sanitizeForLog(branch)} sha=${commitSha.slice(0, 7)} files=${composeFiles.length} env=${envContent !== null ? 'present' : 'absent'} warnings=${warnings.length} materialized=${materialization !== null} elapsedMs=${Date.now() - startedAt}`
                     );
                 }
-                return { composeFiles, envContent, commitSha, warnings, materialization };
+                return { composeFiles, envContent, commitSha, resolvedRefKind, warnings, materialization };
             });
         } catch (err) {
             if (diag) {
@@ -1745,6 +1766,9 @@ export class GitSourceService {
             composePaths: src.compose_paths,
             envPath: src.sync_env ? src.env_path : null,
             token,
+            // A ref that resolved on an earlier successful fetch but no longer
+            // does is a deletion or force-push, not a mis-typed ref.
+            hasPriorHistory: gitopsApp?.fetched_commit_sha != null,
             onClone: async (cloneDir, commitSha, envContent) => {
                 materialization.value = await this.buildMaterialization(stackName, cloneDir, commitSha, src, envContent);
             },
@@ -1831,6 +1855,7 @@ export class GitSourceService {
                     commitSha: fetched.commitSha,
                     identity,
                     configuredRef: src.branch,
+                    resolvedRefKind: fetched.resolvedRefKind,
                     candidateRelPath: materialization.value.candidateRelPath,
                     appliedRelPath: appliedRelPathFor(fetched.commitSha, nextManifestVersion),
                     manifestVersion: nextManifestVersion,
@@ -2725,6 +2750,7 @@ export class GitSourceService {
                             commitSha: fetched.commitSha,
                             identity: gitopsIdentity,
                             configuredRef: input.branch,
+                            resolvedRefKind: fetched.resolvedRefKind,
                             candidateRelPath: staged.candidateRelPath,
                             appliedRelPath: appliedRelPathFor(fetched.commitSha, completeProjectManifest.manifestVersion),
                             manifestVersion: completeProjectManifest.manifestVersion,

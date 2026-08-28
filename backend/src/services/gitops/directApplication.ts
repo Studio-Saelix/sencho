@@ -5,6 +5,7 @@ import { MANAGED_ROOT_NAME } from './managedPaths';
 import { encodeGitOpsJson } from './json';
 import { materializationFingerprint } from './fingerprint';
 import { parseHttpsRepoUrl, parseLegacyRepoUrl, secretFreeRepoUrl, serializeRepoIdentity, type RepoIdentity } from './repoIdentity';
+import type { RefKind } from '../git/types';
 import type {
   GitOpsApplicationRow,
   GitOpsCreateCheckpointRow,
@@ -170,6 +171,7 @@ export function buildGenerationRow(args: {
   commitSha: string;
   identity: DirectSourceIdentity;
   configuredRef: string;
+  resolvedRefKind: RefKind;
   candidateRelPath: string;
   appliedRelPath: string;
   manifestVersion: number;
@@ -188,6 +190,7 @@ export function buildGenerationRow(args: {
     commit_sha: args.commitSha,
     repo_url: args.identity.repoUrl,
     configured_ref: args.configuredRef,
+    resolved_ref_kind: args.resolvedRefKind,
     repo_identity_json: encodeGitOpsJson(args.identity.identity),
     manifest_version: args.manifestVersion,
     candidate_dir: args.candidateRelPath,

@@ -81,10 +81,10 @@ Check from two places, since neither alone proves the pull was actually applied 
 
 ## If something goes wrong
 
-**Saving the source fails with "Repository not found or not accessible," even though the URL is right.** Branch names are case-sensitive, and a typo there (`Main` instead of `main`, for example) surfaces as this same repository-level error rather than a distinct branch error, since Sencho can't always tell a missing branch apart from a missing repository during the reachability check. Double-check the branch name against what your Git host actually shows before assuming the URL itself is wrong.
+**Saving the source fails with "The configured branch, tag, or commit was not found," even though the URL is right.** Ref names are case-sensitive, and a typo there (`Main` instead of `main`, for example) surfaces as a distinct not-found error rather than a repository error, because Sencho resolves the ref on the remote before fetching. Double-check the branch name against what your Git host actually shows before assuming the URL itself is wrong.
 
 <Frame>
-  <img src="/images/tutorials/connect-a-git-source/branch-error.png" alt="Git source panel with Branch set to the incorrect value Main, and a red error toast in the corner reading Repository not found or not accessible." />
+  <img src="/images/tutorials/connect-a-git-source/branch-error.png" alt="Git source panel with Branch set to the incorrect value Main, and a red error toast in the corner reading The configured branch, tag, or commit was not found." />
 </Frame>
 
 ## Related

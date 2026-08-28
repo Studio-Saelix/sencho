@@ -10,7 +10,7 @@ import {
     writeCredentialHelper,
 } from './credentialHelper';
 import { isTransportFailure, type TransportFailure } from './errors';
-import type { FetchRequest, FetchResult, GitTransport, ResolveRequest } from './types';
+import type { FetchRequest, FetchResult, GitTransport, ResolveRequest, ResolveResult } from './types';
 
 /**
  * Native git transport: every Git operation is an `execFile`-style spawn of
@@ -590,26 +590,31 @@ async function ensureBinaryReady(hasToken: boolean): Promise<void> {
     }
 }
 
-function parseLsRemoteLine(line: string, fullRef: string): string | null {
-    const tabIndex = line.indexOf('\t');
-    if (tabIndex === -1) return null;
-    if (line.slice(tabIndex + 1).trim() !== fullRef) return null;
-    const sha = line.slice(0, tabIndex).trim();
-    return SHA_PATTERN.test(sha) ? sha.toLowerCase() : null;
+interface ResolvedRemoteRefs {
+    branchSha: string | null;
+    tagSha: string | null;
 }
 
-async function lsRemoteHead(
+/**
+ * Ask the remote where a bare ref name lives. One `ls-remote` with explicit
+ * refspecs for both namespaces keeps the response tiny (a name matches at
+ * most a couple of lines even on huge repos), so the stdout cap can never
+ * truncate the answer we need. For an annotated tag the peeled `^{}` entry
+ * carries the commit, so it wins over the raw tag-object line; a lightweight
+ * tag's raw line already points at the commit.
+ */
+async function lsRemoteRefs(
     url: URL,
     ref: string,
     env: NodeJS.ProcessEnv,
     baseArgs: string[],
     timeoutMs: number,
     hasToken: boolean,
-): Promise<string> {
+): Promise<ResolvedRemoteRefs> {
     let res: RunResult;
     try {
         res = await runGit(
-            [...baseArgs, 'ls-remote', '--heads', url.href, `refs/heads/${ref}`],
+            [...baseArgs, 'ls-remote', url.href, `refs/heads/${ref}`, `refs/tags/${ref}`],
             { env, timeoutMs: Math.min(timeoutMs, LS_REMOTE_MAX_MS) },
         );
     } catch (e) {
@@ -623,27 +628,47 @@ async function lsRemoteHead(
     if (res.exitCode !== 0) {
         throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: baseArgs, host: url.host, hasToken } satisfies TransportFailure;
     }
-    const fullRef = `refs/heads/${ref}`;
+    const found: ResolvedRemoteRefs = { branchSha: null, tagSha: null };
     for (const line of res.stdout.split(/\r?\n/)) {
-        const sha = parseLsRemoteLine(line, fullRef);
-        if (sha) return sha;
+        const tabIndex = line.indexOf('\t');
+        if (tabIndex === -1) continue;
+        const sha = line.slice(0, tabIndex).trim();
+        if (!SHA_PATTERN.test(sha)) continue;
+        const full = line.slice(tabIndex + 1).trim();
+        if (full === `refs/heads/${ref}`) {
+            found.branchSha = sha.toLowerCase();
+        } else if (full === `refs/tags/${ref}^{}`) {
+            found.tagSha = sha.toLowerCase();
+        } else if (full === `refs/tags/${ref}` && found.tagSha === null) {
+            found.tagSha = sha.toLowerCase();
+        }
     }
-    throw { transportFailure: true as const, reason: 'ref-not-found', host: url.host, hasToken } satisfies TransportFailure;
+    return found;
 }
 
 export const nativeGitTransport: GitTransport = {
-    async resolveRef(req: ResolveRequest): Promise<{ commitSha: string }> {
+    async resolveRef(req: ResolveRequest): Promise<ResolveResult> {
         const hasToken = Boolean(req.token);
         await ensureBinaryReady(hasToken);
         const url = assertValidRepoUrl(req.repoUrl, hasToken);
-        assertValidRef(req.ref, url.host, hasToken);
 
+        if (SHA_PATTERN.test(req.ref)) {
+            // A full SHA is self-resolving: the immutable identity IS the
+            // value, so there is nothing to look up. Reachability is verified
+            // at fetch, where the host either serves the object or refuses it
+            // (classified as UNSUPPORTED_REF).
+            return { commitSha: req.ref.toLowerCase(), kind: 'sha' };
+        }
+
+        assertValidRef(req.ref, url.host, hasToken);
         const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token);
-        const commitSha = await lsRemoteHead(
+        const found = await lsRemoteRefs(
             url, req.ref, env, baseArgs,
             req.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasToken,
         );
-        return { commitSha };
+        if (found.branchSha) return { commitSha: found.branchSha, kind: 'branch' };
+        if (found.tagSha) return { commitSha: found.tagSha, kind: 'tag' };
+        throw { transportFailure: true as const, reason: 'ref-not-found', host: url.host, hasToken } satisfies TransportFailure;
     },
 
     async fetchAtCommit(req: FetchRequest): Promise<FetchResult> {
@@ -670,49 +695,63 @@ export const nativeGitTransport: GitTransport = {
         });
 
         try {
-            let cloneResult: RunResult;
-            try {
-                cloneResult = await runGit(
-                    [
-                        ...baseArgs, 'clone',
-                        '--depth=1', '--single-branch', '--no-tags', '--no-recurse-submodules',
-                        '--branch', req.ref, url.href, checkout,
-                    ],
-                    { cwd: layout.homeDir, env, timeoutMs, onSpawn: (child) => { activeChild = child; } },
-                );
-            } catch (e) {
-                // A size breach wins over the timeout wording: both kills are
-                // ours, but the operator guidance differs.
+            // Run each materialization step through one failure mapper. A size
+            // breach wins over the timeout wording: both kills are ours, but
+            // the operator guidance differs. runGit resolves on any exit code,
+            // so a non-zero exit is classified here by its real stderr rather
+            // than leaking a generic GIT_ERROR upstream.
+            const materialize = async (args: string[]): Promise<RunResult> => {
+                let res: RunResult;
+                try {
+                    res = await runGit(args, {
+                        cwd: layout.homeDir, env, timeoutMs,
+                        onSpawn: (child) => { activeChild = child; },
+                    });
+                } catch (e) {
+                    // A size breach wins over the timeout wording.
+                    if (sizeExceeded) {
+                        throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
+                    }
+                    if (isTimeoutError(e)) {
+                        throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+                    }
+                    throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), argv: args, host: url.host, hasToken } satisfies TransportFailure;
+                }
+                // A watchdog-triggered SIGKILL settles runGit's promise via the
+                // child's normal 'close' event (code null -> exitCode -1), not
+                // a rejection, so this is the common path for an in-flight
+                // breach and must check sizeExceeded before the generic mapping.
                 if (sizeExceeded) {
                     throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
                 }
-                if (isTimeoutError(e)) {
-                    throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+                if (res.exitCode !== 0) {
+                    throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: args, host: url.host, hasToken } satisfies TransportFailure;
                 }
-                throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), argv: [...baseArgs, 'clone'], host: url.host, hasToken } satisfies TransportFailure;
-            }
+                return res;
+            };
 
-            // A watchdog-triggered SIGKILL settles runGit's promise via the
-            // child's normal 'close' event (code null -> exitCode -1), not a
-            // rejection, so this branch is the common path for an in-flight
-            // breach and must check sizeExceeded before the generic mapping.
-            if (sizeExceeded) {
-                throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
-            }
-
-            // runGit resolves on any exit code: a failed clone (auth, missing
-            // repo, TLS) must classify by its real stderr here rather than
-            // fall through to rev-parse and surface as a generic GIT_ERROR.
-            if (cloneResult.exitCode !== 0) {
-                throw {
-                    transportFailure: true as const,
-                    reason: 'exit',
-                    stderr: cloneResult.stderr,
-                    exitCode: cloneResult.exitCode,
-                    argv: [...baseArgs, 'clone'],
-                    host: url.host,
-                    hasToken,
-                } satisfies TransportFailure;
+            if (req.refKind === 'sha') {
+                // `--branch` cannot take a bare SHA, so a pinned commit uses a
+                // third strategy: init a repo, fetch exactly that object, and
+                // check it out detached. The host must allow fetching a direct
+                // SHA (GitHub does by default); a refusal surfaces as a
+                // non-zero `git fetch` here and classifies as UNSUPPORTED_REF.
+                await materialize([...baseArgs, 'init', checkout]);
+                await materialize([...baseArgs, '-C', checkout, 'fetch', '--depth=1', url.href, req.ref]);
+                await materialize([...baseArgs, '-C', checkout, 'checkout', '--detach', req.ref]);
+            } else {
+                // A bare name works for both branches and tags: `--branch`
+                // detaches at the named ref's commit either way, and passing a
+                // fully-qualified `refs/tags/<ref>` is rejected by git
+                // (`Remote branch ... not found`). The resolved kind is
+                // already pinned by ls-remote, and the rev-parse HEAD
+                // verification below confirms the checkout matched it.
+                const branchArg = req.ref;
+                await materialize([
+                    ...baseArgs, 'clone',
+                    '--depth=1', '--single-branch', '--no-tags', '--no-recurse-submodules',
+                    '--branch', branchArg, url.href, checkout,
+                ]);
             }
 
             let actual: string;

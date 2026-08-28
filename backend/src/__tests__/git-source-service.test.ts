@@ -6,7 +6,7 @@
  * - validateCompose YAML pre-check (empty / non-object / syntax error)
  * - Token round-trip via upsert: encryption, has_token projection, undefined/null/empty/non-empty semantics
  * - Apply-matrix rejection (auto_deploy requires auto_apply)
- * - Error code mapping from native-git transport failures (REPO_NOT_FOUND, AUTH_FAILED, BRANCH_NOT_FOUND, NETWORK_TIMEOUT)
+ * - Error code mapping from native-git transport failures (REPO_NOT_FOUND, AUTH_FAILED, REF_NOT_FOUND, REF_DELETED, UNSUPPORTED_REF, NETWORK_TIMEOUT)
  * - Credential scrubbing in surfaced error messages
  * - Pending state lifecycle (setPending -> apply clears -> dismissPending clears)
  * - Webhook debounce enforcement
@@ -139,7 +139,7 @@ function wireTransportDefaults(): void {
     mockResolveRef.mockImplementation(async () => {
         const log = await mockGitLog({});
         const oid = Array.isArray(log) ? log[0]?.oid : undefined;
-        return { commitSha: oid ?? '' };
+        return { commitSha: oid ?? '', kind: 'branch' as const, ref: 'main' };
     });
     mockFetchAtCommit.mockImplementation(async (req: { workspaceRoot: string; commitSha: string }) => {
         const path = await import('path');
@@ -708,6 +708,7 @@ describe('GitSourceService error mapping', () => {
         expect(mockFetchAtCommit.mock.calls[0][0]).toMatchObject({
             commitSha: sha,
             ref: 'main',
+            refKind: 'branch',
             repoUrl: 'https://github.com/example/repo.git',
             token: 'tok-abc',
             workspaceRoot: expect.any(String),
@@ -727,12 +728,12 @@ describe('GitSourceService error mapping', () => {
         expect(fsMod.existsSync(failureRoot)).toBe(false);
     });
 
-    it('reports BRANCH_NOT_FOUND for a branch with no commits', async () => {
-        // Resolve-first turns an empty branch into a missing remote head.
+    it('reports REF_NOT_FOUND for a branch with no commits', async () => {
+        // Resolve-first turns an empty branch into a missing remote ref.
         mockGitLog.mockResolvedValue([]);
         await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({
-            code: 'BRANCH_NOT_FOUND',
-            message: expect.stringMatching(/Branch not found/),
+            code: 'REF_NOT_FOUND',
+            message: expect.stringMatching(/was not found/),
         });
     });
 
@@ -741,12 +742,59 @@ describe('GitSourceService error mapping', () => {
         await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'REPO_NOT_FOUND' });
     });
 
-    it('maps remote-branch-not-found to BRANCH_NOT_FOUND', async () => {
+    it('maps remote-branch-not-found to REF_NOT_FOUND', async () => {
         mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
             'fatal: Remote branch nonexistent not found in upstream origin',
             false,
         ));
-        await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'BRANCH_NOT_FOUND' });
+        await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'REF_NOT_FOUND' });
+    });
+
+    it('upgrades REF_NOT_FOUND to REF_DELETED when the source has prior history', async () => {
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            'fatal: Remote branch nonexistent not found in upstream origin',
+            false,
+        ));
+        await expect(svc().fetchFromGit({ ...fetchParams, hasPriorHistory: true }))
+            .rejects.toMatchObject({ code: 'REF_DELETED' });
+    });
+
+    it('maps a host refusal to serve a pinned SHA to UNSUPPORTED_REF', async () => {
+        // A SHA fetch requires the host to serve unadvertised objects; a
+        // refusal (allowAnySHA1InWant off) is a server-capability failure,
+        // not a missing commit. GitLab/Gitea word it differently from GitHub,
+        // so the classifier matches the stable "unadvertised object" phrase.
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            'fatal: upload-pack: unable to find 0123456789abcdef0123456789abcdef01234567, does not allow request for unadvertised object',
+            false,
+        ));
+        await expect(svc().fetchFromGit({ ...fetchParams, branch: '0123456789abcdef0123456789abcdef01234567' }))
+            .rejects.toMatchObject({ code: 'UNSUPPORTED_REF' });
+    });
+
+    it('keeps NETWORK_TIMEOUT on a timed-out fetch even with prior history', async () => {
+        // The REF_DELETED upgrade fires only on a classified REF_NOT_FOUND.
+        // A network timeout on a source that previously resolved must stay a
+        // timeout, not read as "the ref vanished".
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            "fatal: unable to access 'https://github.com/example/repo.git/': Failed to connect to github.com port 443: Connection timed out",
+            false,
+        ));
+        await expect(svc().fetchFromGit({ ...fetchParams, hasPriorHistory: true }))
+            .rejects.toMatchObject({ code: 'NETWORK_TIMEOUT' });
+    });
+
+    it('leaves a missing pinned SHA as GIT_ERROR, not UNSUPPORTED_REF', async () => {
+        // A SHA the host simply has never seen surfaces as "couldn't find
+        // remote ref". That is a missing object, not a server-capability
+        // refusal, and it is deliberately not collapsed into the delete/force
+        // upgrade: there is no evidence the ref ever existed.
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            'fatal: couldn\'t find remote ref 0123456789abcdef0123456789abcdef01234567',
+            false,
+        ));
+        await expect(svc().fetchFromGit({ ...fetchParams, branch: '0123456789abcdef0123456789abcdef01234567' }))
+            .rejects.toMatchObject({ code: 'GIT_ERROR' });
     });
 
     it('maps connection timeouts to NETWORK_TIMEOUT', async () => {
@@ -2965,6 +3013,7 @@ function seedDirectCandidate(stackName: string): { appId: string; generationId: 
         commitSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         identity,
         configuredRef: 'main',
+        resolvedRefKind: 'branch',
         candidateRelPath: 'generations/cand',
         appliedRelPath: 'applied/1',
         manifestVersion: 1,

@@ -726,6 +726,7 @@ function gen(id: string, applicationId: string): GitOpsGenerationRow {
     application_id: applicationId,
     commit_sha: SHA,
     repo_url: 'https://github.com/org/repo.git',
+    resolved_ref_kind: 'branch',
     configured_ref: 'main',
     repo_identity_json: '{"host":"github.com","pathname":"/org/repo.git"}',
     manifest_version: 0,
