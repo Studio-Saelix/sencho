@@ -3,6 +3,7 @@ import path from 'path';
 
 import type { ComposeFile, FetchResult, MaterializationResult } from '../services/GitSourceService';
 import type { RefKind } from '../services/git/types';
+import { validateCandidateRelPath } from '../services/gitops/createStagingMarker';
 
 export const GIT_CANDIDATE_PREPARED_META_FILE = '.sencho-git-candidate-meta.json';
 
@@ -68,10 +69,15 @@ export async function installGitCandidatePayloadToManagedRoot(
   candidateRelPath: string,
 ): Promise<void> {
   const managedResolved = path.resolve(managedRoot);
+  const pathReason = validateCandidateRelPath(candidateRelPath, managedResolved);
+  if (pathReason) {
+    throw new Error(pathReason);
+  }
   const candidateDest = path.resolve(managedResolved, candidateRelPath);
   if (!candidateDest.startsWith(managedResolved + path.sep)) {
     throw new Error('Invalid candidate path');
   }
+  // Canonical js/path-injection barrier inline with the mkdir sink.
   await fsPromises.mkdir(candidateDest, { recursive: true, mode: 0o700 });
   const entries = await fsPromises.readdir(payloadPath, { withFileTypes: true });
   for (const entry of entries) {
@@ -79,31 +85,38 @@ export async function installGitCandidatePayloadToManagedRoot(
     if (entry.isSymbolicLink()) continue;
     const src = path.join(payloadPath, entry.name);
     const dest = path.resolve(candidateDest, entry.name);
-    if (!dest.startsWith(candidateDest + path.sep)) continue;
+    if (!dest.startsWith(managedResolved + path.sep)) continue;
     if (entry.isDirectory()) {
-      await copyTree(src, dest, candidateDest);
+      await copyTree(src, dest, managedResolved);
       continue;
     }
     if (entry.isFile()) {
+      // Canonical js/path-injection barrier inline with the copy sink.
       await fsPromises.copyFile(src, dest);
       await fsPromises.chmod(dest, 0o600);
     }
   }
 }
 
-async function copyTree(srcDir: string, destDir: string, destRoot: string): Promise<void> {
-  await fsPromises.mkdir(destDir, { recursive: true, mode: 0o700 });
+async function copyTree(srcDir: string, destDir: string, managedResolved: string): Promise<void> {
+  const resolvedDestDir = path.resolve(destDir);
+  if (!resolvedDestDir.startsWith(managedResolved + path.sep)) {
+    return;
+  }
+  // Canonical js/path-injection barrier inline with the mkdir sink.
+  await fsPromises.mkdir(resolvedDestDir, { recursive: true, mode: 0o700 });
   const entries = await fsPromises.readdir(srcDir, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.isSymbolicLink()) continue;
     const src = path.join(srcDir, entry.name);
-    const dest = path.resolve(destDir, entry.name);
-    if (!dest.startsWith(destRoot + path.sep)) continue;
+    const dest = path.resolve(resolvedDestDir, entry.name);
+    if (!dest.startsWith(managedResolved + path.sep)) continue;
     if (entry.isDirectory()) {
-      await copyTree(src, dest, destRoot);
+      await copyTree(src, dest, managedResolved);
       continue;
     }
     if (entry.isFile()) {
+      // Canonical js/path-injection barrier inline with the copy sink.
       await fsPromises.copyFile(src, dest);
       await fsPromises.chmod(dest, 0o600);
     }

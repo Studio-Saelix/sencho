@@ -75,12 +75,19 @@ function discoverDockerfiles(baseResolved: string): string[] {
       if (!entry.isFile()) continue;
       const lower = entry.name.toLowerCase();
       if (lower !== 'dockerfile' && !lower.startsWith('dockerfile.')) continue;
-      const content = fs.readFileSync(full, 'utf8');
-      if (Buffer.byteLength(content, 'utf8') > MAX_DOCKERFILE_BYTES) {
-        throw new Error(`Dockerfile exceeds size limit: ${entry.name}`);
-      }
-      for (const host of parseDockerfileReferences(content)) {
-        hosts.add(host);
+      const fd = fs.openSync(full, 'r');
+      try {
+        const stat = fs.fstatSync(fd);
+        if (stat.size > MAX_DOCKERFILE_BYTES) {
+          throw new Error(`Dockerfile exceeds size limit: ${entry.name}`);
+        }
+        const buf = Buffer.alloc(stat.size);
+        fs.readSync(fd, buf, 0, stat.size, 0);
+        for (const host of parseDockerfileReferences(buf.toString('utf8'))) {
+          hosts.add(host);
+        }
+      } finally {
+        fs.closeSync(fd);
       }
     }
   }

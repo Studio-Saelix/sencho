@@ -2,24 +2,6 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-function collectRelativeFiles(rootDir: string, current = ''): string[] {
-  const abs = current ? path.join(rootDir, current) : rootDir;
-  const entries = fs.readdirSync(abs, { withFileTypes: true });
-  const files: string[] = [];
-  for (const entry of entries) {
-    const rel = current ? path.join(current, entry.name) : entry.name;
-    if (entry.isSymbolicLink()) continue;
-    if (entry.isDirectory()) {
-      files.push(...collectRelativeFiles(rootDir, rel));
-      continue;
-    }
-    if (entry.isFile()) {
-      files.push(rel.split(path.sep).join('/'));
-    }
-  }
-  return files.sort();
-}
-
 const COMPOSE_FILENAMES = [
   'compose.yaml',
   'compose.yml',
@@ -49,16 +31,34 @@ export function hashProjectSource(projectDir: string): string {
   return hash.digest('hex');
 }
 
-/** Stable hash of a prepared source bundle directory (all regular files). */
-export function hashDeliverySourceDir(projectDir: string): string {
-  const hash = crypto.createHash('sha256');
-  for (const rel of collectRelativeFiles(projectDir)) {
-    const filePath = path.join(projectDir, rel);
-    hash.update(rel);
+function hashDirectoryTree(rootDir: string, hash: crypto.Hash, current = ''): void {
+  const baseResolved = path.resolve(rootDir);
+  const abs = current ? path.resolve(baseResolved, current) : baseResolved;
+  if (current && !abs.startsWith(baseResolved + path.sep)) {
+    return;
+  }
+  const entries = fs.readdirSync(abs, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue;
+    const rel = current ? path.join(current, entry.name) : entry.name;
+    const filePath = path.resolve(baseResolved, rel);
+    if (!filePath.startsWith(baseResolved + path.sep)) continue;
+    if (entry.isDirectory()) {
+      hashDirectoryTree(rootDir, hash, rel);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    hash.update(rel.split(path.sep).join('/'));
     hash.update('\0');
     hash.update(fs.readFileSync(filePath));
     hash.update('\n');
   }
+}
+
+/** Stable hash of a prepared source bundle directory (all regular files). */
+export function hashDeliverySourceDir(projectDir: string): string {
+  const hash = crypto.createHash('sha256');
+  hashDirectoryTree(projectDir, hash);
   return hash.digest('hex');
 }
 

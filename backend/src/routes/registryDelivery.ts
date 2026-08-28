@@ -18,7 +18,7 @@ registryDeliveryRouter.post('/discover', async (req: Request, res: Response) => 
     const result = await service.discoverOnTarget(req.body);
     res.json(result);
   } catch (error) {
-    console.error('[registry-delivery] discover failed:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+    console.error('[registry-delivery] discover failed: %s', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Registry delivery discovery failed' });
   }
 });

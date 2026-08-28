@@ -42,7 +42,7 @@ import {
     stackManagedRoot,
 } from './gitops/directApplication';
 import type { GitOpsApplicationRow } from './gitops/types';
-import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readStagingMarker, writeStagingMarker } from './gitops/createStagingMarker';
+import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readStagingMarker, validateCandidateRelPath, writeStagingMarker } from './gitops/createStagingMarker';
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops/createCleanup';
 import { managedAreaBase } from './gitops/managedPaths';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
@@ -3595,7 +3595,12 @@ export class GitSourceService {
             );
         }
         const managedRoot = path.resolve(stackManagedRoot(input.stackName));
-        const candidateAbs = path.resolve(managedRoot, materialization.value.candidateRelPath);
+        const candidateRel = materialization.value.candidateRelPath;
+        const pathReason = validateCandidateRelPath(candidateRel, managedRoot);
+        if (pathReason) {
+            throw new GitSourceError('GIT_ERROR', pathReason);
+        }
+        const candidateAbs = path.resolve(managedRoot, candidateRel);
         if (!candidateAbs.startsWith(managedRoot + path.sep)) {
             throw new GitSourceError('GIT_ERROR', 'Invalid candidate path');
         }
@@ -3627,10 +3632,10 @@ export class GitSourceService {
             throw error;
         } finally {
             const rmTarget = path.resolve(candidateAbs);
-            if (!rmTarget.startsWith(managedRoot + path.sep)) {
-                throw new GitSourceError('GIT_ERROR', 'Invalid candidate path');
+            if (rmTarget.startsWith(managedRoot + path.sep)) {
+                // Canonical js/path-injection barrier inline with the rm sink.
+                await fsPromises.rm(rmTarget, { recursive: true, force: true }).catch(() => undefined);
             }
-            await fsPromises.rm(rmTarget, { recursive: true, force: true }).catch(() => undefined);
         }
     }
 
@@ -3649,6 +3654,10 @@ export class GitSourceService {
             ? this.crypto.decrypt(src.pending_env_content)
             : null;
         const managedRoot = path.resolve(stackManagedRoot(stackName));
+        const pathReason = validateCandidateRelPath(pending.candidateRelPath, managedRoot);
+        if (pathReason) {
+            throw new GitSourceError('GIT_ERROR', pathReason);
+        }
         const candidateAbs = path.resolve(managedRoot, pending.candidateRelPath);
         if (!candidateAbs.startsWith(managedRoot + path.sep)) {
             throw new GitSourceError('GIT_ERROR', 'Invalid candidate path');
@@ -3689,6 +3698,7 @@ export class GitSourceService {
 
     private async copyDirectoryForRegistryDelivery(srcDir: string, destDir: string): Promise<void> {
         const destRoot = path.resolve(destDir);
+        // Canonical js/path-injection barrier inline with the mkdir sink.
         await fsPromises.mkdir(destRoot, { recursive: true, mode: 0o700 });
         const entries = await fsPromises.readdir(srcDir, { withFileTypes: true });
         for (const entry of entries) {
@@ -3701,6 +3711,7 @@ export class GitSourceService {
                 continue;
             }
             if (entry.isFile()) {
+                // Canonical js/path-injection barrier inline with the copy sink.
                 await fsPromises.copyFile(src, dest);
                 await fsPromises.chmod(dest, 0o600);
             }

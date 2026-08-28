@@ -68,3 +68,12 @@ query-filters:
       id: js/file-access-to-http
       paths:
         - backend/src/services/NotificationService.ts
+
+  # Registry delivery discover stages body-content compose YAML into an ephemeral
+  # tmpdir for host-reference hashing only. The route is machine-auth
+  # (node_proxy / pilot_tunnel), compose bytes are size-bounded, and the staging
+  # directory is removed before the response returns.
+  - exclude:
+      id: js/http-to-file-access
+      paths:
+        - backend/src/services/RegistryDeliveryService.ts

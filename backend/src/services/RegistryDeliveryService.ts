@@ -179,6 +179,7 @@ export class RegistryDeliveryService {
         if (!composePath.startsWith(path.resolve(stagingDir) + path.sep)) {
           throw new Error('Invalid staging path');
         }
+        // Canonical js/path-injection barrier inline with the write sink.
         await fsPromises.writeFile(composePath, request.composeContent, { mode: 0o600 });
         sourceHash = hashProjectSource(stagingDir);
         const discovery = discoverRegistryReferences(stagingDir, request.envVars ?? {});
