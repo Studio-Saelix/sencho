@@ -41,6 +41,7 @@ interface RichFixtureRepo {
     annotatedTagSha: string;
     lightweightTagSha: string;
     pinnedSha: string;
+    chainTipSha: string;
     rewrittenSha: string;
 }
 
@@ -67,6 +68,14 @@ function buildRichFixtureRepo(): RichFixtureRepo {
     run(['-c', 'commit.gpgsign=false', 'commit', '-m', 'second']);
     const pinnedSha = run(['rev-parse', 'HEAD']);
 
+    run(['checkout', 'main']);
+    for (let i = 3; i <= 5; i += 1) {
+        writeFileSync(path.join(srcDir, `chain-${i}.txt`), `chain file ${i}\n`);
+        run(['add', `chain-${i}.txt`]);
+        run(['-c', 'commit.gpgsign=false', 'commit', '-m', `chain-${i}`]);
+    }
+    const chainTipSha = run(['rev-parse', 'HEAD']);
+
     run(['checkout', '--orphan', 'rewritten']);
     writeFileSync(path.join(srcDir, 'rewritten.txt'), 'rewritten history\n');
     run(['add', 'rewritten.txt']);
@@ -91,6 +100,7 @@ function buildRichFixtureRepo(): RichFixtureRepo {
         annotatedTagSha,
         lightweightTagSha,
         pinnedSha,
+        chainTipSha,
         rewrittenSha,
     };
 }
@@ -369,17 +379,17 @@ describe.skipIf(!gitAvailable())('authenticated native git transport (real git, 
         const workspaceRoot = await makeWorkspace();
         const resolved = await nativeGitTransport.resolveRef({
             repoUrl,
-            ref: fixture.pinnedSha,
+            ref: fixture.chainTipSha,
             token: VALID_TOKEN,
             timeoutMs: 15_000,
             workspaceRoot,
         });
-        expect(resolved).toMatchObject({ commitSha: fixture.pinnedSha, kind: 'sha' });
+        expect(resolved).toMatchObject({ commitSha: fixture.chainTipSha, kind: 'sha' });
 
         const fetchWorkspace = await makeWorkspace();
         const fetched = await nativeGitTransport.fetchAtCommit({
             repoUrl,
-            ref: fixture.pinnedSha,
+            ref: fixture.chainTipSha,
             token: VALID_TOKEN,
             refKind: 'sha',
             commitSha: resolved.commitSha,
@@ -387,16 +397,30 @@ describe.skipIf(!gitAvailable())('authenticated native git transport (real git, 
             workspaceRoot: fetchWorkspace,
             maxBytes: 10 * 1024 * 1024,
         });
-        expect(fetched.commitSha).toBe(fixture.pinnedSha);
-        expect(await fs.readFile(path.join(fetched.dir, 'second.txt'), 'utf8')).toBe('second fixture file\n');
+        expect(fetched.commitSha).toBe(fixture.chainTipSha);
+        expect(await fs.readFile(path.join(fetched.dir, 'chain-5.txt'), 'utf8')).toBe('chain file 5\n');
     });
 
     it('treats a linear branch advance as a fast-forward', async () => {
         const workspaceRoot = await makeWorkspace();
         const fastForward = await verifyFastForward({
             repoUrl,
+            ancestorSha: fixture.pinnedSha,
+            descendantSha: fixture.chainTipSha,
+            token: VALID_TOKEN,
+            timeoutMs: 15_000,
+            workspaceRoot,
+            maxBytes: 10 * 1024 * 1024,
+        });
+        expect(fastForward).toBe(true);
+    });
+
+    it('treats a multi-commit branch advance as a fast-forward', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const fastForward = await verifyFastForward({
+            repoUrl,
             ancestorSha: fixture.mainSha,
-            descendantSha: fixture.pinnedSha,
+            descendantSha: fixture.chainTipSha,
             token: VALID_TOKEN,
             timeoutMs: 15_000,
             workspaceRoot,
@@ -424,7 +448,7 @@ describe.skipIf(!gitAvailable())('authenticated native git transport (real git, 
         const failure = await verifyFastForward({
             repoUrl,
             ancestorSha: fixture.mainSha,
-            descendantSha: fixture.pinnedSha,
+            descendantSha: fixture.chainTipSha,
             token: 'wrong-token',
             timeoutMs: 15_000,
             workspaceRoot,

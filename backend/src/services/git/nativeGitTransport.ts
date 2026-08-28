@@ -646,18 +646,21 @@ async function lsRemoteRefs(
     return found;
 }
 
-/** Cap deepen iterations so a rewritten tip cannot loop forever. */
-const MAX_FF_DEEPEN = 4096;
+/** Remote fetch rounds allowed after the initial shallow tip fetch. */
+const MAX_FF_FETCH_ROUNDS = 14;
+/** Per-round deepen step cap for exponential backoff. */
+const MAX_FF_DEEPEN_STEP = 2048;
 
 /**
  * Whether `descendantSha` is a fast-forward from `ancestorSha` on the remote.
  * Distinguishes a normal branch advance from a force-push after ls-remote has
  * already resolved the ref to a new tip.
  *
- * Fetches the descendant tip once, then deepens that shallow boundary until
- * the prior commit is reachable or history is exhausted. Operational failures
- * throw a classified TransportFailure; only a proven non-fast-forward returns
- * false.
+ * Fetches the descendant tip once, then deepens that shallow boundary with
+ * exponentially increasing steps until the prior commit is reachable, the
+ * downloaded history is complete, or a safety budget is exhausted. Operational
+ * failures throw a classified TransportFailure; only a proven non-fast-forward
+ * returns false.
  */
 export async function verifyFastForward(req: {
     repoUrl: string;
@@ -676,6 +679,13 @@ export async function verifyFastForward(req: {
     await ensureBinaryReady(hasToken);
     const url = assertValidRepoUrl(req.repoUrl, hasToken);
     const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
+    const remainingMs = (): number => Math.max(1, deadline - Date.now());
+    const assertTimeBudget = (): void => {
+        if (Date.now() >= deadline) {
+            throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+        }
+    };
     const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token);
     const repoDir = path.join(req.workspaceRoot, 'ff-check');
     await fs.mkdir(repoDir, { recursive: true });
@@ -688,31 +698,45 @@ export async function verifyFastForward(req: {
         breachKill = killTree(activeChild);
     });
 
+    const throwIfSizeExceeded = (): void => {
+        if (sizeExceeded) {
+            throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
+        }
+    };
+
     try {
         const materialize = async (args: string[]): Promise<RunResult> => {
+            assertTimeBudget();
             let res: RunResult;
             try {
                 res = await runGit(args, {
                     cwd: repoDir,
                     env,
-                    timeoutMs,
+                    timeoutMs: remainingMs(),
                     onSpawn: (child) => { activeChild = child; },
                 });
             } catch (e) {
-                if (sizeExceeded) {
-                    throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
-                }
+                throwIfSizeExceeded();
                 if (isTimeoutError(e)) {
                     throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
                 }
                 throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), argv: args, host: url.host, hasToken } satisfies TransportFailure;
             }
-            if (sizeExceeded) {
-                throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
-            }
+            throwIfSizeExceeded();
             if (res.exitCode !== 0) {
                 throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: args, host: url.host, hasToken } satisfies TransportFailure;
             }
+            return res;
+        };
+
+        const runProbe = async (args: string[]): Promise<RunResult> => {
+            assertTimeBudget();
+            const res = await runGit(args, {
+                cwd: repoDir,
+                env,
+                timeoutMs: Math.min(remainingMs(), LS_REMOTE_MAX_MS),
+            });
+            throwIfSizeExceeded();
             return res;
         };
 
@@ -720,20 +744,20 @@ export async function verifyFastForward(req: {
         await materialize([...baseArgs, 'fetch', '--depth=1', url.href, descendant]);
 
         const countReachable = async (): Promise<number> => {
-            const listed = await runGit([...baseArgs, 'rev-list', '--count', descendant], {
-                cwd: repoDir,
-                env,
-                timeoutMs: Math.min(timeoutMs, LS_REMOTE_MAX_MS),
-            });
-            if (sizeExceeded) {
-                throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
-            }
+            const listed = await runProbe([...baseArgs, 'rev-list', '--count', descendant]);
             if (listed.exitCode !== 0) return 0;
             const parsed = Number.parseInt(listed.stdout.trim(), 10);
             return Number.isFinite(parsed) ? parsed : 0;
         };
 
+        const isShallowRepository = async (): Promise<boolean> => {
+            const shallow = await runProbe([...baseArgs, 'rev-parse', '--is-shallow-repository']);
+            return shallow.exitCode === 0 && shallow.stdout.trim() === 'true';
+        };
+
         let reachableCount = await countReachable();
+        let fetchRounds = 1;
+        let deepenStep = 1;
 
         const assertWithinSizeBudget = async (): Promise<void> => {
             const finalSize = await treeSize(req.workspaceRoot).catch((e: unknown) => {
@@ -745,42 +769,41 @@ export async function verifyFastForward(req: {
             }
         };
 
-        for (let deepen = 0; deepen <= MAX_FF_DEEPEN; deepen += 1) {
-            const hasAncestor = await runGit([...baseArgs, 'cat-file', '-e', `${ancestor}^{commit}`], {
-                cwd: repoDir,
-                env,
-                timeoutMs: Math.min(timeoutMs, LS_REMOTE_MAX_MS),
-            });
-            if (sizeExceeded) {
-                throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
-            }
+        while (true) {
+            assertTimeBudget();
+
+            const hasAncestor = await runProbe([...baseArgs, 'cat-file', '-e', `${ancestor}^{commit}`]);
             if (hasAncestor.exitCode === 0) {
-                const ancestry = await runGit([...baseArgs, 'merge-base', '--is-ancestor', ancestor, descendant], {
-                    cwd: repoDir,
-                    env,
-                    timeoutMs: Math.min(timeoutMs, LS_REMOTE_MAX_MS),
-                });
-                if (sizeExceeded) {
-                    throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
-                }
+                const ancestry = await runProbe([...baseArgs, 'merge-base', '--is-ancestor', ancestor, descendant]);
                 await assertWithinSizeBudget();
                 return ancestry.exitCode === 0;
             }
-            if (deepen === MAX_FF_DEEPEN) {
-                await assertWithinSizeBudget();
-                return false;
-            }
-            await materialize([...baseArgs, 'fetch', '--deepen=1', url.href, descendant]);
-            const nextReachableCount = await countReachable();
-            if (nextReachableCount <= reachableCount) {
-                await assertWithinSizeBudget();
-                return false;
-            }
-            reachableCount = nextReachableCount;
-        }
 
-        await assertWithinSizeBudget();
-        return false;
+            if (!(await isShallowRepository())) {
+                await assertWithinSizeBudget();
+                return false;
+            }
+
+            if (fetchRounds >= MAX_FF_FETCH_ROUNDS) {
+                throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+            }
+
+            const previousCount = reachableCount;
+            await materialize([...baseArgs, 'fetch', `--deepen=${deepenStep}`, url.href, descendant]);
+            fetchRounds += 1;
+            reachableCount = await countReachable();
+
+            if (reachableCount <= previousCount) {
+                if (!(await isShallowRepository())) {
+                    await assertWithinSizeBudget();
+                    return false;
+                }
+                await assertWithinSizeBudget();
+                return false;
+            }
+
+            deepenStep = Math.min(deepenStep * 2, MAX_FF_DEEPEN_STEP);
+        }
     } finally {
         watchdog.stop();
         await awaitKillConfirmed(breachKill, `size-breach kill for ${url.host}`);

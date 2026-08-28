@@ -952,6 +952,7 @@ describe('clone failure classification and final size gate', () => {
             { code: 0 },
             { stdout: '1\n' },
             { code: 1 },
+            { stdout: 'true\n' },
             { code: 0 },
             { stdout: '2\n' },
             { code: 0 },
@@ -972,6 +973,76 @@ describe('clone failure classification and final size gate', () => {
                 transportFailure: true as const,
                 reason: 'size',
                 maxBytes: 8,
+            });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('deepens history exponentially with a bounded number of remote fetches', async () => {
+        scriptSpawn([
+            { code: 0 },
+            { code: 0 },
+            { stdout: '1\n' },
+            { code: 1 },
+            { stdout: 'true\n' },
+            { code: 0 },
+            { stdout: '2\n' },
+            { code: 1 },
+            { stdout: 'true\n' },
+            { code: 0 },
+            { stdout: '4\n' },
+            { code: 0 },
+            { code: 0 },
+        ]);
+        const root = await makeWorkspace();
+
+        try {
+            await expect(verifyFastForward({
+                repoUrl: 'https://github.com/example/repo.git',
+                ancestorSha: SHA_B,
+                descendantSha: SHA_A,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+                maxBytes: 100 * 1024 * 1024,
+            })).resolves.toBe(true);
+
+            const deepenArgs = mockSpawn.mock.calls
+                .map((call) => call[1] as string[])
+                .filter((args) => args.includes('fetch'));
+            expect(deepenArgs).toHaveLength(3);
+            expect(deepenArgs[1]).toContain('--deepen=1');
+            expect(deepenArgs[2]).toContain('--deepen=2');
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('throws a timeout when fetch rounds are exhausted before ancestry is proven', async () => {
+        const scripted: ScriptedOutput[] = [{ code: 0 }, { code: 0 }, { stdout: '1\n' }];
+        for (let i = 0; i < 13; i += 1) {
+            scripted.push(
+                { code: 1 },
+                { stdout: 'true\n' },
+                { code: 0 },
+                { stdout: `${i + 2}\n` },
+            );
+        }
+        scripted.push({ code: 1 }, { stdout: 'true\n' });
+        scriptSpawn(scripted);
+        const root = await makeWorkspace();
+
+        try {
+            await expect(verifyFastForward({
+                repoUrl: 'https://github.com/example/repo.git',
+                ancestorSha: SHA_B,
+                descendantSha: SHA_A,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+                maxBytes: 100 * 1024 * 1024,
+            })).rejects.toMatchObject({
+                transportFailure: true as const,
+                reason: 'timeout',
             });
         } finally {
             await fs.rm(root, { recursive: true, force: true });
