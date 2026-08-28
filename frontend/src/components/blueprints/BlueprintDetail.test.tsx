@@ -31,8 +31,9 @@ vi.mock('./RolloutPreviewDialog', () => ({
 
 import { getBlueprint } from '@/lib/blueprintsApi';
 import { BlueprintDetail } from './BlueprintDetail';
+import { absentRevision, missingApplicationLimitation } from '@/__tests__/gitopsFixtures';
 
-function summary(): BlueprintSummary {
+function summary(overrides: Partial<BlueprintSummary> = {}): BlueprintSummary {
     return {
         blueprint: {
             id: 1,
@@ -53,6 +54,8 @@ function summary(): BlueprintSummary {
         deployments: [],
         statusCounts: {},
         effectiveApproval: 'pending',
+        gitopsRevision: absentRevision(),
+        ...overrides,
     };
 }
 
@@ -166,5 +169,35 @@ describe('BlueprintDetail action gating', () => {
         expect(screen.getByRole('button', { name: /apply now/i })).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /^edit$/i })).not.toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /^delete$/i })).not.toBeInTheDocument();
+    });
+});
+
+describe('BlueprintDetail GitOps state', () => {
+    function detail() {
+        return (
+            <BlueprintDetail
+                blueprintId={1}
+                open
+                onOpenChange={noop}
+                onChanged={noop}
+                canEdit
+                distinctLabels={[]}
+            />
+        );
+    }
+
+    it('reports a Blueprint whose application row could not be reached', async () => {
+        vi.mocked(getBlueprint).mockResolvedValue(
+            summary({ gitopsRevision: absentRevision([missingApplicationLimitation]) }),
+        );
+        render(detail());
+        expect(await screen.findByTestId('gitops-fault')).toHaveTextContent(missingApplicationLimitation.message);
+    });
+
+    it('stays silent when there is simply nothing to project', async () => {
+        vi.mocked(getBlueprint).mockResolvedValue(summary());
+        render(detail());
+        await screen.findByText('Show compose source');
+        expect(screen.queryByTestId('gitops-fault')).not.toBeInTheDocument();
     });
 });

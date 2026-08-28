@@ -80,7 +80,6 @@
     "helmet": "^8.1.0",
     "http-proxy": "^1.18.1",
     "http-proxy-middleware": "^4.0.0",
-    "isomorphic-git": "^1.37.5",
     "jsonwebtoken": "^9.0.3",
     "ldapts": "^9.0.0",
     "multer": "^2.1.1",

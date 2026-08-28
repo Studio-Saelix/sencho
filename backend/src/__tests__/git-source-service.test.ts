@@ -6,7 +6,7 @@
  * - validateCompose YAML pre-check (empty / non-object / syntax error)
  * - Token round-trip via upsert: encryption, has_token projection, undefined/null/empty/non-empty semantics
  * - Apply-matrix rejection (auto_deploy requires auto_apply)
- * - Error code mapping from isomorphic-git failures (REPO_NOT_FOUND, AUTH_FAILED, BRANCH_NOT_FOUND, NETWORK_TIMEOUT)
+ * - Error code mapping from native-git transport failures (REPO_NOT_FOUND, AUTH_FAILED, BRANCH_NOT_FOUND, NETWORK_TIMEOUT)
  * - Credential scrubbing in surfaced error messages
  * - Pending state lifecycle (setPending -> apply clears -> dismissPending clears)
  * - Webhook debounce enforcement
@@ -17,20 +17,34 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import type { TransportFailure } from '../services/git/errors';
+import { GitOpsStore } from '../services/gitops/store';
+import { GitOpsTransitions } from '../services/gitops/transitions';
+import {
+    buildGenerationRow,
+    directSourceIdentity,
+    newGitOpsId,
+    type DirectSourceConfig,
+} from '../services/gitops/directApplication';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
-const { mockGitClone, mockGitLog } = vi.hoisted(() => ({
+const { mockResolveRef, mockFetchAtCommit, mockGitClone, mockGitLog } = vi.hoisted(() => ({
+    mockResolveRef: vi.fn(),
+    mockFetchAtCommit: vi.fn(),
     mockGitClone: vi.fn(),
     mockGitLog: vi.fn(),
 }));
 
-vi.mock('isomorphic-git', () => {
-    const api = { clone: mockGitClone, log: mockGitLog };
-    return { default: api, clone: mockGitClone, log: mockGitLog };
-});
-
-vi.mock('isomorphic-git/http/node', () => ({ default: {} }));
+// The transport boundary is what gets mocked. mockGitClone/mockGitLog remain
+// as the fixture layer so every per-test override keeps its meaning: clone
+// writes files into the checkout dir, log yields the deterministic sha.
+vi.mock('../services/git/nativeGitTransport', () => ({
+    nativeGitTransport: {
+        resolveRef: mockResolveRef,
+        fetchAtCommit: mockFetchAtCommit,
+    },
+}));
 
 
 const {
@@ -86,8 +100,11 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+    mockResolveRef.mockReset();
+    mockFetchAtCommit.mockReset();
     mockGitClone.mockReset();
     mockGitLog.mockReset();
+    wireTransportDefaults();
     mockCaptureCandidate.mockReset();
     mockCaptureCandidate.mockImplementation(async () => ({ id: 'rec-test-1' }));
     mockRecoveryAbandon.mockReset();
@@ -113,9 +130,46 @@ beforeEach(() => {
 // ── Helpers ────────────────────────────────────────────────────────────
 
 /**
- * Stub out isomorphic-git so that `clone` writes a minimal compose file into
- * the caller's temp dir and `log` returns a deterministic commit sha. Returns
- * the sha so tests can compare.
+ * Default transport wiring: resolveRef defers to the log stub so per-test
+ * overrides of mockGitLog keep controlling the final SHA, and fetchAtCommit
+ * delegates to the clone/log fixture fns, handing clone a `dir` that points
+ * at the workspace checkout.
+ */
+function wireTransportDefaults(): void {
+    mockResolveRef.mockImplementation(async () => {
+        const log = await mockGitLog({});
+        const oid = Array.isArray(log) ? log[0]?.oid : undefined;
+        return { commitSha: oid ?? '' };
+    });
+    mockFetchAtCommit.mockImplementation(async (req: { workspaceRoot: string; commitSha: string }) => {
+        const path = await import('path');
+        const { promises: fsp } = await import('fs');
+        const dir = path.join(req.workspaceRoot, 'repo');
+        // The real clone creates the checkout dir; fixture impls may not.
+        await fsp.mkdir(dir, { recursive: true });
+        await mockGitClone({ ...req, dir });
+        const log = await mockGitLog({ dir });
+        if (!Array.isArray(log) || !log.length) {
+            // An empty branch produces no remote ref; mirror the structured
+            // failure the real transport raises for that case.
+            throw { transportFailure: true as const, reason: 'ref-not-found', host: 'unknown', hasToken: false };
+        }
+        return { commitSha: log[0].oid, dir };
+    });
+}
+
+/**
+ * Structured transport failure carrying a real-world git stderr sample, for
+ * exercising the service's classification of native-git failures.
+ */
+function gitFailure(stderr: string, hasToken: boolean): TransportFailure {
+    return { transportFailure: true as const, reason: 'exit', stderr, exitCode: 128, host: 'github.com', hasToken };
+}
+
+/**
+ * Stub out the clone/log fixtures so that `clone` writes a minimal compose
+ * file into the checkout dir and `log` returns a deterministic commit sha.
+ * Returns the sha so tests can compare.
  */
 function mockSuccessfulClone(options: {
     compose?: string;
@@ -437,7 +491,10 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
     });
 
     it('does not persist when dry-run fetch fails', async () => {
-        mockGitClone.mockRejectedValueOnce(Object.assign(new Error('404 not found'), { code: 'NotFoundError' }));
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            "fatal: repository 'https://github.com/example/nope.git/' not found",
+            false,
+        ));
         const svc = GitSourceService.getInstance();
         await expect(svc.upsert({
             stackName: 'unreachable',
@@ -590,123 +647,159 @@ describe('GitSourceService error mapping', () => {
         composePaths: ['compose.yaml'],
     };
 
-    it('maps 401 with supplied token to AUTH_FAILED', async () => {
-        // A 401 only means "your token is wrong" when the caller actually sent one.
-        mockGitClone.mockRejectedValueOnce(Object.assign(new Error('HTTP Error: 401 Unauthorized'), {
-            code: 'HttpError',
-            data: { statusCode: 401 },
-        }));
+    it('maps an authentication refusal with supplied token to AUTH_FAILED', async () => {
+        // Auth failure only means "your token is wrong" when the caller actually sent one.
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            "fatal: Authentication failed for 'https://github.com/example/repo.git/'",
+            true,
+        ));
         await expect(svc().fetchFromGit({ ...fetchParams, token: 'ghp_some_token_value' }))
             .rejects.toMatchObject({ code: 'AUTH_FAILED' });
     });
 
-    it('maps 401 without a token to REPO_NOT_FOUND with a private-repo hint', async () => {
-        // GitHub returns 404 for genuinely missing public repos but 401/403 can
-        // also reach us for private repos that the caller did not authenticate
-        // to. Without a supplied token, "check your token" is misleading, so we
-        // surface it as "not found or private" and suggest adding a PAT.
-        mockGitClone.mockRejectedValueOnce(Object.assign(new Error('HTTP Error: 401 Unauthorized'), {
-            code: 'HttpError',
-            data: { statusCode: 401 },
-        }));
+    it('maps a credential prompt without a token to REPO_NOT_FOUND with a private-repo hint', async () => {
+        // Private repos demand credentials; without a supplied token,
+        // "check your token" is misleading, so we surface it as "not found or
+        // private" and suggest adding a PAT (GitHub masks private repos too).
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            "fatal: could not read Username for 'https://github.com/example/repo.git': terminal prompts disabled",
+            false,
+        ));
         await expect(svc().fetchFromGit(fetchParams))
             .rejects.toMatchObject({ code: 'REPO_NOT_FOUND', message: expect.stringMatching(/private/i) });
     });
 
-    it('maps 404 HttpError to REPO_NOT_FOUND (not AUTH_FAILED)', async () => {
-        // Regression: isomorphic-git throws HttpError for every non-2xx, so a
-        // 404 on info/refs was previously misclassified as auth failure.
-        mockGitClone.mockRejectedValueOnce(Object.assign(new Error('HTTP Error: 404 Not Found'), {
-            code: 'HttpError',
-            data: { statusCode: 404 },
-        }));
+    it('maps repository-not-found to REPO_NOT_FOUND (not AUTH_FAILED)', async () => {
+        // Regression guard: a missing repo must never read as an auth problem.
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            "fatal: repository 'https://github.com/example/repo.git/' not found",
+            false,
+        ));
         await expect(svc().fetchFromGit(fetchParams))
             .rejects.toMatchObject({ code: 'REPO_NOT_FOUND', message: expect.stringMatching(/private/i) });
     });
 
-    it('maps 404 with a supplied token to REPO_NOT_FOUND with a token-scope hint', async () => {
-        // GitHub returns 404 for both "missing repo" and "token lacks access",
-        // so when the caller did supply a token we point them at URL + scopes
-        // instead of "add a PAT" (which they already did).
-        mockGitClone.mockRejectedValueOnce(Object.assign(new Error('HTTP Error: 404 Not Found'), {
-            code: 'HttpError',
-            data: { statusCode: 404 },
-        }));
+    it('maps repository-not-found with a supplied token to REPO_NOT_FOUND with a token-scope hint', async () => {
+        // GitHub returns not-found for both "missing repo" and "token lacks
+        // access", so when the caller did supply a token we point them at URL
+        // + scopes instead of "add a PAT" (which they already did).
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            "fatal: repository 'https://github.com/example/repo.git/' not found",
+            true,
+        ));
         await expect(svc().fetchFromGit({ ...fetchParams, token: 'ghp_some_token_value' }))
             .rejects.toMatchObject({ code: 'REPO_NOT_FOUND', message: expect.stringMatching(/token has read access/i) });
     });
 
-    it('maps 404/not-found errors to REPO_NOT_FOUND', async () => {
-        mockGitClone.mockRejectedValueOnce(Object.assign(new Error('Repository not found'), { code: 'NotFoundError' }));
+    it('classifies resolve-phase failures too (ls-remote runs before clone)', async () => {
+        // The first real-world failure point is resolution; if the service
+        // ever stops translating its failures this goes generic GIT_ERROR.
+        mockResolveRef.mockRejectedValueOnce(gitFailure(
+            "fatal: Authentication failed for 'https://github.com/example/repo.git/'",
+            true,
+        ));
+        await expect(svc().fetchFromGit({ ...fetchParams, token: 'ghp_some_token_value' }))
+            .rejects.toMatchObject({ code: 'AUTH_FAILED' });
+    });
+
+    it('threads the resolved commit, ref, and token into the pinned fetch', async () => {
+        const sha = mockSuccessfulClone();
+        await svc().fetchFromGit({ ...fetchParams, token: 'tok-abc' });
+        expect(mockFetchAtCommit.mock.calls[0][0]).toMatchObject({
+            commitSha: sha,
+            ref: 'main',
+            repoUrl: 'https://github.com/example/repo.git',
+            token: 'tok-abc',
+            workspaceRoot: expect.any(String),
+        });
+    });
+
+    it('removes the transport workspace after success and after failure', async () => {
+        const fsMod = await import('fs');
+        mockSuccessfulClone();
+        await svc().fetchFromGit(fetchParams);
+        const successRoot = mockFetchAtCommit.mock.calls[0][0].workspaceRoot;
+        expect(fsMod.existsSync(successRoot)).toBe(false);
+
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure('fatal: repository not found', false));
+        await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'REPO_NOT_FOUND' });
+        const failureRoot = mockFetchAtCommit.mock.calls[1][0].workspaceRoot;
+        expect(fsMod.existsSync(failureRoot)).toBe(false);
+    });
+
+    it('reports BRANCH_NOT_FOUND for a branch with no commits', async () => {
+        // Resolve-first turns an empty branch into a missing remote head.
+        mockGitLog.mockResolvedValue([]);
+        await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({
+            code: 'BRANCH_NOT_FOUND',
+            message: expect.stringMatching(/Branch not found/),
+        });
+    });
+
+    it('maps short not-found phrasing to REPO_NOT_FOUND', async () => {
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure('fatal: repository not found', false));
         await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'REPO_NOT_FOUND' });
     });
 
-    it('maps resolve-ref errors to BRANCH_NOT_FOUND', async () => {
-        // Message phrased to miss the REPO_NOT_FOUND regex ("could not resolve")
-        // so the BRANCH_NOT_FOUND branch is exercised.
-        mockGitClone.mockRejectedValueOnce(Object.assign(new Error('unknown ref nonexistent'), { code: 'ResolveRefError' }));
+    it('maps remote-branch-not-found to BRANCH_NOT_FOUND', async () => {
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            'fatal: Remote branch nonexistent not found in upstream origin',
+            false,
+        ));
         await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'BRANCH_NOT_FOUND' });
     });
 
-    it('maps timeout errors to NETWORK_TIMEOUT', async () => {
-        mockGitClone.mockRejectedValueOnce(new Error('ETIMEDOUT connecting to host'));
+    it('maps connection timeouts to NETWORK_TIMEOUT', async () => {
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            "fatal: unable to access 'https://github.com/example/repo.git/': Failed to connect to github.com port 443 after 21005 ms: Connection timed out",
+            false,
+        ));
         await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'NETWORK_TIMEOUT' });
     });
 
-    it('maps a bare "fetch failed" TypeError with an ENOTFOUND cause to NETWORK_TIMEOUT', async () => {
-        // Node's global fetch() reports DNS failure as TypeError('fetch failed')
-        // with the real reason on err.cause. Without cause-unwrapping this fell
-        // through to a useless GIT_ERROR: "fetch failed".
-        mockGitClone.mockRejectedValueOnce(
-            new TypeError('fetch failed', {
-                cause: Object.assign(new Error('getaddrinfo ENOTFOUND github.com'), { code: 'ENOTFOUND' }),
-            }),
-        );
+    it('maps DNS failure stderr to NETWORK_TIMEOUT', async () => {
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            "fatal: unable to access 'https://github.com/example/repo.git/': Could not resolve host: github.com",
+            false,
+        ));
         await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'NETWORK_TIMEOUT' });
     });
 
-    it('maps a "fetch failed" TypeError with an ECONNREFUSED cause to NETWORK_TIMEOUT', async () => {
-        mockGitClone.mockRejectedValueOnce(
-            new TypeError('fetch failed', {
-                cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:443'), { code: 'ECONNREFUSED' }),
-            }),
-        );
+    it('maps connection-refused stderr to NETWORK_TIMEOUT', async () => {
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            "fatal: unable to access 'https://github.com/example/repo.git/': Failed to connect to github.com port 443: Connection refused",
+            false,
+        ));
         await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'NETWORK_TIMEOUT' });
     });
 
-    it('surfaces the host instead of bare "fetch failed" in transport errors', async () => {
-        mockGitClone.mockRejectedValueOnce(
-            new TypeError('fetch failed', {
-                cause: Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }),
-            }),
-        );
+    it('surfaces the host in DNS transport errors', async () => {
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            "fatal: unable to access 'https://github.com/example/repo.git/': Could not resolve host: github.com",
+            false,
+        ));
         try {
             await svc().fetchFromGit(fetchParams);
             expect.fail('should have thrown');
         } catch (e) {
             const err = e as Error;
-            expect(err.message).not.toMatch(/^fetch failed$/i);
             expect(err.message).toContain('github.com');
         }
     });
 
-    it('unwraps a nested fetch cause chain to find the transport code', async () => {
-        mockGitClone.mockRejectedValueOnce(
-            new TypeError('fetch failed', {
-                cause: new TypeError('terminated', {
-                    cause: Object.assign(new Error('reset'), { code: 'ECONNRESET' }),
-                }),
-            }),
-        );
+    it('maps a reset connection to NETWORK_TIMEOUT', async () => {
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            'fatal: the remote end hung up unexpectedly',
+            false,
+        ));
         await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'NETWORK_TIMEOUT' });
     });
 
-    it('maps a TLS certificate "fetch failed" cause to a certificate GIT_ERROR', async () => {
-        mockGitClone.mockRejectedValueOnce(
-            new TypeError('fetch failed', {
-                cause: Object.assign(new Error('self-signed certificate'), { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' }),
-            }),
-        );
+    it('maps a TLS certificate failure to a certificate GIT_ERROR', async () => {
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            "fatal: unable to access 'https://github.com/example/repo.git/': SSL certificate problem: self-signed certificate",
+            false,
+        ));
         await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({
             code: 'GIT_ERROR',
             message: expect.stringMatching(/certificate/i),
@@ -723,7 +816,10 @@ describe('GitSourceService error mapping', () => {
     });
 
     it('scrubs inline credentials from surfaced error messages', async () => {
-        mockGitClone.mockRejectedValueOnce(new Error('Failed: https://user:supersecret@github.com/example/repo.git 500'));
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            "fatal: unable to access 'https://user:supersecret@github.com/example/repo.git/': The requested URL returned error: 500",
+            false,
+        ));
         try {
             await svc().fetchFromGit(fetchParams);
             expect.fail('should have thrown');
@@ -732,42 +828,6 @@ describe('GitSourceService error mapping', () => {
             expect(err.message).not.toContain('supersecret');
             expect(err.message).toContain('***');
         }
-    });
-});
-
-describe('countingBodyIterator (clone size cap)', () => {
-    function chunkStream(...sizes: number[]): AsyncIterableIterator<Uint8Array> {
-        async function* gen(): AsyncIterableIterator<Uint8Array> {
-            for (const s of sizes) yield new Uint8Array(s);
-        }
-        return gen();
-    }
-
-    it('passes chunks through unchanged while under the cap', async () => {
-        const { countingBodyIterator } = await import('../services/GitSourceService');
-        const controller = new AbortController();
-        const state = { exceeded: false, received: 0 };
-        const out: number[] = [];
-        for await (const c of countingBodyIterator(chunkStream(10, 20, 30), controller, 1000, state)) {
-            out.push(c.byteLength);
-        }
-        expect(out).toEqual([10, 20, 30]);
-        expect(state.exceeded).toBe(false);
-        expect(state.received).toBe(60);
-        expect(controller.signal.aborted).toBe(false);
-    });
-
-    it('aborts the transport and throws once the cumulative size exceeds the cap', async () => {
-        const { countingBodyIterator } = await import('../services/GitSourceService');
-        const controller = new AbortController();
-        const state = { exceeded: false, received: 0 };
-        await expect((async () => {
-            for await (const _c of countingBodyIterator(chunkStream(60, 60), controller, 100, state)) {
-                void _c;
-            }
-        })()).rejects.toThrow(/maximum allowed size/i);
-        expect(state.exceeded).toBe(true);
-        expect(controller.signal.aborted).toBe(true);
     });
 });
 
@@ -780,8 +840,8 @@ describe('GitSourceService.fetchFromGit (size limits)', () => {
     };
 
     it('rejects a compose file larger than the per-file read cap', async () => {
-        // The download cap bounds the compressed pack, not a single decompressed
-        // file, so readRepoFile guards the in-memory read by file size.
+        // The workspace cap bounds the on-disk clone, not a single file, so
+        // readRepoFile guards the in-memory read by file size.
         mockSuccessfulClone();
         const { promises: fsp } = await import('fs');
         const lstatSpy = vi.spyOn(fsp, 'lstat').mockResolvedValue({
@@ -797,19 +857,14 @@ describe('GitSourceService.fetchFromGit (size limits)', () => {
         lstatSpy.mockRestore();
     });
 
-    it('surfaces a clone-size error when the download exceeds the cap', async () => {
-        // Drive the real size-counting transport the service injected into
-        // git.clone, with a tiny cap, and confirm fetchFromGit reports it as a
-        // clone-size error rather than a generic transport failure.
+    it('surfaces a clone-size error and forwards the configured cap to the transport', async () => {
+        // The transport enforces the cap with its size watchdog (covered in the
+        // transport unit tests); here we pin the plumbing: the env knob reaches
+        // the transport as maxBytes, and a structured size failure translates
+        // into the clone-size message rather than a generic transport error.
         process.env.GITSOURCE_MAX_CLONE_BYTES = '8';
-        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-            new Response(new Uint8Array(64), { status: 200 }),
-        );
-        mockGitClone.mockImplementation(async (args: {
-            http: { request: (r: { url: string; method: string; headers: Record<string, string> }) => Promise<{ body: AsyncIterableIterator<Uint8Array> }> };
-        }) => {
-            const resp = await args.http.request({ url: 'https://example.test/info/refs', method: 'GET', headers: {} });
-            for await (const chunk of resp.body) { void chunk; }
+        mockFetchAtCommit.mockImplementationOnce(async () => {
+            throw { transportFailure: true as const, reason: 'size', maxBytes: 8, host: 'github.com', hasToken: false };
         });
 
         try {
@@ -817,9 +872,9 @@ describe('GitSourceService.fetchFromGit (size limits)', () => {
                 code: 'GIT_ERROR',
                 message: expect.stringMatching(/exceeds the maximum clone size/i),
             });
+            expect(mockFetchAtCommit.mock.calls[0][0]).toMatchObject({ maxBytes: 8 });
         } finally {
             delete process.env.GITSOURCE_MAX_CLONE_BYTES;
-            fetchSpy.mockRestore();
         }
     });
 });
@@ -847,6 +902,98 @@ describe('GitSourceService pending lifecycle', () => {
 
         svc.dismissPending('pending-stack');
         expect(db.getGitSource('pending-stack')?.pending_commit_sha).toBeNull();
+    });
+
+    it('dismissPending clears the canonical candidate and records a dismissed history row', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const db = DatabaseService.getInstance();
+        const stackName = 'dismiss-canonical';
+        await svc.upsert({
+            stackName,
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        db.setGitSourcePending(stackName, 'sha-xxx', 'services: {}', null);
+        const { appId, generationId } = seedDirectCandidate(stackName);
+        expect(GitOpsStore.getInstance().getApplication(appId)?.candidate_generation_id).toBe(generationId);
+
+        svc.dismissPending(stackName, 'operator-1');
+
+        const app = GitOpsStore.getInstance().getApplication(appId)!;
+        expect(app.candidate_generation_id).toBeNull();
+        expect(app.candidate_plan_blocked).toBe(0);
+        expect(app.review_required).toBe(0);
+        expect(db.getGitSource(stackName)?.pending_commit_sha).toBeNull();
+        const stages = (db.getDb().prepare(
+            'SELECT stage, outcome FROM gitops_history WHERE application_id = ? ORDER BY id',
+        ).all(appId) as Array<{ stage: string; outcome: string }>).map((r) => `${r.stage}:${r.outcome}`);
+        expect(stages).toContain('dismissed:skipped');
+    });
+
+    it('dismissPending refuses while an operation is in flight and mutates nothing', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const db = DatabaseService.getInstance();
+        const stackName = 'dismiss-in-flight';
+        await svc.upsert({
+            stackName,
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        db.setGitSourcePending(stackName, 'sha-yyy', 'services: {}', null);
+        const { appId, generationId } = seedDirectCandidate(stackName);
+        GitOpsTransitions.getInstance().fetchStarted(appId, testEnvelope());
+
+        let caught: unknown;
+        try {
+            svc.dismissPending(stackName, 'operator-1');
+        } catch (error) {
+            caught = error;
+        }
+        expect(caught).toBeInstanceOf(GitSourceError);
+        if (!(caught instanceof GitSourceError)) throw new Error('expected GitSourceError');
+        expect(caught.code).toBe('OPERATION_IN_FLIGHT');
+        // The refusal is the outcome: neither the model nor the legacy columns move.
+        expect(GitOpsStore.getInstance().getApplication(appId)?.candidate_generation_id).toBe(generationId);
+        expect(db.getGitSource(stackName)?.pending_commit_sha).toBe('sha-yyy');
+    });
+
+    it('dismissPending stays a legacy-only no-op without a canonical application', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const db = DatabaseService.getInstance();
+        const stackName = 'dismiss-legacy-only';
+        await svc.upsert({
+            stackName,
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        db.setGitSourcePending(stackName, 'sha-zzz', 'services: {}', null);
+
+        expect(() => svc.dismissPending(stackName, 'operator-1')).not.toThrow();
+        expect(db.getGitSource(stackName)?.pending_commit_sha).toBeNull();
     });
 
     it('clearGitSourceAppliedRevision clears pending plan columns', async () => {
@@ -1206,6 +1353,144 @@ describe('GitSourceService.pull', () => {
         const svc = GitSourceService.getInstance();
         await expect(svc.pull('does-not-exist')).rejects.toMatchObject({ code: 'GIT_ERROR' });
     });
+
+    function generationCount(stackName: string): number {
+        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName)!;
+        return (DatabaseService.getInstance().getDb()
+            .prepare('SELECT COUNT(*) AS n FROM gitops_generations WHERE application_id = ?')
+            .get(app.id) as { n: number }).n;
+    }
+
+    async function createFromGit(stackName: string, sha: string, autoApplyOnWebhook = false): Promise<void> {
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        try {
+            await svc.createStackFromGit({
+                stackName,
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                token: null,
+                autoApplyOnWebhook,
+                autoDeployOnApply: false,
+            });
+        } finally {
+            validateSpy.mockRestore();
+        }
+    }
+
+    it('an up-to-date pull against an accepted commit opens a fresh staging generation', async () => {
+        // Deliberate counterpart to the dedupe below: once the candidate was
+        // accepted, nothing is staged, and staging again is a new dispatch
+        // cycle that apply needs as its acceptance target.
+        const svc = GitSourceService.getInstance();
+        await createFromGit('pull-after-apply', '1111111111111111111111111111111111111111');
+        const base = generationCount('pull-after-apply');
+
+        await svc.pull('pull-after-apply');
+        expect(generationCount('pull-after-apply')).toBe(base + 1);
+        const app = GitOpsStore.getInstance().getLiveDirectApplication('pull-after-apply')!;
+        expect(app.candidate_generation_id).toBeTruthy();
+        expect(DatabaseService.getInstance().getGitSource('pull-after-apply')?.pending_commit_sha).toBeTruthy();
+        await cleanupStackDir('pull-after-apply');
+    });
+
+    it('repeat pulls of an unapplied update keep one candidate', async () => {
+        const svc = GitSourceService.getInstance();
+        await createFromGit('pull-repeat', '2222222222222222222222222222222222222222');
+        const base = generationCount('pull-repeat');
+
+        const updatedSha = '3333333333333333333333333333333333333333';
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-repeat');
+        const stagedId = GitOpsStore.getInstance().getLiveDirectApplication('pull-repeat')!.candidate_generation_id;
+        expect(stagedId).toBeTruthy();
+        expect(generationCount('pull-repeat')).toBe(base + 1);
+
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-repeat');
+        expect(generationCount('pull-repeat')).toBe(base + 1);
+        expect(GitOpsStore.getInstance().getLiveDirectApplication('pull-repeat')!.candidate_generation_id).toBe(stagedId);
+        expect(DatabaseService.getInstance().getGitSource('pull-repeat')?.pending_commit_sha).toBe(updatedSha);
+        await cleanupStackDir('pull-repeat');
+    });
+
+    it('a pull whose source fingerprint drifted from the staged candidate mints anew', async () => {
+        const svc = GitSourceService.getInstance();
+        await createFromGit('pull-fp-drift', '4444444444444444444444444444444444444444');
+        const base = generationCount('pull-fp-drift');
+        const updatedSha = '5555555555555555555555555555555555555555';
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-fp-drift');
+        const stagedId = GitOpsStore.getInstance().getLiveDirectApplication('pull-fp-drift')!.candidate_generation_id;
+        expect(stagedId).toBeTruthy();
+
+        // Simulates a standing candidate produced under different source
+        // wiring than the configuration in effect now. Commit and plan
+        // verdict are unchanged, but the fingerprint term alone must defeat
+        // equivalence so the candidate never misrepresents what a pull stages.
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE gitops_generations SET materialization_fingerprint = ? WHERE id = ?')
+            .run('drifted-fingerprint', stagedId);
+
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-fp-drift');
+        expect(generationCount('pull-fp-drift')).toBe(base + 2);
+        expect(GitOpsStore.getInstance().getLiveDirectApplication('pull-fp-drift')!.candidate_generation_id).not.toBe(stagedId);
+        await cleanupStackDir('pull-fp-drift');
+    });
+
+    it('a pull whose plan verdict differs from the staged candidate mints anew', async () => {
+        const svc = GitSourceService.getInstance();
+        await createFromGit('pull-verdict-flip', '6666666666666666666666666666666666666666');
+        const base = generationCount('pull-verdict-flip');
+        const updatedSha = '7777777777777777777777777777777777777777';
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-verdict-flip');
+        const stagedId = GitOpsStore.getInstance().getLiveDirectApplication('pull-verdict-flip')!.candidate_generation_id;
+        expect(stagedId).toBeTruthy();
+        const seeded = DatabaseService.getInstance().getDb()
+            .prepare('SELECT plan_blocked FROM gitops_generations WHERE id = ?')
+            .get(stagedId) as { plan_blocked: number };
+        expect(seeded.plan_blocked).toBe(0);
+
+        // The plan is re-evaluated on every pull and can flip without a new
+        // commit, for example when stack policy changes between pulls.
+        // Simulating a candidate staged under the other verdict proves the
+        // verdict term defeats equivalence on its own.
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE gitops_generations SET plan_blocked = 1 WHERE id = ?')
+            .run(stagedId);
+
+        mockSuccessfulClone({
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        });
+        await svc.pull('pull-verdict-flip');
+        expect(generationCount('pull-verdict-flip')).toBe(base + 2);
+        expect(GitOpsStore.getInstance().getLiveDirectApplication('pull-verdict-flip')!.candidate_generation_id).not.toBe(stagedId);
+        await cleanupStackDir('pull-verdict-flip');
+    });
 });
 
 describe('GitSourceService.createStackFromGit', () => {
@@ -1537,7 +1822,7 @@ describe('GitSourceService.apply', () => {
         const { ComposeService } = await import('../services/ComposeService');
         const { HealthGateService } = await import('../services/HealthGateService');
         const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
         const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-git');
         const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
 
@@ -1548,7 +1833,7 @@ describe('GitSourceService.apply', () => {
                 source: 'git_apply',
                 actor: 'system:git-source',
             });
-            expect(beginSpy).toHaveBeenCalledWith(nodeId, 'apply-deploy-gate', 'deploy', 'system:git-source');
+            expect(beginSpy).toHaveBeenCalledWith(nodeId, 'apply-deploy-gate', 'deploy', 'system:git-source', { deployedGenerationId: null });
             expect(mockRecoveryLinkGateOrRetain).toHaveBeenCalledWith('rec-test-1', 'gate-git');
         } finally {
             validateSpy.mockRestore();
@@ -1648,7 +1933,7 @@ describe('GitSourceService.apply', () => {
         const TrivyService = (await import('../services/TrivyService')).default;
         const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
         const listImagesSpy = vi.spyOn(ComposeService.prototype, 'listStackImages').mockResolvedValue(['nginx:bad']);
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
         const trivy = TrivyService.getInstance();
         const trivyAvailableSpy = vi.spyOn(trivy, 'isTrivyAvailable').mockReturnValue(true);
         const scanSpy = vi.spyOn(trivy, 'scanImagePreflight').mockResolvedValue({
@@ -2646,3 +2931,50 @@ describe('GitSourceService classified plan fingerprint', () => {
         }
     });
 });
+
+// ── Canonical dismissal fixtures ───────────────────────────────────────
+
+function testEnvelope(): { operationId: string; actor: string; trigger: string; at: number } {
+    return { operationId: newGitOpsId(), actor: 'test', trigger: 'test', at: Date.now() };
+}
+
+/**
+ * Mint an unblocked candidate for `stackName`, the same shape a pull produces,
+ * without driving a real fetch. Reuses the live application the preceding
+ * `svc.upsert` created; the identity is re-derived from the same configuration
+ * so the generation fingerprint matches the application's.
+ */
+function seedDirectCandidate(stackName: string): { appId: string; generationId: string } {
+    const at = Date.now();
+    const config: DirectSourceConfig = {
+        repoUrl: 'https://github.com/example/repo.git',
+        branch: 'main',
+        composePaths: ['compose.yaml'],
+        contextDir: null,
+        syncEnv: false,
+        envPath: null,
+    };
+    const identity = directSourceIdentity(config);
+    const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+    if (!app) throw new Error(`no live direct application for ${stackName}`);
+    const appId = app.id;
+    const generationId = newGitOpsId();
+    GitOpsStore.getInstance().insertGeneration(buildGenerationRow({
+        id: generationId,
+        applicationId: appId,
+        commitSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        identity,
+        configuredRef: 'main',
+        candidateRelPath: 'generations/cand',
+        appliedRelPath: 'applied/1',
+        manifestVersion: 1,
+        expectedInvocation: null,
+        changePlanFingerprint: 'fp-seed',
+        operationId: newGitOpsId(),
+        trigger: 'test',
+        actor: 'test',
+        at,
+    }));
+    GitOpsTransitions.getInstance().candidateReady(appId, generationId, false, testEnvelope());
+    return { appId, generationId };
+}

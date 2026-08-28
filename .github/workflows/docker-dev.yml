@@ -133,7 +133,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm --entrypoint sh localhost/sencho:dev-scan -c \
-            'docker --version && docker compose version'
+            'docker --version && docker compose version && git --version'
 
           docker run -d --name sencho-dev-smoke -p 1852:1852 localhost/sencho:dev-scan
           trap 'docker logs sencho-dev-smoke 2>&1 || true; docker rm -f sencho-dev-smoke >/dev/null 2>&1 || true' EXIT

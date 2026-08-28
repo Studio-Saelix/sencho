@@ -26,10 +26,43 @@ Writes land in the stack's existing directory using the same storage Sencho uses
 
 The panel groups four regions:
 
-- **Pending update banner.** Appears at the top when a webhook in **Review only** mode has fetched a new commit. Click **Review** to re-fetch the incoming commit and open the change plan. If local files conflict with the incoming commit, the banner says the update is blocked.
+- **Pending update banner.** Appears at the top whenever a fetched commit is staged, however it was fetched. Its heading is the source state, so it says whether the commit is ready to apply, waiting on review, or blocked by local conflicts. Click **Review** to re-fetch the incoming commit and open the change plan.
 - **Form fields.** Repository URL, branch, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication toggle, and the apply behavior radio group.
-- **Last applied stat strip.** Shows the short SHA of the last commit Sencho applied to disk, plus the timestamp of the most recent successful save or pull.
+- **Last applied stat strip.** Shows the short SHA of the last commit Sencho applied to disk, the source state (see below), and the timestamp of the most recent successful save or pull.
 - **Footer actions.** **Remove** disconnects the source by exporting the effective compose model into a single `compose.yaml` and removing auto-discovered override files; the remaining materialized files are kept. **Pull now** fetches the configured branch's HEAD; **Save** or **Update** persists form changes after a reachability check passes.
+
+## Source state
+
+A commit SHA tells you which files Sencho wrote. It does not tell you whether that commit was accepted, whether something newer is waiting, or whether an operation was interrupted halfway. The **source state** answers those, in one short phrase that means the same thing everywhere it appears: the Git Source panel, the Drift tab, the stack list, and the stack rows on the dashboard.
+
+These are the states you will see most often.
+
+| State | What it means |
+| --- | --- |
+| **Never reconciled** | No commit from this repository has been accepted yet. |
+| **Fetching** | Sencho is reading from the repository right now. |
+| **Accepted** | The fetched commit has been accepted as the current generation. |
+| **Pending update** | A fetched commit is ready to apply. |
+| **Review required** | A fetched commit is waiting for review before it can apply. |
+| **Pending update blocked** | The change plan has local conflicts. Apply stays disabled until they are resolved. |
+| **Reconcile required** | What was reconciled no longer matches the configuration in force. Pull again to rebuild the plan. |
+| **Applying** | A commit is being written to the stack directory. |
+| **Retry scheduled** | The last attempt failed and another is queued. |
+| **Source failed** | The last operation on this source failed. |
+| **Outcome unknown** | An operation was interrupted, so Sencho cannot confirm how it ended. |
+| **Recovering** | A recovery is running on this stack. |
+
+The last two matter most. Sencho reports an interrupted operation as unknown rather than guessing, so a stack whose pull was cut short by a restart says so instead of quietly reading as up to date.
+
+<Note>
+  Changing the repository, the branch, the compose files, the project directory, or the `.env` sync clears any staged commit, because the plan was built against the settings you just replaced. Pull again to rebuild it. The state moves to **Reconcile required** if a commit had already been accepted, and to **Never reconciled** if none ever was. Changing only the token or the apply behavior leaves a staged commit alone, since neither changes what would be materialized.
+</Note>
+
+### When part of the state could not be proven
+
+The panel sometimes lists one or more things it could not prove, at the top above the form fields. A managed manifest that does not identify this stack on this node from the repository configured now, an approval that could not be restored after a recovery, a record that has gone: each is reported as its own line.
+
+These are qualifications, not failures. The state above them is real, and the lines tell you which part of it to treat with less confidence. That is deliberate: a stack whose evidence is partly missing looks identical to one with complete evidence unless Sencho says otherwise, and the safer wrong answer is never the quiet one.
 
 ## Create a stack from a Git repository
 
@@ -213,7 +246,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
   </Accordion>
 
   <Accordion title="Repository too large">
-    A clone is capped on how much it downloads (100 MB by default), and individual compose/env files are capped on read. A compose repository is normally tiny, so hitting either usually means the tracked branch carries large binaries. Point the source at a repository or branch that holds just your compose and `.env` files. If a large repository is unavoidable, an operator can raise the download ceiling with the `GITSOURCE_MAX_CLONE_BYTES` environment variable.
+    A clone is capped on the on-disk size of its temporary workspace (100 MB by default), and individual compose/env files are capped on read. A compose repository is normally tiny, so hitting either usually means the tracked branch carries large binaries. Point the source at a repository or branch that holds just your compose and `.env` files. If a large repository is unavoidable, an operator can raise the workspace ceiling with the `GITSOURCE_MAX_CLONE_BYTES` environment variable.
   </Accordion>
 
   <Accordion title="Pending commit has changed since this pull was fetched">
@@ -251,7 +284,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
 - **No Git LFS.** Compose and env files stored via LFS are rejected. Commit plain files instead.
 - **No submodules.** Submodule contents are not fetched. Inputs and build contexts that reference submodule contents are refused with an actionable message; a warning is shown when `.gitmodules` is present.
 - **Branch-tracking only.** Sources follow the head of a branch. Specific commit SHAs and tags are not pinnable. Each pull resolves and pins the exact commit SHA, so apply always materializes the reviewed revision.
-- **Clone size cap.** A clone is bounded on how much it downloads (and each compose/env file is capped on read), so very large repositories are rejected. Operators can adjust the download ceiling with `GITSOURCE_MAX_CLONE_BYTES`.
+- **Clone size cap.** A clone is bounded on the on-disk size of its temporary workspace (and each compose/env file is capped on read), so very large repositories are rejected. Operators can adjust the workspace ceiling with `GITSOURCE_MAX_CLONE_BYTES`.
 - **Complete project materialization.** Every repository-local input the project needs is materialized: the ordered compose files, implicit `compose.override.*` files, recursive `include:` and `extends.file` dependencies, service env files, file-backed configs and secrets, label files, and build contexts with `.dockerignore` semantics. The materialized set is recorded in a versioned managed-project manifest, and each pull stages a candidate that is validated with the exact deployment invocation before anything on disk changes. If apply is interrupted, Sencho completes the accepted generation or restores the previous generation. If files were edited during the interruption and no longer match either generation, Sencho preserves them and requires manual recovery instead of overwriting them.
 - **Unsupported inputs are refused, not guessed.** Inputs that cannot be safely reproduced fail the pull with an actionable message: URL includes, Git LFS pointers, submodule contents, symbolic links, build contexts that exceed the size bounds, and include or extends declarations that point outside the repository or use dynamic `\${VAR}` paths (their contents cannot be enumerated). Nothing is applied until the declaration is fixed. Absolute host paths, host bind mounts, external resources, and dynamic `\${VAR}` data paths are never claimed as covered: they resolve at deploy time from the environment or the node, and the manifest records them as unmanaged.
 - **Materialization bounds.** The materialized project is bounded by file count, total bytes, per-file size, path depth, and build-context size, each adjustable with a `GITSOURCE_*` variable (see configuration). Crossing a bound refuses the pull with the counts so far rather than producing a partial project.

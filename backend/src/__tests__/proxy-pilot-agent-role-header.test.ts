@@ -80,6 +80,26 @@ describe('pilot-agent-mode proxy role header parity', () => {
     expect(captured?.[PROXY_ROLE_HEADER]).toBe('deployer');
   });
 
+  it('strips conditional request headers on the gitops identity hop', async () => {
+    captured = null;
+    const res = await request(app)
+      .get('/api/git-sources')
+      .set('Authorization', personas.deployer.bearer)
+      .set('x-node-id', String(pilotNodeId))
+      // A remote answering this with 304 would let the client keep a cached
+      // page the hub never re-filtered, so the revalidation question must
+      // never reach the remote.
+      .set('If-None-Match', 'W/"cached-upstream"')
+      .set('Accept', 'application/json');
+    expect(res.status).toBe(200);
+    expect(captured).not.toBeNull();
+    expect(captured?.['if-none-match']).toBeUndefined();
+    // Unrelated headers still travel.
+    expect(captured?.['accept']).toBe('application/json');
+    // The answer itself must not be cacheable under any validator.
+    expect(res.headers['cache-control']).toBe('no-store');
+  });
+
   it('overwrites a smuggled admin header with the real deployer role on pilot path', async () => {
     captured = null;
     const res = await request(app)

@@ -1,9 +1,10 @@
 /**
  * Route-layer tests for the git-source API.
  *
- * Covers input-validation and guard behavior that lives in the Express
- * handlers (not in GitSourceService), specifically:
- *   - HTTPS-only repo URL enforcement
+ * Covers input-validation and guard behavior reachable through the Express
+ * handlers (the URL rules themselves live in services/gitops/repoIdentity.ts,
+ * not in GitSourceService), specifically:
+ *   - HTTPS-only repo URL enforcement, including userinfo/query/fragment rejection
  *   - Max-length caps on repo_url / branch / compose_path / env_path / token
  *   - Stack-existence 404 guard on PUT
  *   - 400 on invalid stack names
@@ -17,9 +18,74 @@ import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import path from 'path';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { DatabaseService } from '../services/DatabaseService';
 import { ComposeService } from '../services/ComposeService';
 import { GitSourceService, GitSourceError } from '../services/GitSourceService';
+import { GitOpsStore } from '../services/gitops/store';
+import { GitOpsTransitions } from '../services/gitops/transitions';
+import { insertHistory } from '../services/gitops/history';
+import type { GitOpsApplicationRow } from '../services/gitops/types';
+
+/** A minimal live Direct application row for GitOps read-path fixtures. */
+function directApplicationFixture(id: string, stackName: string): GitOpsApplicationRow {
+    return {
+        id,
+        lifecycle_key: `direct:${stackName}`,
+        lifecycle_status: 'active',
+        target_mode: 'direct',
+        stack_name: stackName,
+        blueprint_id: null,
+        configured_repo_url: 'https://github.com/example/repo.git',
+        repo_identity_json: '{"host":"github.com","pathname":"/example/repo.git"}',
+        configured_ref: 'main',
+        compose_paths_json: '["compose.yaml"]',
+        context_dir: null,
+        sync_env: 0,
+        env_path: null,
+        materialization_fingerprint: 'a'.repeat(64),
+        desired_commit_sha: null,
+        fetched_commit_sha: null,
+        candidate_generation_id: null,
+        accepted_generation_id: null,
+        candidate_plan_blocked: 0,
+        review_required: 0,
+        artifact_set_id: null,
+        latest_artifact_set_id: null,
+        intent_revision_id: null,
+        rollout_candidate_id: null,
+        rollout_generation_id: null,
+        source_acceptance_ref: null,
+        placement_approval_ref: null,
+        rollout_authorization_ref: null,
+        legacy_combined_approval_ref: null,
+        preflight_fingerprint: null,
+        latest_operation_id: null,
+        active_operation_id: null,
+        active_operation_stage: null,
+        active_operation_at: null,
+        active_generation_id: null,
+        pause_at: null,
+        pause_reason: null,
+        partial_json: null,
+        failure_stage: null,
+        failure_class: null,
+        failure_at: null,
+        retry_at: null,
+        retry_count: 0,
+        suspended_at: null,
+        recovery_ref: null,
+        recovery_phase: null,
+        interruption_stage: null,
+        interruption_at: null,
+        interruption_operation_id: null,
+        interruption_generation_id: null,
+        evidence_fresh_at: null,
+        evidence_limitations_json: null,
+        created_at: 1,
+        updated_at: 1,
+    };
+}
 
 // ── Hoisted mocks (must come before importing the app) ─────────────────
 
@@ -93,6 +159,27 @@ describe('PUT /api/stacks/:stackName/git-source — URL validation', () => {
         expect(res.body.error).toMatch(/HTTPS/i);
     });
 
+    it('rejects repo URLs with userinfo, query, or fragment', async () => {
+        const cases = [
+            { repo_url: 'https://user:pass@github.com/example/repo.git', error: /userinfo/i },
+            { repo_url: 'https://github.com/example/repo.git?token=1', error: /query/i },
+            { repo_url: 'https://github.com/example/repo.git#head', error: /fragment/i },
+        ];
+        for (const c of cases) {
+            const res = await request(app)
+                .put('/api/stacks/existing-stack/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({
+                    repo_url: c.repo_url,
+                    branch: 'main',
+                    compose_path: 'compose.yaml',
+                    auth_type: 'none',
+                });
+            expect(res.status).toBe(400);
+            expect(res.body.error).toMatch(c.error);
+        }
+    });
+
     it('rejects missing repo_url with 400', async () => {
         const res = await request(app)
             .put('/api/stacks/existing-stack/git-source')
@@ -104,6 +191,28 @@ describe('PUT /api/stacks/:stackName/git-source — URL validation', () => {
             });
         expect(res.status).toBe(400);
         expect(res.body.error).toMatch(/repo_url/i);
+    });
+});
+
+describe('POST /api/git-sources/browse: URL validation', () => {
+    it('rejects non-HTTPS, userinfo, query, and fragment URLs before cloning', async () => {
+        const listRepoTree = vi.spyOn(GitSourceService.getInstance(), 'listRepoTree');
+        const cases = [
+            { repo_url: 'http://github.com/example/repo.git', error: /HTTPS/i },
+            { repo_url: 'https://user:pass@github.com/example/repo.git', error: /userinfo/i },
+            { repo_url: 'https://github.com/example/repo.git?token=1', error: /query/i },
+            { repo_url: 'https://github.com/example/repo.git#head', error: /fragment/i },
+        ];
+        for (const c of cases) {
+            const res = await request(app)
+                .post('/api/git-sources/browse')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ repo_url: c.repo_url, branch: 'main', auth_type: 'none' });
+            expect(res.status).toBe(400);
+            expect(res.body.error).toMatch(c.error);
+        }
+        expect(listRepoTree).not.toHaveBeenCalled();
+        listRepoTree.mockRestore();
     });
 });
 
@@ -134,6 +243,21 @@ describe('PUT /api/stacks/:stackName/git-source — max-length caps', () => {
             });
         expect(res.status).toBe(400);
         expect(res.body.error).toMatch(/branch/i);
+    });
+
+    it('does not reject a branch at the transport limit as too long', async () => {
+        // The route and the transport share one bound, so a branch the route
+        // stores is always one the transport will still fetch. This asserts
+        // the shared side of that: at the limit, length is not the objection.
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                ...baseBody,
+                repo_url: 'https://github.com/example/repo.git',
+                branch: 'b'.repeat(REF_MAX_LEN),
+            });
+        expect(String(res.body?.error ?? '')).not.toMatch(/too long/i);
     });
 
     it('rejects oversized compose_path', async () => {
@@ -276,7 +400,15 @@ describe('GET /api/stacks/:stackName/git-source', () => {
             .get('/api/stacks/unlinked-stack/git-source')
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(res.status).toBe(200);
-        expect(res.body).toEqual({ linked: false });
+        expect(res.body.linked).toBe(false);
+        // The stack is real but carries no Git source, so it has no GitOps
+        // application to project and the directory is still on disk.
+        expect(res.body.stackResourcePresent).toBe(true);
+        expect(res.body.gitopsRevision).toMatchObject({
+            schemaVersion: 1,
+            targetMode: 'not_applicable',
+            applicationId: null,
+        });
     });
 
     it('returns 404 when the stack does not exist on the active node', async () => {
@@ -477,6 +609,15 @@ describe('POST /api/stacks/from-git', () => {
             .send({ ...validBody, repo_url: 'http://github.com/example/repo.git' });
         expect(res.status).toBe(400);
         expect(res.body.error).toMatch(/HTTPS/i);
+    });
+
+    it('rejects repo URLs with userinfo, query, or fragment', async () => {
+        const res = await request(app)
+            .post('/api/stacks/from-git')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ ...validBody, repo_url: 'https://github.com/example/repo.git?token=1' });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/query/i);
     });
 
     it('rejects oversized repo_url with 400', async () => {
@@ -1211,5 +1352,373 @@ describe('POST /api/stacks/:stackName/git-source/pull permissions and actor', ()
         } finally {
             pullSpy.mockRestore();
         }
+    });
+});
+
+describe('GitOps additive fields and history routes', () => {
+    let viewerCookie: string;
+    let auditorCookie: string;
+
+    async function loginAs(username: string, role: 'viewer' | 'auditor'): Promise<string> {
+        const bcrypt = (await import('bcrypt')).default;
+        const password = `${username}-pass`;
+        DatabaseService.getInstance().addUser({
+            username,
+            password_hash: await bcrypt.hash(password, 1),
+            role,
+        });
+        const login = await request(app).post('/api/auth/login').send({ username, password });
+        const cookies = login.headers['set-cookie'] as string | string[];
+        return Array.isArray(cookies) ? cookies[0] : cookies;
+    }
+
+    beforeAll(async () => {
+        viewerCookie = await loginAs('gitops-viewer', 'viewer');
+        auditorCookie = await loginAs('gitops-auditor', 'auditor');
+    });
+
+    function makeStackDir(stackName: string): void {
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, stackName), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, stackName, 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+    }
+
+    /** Bring a real Direct application into the store, which also writes its first history row. */
+    function activateApplication(
+        id: string,
+        stackName: string,
+        lifecycleStatus: GitOpsApplicationRow['lifecycle_status'] = 'active',
+    ): void {
+        const application: GitOpsApplicationRow = {
+            ...directApplicationFixture(id, stackName),
+            lifecycle_status: lifecycleStatus,
+        };
+        GitOpsTransitions.getInstance().activateDirect({
+            application,
+            nodeId: 1,
+            envelope: { operationId: `op-${id}`, actor: 'tester', trigger: 'manual', at: Date.now() },
+        });
+    }
+
+    /** Append one more history row for an existing application. */
+    function recordFetch(applicationId: string, stackName: string, operationId: string, sha: string): void {
+        const application = GitOpsStore.getInstance().getApplication(applicationId)
+            ?? directApplicationFixture(applicationId, stackName);
+        insertHistory(DatabaseService.getInstance().getDb(), {
+            application,
+            nodeId: 1,
+            dedupeTarget: 'app',
+            operationId,
+            stage: 'fetched',
+            outcome: 'committed',
+            trigger: 'manual',
+            actor: 'tester',
+            before: { desiredCommitSha: null },
+            after: { desiredCommitSha: sha },
+            commitSha: sha,
+            at: Date.now(),
+        });
+    }
+
+    it('carries gitopsRevision and stackResourcePresent on each git-source row', async () => {
+        makeStackDir('additive-stack');
+        seedGitSource('additive-stack');
+        const res = await request(app)
+            .get('/api/git-sources')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        const row = res.body.find((r: { stack_name: string }) => r.stack_name === 'additive-stack');
+        expect(row).toBeDefined();
+        expect(row.stackResourcePresent).toBe(true);
+        expect(row.gitopsRevision.schemaVersion).toBe(1);
+    });
+
+    it('withholds a row with no GitOps application from a non-admin', async () => {
+        makeStackDir('unmodelled-stack');
+        seedGitSource('unmodelled-stack');
+        // A viewer holds global stack:read, but a source we cannot tie to a
+        // live application has no lifecycle to prove, so it stays with Admin.
+        const res = await request(app)
+            .get('/api/git-sources')
+            .set('Cookie', viewerCookie);
+        expect(res.status).toBe(200);
+        expect(res.body.map((r: { stack_name: string }) => r.stack_name)).not.toContain('unmodelled-stack');
+    });
+
+    it('projects a live application, not just the not-applicable shape', async () => {
+        makeStackDir('live-app-stack');
+        seedGitSource('live-app-stack');
+        activateApplication('app-live-route', 'live-app-stack');
+        const res = await request(app)
+            .get('/api/git-sources')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        const row = res.body.find((r: { stack_name: string }) => r.stack_name === 'live-app-stack');
+        expect(row.gitopsRevision).toMatchObject({
+            schemaVersion: 1,
+            targetMode: 'direct',
+            applicationId: 'app-live-route',
+            lifecycleStatus: 'active',
+        });
+        expect(row.gitopsRevision.facets).not.toBeNull();
+    });
+
+    it('shows a modelled row to a non-admin holding stack read', async () => {
+        // The deny case alone would pass if the route dropped every row for a
+        // non-admin, so the allow case is what proves the classifier runs.
+        makeStackDir('viewer-visible-stack');
+        seedGitSource('viewer-visible-stack');
+        activateApplication('app-viewer-visible', 'viewer-visible-stack');
+        const res = await request(app)
+            .get('/api/git-sources')
+            .set('Cookie', viewerCookie);
+        expect(res.status).toBe(200);
+        expect(res.body.map((r: { stack_name: string }) => r.stack_name)).toContain('viewer-visible-stack');
+    });
+
+    it('filters cross-stack history per row for a non-admin', async () => {
+        makeStackDir('viewer-hist-stack');
+        activateApplication('app-viewer-hist', 'viewer-hist-stack');
+        // No directory, so this application's rows are unprovable and Admin-only.
+        activateApplication('app-hidden-hist', 'absent-hist-stack');
+
+        const asAdmin = await request(app)
+            .get('/api/git-sources/history?limit=100')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        const adminStacks = asAdmin.body.items.map((i: { stackName: string }) => i.stackName);
+        expect(adminStacks).toContain('viewer-hist-stack');
+        expect(adminStacks).toContain('absent-hist-stack');
+
+        const asViewer = await request(app)
+            .get('/api/git-sources/history?limit=100')
+            .set('Cookie', viewerCookie);
+        const viewerStacks = asViewer.body.items.map((i: { stackName: string }) => i.stackName);
+        expect(viewerStacks).toContain('viewer-hist-stack');
+        expect(viewerStacks).not.toContain('absent-hist-stack');
+    });
+
+    it('shows an auditor the history entries a viewer cannot prove', async () => {
+        // 'absent-hist-stack' has no directory, so its entries cannot be tied
+        // to a readable stack. They are still an audit record, so the audit
+        // permission reaches them where a plain stack grant does not.
+        const asAuditor = await request(app)
+            .get('/api/git-sources/history?limit=100')
+            .set('Cookie', auditorCookie);
+        expect(asAuditor.status).toBe(200);
+        const auditorStacks = asAuditor.body.items.map((i: { stackName: string }) => i.stackName);
+        expect(auditorStacks).toContain('absent-hist-stack');
+        expect(auditorStacks).toContain('viewer-hist-stack');
+    });
+
+    it('does not let the audit permission reach Git configuration', async () => {
+        // The source list is live configuration, not a record of events, so an
+        // auditor sees no more of it than any other non-admin.
+        makeStackDir('auditor-config-stack');
+        seedGitSource('auditor-config-stack');
+        const res = await request(app)
+            .get('/api/git-sources')
+            .set('Cookie', auditorCookie);
+        expect(res.status).toBe(200);
+        // Seeded with no GitOps application, so it stays Admin-only.
+        expect(res.body.map((r: { stack_name: string }) => r.stack_name)).not.toContain('auditor-config-stack');
+    });
+
+    it('advances the cursor past rows the caller may not read', async () => {
+        // The viewer cannot read the absent-stack rows seeded above. Paging
+        // must still move forward, or a narrowly scoped caller re-reads the
+        // same rejected window for ever.
+        const first = await request(app)
+            .get('/api/git-sources/history?limit=1')
+            .set('Cookie', viewerCookie);
+        expect(first.status).toBe(200);
+        expect(first.body.nextCursor).not.toBeNull();
+
+        const second = await request(app)
+            .get(`/api/git-sources/history?limit=1&cursor=${encodeURIComponent(first.body.nextCursor)}`)
+            .set('Cookie', viewerCookie);
+        expect(second.status).toBe(200);
+        const firstIds = first.body.items.map((i: { id: string }) => i.id);
+        const secondIds = second.body.items.map((i: { id: string }) => i.id);
+        expect(secondIds.filter((id: string) => firstIds.includes(id))).toEqual([]);
+    });
+
+    it('hands back a cursor when a page fills and none when the window is spent', async () => {
+        makeStackDir('paging-stack');
+        activateApplication('app-paging', 'paging-stack');
+        recordFetch('app-paging', 'paging-stack', 'op-page-1', 'aaa1111');
+        recordFetch('app-paging', 'paging-stack', 'op-page-2', 'bbb2222');
+
+        const full = await request(app)
+            .get('/api/stacks/paging-stack/git-source/history?limit=2')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(full.body.items).toHaveLength(2);
+        expect(full.body.nextCursor).not.toBeNull();
+
+        const rest = await request(app)
+            .get(`/api/stacks/paging-stack/git-source/history?limit=2&cursor=${encodeURIComponent(full.body.nextCursor)}`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(rest.body.items).toHaveLength(1);
+        expect(rest.body.nextCursor).toBeNull();
+    });
+
+    it('keeps a creating stack own history readable through the per-stack route', async () => {
+        // The row classifier sends `creating` to Admin. The per-stack route
+        // authorizes its collection by name instead, which is the whole reason
+        // that distinction exists.
+        makeStackDir('creating-stack');
+        activateApplication('app-creating', 'creating-stack', 'creating');
+
+        recordFetch('app-creating', 'creating-stack', 'op-creating-1', 'creat111');
+        const perStack = await request(app)
+            .get('/api/stacks/creating-stack/git-source/history')
+            .set('Cookie', viewerCookie);
+        expect(perStack.status).toBe(200);
+        // Asserted by identity, not by count. A non-empty page would also be
+        // satisfied by an exemption that had widened to rows it should not
+        // cover, which is the failure this route's scope exists to prevent.
+        expect(perStack.body.items.map((i: { applicationId: string }) => i.applicationId))
+            .toContain('app-creating');
+        expect(perStack.body.items.map((i: { commitSha: string | null }) => i.commitSha))
+            .toContain('creat111');
+
+        const crossStack = await request(app)
+            .get('/api/git-sources/history?limit=100')
+            .set('Cookie', viewerCookie);
+        const stacks = crossStack.body.items.map((i: { stackName: string }) => i.stackName);
+        expect(stacks).not.toContain('creating-stack');
+    });
+
+    it('does not expose a predecessor application through a reused stack name', async () => {
+        // A stack name outlives the applications that hold it. A grant on the
+        // one holding it now says nothing about the repository, actors or
+        // commits of the one that held it before, so those rows stay behind
+        // the audit permission on this route exactly as they do cross-stack.
+        makeStackDir('reused-name');
+        activateApplication('app-reused-old', 'reused-name');
+        recordFetch('app-reused-old', 'reused-name', 'op-reused-old', 'old11111');
+        GitOpsTransitions.getInstance().applicationTombstoned('app-reused-old', 'deleted', {
+            operationId: 'op-reused-old', actor: 'tester', trigger: 'manual', at: Date.now(),
+        });
+        activateApplication('app-reused-new', 'reused-name');
+        recordFetch('app-reused-new', 'reused-name', 'op-reused-new', 'new22222');
+
+        const viewer = await request(app)
+            .get('/api/stacks/reused-name/git-source/history?limit=100')
+            .set('Cookie', viewerCookie);
+        expect(viewer.status).toBe(200);
+        const viewerShas = viewer.body.items.map((i: { commitSha: string | null }) => i.commitSha);
+        expect(viewerShas).toContain('new22222');
+        expect(viewerShas).not.toContain('old11111');
+
+        // The audit trail is not lost, only moved behind the permission that
+        // exists for reading it.
+        const auditor = await request(app)
+            .get('/api/stacks/reused-name/git-source/history?limit=100')
+            .set('Cookie', auditorCookie);
+        expect(auditor.status).toBe(200);
+        const auditorShas = auditor.body.items.map((i: { commitSha: string | null }) => i.commitSha);
+        expect(auditorShas).toContain('old11111');
+        expect(auditorShas).toContain('new22222');
+    });
+
+    it('moves a detached application behind system:audit even with no successor', async () => {
+        // Detach leaves the files on disk, which once justified reading its
+        // trail on a stack grant. A grant covers whatever occupies the name
+        // today, and nothing in these tables can prove the detached
+        // application still does: some successors hide from every lookup this
+        // route could run, so detach joins `deleted` as an audit-only
+        // predecessor.
+        makeStackDir('detached-kept');
+        activateApplication('app-detached-kept', 'detached-kept');
+        recordFetch('app-detached-kept', 'detached-kept', 'op-detached-kept', 'kept1111');
+        GitOpsTransitions.getInstance().applicationTombstoned('app-detached-kept', 'detached', {
+            operationId: 'op-detached-kept', actor: 'tester', trigger: 'manual', at: Date.now(),
+        });
+
+        const viewer = await request(app)
+            .get('/api/stacks/detached-kept/git-source/history?limit=100')
+            .set('Cookie', viewerCookie);
+        expect(viewer.status).toBe(200);
+        const shas = viewer.body.items.map((i: { commitSha: string | null }) => i.commitSha);
+        expect(shas).not.toContain('kept1111');
+
+        // Moved behind the audit permission, not lost.
+        const auditor = await request(app)
+            .get('/api/stacks/detached-kept/git-source/history?limit=100')
+            .set('Cookie', auditorCookie);
+        expect(auditor.status).toBe(200);
+        const auditorShas = auditor.body.items.map((i: { commitSha: string | null }) => i.commitSha);
+        expect(auditorShas).toContain('kept1111');
+    });
+
+    it('keeps a detached predecessor behind system:audit once a successor takes the name', async () => {
+        // The successor makes the reuse visible, but the answer does not depend
+        // on detecting it: a detached trail is audit-only on its own. This pins
+        // that a successor neither restores nor widens what the stack grant
+        // reaches.
+        makeStackDir('reused-detached');
+        activateApplication('app-detached-old', 'reused-detached');
+        recordFetch('app-detached-old', 'reused-detached', 'op-detached-old', 'det11111');
+        GitOpsTransitions.getInstance().applicationTombstoned('app-detached-old', 'detached', {
+            operationId: 'op-detached-old', actor: 'tester', trigger: 'manual', at: Date.now(),
+        });
+        activateApplication('app-detached-new', 'reused-detached');
+        recordFetch('app-detached-new', 'reused-detached', 'op-detached-new', 'det22222');
+
+        const viewer = await request(app)
+            .get('/api/stacks/reused-detached/git-source/history?limit=100')
+            .set('Cookie', viewerCookie);
+        expect(viewer.status).toBe(200);
+        const shas = viewer.body.items.map((i: { commitSha: string | null }) => i.commitSha);
+        expect(shas).toContain('det22222');
+        expect(shas).not.toContain('det11111');
+
+        // Moved behind the audit permission, not lost.
+        const auditor = await request(app)
+            .get('/api/stacks/reused-detached/git-source/history?limit=100')
+            .set('Cookie', auditorCookie);
+        expect(auditor.status).toBe(200);
+        const auditorShas = auditor.body.items.map((i: { commitSha: string | null }) => i.commitSha);
+        expect(auditorShas).toContain('det11111');
+        expect(auditorShas).toContain('det22222');
+    });
+
+    it('rejects a malformed cursor instead of silently restarting', async () => {
+        const res = await request(app)
+            .get('/api/git-sources/history?cursor=123.not-a-uuid')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/cursor/i);
+    });
+
+    it('rejects a recognized filter carrying an unusable value', async () => {
+        const outcome = await request(app)
+            .get('/api/git-sources/history?outcome=success')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(outcome.status).toBe(400);
+        expect(outcome.body.error).toMatch(/outcome/i);
+
+        const nodeId = await request(app)
+            .get('/api/git-sources/history?nodeId=abc')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(nodeId.status).toBe(400);
+        expect(nodeId.body.error).toMatch(/nodeId/i);
+    });
+
+    it('rejects an invalid stack name on the per-stack history route', async () => {
+        const res = await request(app)
+            .get('/api/stacks/..%2Fetc/git-source/history')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/stack name/i);
+    });
+
+    it('returns an empty page for a stack with no recorded history', async () => {
+        makeStackDir('quiet-stack');
+        const res = await request(app)
+            .get('/api/stacks/quiet-stack/git-source/history')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(res.body.items).toEqual([]);
+        expect(res.body.nextCursor).toBeNull();
     });
 });

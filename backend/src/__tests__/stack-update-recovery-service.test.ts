@@ -140,7 +140,7 @@ vi.mock('fs/promises', () => ({
   rm: (p: string, opts?: unknown) => mockRm(p, opts),
 }));
 
-import { DatabaseService } from '../services/DatabaseService';
+import { DatabaseService, type StackUpdateRecoveryGenerationRow } from '../services/DatabaseService';
 import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryService';
 
 describe('StackUpdateRecoveryService', () => {
@@ -172,8 +172,12 @@ describe('StackUpdateRecoveryService', () => {
     mockTag.mockImplementation(async () => { order.push('tag'); });
     mockWriteFile.mockImplementation(async () => { order.push('write'); });
 
+    let inserted: StackUpdateRecoveryGenerationRow | undefined;
     const spyInsert = vi.spyOn(DatabaseService.prototype, 'insertStackUpdateRecoveryGeneration')
-      .mockImplementation(() => { order.push('insert'); });
+      .mockImplementation((row) => {
+        inserted = row;
+        order.push('insert');
+      });
     vi.spyOn(DatabaseService.prototype, 'getGlobalSettings').mockReturnValue({});
 
     await StackUpdateRecoveryService.getInstance().captureCandidate({
@@ -185,6 +189,11 @@ describe('StackUpdateRecoveryService', () => {
     expect(order.indexOf('validate')).toBeLessThan(order.indexOf('tag'));
     expect(order.indexOf('tag')).toBeLessThan(order.indexOf('write'));
     expect(order.indexOf('write')).toBeLessThan(order.indexOf('insert'));
+    expect(inserted).toMatchObject({
+      gitops_generation_id: null,
+      gitops_artifact_set_id: null,
+      gitops_source_acceptance_ref: null,
+    });
     spyInsert.mockRestore();
   });
 

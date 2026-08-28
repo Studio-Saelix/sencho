@@ -28,136 +28,22 @@ import type { ComposeInputEntry, GitProjectManifest, GitSourceManifestState, Inv
 import type { GitChangePlan, PublicGitChangePlan, GitChangePlanCounts, PublicGitChangePlanOperation } from '../types/gitChangePlan';
 import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
 import type { NotificationCategory } from './NotificationService';
-import type { GitHttpRequest, GitHttpResponse, HttpClient } from 'isomorphic-git/http/node';
-
-// isomorphic-git is the heaviest dependency in the backend (~5 MB) and only
-// fires when a stack is created from a Git source. Lazy-load it so cold
-// boots without any Git-sourced stacks never parse the module.
-type IsomorphicGit = typeof import('isomorphic-git')['default'];
-type IsomorphicGitHttp = typeof import('isomorphic-git/http/node')['default'];
-
-let cachedGit: IsomorphicGit | undefined;
-let cachedGitHttp: IsomorphicGitHttp | undefined;
-
-async function loadIsomorphicGit(): Promise<{ git: IsomorphicGit; gitHttp: IsomorphicGitHttp }> {
-    if (!cachedGit || !cachedGitHttp) {
-        const [gitMod, gitHttpMod] = await Promise.all([
-            import('isomorphic-git'),
-            import('isomorphic-git/http/node'),
-        ]);
-        cachedGit = gitMod.default;
-        cachedGitHttp = gitHttpMod.default;
-    }
-    return { git: cachedGit, gitHttp: cachedGitHttp };
-}
-
-function cloneTimeoutError(): Error & { code: string } {
-    return Object.assign(new Error('Clone timed out'), { code: 'ETIMEDOUT' });
-}
-
-async function collectGitBody(body: AsyncIterableIterator<Uint8Array>, signal: AbortSignal): Promise<Uint8Array> {
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    for await (const chunk of body) {
-        if (signal.aborted) throw cloneTimeoutError();
-        chunks.push(chunk);
-        size += chunk.byteLength;
-    }
-    const result = new Uint8Array(size);
-    let offset = 0;
-    for (const chunk of chunks) {
-        result.set(chunk, offset);
-        offset += chunk.byteLength;
-    }
-    return result;
-}
-
-function responseBodyIterator(body: ReadableStream<Uint8Array> | null): AsyncIterableIterator<Uint8Array> {
-    async function* iterate(): AsyncIterableIterator<Uint8Array> {
-        if (!body) return;
-        const reader = body.getReader();
-        try {
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) return;
-                yield value;
-            }
-        } finally {
-            reader.releaseLock();
-        }
-    }
-    return iterate();
-}
-
-/**
- * Mutable counter shared across every request in one clone so the size cap
- * is cumulative, and so the caller can tell a size abort from a timeout via
- * `exceeded` rather than the thrown error (which isomorphic-git may wrap).
- */
-interface CloneSizeState {
-    exceeded: boolean;
-    received: number;
-}
-
-/**
- * Wrap a response-body iterator with a cumulative byte counter shared
- * across every request in one clone. When the running total crosses
- * `maxBytes`, flip `state.exceeded`, abort the transport (closing the
- * socket so the download stops), and throw to unwind the stream. The
- * caller distinguishes a size abort from a timeout/transport abort via
- * `state.exceeded` rather than the thrown error, which isomorphic-git may
- * wrap.
- */
-export function countingBodyIterator(
-    src: AsyncIterableIterator<Uint8Array>,
-    controller: AbortController,
-    maxBytes: number,
-    state: CloneSizeState,
-): AsyncIterableIterator<Uint8Array> {
-    async function* iterate(): AsyncIterableIterator<Uint8Array> {
-        for await (const chunk of src) {
-            state.received += chunk.byteLength;
-            if (state.received > maxBytes) {
-                state.exceeded = true;
-                controller.abort();
-                throw new Error('Clone exceeded the maximum allowed size');
-            }
-            yield chunk;
-        }
-    }
-    return iterate();
-}
-
-function createAbortableGitHttp(
-    controller: AbortController,
-    maxBytes: number,
-    state: CloneSizeState,
-): HttpClient {
-    const signal = controller.signal;
-    return {
-        async request(request: GitHttpRequest): Promise<GitHttpResponse> {
-            if (signal.aborted) {
-                throw cloneTimeoutError();
-            }
-
-            const response = await fetch(request.url, {
-                method: request.method ?? 'GET',
-                headers: request.headers,
-                body: request.body ? await collectGitBody(request.body, signal) : undefined,
-                signal,
-            });
-
-            return {
-                url: response.url,
-                method: request.method,
-                statusCode: response.status,
-                statusMessage: response.statusText,
-                headers: Object.fromEntries(response.headers.entries()),
-                body: countingBodyIterator(responseBodyIterator(response.body), controller, maxBytes, state),
-            };
-        },
-    };
-}
+import { classifyGitFailure, isTransportFailure } from './git/errors';
+import { nativeGitTransport } from './git/nativeGitTransport';
+import { GitOpsStore } from './gitops/store';
+import { GitOpsTransitions, GitOpsTransitionError } from './gitops/transitions';
+import {
+    buildCreateCheckpointRow,
+    buildDirectApplicationRow,
+    buildGenerationRow,
+    directSourceIdentity,
+    newGitOpsId,
+    stackManagedRoot,
+} from './gitops/directApplication';
+import type { GitOpsApplicationRow } from './gitops/types';
+import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readStagingMarker, writeStagingMarker } from './gitops/createStagingMarker';
+import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops/createCleanup';
+import { managedAreaBase } from './gitops/managedPaths';
 
 /**
  * GitSourceService - fetch compose files from a Git repository and apply
@@ -180,7 +66,8 @@ export type GitSourceErrorCode =
     | 'PLAN_FINGERPRINT_REQUIRED'
     | 'PLAN_BLOCKED'
     | 'LEGACY_PENDING'
-    | 'PLAN_UNAVAILABLE';
+    | 'PLAN_UNAVAILABLE'
+    | 'OPERATION_IN_FLIGHT';
 
 export class GitSourceError extends Error {
     constructor(
@@ -347,17 +234,19 @@ const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 const TEMP_DIR_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 const WEBHOOK_DEBOUNCE_MS = 10_000;
 
-// Ceiling on how many bytes a single clone may download (the compressed pack
-// from the Git host) before it is aborted. This bounds network transfer and
-// abuse, not the decompressed on-disk checkout; it is paired with
-// MAX_REPO_FILE_BYTES and the 30s timeout. Generous default; operators with a
-// legitimately large monorepo can raise it via GITSOURCE_MAX_CLONE_BYTES.
+// Ceiling on the on-disk size of a single clone workspace before the fetch
+// is killed. Enforced by a watchdog that stats the workspace during the
+// clone (the native git transport streams the pack straight to disk, so
+// unlike the previous HTTP client there is no byte counter to hook). Paired
+// with MAX_REPO_FILE_BYTES and the timeout. Generous default; operators
+// with a legitimately large monorepo can raise it via GITSOURCE_MAX_CLONE_BYTES.
 const DEFAULT_MAX_CLONE_BYTES = 100 * 1024 * 1024; // 100 MB
 
 // Per-file ceiling for the compose/env file read into memory after the clone.
-// These files are KB-scale in practice; the clone byte cap bounds the
-// compressed download, not the decompressed working tree, so this guards the
-// in-memory read against a single huge (or highly compressible) file.
+// These files are KB-scale in practice; the clone byte cap bounds the total
+// on-disk workspace, not any single file within it, so this guards the
+// in-memory read against one outsized file inside an otherwise in-budget
+// checkout.
 const MAX_REPO_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
 
 function maxCloneBytes(): number {
@@ -376,10 +265,9 @@ function formatBytes(bytes: number): string {
 
 /**
  * Remove any inline credentials and Authorization headers from an error
- * message before it lands in a log or an API response. isomorphic-git
- * tends to include the fetch URL in thrown errors; if a PAT ever leaks
- * into that URL (we try to avoid it via `onAuth`, but be defensive),
- * strip it here.
+ * message before it lands in a log or an API response. Git errors tend to
+ * include the fetch URL; if a PAT ever leaks into a URL (we never send one,
+ * but be defensive), strip it here.
  */
 function scrubCredentials(message: string): string {
     return message
@@ -438,62 +326,9 @@ export function repoHost(url: string): string {
 }
 
 /**
- * Node's global `fetch()` reports every transport-level failure as a bare
- * `TypeError('fetch failed')` and hides the real reason on `error.cause`
- * (occasionally nested one level deeper through undici). Walk the cause
- * chain for the first Node error code so DNS / connection / TLS failures
- * can be translated into an actionable message instead of "fetch failed",
- * which reads like an internal Sencho bug.
- */
-function findCauseCode(err: unknown): { code?: string } {
-    let cur: unknown = err;
-    for (let depth = 0; depth < 5 && cur; depth++) {
-        const code = (cur as { code?: unknown }).code;
-        if (typeof code === 'string' && code) {
-            return { code };
-        }
-        cur = (cur as { cause?: unknown }).cause;
-    }
-    return {};
-}
-
-/**
- * Translate a Node transport error code into a GitSourceError with a
- * host-qualified, user-actionable message. Returns null for codes we do
- * not specifically recognise so the caller can fall through to its generic
- * handling. `host` is the bare hostname from `repoHost()` (never carries a
- * credential), so it is safe to surface.
- */
-function transportError(code: string, host: string): GitSourceError | null {
-    const dest = host && host !== 'unknown' ? ` ${host}` : ' the repository host';
-    switch (code) {
-        case 'ENOTFOUND':
-        case 'EAI_AGAIN':
-            return new GitSourceError('NETWORK_TIMEOUT', `Could not resolve${dest}. Check the repository URL and your network or DNS.`);
-        case 'ECONNREFUSED':
-            return new GitSourceError('NETWORK_TIMEOUT', `Connection refused by${dest}.`);
-        case 'ECONNRESET':
-            return new GitSourceError('NETWORK_TIMEOUT', `Connection to${dest} was reset. Retry; if it persists, check the host.`);
-        case 'ETIMEDOUT':
-        case 'UND_ERR_CONNECT_TIMEOUT':
-        case 'UND_ERR_HEADERS_TIMEOUT':
-        case 'UND_ERR_BODY_TIMEOUT':
-            return new GitSourceError('NETWORK_TIMEOUT', `Timed out reaching${dest}.`);
-        case 'DEPTH_ZERO_SELF_SIGNED_CERT':
-        case 'SELF_SIGNED_CERT_IN_CHAIN':
-        case 'UNABLE_TO_VERIFY_LEAF_SIGNATURE':
-        case 'CERT_HAS_EXPIRED':
-        case 'ERR_TLS_CERT_ALTNAME_INVALID':
-            return new GitSourceError('GIT_ERROR', `TLS certificate error reaching${dest} (${code}). The host certificate could not be verified.`);
-        default:
-            return null;
-    }
-}
-
-/**
  * Git LFS stores large files as small pointer stubs in the working tree.
  * The pointer is a short text file that always begins with this line.
- * isomorphic-git does not resolve LFS, so if the compose or env file is
+ * The fetch does not resolve LFS, so if the compose or env file is
  * tracked through LFS we would silently write the pointer as content.
  * Detect this and refuse, with a clear error, before it ever lands on
  * disk.
@@ -509,7 +344,7 @@ export function isLfsPointer(content: string): boolean {
 
 /**
  * Check whether the cloned tree references Git submodules. We do not
- * fetch submodule contents (isomorphic-git does not support them), so
+ * fetch submodule contents (clones run with --no-recurse-submodules), so
  * warn the caller that any paths inside submodule directories will be
  * empty at deploy time.
  */
@@ -542,8 +377,8 @@ async function readRepoFile(rootDir: string, relPath: string, label: string): Pr
     if (stat.isSymbolicLink()) {
         throw new GitSourceError('FILE_NOT_FOUND', `${label} cannot be a symbolic link.`);
     }
-    // Bound the in-memory read. The clone byte cap only limits the compressed
-    // download; a single decompressed file can still be large, so reject an
+    // Bound the in-memory read. The clone byte cap only limits the total
+    // on-disk workspace, not any single file within it, so reject an
     // oversized compose/env file before reading it into a string.
     if (stat.size > MAX_REPO_FILE_BYTES) {
         throw new GitSourceError('GIT_ERROR', `${label} is too large (${formatBytes(stat.size)}); the maximum is ${formatBytes(MAX_REPO_FILE_BYTES)}.`);
@@ -758,31 +593,88 @@ export class GitSourceService {
             (existing.context_dir ?? null) !== input.contextDir
         );
 
-        db.upsertGitSource({
-            stack_name: input.stackName,
-            repo_url: input.repoUrl,
+        const gitopsConfig = {
+            repoUrl: input.repoUrl,
             branch: input.branch,
-            compose_path: input.composePaths[0],
-            compose_paths: input.composePaths,
-            context_dir: input.contextDir,
-            sync_env: input.syncEnv,
-            env_path: resolvedEnvPath,
-            auth_type: input.authType,
-            encrypted_token: encryptedToken,
-            auto_apply_on_webhook: input.autoApplyOnWebhook,
-            auto_deploy_on_apply: input.autoDeployOnApply,
-            last_applied_commit_sha: existing?.last_applied_commit_sha ?? null,
-            last_applied_content_hash: existing?.last_applied_content_hash ?? null,
-            pending_commit_sha: existing?.pending_commit_sha ?? null,
-            pending_compose_content: existing?.pending_compose_content ?? null,
-            pending_env_content: existing?.pending_env_content ?? null,
-            pending_fetched_at: existing?.pending_fetched_at ?? null,
-            last_debounce_at: existing?.last_debounce_at ?? null,
-        });
+            composePaths: input.composePaths,
+            contextDir: input.contextDir,
+            syncEnv: input.syncEnv,
+            envPath: resolvedEnvPath,
+        };
+        const gitopsIdentity = directSourceIdentity(gitopsConfig);
 
-        if (configChanged) {
-            db.clearGitSourcePending(input.stackName);
-        }
+        // The source row, the pending clear, and the GitOps transition commit
+        // together. Clearing pending without invalidating the candidate would
+        // leave the model offering an apply for files the operator can no
+        // longer produce.
+        db.getDb().transaction(() => {
+            db.upsertGitSource({
+                stack_name: input.stackName,
+                repo_url: input.repoUrl,
+                branch: input.branch,
+                compose_path: input.composePaths[0],
+                compose_paths: input.composePaths,
+                context_dir: input.contextDir,
+                sync_env: input.syncEnv,
+                env_path: resolvedEnvPath,
+                auth_type: input.authType,
+                encrypted_token: encryptedToken,
+                auto_apply_on_webhook: input.autoApplyOnWebhook,
+                auto_deploy_on_apply: input.autoDeployOnApply,
+                last_applied_commit_sha: existing?.last_applied_commit_sha ?? null,
+                last_applied_content_hash: existing?.last_applied_content_hash ?? null,
+                pending_commit_sha: existing?.pending_commit_sha ?? null,
+                pending_compose_content: existing?.pending_compose_content ?? null,
+                pending_env_content: existing?.pending_env_content ?? null,
+                pending_fetched_at: existing?.pending_fetched_at ?? null,
+                last_debounce_at: existing?.last_debounce_at ?? null,
+            });
+
+            if (configChanged) {
+                db.clearGitSourcePending(input.stackName);
+            }
+
+            const app = this.gitopsApplicationFor(input.stackName);
+            const envelope = this.gitopsEnvelope(crypto.randomUUID(), 'system:git-source', 'configure');
+            if (!app && !existing && !this.gitopsNameHeld(input.stackName)) {
+                // Linking a stack that already exists. Nothing is fetched or
+                // accepted yet, so the application starts live with no desired
+                // commit and the projection asks for a fetch.
+                GitOpsTransitions.getInstance().activateDirect({
+                    application: buildDirectApplicationRow({
+                        id: newGitOpsId(),
+                        stackName: input.stackName,
+                        config: gitopsConfig,
+                        identity: gitopsIdentity,
+                        lifecycleStatus: 'active',
+                        at: envelope.at,
+                    }),
+                    nodeId: NodeRegistry.getInstance().getDefaultNodeId(),
+                    envelope,
+                });
+                return;
+            }
+            // Credential-only and policy-only edits change nothing material, so
+            // they leave the candidate and every accepted pointer alone.
+            if (app && configChanged) {
+                GitOpsTransitions.getInstance().configChangedPendingCleared({
+                    applicationId: app.id,
+                    identity: {
+                        repoUrl: gitopsIdentity.repoUrl,
+                        repoIdentityJson: JSON.stringify(gitopsIdentity.identity),
+                        configuredRef: input.branch,
+                    },
+                    material: {
+                        composePathsJson: JSON.stringify([...input.composePaths]),
+                        contextDir: input.contextDir,
+                        syncEnv: input.syncEnv ? 1 : 0,
+                        envPath: resolvedEnvPath,
+                        fingerprint: gitopsIdentity.fingerprint,
+                    },
+                    envelope,
+                });
+            }
+        })();
 
         return this.get(input.stackName)!;
     }
@@ -933,7 +825,24 @@ export class GitSourceService {
                 await rollbackAndThrow('Managed project data disappeared during detach');
             }
             try {
-                DatabaseService.getInstance().deleteGitSource(stackName);
+                // The source row and the GitOps tombstones commit together, so
+                // a detached stack can never leave a live application pointing
+                // at a source that no longer exists. Configured identity and
+                // SHA pointers survive on the tombstone as frozen facts, and a
+                // later reattach mints a new application rather than reviving
+                // this one.
+                const gitopsApp = this.gitopsApplicationFor(stackName);
+                DatabaseService.getInstance().getDb().transaction(() => {
+                    DatabaseService.getInstance().deleteGitSource(stackName);
+                    if (!gitopsApp) return;
+                    const tx = GitOpsTransitions.getInstance();
+                    const envelope = this.gitopsEnvelope(crypto.randomUUID(), 'system:git-source', 'detach');
+                    for (const target of GitOpsStore.getInstance().listTargets(gitopsApp.id)) {
+                        if (target.target_status !== 'active') continue;
+                        tx.targetTombstoned(gitopsApp.id, target.node_id, envelope);
+                    }
+                    tx.applicationTombstoned(gitopsApp.id, 'detached', envelope);
+                })();
             } catch (e) {
                 await rollbackAndThrow('Could not commit the Git source removal', e);
             }
@@ -998,10 +907,14 @@ export class GitSourceService {
     // ─── Fetch ───────────────────────────────────────────────────────────────
 
     /**
-     * Clone a repo into a throwaway temp dir, run `fn` against the checkout, and
-     * always clean up. Centralizes the clone timeout, size cap, commit-sha read,
-     * and submodule warning so both fetchFromGit (reads compose/env files) and
-     * listRepoTree (lists the working tree) share one hardened clone path.
+     * Resolve the configured branch to an immutable commit, clone exactly that
+     * snapshot into a throwaway workspace, run `fn` against the checkout, and
+     * always clean up. Centralizes resolution, the fetch timeout, the size
+     * watchdog, commit verification, and the submodule warning so both
+     * fetchFromGit (reads compose/env files) and listRepoTree (lists the
+     * working tree) share one hardened path. Transport mechanics live in
+     * `./git/nativeGitTransport`; failures arrive pre-classified or as
+     * structured transport failures mapped below.
      */
     private async withClonedRepo<T>(
         params: { repoUrl: string; branch: string; token?: string | null; timeoutMs?: number },
@@ -1009,76 +922,55 @@ export class GitSourceService {
     ): Promise<T> {
         const { repoUrl, branch, token } = params;
         const timeoutMs = params.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
-        const dir = await createTempDir();
-
-        // isomorphic-git's onAuth callback hands credentials to the HTTP layer
-        // without them touching the URL string, keeping tokens out of any error
-        // messages generated during the clone.
-        const onAuth = token
-            ? () => ({ username: 'x-access-token', password: token })
-            : undefined;
+        const root = await createTempDir();
 
         try {
-            const { git } = await loadIsomorphicGit();
-            // Bound clone duration and abort the HTTP transport so timed-out
-            // fetches do not keep sockets and packfile streams alive.
-            let timer: NodeJS.Timeout | undefined;
-            const controller = new AbortController();
-            const maxBytes = maxCloneBytes();
-            const sizeState = { exceeded: false, received: 0 };
-            const timeout = new Promise<never>((_, reject) => {
-                timer = setTimeout(() => {
-                    controller.abort();
-                    reject(cloneTimeoutError());
-                }, timeoutMs);
+            const resolved = await nativeGitTransport.resolveRef({
+                repoUrl,
+                ref: branch,
+                token,
+                timeoutMs,
+                workspaceRoot: root,
             });
-            try {
-                await Promise.race([
-                    git.clone({
-                        fs: { promises: fsPromises },
-                        http: createAbortableGitHttp(controller, maxBytes, sizeState),
-                        dir,
-                        url: repoUrl,
-                        ref: branch,
-                        singleBranch: true,
-                        depth: 1,
-                        noTags: true,
-                        onAuth,
-                    }),
-                    timeout,
-                ]);
-            } catch (e) {
-                // A size abort surfaces as a generic transport error once
-                // isomorphic-git unwinds, so detect it via the shared flag.
-                if (sizeState.exceeded) {
-                    throw new GitSourceError(
-                        'GIT_ERROR',
-                        `Repository exceeds the maximum clone size of ${formatBytes(maxBytes)}.`,
-                    );
-                }
-                throw this.mapGitError(e as Error, Boolean(token), repoHost(repoUrl));
-            } finally {
-                if (timer) clearTimeout(timer);
-            }
+            const fetched = await nativeGitTransport.fetchAtCommit({
+                repoUrl,
+                ref: branch,
+                token,
+                timeoutMs,
+                commitSha: resolved.commitSha,
+                workspaceRoot: root,
+                maxBytes: maxCloneBytes(),
+            });
 
-            const log = await git.log({ fs: { promises: fsPromises }, dir, ref: branch, depth: 1 });
-            if (!log.length) {
-                throw new GitSourceError('GIT_ERROR', 'Repository has no commits on the requested branch.');
-            }
-            const commitSha = log[0].oid;
-
-            // Submodule detection: non-fatal, surfaced as a warning. isomorphic-git
-            // does not recursively clone submodules, so any path that lives inside
-            // a submodule directory will be empty after apply. Users need to know.
+            // Submodule detection: non-fatal, surfaced as a warning. Clones run
+            // with --no-recurse-submodules, so any path that lives inside a
+            // submodule directory will be empty after apply. Users need to know.
             const warnings: string[] = [];
-            if (await hasSubmodules(dir)) {
+            if (await hasSubmodules(fetched.dir)) {
                 console.warn(`[GitSource] Submodules detected in ${repoHost(repoUrl)}; contents not cloned.`);
                 warnings.push(SUBMODULE_WARNING);
             }
 
-            return await fn(dir, commitSha, warnings);
+            return await fn(fetched.dir, fetched.commitSha, warnings);
+        } catch (e) {
+            if (isTransportFailure(e)) {
+                // The classified message operators see is deliberately
+                // sanitized and may be generic (unrecognized stderr); always
+                // keep the raw reason and scrubbed stderr tail in the server
+                // log so new git wording is diagnosable.
+                const detail = scrubCredentials(
+                    `reason=${e.reason} exit=${'exitCode' in e ? e.exitCode : '-'} stderr=${('stderr' in e && e.stderr ? e.stderr : '').slice(-600)}`,
+                );
+                console.error(`[GitSource:transport] host=${sanitizeForLog(e.host)} ${detail}`);
+                if (isDebugEnabled() && 'argv' in e && e.argv?.length) {
+                    console.error(`[GitSource:transport] argv=[${e.argv.map((a) => sanitizeForLog(a)).join(' ')}]`);
+                }
+                const classified = classifyGitFailure(e);
+                throw new GitSourceError(classified.code, classified.message);
+            }
+            throw e;
         } finally {
-            await removeTempDir(dir);
+            await removeTempDir(root);
         }
     }
 
@@ -1206,72 +1098,6 @@ export class GitSourceService {
         await walk('');
         files.sort();
         return { files, truncated };
-    }
-
-    private mapGitError(err: Error, hasToken: boolean, host = 'unknown'): GitSourceError {
-        const raw = scrubCredentials(err.message || String(err));
-        const code = (err as Error & { code?: string }).code;
-        // isomorphic-git's HttpError exposes the numeric status on .data; inspect
-        // it directly so a 404 is not misclassified as auth failure. GitHub hides
-        // private-repo existence by returning 404 to unauthenticated requests, so
-        // we also treat 401/403 without a supplied token as "not found or private"
-        // to guide the user to add a token rather than "check your token" when
-        // they never provided one.
-        const statusCode = (err as Error & { data?: { statusCode?: number } }).data?.statusCode;
-
-        // GitHub returns 404 for both "repo genuinely missing" and "private repo
-        // the caller cannot see". We cannot distinguish the two without a second
-        // probe, so tailor the hint by whether credentials were supplied:
-        //   - no token: suggest adding one for private repos
-        //   - token present: suggest checking the URL and token scopes, since a
-        //     valid token against a missing or wrong-scoped repo also lands here
-        if (statusCode === 404) {
-            if (hasToken) {
-                return new GitSourceError('REPO_NOT_FOUND', 'Repository not found. Verify the URL and that your token has read access to this repo.');
-            }
-            return new GitSourceError('REPO_NOT_FOUND', 'Repository not found, or it is private. Add a Personal Access Token if the repo is private.');
-        }
-        if (statusCode === 401 || statusCode === 403) {
-            if (hasToken) {
-                return new GitSourceError('AUTH_FAILED', 'Repository authentication failed. Check your token.');
-            }
-            return new GitSourceError('REPO_NOT_FOUND', 'Repository not found, or it is private. Add a Personal Access Token if the repo is private.');
-        }
-
-        // Transport failures: Node's fetch() throws a bare "fetch failed"
-        // TypeError with the real reason (ENOTFOUND, ECONNREFUSED, TLS, ...)
-        // on err.cause. Translate the underlying code before falling through
-        // to the generic branches, which only see the useless "fetch failed".
-        if (!statusCode) {
-            const cause = findCauseCode(err);
-            if (cause.code) {
-                const mapped = transportError(cause.code, host);
-                if (mapped) return mapped;
-            }
-        }
-
-        // Fallbacks for errors without a numeric status attached (e.g. git CLI
-        // output, DNS/lib errors, or future isomorphic-git transports that do
-        // not populate err.data.statusCode). Kept as defense-in-depth.
-        if (/401|403|authentication/i.test(raw)) {
-            return hasToken
-                ? new GitSourceError('AUTH_FAILED', 'Repository authentication failed. Check your token.')
-                : new GitSourceError('REPO_NOT_FOUND', 'Repository not found, or it is private. Add a Personal Access Token if the repo is private.');
-        }
-        if (code === 'NotFoundError' || /404|not found|could not resolve/i.test(raw)) {
-            return new GitSourceError('REPO_NOT_FOUND', 'Repository not found or not accessible.');
-        }
-        if (code === 'ResolveRefError' || /resolve ref|unknown ref|couldn't find remote ref|reference not found/i.test(raw)) {
-            return new GitSourceError('BRANCH_NOT_FOUND', 'Branch not found in the repository.');
-        }
-        if (code === 'ECONNABORTED' || /timeout|timed out|ETIMEDOUT|ENOTFOUND|ECONNREFUSED/i.test(raw)) {
-            return new GitSourceError('NETWORK_TIMEOUT', 'Network timeout or host unreachable.');
-        }
-        // Last-resort: an HttpError with a status we did not specifically handle.
-        if (code === 'HttpError') {
-            return new GitSourceError('GIT_ERROR', `Unexpected HTTP response from git host${statusCode ? ` (${statusCode})` : ''}.`);
-        }
-        return new GitSourceError('GIT_ERROR', raw);
     }
 
     // ─── Validation ──────────────────────────────────────────────────────────
@@ -1777,12 +1603,131 @@ export class GitSourceService {
      * reads last_debounce_at while it is still unset on every request, slips
      * past the gate, and clones once per request.
      */
+    /**
+     * The GitOps application tracking this stack, or null when there is none.
+     *
+     * Stacks that predate the revision-state model have no application until
+     * migration runs, so every producer is a no-op for them rather than
+     * inventing an application from configuration alone.
+     */
+    private gitopsApplicationFor(stackName: string): GitOpsApplicationRow | null {
+        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        return app && app.lifecycle_status === 'active' ? app : null;
+    }
+
+    /**
+     * Whether any application still holds this stack name.
+     *
+     * Wider than `gitopsApplicationFor`, which only reports usable applications.
+     * A `creating` row left by a crash the boot sweep could not settle still
+     * occupies the unique live-application index, so activating over it would
+     * fail the whole save with an internal constraint message.
+     */
+    private gitopsNameHeld(stackName: string): boolean {
+        return !!GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+    }
+
+    private gitopsEnvelope(operationId: string, actor: string, trigger: string) {
+        return { operationId, actor, trigger, at: Date.now() };
+    }
+
+    /**
+     * Record a GitOps transition without letting it break the operation it
+     * describes.
+     *
+     * The store is the record of what happened, not the mechanism that makes it
+     * happen, so a rejected transition must not fail a fetch or an apply that
+     * has already touched the filesystem. The rejection is logged loudly
+     * because it means the recorded state has drifted from reality.
+     */
+    private recordGitOps(stackName: string, what: string, write: () => void): boolean {
+        try {
+            write();
+            return true;
+        } catch (error) {
+            console.error(
+                `[GitOps] Could not record ${what} for ${sanitizeForLog(stackName)}:`,
+                error instanceof Error ? error.stack ?? error.message : String(error),
+            );
+            return false;
+        }
+    }
+
+    /**
+     * Close an operation whose terminal transition was rejected.
+     *
+     * A start that never terminates leaves the source reporting work in
+     * progress and offering no actions, permanently. When the real terminal
+     * event cannot be recorded, the next best truth is that we lost track:
+     * clear the operation and stamp a failure the projection can render, so the
+     * operator sees an error they can retry instead of a spinner.
+     */
+    private abandonGitOpsOperation(
+        stackName: string,
+        applicationId: string,
+        envelope: ReturnType<GitSourceService['gitopsEnvelope']>,
+    ): void {
+        this.recordGitOps(stackName, 'lost-track fallback', () => {
+            GitOpsTransitions.getInstance().applyFailed(applicationId, 'bookkeeping_rejected', envelope);
+        });
+    }
+
     private async pullLocked(stackName: string, actor: string): Promise<PullResult> {
         const db = DatabaseService.getInstance();
         const src = db.getGitSource(stackName);
         if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
+        const gitopsApp = this.gitopsApplicationFor(stackName);
+        const gitopsOperationId = crypto.randomUUID();
+        const gitopsEnv = this.gitopsEnvelope(gitopsOperationId, actor, 'pull');
+        // A fetch that starts and never terminates is worse than one that is
+        // never recorded: fetchStarted refuses to open a second operation, so
+        // every later pull silently stops being tracked until a restart.
+        let fetchOpen = false;
+        if (gitopsApp) {
+            fetchOpen = this.recordGitOps(stackName, 'fetch start', () => {
+                GitOpsTransitions.getInstance().fetchStarted(gitopsApp.id, gitopsEnv);
+            });
+        }
+        const closeFetch = (): void => {
+            if (!gitopsApp || !fetchOpen) return;
+            fetchOpen = false;
+            this.recordGitOps(stackName, 'fetch failure', () => {
+                GitOpsTransitions.getInstance().fetchFailed(gitopsApp.id, gitopsEnv);
+            });
+        };
 
+        try {
+            return await this.pullLockedBody(stackName, actor, src, {
+                app: gitopsApp,
+                operationId: gitopsOperationId,
+                envelope: gitopsEnv,
+                markSettled: () => { fetchOpen = false; },
+                abandon: closeFetch,
+            });
+        } catch (e) {
+            closeFetch();
+            throw e;
+        }
+    }
+
+    private async pullLockedBody(
+        stackName: string,
+        actor: string,
+        src: StackGitSource,
+        gitops: {
+            app: GitOpsApplicationRow | null;
+            operationId: string;
+            envelope: ReturnType<GitSourceService['gitopsEnvelope']>;
+            markSettled: () => void;
+            abandon: () => void;
+        },
+    ): Promise<PullResult> {
+        const db = DatabaseService.getInstance();
         const diag = isDebugEnabled();
+        const gitopsApp = gitops.app;
+        const gitopsOperationId = gitops.operationId;
+        const gitopsEnv = gitops.envelope;
+
         if (diag) {
             console.log(`[GitSource:diag] pull start stack=${stackName} branch=${src.branch} host=${repoHost(src.repo_url)}`);
         }
@@ -1792,7 +1737,9 @@ export class GitSourceService {
         // Object holder: property access is not narrowed by control-flow
         // analysis, so the closure assignment below stays visible.
         const materialization: { value: MaterializationResult | null } = { value: null };
-        const fetched = await this.fetchFromGit({
+        // Every throw from here on, including this fetch, is closed by the
+        // caller's handler, so nothing is recorded locally.
+        const fetched: FetchResult = await this.fetchFromGit({
             repoUrl: src.repo_url,
             branch: src.branch,
             composePaths: src.compose_paths,
@@ -1833,6 +1780,80 @@ export class GitSourceService {
                 envContent: fetched.envContent,
                 prior,
             });
+        }
+
+        // Record what this fetch resolved before the pending blob is written,
+        // so the durable pointers and the operational pending store agree.
+        if (gitopsApp) {
+            const outcomeRecorded = this.recordGitOps(stackName, 'fetch outcome', () => {
+                const tx = GitOpsTransitions.getInstance();
+                // One transaction: a candidate that exists without the fetch
+                // that produced it would let a later apply accept the wrong
+                // generation while the projection reports the older commit.
+                DatabaseService.getInstance().getDb().transaction(() => {
+                if (!validation.ok) {
+                    tx.fetchedInvalid(gitopsApp.id, fetched.commitSha, gitopsEnv);
+                    return;
+                }
+                tx.fetched(gitopsApp.id, fetched.commitSha, gitopsEnv);
+                if (!materialization.value) return;
+                const identity = directSourceIdentity({
+                    repoUrl: src.repo_url,
+                    branch: src.branch,
+                    composePaths: src.compose_paths,
+                    contextDir: src.context_dir,
+                    syncEnv: src.sync_env,
+                    envPath: src.env_path,
+                });
+                // A pull that resolves to exactly what the live candidate
+                // already proposes (same commit, source fingerprint, plan
+                // verdict) must not mint a lookalike generation and rewrite the
+                // candidate pointers. The staged generation stands; only the
+                // fetch above is new. A candidate for a different commit, or no
+                // candidate at all, mints anew: staging after an apply is a new
+                // dispatch cycle and needs its own generation to accept.
+                const staged = gitopsApp.candidate_generation_id
+                    ? GitOpsStore.getInstance().getGeneration(gitopsApp.candidate_generation_id)
+                    : undefined;
+                if (
+                    staged &&
+                    staged.commit_sha === fetched.commitSha &&
+                    staged.materialization_fingerprint === identity.fingerprint &&
+                    staged.plan_blocked === (plan?.blocked === true ? 1 : 0)
+                ) {
+                    return;
+                }
+                const generationId = newGitOpsId();
+                const nextManifestVersion = (prior?.manifestVersion ?? 0) + 1;
+                GitOpsStore.getInstance().insertGeneration(buildGenerationRow({
+                    id: generationId,
+                    applicationId: gitopsApp.id,
+                    commitSha: fetched.commitSha,
+                    identity,
+                    configuredRef: src.branch,
+                    candidateRelPath: materialization.value.candidateRelPath,
+                    appliedRelPath: appliedRelPathFor(fetched.commitSha, nextManifestVersion),
+                    manifestVersion: nextManifestVersion,
+                    // The candidate's own invocation. Recording the prior
+                    // generation's would attribute one generation's facts to
+                    // another, which is the whole failure this model prevents.
+                    expectedInvocation: plan?.candidateInvocation ?? prior?.project.invocation ?? null,
+                    changePlanFingerprint: plan?.fingerprint ?? null,
+                    operationId: gitopsOperationId,
+                    trigger: gitopsEnv.trigger,
+                    actor,
+                    at: gitopsEnv.at,
+                    planBlocked: plan?.blocked === true,
+                }));
+                if (plan?.blocked) tx.sourceConflictBlocker(gitopsApp.id, generationId, gitopsEnv);
+                else tx.candidateReady(gitopsApp.id, generationId, false, gitopsEnv);
+                })();
+                gitops.markSettled();
+            });
+            // The pull itself succeeded; the files and the pending blob are
+            // real. Closing the operation is what stops the source reporting a
+            // fetch in flight for ever and locking out every later pull.
+            if (!outcomeRecorded) gitops.abandon();
         }
 
         const publicPlan = plan ? GitChangePlanService.getInstance().toPublic(plan) : null;
@@ -1947,10 +1968,47 @@ export class GitSourceService {
     }
 
     /** Body of apply(); assumes the caller already holds Git mutex + shared stack lock. */
+    /**
+     * Apply a pending pull, recording the attempt as a GitOps operation.
+     *
+     * The wrapper exists so a throw anywhere in the body still closes the
+     * operation. An apply that started and never terminated would leave the
+     * source projecting `applying` until the next restart reclassified it as an
+     * interruption, which reads as "still working" when nothing is.
+     */
     private async applyLocked(
         stackName: string,
         commitSha: string,
         opts: GitApplyOpts,
+    ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
+        const started: { app: GitOpsApplicationRow | null; env: ReturnType<GitSourceService['gitopsEnvelope']> | null; settled: boolean } = {
+            app: null,
+            env: null,
+            settled: false,
+        };
+        try {
+            return await this.applyLockedBody(stackName, commitSha, opts, started);
+        } catch (e) {
+            if (started.app && started.env && !started.settled) {
+                const app = started.app;
+                const env = started.env;
+                this.recordGitOps(stackName, 'apply failure', () => {
+                    GitOpsTransitions.getInstance().applyFailed(
+                        app.id,
+                        e instanceof GitSourceError ? e.code : 'apply',
+                        env,
+                    );
+                });
+            }
+            throw e;
+        }
+    }
+
+    private async applyLockedBody(
+        stackName: string,
+        commitSha: string,
+        opts: GitApplyOpts,
+        started: { app: GitOpsApplicationRow | null; env: ReturnType<GitSourceService['gitopsEnvelope']> | null; settled: boolean },
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
         const diag = isDebugEnabled();
         const db = DatabaseService.getInstance();
@@ -1993,6 +2051,34 @@ export class GitSourceService {
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const actor = opts.actor ?? 'system:git-source';
         let recoveryId: string | undefined;
+
+        // The apply is bound to the candidate the pull recorded. Without one
+        // there is nothing to accept, so the acceptance below is skipped rather
+        // than inventing a generation from the pending blob.
+        const gitopsApp = this.gitopsApplicationFor(stackName);
+        // The candidate must be the generation built from the commit being
+        // applied. Without this check a candidate left behind by a swallowed
+        // fetch outcome would be accepted for files from a different commit,
+        // and the projection would confidently report the wrong one.
+        const candidateId = gitopsApp?.candidate_generation_id ?? null;
+        const candidateGeneration = candidateId
+            ? GitOpsStore.getInstance().getGeneration(candidateId)
+            : undefined;
+        const gitopsGenerationId = candidateGeneration?.commit_sha === commitSha ? candidateId : null;
+        if (candidateId && !gitopsGenerationId) {
+            console.warn(
+                '[GitOps] Skipping acceptance for %s: the recorded candidate is not built from %s',
+                sanitizeForLog(stackName), sanitizeForLog(commitSha.slice(0, 7)),
+            );
+        }
+        const gitopsEnv = this.gitopsEnvelope(pending.operationId, actor, 'apply');
+        if (gitopsApp && gitopsGenerationId) {
+            this.recordGitOps(stackName, 'apply start', () => {
+                GitOpsTransitions.getInstance().applyStarted(gitopsApp.id, gitopsGenerationId, gitopsEnv);
+                started.app = gitopsApp;
+                started.env = gitopsEnv;
+            });
+        }
 
         let appliedSpec: GitSourceAppliedSpec | null;
         if (pending.candidateRelPath !== null && pending.inventory !== null) {
@@ -2255,6 +2341,25 @@ export class GitSourceService {
         db.markGitSourceApplied(stackName, commitSha, hash);
         db.setGitSourceAppliedSpec(stackName, appliedSpec);
 
+        // The files are on disk and the source row now points at this commit,
+        // so this is where the generation becomes the accepted one.
+        if (gitopsApp && gitopsGenerationId) {
+            const recorded = this.recordGitOps(stackName, 'acceptance', () => {
+                GitOpsTransitions.getInstance().applied({
+                    applicationId: gitopsApp.id,
+                    generationId: gitopsGenerationId,
+                    artifactSetId: newGitOpsId(),
+                    sourceAcceptanceId: newGitOpsId(),
+                    authority: actor === 'system:webhook' ? 'configured_policy' : 'operator',
+                    envelope: gitopsEnv,
+                });
+            });
+            started.settled = true;
+            // The files are on disk either way. What we can still control is
+            // not leaving the operation open when the acceptance was rejected.
+            if (!recorded) this.abandonGitOpsOperation(stackName, gitopsApp.id, gitopsEnv);
+        }
+
         const shouldDeploy = opts.deploy ?? src.auto_deploy_on_apply;
         if (diag) console.log('[GitSource:diag] apply wrote stack=%s sha=%s deploy=%s', sanitizeForLog(stackName), sanitizeForLog(commitSha.slice(0, 7)), sanitizeForLog(shouldDeploy));
 
@@ -2289,7 +2394,7 @@ export class GitSourceService {
                     await finalizeRecoveryCurrent(recoveryId, false);
                 }
                 // Shared stack lock already held as git_apply for capture→deploy.
-                await ComposeService.getInstance(nodeId).deployStack(
+                const autoDeploy = await ComposeService.getInstance(nodeId).deployStack(
                     stackName,
                     undefined,
                     undefined,
@@ -2305,6 +2410,7 @@ export class GitSourceService {
                     stackName,
                     'deploy',
                     'system:git-source',
+                    { deployedGenerationId: autoDeploy.deployedGenerationId },
                 );
                 if (recoveryId) {
                     recoverySvc.linkGateOrRetain(recoveryId, healthGateId);
@@ -2354,7 +2460,28 @@ export class GitSourceService {
         return { applied: true, deployed: false, recoveryId };
     }
 
-    public dismissPending(stackName: string): void {
+    public dismissPending(stackName: string, actor?: string): void {
+        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        if (app?.candidate_generation_id) {
+            try {
+                GitOpsTransitions.getInstance().dismissed(
+                    app.id,
+                    this.gitopsEnvelope(crypto.randomUUID(), actor ?? 'system:git-source', 'dismiss'),
+                );
+            } catch (error) {
+                // The refusal is the outcome the operator must see. Swallowing it
+                // here would leave the projection offering a candidate they just
+                // declined, which is exactly the stale state dismissal exists to
+                // prevent.
+                if (error instanceof GitOpsTransitionError) {
+                    throw new GitSourceError(
+                        'OPERATION_IN_FLIGHT',
+                        `Cannot dismiss the pending update for ${stackName}: ${error.message}`,
+                    );
+                }
+                throw error;
+            }
+        }
         DatabaseService.getInstance().clearGitSourcePending(stackName);
     }
 
@@ -2380,25 +2507,69 @@ export class GitSourceService {
                 throw new GitSourceError('GIT_ERROR', 'Auto-deploy requires auto-apply-on-webhook to be enabled.');
             }
 
+            const gitopsOperationId = crypto.randomUUID();
+            // Inline containment barrier at the stat sink. CodeQL does not
+            // credit the wrapped isPathWithinBase helper, so resolve against the
+            // managed-area base and check containment right here.
+            const areaBase = managedAreaBase();
+            const managedRoot = path.resolve(stackManagedRoot(input.stackName));
+            if (!managedRoot.startsWith(areaBase + path.sep)) {
+                throw new GitSourceError('GIT_ERROR', 'Invalid stack path');
+            }
+            // Whether the managed root is ours to delete is decided once, here,
+            // before anything can create it. Cleanup later reads this answer
+            // rather than re-probing a directory it may itself have made.
+            const rootPreexisted = existsSync(managedRoot);
+            const gitopsIdentity = directSourceIdentity({
+                repoUrl: input.repoUrl,
+                branch: input.branch,
+                composePaths: input.composePaths,
+                contextDir: input.contextDir,
+                syncEnv: input.syncEnv,
+                envPath: input.envPath,
+            });
+            const staged: { candidateRelPath: string | null } = { candidateRelPath: null };
+
             // 1. Fetch from git BEFORE touching disk or DB. If the fetch
             //    fails there is nothing to clean up. The onClone hook stages
             //    the complete-project candidate inside the clone lifecycle.
             const manifestSvc = GitProjectManifestService.getInstance();
             const materialization: { value: MaterializationResult | null } = { value: null };
-            const fetched = await this.fetchFromGit({
-                repoUrl: input.repoUrl,
-                branch: input.branch,
-                composePaths: input.composePaths,
-                envPath: input.syncEnv ? input.envPath : null,
-                token: input.token,
-                onClone: async (cloneDir, commitSha, envContent) => {
-                    materialization.value = await this.buildMaterialization(input.stackName, cloneDir, commitSha, {
-                        compose_paths: input.composePaths,
-                        context_dir: input.contextDir,
-                        sync_env: input.syncEnv,
-                    }, envContent);
-                },
-            });
+            let fetched: FetchResult;
+            try {
+                fetched = await this.fetchFromGit({
+                    repoUrl: input.repoUrl,
+                    branch: input.branch,
+                    composePaths: input.composePaths,
+                    envPath: input.syncEnv ? input.envPath : null,
+                    token: input.token,
+                    onClone: async (cloneDir, commitSha, envContent) => {
+                        // The candidate path is recorded before the build that
+                        // creates it, so a crash mid-build still names exactly one
+                        // directory this operation owns.
+                        staged.candidateRelPath = candidateRelPathForSha(commitSha);
+                        await writeStagingMarker(managedRoot, {
+                            schemaVersion: 1,
+                            operationId: gitopsOperationId,
+                            rootPreexisted,
+                            candidateRelPath: staged.candidateRelPath,
+                            createdAt: Date.now(),
+                        });
+                        materialization.value = await this.buildMaterialization(input.stackName, cloneDir, commitSha, {
+                            compose_paths: input.composePaths,
+                            context_dir: input.contextDir,
+                            sync_env: input.syncEnv,
+                        }, envContent);
+                    },
+                });
+            } catch (e) {
+                // Materialization refuses routinely, not just on crashes. The
+                // marker has to come off with the staged files, or it would
+                // claim this managed area against every later attempt and make
+                // the stack name uncreatable until the next restart.
+                await this.cleanupStagedCreate(managedRoot, staged.candidateRelPath, rootPreexisted);
+                throw e;
+            }
 
             // 2. Validate against the same `docker compose config` check the
             //    apply path uses. Reject before creating anything on disk.
@@ -2406,6 +2577,7 @@ export class GitSourceService {
                 ? materialization.value.validation
                 : await this.validateCompose(fetched.composeFiles, fetched.envContent, input.contextDir);
             if (!validation.ok) {
+                await this.cleanupStagedCreate(managedRoot, staged.candidateRelPath, rootPreexisted);
                 throw new GitSourceError('GIT_ERROR', `Compose validation failed: ${validation.error}`);
             }
 
@@ -2420,6 +2592,12 @@ export class GitSourceService {
             // state instead of 'absent'.
             let completeProjectManifest: GitProjectManifest | null = null;
             let recordedCreatePlan: GitChangePlan | null = null;
+            // Set once the activation transaction commits. Before that there is
+            // nothing in the database to tear down; after it, cleanup has to go
+            // through create_failed so the checkpoint and tombstone stay
+            // consistent with what was removed from disk.
+            let gitopsApplicationId: string | null = null;
+            let gitopsCommitted = false;
             try {
                 let appliedSpec: GitSourceAppliedSpec | null;
                 if (materialization.value) {
@@ -2511,10 +2689,88 @@ export class GitSourceService {
                     completeProjectManifest = manifest;
                 }
 
+                // 3b. Persist the GitOps identity of this create. Everything
+                //     above is still reversible by deleting files; from here on
+                //     recovery is driven by the checkpoint instead of guesswork.
+                if (completeProjectManifest && materialization.value && staged.candidateRelPath) {
+                    const applicationId = newGitOpsId();
+                    const envelope = {
+                        operationId: gitopsOperationId,
+                        actor: 'system:git-source',
+                        trigger: 'create',
+                        at: Date.now(),
+                    };
+                    const sourceConfig = {
+                        repoUrl: input.repoUrl,
+                        branch: input.branch,
+                        composePaths: input.composePaths,
+                        contextDir: input.contextDir,
+                        syncEnv: input.syncEnv,
+                        envPath: input.envPath,
+                    };
+                    GitOpsTransitions.getInstance().activateCreateFromGit({
+                        application: buildDirectApplicationRow({
+                            id: applicationId,
+                            stackName: input.stackName,
+                            config: sourceConfig,
+                            identity: gitopsIdentity,
+                            lifecycleStatus: 'creating',
+                            at: envelope.at,
+                        }),
+                        nodeId: NodeRegistry.getInstance().getDefaultNodeId(),
+                        commitSha: fetched.commitSha,
+                        generation: buildGenerationRow({
+                            id: newGitOpsId(),
+                            applicationId,
+                            commitSha: fetched.commitSha,
+                            identity: gitopsIdentity,
+                            configuredRef: input.branch,
+                            candidateRelPath: staged.candidateRelPath,
+                            appliedRelPath: appliedRelPathFor(fetched.commitSha, completeProjectManifest.manifestVersion),
+                            manifestVersion: completeProjectManifest.manifestVersion,
+                            expectedInvocation: completeProjectManifest.project.invocation,
+                            changePlanFingerprint: recordedCreatePlan?.fingerprint ?? null,
+                            operationId: gitopsOperationId,
+                            trigger: envelope.trigger,
+                            actor: envelope.actor,
+                            at: envelope.at,
+                        }),
+                        checkpoint: buildCreateCheckpointRow({
+                            applicationId,
+                            stackName: input.stackName,
+                            operationId: gitopsOperationId,
+                            config: sourceConfig,
+                            identity: gitopsIdentity,
+                            authType: input.authType,
+                            encryptedToken: input.authType === 'token' && input.token
+                                ? this.crypto.encrypt(input.token)
+                                : null,
+                            autoApplyOnWebhook: input.autoApplyOnWebhook,
+                            autoDeployOnApply: input.autoDeployOnApply,
+                            commitSha: fetched.commitSha,
+                            createdManagedRoot: !rootPreexisted,
+                            at: envelope.at,
+                        }),
+                        envelope,
+                    });
+                    gitopsApplicationId = applicationId;
+                    await deleteStagingMarker(managedRoot);
+                }
+
                 await fsSvc.createStack(input.stackName);
                 stackCreated = true;
+                if (gitopsApplicationId) {
+                    GitOpsStore.getInstance().updateCreateCheckpoint(
+                        gitopsApplicationId, { phase: 'stack_created' }, Date.now(),
+                    );
+                }
 
                 if (completeProjectManifest && materialization.value) {
+                    if (gitopsApplicationId) {
+                        GitOpsStore.getInstance().updateCreateCheckpoint(
+                            gitopsApplicationId, { phase: 'promoting' }, Date.now(),
+                        );
+                    }
                     await manifestSvc.promoteGeneration(input.stackName, {
                         sha: fetched.commitSha,
                         candidateRelPath: materialization.value.candidateRelPath,
@@ -2523,6 +2779,13 @@ export class GitSourceService {
                         adoptExistingMaterializedPaths: 'all',
                     });
                     appliedSpec = this.deriveAppliedSpec(input.composePaths, input.contextDir);
+                    if (gitopsApplicationId) {
+                        GitOpsStore.getInstance().updateCreateCheckpoint(
+                            gitopsApplicationId,
+                            { phase: 'manifest_committed', appliedSpecJson: JSON.stringify(appliedSpec) },
+                            Date.now(),
+                        );
+                    }
                 } else {
                     appliedSpec = await this.materialize(
                         input.stackName, fetched.composeFiles, input.contextDir, input.syncEnv, fetched.envContent, null,
@@ -2537,6 +2800,11 @@ export class GitSourceService {
                     ? this.crypto.encrypt(input.token)
                     : null;
                 const hash = this.hashContent(fetched.composeFiles, fetched.envContent);
+                // The source row, the applied pointers, and the checkpoint
+                // advance together. This commit is the success boundary: once
+                // it lands the stack is live, and any later error is reported
+                // without deleting anything.
+                const commitCreate = db.getDb().transaction(() => {
                 db.upsertGitSource({
                     stack_name: input.stackName,
                     repo_url: input.repoUrl,
@@ -2570,6 +2838,38 @@ export class GitSourceService {
                         completeProjectManifest.generation.appliedDir,
                     );
                 }
+                if (gitopsApplicationId) {
+                    const checkpoint = GitOpsStore.getInstance().getCreateCheckpoint(gitopsApplicationId);
+                    if (!checkpoint?.generation_id) {
+                        throw new GitSourceError('GIT_ERROR', 'Create checkpoint lost its generation before acceptance.');
+                    }
+                    GitOpsTransitions.getInstance().applied({
+                        applicationId: gitopsApplicationId,
+                        generationId: checkpoint.generation_id,
+                        artifactSetId: newGitOpsId(),
+                        sourceAcceptanceId: newGitOpsId(),
+                        authority: 'operator',
+                        envelope: {
+                            operationId: gitopsOperationId,
+                            actor: 'system:git-source',
+                            trigger: 'create',
+                            at: Date.now(),
+                        },
+                        activateCreating: true,
+                    });
+                    GitOpsStore.getInstance().updateCreateCheckpoint(
+                        gitopsApplicationId, { phase: 'pointers_committed' }, Date.now(),
+                    );
+                }
+                });
+                commitCreate();
+                gitopsCommitted = true;
+                // The checkpoint has done its job. Dropping it here keeps the
+                // boot sweep reporting only genuine interruptions, and stops a
+                // copy of the encrypted token living past the create.
+                if (gitopsApplicationId) {
+                    GitOpsStore.getInstance().deleteCreateCheckpoint(gitopsApplicationId);
+                }
 
                 rowInserted = true;
                 const operationId = crypto.randomUUID();
@@ -2601,6 +2901,31 @@ export class GitSourceService {
                 }
                 return { source, commitSha: fetched.commitSha, envWritten, warnings: fetched.warnings };
             } catch (e) {
+                // Past the success boundary the stack is live and owned by the
+                // operator. A later error is reported, never compensated: the
+                // leftover marker or checkpoint is finished by the boot sweep.
+                if (gitopsCommitted) {
+                    const detail = e instanceof Error ? e.message : String(e);
+                    console.error(
+                        `[GitSource] Create for ${sanitizeForLog(input.stackName)} succeeded but a later step failed:`,
+                        detail,
+                    );
+                    this.recordGitActivity(
+                        input.stackName,
+                        'git_create',
+                        `Git create for ${input.stackName} completed, but a follow-up step failed: ${detail}`,
+                        'system:git-source',
+                        'warning',
+                    );
+                    // Say plainly that the stack exists. The raw downstream
+                    // error reads as a failed create, and an operator acting on
+                    // it retries and hits "stack already exists", which looks
+                    // like corruption rather than success.
+                    throw new GitSourceError(
+                        'GIT_ERROR',
+                        `The stack was created from Git, but a follow-up step failed: ${detail}`,
+                    );
+                }
                 // Roll back any partial on-disk state so the caller can retry
                 // cleanly. The DB row is only inserted at step 4, so an error
                 // earlier leaves nothing to clean in the DB.
@@ -2616,7 +2941,10 @@ export class GitSourceService {
                 // for a non-existence reason) must never lose its previous
                 // applied generations to someone else's rollback: when the stack
                 // dir was NOT created by us, remove only the candidate we staged.
-                if (stackCreated) {
+                if (stackCreated && !rootPreexisted) {
+                    // Only legal because this operation created the managed
+                    // root. A root that predated the create holds retained
+                    // generations of its own and is cleaned path by path below.
                     await GitProjectManifestService.getInstance().deleteManagedArea(input.stackName);
                 } else if (materialization.value) {
                     const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -2632,9 +2960,59 @@ export class GitSourceService {
                 if (rowInserted) {
                     db.deleteGitSource(input.stackName);
                 }
+                // Filesystem cleanup has to succeed before the tombstone, so a
+                // create whose files could not be removed keeps its checkpoint
+                // and is retried by the next boot rather than being recorded as
+                // cleanly failed.
+                if (gitopsApplicationId) {
+                    try {
+                        await removeOperationOwnedPaths({
+                            stackManagedRoot: managedRoot,
+                            candidateRelPath: staged.candidateRelPath,
+                            appliedRelPath: completeProjectManifest?.generation.appliedDir ?? null,
+                            ownsManagedRoot: !rootPreexisted,
+                        });
+                        GitOpsTransitions.getInstance().createFailed(
+                            gitopsApplicationId,
+                            e instanceof GitSourceError ? e.code : 'create',
+                            { operationId: gitopsOperationId, actor: 'system:git-source', trigger: 'create', at: Date.now() },
+                        );
+                    } catch (cleanupErr) {
+                        console.error(
+                            `[GitSource] Could not finish tearing down the failed create for ${sanitizeForLog(input.stackName)}; leaving it for the next boot sweep:`,
+                            cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+                        );
+                    }
+                }
                 throw e;
             }
         });
+    }
+
+    /**
+     * Remove what a create staged before any GitOps row existed.
+     *
+     * Best-effort by design: the caller is already throwing the real error, and
+     * a leftover directory here is picked up by the boot sweep, which has the
+     * marker to tell it what this operation owned.
+     */
+    private async cleanupStagedCreate(
+        managedRoot: string,
+        candidateRelPath: string | null,
+        rootPreexisted: boolean,
+    ): Promise<void> {
+        try {
+            await removeOperationOwnedPaths({
+                stackManagedRoot: managedRoot,
+                candidateRelPath,
+                ownsManagedRoot: !rootPreexisted,
+            });
+        } catch (error) {
+            console.warn(
+                '[GitSource] Could not remove the staged create area:',
+                error instanceof Error ? error.message : String(error),
+            );
+        }
     }
 
     /**
@@ -2730,13 +3108,63 @@ export class GitSourceService {
             }
             return;
         }
+        // A managed area with no git-source row is not automatically an orphan.
+        // An in-flight or crashed create owns its area through a checkpoint or
+        // a creating application before the source row exists, so both count as
+        // known and must survive the sweep.
+        for (const checkpoint of GitOpsStore.getInstance().listCreateCheckpoints()) {
+            known.add(checkpoint.stack_name);
+        }
+        for (const app of GitOpsStore.getInstance().listCreatingDirectApplications()) {
+            if (app.stack_name) known.add(app.stack_name);
+        }
+
         for (const entry of entries) {
             if (!entry.isDirectory() || known.has(entry.name)) continue;
-            if (entry.name.startsWith('.detach-') && known.has(entry.name.slice('.detach-'.length))) continue;
+            // Detach staging areas carry their own ownership proof in the
+            // detach journal, not a create marker. They are reaped exactly as
+            // before once their stack is gone.
+            if (entry.name.startsWith('.detach-')) {
+                if (known.has(entry.name.slice('.detach-'.length))) continue;
+                try {
+                    await fsPromises.rm(path.join(managedRoot, entry.name), { recursive: true, force: true });
+                } catch (e) {
+                    console.error(`[GitManifest] could not remove staged detach area ${sanitizeForLog(entry.name)}:`, (e as Error).message);
+                }
+                continue;
+            }
+            // Nothing in the database claims this directory: no git-source row,
+            // no create checkpoint, no creating application. What happens next
+            // turns on the staging marker, and the distinction between its two
+            // failure states is the whole rule.
+            //
+            //   valid   an in-flight create owns this area. Remove only what
+            //           that operation staged.
+            //   missing nothing ever claimed it. This is the ordinary orphan a
+            //           crashed stack deletion leaves behind, and reaping it is
+            //           the long-standing behavior that keeps managed data from
+            //           outliving its stack.
+            //   corrupt something claimed it and we cannot read the claim.
+            //           Preserve: an unexplained directory is far cheaper than a
+            //           wrongly deleted generation.
+            const area = path.join(managedRoot, entry.name);
             try {
-                await fsPromises.rm(path.join(managedRoot, entry.name), { recursive: true, force: true });
+                const marker = await readStagingMarker(area);
+                if (marker.state === 'corrupt') {
+                    console.warn(
+                        `[GitManifest] preserving unclaimed managed area ${sanitizeForLog(entry.name)}: its staging marker is unreadable (${marker.reason}), so ownership cannot be established`,
+                    );
+                    continue;
+                }
+                if (marker.state === 'missing') {
+                    await fsPromises.rm(area, { recursive: true, force: true });
+                    console.log(`[GitManifest] removed orphaned managed area ${sanitizeForLog(entry.name)}: no stack, no create, no marker claims it`);
+                    continue;
+                }
+                const outcome = await cleanupUnclaimedManagedRoot(area, marker.marker);
+                console.log(`[GitManifest] unclaimed managed area ${sanitizeForLog(entry.name)}: ${outcome}`);
             } catch (e) {
-                console.error(`[GitManifest] could not remove orphaned area ${sanitizeForLog(entry.name)}:`, (e as Error).message);
+                console.error(`[GitManifest] could not clean unclaimed area ${sanitizeForLog(entry.name)}:`, (e as Error).message);
             }
         }
     }

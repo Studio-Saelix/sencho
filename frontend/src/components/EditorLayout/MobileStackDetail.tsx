@@ -268,7 +268,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 content={content}
                                 envContent={envContent}
                                 selectedEnvFile={selectedEnvFile}
-                                gitSourcePending={Boolean(gitSourcePendingMap[stackName])}
+                                gitSourcePending={gitSourcePendingMap[stackName] ?? null}
                                 onEditCompose={openComposeEditor}
                                 onOpenGitSource={() => setGitSourceOpen(true)}
                                 onApplyUpdate={() => { void updateStack(); }}

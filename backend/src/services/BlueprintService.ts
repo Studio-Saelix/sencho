@@ -25,6 +25,11 @@ import {
     parseBlueprintMarker,
     type BlueprintMarker,
 } from '../helpers/blueprintMarker';
+import {
+    commitBlueprintDeploymentCause,
+    commitBlueprintDeploymentRemoved,
+    type BlueprintDeploymentCause,
+} from './gitops/blueprintDeploymentProducers';
 /** On-disk compose name for Blueprint applies. Must match createStack scaffold and Sencho discovery priority. */
 const COMPOSE_FILENAME = 'compose.yaml';
 const REMOTE_HTTP_TIMEOUT_MS = 30_000;
@@ -131,10 +136,18 @@ export class BlueprintService {
         };
     }
 
+    /**
+     * Write the deployment row, recording what caused the move.
+     *
+     * The cause is explicit because it cannot be recovered from the status: a
+     * deploy that failed and a withdraw that failed both land on `failed`, and
+     * they mean opposite things about whether the deployment is still there.
+     */
     private setStatus(
         blueprintId: number,
         nodeId: number,
         status: BlueprintDeploymentStatus,
+        cause: BlueprintDeploymentCause,
         extras: Partial<{
             applied_revision: number | null;
             last_deployed_at: number | null;
@@ -143,13 +156,11 @@ export class BlueprintService {
             last_error: string | null;
         }> = {},
     ): BlueprintDeployment {
-        return DatabaseService.getInstance().upsertDeployment({
-            blueprint_id: blueprintId,
-            node_id: nodeId,
+        return commitBlueprintDeploymentCause(cause, blueprintId, nodeId, {
             status,
             last_checked_at: Date.now(),
             ...extras,
-        });
+        }, null);
     }
 
     /**
@@ -280,9 +291,9 @@ export class BlueprintService {
             driftMode: blueprint.drift_mode,
         });
         try {
-            this.setStatus(blueprint.id, node.id, 'deploying');
+            this.setStatus(blueprint.id, node.id, 'deploying', 'deploy_start');
             if (await this.hasNameConflict(blueprint.name, node, blueprint.id)) {
-                this.setStatus(blueprint.id, node.id, 'name_conflict', {
+                this.setStatus(blueprint.id, node.id, 'name_conflict', 'name_conflict', {
                     last_error: `A stack named "${blueprint.name}" already exists on this node and is not managed by Sencho.`,
                 });
                 console.warn('[BlueprintService] deploy name conflict blueprint=%s node=%s durationMs=%s',
@@ -297,7 +308,7 @@ export class BlueprintService {
                 diagnosticLog('deploy branch', { blueprintId: blueprint.id, nodeId: node.id, target: 'remote' });
                 await this.deployRemote(blueprint, node, marker);
             }
-            this.setStatus(blueprint.id, node.id, 'active', {
+            this.setStatus(blueprint.id, node.id, 'active', 'deploy_ack', {
                 applied_revision: blueprint.revision,
                 last_deployed_at: Date.now(),
                 last_drift_at: null,
@@ -309,13 +320,13 @@ export class BlueprintService {
             return { status: 'active' };
         } catch (err) {
             if (err instanceof BlueprintNameConflictError) {
-                this.setStatus(blueprint.id, node.id, 'name_conflict', { last_error: err.message });
+                this.setStatus(blueprint.id, node.id, 'name_conflict', 'name_conflict', { last_error: err.message });
                 console.warn('[BlueprintService] deploy name conflict blueprint=%s node=%s durationMs=%s',
                     sanitizeForLog(blueprint.name), node.id, Date.now() - started);
                 return { status: 'name_conflict', error: 'name_conflict' };
             }
             const message = BlueprintService.formatError(err);
-            this.setStatus(blueprint.id, node.id, 'failed', { last_error: message });
+            this.setStatus(blueprint.id, node.id, 'failed', 'deploy_fail', { last_error: message });
             console.error('[BlueprintService] deploy failed blueprint=%s node=%s durationMs=%s error=%s',
                 sanitizeForLog(blueprint.name), node.id, Date.now() - started, sanitizeForLog(message));
             return { status: 'failed', error: message };
@@ -344,7 +355,7 @@ export class BlueprintService {
             classification: blueprint.classification,
         });
         try {
-            this.setStatus(blueprint.id, node.id, 'withdrawing');
+            this.setStatus(blueprint.id, node.id, 'withdrawing', 'withdraw_start');
             // Ownership is validated on the node that owns the stack, inside the delete lock.
             if (node.type === 'local') {
                 diagnosticLog('withdraw branch', { blueprintId: blueprint.id, nodeId: node.id, target: 'local' });
@@ -355,13 +366,13 @@ export class BlueprintService {
                 const remoteOutcome = await this.withdrawRemote(blueprint, node);
                 if (remoteOutcome.status !== 'withdrawn') return remoteOutcome;
             }
-            DatabaseService.getInstance().deleteDeployment(blueprint.id, node.id);
+            commitBlueprintDeploymentRemoved(blueprint.id, node.id, null);
             console.info('[BlueprintService] withdraw complete blueprint=%s node=%s durationMs=%s',
                 sanitizeForLog(blueprint.name), node.id, Date.now() - started);
             return { status: 'withdrawn' };
         } catch (err) {
             const message = BlueprintService.formatError(err);
-            this.setStatus(blueprint.id, node.id, 'failed', { last_error: `withdraw failed: ${message}` });
+            this.setStatus(blueprint.id, node.id, 'failed', 'withdraw_fail', { last_error: `withdraw failed: ${message}` });
             console.error('[BlueprintService] withdraw failed blueprint=%s node=%s durationMs=%s error=%s',
                 sanitizeForLog(blueprint.name), node.id, Date.now() - started, sanitizeForLog(message));
             return { status: 'failed', error: message };
@@ -444,9 +455,12 @@ export class BlueprintService {
 
     /** Returns whether the stack directory exists. Throws on non-ENOENT I/O. */
     private async stackDirExists(nodeId: number, blueprintName: string): Promise<boolean> {
-        const baseDir = NodeRegistry.getInstance().getComposeDir(nodeId);
-        const stackDir = path.resolve(baseDir, blueprintName);
-        if (!isPathWithinBase(stackDir, baseDir)) {
+        // Inline containment barrier at the stat sink. The scanner does not
+        // credit the wrapped isPathWithinBase helper, so the check has to sit
+        // with the call it protects.
+        const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId));
+        const stackDir = path.resolve(baseResolved, blueprintName);
+        if (!stackDir.startsWith(baseResolved + path.sep)) {
             throw new BlueprintOwnershipProbeError(`Invalid stack path for "${blueprintName}"`);
         }
         try {
@@ -578,10 +592,10 @@ export class BlueprintService {
             return { status: 'withdrawn' };
         }
         if (result.code === 'name_conflict') {
-            this.setStatus(blueprint.id, node.id, 'name_conflict', { last_error: result.error });
+            this.setStatus(blueprint.id, node.id, 'name_conflict', 'withdraw_name_conflict', { last_error: result.error });
             return { status: 'name_conflict' };
         }
-        this.setStatus(blueprint.id, node.id, 'failed', { last_error: result.error });
+        this.setStatus(blueprint.id, node.id, 'failed', 'withdraw_fail', { last_error: result.error });
         return { status: 'failed', error: result.error };
     }
 
@@ -647,7 +661,7 @@ export class BlueprintService {
             );
         } catch (err) {
             const message = BlueprintService.formatError(err);
-            this.setStatus(blueprint.id, node.id, 'failed', { last_error: message });
+            this.setStatus(blueprint.id, node.id, 'failed', 'withdraw_fail', { last_error: message });
             return { status: 'failed', error: message };
         }
 
@@ -663,15 +677,15 @@ export class BlueprintService {
         if (res.status === 409) {
             const error = BlueprintService.extractApiError(res.data) || 'withdraw refused';
             if (BlueprintService.extractApiCode(res.data) === 'name_conflict') {
-                this.setStatus(blueprint.id, node.id, 'name_conflict', { last_error: error });
+                this.setStatus(blueprint.id, node.id, 'name_conflict', 'withdraw_name_conflict', { last_error: error });
                 return { status: 'name_conflict' };
             }
             // stack_op_in_progress and any other 409: match local withdraw lock-conflict → failed
-            this.setStatus(blueprint.id, node.id, 'failed', { last_error: error });
+            this.setStatus(blueprint.id, node.id, 'failed', 'withdraw_fail', { last_error: error });
             return { status: 'failed', error };
         }
         const message = `blueprint withdraw: HTTP ${res.status} ${BlueprintService.extractApiError(res.data)}`;
-        this.setStatus(blueprint.id, node.id, 'failed', { last_error: message });
+        this.setStatus(blueprint.id, node.id, 'failed', 'withdraw_fail', { last_error: message });
         return { status: 'failed', error: message };
     }
 

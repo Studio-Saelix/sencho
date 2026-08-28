@@ -21,6 +21,15 @@ describe('classifyStackApiPath', () => {
       expect(classifyStackApiPath('GET', '/stacks/web/git-source')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:read',
       });
+      // Load-bearing: an unclassified named-stack path is refused before the
+      // admin bypass, so a missing rule here 403s this route on every remote
+      // node for every caller.
+      expect(classifyStackApiPath('GET', '/stacks/web/git-source/history')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:read',
+      });
+      expect(classifyStackApiPath('GET', '/stacks/web/git-source/manifest')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:read',
+      });
       expect(classifyStackApiPath('POST', '/stacks/web/drift/recheck')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:read',
       });

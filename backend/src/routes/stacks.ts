@@ -23,6 +23,8 @@ import {
   buildDetectionDisabledPreview,
 } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
+import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
+import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
@@ -86,6 +88,8 @@ import {
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { classifyStackApiPath } from '../helpers/stackRouteAuth';
+import { projectManagedStackRevision } from '../helpers/gitopsResponse';
+import type { GitOpsRevisionProjection } from '../services/gitops/types';
 
 // Authenticated users with edit permission can write arbitrarily large compose
 // files. Refuse to YAML.parse anything beyond this bound so a malformed (or
@@ -601,7 +605,7 @@ async function runStackBulkOp(
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>
         console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
       );
-      const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null);
+      const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null, { deployedGenerationId: orchResult.kind === 'stack_compose_done' ? orchResult.deployedGenerationId : null });
       const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
       linkStackUpdateRecoveryGate(recoveryId, healthGateId);
       return { stackName, ok: true, healthGateId };
@@ -1110,13 +1114,11 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'auto_deploy_on_apply must be a boolean' });
     }
     const resolvedAuthType = auth_type === 'token' ? 'token' : 'none';
-    if (!/^https:\/\//i.test(repo_url)) {
-      return res.status(400).json({ error: 'Only HTTPS repository URLs are supported' });
+    const repoUrlError = repoUrlRejectionMessage(repo_url);
+    if (repoUrlError) {
+      return res.status(400).json({ error: repoUrlError });
     }
-    if (repo_url.length > 2048) {
-      return res.status(400).json({ error: 'repo_url is too long' });
-    }
-    if (branch.length > 256) {
+    if (branch.length > REF_MAX_LEN) {
       return res.status(400).json({ error: 'branch is too long' });
     }
     if (typeof env_path === 'string' && env_path.length > 1024) {
@@ -1339,7 +1341,12 @@ async function buildDriftPayload(
   nodeId: number,
   stackName: string,
   reconcile: boolean,
-): Promise<StackDriftReport & { temporal: DriftTemporal; ledger: DriftLedgerEntry[]; lastCheckedAt: number | null }> {
+): Promise<StackDriftReport & {
+  temporal: DriftTemporal;
+  ledger: DriftLedgerEntry[];
+  lastCheckedAt: number | null;
+  gitopsRevision: GitOpsRevisionProjection;
+}> {
   const report = await buildStackDriftReport(nodeId, stackName);
   // Only the on-disk read is best-effort: an unreadable compose is already surfaced
   // by the report as a parse error, so temporal degrades to neutral. computeTemporal
@@ -1371,7 +1378,17 @@ async function buildDriftPayload(
   // not this passive read, so surface when that was: the Drift tab labels the history
   // "checked {time ago}" and a stale finding reads as history, not current truth.
   const lastCheckedAt = DatabaseService.getInstance().getStackDossier(nodeId, stackName)?.last_drift_check_at ?? null;
-  return { ...report, temporal, ledger, lastCheckedAt };
+  // Additive and separate on purpose. The ledger above is the compose-versus-runtime
+  // record this tab has always shown; the revision carries the GitOps drift classes,
+  // which are derived state and are never written into stack_drift_findings.
+  //
+  // Deliberately not guarded, matching computeTemporal above: on a read, the
+  // revision is part of the answer rather than decoration on one, so a fault
+  // reading it surfaces as a 500 instead of a projection that quietly reports
+  // less state than exists. Mutation routes take the opposite side, because
+  // there the write has already committed and a decoration must not be able to
+  // report it as failed.
+  return { ...report, temporal, ledger, lastCheckedAt, gitopsRevision: projectManagedStackRevision(stackName, nodeId) };
 }
 
 stacksRouter.get('/:stackName/drift', async (req: Request, res: Response) => {
@@ -1837,7 +1854,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     dlog(`[Stacks] Deploy completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Deploy finished in ${Date.now() - t0}ms`);
     ok = true;
-    const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'deploy', req.user?.username ?? null);
+    const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'deploy', req.user?.username ?? null, { deployedGenerationId: deployResult.deployedGenerationId });
     linkStackUpdateRecoveryGate(deployResult.recoveryId, healthGateId);
     res.json({ message: 'Deployed successfully', healthGateId });
     notifyActionSuccess('deploy_success', `${stackName} deployed`, stackName, req.user?.username ?? 'system');
@@ -2410,7 +2427,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     // Health observation starts immediately after Compose; registry recheck is
     // isolated so a verification failure cannot turn Compose success into 500.
     ok = true;
-    const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null);
+    const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null, { deployedGenerationId: orchResult.kind === 'stack_compose_done' ? orchResult.deployedGenerationId : null });
     const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
     linkStackUpdateRecoveryGate(recoveryId, healthGateId);
 
@@ -2499,14 +2516,14 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       try {
         const rolledBack = await recoverySvc.compensateWithCandidate(
           currentGen.id,
-          async (overridePath, invocation) => {
-            await ComposeService.getInstance(req.nodeId).composeUpWithRecoveryOverride(
-              stackName,
-              overridePath,
-              getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
-              invocation,
-            );
-          },
+          // Returns the Compose result rather than swallowing it, so a proven
+          // restore can bind its deployed pointer and open a health run.
+          (overridePath, invocation) => ComposeService.getInstance(req.nodeId).composeUpWithRecoveryOverride(
+            stackName,
+            overridePath,
+            getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+            invocation,
+          ),
           buildPolicyGateOptions(req, { actor: req.user?.username ?? 'system' }),
         );
         if (!rolledBack) {

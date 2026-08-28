@@ -337,6 +337,14 @@ function projectActions(
         seen.add(node.id);
     };
 
+    // A severed canonical target is invisible to every automatic action. The
+    // decision arrays already refuse it, and marking it seen here keeps the
+    // deployment-status fallbacks below from resurrecting a retry behind
+    // the model's back.
+    for (const nodeId of decision.severedNodeIds) {
+        seen.add(nodeId);
+    }
+
     // Status-precedence pass: in-flight, name conflict, and clear_* must win over
     // decision.withdraw / evictBlocked so Confirm never authorizes mid-flight mutates
     // and never-deployed guards stay on the remove-only clear_stale path.

@@ -153,10 +153,10 @@ jobs:
       - name: Smoke test release image (pre-publish)
         run: |
           set -euo pipefail
-          # Verify source-built Docker CLI and Compose binaries are present and functional.
-          # Both checks run in one container to avoid double start-up overhead.
+          # Verify source-built Docker CLI, Compose, and git binaries are present and functional.
+          # These checks run in one container to avoid repeated start-up overhead.
           docker run --rm --entrypoint sh localhost/sencho:release-scan -c \
-            'docker --version && docker compose version'
+            'docker --version && docker compose version && git --version'
 
           # Not using --rm so that a crashed container sticks around long
           # enough for `docker logs` in the trap to surface the stack trace.

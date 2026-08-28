@@ -27,6 +27,7 @@ import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/au
 import { collectManifestFilePaths } from '../helpers/manifestFilePaths';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
+import { isRealPathAtManagedLocation, managedAreaBase } from './gitops/managedPaths';
 import type {
     BuildContextPlan,
     ComposeInputEntry,
@@ -1226,10 +1227,29 @@ export class GitProjectManifestService {
         // says nothing about recency, and the manifest's previousDir is what a
         // crash restore reads from.
         const keep = new Set([keepBase, previousDir ? path.basename(previousDir) : null].filter((v): v is string => v !== null));
+        const areaBase = managedAreaBase();
         for (const entry of entries) {
             if (!entry.isDirectory() || !entry.name.startsWith('applied-')) continue;
             if (keep.has(entry.name)) continue;
-            await fs.promises.rm(path.join(dir, entry.name), { recursive: true, force: true });
+            const abs = path.resolve(dir, entry.name);
+            // Inline containment barrier at the removal sink (see
+            // `managedAreaBase`): the analyzer credits this literal comparison,
+            // not the positional check below it.
+            if (!abs.startsWith(areaBase + path.sep)) {
+                console.warn(`[GitManifest] refusing to prune ${sanitizeForLog(entry.name)} for ${sanitizeForLog(stackName)}: it resolves outside the managed area`);
+                continue;
+            }
+            // Positional barrier at the recursive-delete sink. This runs on
+            // every successful apply, exactly where a link planted over one
+            // generation name would do the most damage, and lexical
+            // containment cannot see it. Refusal skips the entry rather than
+            // failing an apply that already committed; retention keeps
+            // everything recoverable either way.
+            if (!await isRealPathAtManagedLocation(abs)) {
+                console.warn(`[GitManifest] refusing to prune ${sanitizeForLog(entry.name)} for ${sanitizeForLog(stackName)}: it is not at its own location in the managed area`);
+                continue;
+            }
+            await fs.promises.rm(abs, { recursive: true, force: true });
         }
     }
 
@@ -1344,9 +1364,24 @@ export class GitProjectManifestService {
         try {
             const entries = await fs.promises.readdir(dir, { withFileTypes: true });
             const now = Date.now();
+            const areaBase = managedAreaBase();
             for (const entry of entries) {
                 if (!entry.isDirectory() || !entry.name.startsWith('candidate-')) continue;
-                const abs = path.join(dir, entry.name);
+                const abs = path.resolve(dir, entry.name);
+                // Inline containment barrier at the removal sink (see
+                // `managedAreaBase`): the analyzer credits this literal
+                // comparison, not the positional check below it.
+                if (!abs.startsWith(areaBase + path.sep)) {
+                    console.warn(`[GitManifest] refusing to reap orphan candidate ${sanitizeForLog(entry.name)} for ${sanitizeForLog(stackName)}: it resolves outside the managed area`);
+                    continue;
+                }
+                // Same positional barrier as generation pruning: the boot sweep
+                // reaps candidate directories nobody claims, which is precisely
+                // the kind of unattended delete a planted link would steer.
+                if (!await isRealPathAtManagedLocation(abs)) {
+                    console.warn(`[GitManifest] refusing to reap orphan candidate ${sanitizeForLog(entry.name)} for ${sanitizeForLog(stackName)}: it is not at its own location in the managed area`);
+                    continue;
+                }
                 const complete = await fs.promises
                     .access(path.join(abs, CANDIDATE_COMPLETE_MARKER))
                     .then(() => true)
@@ -1475,7 +1510,17 @@ export class GitProjectManifestService {
         }
         await fs.promises.rm(markerPath, { force: true });
         if (!parsed.managedAreaExisted) {
-            await fs.promises.rm(root, { recursive: true, force: true });
+            // Inline containment barrier at the removal sink (see
+            // `managedAreaBase`), then the positional check. Refusal leaves the
+            // area in place for the operator rather than deleting through a
+            // redirected root; the restore itself already succeeded, so
+            // recovery still reports success.
+            if (!path.resolve(root).startsWith(managedAreaBase() + path.sep)
+                || !await isRealPathAtManagedLocation(root)) {
+                console.warn(`[GitManifest] restored ${sanitizeForLog(stackName)} but left its managed area in place: it is not at its own location in the managed area`);
+            } else {
+                await fs.promises.rm(root, { recursive: true, force: true });
+            }
         }
         return true;
     }
@@ -1509,6 +1554,18 @@ export class GitProjectManifestService {
     async stageManagedAreaForDetach(stackName: string): Promise<boolean> {
         const root = this.managedRoot(stackName);
         const staged = this.detachStagedRoot(stackName);
+        // Inline containment barrier at the removal sink (see
+        // `managedAreaBase`): the analyzer credits this literal comparison,
+        // not the positional check below it.
+        if (!path.resolve(staged).startsWith(managedAreaBase() + path.sep)) {
+            throw new Error(`refusing to restage the managed area for ${sanitizeForLog(stackName)}: a stale staged area resolves outside the managed area`);
+        }
+        // Positional barrier on the stale-staged cleanup. Thrown rather than
+        // skipped because the rename below needs this path back, and detaching
+        // over an unverifiable directory silently is the outcome to avoid.
+        if (!await isRealPathAtManagedLocation(staged)) {
+            throw new Error(`refusing to restage the managed area for ${sanitizeForLog(stackName)}: a stale staged area is not at its own location in the managed area`);
+        }
         await fs.promises.rm(staged, { recursive: true, force: true });
         try {
             await fs.promises.rename(root, staged);
@@ -1529,8 +1586,19 @@ export class GitProjectManifestService {
 
     /** Delete a staged managed area after the database row is gone. */
     async finalizeStagedDetach(stackName: string): Promise<boolean> {
+        const staged = this.detachStagedRoot(stackName);
+        // Same refusal semantics as `deleteManagedArea`: false leaves the area
+        // in place for an operator rather than deleting through a redirected
+        // root now that nothing else references it. The inline containment
+        // barrier (see `managedAreaBase`) is what the analyzer credits; the
+        // positional check carries the property.
+        if (!path.resolve(staged).startsWith(managedAreaBase() + path.sep)
+            || !await isRealPathAtManagedLocation(staged)) {
+            console.warn(`[GitManifest] refusing to delete staged area for ${sanitizeForLog(stackName)}: it is not at its own location in the managed area`);
+            return false;
+        }
         try {
-            await fs.promises.rm(this.detachStagedRoot(stackName), { recursive: true, force: true });
+            await fs.promises.rm(staged, { recursive: true, force: true });
             return true;
         } catch (e) {
             console.warn('[GitManifest] staged detach cleanup failed:', sanitizeForLog(stackName), (e as Error).message);
@@ -1546,6 +1614,16 @@ export class GitProjectManifestService {
      */
     async deleteManagedArea(stackName: string): Promise<boolean> {
         const root = this.managedRoot(stackName);
+        // Same refusal semantics as the rm failure below: false means the area
+        // survived, which is what keeps a detach from dropping its row while
+        // generations it cannot account for are still on disk. The inline
+        // containment barrier (see `managedAreaBase`) is what the analyzer
+        // credits; the positional check carries the property.
+        if (!path.resolve(root).startsWith(managedAreaBase() + path.sep)
+            || !await isRealPathAtManagedLocation(root)) {
+            console.warn(`[GitManifest] refusing to delete managed area for ${sanitizeForLog(stackName)}: it is not at its own location in the managed area`);
+            return false;
+        }
         try {
             await fs.promises.rm(root, { recursive: true, force: true });
             return true;
