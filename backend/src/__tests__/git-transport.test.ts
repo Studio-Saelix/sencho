@@ -1049,6 +1049,129 @@ describe('clone failure classification and final size gate', () => {
         }
     });
 
+    it('classifies a hanging ancestry probe as a timeout transport failure', async () => {
+        mockSpawn.mockImplementation((_cmd, args) => {
+            const argv = args as string[];
+            const child = fakeChild();
+            if (argv.includes('cat-file')) {
+                return child;
+            }
+            queueMicrotask(() => {
+                if (argv.includes('rev-list')) {
+                    child.stdout.emit('data', Buffer.from('1\n'));
+                }
+                if (argv.includes('rev-parse') && argv.includes('--is-shallow-repository')) {
+                    child.stdout.emit('data', Buffer.from('true\n'));
+                }
+                child.emit('close', 0);
+            });
+            return child;
+        });
+        const root = await makeWorkspace();
+
+        try {
+            await expect(verifyFastForward({
+                repoUrl: 'https://github.com/example/repo.git',
+                ancestorSha: SHA_B,
+                descendantSha: SHA_A,
+                timeoutMs: 250,
+                workspaceRoot: root,
+                maxBytes: 100 * 1024 * 1024,
+            })).rejects.toMatchObject({
+                transportFailure: true as const,
+                reason: 'timeout',
+            });
+        } finally {
+            mockSpawn.mockReset();
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('treats an invalid shallow-repository probe as a transport failure', async () => {
+        scriptSpawn([
+            { code: 0 },
+            { code: 0 },
+            { stdout: '1\n' },
+            { code: 1 },
+            { stdout: 'maybe\n' },
+        ]);
+        const root = await makeWorkspace();
+
+        try {
+            await expect(verifyFastForward({
+                repoUrl: 'https://github.com/example/repo.git',
+                ancestorSha: SHA_B,
+                descendantSha: SHA_A,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+                maxBytes: 100 * 1024 * 1024,
+            })).rejects.toMatchObject({
+                transportFailure: true as const,
+                reason: 'exit',
+            });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('treats merge-base operational failures as transport failures', async () => {
+        scriptSpawn([
+            { code: 0 },
+            { code: 0 },
+            { stdout: '1\n' },
+            { code: 0 },
+            { code: 128, stderr: 'fatal: bad object\n' },
+        ]);
+        const root = await makeWorkspace();
+
+        try {
+            await expect(verifyFastForward({
+                repoUrl: 'https://github.com/example/repo.git',
+                ancestorSha: SHA_B,
+                descendantSha: SHA_A,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+                maxBytes: 100 * 1024 * 1024,
+            })).rejects.toMatchObject({
+                transportFailure: true as const,
+                reason: 'exit',
+                exitCode: 128,
+            });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('throws a timeout when deepen stagnates while history remains shallow', async () => {
+        scriptSpawn([
+            { code: 0 },
+            { code: 0 },
+            { stdout: '1\n' },
+            { code: 1 },
+            { stdout: 'true\n' },
+            { code: 0 },
+            { stdout: '1\n' },
+            { stdout: 'true\n' },
+        ]);
+        const root = await makeWorkspace();
+
+        try {
+            await expect(verifyFastForward({
+                repoUrl: 'https://github.com/example/repo.git',
+                ancestorSha: SHA_B,
+                descendantSha: SHA_A,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+                maxBytes: 100 * 1024 * 1024,
+            })).rejects.toMatchObject({
+                transportFailure: true as const,
+                reason: 'timeout',
+            });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
     it('reports a clone-phase timeout and kills the child', async () => {
         scriptSpawnHanging();
         const root = await makeWorkspace();

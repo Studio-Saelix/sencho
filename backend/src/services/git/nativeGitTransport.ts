@@ -729,30 +729,103 @@ export async function verifyFastForward(req: {
             return res;
         };
 
+        const probeFailure = (res: RunResult, argv: string[]): never => {
+            throw {
+                transportFailure: true as const,
+                reason: 'exit',
+                stderr: res.stderr,
+                exitCode: res.exitCode,
+                argv,
+                host: url.host,
+                hasToken,
+            } satisfies TransportFailure;
+        };
+
         const runProbe = async (args: string[]): Promise<RunResult> => {
             assertTimeBudget();
-            const res = await runGit(args, {
-                cwd: repoDir,
-                env,
-                timeoutMs: Math.min(remainingMs(), LS_REMOTE_MAX_MS),
-            });
-            throwIfSizeExceeded();
-            return res;
+            try {
+                const res = await runGit(args, {
+                    cwd: repoDir,
+                    env,
+                    timeoutMs: Math.min(remainingMs(), LS_REMOTE_MAX_MS),
+                });
+                throwIfSizeExceeded();
+                return res;
+            } catch (e) {
+                throwIfSizeExceeded();
+                if (isTimeoutError(e)) {
+                    throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+                }
+                throw {
+                    transportFailure: true as const,
+                    reason: 'exit',
+                    stderr: e instanceof Error ? e.message : String(e),
+                    argv: args,
+                    host: url.host,
+                    hasToken,
+                } satisfies TransportFailure;
+            }
+        };
+
+        const isMissingObjectProbe = (res: RunResult): boolean => {
+            if (res.exitCode === 0) return false;
+            if (res.exitCode === 1) return true;
+            const err = res.stderr.toLowerCase();
+            return err.includes('not a valid object name')
+                || err.includes('bad object')
+                || err.includes('could not get');
         };
 
         await materialize([...baseArgs, 'init']);
         await materialize([...baseArgs, 'fetch', '--depth=1', url.href, descendant]);
 
         const countReachable = async (): Promise<number> => {
-            const listed = await runProbe([...baseArgs, 'rev-list', '--count', descendant]);
-            if (listed.exitCode !== 0) return 0;
+            const argv = [...baseArgs, 'rev-list', '--count', descendant];
+            const listed = await runProbe(argv);
+            if (listed.exitCode !== 0) {
+                probeFailure(listed, argv);
+            }
             const parsed = Number.parseInt(listed.stdout.trim(), 10);
-            return Number.isFinite(parsed) ? parsed : 0;
+            if (!Number.isFinite(parsed) || parsed < 0) {
+                throw {
+                    transportFailure: true as const,
+                    reason: 'exit',
+                    stderr: `unexpected rev-list output: ${listed.stdout}`,
+                    exitCode: listed.exitCode,
+                    argv,
+                    host: url.host,
+                    hasToken,
+                } satisfies TransportFailure;
+            }
+            return parsed;
         };
 
         const isShallowRepository = async (): Promise<boolean> => {
-            const shallow = await runProbe([...baseArgs, 'rev-parse', '--is-shallow-repository']);
-            return shallow.exitCode === 0 && shallow.stdout.trim() === 'true';
+            const argv = [...baseArgs, 'rev-parse', '--is-shallow-repository'];
+            const shallow = await runProbe(argv);
+            if (shallow.exitCode !== 0) {
+                probeFailure(shallow, argv);
+            }
+            const flag = shallow.stdout.trim();
+            if (flag === 'true') return true;
+            if (flag === 'false') return false;
+            throw {
+                transportFailure: true as const,
+                reason: 'exit',
+                stderr: `unexpected shallow-repository output: ${shallow.stdout}`,
+                exitCode: shallow.exitCode,
+                argv,
+                host: url.host,
+                hasToken,
+            } satisfies TransportFailure;
+        };
+
+        const isProvenAncestor = async (): Promise<boolean> => {
+            const argv = [...baseArgs, 'merge-base', '--is-ancestor', ancestor, descendant];
+            const ancestry = await runProbe(argv);
+            if (ancestry.exitCode === 0) return true;
+            if (ancestry.exitCode === 1) return false;
+            probeFailure(ancestry, argv);
         };
 
         let reachableCount = await countReachable();
@@ -772,11 +845,14 @@ export async function verifyFastForward(req: {
         while (true) {
             assertTimeBudget();
 
-            const hasAncestor = await runProbe([...baseArgs, 'cat-file', '-e', `${ancestor}^{commit}`]);
+            const ancestorArgv = [...baseArgs, 'cat-file', '-e', `${ancestor}^{commit}`];
+            const hasAncestor = await runProbe(ancestorArgv);
             if (hasAncestor.exitCode === 0) {
-                const ancestry = await runProbe([...baseArgs, 'merge-base', '--is-ancestor', ancestor, descendant]);
                 await assertWithinSizeBudget();
-                return ancestry.exitCode === 0;
+                return await isProvenAncestor();
+            }
+            if (!isMissingObjectProbe(hasAncestor)) {
+                probeFailure(hasAncestor, ancestorArgv);
             }
 
             if (!(await isShallowRepository())) {
@@ -798,8 +874,7 @@ export async function verifyFastForward(req: {
                     await assertWithinSizeBudget();
                     return false;
                 }
-                await assertWithinSizeBudget();
-                return false;
+                throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
             }
 
             deepenStep = Math.min(deepenStep * 2, MAX_FF_DEEPEN_STEP);
