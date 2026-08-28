@@ -282,7 +282,7 @@ ARG APK_CACHE_BUST=unset
 # removing it also eliminates CVE-2026-33671 (picomatch ReDoS in npm).
 RUN echo "apk cache bust: ${APK_CACHE_BUST}" && \
     apk upgrade --no-cache && \
-    apk add --no-cache bash su-exec git && \
+    apk add --no-cache bash su-exec git tini && \
     mkdir -p /usr/local/lib/docker/cli-plugins
 
 # Copy the source-built Docker CLI and Compose plugin from their builder stages.
@@ -350,8 +350,8 @@ EXPOSE 1852
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD node -e "const h=require('http');h.get('http://localhost:1852/api/health',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"
 
-# Entrypoint ensures /app/data is writable and execs the CMD as root by default,
-# or drops to $SENCHO_USER via su-exec when that env var is set (see comment above).
-# CMD provides the default arguments passed through to the entrypoint.
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+# Tini owns PID 1 so orphaned Git transport helpers are reaped after a
+# process-group kill. The entrypoint still prepares /app/data before execing
+# the application command.
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "dist/index.js"]

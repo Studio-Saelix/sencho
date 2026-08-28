@@ -166,7 +166,7 @@ export function classifyGitFailure(
     if (/could not resolve host|name or service not known|temporary failure in name resolution/.test(raw)) {
         return { code: 'NETWORK_TIMEOUT', message: `Could not resolve${dest}. Check the repository URL and your network or DNS.` };
     }
-    if (/connection refused/.test(raw)) {
+    if (/connection refused|could not connect to server/.test(raw)) {
         return { code: 'NETWORK_TIMEOUT', message: `Connection refused by${dest}.` };
     }
     if (/connection timed out|operation timed out|connection was reset|remote end hung up|connection reset by peer/.test(raw)) {

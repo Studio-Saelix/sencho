@@ -162,6 +162,7 @@ describe('classifyGitFailure (native git stderr corpus)', () => {
     it.each([
         ['DNS', "fatal: unable to access 'https://h/x.git/': Could not resolve host: h", 'NETWORK_TIMEOUT'],
         ['refused', "fatal: unable to access 'https://h/x.git/': Failed to connect to h port 443: Connection refused", 'NETWORK_TIMEOUT'],
+        ['curl refused', "fatal: unable to access 'https://h/x.git/': Failed to connect to h port 443 after 1 ms: Could not connect to server", 'NETWORK_TIMEOUT'],
         ['reset', 'fatal: the remote end hung up unexpectedly', 'NETWORK_TIMEOUT'],
         ['timeout', "fatal: unable to access 'https://h/x.git/': Connection timed out", 'NETWORK_TIMEOUT'],
     ])('maps %s stderr to NETWORK_TIMEOUT', (_label, stderr, code) => {
