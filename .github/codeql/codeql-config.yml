@@ -87,6 +87,7 @@ query-filters:
       paths:
         - backend/src/helpers/registryDeliveryGitCandidate.ts
         - backend/src/helpers/registryDeliveryMaterialize.ts
+        - backend/src/helpers/dockerComposeRunner.ts
 
   # hashDeliverySourceDir and Dockerfile discovery read files during the same
   # directory walk that enumerated them. The TOCTOU window is accepted for
