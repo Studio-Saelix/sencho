@@ -783,7 +783,7 @@ export async function verifyFastForward(req: {
             const argv = [...baseArgs, 'rev-list', '--count', descendant];
             const listed = await runProbe(argv);
             if (listed.exitCode !== 0) {
-                probeFailure(listed, argv);
+                return probeFailure(listed, argv);
             }
             const parsed = Number.parseInt(listed.stdout.trim(), 10);
             if (!Number.isFinite(parsed) || parsed < 0) {
@@ -804,7 +804,7 @@ export async function verifyFastForward(req: {
             const argv = [...baseArgs, 'rev-parse', '--is-shallow-repository'];
             const shallow = await runProbe(argv);
             if (shallow.exitCode !== 0) {
-                probeFailure(shallow, argv);
+                return probeFailure(shallow, argv);
             }
             const flag = shallow.stdout.trim();
             if (flag === 'true') return true;
@@ -825,7 +825,7 @@ export async function verifyFastForward(req: {
             const ancestry = await runProbe(argv);
             if (ancestry.exitCode === 0) return true;
             if (ancestry.exitCode === 1) return false;
-            probeFailure(ancestry, argv);
+            return probeFailure(ancestry, argv);
         };
 
         let reachableCount = await countReachable();
@@ -852,7 +852,7 @@ export async function verifyFastForward(req: {
                 return await isProvenAncestor();
             }
             if (!isMissingObjectProbe(hasAncestor)) {
-                probeFailure(hasAncestor, ancestorArgv);
+                return probeFailure(hasAncestor, ancestorArgv);
             }
 
             if (!(await isShallowRepository())) {
