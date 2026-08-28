@@ -18,6 +18,7 @@ import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
 import { prepareSourceForDiscover } from '../helpers/registryDeliveryPrepare';
 import { PreparedSourceStore } from './preparedSourceStore';
 import { hashProjectSource } from '../helpers/registryDeliveryHashes';
+import { isValidStackName } from '../utils/validation';
 
 const ATTESTATION_AUD = 'registry-delivery';
 const ATTESTATION_TTL_SECONDS = 900;
@@ -30,7 +31,6 @@ export interface RegistryDeliveryDiscoverRequest {
   sourceHash?: string;
   actionSetHash: string;
   prepId?: string;
-  projectDir?: string;
   envVars?: Record<string, string>;
   template?: unknown;
   stackName?: string;
@@ -179,16 +179,20 @@ export class RegistryDeliveryService {
         await fsPromises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
       }
     } else if (request.stack) {
+      if (!isValidStackName(request.stack)) {
+        throw new Error('Invalid stack name');
+      }
       const { FileSystemService } = await import('./FileSystemService');
       const fs = FileSystemService.getInstance(nodeId);
-      const projectDir = path.join(fs.getBaseDir(), request.stack);
+      const baseResolved = path.resolve(fs.getBaseDir());
+      const projectDir = path.resolve(baseResolved, request.stack);
+      if (!projectDir.startsWith(baseResolved + path.sep)) {
+        throw new Error('Invalid stack path');
+      }
       if (!sourceHash || request.sourceKind === 'live-project') {
         sourceHash = hashProjectSource(projectDir);
       }
       const discovery = discoverRegistryReferences(projectDir, request.envVars ?? {});
-      referencedHosts = discovery.referencedHosts;
-    } else if (request.projectDir) {
-      const discovery = discoverRegistryReferences(request.projectDir, request.envVars ?? {});
       referencedHosts = discovery.referencedHosts;
     }
 

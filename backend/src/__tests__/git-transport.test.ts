@@ -907,7 +907,7 @@ describe('clone failure classification and final size gate', () => {
                 // Simulate a real OS termination confirmation arriving after
                 // a short, non-zero delay rather than synchronously with the
                 // kill call.
-                setTimeout(() => child.emit('close', null), 40);
+                setTimeout(() => child.emit('close', null), 150);
             };
             return child;
         });
@@ -928,7 +928,7 @@ describe('clone failure classification and final size gate', () => {
             // simulated confirmation has not arrived yet: settling here
             // would let a caller start cleaning up the workspace while the
             // child tree is still alive.
-            await new Promise((r) => setTimeout(r, 60));
+            await new Promise((r) => setTimeout(r, 55));
             expect(killInvoked).toBe(true);
             expect(settled).toBe(false);
 

@@ -12,6 +12,7 @@ import { discoverRegistryReferences } from '../services/registryReferenceDiscove
 import type { RegistryDeliveryEnvelope } from './registryDeliveryContext';
 import { hashActionSet, hashProjectSource } from './registryDeliveryHashes';
 import type { RegistryDeliveryStage } from './registryOpClassifier';
+import { isValidStackName } from '../utils/validation';
 
 export interface RegistryDeliverySeamInput {
   envelope: RegistryDeliveryEnvelope;
@@ -122,8 +123,15 @@ export async function resolveRegistryAuthAtSeam(
     const discovery = discoverRegistryReferences(payloadPath);
     referencedHosts = discovery.referencedHosts;
   } else {
+    if (!isValidStackName(input.stack)) {
+      throw new Error('Invalid stack name');
+    }
     const fs = FileSystemService.getInstance(input.nodeId);
-    const projectDir = path.join(fs.getBaseDir(), input.stack);
+    const baseResolved = path.resolve(fs.getBaseDir());
+    const projectDir = path.resolve(baseResolved, input.stack);
+    if (!projectDir.startsWith(baseResolved + path.sep)) {
+      throw new Error('Invalid stack path');
+    }
     sourceHash = hashProjectSource(projectDir);
     assertClaim(
       payload.sourceHash === sourceHash,

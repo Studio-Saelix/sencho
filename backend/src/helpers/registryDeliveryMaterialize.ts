@@ -2,7 +2,7 @@ import { promises as fsPromises } from 'fs';
 import path from 'path';
 import { FileSystemService } from '../services/FileSystemService';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
-import { isPathWithinBase } from '../utils/validation';
+import { isValidStackName } from '../utils/validation';
 
 /**
  * Copy a prepared payload bundle into a stack directory before compose runs.
@@ -13,12 +13,15 @@ export async function materializePreparedSourceToStack(
   nodeId: number,
   stackName: string,
 ): Promise<void> {
+  if (!isValidStackName(stackName)) {
+    throw new Error('Invalid stack name');
+  }
   const store = PreparedSourceStore.getInstance();
   const payloadPath = store.peekPayloadPath(prepId);
   const fsSvc = FileSystemService.getInstance(nodeId);
-  const stackDir = path.join(fsSvc.getBaseDir(), stackName);
-  const baseDir = fsSvc.getBaseDir();
-  if (!isPathWithinBase(stackDir, baseDir)) {
+  const baseResolved = path.resolve(fsSvc.getBaseDir());
+  const stackDir = path.resolve(baseResolved, stackName);
+  if (!stackDir.startsWith(baseResolved + path.sep)) {
     throw new Error('Invalid stack path');
   }
   await fsPromises.mkdir(stackDir, { recursive: true, mode: 0o700 });
@@ -27,8 +30,8 @@ export async function materializePreparedSourceToStack(
   for (const entry of entries) {
     if (entry.isSymbolicLink()) continue;
     const src = path.join(payloadPath, entry.name);
-    const dest = path.join(stackDir, entry.name);
-    if (!isPathWithinBase(dest, stackDir)) continue;
+    const dest = path.resolve(stackDir, entry.name);
+    if (!dest.startsWith(stackDir + path.sep)) continue;
     if (entry.isDirectory()) {
       await copyTree(src, dest, stackDir);
       continue;
@@ -46,8 +49,8 @@ async function copyTree(srcDir: string, destDir: string, stackRoot: string): Pro
   for (const entry of entries) {
     if (entry.isSymbolicLink()) continue;
     const src = path.join(srcDir, entry.name);
-    const dest = path.join(destDir, entry.name);
-    if (!isPathWithinBase(dest, stackRoot)) continue;
+    const dest = path.resolve(destDir, entry.name);
+    if (!dest.startsWith(stackRoot + path.sep)) continue;
     if (entry.isDirectory()) {
       await copyTree(src, dest, stackRoot);
       continue;

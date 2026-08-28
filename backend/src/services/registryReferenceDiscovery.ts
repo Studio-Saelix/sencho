@@ -38,8 +38,12 @@ function parseDockerfileReferences(content: string): string[] {
   return [...hosts];
 }
 
-function discoverFromComposeFile(filePath: string, envVars: Record<string, string>): string[] {
-  const content = fs.readFileSync(filePath, 'utf8');
+function discoverFromComposeFile(baseResolved: string, fileName: string, envVars: Record<string, string>): string[] {
+  const safePath = path.resolve(baseResolved, fileName);
+  if (!safePath.startsWith(baseResolved + path.sep)) {
+    return [];
+  }
+  const content = fs.readFileSync(safePath, 'utf8');
   const images = extractImagesFromCompose(content, envVars);
   const hosts = new Set<string>();
   for (const image of images) {
@@ -49,9 +53,9 @@ function discoverFromComposeFile(filePath: string, envVars: Record<string, strin
   return [...hosts];
 }
 
-function discoverDockerfiles(rootDir: string): string[] {
+function discoverDockerfiles(baseResolved: string): string[] {
   const hosts = new Set<string>();
-  const stack: string[] = [rootDir];
+  const stack: string[] = [baseResolved];
   while (stack.length > 0) {
     const current = stack.pop();
     if (!current) continue;
@@ -62,7 +66,8 @@ function discoverDockerfiles(rootDir: string): string[] {
       continue;
     }
     for (const entry of entries) {
-      const full = path.join(current, entry.name);
+      const full = path.resolve(current, entry.name);
+      if (!full.startsWith(baseResolved + path.sep)) continue;
       if (entry.isDirectory()) {
         stack.push(full);
         continue;
@@ -91,17 +96,19 @@ export function discoverRegistryReferences(
   envVars: Record<string, string> = {},
 ): RegistryReferenceDiscoveryResult {
   const hosts = new Set<string>();
+  const baseResolved = path.resolve(projectDir);
 
   const composeNames = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
   for (const name of composeNames) {
-    const composePath = path.join(projectDir, name);
+    const composePath = path.resolve(baseResolved, name);
+    if (!composePath.startsWith(baseResolved + path.sep)) continue;
     if (!fs.existsSync(composePath)) continue;
-    for (const host of discoverFromComposeFile(composePath, envVars)) {
+    for (const host of discoverFromComposeFile(baseResolved, name, envVars)) {
       hosts.add(host);
     }
   }
 
-  for (const host of discoverDockerfiles(projectDir)) {
+  for (const host of discoverDockerfiles(baseResolved)) {
     hosts.add(host);
   }
 
