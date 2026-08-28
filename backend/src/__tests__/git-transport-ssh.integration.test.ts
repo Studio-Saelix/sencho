@@ -125,7 +125,15 @@ async function startSshGitServer(bareDir: string, port: number): Promise<Omit<Ss
     let stderr = '';
     child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
 
-    await waitForPort('127.0.0.1', port);
+    try {
+        await waitForPort('127.0.0.1', port);
+    } catch (e) {
+        // sshd reports its own startup failures on stderr; without this the only
+        // CI signal is an opaque port timeout. Kill first so no orphan holds the
+        // port and turns the next run into a misleading "address already in use".
+        child.kill('SIGKILL');
+        throw new Error(`sshd did not come up on port ${port}: ${stderr.trim() || '(no stderr)'}`, { cause: e });
+    }
 
     const scanned = await scanHostKeys('127.0.0.1', port);
     const knownHostsEntry = scanned.map((k) => k.line).join('\n');
