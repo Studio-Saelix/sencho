@@ -21,9 +21,10 @@ import path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
-const { mockResolveRef, mockFetchAtCommit, mockGitClone, mockGitLog, compose } = vi.hoisted(() => ({
+const { mockResolveRef, mockFetchAtCommit, mockVerifyFastForward, mockGitClone, mockGitLog, compose } = vi.hoisted(() => ({
   mockResolveRef: vi.fn(),
   mockFetchAtCommit: vi.fn(),
+  mockVerifyFastForward: vi.fn(),
   mockGitClone: vi.fn(),
   mockGitLog: vi.fn(),
   /** Exit code the next daemon-dependent compose command reports. */
@@ -39,6 +40,7 @@ vi.mock('../services/git/nativeGitTransport', () => ({
     resolveRef: mockResolveRef,
     fetchAtCommit: mockFetchAtCommit,
   },
+  verifyFastForward: mockVerifyFastForward,
 }));
 
 /**
@@ -147,10 +149,11 @@ let projectApplication: typeof import('../services/gitops/derive').projectApplic
  * wireTransportDefaults.
  */
 function wireTransportDefaults(): void {
+  mockVerifyFastForward.mockResolvedValue(true);
   mockResolveRef.mockImplementation(async () => {
     const log = await mockGitLog({});
     const oid = Array.isArray(log) ? log[0]?.oid : undefined;
-    return { commitSha: oid ?? '' };
+    return { commitSha: oid ?? '', kind: 'branch' as const };
   });
   mockFetchAtCommit.mockImplementation(async (req: { workspaceRoot: string; commitSha: string }) => {
     const dir = path.join(req.workspaceRoot, 'repo');
@@ -202,6 +205,7 @@ describe('Direct Git producers drive the revision state', () => {
   beforeEach(() => {
     mockResolveRef.mockReset();
     mockFetchAtCommit.mockReset();
+    mockVerifyFastForward.mockReset();
     mockGitClone.mockReset();
     mockGitLog.mockReset();
     wireTransportDefaults();
