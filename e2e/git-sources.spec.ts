@@ -97,7 +97,7 @@ test.describe('Git Sources', () => {
     });
 
     await page.getByRole('button', { name: 'Fetch host key fingerprint' }).click();
-    await expect(page.getByText('SHA256:E2EProbeFingerprint')).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText('SHA256:E2EProbeFingerprint', { exact: true })).toBeVisible({ timeout: 5_000 });
 
     await page.locator('textarea').fill('-----BEGIN OPENSSH PRIVATE KEY-----\ne2e-fixture\n-----END OPENSSH PRIVATE KEY-----\n');
 
