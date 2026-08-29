@@ -229,7 +229,6 @@ describe('Blueprint compose apply (real filesystem)', () => {
             JSON.stringify({ blueprintId: 10, revision: 1, lastApplied: 1 }, null, 2),
         );
 
-        const fs = FileSystemService.getInstance(nodeId);
         vi.spyOn(FileSystemService.prototype, 'readStackFile').mockResolvedValue({
             content: undefined,
             binary: false,
