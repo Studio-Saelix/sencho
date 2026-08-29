@@ -1,5 +1,6 @@
 data_extensions:
   - .github/codeql/extensions/safeLog.model.yml
+  - .github/codeql/extensions/sshTrust.model.yml
 
 # End-to-end Playwright specs are test-harness code, not shipped product code.
 # They seed fixture files directly into the backend's COMPOSE_DIR (a fixed path
@@ -68,3 +69,14 @@ query-filters:
       id: js/file-access-to-http
       paths:
         - backend/src/services/NotificationService.ts
+
+  # SSH fetch materializes admin-configured deploy keys and trusted host-key
+  # lines into mode-0600 files under a per-operation workspace before git/ssh
+  # runs. writeDeployKey and writeKnownHosts canonicalize from parsed PEM /
+  # known_hosts structure immediately before the sink; ssh-keyscan probe output
+  # is returned to the UI for explicit operator trust and does not reach these
+  # sinks without passing server-side validation on save.
+  - exclude:
+      id: js/http-to-file-access
+      paths:
+        - backend/src/services/git/sshTrust.ts

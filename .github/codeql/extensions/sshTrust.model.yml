@@ -1,0 +1,7 @@
+extensions:
+  - addsTo:
+      pack: codeql/javascript-all
+      extensible: barrierModel
+    data:
+      - ["backend/src/services/git/sshTrust", "Function[canonicalizeDeployKeyPem].ReturnValue", "file-content-store"]
+      - ["backend/src/services/git/sshTrust", "Function[canonicalizeKnownHostsEntry].ReturnValue", "file-content-store"]

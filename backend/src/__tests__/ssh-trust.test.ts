@@ -2,6 +2,8 @@ import { createHash } from 'crypto';
 import { describe, expect, it } from 'vitest';
 import {
   buildSshCommand,
+  canonicalizeDeployKeyPem,
+  canonicalizeKnownHostsEntry,
   fingerprintFromKnownHostsLine,
   parseRepoTransportUrl,
   parseSshScpUrl,
@@ -42,6 +44,29 @@ describe('ssh host key fingerprint', () => {
     const fp = fingerprintFromKnownHostsLine(line);
     const expected = `SHA256:${createHash('sha256').update(Buffer.from(keyBase64, 'base64')).digest('base64').replace(/=+$/, '')}`;
     expect(fp).toBe(expected);
+  });
+});
+
+describe('ssh credential canonicalization', () => {
+  it('rebuilds known_hosts lines from parsed key material only', () => {
+    const keyBase64 = 'AAAAC3NzaC1lZDI1NTE5AAAAIGb3JzL3Rlc3Q=';
+    const raw = `git.example.com ssh-ed25519 ${keyBase64} trailing-garbage`;
+    const canonical = canonicalizeKnownHostsEntry(raw);
+    expect(canonical).toBe(`git.example.com ssh-ed25519 ${keyBase64}\n`);
+    expect(canonical).not.toContain('trailing-garbage');
+  });
+
+  it('rejects invalid known_hosts lines', () => {
+    expect(() => canonicalizeKnownHostsEntry('not-a-host-key')).toThrow(/invalid|empty/i);
+  });
+
+  it('rebuilds deploy key PEM from validated envelope and body', () => {
+    const pem = '-----BEGIN OPENSSH PRIVATE KEY-----\nYWJj\n-----END OPENSSH PRIVATE KEY-----\n';
+    expect(canonicalizeDeployKeyPem(pem)).toBe(pem);
+  });
+
+  it('rejects malformed deploy keys', () => {
+    expect(() => canonicalizeDeployKeyPem('not a pem')).toThrow(/invalid/i);
   });
 });
 

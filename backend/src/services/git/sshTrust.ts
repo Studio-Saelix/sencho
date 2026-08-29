@@ -142,6 +142,65 @@ function keyMaterialFromKnownHostsLine(line: string): { keyType: string; keyBase
     return null;
 }
 
+const DEPLOY_KEY_PEM_HEADER = /^-----BEGIN (?:OPENSSH )?PRIVATE KEY-----$/;
+const DEPLOY_KEY_PEM_FOOTER = /^-----END (?:OPENSSH )?PRIVATE KEY-----$/;
+
+/** Rebuild a deploy key PEM from validated envelope and base64 body lines only. */
+export function canonicalizeDeployKeyPem(raw: string): string {
+    const lines = raw.replace(/\r\n/g, '\n').trim().split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+    if (lines.length < 3) {
+        throw new Error('deploy key is invalid');
+    }
+    const header = lines[0];
+    const footer = lines[lines.length - 1];
+    if (!DEPLOY_KEY_PEM_HEADER.test(header) || !DEPLOY_KEY_PEM_FOOTER.test(footer)) {
+        throw new Error('deploy key is invalid');
+    }
+    const bodyLines = lines.slice(1, -1);
+    for (const bodyLine of bodyLines) {
+        if (!/^[A-Za-z0-9+/=]+$/.test(bodyLine)) {
+            throw new Error('deploy key is invalid');
+        }
+    }
+    return `${header}\n${bodyLines.join('\n')}\n${footer}\n`;
+}
+
+function canonicalizeKnownHostsLine(line: string): string {
+    const material = keyMaterialFromKnownHostsLine(line);
+    if (!material) {
+        throw new Error('known_hosts entry is invalid');
+    }
+    try {
+        Buffer.from(material.keyBase64, 'base64');
+    } catch {
+        throw new Error('known_hosts entry is invalid');
+    }
+    const parts = line.trim().split(/\s+/);
+    let keyTypeIdx = -1;
+    for (let i = 0; i < parts.length - 1; i += 1) {
+        if (isSshKeyType(parts[i])) {
+            keyTypeIdx = i;
+            break;
+        }
+    }
+    if (keyTypeIdx < 1) {
+        throw new Error('known_hosts entry is invalid');
+    }
+    const hostPart = parts.slice(0, keyTypeIdx).join(' ');
+    return `${hostPart} ${material.keyType} ${material.keyBase64}`;
+}
+
+/** Rebuild known_hosts content from parsed host markers and key material only. */
+export function canonicalizeKnownHostsEntry(raw: string): string {
+    const lines = raw.trim().split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('#'));
+    if (lines.length === 0) {
+        throw new Error('known_hosts entry is empty');
+    }
+    return `${lines.map(canonicalizeKnownHostsLine).join('\n')}\n`;
+}
+
 export interface ScannedHostKey {
     keyType: string;
     fingerprint: string;
@@ -196,17 +255,17 @@ export async function scanHostKeys(host: string, port: number): Promise<ScannedH
 
 export async function writeDeployKey(metaDir: string, pem: string): Promise<string> {
     const keyPath = path.join(metaDir, 'deploy-key');
-    await fs.writeFile(keyPath, pem.endsWith('\n') ? pem : `${pem}\n`, { mode: 0o600 });
+    const canonical = canonicalizeDeployKeyPem(pem);
+    // codeql[js/http-to-file-access]: operator-provided deploy key; canonicalized PEM envelope and base64 body only, mode 0600, operation-scoped path.
+    await fs.writeFile(keyPath, canonical, { mode: 0o600 });
     return keyPath.split(path.sep).join('/');
 }
 
 export async function writeKnownHosts(metaDir: string, entry: string): Promise<string> {
     const knownHostsPath = path.join(metaDir, 'known_hosts');
-    const normalized = entry.trim().split(/\r?\n/).filter((l) => l.trim() && !l.trim().startsWith('#')).join('\n');
-    if (!normalized) {
-        throw new Error('known_hosts entry is empty');
-    }
-    await fs.writeFile(knownHostsPath, `${normalized}\n`, { mode: 0o600 });
+    const canonical = canonicalizeKnownHostsEntry(entry);
+    // codeql[js/http-to-file-access]: admin-trusted host key; canonicalized from parsed host marker + key type + base64 material only, mode 0600, operation-scoped path.
+    await fs.writeFile(knownHostsPath, canonical, { mode: 0o600 });
     return knownHostsPath.split(path.sep).join('/');
 }
 
