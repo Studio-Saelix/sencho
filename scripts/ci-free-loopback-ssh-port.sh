@@ -37,20 +37,27 @@ kill_port_listeners() {
   fi
 }
 
-assert_port_free() {
-  python3 - <<PY
-import socket
-import sys
+allow_unprivileged_sshd_bind() {
+  if [[ -x /usr/sbin/sshd ]]; then
+    sudo setcap 'cap_net_bind_service=+ep' /usr/sbin/sshd 2>/dev/null || true
+  fi
+}
 
-port = int("${PORT}")
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-try:
-    sock.bind(("127.0.0.1", port))
-finally:
-    sock.close()
-print(f"loopback port {port} is free")
-PY
+assert_port_free() {
+  if command -v ss >/dev/null 2>&1; then
+    if ss -ltn "sport = :${PORT}" 2>/dev/null | awk 'NR > 1 && /LISTEN/ { found=1 } END { exit !found }'; then
+      echo "loopback port ${PORT} still has listeners:" >&2
+      ss -ltnp "sport = :${PORT}" >&2 || true
+      exit 1
+    fi
+  elif command -v lsof >/dev/null 2>&1; then
+    if sudo lsof -tiTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+      echo "loopback port ${PORT} still has listeners:" >&2
+      sudo lsof -iTCP:"${PORT}" -sTCP:LISTEN >&2 || true
+      exit 1
+    fi
+  fi
+  echo "loopback port ${PORT} has no listeners"
 }
 
 stop_systemd_ssh
@@ -58,4 +65,5 @@ stop_sysv_ssh
 kill_port_listeners
 sleep 0.5
 kill_port_listeners
+allow_unprivileged_sshd_bind
 assert_port_free

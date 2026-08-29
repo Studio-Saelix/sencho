@@ -91,14 +91,14 @@ interface SshGitFixture {
 
 const DEFAULT_SSH_PORT = 22;
 
-async function canBindPort(port: number): Promise<boolean> {
-    return new Promise((resolve) => {
-        const server = net.createServer();
-        server.once('error', () => resolve(false));
-        server.listen(port, '127.0.0.1', () => {
-            server.close(() => resolve(true));
-        });
-    });
+async function loopbackPortHasListeners(port: number): Promise<boolean> {
+    const ss = spawnSync('ss', ['-ltn', `sport = :${port}`], { encoding: 'utf8' });
+    if (ss.status === 0) {
+        const lines = ss.stdout.trim().split(/\r?\n/).slice(1);
+        if (lines.some((line) => line.includes('LISTEN'))) return true;
+    }
+    const lsof = spawnSync('lsof', ['-tiTCP:' + String(port), '-sTCP:LISTEN'], { encoding: 'utf8' });
+    return lsof.status === 0 && lsof.stdout.trim().length > 0;
 }
 
 function keyMaterialFromPublicLine(publicLine: string): string | null {
@@ -301,7 +301,7 @@ describe.skipIf(!gitAvailable() || !sshdAvailable())('SSH deploy-key transport o
     const workspaces: string[] = [];
 
     beforeAll(async () => {
-        if (!(await canBindPort(DEFAULT_SSH_PORT))) {
+        if (await loopbackPortHasListeners(DEFAULT_SSH_PORT)) {
             throw new Error(`Port ${DEFAULT_SSH_PORT} is already in use; the default-port SSH integration requires loopback port ${DEFAULT_SSH_PORT} to be free.`);
         }
         const repo = buildBareRepo();
