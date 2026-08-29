@@ -11,6 +11,11 @@ import {
 } from '../helpers/registryDeliveryEvidence';
 import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 
+/** Express strips the /api mount prefix from req.path; classifiers expect /api/... */
+export function registryDeliveryApiPath(req: Pick<Request, 'path'>): string {
+  return `/api${req.path}`;
+}
+
 function scrubDeliveryField(body: unknown): void {
   if (!body || typeof body !== 'object') return;
   if (REGISTRY_DELIVERY_BODY_FIELD in (body as Record<string, unknown>)) {
@@ -23,7 +28,8 @@ function scrubDeliveryField(body: unknown): void {
  * Installed after authGate and before remoteNodeProxy.
  */
 export function registryDeliveryMiddleware(req: Request, res: Response, next: NextFunction): void {
-  const classification = classifyRegistryDeliveryOp(req.method, req.path);
+  const apiPath = registryDeliveryApiPath(req);
+  const classification = classifyRegistryDeliveryOp(req.method, apiPath);
   if (!classification.eligible) {
     next();
     return;
@@ -71,7 +77,7 @@ export function registryDeliveryMiddleware(req: Request, res: Response, next: Ne
     const recordOperationEvidence = () => {
       if (operationEvidenceRecorded) return;
       operationEvidenceRecorded = true;
-      const stack = resolveDeliveryStack(req.method, req.path, rawBody) ?? classification.stack;
+      const stack = resolveDeliveryStack(req.method, apiPath, rawBody) ?? classification.stack;
       if (!stack || !classification.stage) return;
       recordRegistryDeliveryEvent({
         deliverySourceId: delivery.deliverySourceId,
@@ -89,7 +95,7 @@ export function registryDeliveryMiddleware(req: Request, res: Response, next: Ne
     });
     res.once('close', detachAbortListeners);
 
-    const stack = resolveDeliveryStack(req.method, req.path, rawBody) ?? classification.stack;
+    const stack = resolveDeliveryStack(req.method, apiPath, rawBody) ?? classification.stack;
     if (!stack || !classification.stage) {
       detachAbortListeners();
       res.status(400).json({ error: 'Invalid registry delivery route classification' });
