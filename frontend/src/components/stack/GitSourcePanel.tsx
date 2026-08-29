@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { apiFetch } from '@/lib/api';
+import { isSupportedGitRepoUrl, UNSUPPORTED_GIT_REPO_URL_MESSAGE } from '@/lib/gitRepoUrl';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useNodes } from '@/context/NodeContext';
 import { toast } from '@/components/ui/toast-store';
@@ -213,9 +214,8 @@ export function GitSourcePanel({
       return;
     }
     const trimmedUrl = repoUrl.trim();
-    const supportedUrl = /^https:\/\//i.test(trimmedUrl) || /^git@/i.test(trimmedUrl) || /^ssh:\/\//i.test(trimmedUrl);
-    if (!supportedUrl) {
-      toast.error('Use an https:// URL or an SSH URL (git@host:org/repo.git or ssh://).');
+    if (!isSupportedGitRepoUrl(trimmedUrl)) {
+      toast.error(UNSUPPORTED_GIT_REPO_URL_MESSAGE);
       return;
     }
     setSaving(true);
