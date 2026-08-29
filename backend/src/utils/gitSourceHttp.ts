@@ -21,9 +21,13 @@ export function gitSourceStatus(code: GitSourceErrorCode): number {
     case 'PLAN_FINGERPRINT_REQUIRED':
       return 400;
     case 'REPO_NOT_FOUND':
-    case 'BRANCH_NOT_FOUND':
+    case 'REF_NOT_FOUND':
+    case 'REF_DELETED':
     case 'FILE_NOT_FOUND':
       return 404;
+    case 'UNSUPPORTED_REF':
+    case 'SSH_HOST_KEY_FAILED':
+      return 400;
     case 'STALE_PLAN':
     case 'PLAN_BLOCKED':
     case 'LEGACY_PENDING':

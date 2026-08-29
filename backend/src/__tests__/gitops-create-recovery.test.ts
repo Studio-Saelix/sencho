@@ -13,8 +13,9 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
-import { assertCreatesSettled, resolveInterruptedCreates } from '../services/gitops/createRecovery';
+import { CryptoService } from '../services/CryptoService';
 import { candidateRelPathForSha, CREATE_STAGING_MARKER_FILENAME } from '../services/gitops/createStagingMarker';
+import { assertCreatesSettled, resolveInterruptedCreates } from '../services/gitops/createRecovery';
 import { stackManagedRoot } from '../services/gitops/directApplication';
 import type {
   GitOpsApplicationRow,
@@ -123,6 +124,33 @@ describe('gitops interrupted create recovery', () => {
     expect(store.getCreateCheckpoint('app-finish')).toBeUndefined();
   });
 
+  it('restores deploy-key credentials when finishing a manifest_committed create', async () => {
+    const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
+    const deployKey = '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-key\n-----END OPENSSH PRIVATE KEY-----\n';
+    const knownHosts = '127.0.0.1 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGitRecoveryDeployKeyTestOnly';
+    const fingerprint = 'SHA256:gitops-recovery-deploy-key-test';
+    const encryptedDeployKey = CryptoService.getInstance().encrypt(deployKey);
+    seedCreate('app-ssh-finish', 'ssh-finish-web', 'manifest_committed', {
+      authType: 'deploy_key',
+      encryptedDeployKey,
+      sshKnownHostsEntry: knownHosts,
+      sshHostKeyFingerprint: fingerprint,
+    });
+    fs.mkdirSync(path.join(process.env.COMPOSE_DIR!, 'ssh-finish-web'), { recursive: true });
+
+    const settled = await resolveInterruptedCreates();
+
+    expect(settled[0].outcome).toBe('completed');
+    const source = db.getGitSource('ssh-finish-web');
+    expect(source?.auth_type).toBe('deploy_key');
+    expect(source?.encrypted_deploy_key).toBe(encryptedDeployKey);
+    expect(CryptoService.getInstance().decrypt(source!.encrypted_deploy_key!)).toBe(deployKey);
+    expect(source?.ssh_known_hosts_entry).toBe(knownHosts);
+    expect(source?.ssh_host_key_fingerprint).toBe(fingerprint);
+    expect(store.getCreateCheckpoint('app-ssh-finish')).toBeUndefined();
+  });
+
   it('clears the checkpoint of a create that already reached its boundary', async () => {
     const store = GitOpsStore.getInstance();
     seedCreate('app-done', 'done-web', 'pointers_committed');
@@ -153,6 +181,9 @@ describe('gitops interrupted create recovery', () => {
       env_path: null,
       auth_type: 'none',
       encrypted_token: null,
+      encrypted_deploy_key: null,
+      ssh_known_hosts_entry: null,
+      ssh_host_key_fingerprint: null,
       auto_apply_on_webhook: false,
       auto_deploy_on_apply: false,
       last_applied_commit_sha: SHA,
@@ -315,7 +346,13 @@ function seedCreate(
   applicationId: string,
   stackName: string,
   phase: GitOpsCreateCheckpointRow['phase'],
-  options: { createdManagedRoot?: number } = {},
+  options: {
+    createdManagedRoot?: number;
+    authType?: string;
+    encryptedDeployKey?: string | null;
+    sshKnownHostsEntry?: string | null;
+    sshHostKeyFingerprint?: string | null;
+  } = {},
 ): void {
   const store = GitOpsStore.getInstance();
   const generationId = `gen-${applicationId}`;
@@ -337,8 +374,11 @@ function seedCreate(
       context_dir: null,
       sync_env: 0,
       env_path: null,
-      auth_type: 'none',
+      auth_type: options.authType ?? 'none',
       encrypted_token: null,
+      encrypted_deploy_key: options.encryptedDeployKey ?? null,
+      ssh_known_hosts_entry: options.sshKnownHostsEntry ?? null,
+      ssh_host_key_fingerprint: options.sshHostKeyFingerprint ?? null,
       auto_apply_on_webhook: 0,
       auto_deploy_on_apply: 0,
       commit_sha: SHA,
@@ -376,6 +416,7 @@ function creatingApp(id: string, stackName: string): GitOpsApplicationRow {
     materialization_fingerprint: 'a'.repeat(64),
     desired_commit_sha: null,
     fetched_commit_sha: null,
+    fetched_resolved_ref_kind: null,
     candidate_generation_id: null,
     accepted_generation_id: null,
     candidate_plan_blocked: 0,
@@ -423,6 +464,7 @@ function gen(id: string, applicationId: string): GitOpsGenerationRow {
     application_id: applicationId,
     commit_sha: SHA,
     repo_url: 'https://github.com/org/repo.git',
+    resolved_ref_kind: 'branch',
     configured_ref: 'main',
     repo_identity_json: '{"host":"github.com","pathname":"/org/repo.git"}',
     manifest_version: 1,

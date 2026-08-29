@@ -369,6 +369,41 @@ describe('remote proxy node-wide image refresh elevation gate', () => {
   });
 });
 
+describe('remote proxy ssh-host-key scoped-evidence gate', () => {
+  it('forwards scoped stack:edit evidence for scoped deployer on POST /git-sources/ssh-host-key', async () => {
+    grantScopedStackEdit(deployerId, grantedNodeId, 'web');
+
+    const res = await request(app)
+      .post('/api/git-sources/ssh-host-key')
+      .set('Authorization', `Bearer ${deployerBearer}`)
+      .set('x-node-id', String(grantedNodeId))
+      .send({ repo_url: 'git@github.com:example/repo.git', stack_name: 'web' });
+
+    expect(res.status).toBe(200);
+    const hop = grantedHops.find((h) => h.url?.includes('/api/git-sources/ssh-host-key'));
+    expect(hop).toBeDefined();
+    expect(hop!.stackNameHeader).toBe('web');
+    expect(hop!.stackActionsHeader).toContain('stack:edit');
+
+    clearAssignments(deployerId);
+  });
+
+  it('denies scoped deployer probing host keys for an unrelated stack', async () => {
+    grantScopedStackEdit(deployerId, grantedNodeId, 'web');
+
+    const res = await request(app)
+      .post('/api/git-sources/ssh-host-key')
+      .set('Authorization', `Bearer ${deployerBearer}`)
+      .set('x-node-id', String(grantedNodeId))
+      .send({ repo_url: 'git@github.com:example/repo.git', stack_name: 'other-stack' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
+
+    clearAssignments(deployerId);
+  });
+});
+
 describe('classifyStackApiPath per-stack image refresh', () => {
   it('classifies POST /image-updates/refresh/web as named-stack with stack:deploy', () => {
     const result = classifyStackApiPath('POST', '/image-updates/refresh/web');

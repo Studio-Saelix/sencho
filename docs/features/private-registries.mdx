@@ -175,6 +175,16 @@ Registry credentials are stored on the Sencho instance where you enter them, and
 
 Because the Registries section is hidden when you view another node through the node switcher, manage a remote node's registries by signing into that node's own Sencho instance directly. Configure each private registry on every instance that deploys images from it, so a stack keeps pulling no matter which node it runs on.
 
+## Remote fleet delivery
+
+When you manage remote nodes from a central Sencho instance, you can store private registry credentials once on the hub and have Sencho deliver them to a compatible remote target for a single Compose operation (deploy, update, rollback, template deploy, or Git apply with auto-deploy).
+
+Delivery runs only when the remote target advertises the `remote-registry-credentials` capability and the hop is confidential (HTTPS proxy URL, or a Pilot tunnel terminated with TLS or a trusted reverse proxy). Otherwise the operation forwards unchanged: public images and registry rows already configured on the target keep working without hub credentials traveling to that node.
+
+Credentials exist only in the forwarded delivery envelope and a temporary `DOCKER_CONFIG` for the duration of the Compose child process. They are not written to the target's registry table, responses, logs, or audit trail. Target-local registry rows always win when both sides have a credential for the same host.
+
+If discovery or delivery fails before Compose starts, Sencho returns a clear error and does not spawn the operation. Retry the deploy after fixing hub registry configuration or upgrading the remote Sencho version.
+
 ## Troubleshooting
 
 <AccordionGroup>

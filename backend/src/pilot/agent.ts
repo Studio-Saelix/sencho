@@ -131,7 +131,7 @@ export class PilotAgent {
     private ws: WebSocket | null = null;
     private pingTimer?: NodeJS.Timeout;
     private reconnectTimer?: NodeJS.Timeout;
-    private readonly httpStreams = new Map<number, { req: http.ClientRequest }>();
+    private readonly httpStreams = new Map<number, { req: http.ClientRequest; cancelled?: boolean }>();
     private readonly wsStreams = new Map<number, WebSocket>();
     /** Per-connection mesh frame handler. Created on `connect()`, cleaned up on disconnect. */
     private switchboard: TcpStreamSwitchboard | null = null;
@@ -486,6 +486,7 @@ export class PilotAgent {
             }
             case 'http_req': this.onHttpReq(frame); break;
             case 'http_req_end': this.onHttpReqEnd(frame.s); break;
+            case 'http_cancel': this.onHttpCancel(frame.s); break;
             case 'ws_open': this.onWsOpen(frame); break;
             case 'ws_msg_text': this.onWsMsgText(frame.s, frame.data); break;
             case 'ws_close': this.onWsClose(frame.s, frame.code, frame.reason); break;
@@ -500,7 +501,7 @@ export class PilotAgent {
         switch (frame.type) {
             case BinaryFrameType.HttpReqBody: {
                 const entry = this.httpStreams.get(frame.streamId);
-                if (!entry) return;
+                if (!entry || entry.cancelled) return;
                 try { entry.req.write(frame.payload); } catch { /* ignore */ }
                 this.refreshIdleTimer(frame.streamId);
                 break;
@@ -591,9 +592,18 @@ export class PilotAgent {
 
     private onHttpReqEnd(streamId: number): void {
         const entry = this.httpStreams.get(streamId);
-        if (!entry) return;
+        if (!entry || entry.cancelled) return;
         try { entry.req.end(); } catch { /* ignore */ }
         this.refreshIdleTimer(streamId);
+    }
+
+    private onHttpCancel(streamId: number): void {
+        const entry = this.httpStreams.get(streamId);
+        if (!entry || entry.cancelled) return;
+        entry.cancelled = true;
+        try { entry.req.destroy(); } catch { /* ignore */ }
+        this.httpStreams.delete(streamId);
+        this.clearIdleTimer(streamId);
     }
 
     // --- WebSocket dispatch (tunnel -> loopback) ---

@@ -41,6 +41,9 @@ jobs:
         working-directory: ./backend
         run: npm ci
 
+      - name: Free loopback SSH port 22 for default-port integration
+        run: bash scripts/ci-free-loopback-ssh-port.sh 22
+
       - name: Build (TypeScript)
         working-directory: ./backend
         run: npm run build
@@ -204,11 +207,10 @@ jobs:
         with:
           skip-backend-build: 'true'
         env:
-          # The git-sources E2E specs exercise the complete-project materializer
-          # against a local TLS fixture repo (e2e/fixtures); the backend must
-          # trust its dev-only CA to clone over https://. Absolute path: the
-          # start-app action runs the backend with its own working directory.
           NODE_EXTRA_CA_CERTS: ${{ github.workspace }}/e2e/fixtures/git-ca.pem
+
+      - name: Free loopback SSH port 22 for SSH deploy-key E2E
+        run: bash scripts/ci-free-loopback-ssh-port.sh 22
 
       - name: Run E2E tests
         # `--project=chromium` is explicit because playwright.config.ts also

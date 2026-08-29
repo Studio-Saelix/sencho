@@ -10,7 +10,13 @@ import {
     writeCredentialHelper,
 } from './credentialHelper';
 import { isTransportFailure, type TransportFailure } from './errors';
-import type { FetchRequest, FetchResult, GitTransport, ResolveRequest } from './types';
+import type { FetchRequest, FetchResult, GitTransport, ResolveRequest, ResolveResult } from './types';
+import {
+    buildSshCommand,
+    parseRepoTransportUrl,
+    type ParsedRepoUrl,
+} from './sshTrust';
+import { writeDeployKey, writeKnownHosts } from './sshCredentialFiles';
 
 /**
  * Native git transport: every Git operation is an `execFile`-style spawn of
@@ -261,7 +267,12 @@ async function prepareWorkspace(root: string): Promise<WorkspaceLayout> {
     return { metaDir, hooksDir, homeDir };
 }
 
-function buildEnv(homeDir: string, token?: string | null, helperPath?: string | null): NodeJS.ProcessEnv {
+function buildEnv(
+    homeDir: string,
+    token?: string | null,
+    helperPath?: string | null,
+    sshCommand?: string | null,
+): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = {
         ...process.env,
         GIT_CONFIG_NOSYSTEM: '1',
@@ -289,6 +300,9 @@ function buildEnv(homeDir: string, token?: string | null, helperPath?: string | 
         // value so no workspace path character can change how git's shell
         // parses it. See credentialHelper.ts.
         env[GIT_HELPER_PATH_ENV_VAR] = helperPath;
+    }
+    if (sshCommand) {
+        env.GIT_SSH_COMMAND = sshCommand;
     }
     return env;
 }
@@ -395,12 +409,16 @@ async function resolveCaArgs(layout: WorkspaceLayout): Promise<string[]> {
  * Config shared by every invocation. With no helper, credential.helper is
  * explicitly cleared so nothing from the environment can answer prompts.
  */
-async function commonArgs(layout: WorkspaceLayout, helperPath: string | null): Promise<string[]> {
+async function commonArgs(layout: WorkspaceLayout, helperPath: string | null, ssh: boolean): Promise<string[]> {
     const args = [
         '-c', 'protocol.allow=never',
-        '-c', 'protocol.https.allow=always',
-        '-c', `core.hooksPath=${layout.hooksDir.split(path.sep).join('/')}`,
     ];
+    if (ssh) {
+        args.push('-c', 'protocol.ssh.allow=always');
+    } else {
+        args.push('-c', 'protocol.https.allow=always');
+    }
+    args.push('-c', `core.hooksPath=${layout.hooksDir.split(path.sep).join('/')}`);
     if (process.platform === 'win32') {
         // With every config channel neutralized above, git falls back to its
         // build-default TLS backend, which on Git for Windows can be
@@ -438,13 +456,18 @@ async function commonArgs(layout: WorkspaceLayout, helperPath: string | null): P
 async function prepareInvocation(
     workspaceRoot: string,
     token?: string | null,
+    sshAuth?: ResolveRequest['sshAuth'],
 ): Promise<{ layout: WorkspaceLayout; env: NodeJS.ProcessEnv; baseArgs: string[] }> {
     const layout = await prepareWorkspace(workspaceRoot);
+    let sshCommand: string | null = null;
+    if (sshAuth) {
+        const keyPath = await writeDeployKey(layout.metaDir, sshAuth.privateKey);
+        const knownPath = await writeKnownHosts(layout.metaDir, sshAuth.knownHostsEntry);
+        sshCommand = buildSshCommand(keyPath, knownPath);
+    }
     const helperPath = token ? await writeCredentialHelper(layout.metaDir) : null;
-    const env = buildEnv(layout.homeDir, token, helperPath);
-    // The same helperPath drives the env export and the config arg, so the two
-    // cannot describe different worlds.
-    const baseArgs = await commonArgs(layout, helperPath);
+    const env = buildEnv(layout.homeDir, token, helperPath, sshCommand);
+    const baseArgs = await commonArgs(layout, helperPath, Boolean(sshAuth));
     return { layout, env, baseArgs };
 }
 
@@ -454,17 +477,19 @@ function invalidUrl(host: string, hasToken: boolean): TransportFailure {
     return { transportFailure: true as const, reason: 'invalid-url', host, hasToken };
 }
 
-function assertValidRepoUrl(repoUrl: string, hasToken: boolean): URL {
-    let url: URL;
-    try {
-        url = new URL(repoUrl);
-    } catch {
+function assertValidRepoUrl(repoUrl: string, hasToken: boolean): ParsedRepoUrl {
+    const parsed = parseRepoTransportUrl(repoUrl);
+    if (!parsed) {
         throw invalidUrl('unknown', hasToken);
     }
-    if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) {
-        throw invalidUrl(url.host || 'unknown', hasToken);
+    return parsed;
+}
+
+function repoHostLabel(repo: ParsedRepoUrl): string {
+    if (repo.kind === 'ssh' && repo.port && repo.port !== 22) {
+        return `${repo.host}:${repo.port}`;
     }
-    return url;
+    return repo.host;
 }
 
 /**
@@ -590,69 +615,337 @@ async function ensureBinaryReady(hasToken: boolean): Promise<void> {
     }
 }
 
-function parseLsRemoteLine(line: string, fullRef: string): string | null {
-    const tabIndex = line.indexOf('\t');
-    if (tabIndex === -1) return null;
-    if (line.slice(tabIndex + 1).trim() !== fullRef) return null;
-    const sha = line.slice(0, tabIndex).trim();
-    return SHA_PATTERN.test(sha) ? sha.toLowerCase() : null;
+interface ResolvedRemoteRefs {
+    branchSha: string | null;
+    tagSha: string | null;
 }
 
-async function lsRemoteHead(
-    url: URL,
+/**
+ * Ask the remote where a bare ref name lives. One `ls-remote` with explicit
+ * refspecs for both namespaces keeps the response tiny (a name matches at
+ * most a couple of lines even on huge repos), so the stdout cap can never
+ * truncate the answer we need. For an annotated tag the peeled `^{}` entry
+ * carries the commit, so it wins over the raw tag-object line; a lightweight
+ * tag's raw line already points at the commit.
+ */
+async function lsRemoteRefs(
+    repo: ParsedRepoUrl,
     ref: string,
     env: NodeJS.ProcessEnv,
     baseArgs: string[],
     timeoutMs: number,
     hasToken: boolean,
-): Promise<string> {
+): Promise<ResolvedRemoteRefs> {
+    const host = repoHostLabel(repo);
     let res: RunResult;
     try {
         res = await runGit(
-            [...baseArgs, 'ls-remote', '--heads', url.href, `refs/heads/${ref}`],
+            [...baseArgs, 'ls-remote', repo.href, `refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`],
             { env, timeoutMs: Math.min(timeoutMs, LS_REMOTE_MAX_MS) },
         );
     } catch (e) {
-        // A resolution-phase timeout must classify like any other network
-        // timeout, not leak the internal flagged error to callers.
         if (isTimeoutError(e)) {
-            throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+            throw { transportFailure: true as const, reason: 'timeout', host, hasToken } satisfies TransportFailure;
         }
         throw e;
     }
     if (res.exitCode !== 0) {
-        throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: baseArgs, host: url.host, hasToken } satisfies TransportFailure;
+        throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: baseArgs, host, hasToken } satisfies TransportFailure;
     }
-    const fullRef = `refs/heads/${ref}`;
+    const found: ResolvedRemoteRefs = { branchSha: null, tagSha: null };
     for (const line of res.stdout.split(/\r?\n/)) {
-        const sha = parseLsRemoteLine(line, fullRef);
-        if (sha) return sha;
+        const tabIndex = line.indexOf('\t');
+        if (tabIndex === -1) continue;
+        const sha = line.slice(0, tabIndex).trim();
+        if (!SHA_PATTERN.test(sha)) continue;
+        const full = line.slice(tabIndex + 1).trim();
+        if (full === `refs/heads/${ref}`) {
+            found.branchSha = sha.toLowerCase();
+        } else if (full === `refs/tags/${ref}^{}`) {
+            found.tagSha = sha.toLowerCase();
+        } else if (full === `refs/tags/${ref}` && found.tagSha === null) {
+            found.tagSha = sha.toLowerCase();
+        }
     }
-    throw { transportFailure: true as const, reason: 'ref-not-found', host: url.host, hasToken } satisfies TransportFailure;
+    return found;
+}
+
+/** Remote fetch rounds allowed after the initial shallow tip fetch. */
+const MAX_FF_FETCH_ROUNDS = 14;
+/** Per-round deepen step cap for exponential backoff. */
+const MAX_FF_DEEPEN_STEP = 2048;
+
+/**
+ * Whether `descendantSha` is a fast-forward from `ancestorSha` on the remote.
+ * Distinguishes a normal branch advance from a force-push after ls-remote has
+ * already resolved the ref to a new tip.
+ *
+ * Fetches the descendant tip once, then deepens that shallow boundary with
+ * exponentially increasing steps until the prior commit is reachable, the
+ * downloaded history is complete, or a safety budget is exhausted. Operational
+ * failures throw a classified TransportFailure; only a proven non-fast-forward
+ * returns false.
+ */
+export async function verifyFastForward(req: {
+    repoUrl: string;
+    ancestorSha: string;
+    descendantSha: string;
+    token?: string | null;
+    sshAuth?: ResolveRequest['sshAuth'];
+    timeoutMs?: number;
+    workspaceRoot: string;
+    maxBytes: number;
+}): Promise<boolean> {
+    const ancestor = req.ancestorSha.toLowerCase();
+    const descendant = req.descendantSha.toLowerCase();
+    if (ancestor === descendant) return true;
+
+    const hasToken = Boolean(req.token) || Boolean(req.sshAuth);
+    await ensureBinaryReady(hasToken);
+    const repo = assertValidRepoUrl(req.repoUrl, hasToken);
+    const host = repoHostLabel(repo);
+    const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
+    const remainingMs = (): number => Math.max(1, deadline - Date.now());
+    const assertTimeBudget = (): void => {
+        if (Date.now() >= deadline) {
+            throw { transportFailure: true as const, reason: 'timeout', host, hasToken } satisfies TransportFailure;
+        }
+    };
+    const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token, req.sshAuth);
+    const repoDir = path.join(req.workspaceRoot, 'ff-check');
+    await fs.mkdir(repoDir, { recursive: true });
+
+    let sizeExceeded = false;
+    let activeChild: ChildProcess | undefined;
+    let breachKill: Promise<void> | undefined;
+    const watchdog = startSizeWatchdog(req.workspaceRoot, req.maxBytes, () => {
+        sizeExceeded = true;
+        breachKill = killTree(activeChild);
+    });
+
+    const throwIfSizeExceeded = (): void => {
+        if (sizeExceeded) {
+            throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
+        }
+    };
+
+    try {
+        const materialize = async (args: string[]): Promise<RunResult> => {
+            assertTimeBudget();
+            let res: RunResult;
+            try {
+                res = await runGit(args, {
+                    cwd: repoDir,
+                    env,
+                    timeoutMs: remainingMs(),
+                    onSpawn: (child) => { activeChild = child; },
+                });
+            } catch (e) {
+                throwIfSizeExceeded();
+                if (isTimeoutError(e)) {
+                    throw { transportFailure: true as const, reason: 'timeout', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
+                }
+                throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), argv: args, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
+            }
+            throwIfSizeExceeded();
+            if (res.exitCode !== 0) {
+                throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: args, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
+            }
+            return res;
+        };
+
+        const probeFailure = (res: RunResult, argv: string[]): never => {
+            throw {
+                transportFailure: true as const,
+                reason: 'exit',
+                stderr: res.stderr,
+                exitCode: res.exitCode,
+                argv,
+                host: repoHostLabel(repo),
+                hasToken,
+            } satisfies TransportFailure;
+        };
+
+        const runProbe = async (args: string[]): Promise<RunResult> => {
+            assertTimeBudget();
+            try {
+                const res = await runGit(args, {
+                    cwd: repoDir,
+                    env,
+                    timeoutMs: Math.min(remainingMs(), LS_REMOTE_MAX_MS),
+                });
+                throwIfSizeExceeded();
+                return res;
+            } catch (e) {
+                throwIfSizeExceeded();
+                if (isTimeoutError(e)) {
+                    throw { transportFailure: true as const, reason: 'timeout', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
+                }
+                throw {
+                    transportFailure: true as const,
+                    reason: 'exit',
+                    stderr: e instanceof Error ? e.message : String(e),
+                    argv: args,
+                    host: repoHostLabel(repo),
+                    hasToken,
+                } satisfies TransportFailure;
+            }
+        };
+
+        const isMissingObjectProbe = (res: RunResult): boolean => {
+            if (res.exitCode === 0) return false;
+            if (res.exitCode === 1) return true;
+            const err = res.stderr.toLowerCase();
+            return err.includes('not a valid object name')
+                || err.includes('bad object')
+                || err.includes('could not get');
+        };
+
+        await materialize([...baseArgs, 'init']);
+        await materialize([...baseArgs, 'fetch', '--depth=1', repo.href, descendant]);
+
+        const countReachable = async (): Promise<number> => {
+            const argv = [...baseArgs, 'rev-list', '--count', descendant];
+            const listed = await runProbe(argv);
+            if (listed.exitCode !== 0) {
+                return probeFailure(listed, argv);
+            }
+            const parsed = Number.parseInt(listed.stdout.trim(), 10);
+            if (!Number.isFinite(parsed) || parsed < 0) {
+                throw {
+                    transportFailure: true as const,
+                    reason: 'exit',
+                    stderr: `unexpected rev-list output: ${listed.stdout}`,
+                    exitCode: listed.exitCode,
+                    argv,
+                    host: repoHostLabel(repo),
+                    hasToken,
+                } satisfies TransportFailure;
+            }
+            return parsed;
+        };
+
+        const isShallowRepository = async (): Promise<boolean> => {
+            const argv = [...baseArgs, 'rev-parse', '--is-shallow-repository'];
+            const shallow = await runProbe(argv);
+            if (shallow.exitCode !== 0) {
+                return probeFailure(shallow, argv);
+            }
+            const flag = shallow.stdout.trim();
+            if (flag === 'true') return true;
+            if (flag === 'false') return false;
+            throw {
+                transportFailure: true as const,
+                reason: 'exit',
+                stderr: `unexpected shallow-repository output: ${shallow.stdout}`,
+                exitCode: shallow.exitCode,
+                argv,
+                host: repoHostLabel(repo),
+                hasToken,
+            } satisfies TransportFailure;
+        };
+
+        const isProvenAncestor = async (): Promise<boolean> => {
+            const argv = [...baseArgs, 'merge-base', '--is-ancestor', ancestor, descendant];
+            const ancestry = await runProbe(argv);
+            if (ancestry.exitCode === 0) return true;
+            if (ancestry.exitCode === 1) return false;
+            return probeFailure(ancestry, argv);
+        };
+
+        let reachableCount = await countReachable();
+        let fetchRounds = 1;
+        let deepenStep = 1;
+
+        const assertWithinSizeBudget = async (): Promise<void> => {
+            const finalSize = await treeSize(req.workspaceRoot).catch((e: unknown) => {
+                console.warn(`[GitSource:transport] final size measurement failed for ${req.workspaceRoot}, failing closed: ${e instanceof Error ? e.message : String(e)}`);
+                return -1;
+            });
+            if (sizeExceeded || finalSize < 0 || finalSize > req.maxBytes) {
+                throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
+            }
+        };
+
+        while (true) {
+            assertTimeBudget();
+
+            const ancestorArgv = [...baseArgs, 'cat-file', '-e', `${ancestor}^{commit}`];
+            const hasAncestor = await runProbe(ancestorArgv);
+            if (hasAncestor.exitCode === 0) {
+                await assertWithinSizeBudget();
+                return await isProvenAncestor();
+            }
+            if (!isMissingObjectProbe(hasAncestor)) {
+                return probeFailure(hasAncestor, ancestorArgv);
+            }
+
+            if (!(await isShallowRepository())) {
+                await assertWithinSizeBudget();
+                return false;
+            }
+
+            if (fetchRounds >= MAX_FF_FETCH_ROUNDS) {
+                throw { transportFailure: true as const, reason: 'timeout', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
+            }
+
+            const previousCount = reachableCount;
+            await materialize([...baseArgs, 'fetch', `--deepen=${deepenStep}`, repo.href, descendant]);
+            fetchRounds += 1;
+            reachableCount = await countReachable();
+
+            if (reachableCount <= previousCount) {
+                if (!(await isShallowRepository())) {
+                    await assertWithinSizeBudget();
+                    return false;
+                }
+                throw { transportFailure: true as const, reason: 'timeout', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
+            }
+
+            deepenStep = Math.min(deepenStep * 2, MAX_FF_DEEPEN_STEP);
+        }
+    } finally {
+        watchdog.stop();
+        await awaitKillConfirmed(breachKill, `size-breach kill for ${repoHostLabel(repo)}`);
+        await fs.rm(repoDir, { recursive: true, force: true }).catch((e: unknown) => {
+            console.warn(`[GitSource:transport] failed to remove fast-forward scratch repo ${repoDir}: ${e instanceof Error ? e.message : String(e)}`);
+        });
+    }
 }
 
 export const nativeGitTransport: GitTransport = {
-    async resolveRef(req: ResolveRequest): Promise<{ commitSha: string }> {
-        const hasToken = Boolean(req.token);
+    async resolveRef(req: ResolveRequest): Promise<ResolveResult> {
+        const hasToken = Boolean(req.token) || Boolean(req.sshAuth);
         await ensureBinaryReady(hasToken);
-        const url = assertValidRepoUrl(req.repoUrl, hasToken);
-        assertValidRef(req.ref, url.host, hasToken);
+        const repo = assertValidRepoUrl(req.repoUrl, hasToken);
 
-        const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token);
-        const commitSha = await lsRemoteHead(
-            url, req.ref, env, baseArgs,
+        if (SHA_PATTERN.test(req.ref)) {
+            // A full SHA is self-resolving: the immutable identity IS the
+            // value, so there is nothing to look up. Reachability is verified
+            // at fetch, where the host either serves the object or refuses it
+            // (classified as UNSUPPORTED_REF).
+            return { commitSha: req.ref.toLowerCase(), kind: 'sha' };
+        }
+
+        assertValidRef(req.ref, repoHostLabel(repo), hasToken);
+        const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token, req.sshAuth);
+        const found = await lsRemoteRefs(
+            repo, req.ref, env, baseArgs,
             req.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasToken,
         );
-        return { commitSha };
+        if (found.branchSha) return { commitSha: found.branchSha, kind: 'branch' };
+        if (found.tagSha) return { commitSha: found.tagSha, kind: 'tag' };
+        throw { transportFailure: true as const, reason: 'ref-not-found', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
     },
 
     async fetchAtCommit(req: FetchRequest): Promise<FetchResult> {
-        const hasToken = Boolean(req.token);
+        const hasToken = Boolean(req.token) || Boolean(req.sshAuth);
         await ensureBinaryReady(hasToken);
-        const url = assertValidRepoUrl(req.repoUrl, hasToken);
-        assertValidRef(req.ref, url.host, hasToken);
+        const repo = assertValidRepoUrl(req.repoUrl, hasToken);
+        assertValidRef(req.ref, repoHostLabel(repo), hasToken);
 
-        const { layout, env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token);
+        const { layout, env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token, req.sshAuth);
         const checkout = path.join(req.workspaceRoot, 'repo');
         const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -670,49 +963,63 @@ export const nativeGitTransport: GitTransport = {
         });
 
         try {
-            let cloneResult: RunResult;
-            try {
-                cloneResult = await runGit(
-                    [
-                        ...baseArgs, 'clone',
-                        '--depth=1', '--single-branch', '--no-tags', '--no-recurse-submodules',
-                        '--branch', req.ref, url.href, checkout,
-                    ],
-                    { cwd: layout.homeDir, env, timeoutMs, onSpawn: (child) => { activeChild = child; } },
-                );
-            } catch (e) {
-                // A size breach wins over the timeout wording: both kills are
-                // ours, but the operator guidance differs.
+            // Run each materialization step through one failure mapper. A size
+            // breach wins over the timeout wording: both kills are ours, but
+            // the operator guidance differs. runGit resolves on any exit code,
+            // so a non-zero exit is classified here by its real stderr rather
+            // than leaking a generic GIT_ERROR upstream.
+            const materialize = async (args: string[]): Promise<RunResult> => {
+                let res: RunResult;
+                try {
+                    res = await runGit(args, {
+                        cwd: layout.homeDir, env, timeoutMs,
+                        onSpawn: (child) => { activeChild = child; },
+                    });
+                } catch (e) {
+                    // A size breach wins over the timeout wording.
+                    if (sizeExceeded) {
+                        throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
+                    }
+                    if (isTimeoutError(e)) {
+                        throw { transportFailure: true as const, reason: 'timeout', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
+                    }
+                    throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), argv: args, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
+                }
+                // A watchdog-triggered SIGKILL settles runGit's promise via the
+                // child's normal 'close' event (code null -> exitCode -1), not
+                // a rejection, so this is the common path for an in-flight
+                // breach and must check sizeExceeded before the generic mapping.
                 if (sizeExceeded) {
-                    throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
+                    throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
-                if (isTimeoutError(e)) {
-                    throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+                if (res.exitCode !== 0) {
+                    throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: args, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
-                throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), argv: [...baseArgs, 'clone'], host: url.host, hasToken } satisfies TransportFailure;
-            }
+                return res;
+            };
 
-            // A watchdog-triggered SIGKILL settles runGit's promise via the
-            // child's normal 'close' event (code null -> exitCode -1), not a
-            // rejection, so this branch is the common path for an in-flight
-            // breach and must check sizeExceeded before the generic mapping.
-            if (sizeExceeded) {
-                throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
-            }
-
-            // runGit resolves on any exit code: a failed clone (auth, missing
-            // repo, TLS) must classify by its real stderr here rather than
-            // fall through to rev-parse and surface as a generic GIT_ERROR.
-            if (cloneResult.exitCode !== 0) {
-                throw {
-                    transportFailure: true as const,
-                    reason: 'exit',
-                    stderr: cloneResult.stderr,
-                    exitCode: cloneResult.exitCode,
-                    argv: [...baseArgs, 'clone'],
-                    host: url.host,
-                    hasToken,
-                } satisfies TransportFailure;
+            if (req.refKind === 'sha') {
+                // `--branch` cannot take a bare SHA, so a pinned commit uses a
+                // third strategy: init a repo, fetch exactly that object, and
+                // check it out detached. The host must allow fetching a direct
+                // SHA (GitHub does by default); a refusal surfaces as a
+                // non-zero `git fetch` here and classifies as UNSUPPORTED_REF.
+                await materialize([...baseArgs, 'init', checkout]);
+                await materialize([...baseArgs, '-C', checkout, 'fetch', '--depth=1', repo.href, req.ref]);
+                await materialize([...baseArgs, '-C', checkout, 'checkout', '--detach', req.ref]);
+            } else {
+                // A bare name works for both branches and tags: `--branch`
+                // detaches at the named ref's commit either way, and passing a
+                // fully-qualified `refs/tags/<ref>` is rejected by git
+                // (`Remote branch ... not found`). The resolved kind is
+                // already pinned by ls-remote, and the rev-parse HEAD
+                // verification below confirms the checkout matched it.
+                const branchArg = req.ref;
+                await materialize([
+                    ...baseArgs, 'clone',
+                    '--depth=1', '--single-branch', '--no-tags', '--no-recurse-submodules',
+                    '--branch', branchArg, repo.href, checkout,
+                ]);
             }
 
             let actual: string;
@@ -724,20 +1031,20 @@ export const nativeGitTransport: GitTransport = {
                 });
                 actual = head.stdout.trim().toLowerCase();
                 if (!SHA_PATTERN.test(actual)) {
-                    throw { transportFailure: true as const, reason: 'exit', stderr: `unexpected rev-parse output: ${head.stdout}`, exitCode: head.exitCode, host: url.host, hasToken } satisfies TransportFailure;
+                    throw { transportFailure: true as const, reason: 'exit', stderr: `unexpected rev-parse output: ${head.stdout}`, exitCode: head.exitCode, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
             } catch (e) {
                 if (isTransportFailure(e)) throw e;
                 if (isTimeoutError(e)) {
-                    throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+                    throw { transportFailure: true as const, reason: 'timeout', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
-                throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), host: url.host, hasToken } satisfies TransportFailure;
+                throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
             }
 
             if (actual !== req.commitSha.toLowerCase()) {
                 // The branch tip moved between resolution and fetch. Refuse
                 // rather than materialize content nobody reviewed.
-                throw { transportFailure: true as const, reason: 'tip-changed', host: url.host, hasToken } satisfies TransportFailure;
+                throw { transportFailure: true as const, reason: 'tip-changed', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
             }
 
             // Deterministic final measure: a breach landing between the last
@@ -750,13 +1057,13 @@ export const nativeGitTransport: GitTransport = {
                 return -1;
             });
             if (sizeExceeded || finalSize < 0 || finalSize > req.maxBytes) {
-                throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
+                throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
             }
 
             return { commitSha: actual, dir: checkout };
         } finally {
             watchdog.stop();
-            await awaitKillConfirmed(breachKill, `size-breach kill for ${url.host}`);
+            await awaitKillConfirmed(breachKill, `size-breach kill for ${repoHostLabel(repo)}`);
         }
     },
 };

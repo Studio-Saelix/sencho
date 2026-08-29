@@ -1,5 +1,6 @@
 import type { ArtifactEvidenceJson, ObservedArtifactIdentity } from './json';
 import type { RepoIdentity } from './repoIdentity';
+import type { RefKind } from '../git/types';
 
 export type GitOpsTargetMode = 'direct' | 'inline_blueprint' | 'blueprint';
 export type GitOpsLifecycleStatus = 'active' | 'creating' | 'detached' | 'deleted';
@@ -48,6 +49,7 @@ export type GitOpsApplicationRow = {
   materialization_fingerprint: string | null;
   desired_commit_sha: string | null;
   fetched_commit_sha: string | null;
+  fetched_resolved_ref_kind: RefKind | null;
   candidate_generation_id: string | null;
   accepted_generation_id: string | null;
   candidate_plan_blocked: number;
@@ -118,6 +120,9 @@ export type GitOpsCreateCheckpointRow = {
   env_path: string | null;
   auth_type: string;
   encrypted_token: string | null;
+  encrypted_deploy_key: string | null;
+  ssh_known_hosts_entry: string | null;
+  ssh_host_key_fingerprint: string | null;
   auto_apply_on_webhook: number;
   auto_deploy_on_apply: number;
   commit_sha: string | null;
@@ -137,6 +142,8 @@ export type GitOpsGenerationRow = {
   commit_sha: string;
   repo_url: string;
   configured_ref: string;
+  /** The namespace (branch | tag | sha) the configured ref resolved through. */
+  resolved_ref_kind: RefKind | null;
   repo_identity_json: string;
   manifest_version: number;
   candidate_dir: string;

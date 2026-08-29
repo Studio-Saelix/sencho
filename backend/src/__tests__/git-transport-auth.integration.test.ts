@@ -25,7 +25,7 @@ import os from 'os';
 import path from 'path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { classifyGitFailure, isTransportFailure } from '../services/git/errors';
-import { nativeGitTransport } from '../services/git/nativeGitTransport';
+import { nativeGitTransport, verifyFastForward } from '../services/git/nativeGitTransport';
 
 function gitAvailable(): boolean {
     return spawnSync('git', ['--version'], { stdio: 'ignore' }).status === 0;
@@ -35,31 +35,74 @@ const FIXTURES_DIR = path.resolve(__dirname, '..', '..', '..', 'e2e', 'fixtures'
 const VALID_TOKEN = 'sencho-integration-test-token-do-not-leak';
 const FILE_CONTENT = 'hello from the authenticated fixture repo\n';
 
-/**
- * Build a bare repo with one committed file. Mirrors e2e/gitServer.helper.ts's
- * fixture builder. Returns both the served bare dir and every scratch
- * directory created along the way, so the caller can remove them all.
- */
-function buildBareFixtureRepo(): { bareDir: string; scratchDirs: string[] } {
+interface RichFixtureRepo {
+    bare: { bareDir: string; scratchDirs: string[] };
+    mainSha: string;
+    annotatedTagSha: string;
+    lightweightTagSha: string;
+    pinnedSha: string;
+    chainTipSha: string;
+    rewrittenSha: string;
+}
+
+function buildRichFixtureRepo(): RichFixtureRepo {
     const srcDir = mkdtempSync(path.join(os.tmpdir(), 'sencho-git-auth-src-'));
     writeFileSync(path.join(srcDir, 'hello.txt'), FILE_CONTENT);
     const run = (args: string[]) => {
         const r = spawnSync('git', args, { cwd: srcDir, encoding: 'utf8' });
         if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr}`);
+        return r.stdout.trim();
     };
     run(['init', '-b', 'main']);
     run(['config', 'user.email', 'integration-test@sencho.test']);
     run(['config', 'user.name', 'Sencho Integration Test']);
     run(['add', '-A']);
-    // Explicitly off: a developer machine or CI runner with commit.gpgsign=true
-    // in its global gitconfig would otherwise fail this fixture commit.
     run(['-c', 'commit.gpgsign=false', 'commit', '-m', 'fixture']);
+    const mainSha = run(['rev-parse', 'HEAD']);
+    run(['tag', '-a', 'v-annotated', '-m', 'annotated release']);
+    const annotatedTagSha = run(['rev-parse', 'v-annotated^{commit}']);
+    run(['tag', 'v-light']);
+    const lightweightTagSha = run(['rev-parse', 'v-light']);
+    writeFileSync(path.join(srcDir, 'second.txt'), 'second fixture file\n');
+    run(['add', 'second.txt']);
+    run(['-c', 'commit.gpgsign=false', 'commit', '-m', 'second']);
+    const pinnedSha = run(['rev-parse', 'HEAD']);
+
+    run(['checkout', 'main']);
+    for (let i = 3; i <= 5; i += 1) {
+        writeFileSync(path.join(srcDir, `chain-${i}.txt`), `chain file ${i}\n`);
+        run(['add', `chain-${i}.txt`]);
+        run(['-c', 'commit.gpgsign=false', 'commit', '-m', `chain-${i}`]);
+    }
+    const chainTipSha = run(['rev-parse', 'HEAD']);
+
+    run(['checkout', '--orphan', 'rewritten']);
+    writeFileSync(path.join(srcDir, 'rewritten.txt'), 'rewritten history\n');
+    run(['add', 'rewritten.txt']);
+    run(['-c', 'commit.gpgsign=false', 'commit', '-m', 'rewritten']);
+    const rewrittenSha = run(['rev-parse', 'HEAD']);
 
     const bareRoot = mkdtempSync(path.join(os.tmpdir(), 'sencho-git-auth-bare-'));
     const bareDir = path.join(bareRoot, 'repo.git');
     const clone = spawnSync('git', ['clone', '--bare', '--quiet', srcDir, bareDir], { encoding: 'utf8' });
     if (clone.status !== 0) throw new Error(`git clone --bare failed: ${clone.stderr}`);
-    return { bareDir, scratchDirs: [srcDir, bareRoot] };
+    const pushRewritten = spawnSync(
+        'git',
+        ['push', bareDir, 'rewritten:refs/heads/rewritten'],
+        { cwd: srcDir, encoding: 'utf8' },
+    );
+    if (pushRewritten.status !== 0) {
+        throw new Error(`git push rewritten main failed: ${pushRewritten.stderr}`);
+    }
+    return {
+        bare: { bareDir, scratchDirs: [srcDir, bareRoot] },
+        mainSha,
+        annotatedTagSha,
+        lightweightTagSha,
+        pinnedSha,
+        chainTipSha,
+        rewrittenSha,
+    };
 }
 
 /** Serve one bare repo over HTTPS smart-HTTP, rejecting any request without a valid Basic Auth token. */
@@ -136,12 +179,13 @@ describe.skipIf(!gitAvailable())('authenticated native git transport (real git, 
     let closeServer: () => void;
     let prevExtraCaCerts: string | undefined;
     let fixtureScratchDirs: string[] = [];
+    let fixture: RichFixtureRepo;
     const workspaces: string[] = [];
 
     beforeAll(async () => {
-        const { bareDir, scratchDirs } = buildBareFixtureRepo();
-        fixtureScratchDirs = scratchDirs;
-        const served = await serveAuthedRepo(bareDir);
+        fixture = buildRichFixtureRepo();
+        fixtureScratchDirs = fixture.bare.scratchDirs;
+        const served = await serveAuthedRepo(fixture.bare.bareDir);
         repoUrl = served.url;
         closeServer = served.close;
         prevExtraCaCerts = process.env.NODE_EXTRA_CA_CERTS;
@@ -197,6 +241,7 @@ describe.skipIf(!gitAvailable())('authenticated native git transport (real git, 
             repoUrl,
             ref: 'main',
             token: VALID_TOKEN,
+            refKind: 'branch',
             commitSha: resolved.commitSha,
             timeoutMs: 15_000,
             workspaceRoot: fetchWorkspace,
@@ -223,6 +268,7 @@ describe.skipIf(!gitAvailable())('authenticated native git transport (real git, 
             repoUrl,
             ref: 'main',
             token: VALID_TOKEN,
+            refKind: 'branch',
             commitSha: resolved.commitSha,
             timeoutMs: 15_000,
             workspaceRoot: fetchWorkspace,
@@ -276,5 +322,141 @@ describe.skipIf(!gitAvailable())('authenticated native git transport (real git, 
         const serialized = JSON.stringify(failure) + classified.message;
         expect(serialized).not.toContain(wrongToken);
         expect(serialized).not.toContain(VALID_TOKEN);
+    });
+
+    it('resolves and fetches an annotated tag through the peeled commit', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const resolved = await nativeGitTransport.resolveRef({
+            repoUrl,
+            ref: 'v-annotated',
+            token: VALID_TOKEN,
+            timeoutMs: 15_000,
+            workspaceRoot,
+        });
+        expect(resolved).toMatchObject({ commitSha: fixture.annotatedTagSha, kind: 'tag' });
+
+        const fetchWorkspace = await makeWorkspace();
+        const fetched = await nativeGitTransport.fetchAtCommit({
+            repoUrl,
+            ref: 'v-annotated',
+            token: VALID_TOKEN,
+            refKind: 'tag',
+            commitSha: resolved.commitSha,
+            timeoutMs: 15_000,
+            workspaceRoot: fetchWorkspace,
+            maxBytes: 10 * 1024 * 1024,
+        });
+        expect(fetched.commitSha).toBe(fixture.annotatedTagSha);
+        expect(await fs.readFile(path.join(fetched.dir, 'hello.txt'), 'utf8')).toBe(FILE_CONTENT);
+    });
+
+    it('resolves and fetches a lightweight tag', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const resolved = await nativeGitTransport.resolveRef({
+            repoUrl,
+            ref: 'v-light',
+            token: VALID_TOKEN,
+            timeoutMs: 15_000,
+            workspaceRoot,
+        });
+        expect(resolved).toMatchObject({ commitSha: fixture.lightweightTagSha, kind: 'tag' });
+
+        const fetchWorkspace = await makeWorkspace();
+        const fetched = await nativeGitTransport.fetchAtCommit({
+            repoUrl,
+            ref: 'v-light',
+            token: VALID_TOKEN,
+            refKind: 'tag',
+            commitSha: resolved.commitSha,
+            timeoutMs: 15_000,
+            workspaceRoot: fetchWorkspace,
+            maxBytes: 10 * 1024 * 1024,
+        });
+        expect(fetched.commitSha).toBe(fixture.lightweightTagSha);
+    });
+
+    it('resolves and fetches a pinned commit SHA', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const resolved = await nativeGitTransport.resolveRef({
+            repoUrl,
+            ref: fixture.chainTipSha,
+            token: VALID_TOKEN,
+            timeoutMs: 15_000,
+            workspaceRoot,
+        });
+        expect(resolved).toMatchObject({ commitSha: fixture.chainTipSha, kind: 'sha' });
+
+        const fetchWorkspace = await makeWorkspace();
+        const fetched = await nativeGitTransport.fetchAtCommit({
+            repoUrl,
+            ref: fixture.chainTipSha,
+            token: VALID_TOKEN,
+            refKind: 'sha',
+            commitSha: resolved.commitSha,
+            timeoutMs: 15_000,
+            workspaceRoot: fetchWorkspace,
+            maxBytes: 10 * 1024 * 1024,
+        });
+        expect(fetched.commitSha).toBe(fixture.chainTipSha);
+        expect(await fs.readFile(path.join(fetched.dir, 'chain-5.txt'), 'utf8')).toBe('chain file 5\n');
+    });
+
+    it('treats a linear branch advance as a fast-forward', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const fastForward = await verifyFastForward({
+            repoUrl,
+            ancestorSha: fixture.pinnedSha,
+            descendantSha: fixture.chainTipSha,
+            token: VALID_TOKEN,
+            timeoutMs: 15_000,
+            workspaceRoot,
+            maxBytes: 10 * 1024 * 1024,
+        });
+        expect(fastForward).toBe(true);
+    });
+
+    it('treats a multi-commit branch advance as a fast-forward', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const fastForward = await verifyFastForward({
+            repoUrl,
+            ancestorSha: fixture.mainSha,
+            descendantSha: fixture.chainTipSha,
+            token: VALID_TOKEN,
+            timeoutMs: 15_000,
+            workspaceRoot,
+            maxBytes: 10 * 1024 * 1024,
+        });
+        expect(fastForward).toBe(true);
+    });
+
+    it('rejects rewritten history as non-fast-forward', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const fastForward = await verifyFastForward({
+            repoUrl,
+            ancestorSha: fixture.mainSha,
+            descendantSha: fixture.rewrittenSha,
+            token: VALID_TOKEN,
+            timeoutMs: 15_000,
+            workspaceRoot,
+            maxBytes: 10 * 1024 * 1024,
+        });
+        expect(fastForward).toBe(false);
+    });
+
+    it('classifies verifyFastForward auth failures without collapsing to non-fast-forward', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const failure = await verifyFastForward({
+            repoUrl,
+            ancestorSha: fixture.mainSha,
+            descendantSha: fixture.chainTipSha,
+            token: 'wrong-token',
+            timeoutMs: 15_000,
+            workspaceRoot,
+            maxBytes: 10 * 1024 * 1024,
+        }).then(() => null, (e: unknown) => e);
+
+        expect(isTransportFailure(failure)).toBe(true);
+        if (!isTransportFailure(failure)) throw new Error('unreachable');
+        expect(classifyGitFailure(failure).code).toBe('AUTH_FAILED');
     });
 });

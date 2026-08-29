@@ -5,6 +5,7 @@
  * handlers (the URL rules themselves live in services/gitops/repoIdentity.ts,
  * not in GitSourceService), specifically:
  *   - HTTPS-only repo URL enforcement, including userinfo/query/fragment rejection
+ *   - SSH deploy-key auth_type, deploy_key length caps, ssh-host-key probe route
  *   - Max-length caps on repo_url / branch / compose_path / env_path / token
  *   - Stack-existence 404 guard on PUT
  *   - 400 on invalid stack names
@@ -20,12 +21,14 @@ import path from 'path';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { DatabaseService } from '../services/DatabaseService';
+import { CryptoService } from '../services/CryptoService';
 import { ComposeService } from '../services/ComposeService';
 import { GitSourceService, GitSourceError } from '../services/GitSourceService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
 import { insertHistory } from '../services/gitops/history';
 import type { GitOpsApplicationRow } from '../services/gitops/types';
+import { PROXY_DEPLOY_ACTOR_HEADER, PROXY_DEPLOY_SOURCE_HEADER } from '../services/license-headers';
 
 /** A minimal live Direct application row for GitOps read-path fixtures. */
 function directApplicationFixture(id: string, stackName: string): GitOpsApplicationRow {
@@ -46,6 +49,7 @@ function directApplicationFixture(id: string, stackName: string): GitOpsApplicat
         materialization_fingerprint: 'a'.repeat(64),
         desired_commit_sha: null,
         fetched_commit_sha: null,
+    fetched_resolved_ref_kind: null,
         candidate_generation_id: null,
         accepted_generation_id: null,
         candidate_plan_blocked: 0,
@@ -109,7 +113,7 @@ function seedGitSource(stackName: string): void {
         sync_env: false,
         env_path: null,
         auth_type: 'none',
-        encrypted_token: null,
+        encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
         auto_apply_on_webhook: false,
         auto_deploy_on_apply: false,
         last_applied_commit_sha: null,
@@ -1157,7 +1161,7 @@ describe('stack_git_sources manifest cache columns', () => {
             sync_env: false,
             env_path: null,
             auth_type: 'none',
-            encrypted_token: null,
+            encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -1720,5 +1724,254 @@ describe('GitOps additive fields and history routes', () => {
         expect(res.status).toBe(200);
         expect(res.body.items).toEqual([]);
         expect(res.body.nextCursor).toBeNull();
+    });
+});
+
+describe('POST /api/git-sources/ssh-host-key', () => {
+    it('rejects missing repo_url with 400', async () => {
+        const res = await request(app)
+            .post('/api/git-sources/ssh-host-key')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/repo_url/i);
+    });
+
+    it('rejects unsupported URL schemes before probing', async () => {
+        const res = await request(app)
+            .post('/api/git-sources/ssh-host-key')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ repo_url: 'http://github.com/example/repo.git' });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/https:\/\/ URL or an SSH URL/i);
+    });
+
+    it('rejects HTTPS URLs that are storable but not SSH probe targets', async () => {
+        const res = await request(app)
+            .post('/api/git-sources/ssh-host-key')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ repo_url: 'https://github.com/example/repo.git' });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/SSH repository URL/i);
+    });
+
+    it('returns scanned host keys for an SSH repository URL', async () => {
+        const scanHostKeys = vi.spyOn(
+            await import('../services/git/sshTrust'),
+            'scanHostKeys',
+        ).mockResolvedValue([
+            {
+                keyType: 'ssh-ed25519',
+                fingerprint: 'SHA256:fixtureFingerprint',
+                line: '|1|fixture|fixture ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureKeyMaterial',
+            },
+        ]);
+        const res = await request(app)
+            .post('/api/git-sources/ssh-host-key')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ repo_url: 'git@github.com:example/repo.git' });
+        expect(res.status).toBe(200);
+        expect(res.body.host).toBe('github.com');
+        expect(res.body.port).toBe(22);
+        expect(res.body.keys).toHaveLength(1);
+        expect(res.body.keys[0].fingerprint).toBe('SHA256:fixtureFingerprint');
+        scanHostKeys.mockRestore();
+    });
+
+    it('allows host-key probing for an existing stack when stack_name is supplied', async () => {
+        const scanHostKeys = vi.spyOn(
+            await import('../services/git/sshTrust'),
+            'scanHostKeys',
+        ).mockResolvedValue([
+            {
+                keyType: 'ssh-ed25519',
+                fingerprint: 'SHA256:fixtureFingerprint',
+                line: '|1|fixture|fixture ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureKeyMaterial',
+            },
+        ]);
+        const res = await request(app)
+            .post('/api/git-sources/ssh-host-key')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ repo_url: 'git@github.com:example/repo.git', stack_name: 'existing-stack' });
+        expect(res.status).toBe(200);
+        scanHostKeys.mockRestore();
+    });
+
+    it('returns 403 when the caller lacks stack:create and does not name a stack', async () => {
+        const deployerName = 'ssh-host-key-deployer';
+        const db = DatabaseService.getInstance();
+        if (!db.getUserByUsername(deployerName)) {
+            db.addUser({ username: deployerName, password_hash: 'test', role: 'deployer' });
+        }
+        const deployer = db.getUserByUsername(deployerName);
+        if (!deployer) throw new Error('expected deployer user');
+        const res = await request(app)
+            .post('/api/git-sources/ssh-host-key')
+            .set('Authorization', `Bearer ${jwt.sign({ username: deployer.username, role: deployer.role, userId: deployer.id }, TEST_JWT_SECRET, { expiresIn: '1m' })}`)
+            .send({ repo_url: 'git@github.com:example/repo.git' });
+        expect(res.status).toBe(403);
+    });
+
+    it('returns 500 when host-key probing throws an unexpected error', async () => {
+        const scanHostKeys = vi.spyOn(
+            await import('../services/git/sshTrust'),
+            'scanHostKeys',
+        ).mockRejectedValue(new Error('ssh-keyscan failed'));
+        const res = await request(app)
+            .post('/api/git-sources/ssh-host-key')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ repo_url: 'ssh://git@git.example.com:2222/org/repo.git' });
+        expect(res.status).toBe(500);
+        expect(res.body.error).toMatch(/Git source operation failed/i);
+        scanHostKeys.mockRestore();
+    });
+});
+
+describe('SSH deploy-key route validation', () => {
+    const sshRepoUrl = 'git@github.com:example/deploy-repo.git';
+    const deployKey = '-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n';
+    const knownHosts = '|1|fixture|fixture ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureKeyMaterial';
+
+    it('rejects an unknown auth_type on PUT', async () => {
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: sshRepoUrl,
+                branch: 'main',
+                compose_path: 'compose.yaml',
+                auth_type: 'oauth',
+            });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/auth_type/i);
+    });
+
+    it('rejects an oversized deploy_key on PUT', async () => {
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: sshRepoUrl,
+                branch: 'main',
+                compose_path: 'compose.yaml',
+                auth_type: 'deploy_key',
+                deploy_key: 'k'.repeat(16385),
+            });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/deploy_key is too long/i);
+    });
+
+    it('forwards deploy_key fields to upsert for SSH repository URLs', async () => {
+        const upsertSpy = vi.spyOn(GitSourceService.getInstance(), 'upsert')
+            .mockResolvedValue({} as Awaited<ReturnType<typeof GitSourceService.prototype.upsert>>);
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: sshRepoUrl,
+                branch: 'main',
+                compose_path: 'compose.yaml',
+                auth_type: 'deploy_key',
+                deploy_key: deployKey,
+                ssh_known_hosts_entry: knownHosts,
+                ssh_host_key_fingerprint: 'SHA256:fixtureFingerprint',
+            });
+        expect(res.status).toBe(200);
+        expect(upsertSpy).toHaveBeenCalledWith(expect.objectContaining({
+            repoUrl: sshRepoUrl,
+            authType: 'deploy_key',
+            deployKey,
+            sshKnownHostsEntry: knownHosts,
+            sshHostKeyFingerprint: 'SHA256:fixtureFingerprint',
+        }));
+        upsertSpy.mockRestore();
+    });
+
+    it('forwards proxied deploy actor into upsert auditContext', async () => {
+        const upsertSpy = vi.spyOn(GitSourceService.getInstance(), 'upsert')
+            .mockResolvedValue({} as Awaited<ReturnType<typeof GitSourceService.prototype.upsert>>);
+        const nodeToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${nodeToken}`)
+            .set(PROXY_DEPLOY_ACTOR_HEADER, 'fleet-operator')
+            .set(PROXY_DEPLOY_SOURCE_HEADER, 'from_git')
+            .send({
+                repo_url: sshRepoUrl,
+                branch: 'main',
+                compose_path: 'compose.yaml',
+                auth_type: 'deploy_key',
+                deploy_key: deployKey,
+                ssh_known_hosts_entry: knownHosts,
+                ssh_host_key_fingerprint: 'SHA256:fixtureFingerprint',
+            });
+        expect(res.status).toBe(200);
+        expect(upsertSpy).toHaveBeenCalledWith(expect.objectContaining({
+            auditContext: expect.objectContaining({ username: 'fleet-operator' }),
+        }));
+        upsertSpy.mockRestore();
+    });
+
+    it('forwards sshAuth to listRepoTree when browsing with deploy_key auth', async () => {
+        const listRepoTree = vi.spyOn(GitSourceService.getInstance(), 'listRepoTree')
+            .mockResolvedValue({ files: [], truncated: false, commitSha: 'a'.repeat(40), warnings: [] });
+        const res = await request(app)
+            .post('/api/git-sources/browse')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: sshRepoUrl,
+                branch: 'main',
+                auth_type: 'deploy_key',
+                deploy_key: deployKey,
+                ssh_known_hosts_entry: knownHosts,
+            });
+        expect(res.status).toBe(200);
+        expect(listRepoTree).toHaveBeenCalledWith(expect.objectContaining({
+            repoUrl: sshRepoUrl,
+            sshAuth: { privateKey: deployKey, knownHostsEntry: knownHosts },
+        }));
+        listRepoTree.mockRestore();
+    });
+
+    it('GET exposes deploy-key metadata without returning the private key', async () => {
+        const stackName = 'ssh-deploy-get';
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, stackName), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, stackName, 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+        DatabaseService.getInstance().upsertGitSource({
+            stack_name: stackName,
+            repo_url: sshRepoUrl,
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            compose_paths: ['compose.yaml'],
+            context_dir: null,
+            sync_env: false,
+            env_path: null,
+            auth_type: 'deploy_key',
+            encrypted_token: null,
+            encrypted_deploy_key: CryptoService.getInstance().encrypt(deployKey),
+            ssh_known_hosts_entry: knownHosts,
+            ssh_host_key_fingerprint: 'SHA256:fixtureFingerprint',
+            auto_apply_on_webhook: false,
+            auto_deploy_on_apply: false,
+            last_applied_commit_sha: null,
+            last_applied_content_hash: null,
+            pending_commit_sha: null,
+            pending_compose_content: null,
+            pending_env_content: null,
+            pending_fetched_at: null,
+            last_debounce_at: null,
+        });
+
+        const res = await request(app)
+            .get(`/api/stacks/${stackName}/git-source`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(res.body.auth_type).toBe('deploy_key');
+        expect(res.body.has_deploy_key).toBe(true);
+        expect(res.body.ssh_host_key_fingerprint).toBe('SHA256:fixtureFingerprint');
+        const serialized = JSON.stringify(res.body);
+        expect(serialized).not.toContain(deployKey);
+        expect(serialized).not.toContain('encrypted_deploy_key');
     });
 });

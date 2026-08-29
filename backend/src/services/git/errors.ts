@@ -18,7 +18,9 @@
 export type TransportFacingCode =
     | 'REPO_NOT_FOUND'
     | 'AUTH_FAILED'
-    | 'BRANCH_NOT_FOUND'
+    | 'SSH_HOST_KEY_FAILED'
+    | 'REF_NOT_FOUND'
+    | 'UNSUPPORTED_REF'
     | 'NETWORK_TIMEOUT'
     | 'GIT_ERROR';
 
@@ -29,6 +31,7 @@ export type TransportFailureReason =
     | 'git-missing'
     | 'git-old'
     | 'ref-not-found'
+    | 'unsupported-ref'
     | 'tip-changed'
     | 'size'
     | 'timeout'
@@ -52,6 +55,7 @@ export type TransportFailure = TransportFailureBase & (
     | { reason: 'git-missing'; stderr?: string }
     | { reason: 'git-old'; stderr?: string }
     | { reason: 'ref-not-found' }
+    | { reason: 'unsupported-ref' }
     | { reason: 'tip-changed' }
     | { reason: 'size'; maxBytes: number }
     | { reason: 'timeout' }
@@ -101,15 +105,17 @@ export function classifyGitFailure(
     // stderr guessing.
     switch (failure.reason) {
         case 'invalid-url':
-            return { code: 'GIT_ERROR', message: 'Unsupported repository URL. Use an https:// URL without embedded credentials.' };
+            return { code: 'GIT_ERROR', message: 'Unsupported repository URL. Use https:// or SSH (git@host:org/repo.git or ssh://) without embedded credentials.' };
         case 'invalid-ref':
-            return { code: 'GIT_ERROR', message: 'Unsupported branch name. Use the branch name as the remote reports it.' };
+            return { code: 'GIT_ERROR', message: 'Unsupported ref name. Use a branch name, a tag name, or a full commit SHA as the remote reports it.' };
         case 'git-missing':
             return { code: 'GIT_ERROR', message: failure.stderr || 'The git command was not found on PATH.' };
         case 'git-old':
             return { code: 'GIT_ERROR', message: failure.stderr || 'The installed git client is too old.' };
         case 'ref-not-found':
-            return { code: 'BRANCH_NOT_FOUND', message: 'Branch not found in the repository.' };
+            return { code: 'REF_NOT_FOUND', message: 'The configured branch, tag, or commit was not found in the repository.' };
+        case 'unsupported-ref':
+            return { code: 'UNSUPPORTED_REF', message: 'The configured commit is not reachable on this repository host. Use a branch or tag, or a commit the host advertises.' };
         case 'tip-changed':
             return { code: 'GIT_ERROR', message: 'Repository tip changed during fetch; retry the pull.' };
         case 'size':
@@ -136,6 +142,20 @@ export function classifyGitFailure(
             message: PRIVATE_REPO_HINT,
         };
     }
+    if (/host key verification failed|remotely changed the ssh host key|no matching host key found|offending key for ip|host key mismatch/.test(raw)) {
+        return {
+            code: 'SSH_HOST_KEY_FAILED',
+            message: 'SSH host key verification failed. The server key changed or is not trusted. Review the fingerprint and update host trust if you intend to accept the new key.',
+        };
+    }
+    if (/permission denied \(publickey|publickey denied|no supported authentication methods/.test(raw)) {
+        return failure.hasToken
+            ? { code: 'AUTH_FAILED', message: 'Repository authentication failed. Check your deploy key or token.' }
+            : {
+                code: 'REPO_NOT_FOUND',
+                message: PRIVATE_REPO_HINT,
+            };
+    }
     if (/authentication failed|\b40[13]\b/.test(raw)) {
         return failure.hasToken
             ? { code: 'AUTH_FAILED', message: 'Repository authentication failed. Check your token.' }
@@ -145,7 +165,15 @@ export function classifyGitFailure(
             };
     }
     if (/remote branch .+ not found in upstream|branch not found/.test(raw)) {
-        return { code: 'BRANCH_NOT_FOUND', message: 'Branch not found in the repository.' };
+        return { code: 'REF_NOT_FOUND', message: 'The configured branch, tag, or commit was not found in the repository.' };
+    }
+    // A host that refuses to serve an unadvertised object (SHA fetch without
+    // allowAnySHA1InWant/allowReachableSHA1InWant) still exits non-zero, but
+    // the failure is about server capability, not the SHA existing. Hosts word
+    // the refusal differently (GitHub vs GitLab/Gitea), so match stable phrases
+    // rather than one vendor's full sentence.
+    if (/unadvertised object|not our ref/.test(raw)) {
+        return { code: 'UNSUPPORTED_REF', message: 'The configured commit is not reachable on this repository host. Use a branch or tag, or a commit the host advertises.' };
     }
     if (/repository[\s\S]*\bnot found\b|not found in upstream/.test(raw)) {
         return {

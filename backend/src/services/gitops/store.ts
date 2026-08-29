@@ -265,13 +265,15 @@ export class GitOpsStore {
       `INSERT INTO gitops_create_checkpoints (
         application_id, stack_name, phase, generation_id, operation_id, repo_url, branch,
         compose_path, compose_paths_json, context_dir, sync_env, env_path, auth_type,
-        encrypted_token, auto_apply_on_webhook, auto_deploy_on_apply, commit_sha,
+        encrypted_token, encrypted_deploy_key, ssh_known_hosts_entry, ssh_host_key_fingerprint,
+        auto_apply_on_webhook, auto_deploy_on_apply, commit_sha,
         applied_spec_json, created_managed_root, created_at, updated_at
-      ) VALUES (${Array(21).fill('?').join(', ')})`,
+      ) VALUES (${Array(24).fill('?').join(', ')})`,
     ).run(
       row.application_id, row.stack_name, row.phase, row.generation_id, row.operation_id,
       row.repo_url, row.branch, row.compose_path, row.compose_paths_json, row.context_dir,
-      row.sync_env, row.env_path, row.auth_type, row.encrypted_token, row.auto_apply_on_webhook,
+      row.sync_env, row.env_path, row.auth_type, row.encrypted_token, row.encrypted_deploy_key,
+      row.ssh_known_hosts_entry, row.ssh_host_key_fingerprint, row.auto_apply_on_webhook,
       row.auto_deploy_on_apply, row.commit_sha, row.applied_spec_json, row.created_managed_root,
       row.created_at, row.updated_at,
     );
@@ -356,7 +358,7 @@ export class GitOpsStore {
         id, lifecycle_key, lifecycle_status, target_mode, stack_name, blueprint_id,
         configured_repo_url, repo_identity_json, configured_ref, compose_paths_json,
         context_dir, sync_env, env_path, materialization_fingerprint, desired_commit_sha,
-        fetched_commit_sha, candidate_generation_id, accepted_generation_id,
+        fetched_commit_sha, fetched_resolved_ref_kind, candidate_generation_id, accepted_generation_id,
         candidate_plan_blocked, review_required, artifact_set_id, latest_artifact_set_id,
         intent_revision_id, rollout_candidate_id, rollout_generation_id, source_acceptance_ref,
         placement_approval_ref, rollout_authorization_ref, legacy_combined_approval_ref,
@@ -366,12 +368,12 @@ export class GitOpsStore {
         recovery_ref, recovery_phase, interruption_stage, interruption_at,
         interruption_operation_id, interruption_generation_id, evidence_fresh_at,
         evidence_limitations_json, created_at, updated_at
-      ) VALUES (${Array(54).fill('?').join(', ')})`,
+      ) VALUES (${Array(55).fill('?').join(', ')})`,
     ).run(
       row.id, row.lifecycle_key, row.lifecycle_status, row.target_mode, row.stack_name, row.blueprint_id,
       row.configured_repo_url, row.repo_identity_json, row.configured_ref, row.compose_paths_json,
       row.context_dir, row.sync_env, row.env_path, row.materialization_fingerprint, row.desired_commit_sha,
-      row.fetched_commit_sha, row.candidate_generation_id, row.accepted_generation_id,
+      row.fetched_commit_sha, row.fetched_resolved_ref_kind, row.candidate_generation_id, row.accepted_generation_id,
       row.candidate_plan_blocked, row.review_required, row.artifact_set_id, row.latest_artifact_set_id,
       row.intent_revision_id, row.rollout_candidate_id, row.rollout_generation_id, row.source_acceptance_ref,
       row.placement_approval_ref, row.rollout_authorization_ref, row.legacy_combined_approval_ref,
@@ -387,13 +389,13 @@ export class GitOpsStore {
   insertGeneration(row: GitOpsGenerationRow): void {
     this.db().prepare(
       `INSERT INTO gitops_generations (
-        id, application_id, commit_sha, repo_url, configured_ref, repo_identity_json,
+        id, application_id, commit_sha, repo_url, configured_ref, resolved_ref_kind, repo_identity_json,
         manifest_version, candidate_dir, applied_dir, expected_invocation_json,
         materialization_fingerprint, validation_ok, plan_blocked, change_plan_fingerprint,
         operation_id, trigger, actor, previous_generation_id, redacted_limitations_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      row.id, row.application_id, row.commit_sha, row.repo_url, row.configured_ref, row.repo_identity_json,
+      row.id, row.application_id, row.commit_sha, row.repo_url, row.configured_ref, row.resolved_ref_kind, row.repo_identity_json,
       row.manifest_version, row.candidate_dir, row.applied_dir, row.expected_invocation_json,
       row.materialization_fingerprint, row.validation_ok, row.plan_blocked, row.change_plan_fingerprint,
       row.operation_id, row.trigger, row.actor, row.previous_generation_id, row.redacted_limitations_json,

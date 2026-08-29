@@ -1,0 +1,153 @@
+import fs from 'fs';
+import path from 'path';
+import { parseImageRef } from './registry-api';
+import { extractImagesFromCompose } from './ImageUpdateService';
+import { normalizeImageHost } from './RegistryService';
+
+const MAX_DOCKERFILE_BYTES = 1_048_576;
+
+export interface RegistryReferenceDiscoveryResult {
+  referencedHosts: string[];
+}
+
+function hostFromImageRef(imageRef: string): string | null {
+  const parsed = parseImageRef(imageRef);
+  if (!parsed) return null;
+  return normalizeImageHost(parsed.registry);
+}
+
+function parseDockerfileReferences(content: string): string[] {
+  const hosts = new Set<string>();
+  const lines = content.split('\n');
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+
+    const fromMatch = /^FROM\s+(--platform=[^\s]+\s+)?([^\s]+)/i.exec(line);
+    if (fromMatch?.[2]) {
+      const host = hostFromImageRef(fromMatch[2]);
+      if (host) hosts.add(host);
+    }
+
+    const copyFromMatch = /^COPY\s+--from=([^\s]+)/i.exec(line);
+    if (copyFromMatch?.[1] && !/^\d+$/.test(copyFromMatch[1])) {
+      const host = hostFromImageRef(copyFromMatch[1]);
+      if (host) hosts.add(host);
+    }
+  }
+  return [...hosts];
+}
+
+function readRegularFileSync(filePath: string, baseResolved: string): Buffer | null {
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(baseResolved + path.sep)) return null;
+  const fd = fs.openSync(resolved, 'r');
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) return null;
+    const buf = Buffer.alloc(stat.size);
+    fs.readSync(fd, buf, 0, stat.size, 0);
+    return buf;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function discoverFromComposeFile(baseResolved: string, fileName: string, envVars: Record<string, string>): string[] {
+  const safePath = path.resolve(baseResolved, fileName);
+  if (!safePath.startsWith(baseResolved + path.sep)) {
+    return [];
+  }
+  const content = readRegularFileSync(safePath, baseResolved);
+  if (!content) return [];
+  const images = extractImagesFromCompose(content.toString('utf8'), envVars);
+  const hosts = new Set<string>();
+  for (const image of images) {
+    const host = hostFromImageRef(image);
+    if (host) hosts.add(host);
+  }
+  return [...hosts];
+}
+
+function discoverDockerfiles(baseResolved: string): string[] {
+  const hosts = new Set<string>();
+  const stack: string[] = [baseResolved];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) continue;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = path.resolve(current, entry.name);
+      if (!full.startsWith(baseResolved + path.sep)) continue;
+      if (entry.isDirectory()) {
+        stack.push(full);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const lower = entry.name.toLowerCase();
+      if (lower !== 'dockerfile' && !lower.startsWith('dockerfile.')) continue;
+      const fd = fs.openSync(full, 'r');
+      try {
+        const stat = fs.fstatSync(fd);
+        if (stat.size > MAX_DOCKERFILE_BYTES) {
+          throw new Error(`Dockerfile exceeds size limit: ${entry.name}`);
+        }
+        const buf = Buffer.alloc(stat.size);
+        fs.readSync(fd, buf, 0, stat.size, 0);
+        for (const host of parseDockerfileReferences(buf.toString('utf8'))) {
+          hosts.add(host);
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
+  }
+  return [...hosts];
+}
+
+export function discoverRegistryReferencesFromComposeContent(
+  composeContent: string,
+  envVars: Record<string, string> = {},
+): RegistryReferenceDiscoveryResult {
+  const hosts = new Set<string>();
+  for (const image of extractImagesFromCompose(composeContent, envVars)) {
+    const host = hostFromImageRef(image);
+    if (host) hosts.add(host);
+  }
+  return { referencedHosts: [...hosts].sort() };
+}
+
+/**
+ * Discover registry hosts referenced by compose files and Dockerfiles in a
+ * project directory. Returns referenced hosts, not proven-private hosts.
+ */
+export function discoverRegistryReferences(
+  projectDir: string,
+  envVars: Record<string, string> = {},
+): RegistryReferenceDiscoveryResult {
+  const hosts = new Set<string>();
+  const baseResolved = path.resolve(projectDir);
+
+  const composeNames = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
+  for (const name of composeNames) {
+    const composePath = path.resolve(baseResolved, name);
+    if (!composePath.startsWith(baseResolved + path.sep)) continue;
+    if (!fs.existsSync(composePath)) continue;
+    for (const host of discoverFromComposeFile(baseResolved, name, envVars)) {
+      hosts.add(host);
+    }
+  }
+
+  for (const host of discoverDockerfiles(baseResolved)) {
+    hosts.add(host);
+  }
+
+  return { referencedHosts: [...hosts].sort() };
+}
+
+export { parseDockerfileReferences };

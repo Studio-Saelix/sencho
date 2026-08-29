@@ -4,7 +4,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
 import { useNodes } from '@/context/NodeContext';
-import { resolveHostConsoleCapability } from '@/lib/routing/hostConsoleCapability';
+import { resolveHostConsoleCapability, resolveHostConsoleLockMessage } from '@/lib/routing/hostConsoleCapability';
 import { LockCard } from '../ui/LockCard';
 import { CapabilityGate } from '../CapabilityGate';
 import { HubOnlyGate } from '../HubOnlyGate';
@@ -207,17 +207,16 @@ export function ViewRouter({
         });
         if (capState === 'loading') return <ViewSkeleton />;
         if (capState === 'locked') {
-            const nodeName = activeNode.name;
-            const version = activeNodeMeta?.version;
-            let versionHint = `${nodeName} does not advertise this capability.`;
-            if (version && version !== 'unknown' && version !== '0.0.0-dev') {
-                versionHint = `${nodeName} is running v${version}.`;
-            }
+            const { title, body } = resolveHostConsoleLockMessage({
+                nodeMode: activeNode.mode,
+                nodeName: activeNode.name,
+                version: activeNodeMeta?.version,
+            });
             return (
                 <LockCard
                     icon={Unplug}
-                    title="Host Console is not available on this node"
-                    body={`${versionHint} Upgrade the node to use this feature.`}
+                    title={title}
+                    body={body}
                 />
             );
         }

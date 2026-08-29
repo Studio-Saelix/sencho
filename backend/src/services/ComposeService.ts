@@ -1,6 +1,5 @@
 import { spawn } from 'child_process';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import WebSocket from 'ws';
 import DockerController from './DockerController';
@@ -10,6 +9,12 @@ import { MeshService } from './MeshService';
 import { LogFormatter } from './LogFormatter';
 import { NodeRegistry } from './NodeRegistry';
 import { RegistryService } from './RegistryService';
+import { RegistryDeliveryService } from './RegistryDeliveryService';
+import { createDockerAuthTempDir } from '../helpers/dockerAuthTempDir';
+import { getRegistryDeliveryContext } from '../helpers/registryDeliveryContext';
+import { PreparedSourceStore } from '../services/preparedSourceStore';
+import { recordRegistryDeliveryEvent } from '../helpers/registryDeliveryEvidence';
+import { resolveRegistryAuthAtSeam } from '../helpers/registryDeliverySeam';
 import { DriftLedgerService } from './DriftLedgerService';
 import SelfIdentityService from './SelfIdentityService';
 import { parseEffectiveModel } from './preflight/effectiveModel';
@@ -273,8 +278,16 @@ export class ComposeService {
     // When set, terminate the child if it emits no output for this long while
     // still running (idle stall backstop). Appended last so the existing
     // registry-auth call sites that pass `env` are unaffected.
-    idleTimeoutMs?: number
+    idleTimeoutMs?: number,
+    abortSignal?: AbortSignal,
   ): Promise<void> {
+    const deliveryAbortSignal = getRegistryDeliveryContext()?.abortSignal;
+    const effectiveAbortSignal = abortSignal ?? deliveryAbortSignal;
+
+    if (effectiveAbortSignal?.aborted) {
+      return Promise.reject(new Error('OPERATION_ABORTED: client disconnected'));
+    }
+
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         cwd,
@@ -299,28 +312,6 @@ export class ComposeService {
         }
       };
 
-      const cleanup = () => {
-        if (timeout) {
-          clearTimeout(timeout);
-          timeout = null;
-        }
-        if (forceKillTimeout) {
-          clearTimeout(forceKillTimeout);
-          forceKillTimeout = null;
-        }
-        if (idleTimeout) {
-          clearTimeout(idleTimeout);
-          idleTimeout = null;
-        }
-      };
-
-      const finish = (complete: () => void) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        complete();
-      };
-
       const terminateChild = (error: Error) => {
         pendingTerminationError = pendingTerminationError ?? error;
         if (exited) return;
@@ -337,6 +328,38 @@ export class ComposeService {
             console.warn('[ComposeService] Failed to force terminate compose command:', sanitizeForLog(getErrorMessage(error, 'unknown')));
           }
         }, 5000);
+      };
+
+      const onAbort = effectiveAbortSignal
+        ? () => {
+            sendOutput('=== Operation cancelled (client disconnected) ===\n');
+            terminateChild(new Error('OPERATION_ABORTED: client disconnected'));
+          }
+        : undefined;
+
+      const cleanup = () => {
+        if (timeout) {
+          clearTimeout(timeout);
+          timeout = null;
+        }
+        if (forceKillTimeout) {
+          clearTimeout(forceKillTimeout);
+          forceKillTimeout = null;
+        }
+        if (idleTimeout) {
+          clearTimeout(idleTimeout);
+          idleTimeout = null;
+        }
+        if (effectiveAbortSignal && onAbort) {
+          effectiveAbortSignal.removeEventListener('abort', onAbort);
+        }
+      };
+
+      const finish = (complete: () => void) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        complete();
       };
 
       // Idle stall backstop. Armed once below and reset on every output chunk;
@@ -366,6 +389,10 @@ export class ComposeService {
       }, timeoutMs);
 
       armIdleTimeout();
+
+      if (effectiveAbortSignal && onAbort) {
+        effectiveAbortSignal.addEventListener('abort', onAbort);
+      }
 
       const onData = (data: Buffer) => {
         const text = data.toString();
@@ -417,37 +444,101 @@ export class ComposeService {
     fn: (env: Record<string, string | undefined>) => Promise<T>,
     sendOutput?: (data: string) => void,
   ): Promise<T> {
-    const registries = DatabaseService.getInstance().getRegistries();
-    if (registries.length === 0) {
+    const deliveryContext = getRegistryDeliveryContext();
+
+    const mergedAuths: Record<string, { auth: string }> = {};
+
+    if (deliveryContext) {
+      if (!deliveryContext.seamResult) {
+        deliveryContext.seamResult = await resolveRegistryAuthAtSeam({
+          envelope: deliveryContext.envelope,
+          nodeId: deliveryContext.nodeId,
+          stack: deliveryContext.stack,
+          stage: deliveryContext.stage,
+          service: deliveryContext.service,
+        });
+        deliveryContext.seamSettled = true;
+      }
+      Object.assign(mergedAuths, deliveryContext.seamResult.auths);
+    } else {
+      const registries = DatabaseService.getInstance().getRegistries();
+      if (registries.length > 0) {
+        const { config, warnings } = await RegistryService.getInstance().resolveDockerConfig();
+        if (warnings.length > 0 && sendOutput) {
+          for (const warning of warnings) {
+            sendOutput(`[Sencho] Warning: ${warning}\n`);
+          }
+        }
+        Object.assign(mergedAuths, config.auths);
+      }
+    }
+
+    if (Object.keys(mergedAuths).length === 0) {
       return fn({
         ...process.env,
         PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
       });
     }
 
-    const { config, warnings } = await RegistryService.getInstance().resolveDockerConfig();
-    if (warnings.length > 0 && sendOutput) {
-      for (const warning of warnings) {
-        sendOutput(`[Sencho] Warning: ${warning}\n`);
-      }
-    }
-
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-docker-'));
-    const configPath = path.join(tmpDir, 'config.json');
+    const deliverySourceId = RegistryDeliveryService.getInstance().getDeliverySourceId();
+    const handle = createDockerAuthTempDir(
+      deliverySourceId,
+      deliveryContext ? 'delivered' : 'local',
+      { auths: mergedAuths },
+    );
 
     try {
-      fs.writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
       return await fn({
         ...process.env,
-        DOCKER_CONFIG: tmpDir,
+        DOCKER_CONFIG: handle.dirPath,
         PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
       });
     } finally {
-      // Best-effort cleanup; each step runs independently so a file that was never
-      // written (e.g., writeFileSync threw) does not prevent the directory removal.
-      try { fs.unlinkSync(configPath); } catch { /* file may not exist */ }
-      try { fs.rmdirSync(tmpDir); } catch (e) {
-        console.warn('[ComposeService] Could not remove temp Docker config dir:', (e as Error).message);
+      try {
+        handle.cleanup();
+      } catch (cleanupErr) {
+        const cleanupMessage = getErrorMessage(cleanupErr, 'unknown error');
+        if (deliveryContext) {
+          try {
+            recordRegistryDeliveryEvent({
+              deliverySourceId,
+              eventType: 'cleanup_failed',
+              tempDirId: path.basename(handle.dirPath),
+              stack: deliveryContext.stack ?? null,
+              op: deliveryContext.stage ?? null,
+            });
+            console.error(
+              'Registry delivery temp dir cleanup failed for %s:',
+              sanitizeForLog(deliverySourceId),
+              cleanupMessage,
+            );
+          } catch (evidenceErr) {
+            console.error(
+              'Registry delivery cleanup and evidence both failed for %s:',
+              sanitizeForLog(deliverySourceId),
+              getErrorMessage(evidenceErr, 'unknown error'),
+              cleanupMessage,
+            );
+          }
+        } else {
+          console.error(
+            'Registry delivery temp dir cleanup failed for %s:',
+            sanitizeForLog(deliverySourceId),
+            cleanupMessage,
+          );
+        }
+      }
+      const prepId = deliveryContext?.seamResult?.prepId ?? deliveryContext?.envelope.prepId;
+      if (prepId) {
+        try {
+          PreparedSourceStore.getInstance().finalize(prepId);
+        } catch (finalizeErr) {
+          console.error(
+            'Registry delivery prepared-source finalize failed for %s:',
+            sanitizeForLog(prepId),
+            getErrorMessage(finalizeErr, 'unknown error'),
+          );
+        }
       }
     }
   }

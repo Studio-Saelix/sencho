@@ -13,6 +13,7 @@ import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
+import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
 
 type ExecutionResult = { success: boolean; error?: string; duration_ms: number };
 type ExecutionStatus = 'success' | 'failure';
@@ -335,10 +336,42 @@ export class WebhookService {
 
             // Build URL from validated, server-controlled components.
             const url = `${protocol}//${host}/api/stacks/${encodeURIComponent(stackName)}/${endpoint}`;
+            const apiPath = `/api/stacks/${encodeURIComponent(stackName)}/${endpoint}`;
+            let bodyToSend = body;
+            if (method === 'POST' && body !== undefined) {
+                const bodyRecord = typeof body === 'object' && body !== null && !Array.isArray(body)
+                    ? body as Record<string, unknown>
+                    : {};
+                const augmented = await prepareOutboundRegistryDeliveryBody({
+                    method,
+                    apiPath,
+                    nodeId,
+                    body: bodyRecord,
+                });
+                if (!augmented.ok) {
+                    const err = new Error(augmented.error);
+                    (err as { status?: number }).status = augmented.status;
+                    throw err;
+                }
+                bodyToSend = augmented.body;
+            } else if (method === 'POST') {
+                const augmented = await prepareOutboundRegistryDeliveryBody({
+                    method,
+                    apiPath,
+                    nodeId,
+                    body: {},
+                });
+                if (!augmented.ok) {
+                    const err = new Error(augmented.error);
+                    (err as { status?: number }).status = augmented.status;
+                    throw err;
+                }
+                bodyToSend = augmented.body;
+            }
             return await fetch(url, {
                 method,
                 headers,
-                body: method === 'GET' || body === undefined ? undefined : JSON.stringify(body),
+                body: method === 'GET' || bodyToSend === undefined ? undefined : JSON.stringify(bodyToSend),
                 signal: controller.signal,
             });
         } catch (err) {

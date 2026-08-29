@@ -32,6 +32,7 @@ import type { ScanAllNodeImagesResult } from './TrivyService';
 import TrivyInstaller from './TrivyInstaller';
 import { CloudBackupService } from './CloudBackupService';
 import { buildSystemPolicyGateOptions } from '../helpers/policyGate';
+import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { excludeSelfContainers } from '../helpers/excludeSelfContainers';
 import { enforcePolicyPreDeploy } from './PolicyEnforcement';
@@ -1245,10 +1246,20 @@ export class SchedulerService {
         const proxyTarget = this.requireRemoteProxyTarget(nodeId);
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
+        const apiPath = `/api/stacks/${routeSuffix}`;
         if (isDebugEnabled()) {
             console.log(`[SchedulerService:debug] postToRemoteStack: node=${nodeId} route=${routeSuffix}`);
         }
         try {
+            const augmented = await prepareOutboundRegistryDeliveryBody({
+                method: 'POST',
+                apiPath,
+                nodeId,
+                body: {},
+            });
+            if (!augmented.ok) {
+                throw new Error(augmented.error);
+            }
             const response = await fetch(`${baseUrl}/api/stacks/${routeSuffix}`, {
                 method: 'POST',
                 headers: {
@@ -1257,6 +1268,7 @@ export class SchedulerService {
                     [PROXY_TIER_HEADER]: proxyHeaders.tier,
                     ...extraHeaders,
                 },
+                body: JSON.stringify(augmented.body),
                 signal: AbortSignal.timeout(300_000),
             });
             if (!response.ok) {

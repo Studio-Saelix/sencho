@@ -15,6 +15,8 @@ import { MeshService } from '../services/MeshService';
 import { BlueprintReconciler } from '../services/BlueprintReconciler';
 import { CveIntelService } from '../services/CveIntelService';
 import { PilotMetrics } from '../services/PilotMetrics';
+import { PreparedSourceStore } from '../services/preparedSourceStore';
+import { RegistryDeliveryReconciler } from '../services/RegistryDeliveryReconciler';
 
 /**
  * Wire graceful shutdown handlers. Docker sends SIGTERM when the container
@@ -64,6 +66,12 @@ export function installShutdownHandlers(server: Server): void {
       }
       try { PilotMetrics.flush(); } catch (e) {
         console.warn('[Shutdown] PilotMetrics flush failed:', (e as Error).message);
+      }
+      try { PreparedSourceStore.getInstance().stop(); } catch (e) {
+        console.warn('[Shutdown] PreparedSourceStore cleanup failed:', (e as Error).message);
+      }
+      try { RegistryDeliveryReconciler.getInstance().stop(); } catch (e) {
+        console.warn('[Shutdown] RegistryDeliveryReconciler cleanup failed:', (e as Error).message);
       }
       try { DatabaseService.getInstance().flushAuditLogBuffer(); } catch (e) {
         console.warn('[Shutdown] Audit log flush failed:', (e as Error).message);

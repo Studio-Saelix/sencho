@@ -1,8 +1,18 @@
+import { useEffect, useState } from 'react';
+import { AlertTriangle } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 import { GitComposeFilePicker, type GitBrowseResult } from './GitComposeFilePicker';
+
+interface HostKeyRotationWarning {
+  previous: string;
+  current: string;
+}
 
 export type ApplyMode = 'review' | 'auto-write' | 'auto-deploy';
 
@@ -26,15 +36,22 @@ export interface GitSourceFieldsState {
   composePaths: string[];
   contextDir: string;
   syncEnv: boolean;
-  authType: 'none' | 'token';
+  authType: 'none' | 'token' | 'deploy_key';
   token: string;
+  deployKey: string;
+  sshKnownHostsEntry: string;
+  sshHostKeyFingerprint: string;
   /** When editing an existing source, the server tells us whether a token is already stored. */
   hasStoredToken: boolean;
+  hasStoredDeployKey: boolean;
+  storedHostKeyFingerprint: string | null;
   applyMode: ApplyMode;
 }
 
 export interface GitSourceFieldsProps extends GitSourceFieldsState {
   disabled?: boolean;
+  /** When probing host keys from the edit panel, scopes the request to stack:edit. */
+  stackName?: string;
   /** 'edit' for the per-stack panel, 'create' for the new-stack dialog. Changes apply-mode copy. */
   variant: 'edit' | 'create';
   onRepoUrlChange: (value: string) => void;
@@ -42,8 +59,11 @@ export interface GitSourceFieldsProps extends GitSourceFieldsState {
   onComposePathsChange: (value: string[]) => void;
   onContextDirChange: (value: string) => void;
   onSyncEnvChange: (value: boolean) => void;
-  onAuthTypeChange: (value: 'none' | 'token') => void;
+  onAuthTypeChange: (value: 'none' | 'token' | 'deploy_key') => void;
   onTokenChange: (value: string) => void;
+  onDeployKeyChange: (value: string) => void;
+  onSshKnownHostsEntryChange: (value: string) => void;
+  onSshHostKeyFingerprintChange: (value: string) => void;
   onApplyModeChange: (value: ApplyMode) => void;
   /** Runs the correct browse endpoint (create vs edit); returns the repo file list or null on failure. */
   onBrowse: () => Promise<GitBrowseResult | null>;
@@ -70,7 +90,11 @@ export function GitSourceFields({
   syncEnv,
   authType,
   token,
+  deployKey,
+  sshHostKeyFingerprint,
   hasStoredToken,
+  hasStoredDeployKey,
+  storedHostKeyFingerprint,
   applyMode,
   disabled = false,
   variant,
@@ -81,12 +105,62 @@ export function GitSourceFields({
   onSyncEnvChange,
   onAuthTypeChange,
   onTokenChange,
+  onDeployKeyChange,
+  onSshKnownHostsEntryChange,
+  onSshHostKeyFingerprintChange,
   onApplyModeChange,
   onBrowse,
+  stackName,
 }: GitSourceFieldsProps) {
   const copy = APPLY_MODE_COPY[variant];
   const primaryComposePath = composePaths[0] ?? '';
   const canBrowse = !!repoUrl?.trim() && !!branch?.trim();
+  const [hostKeyRotation, setHostKeyRotation] = useState<HostKeyRotationWarning | null>(null);
+
+  useEffect(() => {
+    setHostKeyRotation(null);
+  }, [repoUrl]);
+
+  const probeHostKey = async () => {
+    if (!repoUrl.trim()) {
+      toast.error('Enter a repository URL first.');
+      return;
+    }
+    try {
+      const res = await apiFetch('/git-sources/ssh-host-key', {
+        method: 'POST',
+        body: JSON.stringify({
+          repo_url: repoUrl.trim(),
+          ...(stackName ? { stack_name: stackName } : {}),
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err?.error || 'Failed to fetch host key.');
+        return;
+      }
+      const data = await res.json() as { keys?: Array<{ fingerprint: string; line: string }> };
+      const first = data.keys?.[0];
+      if (!first) {
+        toast.error('No host keys returned.');
+        return;
+      }
+      const previousFingerprint = (storedHostKeyFingerprint ?? sshHostKeyFingerprint).trim();
+      if (previousFingerprint && previousFingerprint !== first.fingerprint) {
+        setHostKeyRotation({ previous: previousFingerprint, current: first.fingerprint });
+        toast.warning('Host key fingerprint changed. Review the new fingerprint before saving.');
+      } else {
+        setHostKeyRotation(null);
+        if (!previousFingerprint) {
+          toast.success(`Trusted host key fingerprint: ${first.fingerprint}`);
+        }
+      }
+      onSshHostKeyFingerprintChange(first.fingerprint);
+      onSshKnownHostsEntryChange(first.line);
+    } catch (e) {
+      toast.error((e as Error)?.message || 'Network error.');
+    }
+  };
 
   const radioOption = (mode: ApplyMode) => (
     <button
@@ -121,7 +195,7 @@ export function GitSourceFields({
         <Label htmlFor="git-source-repo">Repository URL</Label>
         <Input
           id="git-source-repo"
-          placeholder="https://github.com/org/repo.git"
+          placeholder="https://github.com/org/repo.git or user@host:org/repo.git"
           value={repoUrl}
           onChange={(e) => onRepoUrlChange(e.target.value)}
           disabled={disabled}
@@ -130,10 +204,10 @@ export function GitSourceFields({
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="git-source-branch">Branch</Label>
+        <Label htmlFor="git-source-branch">Ref</Label>
         <Input
           id="git-source-branch"
-          placeholder="main"
+          placeholder="main, v1.0, or commit SHA"
           value={branch}
           onChange={(e) => onBranchChange(e.target.value)}
           disabled={disabled}
@@ -203,6 +277,19 @@ export function GitSourceFields({
           >
             Personal Access Token
           </button>
+          <button
+            type="button"
+            onClick={() => !disabled && onAuthTypeChange('deploy_key')}
+            disabled={disabled}
+            className={cn(
+              'flex-1 rounded-md border px-3 py-1.5 text-xs transition-colors',
+              authType === 'deploy_key'
+                ? 'border-brand/60 bg-brand/5'
+                : 'border-glass-border hover:border-card-border-hover',
+            )}
+          >
+            Deploy key (SSH)
+          </button>
         </div>
         {authType === 'token' && (
           <div className="space-y-1.5">
@@ -217,6 +304,59 @@ export function GitSourceFields({
             />
             <p className="text-[11px] text-stat-subtitle">
               Token is encrypted at rest and never returned from the API.
+            </p>
+          </div>
+        )}
+        {authType === 'deploy_key' && (
+          <div className="space-y-2">
+            {hostKeyRotation && (
+              <div
+                data-testid="ssh-host-key-rotation-warning"
+                className="rounded-md border border-warning/30 bg-warning/[0.06] px-3 py-2 text-[12px] leading-relaxed text-warning"
+              >
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={1.5} aria-hidden />
+                  <div>
+                    <p className="font-medium">Host key fingerprint changed</p>
+                    <p className="mt-1">
+                      The server presented a different key than the one you trusted. Confirm this is an expected rotation before saving.
+                    </p>
+                    <p className="mt-2 font-mono text-[11px]">
+                      <span className="text-stat-subtitle">Previously trusted: </span>
+                      {hostKeyRotation.previous}
+                    </p>
+                    <p className="mt-1 font-mono text-[11px]">
+                      <span className="text-stat-subtitle">New fingerprint: </span>
+                      {hostKeyRotation.current}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => void probeHostKey()}>
+                Fetch host key fingerprint
+              </Button>
+              {(sshHostKeyFingerprint || storedHostKeyFingerprint) && (
+                <span
+                  className={cn(
+                    'text-[11px] font-mono',
+                    hostKeyRotation ? 'text-warning' : 'text-stat-subtitle',
+                  )}
+                >
+                  {sshHostKeyFingerprint || storedHostKeyFingerprint}
+                </span>
+              )}
+            </div>
+            <textarea
+              placeholder={hasStoredDeployKey ? 'Private key stored (paste to replace)' : 'Paste PEM private key'}
+              value={deployKey}
+              onChange={(e) => onDeployKeyChange(e.target.value)}
+              disabled={disabled}
+              className="w-full min-h-[88px] rounded-md border border-glass-border bg-transparent px-3 py-2 font-mono text-xs"
+            />
+            <p className="text-[11px] text-stat-subtitle">
+              Deploy keys are encrypted at rest. Host keys are verified strictly; fetch the fingerprint before saving a new SSH URL.
             </p>
           </div>
         )}

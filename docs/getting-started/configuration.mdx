@@ -62,6 +62,10 @@ These tune optional subsystems. Most deployments never set them; the defaults ar
 
 Running a remote host as a pilot agent uses four more variables (`SENCHO_MODE`, `SENCHO_PRIMARY_URL`, `SENCHO_ENROLL_TOKEN`, and `SENCHO_PILOT_CA_FILE`), set only on the remote agent container. Sencho bakes them into the enrollment Compose file it generates, so you rarely write them by hand. See [Pilot Agent](/features/pilot-agent) for the full enrollment walkthrough.
 
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SENCHO_TRUSTED_PROXY_CIDRS` | *(unset)* | Comma-separated CIDRs of reverse proxies that may set `X-Forwarded-Proto` for Pilot Agent TLS termination. When unset or invalid, non-TLS Pilot upgrades are treated as non-confidential and hub registry credential delivery is skipped for that hop. Set this when a TLS-terminating proxy sits in front of the primary and pilots connect through it. |
+
 ## ZFS ARC-aware host memory
 
 On OpenZFS hosts (TrueNAS SCALE, Proxmox, ZFS on Ubuntu or Debian) the ZFS ARC cache can hold a large share of RAM. ARC is reclaimable on demand, but the Linux kernel reports it as unavailable, so a naive reading counts ARC as used memory and can raise false host-memory alerts.

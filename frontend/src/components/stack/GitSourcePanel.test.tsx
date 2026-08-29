@@ -169,13 +169,15 @@ describe('GitSourcePanel load', () => {
 
     render(panel());
 
+    // The repository field replaces the loading skeleton, so waiting on it is
+    // what proves the load settled. The footer buttons render in both states.
+    expect(await screen.findByLabelText(/repository url/i)).toHaveValue('');
     // Save (not Update) and no Pull now / Remove affordances means the panel
     // did not mistake the { linked: false } sentinel for a configured source.
-    await screen.findByRole('button', { name: /^save$/i });
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /update/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /pull now/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
-    expect(screen.getByLabelText(/repository url/i)).toHaveValue('');
   });
 
   it('renders the configured source when one is attached', async () => {

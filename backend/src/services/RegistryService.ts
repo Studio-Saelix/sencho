@@ -111,7 +111,7 @@ export function hostFromStoredRegistry(reg: Pick<Registry, 'url' | 'type'>): str
 }
 
 /** Normalize an image reference's host (the thing ImageUpdateService passes in). */
-function normalizeImageHost(host: string): string {
+export function normalizeImageHost(host: string): string {
     const lower = host.trim().toLowerCase();
     // Docker Hub aliases resolve to the same credential.
     if (lower === 'docker.io' || lower === 'registry-1.docker.io' || lower === '') {
@@ -175,6 +175,14 @@ function httpGet(
         req.on('error', reject);
         req.setTimeout(timeoutMs, () => req.destroy(new Error('Request timed out')));
     });
+}
+
+export type DockerConfigHostState = 'missing' | 'available' | 'unavailable';
+
+export interface DockerConfigHostResolution {
+    state: DockerConfigHostState;
+    auth?: { username: string; password: string };
+    expiresAt?: number;
 }
 
 // ─── Service ─────────────────────────────────────────────────────────────────
@@ -394,20 +402,63 @@ export class RegistryService {
 
     /** Resolve a Docker config containing credentials for one registry host only. */
     public async resolveDockerConfigForHost(registryHost: string): Promise<ResolvedDockerConfig> {
-        const auth = await this.getAuthForRegistry(registryHost);
-        if (!auth) return { config: { auths: {} }, warnings: [] };
+        const detailed = await this.resolveDockerConfigForHostDetailed(registryHost);
+        if (detailed.state !== 'available' || !detailed.auth) {
+            return { config: { auths: {} }, warnings: [] };
+        }
 
         const normalized = normalizeImageHost(registryHost);
         return {
             config: {
                 auths: {
                     [normalized]: {
-                        auth: Buffer.from(`${auth.username}:${auth.password}`).toString('base64'),
+                        auth: Buffer.from(`${detailed.auth.username}:${detailed.auth.password}`).toString('base64'),
                     },
                 },
             },
             warnings: [],
         };
+    }
+
+    /**
+     * Tri-state host resolution for registry delivery. Target `unavailable`
+     * means a configured row exists but credentials could not be resolved.
+     */
+    public async resolveDockerConfigForHostDetailed(registryHost: string): Promise<DockerConfigHostResolution> {
+        const db = DatabaseService.getInstance();
+        const registries = db.getRegistries();
+        const normalized = normalizeImageHost(registryHost);
+        const match = registries.find(r => hostFromStoredRegistry(r) === normalized);
+
+        if (!match) {
+            return { state: 'missing' };
+        }
+
+        try {
+            if (match.type === 'ecr') {
+                const creds = await this.getEcrCredentials(match);
+                const cached = this.ecrCache.get(match.id);
+                const expiresAt = cached?.expiresAt ?? Date.now() + ECR_DEFAULT_TTL_MS;
+                return {
+                    state: 'available',
+                    auth: { username: creds.username, password: creds.password },
+                    expiresAt,
+                };
+            }
+            return {
+                state: 'available',
+                auth: {
+                    username: match.username,
+                    password: this.crypto.decrypt(match.secret),
+                },
+            };
+        } catch (e) {
+            console.warn(
+                `[RegistryService] resolveDockerConfigForHostDetailed(${registryHost}) failed:`,
+                sanitizeForLog((e as Error).message),
+            );
+            return { state: 'unavailable' };
+        }
     }
 
 

@@ -17,6 +17,7 @@ import { sendGitSourceError, webhookPullStatus } from '../utils/gitSourceHttp';
 import { sanitizeForLog } from '../utils/safeLog';
 import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
+import { auditActorUsername } from '../helpers/auditActor';
 
 // Reasonable upper bounds so a caller cannot flood the service with huge
 // payloads. Generous compared to anything a real Git provider emits.
@@ -32,14 +33,22 @@ const MAX_TOKEN_LENGTH = 8192;
  * is reused when the request omits a token, so the edit-mode flow does not force
  * re-entering a stored PAT.
  */
-async function handleBrowse(req: Request, res: Response, storedToken: string | null): Promise<void> {
-  const { repo_url, branch, auth_type, token } = req.body ?? {};
+const MAX_DEPLOY_KEY_LENGTH = 16384;
+
+async function handleBrowse(
+  req: Request,
+  res: Response,
+  storedToken: string | null,
+  storedDeployKey: string | null,
+  storedKnownHosts: string | null,
+): Promise<void> {
+  const { repo_url, branch, auth_type, token, deploy_key, ssh_known_hosts_entry } = req.body ?? {};
   if (typeof repo_url !== 'string' || !repo_url.trim()) {
     res.status(400).json({ error: 'repo_url is required' });
     return;
   }
   if (typeof branch !== 'string' || !branch.trim()) {
-    res.status(400).json({ error: 'branch is required' });
+    res.status(400).json({ error: 'A branch, tag, or commit SHA is required.' });
     return;
   }
   const repoUrlError = repoUrlRejectionMessage(repo_url);
@@ -48,25 +57,46 @@ async function handleBrowse(req: Request, res: Response, storedToken: string | n
     return;
   }
   if (branch.length > MAX_BRANCH_LENGTH) {
-    res.status(400).json({ error: 'branch is too long' });
+    res.status(400).json({ error: 'The branch, tag, or commit SHA is too long.' });
     return;
   }
-  if (auth_type !== undefined && auth_type !== 'none' && auth_type !== 'token') {
-    res.status(400).json({ error: 'auth_type must be "none" or "token"' });
+  if (auth_type !== undefined && auth_type !== 'none' && auth_type !== 'token' && auth_type !== 'deploy_key') {
+    res.status(400).json({ error: 'auth_type must be "none", "token", or "deploy_key"' });
     return;
   }
   if (typeof token === 'string' && token.length > MAX_TOKEN_LENGTH) {
     res.status(400).json({ error: 'token is too long' });
     return;
   }
+  if (typeof deploy_key === 'string' && deploy_key.length > MAX_DEPLOY_KEY_LENGTH) {
+    res.status(400).json({ error: 'deploy_key is too long' });
+    return;
+  }
   const explicitToken = typeof token === 'string' && token.trim() ? token : null;
-  const effectiveToken = auth_type === 'none' ? null : (explicitToken ?? storedToken);
+  const effectiveToken = auth_type === 'token' ? (explicitToken ?? storedToken) : null;
+  const explicitDeployKey = typeof deploy_key === 'string' && deploy_key.trim() ? deploy_key : null;
+  const effectiveDeployKey = auth_type === 'deploy_key' ? (explicitDeployKey ?? storedDeployKey) : null;
+  const effectiveKnownHosts = auth_type === 'deploy_key'
+    ? (typeof ssh_known_hosts_entry === 'string' && ssh_known_hosts_entry.trim()
+      ? ssh_known_hosts_entry.trim()
+      : storedKnownHosts)
+    : null;
+  const listParams: {
+    repoUrl: string;
+    branch: string;
+    token?: string | null;
+    sshAuth?: { privateKey: string; knownHostsEntry: string };
+  } = {
+    repoUrl: repo_url.trim(),
+    branch: branch.trim(),
+  };
+  if (auth_type === 'token') {
+    listParams.token = effectiveToken;
+  } else if (auth_type === 'deploy_key' && effectiveDeployKey && effectiveKnownHosts) {
+    listParams.sshAuth = { privateKey: effectiveDeployKey, knownHostsEntry: effectiveKnownHosts };
+  }
   try {
-    const result = await GitSourceService.getInstance().listRepoTree({
-      repoUrl: repo_url.trim(),
-      branch: branch.trim(),
-      token: effectiveToken,
-    });
+    const result = await GitSourceService.getInstance().listRepoTree(listParams);
     res.json(result);
   } catch (error) {
     sendGitSourceError(res, error);
@@ -75,6 +105,44 @@ async function handleBrowse(req: Request, res: Response, storedToken: string | n
 
 /** Router for listing git-source configuration: `GET /api/git-sources`. */
 export const gitSourcesRouter = Router();
+
+gitSourcesRouter.post('/ssh-host-key', async (req: Request, res: Response): Promise<void> => {
+  const { repo_url, stack_name } = req.body ?? {};
+  if (typeof stack_name === 'string' && stack_name.trim()) {
+    if (!isValidStackName(stack_name.trim())) {
+      res.status(400).json({ error: 'Invalid stack name' });
+      return;
+    }
+    if (!requirePermission(req, res, 'stack:edit', 'stack', stack_name.trim())) return;
+  } else if (!requirePermission(req, res, 'stack:create')) {
+    return;
+  }
+  if (typeof repo_url !== 'string' || !repo_url.trim()) {
+    res.status(400).json({ error: 'repo_url is required' });
+    return;
+  }
+  const repoUrlError = repoUrlRejectionMessage(repo_url);
+  if (repoUrlError) {
+    res.status(400).json({ error: repoUrlError });
+    return;
+  }
+  try {
+    const { parseSshUrl, scanHostKeys } = await import('../services/git/sshTrust');
+    const parsed = parseSshUrl(repo_url.trim());
+    if (!parsed) {
+      res.status(400).json({ error: 'Host key probe requires an SSH repository URL' });
+      return;
+    }
+    const keys = await scanHostKeys(parsed.host, parsed.port);
+    res.json({
+      host: parsed.host,
+      port: parsed.port,
+      keys,
+    });
+  } catch (error) {
+    sendGitSourceError(res, error);
+  }
+});
 
 gitSourcesRouter.get('/', async (req: Request, res: Response): Promise<void> => {
   try {
@@ -126,7 +194,7 @@ gitSourcesRouter.get('/history', async (req: Request, res: Response): Promise<vo
 // creating a stack from Git.
 gitSourcesRouter.post('/browse', async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'stack:create')) return;
-  await handleBrowse(req, res, null);
+  await handleBrowse(req, res, null, null, null);
 });
 
 /**
@@ -220,6 +288,9 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       env_path,
       auth_type,
       token,
+      deploy_key,
+      ssh_known_hosts_entry,
+      ssh_host_key_fingerprint,
       auto_apply_on_webhook,
       auto_deploy_on_apply,
     } = req.body ?? {};
@@ -229,7 +300,7 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       return;
     }
     if (typeof branch !== 'string' || !branch.trim()) {
-      res.status(400).json({ error: 'branch is required' });
+      res.status(400).json({ error: 'A branch, tag, or commit SHA is required.' });
       return;
     }
     const selection = parseComposeSelection(req.body);
@@ -237,8 +308,8 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       res.status(400).json({ error: selection.error });
       return;
     }
-    if (auth_type !== 'none' && auth_type !== 'token') {
-      res.status(400).json({ error: 'auth_type must be "none" or "token"' });
+    if (auth_type !== 'none' && auth_type !== 'token' && auth_type !== 'deploy_key') {
+      res.status(400).json({ error: 'auth_type must be "none", "token", or "deploy_key"' });
       return;
     }
     if (auto_apply_on_webhook !== undefined && typeof auto_apply_on_webhook !== 'boolean') {
@@ -255,7 +326,7 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       return;
     }
     if (branch.length > MAX_BRANCH_LENGTH) {
-      res.status(400).json({ error: 'branch is too long' });
+      res.status(400).json({ error: 'The branch, tag, or commit SHA is too long.' });
       return;
     }
     if (typeof env_path === 'string' && env_path.length > MAX_ENV_PATH_LENGTH) {
@@ -268,6 +339,10 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
     }
     if (typeof token === 'string' && token.length > MAX_TOKEN_LENGTH) {
       res.status(400).json({ error: 'token is too long' });
+      return;
+    }
+    if (typeof deploy_key === 'string' && deploy_key.length > MAX_DEPLOY_KEY_LENGTH) {
+      res.status(400).json({ error: 'deploy_key is too long' });
       return;
     }
     const autoApplyOnWebhook = auto_apply_on_webhook === true;
@@ -298,8 +373,17 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       envPath: resolvedEnvPath,
       authType: auth_type,
       token: typeof token === 'string' ? token : undefined,
+      deployKey: typeof deploy_key === 'string' ? deploy_key : undefined,
+      sshKnownHostsEntry: typeof ssh_known_hosts_entry === 'string' ? ssh_known_hosts_entry : undefined,
+      sshHostKeyFingerprint: typeof ssh_host_key_fingerprint === 'string' ? ssh_host_key_fingerprint : undefined,
       autoApplyOnWebhook,
       autoDeployOnApply,
+      auditContext: {
+        username: auditActorUsername(req),
+        method: req.method,
+        path: req.originalUrl,
+        ipAddress: req.ip || 'unknown',
+      },
     });
 
     // The cached /stacks/statuses payload carries the source label; drop it
@@ -488,5 +572,7 @@ stackGitSourceRouter.post('/:stackName/git-source/browse', async (req: Request, 
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   const src = DatabaseService.getInstance().getGitSource(stackName);
   const storedToken = src?.encrypted_token ? CryptoService.getInstance().decrypt(src.encrypted_token) : null;
-  await handleBrowse(req, res, storedToken);
+  const storedDeployKey = src?.encrypted_deploy_key ? CryptoService.getInstance().decrypt(src.encrypted_deploy_key) : null;
+  const storedKnownHosts = src?.ssh_known_hosts_entry ?? null;
+  await handleBrowse(req, res, storedToken, storedDeployKey, storedKnownHosts);
 });

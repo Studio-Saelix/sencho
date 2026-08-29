@@ -64,6 +64,7 @@ export const HUB_ONLY_PREFIXES: readonly string[] = [
   '/api/secrets/',
   '/api/blueprints/',
   '/api/node-labels/',
+  '/api/registry-delivery/',
   '/api/sso/',
 ];
 

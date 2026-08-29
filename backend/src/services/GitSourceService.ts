@@ -1,5 +1,4 @@
 import { promises as fsPromises, existsSync } from 'fs';
-import { spawn } from 'child_process';
 import crypto from 'crypto';
 import os from 'os';
 import path from 'path';
@@ -29,7 +28,9 @@ import type { GitChangePlan, PublicGitChangePlan, GitChangePlanCounts, PublicGit
 import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
 import type { NotificationCategory } from './NotificationService';
 import { classifyGitFailure, isTransportFailure } from './git/errors';
-import { nativeGitTransport } from './git/nativeGitTransport';
+import type { RefKind, SshDeployKeyAuth } from './git/types';
+import { nativeGitTransport, verifyFastForward } from './git/nativeGitTransport';
+import { fingerprintFromKnownHostsLine } from './git/sshTrust';
 import { GitOpsStore } from './gitops/store';
 import { GitOpsTransitions, GitOpsTransitionError } from './gitops/transitions';
 import {
@@ -41,9 +42,12 @@ import {
     stackManagedRoot,
 } from './gitops/directApplication';
 import type { GitOpsApplicationRow } from './gitops/types';
-import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readStagingMarker, writeStagingMarker } from './gitops/createStagingMarker';
+import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readStagingMarker, validateCandidateRelPath, writeStagingMarker } from './gitops/createStagingMarker';
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops/createCleanup';
 import { managedAreaBase } from './gitops/managedPaths';
+import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
+import { copyPreparedPayloadDirectory } from '../helpers/registryDeliveryMaterialize';
+import { runDockerCompose as spawnDockerCompose } from '../helpers/dockerComposeRunner';
 
 /**
  * GitSourceService - fetch compose files from a Git repository and apply
@@ -58,7 +62,10 @@ import { managedAreaBase } from './gitops/managedPaths';
 export type GitSourceErrorCode =
     | 'REPO_NOT_FOUND'
     | 'AUTH_FAILED'
-    | 'BRANCH_NOT_FOUND'
+    | 'REF_NOT_FOUND'
+    | 'REF_DELETED'
+    | 'UNSUPPORTED_REF'
+    | 'SSH_HOST_KEY_FAILED'
     | 'FILE_NOT_FOUND'
     | 'NETWORK_TIMEOUT'
     | 'GIT_ERROR'
@@ -104,6 +111,7 @@ export interface FetchParams {
     composePaths: string[];
     envPath?: string | null;
     token?: string | null;
+    sshAuth?: SshDeployKeyAuth | null;
     timeoutMs?: number;
     /**
      * Runs inside the clone lifecycle (before the temp dir is removed) so the
@@ -111,12 +119,29 @@ export interface FetchParams {
      * Used by the pull/create paths for complete-project materialization.
      */
     onClone?: (cloneDir: string, commitSha: string, envContent: string | null) => Promise<unknown>;
+    /**
+     * True when this source has fetched successfully before. Turns a ref that
+     * now fails to resolve into REF_DELETED (removed or force-pushed) instead
+     * of a plain REF_NOT_FOUND, which would read as a mis-typed ref.
+     */
+    hasPriorHistory?: boolean;
+    /**
+     * The commit and resolved namespace from the last successful fetch. Used to
+     * detect force-pushes and ref-kind changes when the symbolic ref still exists.
+     */
+    priorIdentity?: { commitSha: string; kind: RefKind };
 }
 
 export interface FetchResult {
     composeFiles: ComposeFile[];
     envContent: string | null;
     commitSha: string;
+    /**
+     * The namespace the configured ref resolved through. Recorded wherever the
+     * commit is persisted so "tag v1 -> <sha>" and "branch v1 -> <sha>" stay
+     * distinguishable in revision state.
+     */
+    resolvedRefKind: RefKind;
     /**
      * Non-fatal issues detected during the fetch (e.g. the repo uses
      * submodules that are not cloned). The stack is still usable but the
@@ -145,8 +170,17 @@ export interface UpsertInput {
     envPath: string | null;
     authType: GitSourceAuthType;
     token?: string | null;  // undefined = keep existing, '' = clear, non-empty = replace
+    deployKey?: string | null;
+    sshKnownHostsEntry?: string | null;
+    sshHostKeyFingerprint?: string | null;
     autoApplyOnWebhook: boolean;
     autoDeployOnApply: boolean;
+    auditContext?: {
+        username: string;
+        method: string;
+        path: string;
+        ipAddress: string;
+    };
 }
 
 export interface CreateStackFromGitInput {
@@ -159,8 +193,17 @@ export interface CreateStackFromGitInput {
     envPath: string | null;
     authType: GitSourceAuthType;
     token: string | null;
+    deployKey?: string | null;
+    sshKnownHostsEntry?: string | null;
+    sshHostKeyFingerprint?: string | null;
     autoApplyOnWebhook: boolean;
     autoDeployOnApply: boolean;
+    auditContext?: {
+        username: string;
+        method: string;
+        path: string;
+        ipAddress: string;
+    };
 }
 
 export interface CreateStackFromGitResult {
@@ -204,6 +247,8 @@ export interface PublicGitSource {
     env_path: string | null;
     auth_type: GitSourceAuthType;
     has_token: boolean;
+    has_deploy_key: boolean;
+    ssh_host_key_fingerprint: string | null;
     auto_apply_on_webhook: boolean;
     auto_deploy_on_apply: boolean;
     last_applied_commit_sha: string | null;
@@ -407,6 +452,24 @@ async function readRepoFile(rootDir: string, relPath: string, label: string): Pr
 const SUBMODULE_WARNING =
     'Repository contains Git submodules. Their contents are not cloned; any paths referenced from them will be missing at deploy time.';
 
+const REF_DELETED_MESSAGE =
+    'The configured branch, tag, or commit no longer points at the same revision as before. It may have been deleted, force-pushed, or moved to a different commit (for example a retagged release).';
+
+function priorFetchIdentity(app: GitOpsApplicationRow | null | undefined): FetchParams['priorIdentity'] {
+    if (!app?.fetched_commit_sha) return undefined;
+    let kind = app.fetched_resolved_ref_kind;
+    if (!kind) {
+        const genId = app.candidate_generation_id ?? app.accepted_generation_id;
+        if (genId) {
+            kind = GitOpsStore.getInstance().getGeneration(genId)?.resolved_ref_kind ?? null;
+        }
+    }
+    return {
+        commitSha: app.fetched_commit_sha,
+        kind: kind ?? 'branch',
+    };
+}
+
 /**
  * Reject any relative path that resolves into the `.git` metadata
  * directory. The path-traversal check in `fetchFromGit` already bounds
@@ -504,6 +567,8 @@ export class GitSourceService {
             env_path: src.env_path,
             auth_type: src.auth_type,
             has_token: !!src.encrypted_token,
+            has_deploy_key: !!src.encrypted_deploy_key,
+            ssh_host_key_fingerprint: src.ssh_host_key_fingerprint ?? null,
             auto_apply_on_webhook: src.auto_apply_on_webhook,
             auto_deploy_on_apply: src.auto_deploy_on_apply,
             last_applied_commit_sha: src.last_applied_commit_sha,
@@ -529,21 +594,126 @@ export class GitSourceService {
 
     // ─── CRUD ────────────────────────────────────────────────────────────────
 
+    private resolveSshTrustFromKnownHostsEntry(
+        knownHostsEntry: string,
+        clientFingerprint?: string | null,
+    ): { sshKnownHostsEntry: string; sshHostKeyFingerprint: string } {
+        const sshKnownHostsEntry = knownHostsEntry.trim();
+        const derived = fingerprintFromKnownHostsLine(sshKnownHostsEntry);
+        if (!derived) {
+            throw new GitSourceError('GIT_ERROR', 'SSH known_hosts entry is invalid or incomplete.');
+        }
+        const trimmedClient = clientFingerprint?.trim();
+        if (trimmedClient && trimmedClient !== derived) {
+            throw new GitSourceError('GIT_ERROR', 'SSH host key fingerprint does not match the trusted key entry.');
+        }
+        return { sshKnownHostsEntry, sshHostKeyFingerprint: derived };
+    }
+
+    private recordSshTrustAudit(args: {
+        stackName: string;
+        username: string;
+        method: string;
+        path: string;
+        ipAddress: string;
+        fingerprint: string;
+        action: 'created' | 'rotated';
+    }): void {
+        try {
+            DatabaseService.getInstance().insertAuditLog({
+                timestamp: Date.now(),
+                username: args.username,
+                method: args.method,
+                path: args.path,
+                status_code: 200,
+                node_id: null,
+                ip_address: args.ipAddress,
+                summary: `git_source.ssh_trust_${args.action}: stack=${args.stackName} fingerprint=${args.fingerprint}`,
+            });
+        } catch (err) {
+            console.warn('[GitSource] SSH trust audit write failed:', sanitizeForLog(String(err)));
+        }
+    }
+
+    private maybeRecordSshTrustAudit(
+        auditContext: UpsertInput['auditContext'],
+        stackName: string,
+        fingerprint: string,
+        action: 'created' | 'rotated',
+    ): void {
+        if (!auditContext) return;
+        this.recordSshTrustAudit({ ...auditContext, stackName, fingerprint, action });
+    }
+
+    private resolveTransportAuth(src: Pick<StackGitSource, 'auth_type' | 'encrypted_token' | 'encrypted_deploy_key' | 'ssh_known_hosts_entry'>): {
+        token?: string | null;
+        sshAuth?: SshDeployKeyAuth | null;
+    } {
+        if (src.auth_type === 'token') {
+            return { token: src.encrypted_token ? this.crypto.decrypt(src.encrypted_token) : null };
+        }
+        if (src.auth_type === 'deploy_key') {
+            if (!src.encrypted_deploy_key || !src.ssh_known_hosts_entry) {
+                return { sshAuth: null };
+            }
+            return {
+                sshAuth: {
+                    privateKey: this.crypto.decrypt(src.encrypted_deploy_key),
+                    knownHostsEntry: src.ssh_known_hosts_entry,
+                },
+            };
+        }
+        return { token: null };
+    }
+
     public async upsert(input: UpsertInput): Promise<PublicGitSource> {
         const db = DatabaseService.getInstance();
         const existing = db.getGitSource(input.stackName);
 
-        // Determine the stored token.
-        let encryptedToken: string | null;
+        // Determine stored credentials per auth type.
+        let encryptedToken: string | null = null;
+        let encryptedDeployKey: string | null = null;
+        let sshKnownHostsEntry: string | null = null;
+        let sshHostKeyFingerprint: string | null = null;
+
         if (input.authType === 'none') {
-            encryptedToken = null;
-        } else if (input.token === undefined) {
-            // Keep existing
-            encryptedToken = existing?.encrypted_token ?? null;
-        } else if (input.token === null || input.token === '') {
-            encryptedToken = null;
-        } else {
-            encryptedToken = this.crypto.encrypt(input.token);
+            // all null
+        } else if (input.authType === 'token') {
+            if (input.token === undefined) {
+                encryptedToken = existing?.encrypted_token ?? null;
+            } else if (input.token === null || input.token === '') {
+                encryptedToken = null;
+            } else {
+                encryptedToken = this.crypto.encrypt(input.token);
+            }
+        } else if (input.authType === 'deploy_key') {
+            if (input.deployKey === undefined) {
+                encryptedDeployKey = existing?.encrypted_deploy_key ?? null;
+            } else if (input.deployKey === null || input.deployKey === '') {
+                encryptedDeployKey = null;
+            } else {
+                encryptedDeployKey = this.crypto.encrypt(input.deployKey);
+            }
+            if (input.sshKnownHostsEntry === undefined) {
+                sshKnownHostsEntry = existing?.ssh_known_hosts_entry ?? null;
+                sshHostKeyFingerprint = existing?.ssh_host_key_fingerprint ?? null;
+            } else if (input.sshKnownHostsEntry === null || input.sshKnownHostsEntry.trim() === '') {
+                sshKnownHostsEntry = null;
+                sshHostKeyFingerprint = null;
+            } else {
+                const trust = this.resolveSshTrustFromKnownHostsEntry(
+                    input.sshKnownHostsEntry,
+                    input.sshHostKeyFingerprint,
+                );
+                sshKnownHostsEntry = trust.sshKnownHostsEntry;
+                sshHostKeyFingerprint = trust.sshHostKeyFingerprint;
+            }
+            if (!encryptedDeployKey || !sshKnownHostsEntry) {
+                throw new GitSourceError(
+                    'GIT_ERROR',
+                    'Deploy key authentication requires a private key and a trusted SSH host key.',
+                );
+            }
         }
 
         // Apply-matrix sanity: auto_deploy requires auto_apply.
@@ -571,13 +741,22 @@ export class GitSourceService {
 
         // Dry-run reachability check before persisting. Fetches every configured
         // file so a bad path in the ordered list is caught at save time.
-        const token = encryptedToken ? this.crypto.decrypt(encryptedToken) : null;
+        const fetchAuth = input.authType === 'token'
+            ? { token: encryptedToken ? this.crypto.decrypt(encryptedToken) : null }
+            : input.authType === 'deploy_key'
+                ? {
+                    sshAuth: {
+                        privateKey: this.crypto.decrypt(encryptedDeployKey!),
+                        knownHostsEntry: sshKnownHostsEntry!,
+                    },
+                }
+                : { token: null };
         await this.fetchFromGit({
             repoUrl: input.repoUrl,
             branch: input.branch,
             composePaths: input.composePaths,
             envPath: input.syncEnv ? input.envPath : null,
-            token,
+            ...fetchAuth,
         });
 
         const resolvedEnvPath = input.syncEnv ? input.envPath : null;
@@ -619,6 +798,9 @@ export class GitSourceService {
                 env_path: resolvedEnvPath,
                 auth_type: input.authType,
                 encrypted_token: encryptedToken,
+                encrypted_deploy_key: encryptedDeployKey,
+                ssh_known_hosts_entry: sshKnownHostsEntry,
+                ssh_host_key_fingerprint: sshHostKeyFingerprint,
                 auto_apply_on_webhook: input.autoApplyOnWebhook,
                 auto_deploy_on_apply: input.autoDeployOnApply,
                 last_applied_commit_sha: existing?.last_applied_commit_sha ?? null,
@@ -675,6 +857,23 @@ export class GitSourceService {
                 });
             }
         })();
+
+        if (
+            input.authType === 'deploy_key'
+            && input.sshKnownHostsEntry !== undefined
+            && sshKnownHostsEntry
+            && sshHostKeyFingerprint
+        ) {
+            const priorKnownHosts = existing?.ssh_known_hosts_entry ?? null;
+            if (priorKnownHosts !== sshKnownHostsEntry) {
+                this.maybeRecordSshTrustAudit(
+                    input.auditContext,
+                    input.stackName,
+                    sshHostKeyFingerprint,
+                    priorKnownHosts ? 'rotated' : 'created',
+                );
+            }
+        }
 
         return this.get(input.stackName)!;
     }
@@ -917,25 +1116,58 @@ export class GitSourceService {
      * structured transport failures mapped below.
      */
     private async withClonedRepo<T>(
-        params: { repoUrl: string; branch: string; token?: string | null; timeoutMs?: number },
-        fn: (dir: string, commitSha: string, warnings: string[]) => Promise<T>,
+        params: {
+            repoUrl: string;
+            branch: string;
+            token?: string | null;
+            sshAuth?: SshDeployKeyAuth | null;
+            timeoutMs?: number;
+            hasPriorHistory?: boolean;
+            priorIdentity?: { commitSha: string; kind: RefKind };
+        },
+        fn: (dir: string, commitSha: string, warnings: string[], resolvedRefKind: RefKind) => Promise<T>,
     ): Promise<T> {
-        const { repoUrl, branch, token } = params;
+        const { repoUrl, branch, token, sshAuth } = params;
         const timeoutMs = params.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
         const root = await createTempDir();
+        const hasPriorHistory = params.hasPriorHistory === true || params.priorIdentity != null;
 
         try {
             const resolved = await nativeGitTransport.resolveRef({
                 repoUrl,
                 ref: branch,
                 token,
+                sshAuth,
                 timeoutMs,
                 workspaceRoot: root,
             });
+            if (params.priorIdentity) {
+                const prior = params.priorIdentity;
+                if (prior.kind !== resolved.kind) {
+                    throw new GitSourceError('REF_DELETED', REF_DELETED_MESSAGE);
+                }
+                if (prior.kind !== 'sha' && prior.commitSha !== resolved.commitSha) {
+                    const fastForward = await verifyFastForward({
+                        repoUrl,
+                        ancestorSha: prior.commitSha,
+                        descendantSha: resolved.commitSha,
+                        token,
+                        sshAuth,
+                        timeoutMs,
+                        workspaceRoot: root,
+                        maxBytes: maxCloneBytes(),
+                    });
+                    if (!fastForward) {
+                        throw new GitSourceError('REF_DELETED', REF_DELETED_MESSAGE);
+                    }
+                }
+            }
             const fetched = await nativeGitTransport.fetchAtCommit({
                 repoUrl,
                 ref: branch,
+                refKind: resolved.kind,
                 token,
+                sshAuth,
                 timeoutMs,
                 commitSha: resolved.commitSha,
                 workspaceRoot: root,
@@ -951,7 +1183,7 @@ export class GitSourceService {
                 warnings.push(SUBMODULE_WARNING);
             }
 
-            return await fn(fetched.dir, fetched.commitSha, warnings);
+            return await fn(fetched.dir, fetched.commitSha, warnings, resolved.kind);
         } catch (e) {
             if (isTransportFailure(e)) {
                 // The classified message operators see is deliberately
@@ -966,6 +1198,11 @@ export class GitSourceService {
                     console.error(`[GitSource:transport] argv=[${e.argv.map((a) => sanitizeForLog(a)).join(' ')}]`);
                 }
                 const classified = classifyGitFailure(e);
+                // A ref that resolved before but no longer does is a deletion
+                // or force-push, distinct from a mis-typed ref on first link.
+                if (classified.code === 'REF_NOT_FOUND' && hasPriorHistory) {
+                    throw new GitSourceError('REF_DELETED', REF_DELETED_MESSAGE);
+                }
                 throw new GitSourceError(classified.code, classified.message);
             }
             throw e;
@@ -975,7 +1212,7 @@ export class GitSourceService {
     }
 
     public async fetchFromGit(params: FetchParams): Promise<FetchResult> {
-        const { repoUrl, branch, composePaths, envPath, token } = params;
+        const { repoUrl, branch, composePaths, envPath, token, sshAuth } = params;
 
         // Reject any compose/env target that resolves inside the `.git`
         // metadata directory BEFORE we spin up a clone. This blocks a
@@ -987,13 +1224,21 @@ export class GitSourceService {
         const startedAt = Date.now();
         const diag = isDebugEnabled();
         if (diag) {
-            console.log(
-                `[GitSource:diag] fetch start host=${sanitizeForLog(repoHost(repoUrl))} branch=${sanitizeForLog(branch)} files=${composePaths.length} envSync=${envPath ? 'true' : 'false'}`
-            );
+            console.log(sanitizeForLog(
+                `[GitSource:diag] fetch start host=${repoHost(repoUrl)} branch=${branch} files=${composePaths.length} envSync=${envPath ? 'true' : 'false'}`,
+            ));
         }
 
         try {
-            return await this.withClonedRepo({ repoUrl, branch, token, timeoutMs: params.timeoutMs }, async (dir, commitSha, warnings) => {
+            return await this.withClonedRepo({
+                repoUrl,
+                branch,
+                token,
+                sshAuth,
+                timeoutMs: params.timeoutMs,
+                hasPriorHistory: params.hasPriorHistory,
+                priorIdentity: params.priorIdentity,
+            }, async (dir, commitSha, warnings, resolvedRefKind) => {
                 const composeFiles: ComposeFile[] = [];
                 for (const composePath of composePaths) {
                     const content = await readRepoFile(dir, composePath, 'Compose path');
@@ -1040,7 +1285,7 @@ export class GitSourceService {
                         `[GitSource:diag] fetch ok host=${sanitizeForLog(repoHost(repoUrl))} branch=${sanitizeForLog(branch)} sha=${commitSha.slice(0, 7)} files=${composeFiles.length} env=${envContent !== null ? 'present' : 'absent'} warnings=${warnings.length} materialized=${materialization !== null} elapsedMs=${Date.now() - startedAt}`
                     );
                 }
-                return { composeFiles, envContent, commitSha, warnings, materialization };
+                return { composeFiles, envContent, commitSha, resolvedRefKind, warnings, materialization };
             });
         } catch (err) {
             if (diag) {
@@ -1059,7 +1304,7 @@ export class GitSourceService {
      * same clone size/timeout guards as fetch, plus a file-count cap.
      */
     public async listRepoTree(
-        params: { repoUrl: string; branch: string; token?: string | null; timeoutMs?: number },
+        params: { repoUrl: string; branch: string; token?: string | null; sshAuth?: SshDeployKeyAuth | null; timeoutMs?: number },
     ): Promise<{ files: string[]; truncated: boolean; commitSha: string; warnings: string[] }> {
         return this.withClonedRepo(params, async (dir, commitSha, warnings) => {
             const { files, truncated } = await this.walkRepoFiles(dir);
@@ -1301,26 +1546,8 @@ export class GitSourceService {
         };
     }
 
-    private runDockerCompose(args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
-        return new Promise((resolve) => {
-            const child = spawn('docker', args, { cwd });
-            let stdout = '';
-            let stderr = '';
-            const timer = setTimeout(() => {
-                try { child.kill('SIGKILL'); } catch { /* best effort */ }
-                resolve({ code: -1, stdout, stderr: stderr + '\nValidation timed out.' });
-            }, timeoutMs);
-            child.stdout.on('data', d => { stdout += d.toString(); });
-            child.stderr.on('data', d => { stderr += d.toString(); });
-            child.on('close', (code) => {
-                clearTimeout(timer);
-                resolve({ code: code ?? -1, stdout, stderr });
-            });
-            child.on('error', (err) => {
-                clearTimeout(timer);
-                resolve({ code: -1, stdout, stderr: stderr + '\n' + err.message });
-            });
-        });
+    private runDockerCompose(args: string[], cwd: string, timeoutMs: number) {
+        return spawnDockerCompose(args, cwd, timeoutMs);
     }
 
     // ─── Hashing + diff ──────────────────────────────────────────────────────
@@ -1732,19 +1959,23 @@ export class GitSourceService {
             console.log(`[GitSource:diag] pull start stack=${stackName} branch=${src.branch} host=${repoHost(src.repo_url)}`);
         }
 
-        const token = src.encrypted_token ? this.crypto.decrypt(src.encrypted_token) : null;
+        const transportAuth = this.resolveTransportAuth(src);
         const manifestSvc = GitProjectManifestService.getInstance();
         // Object holder: property access is not narrowed by control-flow
         // analysis, so the closure assignment below stays visible.
         const materialization: { value: MaterializationResult | null } = { value: null };
         // Every throw from here on, including this fetch, is closed by the
         // caller's handler, so nothing is recorded locally.
+        const priorIdentity = priorFetchIdentity(gitopsApp);
         const fetched: FetchResult = await this.fetchFromGit({
             repoUrl: src.repo_url,
             branch: src.branch,
             composePaths: src.compose_paths,
             envPath: src.sync_env ? src.env_path : null,
-            token,
+            token: transportAuth.token,
+            sshAuth: transportAuth.sshAuth,
+            hasPriorHistory: priorIdentity != null,
+            priorIdentity,
             onClone: async (cloneDir, commitSha, envContent) => {
                 materialization.value = await this.buildMaterialization(stackName, cloneDir, commitSha, src, envContent);
             },
@@ -1792,10 +2023,10 @@ export class GitSourceService {
                 // generation while the projection reports the older commit.
                 DatabaseService.getInstance().getDb().transaction(() => {
                 if (!validation.ok) {
-                    tx.fetchedInvalid(gitopsApp.id, fetched.commitSha, gitopsEnv);
+                    tx.fetchedInvalid(gitopsApp.id, fetched.commitSha, gitopsEnv, fetched.resolvedRefKind);
                     return;
                 }
-                tx.fetched(gitopsApp.id, fetched.commitSha, gitopsEnv);
+                tx.fetched(gitopsApp.id, fetched.commitSha, gitopsEnv, fetched.resolvedRefKind);
                 if (!materialization.value) return;
                 const identity = directSourceIdentity({
                     repoUrl: src.repo_url,
@@ -1831,6 +2062,7 @@ export class GitSourceService {
                     commitSha: fetched.commitSha,
                     identity,
                     configuredRef: src.branch,
+                    resolvedRefKind: fetched.resolvedRefKind,
                     candidateRelPath: materialization.value.candidateRelPath,
                     appliedRelPath: appliedRelPathFor(fetched.commitSha, nextManifestVersion),
                     manifestVersion: nextManifestVersion,
@@ -1957,6 +2189,7 @@ export class GitSourceService {
             'git_apply',
             opts.actor ?? 'system:git-source',
             () => this.applyLocked(stackName, commitSha, opts),
+            getRegistryDeliveryLockContext(),
         );
         if (!lock.ran) {
             throw new GitSourceError(
@@ -2100,6 +2333,15 @@ export class GitSourceService {
 
             // The staged candidate must still exist and be complete; a deleted
             // candidate (or a node restart that swept it) invalidates the pull.
+            const deliveryPrepId = getRegistryDeliveryContext()?.envelope.prepId;
+            if (deliveryPrepId) {
+                await this.restoreApplyFromPreparedGitCandidate(
+                    deliveryPrepId,
+                    stackName,
+                    commitSha,
+                    pending.candidateRelPath,
+                );
+            }
             const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
             const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, pending.candidateRelPath);
             try {
@@ -2530,38 +2772,79 @@ export class GitSourceService {
             });
             const staged: { candidateRelPath: string | null } = { candidateRelPath: null };
 
+            const createDeployKeyTrust = input.authType === 'deploy_key'
+                ? (() => {
+                    if (!input.deployKey?.trim() || !input.sshKnownHostsEntry?.trim()) {
+                        throw new GitSourceError(
+                            'GIT_ERROR',
+                            'Deploy key authentication requires a private key and a trusted SSH host key.',
+                        );
+                    }
+                    return {
+                        encryptedDeployKey: this.crypto.encrypt(input.deployKey.trim()),
+                        ...this.resolveSshTrustFromKnownHostsEntry(
+                            input.sshKnownHostsEntry,
+                            input.sshHostKeyFingerprint,
+                        ),
+                    };
+                })()
+                : null;
+
             // 1. Fetch from git BEFORE touching disk or DB. If the fetch
             //    fails there is nothing to clean up. The onClone hook stages
             //    the complete-project candidate inside the clone lifecycle.
             const manifestSvc = GitProjectManifestService.getInstance();
             const materialization: { value: MaterializationResult | null } = { value: null };
+            const deliveryPrepId = getRegistryDeliveryContext()?.envelope.prepId;
             let fetched: FetchResult;
+            const createFetchAuth = input.authType === 'token'
+                ? { token: input.token }
+                : createDeployKeyTrust
+                    ? {
+                        sshAuth: {
+                            privateKey: input.deployKey!.trim(),
+                            knownHostsEntry: createDeployKeyTrust.sshKnownHostsEntry,
+                        },
+                    }
+                    : { token: null };
             try {
-                fetched = await this.fetchFromGit({
-                    repoUrl: input.repoUrl,
-                    branch: input.branch,
-                    composePaths: input.composePaths,
-                    envPath: input.syncEnv ? input.envPath : null,
-                    token: input.token,
-                    onClone: async (cloneDir, commitSha, envContent) => {
-                        // The candidate path is recorded before the build that
-                        // creates it, so a crash mid-build still names exactly one
-                        // directory this operation owns.
-                        staged.candidateRelPath = candidateRelPathForSha(commitSha);
-                        await writeStagingMarker(managedRoot, {
-                            schemaVersion: 1,
-                            operationId: gitopsOperationId,
-                            rootPreexisted,
-                            candidateRelPath: staged.candidateRelPath,
-                            createdAt: Date.now(),
-                        });
-                        materialization.value = await this.buildMaterialization(input.stackName, cloneDir, commitSha, {
-                            compose_paths: input.composePaths,
-                            context_dir: input.contextDir,
-                            sync_env: input.syncEnv,
-                        }, envContent);
-                    },
-                });
+                if (deliveryPrepId) {
+                    const restored = await this.restoreCreateFromPreparedGitCandidate(
+                        deliveryPrepId,
+                        managedRoot,
+                        rootPreexisted,
+                        gitopsOperationId,
+                        staged,
+                    );
+                    fetched = restored.fetched;
+                    materialization.value = restored.materialization;
+                } else {
+                    fetched = await this.fetchFromGit({
+                        repoUrl: input.repoUrl,
+                        branch: input.branch,
+                        composePaths: input.composePaths,
+                        envPath: input.syncEnv ? input.envPath : null,
+                        ...createFetchAuth,
+                        onClone: async (cloneDir, commitSha, envContent) => {
+                            // The candidate path is recorded before the build that
+                            // creates it, so a crash mid-build still names exactly one
+                            // directory this operation owns.
+                            staged.candidateRelPath = candidateRelPathForSha(commitSha);
+                            await writeStagingMarker(managedRoot, {
+                                schemaVersion: 1,
+                                operationId: gitopsOperationId,
+                                rootPreexisted,
+                                candidateRelPath: staged.candidateRelPath,
+                                createdAt: Date.now(),
+                            });
+                            materialization.value = await this.buildMaterialization(input.stackName, cloneDir, commitSha, {
+                                compose_paths: input.composePaths,
+                                context_dir: input.contextDir,
+                                sync_env: input.syncEnv,
+                            }, envContent);
+                        },
+                    });
+                }
             } catch (e) {
                 // Materialization refuses routinely, not just on crashes. The
                 // marker has to come off with the staged files, or it would
@@ -2725,6 +3008,7 @@ export class GitSourceService {
                             commitSha: fetched.commitSha,
                             identity: gitopsIdentity,
                             configuredRef: input.branch,
+                            resolvedRefKind: fetched.resolvedRefKind,
                             candidateRelPath: staged.candidateRelPath,
                             appliedRelPath: appliedRelPathFor(fetched.commitSha, completeProjectManifest.manifestVersion),
                             manifestVersion: completeProjectManifest.manifestVersion,
@@ -2745,6 +3029,9 @@ export class GitSourceService {
                             encryptedToken: input.authType === 'token' && input.token
                                 ? this.crypto.encrypt(input.token)
                                 : null,
+                            encryptedDeployKey: createDeployKeyTrust?.encryptedDeployKey ?? null,
+                            sshKnownHostsEntry: createDeployKeyTrust?.sshKnownHostsEntry ?? null,
+                            sshHostKeyFingerprint: createDeployKeyTrust?.sshHostKeyFingerprint ?? null,
                             autoApplyOnWebhook: input.autoApplyOnWebhook,
                             autoDeployOnApply: input.autoDeployOnApply,
                             commitSha: fetched.commitSha,
@@ -2816,6 +3103,9 @@ export class GitSourceService {
                     env_path: input.syncEnv ? input.envPath : null,
                     auth_type: input.authType,
                     encrypted_token: encryptedToken,
+                    encrypted_deploy_key: createDeployKeyTrust?.encryptedDeployKey ?? null,
+                    ssh_known_hosts_entry: createDeployKeyTrust?.sshKnownHostsEntry ?? null,
+                    ssh_host_key_fingerprint: createDeployKeyTrust?.sshHostKeyFingerprint ?? null,
                     auto_apply_on_webhook: input.autoApplyOnWebhook,
                     auto_deploy_on_apply: input.autoDeployOnApply,
                     last_applied_commit_sha: fetched.commitSha,
@@ -2898,6 +3188,14 @@ export class GitSourceService {
                 console.log(`[GitSource] Created stack ${input.stackName} from ${repoHost(input.repoUrl)} at ${fetched.commitSha.slice(0, 7)}`);
                 if (diag) {
                     console.log(`[GitSource:diag] createStackFromGit ok stack=${input.stackName} sha=${fetched.commitSha.slice(0, 7)} envWritten=${envWritten} warnings=${fetched.warnings.length}`);
+                }
+                if (createDeployKeyTrust?.sshHostKeyFingerprint) {
+                    this.maybeRecordSshTrustAudit(
+                        input.auditContext,
+                        input.stackName,
+                        createDeployKeyTrust.sshHostKeyFingerprint,
+                        'created',
+                    );
                 }
                 return { source, commitSha: fetched.commitSha, envWritten, warnings: fetched.warnings };
             } catch (e) {
@@ -3390,6 +3688,201 @@ export class GitSourceService {
             );
         } catch (error) {
             console.error('[GitSource] Failed to record activity for %s:', sanitizeForLog(stackName), error);
+        }
+    }
+
+    // ─── Registry delivery preparation ─────────────────────────────────────
+
+    private async loadPreparedGitCandidate(
+        prepId: string,
+        managedRoot: string,
+        expectations?: { commitSha?: string; candidateRelPath?: string },
+    ): Promise<import('../helpers/registryDeliveryGitCandidate').GitCandidatePreparedMeta> {
+        const { PreparedSourceStore } = await import('./preparedSourceStore');
+        const {
+            installGitCandidatePayloadToManagedRoot,
+            readGitCandidatePreparedMeta,
+        } = await import('../helpers/registryDeliveryGitCandidate');
+        const payloadPath = PreparedSourceStore.getInstance().peekPayloadPath(prepId);
+        const meta = await readGitCandidatePreparedMeta(payloadPath);
+        if (!meta.materialization.validation.ok) {
+            throw new GitSourceError(
+                'GIT_ERROR',
+                `Compose validation failed: ${meta.materialization.validation.error ?? 'unknown'}`,
+            );
+        }
+        if (expectations?.commitSha && meta.commitSha !== expectations.commitSha) {
+            throw new GitSourceError('GIT_ERROR', 'Prepared git candidate commit mismatch');
+        }
+        if (expectations?.candidateRelPath && meta.candidateRelPath !== expectations.candidateRelPath) {
+            throw new GitSourceError('GIT_ERROR', 'Prepared git candidate path mismatch');
+        }
+        await installGitCandidatePayloadToManagedRoot(payloadPath, managedRoot, meta.candidateRelPath);
+        return meta;
+    }
+
+    private async restoreCreateFromPreparedGitCandidate(
+        prepId: string,
+        managedRoot: string,
+        rootPreexisted: boolean,
+        gitopsOperationId: string,
+        staged: { candidateRelPath: string | null },
+    ): Promise<{ fetched: FetchResult; materialization: MaterializationResult }> {
+        const { fetchResultFromPreparedMeta } = await import('../helpers/registryDeliveryGitCandidate');
+        const meta = await this.loadPreparedGitCandidate(prepId, managedRoot);
+        staged.candidateRelPath = meta.candidateRelPath;
+        await writeStagingMarker(managedRoot, {
+            schemaVersion: 1,
+            operationId: gitopsOperationId,
+            rootPreexisted,
+            candidateRelPath: staged.candidateRelPath,
+            createdAt: Date.now(),
+        });
+        return {
+            fetched: fetchResultFromPreparedMeta(meta),
+            materialization: meta.materialization,
+        };
+    }
+
+    private async restoreApplyFromPreparedGitCandidate(
+        prepId: string,
+        stackName: string,
+        commitSha: string,
+        candidateRelPath: string,
+    ): Promise<void> {
+        const managedRoot = path.resolve(stackManagedRoot(stackName));
+        await this.loadPreparedGitCandidate(prepId, managedRoot, { commitSha, candidateRelPath });
+    }
+
+    public async prepareRegistryDeliveryFromGit(
+        input: CreateStackFromGitInput,
+    ): Promise<{ prepId: string; sourceHash: string }> {
+        const materialization: { value: MaterializationResult | null } = { value: null };
+        const fetched = await this.fetchFromGit({
+            repoUrl: input.repoUrl,
+            branch: input.branch,
+            composePaths: input.composePaths,
+            envPath: input.syncEnv ? input.envPath : null,
+            token: input.token,
+            onClone: async (cloneDir, commitSha, envContent) => {
+                materialization.value = await this.buildMaterialization(
+                    input.stackName,
+                    cloneDir,
+                    commitSha,
+                    {
+                        compose_paths: input.composePaths,
+                        context_dir: input.contextDir,
+                        sync_env: input.syncEnv,
+                    },
+                    envContent,
+                );
+            },
+        });
+        if (!materialization.value?.validation.ok) {
+            throw new GitSourceError(
+                'GIT_ERROR',
+                `Compose validation failed: ${materialization.value?.validation.error ?? 'unknown'}`,
+            );
+        }
+        const managedRoot = path.resolve(stackManagedRoot(input.stackName));
+        const candidateRel = materialization.value.candidateRelPath;
+        const pathReason = validateCandidateRelPath(candidateRel, managedRoot);
+        if (pathReason) {
+            throw new GitSourceError('GIT_ERROR', pathReason);
+        }
+        const candidateAbs = path.resolve(managedRoot, candidateRel);
+        if (!candidateAbs.startsWith(managedRoot + path.sep)) {
+            throw new GitSourceError('GIT_ERROR', 'Invalid candidate path');
+        }
+        const stagingDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-regprep-'));
+        try {
+            await copyPreparedPayloadDirectory(candidateAbs, stagingDir);
+            const { writeGitCandidatePreparedMeta } = await import('../helpers/registryDeliveryGitCandidate');
+            await writeGitCandidatePreparedMeta(stagingDir, {
+                version: 1,
+                commitSha: fetched.commitSha,
+                resolvedRefKind: fetched.resolvedRefKind,
+                candidateRelPath: materialization.value.candidateRelPath,
+                composeFiles: fetched.composeFiles,
+                envContent: fetched.envContent,
+                materialization: materialization.value,
+                warnings: fetched.warnings,
+            });
+            const { hashDeliverySourceDir } = await import('../helpers/registryDeliveryHashes');
+            const { PreparedSourceStore } = await import('./preparedSourceStore');
+            const sourceHash = hashDeliverySourceDir(stagingDir);
+            const entry = await PreparedSourceStore.getInstance().prepareFromDirectory(
+                'git-candidate',
+                sourceHash,
+                stagingDir,
+            );
+            return { prepId: entry.prepId, sourceHash };
+        } catch (error) {
+            await fsPromises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+            throw error;
+        } finally {
+            const rmTarget = path.resolve(candidateAbs);
+            if (rmTarget.startsWith(managedRoot + path.sep)) {
+                // Canonical js/path-injection barrier inline with the rm sink.
+                await fsPromises.rm(rmTarget, { recursive: true, force: true }).catch(() => undefined);
+            }
+        }
+    }
+
+    public async prepareRegistryDeliveryFromPending(
+        stackName: string,
+    ): Promise<{ prepId: string; sourceHash: string }> {
+        const src = DatabaseService.getInstance().getGitSource(stackName);
+        if (!src?.pending_commit_sha || !src.pending_compose_content) {
+            throw new GitSourceError('GIT_ERROR', 'No pending pull to prepare');
+        }
+        const pending = this.decodePendingCompose(src.pending_compose_content);
+        if (!pending.candidateRelPath || pending.inventory === null) {
+            throw new GitSourceError('GIT_ERROR', 'No staged candidate for pending apply');
+        }
+        const envContent = src.pending_env_content !== null
+            ? this.crypto.decrypt(src.pending_env_content)
+            : null;
+        const managedRoot = path.resolve(stackManagedRoot(stackName));
+        const pathReason = validateCandidateRelPath(pending.candidateRelPath, managedRoot);
+        if (pathReason) {
+            throw new GitSourceError('GIT_ERROR', pathReason);
+        }
+        const candidateAbs = path.resolve(managedRoot, pending.candidateRelPath);
+        if (!candidateAbs.startsWith(managedRoot + path.sep)) {
+            throw new GitSourceError('GIT_ERROR', 'Invalid candidate path');
+        }
+        const stagingDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-regprep-'));
+        try {
+            await copyPreparedPayloadDirectory(candidateAbs, stagingDir);
+            const { writeGitCandidatePreparedMeta } = await import('../helpers/registryDeliveryGitCandidate');
+            await writeGitCandidatePreparedMeta(stagingDir, {
+                version: 1,
+                commitSha: src.pending_commit_sha,
+                resolvedRefKind: priorFetchIdentity(this.gitopsApplicationFor(stackName))?.kind ?? 'branch',
+                candidateRelPath: pending.candidateRelPath,
+                composeFiles: pending.files,
+                envContent,
+                materialization: {
+                    inventory: pending.inventory,
+                    contextCopyPlans: [],
+                    candidateRelPath: pending.candidateRelPath,
+                    validation: { ok: true },
+                },
+                warnings: [],
+            });
+            const { hashDeliverySourceDir } = await import('../helpers/registryDeliveryHashes');
+            const { PreparedSourceStore } = await import('./preparedSourceStore');
+            const sourceHash = hashDeliverySourceDir(stagingDir);
+            const entry = await PreparedSourceStore.getInstance().prepareFromDirectory(
+                'git-candidate',
+                sourceHash,
+                stagingDir,
+            );
+            return { prepId: entry.prepId, sourceHash };
+        } catch (error) {
+            await fsPromises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+            throw error;
         }
     }
 
