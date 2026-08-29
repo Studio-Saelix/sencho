@@ -46,6 +46,10 @@ export async function augmentRemoteProxyWithRegistryDelivery(
     return { forward: false, status: result.status, error: result.error };
   }
 
+  if (req.registryDeliveryAbortController?.signal.aborted) {
+    return { forward: false, status: 499, error: 'Request aborted' };
+  }
+
   if (result.augmented || rawBody.length === 0) {
     req.rawBody = Buffer.from(JSON.stringify(result.body), 'utf-8');
   } else if (rawBody.length > 0) {

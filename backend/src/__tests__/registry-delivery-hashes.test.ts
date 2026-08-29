@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { describe, it, expect } from 'vitest';
-import { hashActionSet, hashProjectSource } from '../helpers/registryDeliveryHashes';
+import { hashActionSet, hashBlueprintPostApplySource, hashProjectSource } from '../helpers/registryDeliveryHashes';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -33,6 +33,18 @@ describe('registryDeliveryHashes', () => {
       fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: nginx:2\n');
       const after = hashProjectSource(dir);
       expect(before).not.toBe(after);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('hashBlueprintPostApplySource matches hashProjectSource for an empty .env file', () => {
+    const compose = 'services:\n  web:\n    image: nginx\n';
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-hash-test-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'compose.yaml'), compose);
+      fs.writeFileSync(path.join(dir, '.env'), '');
+      expect(hashBlueprintPostApplySource(compose, '')).toBe(hashProjectSource(dir));
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

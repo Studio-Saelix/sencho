@@ -33,7 +33,7 @@ export function hashBlueprintPostApplySource(
   hash.update('\0');
   hash.update(composeContent);
   hash.update('\n');
-  if (envFileContent) {
+  if (envFileContent !== null && envFileContent !== undefined) {
     hash.update('.env');
     hash.update('\0');
     hash.update(envFileContent);

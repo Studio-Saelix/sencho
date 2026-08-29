@@ -170,4 +170,55 @@ describe('registryDeliveryOutbound', () => {
     expect(result.body[REGISTRY_DELIVERY_BODY_FIELD]).toBeDefined();
     expect(mockAxiosPost).toHaveBeenCalledOnce();
   });
+
+  it('returns aborted when hub envelope build is cancelled after discover', async () => {
+    mockRemoteAdvertises.mockResolvedValue(true);
+    const delivery = RegistryDeliveryService.getInstance();
+    const discover = {
+      referencedHosts: ['ghcr.io'],
+      coveredHosts: [],
+      sourceHash: 'abc',
+      actionSetHash: 'def',
+      deliverySourceId: delivery.getDeliverySourceId(),
+      attestation: delivery.signAttestation({
+        nodeIdClaim: 1,
+        stack: 'demo',
+        op: 'stack-deploy',
+        sourceHash: 'abc',
+        referencedHostsHash: delivery.hashHostList(['ghcr.io']),
+        coveredHostsHash: delivery.hashHostList([]),
+        actionSetHash: 'def',
+      }),
+    };
+    mockAxiosPost.mockResolvedValue({ status: 200, data: discover });
+
+    let releaseEnvelope: (() => void) | undefined;
+    vi.spyOn(delivery, 'buildHubEnvelope').mockImplementation(() => new Promise((resolve) => {
+      releaseEnvelope = () => resolve({
+        attestation: discover.attestation,
+        auths: [],
+        notAfter: Date.now() + 60_000,
+        deliverySourceId: discover.deliverySourceId,
+      });
+    }));
+
+    const controller = new AbortController();
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const node = DatabaseService.getInstance().getNode(nodeId)!;
+    const pending = augmentJsonBodyForRegistryDelivery({
+      method: 'POST',
+      apiPath: '/api/stacks/demo/deploy',
+      nodeId,
+      node,
+      target: { apiUrl: 'http://remote:1852', apiToken: 'token' },
+      body: {},
+      abortSignal: controller.signal,
+    });
+
+    setTimeout(() => controller.abort(), 10);
+    setTimeout(() => releaseEnvelope?.(), 50);
+
+    const result = await pending;
+    expect(result).toEqual({ ok: false, status: 499, error: 'Request aborted' });
+  });
 });

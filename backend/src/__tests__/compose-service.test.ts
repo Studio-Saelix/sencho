@@ -38,6 +38,8 @@ const {
   mockFsStat,
   mockCleanupDockerAuthTempDir,
   mockCreateDockerAuthTempDir,
+  mockRecordRegistryDeliveryEvent,
+  mockPreparedSourceFinalize,
 } = vi.hoisted(() => {
   const mockCleanupDockerAuthTempDir = vi.fn();
   return {
@@ -99,11 +101,29 @@ const {
     kind: 'local' as const,
     cleanup: mockCleanupDockerAuthTempDir,
   })),
+  mockRecordRegistryDeliveryEvent: vi.fn(),
+  mockPreparedSourceFinalize: vi.fn(),
   };
 });
 
 vi.mock('../helpers/dockerAuthTempDir', () => ({
   createDockerAuthTempDir: mockCreateDockerAuthTempDir,
+}));
+
+vi.mock('../helpers/registryDeliveryEvidence', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../helpers/registryDeliveryEvidence')>();
+  return {
+    ...actual,
+    recordRegistryDeliveryEvent: (...args: unknown[]) => mockRecordRegistryDeliveryEvent(...args),
+  };
+});
+
+vi.mock('../services/preparedSourceStore', () => ({
+  PreparedSourceStore: {
+    getInstance: () => ({
+      finalize: (...args: unknown[]) => mockPreparedSourceFinalize(...args),
+    }),
+  },
 }));
 
 vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
@@ -1372,6 +1392,99 @@ describe('ComposeService - withRegistryAuth', () => {
     const error = await result;
     expect(error).not.toBeNull();
     expect(mockCleanupDockerAuthTempDir).toHaveBeenCalled();
+  });
+});
+
+describe('ComposeService - registry delivery cleanup logging', () => {
+  const deliveryEnvelope = {
+    attestation: 'test-token',
+    auths: [],
+    notAfter: Date.now() + 60_000,
+    deliverySourceId: 'delivery-src-1',
+  };
+
+  async function deployWithDeliveryContext(): Promise<void> {
+    const { runWithRegistryDeliveryContext } = await import('../helpers/registryDeliveryContext');
+    const svc = ComposeService.getInstance(1);
+    await runWithRegistryDeliveryContext({
+      envelope: deliveryEnvelope,
+      nodeId: 1,
+      stack: 'my-stack',
+      stage: 'stack-deploy',
+      seamResult: { auths: { 'registry.example.com': { auth: 'dGVzdA==' } }, prepId: 'prep-1' },
+      seamSettled: true,
+    }, async () => {
+      const promise = svc.deployStack('my-stack');
+      await vi.advanceTimersByTimeAsync(3100);
+      await promise;
+    });
+  }
+
+  beforeEach(() => {
+    mockGetRegistries.mockReturnValue([]);
+    mockGetGlobalSettings.mockReturnValue({ delivery_source_id: 'delivery-src-1' });
+    mockCleanupDockerAuthTempDir.mockReset();
+    mockCleanupDockerAuthTempDir.mockImplementation(() => undefined);
+    mockRecordRegistryDeliveryEvent.mockReset();
+    mockPreparedSourceFinalize.mockReset();
+    mockPreparedSourceFinalize.mockImplementation(() => undefined);
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+  });
+
+  it('logs cleanup failure when evidence records successfully', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mockCleanupDockerAuthTempDir.mockImplementation(() => {
+      throw new Error('cleanup failed');
+    });
+
+    await deployWithDeliveryContext();
+
+    expect(mockRecordRegistryDeliveryEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'cleanup_failed',
+    }));
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Registry delivery temp dir cleanup failed'),
+      expect.any(String),
+      'cleanup failed',
+    );
+    errorSpy.mockRestore();
+  });
+
+  it('logs both cleanup and evidence failures without changing deploy success', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mockCleanupDockerAuthTempDir.mockImplementation(() => {
+      throw new Error('cleanup failed');
+    });
+    mockRecordRegistryDeliveryEvent.mockImplementation(() => {
+      throw new Error('evidence failed');
+    });
+
+    await deployWithDeliveryContext();
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Registry delivery cleanup and evidence both failed'),
+      expect.any(String),
+      'evidence failed',
+      'cleanup failed',
+    );
+    errorSpy.mockRestore();
+  });
+
+  it('logs prepared-source finalization failure without changing deploy success', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mockPreparedSourceFinalize.mockImplementation(() => {
+      throw new Error('finalize failed');
+    });
+
+    await deployWithDeliveryContext();
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Registry delivery prepared-source finalize failed'),
+      'prep-1',
+      'finalize failed',
+    );
+    errorSpy.mockRestore();
   });
 });
 

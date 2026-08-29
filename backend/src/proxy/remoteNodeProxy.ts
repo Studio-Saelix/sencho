@@ -791,6 +791,9 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       }
 
       beginProxyTiming(req, res);
+      if (req.registryDeliveryAbortController?.signal.aborted) {
+        return;
+      }
       proxy(req, res, next);
     };
 

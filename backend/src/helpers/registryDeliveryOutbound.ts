@@ -131,6 +131,9 @@ export async function augmentJsonBodyForRegistryDelivery(
       return { ok: false, status: 499, error: 'Request aborted' };
     }
     const envelope = await RegistryDeliveryService.getInstance().buildHubEnvelope(input.nodeId, discover);
+    if (input.abortSignal?.aborted) {
+      return { ok: false, status: 499, error: 'Request aborted' };
+    }
     if (!envelope) {
       return { ok: true, body: input.body, augmented: false };
     }
@@ -154,6 +157,10 @@ export async function augmentJsonBodyForRegistryDelivery(
         status: 413,
         error: 'Request body exceeds registry delivery limit',
       };
+    }
+
+    if (input.abortSignal?.aborted) {
+      return { ok: false, status: 499, error: 'Request aborted' };
     }
 
     return { ok: true, body: parsed, augmented: true };

@@ -83,4 +83,32 @@ describe('RegistryDeliveryService', () => {
     expect(discover.referencedHosts).toEqual(seamHosts);
     expect(discover.referencedHosts).toEqual(['ghcr.io']);
   });
+
+  it('blueprint body-content discover matches seam hash when .env exists but is empty', async () => {
+    const delivery = RegistryDeliveryService.getInstance();
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const stackName = 'bp-regdisc-empty-env';
+    const composeDir = NodeRegistry.getInstance().getComposeDir(nodeId);
+    const stackDir = path.join(composeDir, stackName);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stackDir, 'compose.yaml'),
+      'services:\n  old:\n    image: nginx:latest\n',
+    );
+    fs.writeFileSync(path.join(stackDir, '.env'), '');
+
+    const incomingCompose = 'services:\n  app:\n    image: nginx:alpine\n';
+    const discover = await delivery.discoverOnTarget({
+      op: 'blueprint-apply',
+      sourceKind: 'body-content',
+      stack: stackName,
+      composeContent: incomingCompose,
+      actionSetHash: hashActionSet(['stack:deploy']),
+    });
+
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), incomingCompose);
+    const seamHash = hashProjectSource(stackDir);
+
+    expect(discover.sourceHash).toBe(seamHash);
+  });
 });
