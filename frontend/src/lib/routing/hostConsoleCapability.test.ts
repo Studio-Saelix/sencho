@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveHostConsoleCapability } from './hostConsoleCapability';
+import { resolveHostConsoleCapability, resolveHostConsoleLockMessage } from './hostConsoleCapability';
 
 describe('resolveHostConsoleCapability', () => {
   it('returns loading when the active node is unresolved', () => {
@@ -90,5 +90,62 @@ describe('resolveHostConsoleCapability', () => {
       licenseReady: true,
       activeNodeMeta: { capabilities: ['stacks', 'fleet'] },
     })).toBe('locked');
+  });
+});
+
+describe('resolveHostConsoleLockMessage', () => {
+  it('returns Pilot-specific copy for a pilot_agent node regardless of version', () => {
+    expect(resolveHostConsoleLockMessage({
+      nodeMode: 'pilot_agent',
+      nodeName: 'Pilot',
+      version: '0.97.1',
+    })).toEqual({
+      title: 'Host Console is not available through Pilot Agent yet',
+      body: 'Host Console is currently available on the local node and Distributed API Proxy remotes.',
+    });
+  });
+
+  it('returns the upgrade copy for a proxy node with a real version', () => {
+    expect(resolveHostConsoleLockMessage({
+      nodeMode: 'proxy',
+      nodeName: 'Peer',
+      version: '0.95.0',
+    })).toEqual({
+      title: 'Host Console is not available on this node',
+      body: 'Peer is running v0.95.0. Upgrade the node to use this feature.',
+    });
+  });
+
+  it('returns the no-capability copy for a proxy node with a placeholder version', () => {
+    expect(resolveHostConsoleLockMessage({
+      nodeMode: 'proxy',
+      nodeName: 'Peer',
+      version: '0.0.0-dev',
+    })).toEqual({
+      title: 'Host Console is not available on this node',
+      body: 'Peer does not advertise this capability. Upgrade the node to use this feature.',
+    });
+  });
+
+  it('returns the no-capability copy for a proxy node with an unknown version', () => {
+    expect(resolveHostConsoleLockMessage({
+      nodeMode: 'proxy',
+      nodeName: 'Peer',
+      version: 'unknown',
+    })).toEqual({
+      title: 'Host Console is not available on this node',
+      body: 'Peer does not advertise this capability. Upgrade the node to use this feature.',
+    });
+  });
+
+  it('treats an undefined mode as the generic proxy fallback', () => {
+    expect(resolveHostConsoleLockMessage({
+      nodeMode: undefined,
+      nodeName: 'Peer',
+      version: null,
+    })).toEqual({
+      title: 'Host Console is not available on this node',
+      body: 'Peer does not advertise this capability. Upgrade the node to use this feature.',
+    });
   });
 });
