@@ -186,6 +186,8 @@ describe('Blueprint compose apply (real filesystem)', () => {
         ).rejects.toThrow(/deploy blew up/);
 
         expect(await fsPromises.readFile(path.join(stackDir, '.blueprint.json'), 'utf-8')).toBe(priorMarker);
+        expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8'))
+            .toBe('services:\n  old:\n    image: nginx\n');
         expect(await fsPromises.access(stackDir).then(() => true, () => false)).toBe(true);
     });
 

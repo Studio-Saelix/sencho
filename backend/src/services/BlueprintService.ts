@@ -547,6 +547,19 @@ export class BlueprintService {
                     await fs.createStack(stackName);
                     createdStack = true;
                 }
+                let previousComposeContent: string | null = null;
+                if (!createdStack) {
+                    try {
+                        const prior = await fs.readStackFile(stackName, COMPOSE_FILENAME);
+                        previousComposeContent = prior.content ?? null;
+                    } catch (readErr) {
+                        console.warn(
+                            '[BlueprintService] Could not read prior compose for "%s" before apply: %s',
+                            sanitizeForLog(stackName),
+                            sanitizeForLog(BlueprintService.formatError(readErr)),
+                        );
+                    }
+                }
                 await fs.writeStackFile(stackName, COMPOSE_FILENAME, composeContent);
                 // Clear lower-priority compose siblings so discovery cannot shadow compose.yaml.
                 await fs.removeAlternateRootComposeFiles(stackName);
@@ -572,6 +585,16 @@ export class BlueprintService {
                                 '[BlueprintService] Failed to roll back newly created stack "%s" after apply error: %s',
                                 sanitizeForLog(stackName),
                                 sanitizeForLog(BlueprintService.formatError(cleanupErr)),
+                            );
+                        }
+                    } else if (previousComposeContent !== null) {
+                        try {
+                            await fs.writeStackFile(stackName, COMPOSE_FILENAME, previousComposeContent);
+                        } catch (restoreErr) {
+                            console.warn(
+                                '[BlueprintService] Failed to restore prior compose for "%s" after apply error: %s',
+                                sanitizeForLog(stackName),
+                                sanitizeForLog(BlueprintService.formatError(restoreErr)),
                             );
                         }
                     }

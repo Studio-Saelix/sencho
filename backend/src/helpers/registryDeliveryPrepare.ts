@@ -16,6 +16,40 @@ export interface PreparedSourceResult {
   sourceHash: string;
 }
 
+const BLUEPRINT_COMPOSE_FILENAME = 'compose.yaml';
+
+/**
+ * Stage the post-apply project bundle for blueprint body-content discovery:
+ * incoming compose content plus any existing stack .env left untouched by apply.
+ */
+export async function stageBlueprintPostApplyBundle(
+  stackName: string,
+  composeContent: string,
+  nodeId: number,
+): Promise<string> {
+  const stagingDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-bp-regdisc-'));
+  try {
+    await fsPromises.writeFile(
+      path.join(stagingDir, BLUEPRINT_COMPOSE_FILENAME),
+      composeContent,
+      { mode: 0o600 },
+    );
+    const fs = FileSystemService.getInstance(nodeId);
+    try {
+      if (await fs.envExists(stackName)) {
+        const envContent = await fs.getEnvContent(stackName);
+        await fsPromises.writeFile(path.join(stagingDir, '.env'), envContent, { mode: 0o600 });
+      }
+    } catch {
+      // Best effort: discovery still runs from compose content alone.
+    }
+    return stagingDir;
+  } catch (error) {
+    await fsPromises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
 export async function prepareRequestGeneratedSource(input: {
   stackName: string;
   template: Template;

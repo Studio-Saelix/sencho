@@ -496,14 +496,31 @@ export class ComposeService {
     } finally {
       try {
         handle.cleanup();
-      } catch {
-        recordRegistryDeliveryEvent({
-          deliverySourceId,
-          eventType: 'cleanup_failed',
-          tempDirId: path.basename(handle.dirPath),
-          stack: deliveryContext?.stack ?? null,
-          op: deliveryContext?.stage ?? null,
-        });
+      } catch (cleanupErr) {
+        if (deliveryContext) {
+          try {
+            recordRegistryDeliveryEvent({
+              deliverySourceId,
+              eventType: 'cleanup_failed',
+              tempDirId: path.basename(handle.dirPath),
+              stack: deliveryContext.stack ?? null,
+              op: deliveryContext.stage ?? null,
+            });
+          } catch (evidenceErr) {
+            console.error(
+              'Registry delivery cleanup and evidence both failed for %s:',
+              sanitizeForLog(deliverySourceId),
+              getErrorMessage(evidenceErr, 'unknown error'),
+              getErrorMessage(cleanupErr, 'unknown error'),
+            );
+          }
+        } else {
+          console.error(
+            'Registry delivery temp dir cleanup failed for %s:',
+            sanitizeForLog(deliverySourceId),
+            getErrorMessage(cleanupErr, 'unknown error'),
+          );
+        }
       }
       const prepId = deliveryContext?.seamResult?.prepId ?? deliveryContext?.envelope.prepId;
       if (prepId) {

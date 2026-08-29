@@ -1,6 +1,6 @@
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import type { Node } from '../services/DatabaseService';
-import { augmentJsonBodyForRegistryDelivery } from './registryDeliveryOutbound';
+import { augmentJsonBodyForRegistryDelivery, wouldAttemptRegistryDelivery } from './registryDeliveryOutbound';
 
 export interface RegistryDeliveryProxyResult {
   /** When false, respond to the client with status/error instead of forwarding. */
@@ -53,4 +53,56 @@ export async function augmentRemoteProxyWithRegistryDelivery(
   }
 
   return { forward: true };
+}
+
+/** Bind hop-1 abort to client disconnect before any async capability work. */
+export function ensureRegistryDeliveryHopAbortController(req: Request, res: Response): void {
+  if (req.registryDeliveryAbortController) return;
+  const abortController = new AbortController();
+  req.registryDeliveryAbortController = abortController;
+  const onReqAborted = () => {
+    if (!abortController.signal.aborted) {
+      abortController.abort();
+    }
+  };
+  const onResClose = () => {
+    if (!res.writableEnded && !abortController.signal.aborted) {
+      abortController.abort();
+    }
+  };
+  let detached = false;
+  const detach = () => {
+    if (detached) return;
+    detached = true;
+    req.off('aborted', onReqAborted);
+    res.off('close', onResClose);
+  };
+  req.on('aborted', onReqAborted);
+  res.on('close', onResClose);
+  res.once('finish', detach);
+  res.once('close', detach);
+}
+
+/**
+ * Register abort listeners, then decide whether hop-1 registry delivery runs.
+ * Abort is wired before the capability probe so a client disconnect during the
+ * probe still cancels the hop.
+ */
+export async function shouldAttemptRegistryDeliveryProxyHop(
+  req: Request,
+  res: Response,
+  nodeId: number,
+  node: Node,
+  method: string,
+  deliveryApiPath: string,
+): Promise<boolean> {
+  ensureRegistryDeliveryHopAbortController(req, res);
+  if (req.registryDeliveryAbortController?.signal.aborted) {
+    return false;
+  }
+  const wouldAttempt = await wouldAttemptRegistryDelivery(nodeId, node, method, deliveryApiPath);
+  if (req.registryDeliveryAbortController?.signal.aborted) {
+    return false;
+  }
+  return wouldAttempt;
 }

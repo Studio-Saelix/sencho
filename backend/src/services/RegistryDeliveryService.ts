@@ -7,18 +7,18 @@ import {
   RegistryService,
   type DockerConfigHostResolution,
 } from './RegistryService';
-import { discoverRegistryReferences, discoverRegistryReferencesFromComposeContent } from './registryReferenceDiscovery';
+import { discoverRegistryReferences } from './registryReferenceDiscovery';
 import { remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
 import { REMOTE_REGISTRY_CREDENTIALS_CAPABILITY } from './CapabilityRegistry';
 import { isTrustedProxyPeer } from '../helpers/trustedProxyCidrs';
 import type { RegistryDeliveryEnvelope, RegistryDeliveryAuthEntry } from '../helpers/registryDeliveryContext';
 import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
-import { prepareSourceForDiscover } from '../helpers/registryDeliveryPrepare';
+import { prepareSourceForDiscover, stageBlueprintPostApplyBundle } from '../helpers/registryDeliveryPrepare';
 import { PreparedSourceStore } from './preparedSourceStore';
-import { hashComposeBodyContent, hashProjectSource } from '../helpers/registryDeliveryHashes';
+import { hashProjectSource } from '../helpers/registryDeliveryHashes';
 import { isValidStackName } from '../utils/validation';
+import { promises as fsPromises } from 'fs';
 import {
-  resolveComposeEnvForContent,
   resolveComposeEnvForDiscovery,
 } from '../helpers/registryDeliveryComposeEnv';
 
@@ -56,7 +56,7 @@ export class RegistryDeliveryService {
   private static instance: RegistryDeliveryService | null = null;
   private readonly targetSessionId = crypto.randomBytes(16).toString('hex');
   private readonly consumedJtis = new Map<string, number>();
-  private readonly maxConsumedJtis = 10_000;
+  private maxConsumedJtis = 10_000;
 
   static getInstance(): RegistryDeliveryService {
     if (!this.instance) this.instance = new RegistryDeliveryService();
@@ -65,6 +65,12 @@ export class RegistryDeliveryService {
 
   static resetForTests(): void {
     this.instance = null;
+  }
+
+  /** @internal Narrow replay-store capacity for unit tests. */
+  setReplayStoreCapacityForTests(capacity: number): void {
+    this.maxConsumedJtis = capacity;
+    this.consumedJtis.clear();
   }
 
   getTargetSessionId(): string {
@@ -173,12 +179,14 @@ export class RegistryDeliveryService {
     if (
       request.sourceKind === 'restore-candidate'
       || request.sourceKind === 'live-project'
+      || request.sourceKind === 'body-content'
       || request.gitApply === true
     ) {
-      if (typeof stackName !== 'string' || !isValidStackName(stackName)) {
+      const stack = request.stack ?? request.stackName;
+      if (typeof stack !== 'string' || !isValidStackName(stack)) {
         throw new Error('Invalid stack name');
       }
-      request.stack = stackName;
+      request.stack = stack;
     }
 
     let referencedHosts: string[] = [];
@@ -200,12 +208,21 @@ export class RegistryDeliveryService {
       if (Buffer.byteLength(request.composeContent, 'utf8') > MAX_COMPOSE_CONTENT_BYTES) {
         throw new Error('Compose content exceeds size limit');
       }
-      sourceHash = hashComposeBodyContent(request.composeContent);
-      const discovery = discoverRegistryReferencesFromComposeContent(
-        request.composeContent,
-        resolveComposeEnvForContent(request.envVars),
-      );
-      referencedHosts = discovery.referencedHosts;
+      const stack = request.stack ?? request.stackName;
+      if (typeof stack !== 'string') {
+        throw new Error('Invalid stack name');
+      }
+      const stagingDir = await stageBlueprintPostApplyBundle(stack, request.composeContent, nodeId);
+      try {
+        sourceHash = hashProjectSource(stagingDir);
+        const discovery = discoverRegistryReferences(
+          stagingDir,
+          resolveComposeEnvForDiscovery(stagingDir),
+        );
+        referencedHosts = discovery.referencedHosts;
+      } finally {
+        await fsPromises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+      }
     } else if (request.stack) {
       if (!isValidStackName(request.stack)) {
         throw new Error('Invalid stack name');

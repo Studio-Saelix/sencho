@@ -56,8 +56,7 @@ import {
   classifyRegistryDeliveryRouteClass,
   getRegistryDeliveryTotalBodyLimit,
 } from '../helpers/registryDeliveryBodyLimits';
-import { augmentRemoteProxyWithRegistryDelivery } from '../helpers/registryDeliveryProxy';
-import { wouldAttemptRegistryDelivery } from '../helpers/registryDeliveryOutbound';
+import { augmentRemoteProxyWithRegistryDelivery, shouldAttemptRegistryDeliveryProxyHop } from '../helpers/registryDeliveryProxy';
 
 /**
  * Per-request hop timing for the critical hydration GETs, kept off the Request
@@ -712,14 +711,15 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       // the forwarded JSON body. Otherwise forward unchanged (AUD-30).
       const deliveryApiPath = `/api${req.path}`;
       if (RegistryDeliveryService.getInstance().isDeliveryEligibleRoute(req.method, deliveryApiPath)) {
-        const wouldAttempt = await wouldAttemptRegistryDelivery(
+        const wouldAttempt = await shouldAttemptRegistryDeliveryProxyHop(
+          req,
+          res,
           req.nodeId,
           node,
           req.method,
           deliveryApiPath,
         );
         if (wouldAttempt) {
-          ensureRegistryDeliveryHopAbortController(req, res);
           if (hasNonIdentityContentEncoding(req)) {
             await drainRequestBody(req);
             res.status(415).json({
@@ -928,33 +928,6 @@ function hasNonIdentityContentEncoding(req: Request): boolean {
     const encoding = part.trim().toLowerCase();
     return encoding.length > 0 && encoding !== 'identity';
   });
-}
-
-function ensureRegistryDeliveryHopAbortController(req: Request, res: Response): void {
-  if (req.registryDeliveryAbortController) return;
-  const abortController = new AbortController();
-  req.registryDeliveryAbortController = abortController;
-  const onReqAborted = () => {
-    if (!abortController.signal.aborted) {
-      abortController.abort();
-    }
-  };
-  const onResClose = () => {
-    if (!res.writableEnded && !abortController.signal.aborted) {
-      abortController.abort();
-    }
-  };
-  let detached = false;
-  const detach = () => {
-    if (detached) return;
-    detached = true;
-    req.off('aborted', onReqAborted);
-    res.off('close', onResClose);
-  };
-  req.on('aborted', onReqAborted);
-  res.on('close', onResClose);
-  res.once('finish', detach);
-  res.once('close', detach);
 }
 
 /** True when the buffered JSON alert body targets a specific Compose service. */
