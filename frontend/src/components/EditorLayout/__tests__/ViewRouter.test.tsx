@@ -128,12 +128,25 @@ describe('ViewRouter host-console', () => {
 
   it('shows a lock card for Community + legacy remote without mounting HostConsole', () => {
     vi.mocked(NodeContext.useNodes).mockReturnValue({
-      activeNode: { id: 2, name: 'Legacy', type: 'remote' },
+      activeNode: { id: 2, name: 'Legacy', type: 'remote', mode: 'proxy' },
       activeNodeMeta: { version: '0.95.0', capabilities: ['host-console'], fetchedAt: 1 },
     } as unknown as ReturnType<typeof NodeContext.useNodes>);
     render(<ViewRouter {...baseProps} />);
     expect(screen.queryByTestId('host-console')).toBeNull();
     expect(screen.getByText(/Host Console is not available on this node/i)).toBeTruthy();
+    expect(screen.getByText(/Legacy is running v0\.95\.0\. Upgrade the node to use this feature\./i)).toBeTruthy();
+  });
+
+  it('shows Pilot-specific copy for a pilot_agent node without mounting HostConsole', () => {
+    vi.mocked(NodeContext.useNodes).mockReturnValue({
+      activeNode: { id: 4, name: 'Pilot', type: 'remote', mode: 'pilot_agent' },
+      activeNodeMeta: { version: '0.97.1', capabilities: [], fetchedAt: 1 },
+    } as unknown as ReturnType<typeof NodeContext.useNodes>);
+    render(<ViewRouter {...baseProps} />);
+    expect(screen.queryByTestId('host-console')).toBeNull();
+    expect(screen.getByText(/Host Console is not available through Pilot Agent yet/i)).toBeTruthy();
+    expect(screen.getByText(/Host Console is currently available on the local node and Distributed API Proxy remotes\./i)).toBeTruthy();
+    expect(screen.queryByText(/Upgrade the node to use this feature\./i)).toBeNull();
   });
 
   it('mounts Host Console for Admiral + legacy remote after meta resolves', async () => {
