@@ -497,6 +497,7 @@ export class ComposeService {
       try {
         handle.cleanup();
       } catch (cleanupErr) {
+        const cleanupMessage = getErrorMessage(cleanupErr, 'unknown error');
         if (deliveryContext) {
           try {
             recordRegistryDeliveryEvent({
@@ -506,19 +507,24 @@ export class ComposeService {
               stack: deliveryContext.stack ?? null,
               op: deliveryContext.stage ?? null,
             });
+            console.error(
+              'Registry delivery temp dir cleanup failed for %s:',
+              sanitizeForLog(deliverySourceId),
+              cleanupMessage,
+            );
           } catch (evidenceErr) {
             console.error(
               'Registry delivery cleanup and evidence both failed for %s:',
               sanitizeForLog(deliverySourceId),
               getErrorMessage(evidenceErr, 'unknown error'),
-              getErrorMessage(cleanupErr, 'unknown error'),
+              cleanupMessage,
             );
           }
         } else {
           console.error(
             'Registry delivery temp dir cleanup failed for %s:',
             sanitizeForLog(deliverySourceId),
-            getErrorMessage(cleanupErr, 'unknown error'),
+            cleanupMessage,
           );
         }
       }
@@ -526,8 +532,12 @@ export class ComposeService {
       if (prepId) {
         try {
           PreparedSourceStore.getInstance().finalize(prepId);
-        } catch {
-          /* best effort */
+        } catch (finalizeErr) {
+          console.error(
+            'Registry delivery prepared-source finalize failed for %s:',
+            sanitizeForLog(prepId),
+            getErrorMessage(finalizeErr, 'unknown error'),
+          );
         }
       }
     }

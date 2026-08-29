@@ -549,16 +549,13 @@ export class BlueprintService {
                 }
                 let previousComposeContent: string | null = null;
                 if (!createdStack) {
-                    try {
-                        const prior = await fs.readStackFile(stackName, COMPOSE_FILENAME);
-                        previousComposeContent = prior.content ?? null;
-                    } catch (readErr) {
-                        console.warn(
-                            '[BlueprintService] Could not read prior compose for "%s" before apply: %s',
-                            sanitizeForLog(stackName),
-                            sanitizeForLog(BlueprintService.formatError(readErr)),
+                    const prior = await fs.readStackFile(stackName, COMPOSE_FILENAME);
+                    if (prior.oversized || prior.binary || prior.content === undefined) {
+                        throw new Error(
+                            `Cannot snapshot existing compose for blueprint apply on "${stackName}"`,
                         );
                     }
+                    previousComposeContent = prior.content;
                 }
                 await fs.writeStackFile(stackName, COMPOSE_FILENAME, composeContent);
                 // Clear lower-priority compose siblings so discovery cannot shadow compose.yaml.

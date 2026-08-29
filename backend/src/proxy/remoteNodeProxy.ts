@@ -56,7 +56,7 @@ import {
   classifyRegistryDeliveryRouteClass,
   getRegistryDeliveryTotalBodyLimit,
 } from '../helpers/registryDeliveryBodyLimits';
-import { augmentRemoteProxyWithRegistryDelivery, shouldAttemptRegistryDeliveryProxyHop } from '../helpers/registryDeliveryProxy';
+import { augmentRemoteProxyWithRegistryDelivery, evaluateRegistryDeliveryProxyGate } from '../helpers/registryDeliveryProxy';
 
 /**
  * Per-request hop timing for the critical hydration GETs, kept off the Request
@@ -711,7 +711,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       // the forwarded JSON body. Otherwise forward unchanged (AUD-30).
       const deliveryApiPath = `/api${req.path}`;
       if (RegistryDeliveryService.getInstance().isDeliveryEligibleRoute(req.method, deliveryApiPath)) {
-        const wouldAttempt = await shouldAttemptRegistryDeliveryProxyHop(
+        const gate = await evaluateRegistryDeliveryProxyGate(
           req,
           res,
           req.nodeId,
@@ -719,7 +719,10 @@ export function createRemoteProxyMiddleware(): RequestHandler {
           req.method,
           deliveryApiPath,
         );
-        if (wouldAttempt) {
+        if (gate.outcome === 'stop') {
+          return;
+        }
+        if (gate.outcome === 'run-delivery') {
           if (hasNonIdentityContentEncoding(req)) {
             await drainRequestBody(req);
             res.status(415).json({

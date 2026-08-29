@@ -83,26 +83,72 @@ export function ensureRegistryDeliveryHopAbortController(req: Request, res: Resp
   res.once('close', detach);
 }
 
+export type RegistryDeliveryProxyHopDecision =
+  | { action: 'attempt' }
+  | { action: 'skip' }
+  | { action: 'aborted' };
+
+export type RegistryDeliveryProxyGateResult =
+  | { outcome: 'continue' }
+  | { outcome: 'stop' }
+  | { outcome: 'run-delivery' };
+
 /**
  * Register abort listeners, then decide whether hop-1 registry delivery runs.
  * Abort is wired before the capability probe so a client disconnect during the
- * probe still cancels the hop.
+ * probe still cancels the hop. Aborted is distinct from skip so callers do not
+ * forward consequential requests after cancellation.
  */
-export async function shouldAttemptRegistryDeliveryProxyHop(
+export async function decideRegistryDeliveryProxyHop(
   req: Request,
   res: Response,
   nodeId: number,
   node: Node,
   method: string,
   deliveryApiPath: string,
-): Promise<boolean> {
+): Promise<RegistryDeliveryProxyHopDecision> {
+  if (req.destroyed || req.aborted) {
+    return { action: 'aborted' };
+  }
   ensureRegistryDeliveryHopAbortController(req, res);
   if (req.registryDeliveryAbortController?.signal.aborted) {
-    return false;
+    return { action: 'aborted' };
   }
   const wouldAttempt = await wouldAttemptRegistryDelivery(nodeId, node, method, deliveryApiPath);
-  if (req.registryDeliveryAbortController?.signal.aborted) {
-    return false;
+  if (
+    req.destroyed
+    || req.aborted
+    || req.registryDeliveryAbortController?.signal.aborted
+  ) {
+    return { action: 'aborted' };
   }
-  return wouldAttempt;
+  return wouldAttempt ? { action: 'attempt' } : { action: 'skip' };
+}
+
+/**
+ * Map an eligible-route registry delivery decision to proxy gate behavior.
+ */
+export async function evaluateRegistryDeliveryProxyGate(
+  req: Request,
+  res: Response,
+  nodeId: number,
+  node: Node,
+  method: string,
+  deliveryApiPath: string,
+): Promise<RegistryDeliveryProxyGateResult> {
+  const decision = await decideRegistryDeliveryProxyHop(
+    req,
+    res,
+    nodeId,
+    node,
+    method,
+    deliveryApiPath,
+  );
+  if (decision.action === 'aborted') {
+    return { outcome: 'stop' };
+  }
+  if (decision.action === 'attempt') {
+    return { outcome: 'run-delivery' };
+  }
+  return { outcome: 'continue' };
 }

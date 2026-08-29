@@ -6,48 +6,45 @@ import { templateService } from '../services/TemplateService';
 import { FileSystemService } from '../services/FileSystemService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
-import { hashDeliverySourceDir, hashProjectSource } from './registryDeliveryHashes';
+import { hashDeliverySourceDir, hashBlueprintPostApplySource, hashProjectSource } from './registryDeliveryHashes';
 import type { RegistryDeliveryDiscoverRequest } from '../services/RegistryDeliveryService';
 import type { CreateStackFromGitInput } from '../services/GitSourceService';
 import { isValidStackName } from '../utils/validation';
+import { loadDotEnv } from '../services/ImageUpdateService';
+import { discoverRegistryReferencesFromComposeContent } from '../services/registryReferenceDiscovery';
+import { mergeComposeEnvVars } from './registryDeliveryComposeEnv';
 
 export interface PreparedSourceResult {
   prepId: string;
   sourceHash: string;
 }
 
-const BLUEPRINT_COMPOSE_FILENAME = 'compose.yaml';
+export interface BlueprintPostApplyDiscovery {
+  sourceHash: string;
+  referencedHosts: string[];
+}
 
 /**
- * Stage the post-apply project bundle for blueprint body-content discovery:
- * incoming compose content plus any existing stack .env left untouched by apply.
+ * Discover registry references for blueprint body-content using the post-apply
+ * project shape without writing sensitive material to a temp directory.
  */
-export async function stageBlueprintPostApplyBundle(
+export async function resolveBlueprintPostApplyDiscovery(
   stackName: string,
   composeContent: string,
   nodeId: number,
-): Promise<string> {
-  const stagingDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-bp-regdisc-'));
-  try {
-    await fsPromises.writeFile(
-      path.join(stagingDir, BLUEPRINT_COMPOSE_FILENAME),
-      composeContent,
-      { mode: 0o600 },
-    );
-    const fs = FileSystemService.getInstance(nodeId);
-    try {
-      if (await fs.envExists(stackName)) {
-        const envContent = await fs.getEnvContent(stackName);
-        await fsPromises.writeFile(path.join(stagingDir, '.env'), envContent, { mode: 0o600 });
-      }
-    } catch {
-      // Best effort: discovery still runs from compose content alone.
-    }
-    return stagingDir;
-  } catch (error) {
-    await fsPromises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
-    throw error;
+): Promise<BlueprintPostApplyDiscovery> {
+  const fs = FileSystemService.getInstance(nodeId);
+  let envFileContent: string | null = null;
+  if (await fs.envExists(stackName)) {
+    envFileContent = await fs.getEnvContent(stackName);
   }
+  const dotEnv = envFileContent ? loadDotEnv(envFileContent) : {};
+  const sourceHash = hashBlueprintPostApplySource(composeContent, envFileContent);
+  const discovery = discoverRegistryReferencesFromComposeContent(
+    composeContent,
+    mergeComposeEnvVars(dotEnv),
+  );
+  return { sourceHash, referencedHosts: discovery.referencedHosts };
 }
 
 export async function prepareRequestGeneratedSource(input: {

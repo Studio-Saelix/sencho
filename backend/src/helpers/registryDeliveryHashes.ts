@@ -20,6 +20,28 @@ export function hashComposeBodyContent(composeContent: string): string {
   return hash.digest('hex');
 }
 
+/**
+ * Stable hash of the post-apply blueprint project bundle: incoming compose.yaml
+ * plus the existing stack .env bytes when present.
+ */
+export function hashBlueprintPostApplySource(
+  composeContent: string,
+  envFileContent?: string | null,
+): string {
+  const hash = crypto.createHash('sha256');
+  hash.update('compose.yaml');
+  hash.update('\0');
+  hash.update(composeContent);
+  hash.update('\n');
+  if (envFileContent) {
+    hash.update('.env');
+    hash.update('\0');
+    hash.update(envFileContent);
+    hash.update('\n');
+  }
+  return hash.digest('hex');
+}
+
 /** Stable hash of the live project file bundle used for live-project delivery. */
 export function hashProjectSource(projectDir: string): string {
   const hash = crypto.createHash('sha256');

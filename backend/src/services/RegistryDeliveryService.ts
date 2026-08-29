@@ -13,11 +13,10 @@ import { REMOTE_REGISTRY_CREDENTIALS_CAPABILITY } from './CapabilityRegistry';
 import { isTrustedProxyPeer } from '../helpers/trustedProxyCidrs';
 import type { RegistryDeliveryEnvelope, RegistryDeliveryAuthEntry } from '../helpers/registryDeliveryContext';
 import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
-import { prepareSourceForDiscover, stageBlueprintPostApplyBundle } from '../helpers/registryDeliveryPrepare';
+import { prepareSourceForDiscover, resolveBlueprintPostApplyDiscovery } from '../helpers/registryDeliveryPrepare';
 import { PreparedSourceStore } from './preparedSourceStore';
 import { hashProjectSource } from '../helpers/registryDeliveryHashes';
 import { isValidStackName } from '../utils/validation';
-import { promises as fsPromises } from 'fs';
 import {
   resolveComposeEnvForDiscovery,
 } from '../helpers/registryDeliveryComposeEnv';
@@ -211,17 +210,13 @@ export class RegistryDeliveryService {
       if (typeof stack !== 'string') {
         throw new Error('Invalid stack name');
       }
-      const stagingDir = await stageBlueprintPostApplyBundle(stack, request.composeContent, nodeId);
-      try {
-        sourceHash = hashProjectSource(stagingDir);
-        const discovery = discoverRegistryReferences(
-          stagingDir,
-          resolveComposeEnvForDiscovery(stagingDir),
-        );
-        referencedHosts = discovery.referencedHosts;
-      } finally {
-        await fsPromises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
-      }
+      const discovery = await resolveBlueprintPostApplyDiscovery(
+        stack,
+        request.composeContent,
+        nodeId,
+      );
+      sourceHash = discovery.sourceHash;
+      referencedHosts = discovery.referencedHosts;
     } else if (request.stack) {
       if (!isValidStackName(request.stack)) {
         throw new Error('Invalid stack name');

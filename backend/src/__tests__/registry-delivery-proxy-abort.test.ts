@@ -48,8 +48,8 @@ describe('registry delivery proxy hop abort', () => {
     expect(req.registryDeliveryAbortController?.signal.aborted).toBe(true);
   });
 
-  it('returns false from shouldAttemptRegistryDeliveryProxyHop when aborted before probe completes', async () => {
-    const { shouldAttemptRegistryDeliveryProxyHop } = await import('../helpers/registryDeliveryProxy');
+  it('returns aborted from decideRegistryDeliveryProxyHop when disconnected during the probe', async () => {
+    const { decideRegistryDeliveryProxyHop } = await import('../helpers/registryDeliveryProxy');
     const { req, res } = mockReqRes();
     const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
     const node = DatabaseService.getInstance().getNode(nodeId)!;
@@ -59,7 +59,7 @@ describe('registry delivery proxy hop abort', () => {
       resolveProbe = resolve;
     }));
 
-    const decision = shouldAttemptRegistryDeliveryProxyHop(
+    const decision = decideRegistryDeliveryProxyHop(
       req,
       res,
       nodeId,
@@ -71,6 +71,46 @@ describe('registry delivery proxy hop abort', () => {
     req.emit('aborted');
     resolveProbe?.(true);
 
-    await expect(decision).resolves.toBe(false);
+    await expect(decision).resolves.toEqual({ action: 'aborted' });
+  });
+
+  it('maps aborted decisions to stop at the proxy gate', async () => {
+    const { evaluateRegistryDeliveryProxyGate } = await import('../helpers/registryDeliveryProxy');
+    const { req, res } = mockReqRes();
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const node = DatabaseService.getInstance().getNode(nodeId)!;
+
+    Object.defineProperty(req, 'aborted', { value: true, configurable: true });
+
+    await expect(
+      evaluateRegistryDeliveryProxyGate(
+        req,
+        res,
+        nodeId,
+        node,
+        'POST',
+        '/api/blueprints/apply-local',
+      ),
+    ).resolves.toEqual({ outcome: 'stop' });
+  });
+
+  it('maps capability miss to continue at the proxy gate', async () => {
+    const { evaluateRegistryDeliveryProxyGate } = await import('../helpers/registryDeliveryProxy');
+    const { req, res } = mockReqRes();
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const node = DatabaseService.getInstance().getNode(nodeId)!;
+
+    mockWouldAttempt.mockResolvedValue(false);
+
+    await expect(
+      evaluateRegistryDeliveryProxyGate(
+        req,
+        res,
+        nodeId,
+        node,
+        'POST',
+        '/api/blueprints/apply-local',
+      ),
+    ).resolves.toEqual({ outcome: 'continue' });
   });
 });

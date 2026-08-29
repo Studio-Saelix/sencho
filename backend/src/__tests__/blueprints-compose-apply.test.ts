@@ -216,6 +216,48 @@ describe('Blueprint compose apply (real filesystem)', () => {
         await expectMissing(path.join(stackDir, '.blueprint.json'));
         expect(deploySpy).not.toHaveBeenCalled();
     });
+
+    it('does not mutate an existing stack when compose snapshot read fails', async () => {
+        const nodeId = seedLocalNode();
+        const stackName = `bp-snapshot-fail-${counter}`;
+        const stackDir = path.join(process.env.COMPOSE_DIR!, stackName);
+        const original = 'services:\n  old:\n    image: nginx\n';
+        await fsPromises.mkdir(stackDir, { recursive: true });
+        await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), original);
+        await fsPromises.writeFile(
+            path.join(stackDir, '.blueprint.json'),
+            JSON.stringify({ blueprintId: 10, revision: 1, lastApplied: 1 }, null, 2),
+        );
+
+        const fs = FileSystemService.getInstance(nodeId);
+        vi.spyOn(FileSystemService.prototype, 'readStackFile').mockResolvedValue({
+            content: undefined,
+            binary: false,
+            oversized: true,
+            size: 3 * 1024 * 1024,
+            mime: 'text/yaml',
+            mtimeMs: Date.now(),
+        });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({
+            recoveryId: null,
+            deployedGenerationId: null,
+        });
+        const writeSpy = vi.spyOn(FileSystemService.prototype, 'writeStackFile');
+
+        await expect(
+            BlueprintService.getInstance().applyLocalUnderLock(
+                nodeId,
+                stackName,
+                'services:\n  new:\n    image: redis:7\n',
+                JSON.stringify({ blueprintId: 10, revision: 2, lastApplied: Date.now() }, null, 2),
+                '/api/blueprints/test/apply',
+            ),
+        ).rejects.toThrow(/Cannot snapshot existing compose/i);
+
+        expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe(original);
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(writeSpy).not.toHaveBeenCalled();
+    });
 });
 
 describe('FileSystemService.removeAlternateRootComposeFiles', () => {
