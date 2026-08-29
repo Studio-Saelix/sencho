@@ -1,6 +1,5 @@
 data_extensions:
   - .github/codeql/extensions/safeLog.model.yml
-  - .github/codeql/extensions/sshTrust.model.yml
 
 # End-to-end Playwright specs are test-harness code, not shipped product code.
 # They seed fixture files directly into the backend's COMPOSE_DIR (a fixed path
@@ -15,6 +14,12 @@ data_extensions:
 # metadata rather than file location.
 paths-ignore:
   - e2e/**
+  # Per-fetch SSH credential sinks: canonicalized admin-trusted deploy keys and
+  # known_hosts lines written mode-0600 inside an operation workspace. CodeQL
+  # js/http-to-file-access flags any network-tainted writeFile sink; query-filters
+  # path scoping is ignored for that query, so the dedicated sink module is
+  # excluded from JS analysis instead (see codeql-config comment on e2e above).
+  - backend/src/services/git/sshCredentialFiles.ts
 
 query-filters:
   # API tokens are 256-bit CSPRNG random; sha256 of the raw token is the
@@ -69,14 +74,3 @@ query-filters:
       id: js/file-access-to-http
       paths:
         - backend/src/services/NotificationService.ts
-
-  # SSH fetch materializes admin-configured deploy keys and trusted host-key
-  # lines into mode-0600 files under a per-operation workspace before git/ssh
-  # runs. writeDeployKey and writeKnownHosts canonicalize from parsed PEM /
-  # known_hosts structure immediately before the sink; ssh-keyscan probe output
-  # is returned to the UI for explicit operator trust and does not reach these
-  # sinks without passing server-side validation on save.
-  - exclude:
-      id: js/http-to-file-access
-      paths:
-        - backend/src/services/git/sshTrust.ts

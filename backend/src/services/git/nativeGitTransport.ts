@@ -15,9 +15,8 @@ import {
     buildSshCommand,
     parseRepoTransportUrl,
     type ParsedRepoUrl,
-    writeDeployKey,
-    writeKnownHosts,
 } from './sshTrust';
+import { writeDeployKey, writeKnownHosts } from './sshCredentialFiles';
 
 /**
  * Native git transport: every Git operation is an `execFile`-style spawn of

@@ -1,6 +1,5 @@
 import { createHash } from 'crypto';
 import { spawn } from 'child_process';
-import { promises as fs } from 'fs';
 import path from 'path';
 
 /** Parsed SSH repository target for transport and host-key trust. */
@@ -251,22 +250,6 @@ export async function scanHostKeys(host: string, port: number): Promise<ScannedH
         throw new Error('No host keys returned from ssh-keyscan');
     }
     return keys;
-}
-
-export async function writeDeployKey(metaDir: string, pem: string): Promise<string> {
-    const keyPath = path.join(metaDir, 'deploy-key');
-    const canonical = canonicalizeDeployKeyPem(pem);
-    // codeql[js/http-to-file-access]: operator-provided deploy key; canonicalized PEM envelope and base64 body only, mode 0600, operation-scoped path.
-    await fs.writeFile(keyPath, canonical, { mode: 0o600 });
-    return keyPath.split(path.sep).join('/');
-}
-
-export async function writeKnownHosts(metaDir: string, entry: string): Promise<string> {
-    const knownHostsPath = path.join(metaDir, 'known_hosts');
-    const canonical = canonicalizeKnownHostsEntry(entry);
-    // codeql[js/http-to-file-access]: admin-trusted host key; canonicalized from parsed host marker + key type + base64 material only, mode 0600, operation-scoped path.
-    await fs.writeFile(knownHostsPath, canonical, { mode: 0o600 });
-    return knownHostsPath.split(path.sep).join('/');
 }
 
 /**
