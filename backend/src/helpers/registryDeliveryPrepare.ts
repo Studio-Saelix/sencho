@@ -9,6 +9,7 @@ import { PreparedSourceStore } from '../services/preparedSourceStore';
 import { hashDeliverySourceDir, hashProjectSource } from './registryDeliveryHashes';
 import type { RegistryDeliveryDiscoverRequest } from '../services/RegistryDeliveryService';
 import type { CreateStackFromGitInput } from '../services/GitSourceService';
+import { isValidStackName } from '../utils/validation';
 
 export interface PreparedSourceResult {
   prepId: string;
@@ -166,7 +167,9 @@ export async function prepareSourceForDiscover(
     }
     case 'restore-candidate': {
       const stack = request.stack;
-      if (!stack) throw new Error('Restore discovery requires stack');
+      if (!stack || !isValidStackName(stack)) {
+        throw new Error('Invalid stack name');
+      }
       const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
       return prepareRestoreCandidateForStack(stack, nodeId);
     }

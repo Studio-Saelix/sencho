@@ -14,7 +14,6 @@ data_extensions:
 # metadata rather than file location.
 paths-ignore:
   - e2e/**
-  - backend/src/helpers/dockerComposeRunner.ts
 
 query-filters:
   # API tokens are 256-bit CSPRNG random; sha256 of the raw token is the
@@ -69,32 +68,3 @@ query-filters:
       id: js/file-access-to-http
       paths:
         - backend/src/services/NotificationService.ts
-
-  # Registry delivery discover stages body-content compose YAML into an ephemeral
-  # tmpdir for host-reference hashing only. The route is machine-auth
-  # (node_proxy / pilot_tunnel), compose bytes are size-bounded, and the staging
-  # directory is removed before the response returns.
-  - exclude:
-      id: js/http-to-file-access
-      paths:
-        - backend/src/services/RegistryDeliveryService.ts
-
-  # Registry delivery copies validated prepared payloads into managed git
-  # candidate directories. validateCandidateRelPath and inline path.resolve
-  # checks at each sink mirror registryDeliveryMaterialize.ts; CodeQL does not
-  # credit the validator across function boundaries.
-  - exclude:
-      id: js/path-injection
-      paths:
-        - backend/src/helpers/registryDeliveryGitCandidate.ts
-        - backend/src/helpers/registryDeliveryMaterialize.ts
-        - backend/src/helpers/dockerComposeRunner.ts
-
-  # hashDeliverySourceDir and Dockerfile discovery read files during the same
-  # directory walk that enumerated them. The TOCTOU window is accepted for
-  # hashing and host discovery on admin-controlled project trees.
-  - exclude:
-      id: js/file-system-race
-      paths:
-        - backend/src/helpers/registryDeliveryHashes.ts
-        - backend/src/services/registryReferenceDiscovery.ts

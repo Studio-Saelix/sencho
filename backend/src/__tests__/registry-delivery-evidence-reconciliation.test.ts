@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import axios from 'axios';
 import { setupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import {
@@ -12,6 +13,7 @@ describe('registry delivery evidence persistence', () => {
   beforeEach(async () => {
     await setupTestDb();
     RegistryDeliveryReconciler.resetForTests();
+    vi.restoreAllMocks();
   });
 
   it('assigns monotonic seq values and pages by cursor', () => {
@@ -104,5 +106,43 @@ describe('registry delivery evidence persistence', () => {
     const gap = listRegistryDeliveryEvidencePage(deliverySourceId, seq - 1, 10);
     const retention = gap.events.find((event) => event.event_type === 'retention_gap');
     expect(retention?.pruned_through_seq).toBe(seq);
+  });
+
+  it('attributes imported evidence to the remote node id', async () => {
+    const db = DatabaseService.getInstance();
+    const remoteNodeId = 42;
+    const deliverySourceId = 'remote-source-id';
+    db.getDb().prepare(
+      `INSERT INTO nodes (id, name, type, api_url, api_token, mode, compose_dir, is_default, status, created_at)
+       VALUES (?, 'remote-test', 'remote', 'http://remote:1852', 'token', 'direct', ?, 0, 'online', ?)
+       ON CONFLICT(id) DO UPDATE SET
+         type = excluded.type,
+         api_url = excluded.api_url,
+         api_token = excluded.api_token,
+         mode = excluded.mode`,
+    ).run(remoteNodeId, process.env.COMPOSE_DIR!, Date.now());
+
+    vi.spyOn(axios, 'get').mockResolvedValue({
+      status: 200,
+      data: {
+        deliverySourceId,
+        events: [{
+          event_id: 'evt-remote-1',
+          seq: 99,
+          event_type: 'operation_completed',
+          created_at: Date.now(),
+          stack: 'demo',
+          op: 'stack-deploy',
+        }],
+        nextCursor: 99,
+      },
+    });
+
+    await RegistryDeliveryReconciler.getInstance().reconcileNode(remoteNodeId);
+
+    const row = db.getDb().prepare(
+      'SELECT hub_node_id_snapshot FROM registry_delivery_imported_events WHERE event_id = ?',
+    ).get('evt-remote-1') as { hub_node_id_snapshot: number } | undefined;
+    expect(row?.hub_node_id_snapshot).toBe(remoteNodeId);
   });
 });

@@ -57,6 +57,7 @@ import {
   getRegistryDeliveryTotalBodyLimit,
 } from '../helpers/registryDeliveryBodyLimits';
 import { augmentRemoteProxyWithRegistryDelivery } from '../helpers/registryDeliveryProxy';
+import { wouldAttemptRegistryDelivery } from '../helpers/registryDeliveryOutbound';
 
 /**
  * Per-request hop timing for the critical hydration GETs, kept off the Request
@@ -711,43 +712,55 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       // the forwarded JSON body. Otherwise forward unchanged (AUD-30).
       const deliveryApiPath = `/api${req.path}`;
       if (RegistryDeliveryService.getInstance().isDeliveryEligibleRoute(req.method, deliveryApiPath)) {
-        if (hasNonIdentityContentEncoding(req)) {
-          await drainRequestBody(req);
-          res.status(415).json({
-            error: 'Compressed request bodies are not supported for remote registry delivery',
-            code: 'encoding_unsupported',
-          });
-          return;
-        }
-        const routeClass = classifyRegistryDeliveryRouteClass(req.method, deliveryApiPath);
-        if (routeClass) {
-          const bodyLimit = getRegistryDeliveryTotalBodyLimit(routeClass);
-          try {
-            req.rawBody = await bufferRequestBody(req, bodyLimit);
-          } catch (err) {
-            const status = Number((err as { status?: number }).status);
-            if (status === 413) {
-              res.status(413).json({ error: 'Request body too large for registry delivery' });
-              return;
-            }
-            if (status === 400) {
-              res.status(400).json({ error: 'Incomplete request body' });
-              return;
-            }
-            throw err;
-          }
-          const deliveryResult = await augmentRemoteProxyWithRegistryDelivery(
-            req,
-            req.nodeId,
-            node,
-            target,
-            req.rawBody,
-          );
-          if (!deliveryResult.forward) {
-            res.status(deliveryResult.status ?? 500).json({
-              error: deliveryResult.error ?? 'Registry delivery failed',
+        const wouldAttempt = await wouldAttemptRegistryDelivery(
+          req.nodeId,
+          node,
+          req.method,
+          deliveryApiPath,
+        );
+        if (wouldAttempt) {
+          ensureRegistryDeliveryHopAbortController(req, res);
+          if (hasNonIdentityContentEncoding(req)) {
+            await drainRequestBody(req);
+            res.status(415).json({
+              error: 'Compressed request bodies are not supported for remote registry delivery',
+              code: 'encoding_unsupported',
             });
             return;
+          }
+          const routeClass = classifyRegistryDeliveryRouteClass(req.method, deliveryApiPath);
+          if (routeClass) {
+            const bodyLimit = getRegistryDeliveryTotalBodyLimit(routeClass);
+            try {
+              req.rawBody = await bufferRequestBody(req, bodyLimit);
+            } catch (err) {
+              const status = Number((err as { status?: number }).status);
+              if (status === 413) {
+                res.status(413).json({ error: 'Request body too large for registry delivery' });
+                return;
+              }
+              if (status === 400) {
+                res.status(400).json({ error: 'Incomplete request body' });
+                return;
+              }
+              throw err;
+            }
+            const deliveryResult = await augmentRemoteProxyWithRegistryDelivery(
+              req,
+              req.nodeId,
+              node,
+              target,
+              req.rawBody,
+            );
+            if (!deliveryResult.forward) {
+              if (req.registryDeliveryAbortController?.signal.aborted) {
+                return;
+              }
+              res.status(deliveryResult.status ?? 500).json({
+                error: deliveryResult.error ?? 'Registry delivery failed',
+              });
+              return;
+            }
           }
         }
       }
@@ -915,6 +928,33 @@ function hasNonIdentityContentEncoding(req: Request): boolean {
     const encoding = part.trim().toLowerCase();
     return encoding.length > 0 && encoding !== 'identity';
   });
+}
+
+function ensureRegistryDeliveryHopAbortController(req: Request, res: Response): void {
+  if (req.registryDeliveryAbortController) return;
+  const abortController = new AbortController();
+  req.registryDeliveryAbortController = abortController;
+  const onReqAborted = () => {
+    if (!abortController.signal.aborted) {
+      abortController.abort();
+    }
+  };
+  const onResClose = () => {
+    if (!res.writableEnded && !abortController.signal.aborted) {
+      abortController.abort();
+    }
+  };
+  let detached = false;
+  const detach = () => {
+    if (detached) return;
+    detached = true;
+    req.off('aborted', onReqAborted);
+    res.off('close', onResClose);
+  };
+  req.on('aborted', onReqAborted);
+  res.on('close', onResClose);
+  res.once('finish', detach);
+  res.once('close', detach);
 }
 
 /** True when the buffered JSON alert body targets a specific Compose service. */

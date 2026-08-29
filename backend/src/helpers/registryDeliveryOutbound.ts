@@ -30,6 +30,7 @@ export interface AugmentRegistryDeliveryInput {
   body: Record<string, unknown>;
   sourceKind?: string;
   prepId?: string;
+  abortSignal?: AbortSignal;
 }
 
 function isTransportConfidential(nodeId: number, node: Node): boolean {
@@ -40,17 +41,44 @@ function isTransportConfidential(nodeId: number, node: Node): boolean {
   return delivery.isProxyTransportConfidential(nodeId);
 }
 
+export async function wouldAttemptRegistryDelivery(
+  nodeId: number,
+  node: Node,
+  method: string,
+  apiPath: string,
+): Promise<boolean> {
+  const classification = classifyRegistryDeliveryOp(method, apiPath);
+  if (!classification.eligible || !classification.stage) {
+    return false;
+  }
+  if (!isTransportConfidential(nodeId, node)) {
+    return false;
+  }
+  if (!await remoteAdvertisesCapability(nodeId, REMOTE_REGISTRY_CREDENTIALS_CAPABILITY)) {
+    return false;
+  }
+  return classifyRegistryDeliveryRouteClass(method, apiPath) != null;
+}
+
 async function callTargetDiscover(
   target: { apiUrl: string; apiToken: string },
   body: Record<string, unknown>,
+  abortSignal?: AbortSignal,
 ): Promise<RegistryDeliveryDiscoverResponse> {
+  if (abortSignal?.aborted) {
+    throw Object.assign(new Error('Registry delivery aborted'), { status: 499, code: 'ABORTED' });
+  }
   const base = target.apiUrl.replace(/\/$/, '');
   const res = await axios.post(`${base}/api/registry-delivery/discover`, body, {
     headers: { Authorization: `Bearer ${target.apiToken}` },
     timeout: 30_000,
     maxBodyLength: REGISTRY_DELIVERY_FIELD_LIMIT_BYTES,
+    signal: abortSignal,
     validateStatus: () => true,
   });
+  if (abortSignal?.aborted) {
+    throw Object.assign(new Error('Registry delivery aborted'), { status: 499, code: 'ABORTED' });
+  }
   if (res.status < 200 || res.status >= 300) {
     const message = typeof res.data?.error === 'string'
       ? res.data.error
@@ -71,6 +99,10 @@ export async function augmentJsonBodyForRegistryDelivery(
   const classification = classifyRegistryDeliveryOp(input.method, input.apiPath);
   if (!classification.eligible || !classification.stage) {
     return { ok: true, body: input.body, augmented: false };
+  }
+
+  if (input.abortSignal?.aborted) {
+    return { ok: false, status: 499, error: 'Request aborted' };
   }
 
   const confidential = isTransportConfidential(input.nodeId, input.node);
@@ -94,7 +126,10 @@ export async function augmentJsonBodyForRegistryDelivery(
       return { ok: true, body: input.body, augmented: false };
     }
 
-    const discover = await callTargetDiscover(input.target, discoverBody);
+    const discover = await callTargetDiscover(input.target, discoverBody, input.abortSignal);
+    if (input.abortSignal?.aborted) {
+      return { ok: false, status: 499, error: 'Request aborted' };
+    }
     const envelope = await RegistryDeliveryService.getInstance().buildHubEnvelope(input.nodeId, discover);
     if (!envelope) {
       return { ok: true, body: input.body, augmented: false };
@@ -123,6 +158,12 @@ export async function augmentJsonBodyForRegistryDelivery(
 
     return { ok: true, body: parsed, augmented: true };
   } catch (error) {
+    if (input.abortSignal?.aborted || (error as { code?: string }).code === 'ABORTED') {
+      return { ok: false, status: 499, error: 'Request aborted' };
+    }
+    if (axios.isCancel(error)) {
+      return { ok: false, status: 499, error: 'Request aborted' };
+    }
     const status = Number((error as { status?: number }).status) || 500;
     console.error(
       '[registryDeliveryOutbound] hop-1 failed:',
@@ -147,6 +188,7 @@ export async function prepareOutboundRegistryDeliveryBody(options: {
   body?: Record<string, unknown> | null;
   sourceKind?: string;
   prepId?: string;
+  abortSignal?: AbortSignal;
 }): Promise<RegistryDeliveryAugmentResult> {
   const body = options.body ?? {};
   const node = DatabaseService.getInstance().getNode(options.nodeId);
@@ -163,5 +205,6 @@ export async function prepareOutboundRegistryDeliveryBody(options: {
     body,
     sourceKind: options.sourceKind,
     prepId: options.prepId,
+    abortSignal: options.abortSignal,
   });
 }

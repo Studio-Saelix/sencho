@@ -1,19 +1,35 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
+import jwt from 'jsonwebtoken';
 import { setupTestDb } from './helpers/setupTestDb';
 import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { StackOpLockService } from '../services/StackOpLockService';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
 import { resolveRegistryAuthAtSeam } from '../helpers/registryDeliverySeam';
 import { hashActionSet, hashDeliverySourceDir } from '../helpers/registryDeliveryHashes';
 import { discoverRegistryReferences } from '../services/registryReferenceDiscovery';
 import { normalizeImageHost } from '../services/RegistryService';
 
+function acquireLockForAttestation(
+  nodeId: number,
+  stack: string,
+  attestation: string,
+  stage: string,
+): void {
+  const payload = jwt.decode(attestation) as jwt.JwtPayload;
+  StackOpLockService.getInstance().tryAcquire(nodeId, stack, 'deploy', 'admin', {
+    opId: String(payload.jti_t),
+    kind: stage,
+  });
+}
+
 describe('registryDeliverySeam prepared source claim', () => {
   beforeEach(async () => {
     await setupTestDb();
     RegistryDeliveryService.resetForTests();
+    StackOpLockService.resetForTests();
     const deliverySourceId = RegistryDeliveryService.getInstance().getDeliverySourceId();
     PreparedSourceStore.getInstance().configure(deliverySourceId);
   });
@@ -60,6 +76,8 @@ describe('registryDeliverySeam prepared source claim', () => {
       deliverySourceId: delivery.getDeliverySourceId(),
     };
 
+    acquireLockForAttestation(nodeId, stackName, attestation, 'template-deploy');
+
     const result = await resolveRegistryAuthAtSeam({
       envelope,
       nodeId,
@@ -86,6 +104,8 @@ describe('registryDeliverySeam prepared source claim', () => {
       actionSetHash: hashActionSet(['stack:create', 'stack:deploy']),
       prepId: 'deadbeefdeadbeefdeadbeefdeadbeef',
     });
+
+    acquireLockForAttestation(nodeId, 'mismatch', attestation, 'template-deploy');
 
     await expect(resolveRegistryAuthAtSeam({
       envelope: {

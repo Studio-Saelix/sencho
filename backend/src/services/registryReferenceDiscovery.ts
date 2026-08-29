@@ -38,13 +38,29 @@ function parseDockerfileReferences(content: string): string[] {
   return [...hosts];
 }
 
+function readRegularFileSync(filePath: string, baseResolved: string): Buffer | null {
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(baseResolved + path.sep)) return null;
+  const fd = fs.openSync(resolved, 'r');
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) return null;
+    const buf = Buffer.alloc(stat.size);
+    fs.readSync(fd, buf, 0, stat.size, 0);
+    return buf;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function discoverFromComposeFile(baseResolved: string, fileName: string, envVars: Record<string, string>): string[] {
   const safePath = path.resolve(baseResolved, fileName);
   if (!safePath.startsWith(baseResolved + path.sep)) {
     return [];
   }
-  const content = fs.readFileSync(safePath, 'utf8');
-  const images = extractImagesFromCompose(content, envVars);
+  const content = readRegularFileSync(safePath, baseResolved);
+  if (!content) return [];
+  const images = extractImagesFromCompose(content.toString('utf8'), envVars);
   const hosts = new Set<string>();
   for (const image of images) {
     const host = hostFromImageRef(image);

@@ -13,6 +13,7 @@ import type { RegistryDeliveryEnvelope } from './registryDeliveryContext';
 import { hashActionSet, hashProjectSource } from './registryDeliveryHashes';
 import type { RegistryDeliveryStage } from './registryOpClassifier';
 import { isValidStackName } from '../utils/validation';
+import { resolveComposeEnvForDiscovery } from './registryDeliveryComposeEnv';
 
 export interface RegistryDeliverySeamInput {
   envelope: RegistryDeliveryEnvelope;
@@ -93,15 +94,17 @@ export async function resolveRegistryAuthAtSeam(
   }
 
   const heldLock = StackOpLockService.getInstance().get(input.nodeId, input.stack);
-  if (heldLock?.context?.opId) {
-    const jti = payload.jti_t;
-    assertClaim(
-      typeof jti === 'string'
-        && heldLock.context.opId === jti
-        && heldLock.context.kind === input.stage,
-      'Stack lock context mismatch',
-    );
-  }
+  const jtiForLock = payload.jti_t;
+  assertClaim(
+    !!heldLock,
+    'Stack lock required for registry delivery',
+  );
+  assertClaim(
+    typeof jtiForLock === 'string'
+      && heldLock.context?.opId === jtiForLock
+      && heldLock.context?.kind === input.stage,
+    'Stack lock context mismatch',
+  );
 
   const prepId = input.envelope.prepId ?? (typeof payload.prepId === 'string' ? payload.prepId : undefined);
   let sourceHash: string;
@@ -120,7 +123,10 @@ export async function resolveRegistryAuthAtSeam(
       payload.sourceHash === sourceHash,
       'Prepared source hash mismatch',
     );
-    const discovery = discoverRegistryReferences(payloadPath);
+    const discovery = discoverRegistryReferences(
+      payloadPath,
+      resolveComposeEnvForDiscovery(payloadPath),
+    );
     referencedHosts = discovery.referencedHosts;
   } else {
     if (!isValidStackName(input.stack)) {
@@ -137,7 +143,10 @@ export async function resolveRegistryAuthAtSeam(
       payload.sourceHash === sourceHash,
       'Project source hash mismatch',
     );
-    const discovery = discoverRegistryReferences(projectDir);
+    const discovery = discoverRegistryReferences(
+      projectDir,
+      resolveComposeEnvForDiscovery(projectDir),
+    );
     referencedHosts = discovery.referencedHosts;
   }
 
@@ -173,7 +182,8 @@ export async function resolveRegistryAuthAtSeam(
 
   const jti = payload.jti_t;
   assertClaim(typeof jti === 'string' && jti.length > 0, 'Attestation missing jti');
-  delivery.consumeAttestationJti(jti);
+  const expiresAtMs = typeof payload.exp === 'number' ? payload.exp * 1000 : Date.now() + 900_000;
+  delivery.consumeAttestationJti(jti, expiresAtMs);
 
   if (Date.now() >= input.envelope.notAfter) {
     throw new Error('Registry delivery envelope expired');

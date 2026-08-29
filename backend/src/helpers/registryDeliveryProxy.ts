@@ -39,6 +39,7 @@ export async function augmentRemoteProxyWithRegistryDelivery(
     node,
     target,
     body: parsed,
+    abortSignal: req.registryDeliveryAbortController?.signal,
   });
 
   if (!result.ok) {

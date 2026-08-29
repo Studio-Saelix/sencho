@@ -11,14 +11,15 @@ export function runDockerCompose(
   const resolvedCwd = path.resolve(cwd);
   const managedBase = path.resolve(managedAreaBase());
   const tmpBase = path.resolve(os.tmpdir());
-  if (
-    !resolvedCwd.startsWith(managedBase + path.sep)
-    && !resolvedCwd.startsWith(tmpBase + path.sep)
-  ) {
+  const allowedCwd = resolvedCwd.startsWith(managedBase + path.sep)
+    || resolvedCwd.startsWith(tmpBase + path.sep)
+    ? resolvedCwd
+    : null;
+  if (!allowedCwd) {
     return Promise.resolve({ code: -1, stdout: '', stderr: 'Invalid working directory' });
   }
   return new Promise((resolve) => {
-    const child = spawn('docker', args, { cwd: resolvedCwd });
+    const child = spawn('docker', args, { cwd: allowedCwd });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {

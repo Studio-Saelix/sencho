@@ -50,4 +50,16 @@ describe('registryReferenceDiscovery', () => {
 
     expect(() => discoverRegistryReferences(dir)).toThrow(/size limit/i);
   });
+
+  it('resolves registry variables from .env when env map is supplied', () => {
+    const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-refdisc-env-${Date.now()}`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'compose.yaml'),
+      'services:\n  app:\n    image: ${REGISTRY}/org/private:latest\n',
+    );
+
+    const result = discoverRegistryReferences(dir, { REGISTRY: 'ghcr.io' });
+    expect(result.referencedHosts).toEqual(['ghcr.io']);
+  });
 });

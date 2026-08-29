@@ -17,6 +17,10 @@ import { prepareSourceForDiscover } from '../helpers/registryDeliveryPrepare';
 import { PreparedSourceStore } from './preparedSourceStore';
 import { hashComposeBodyContent, hashProjectSource } from '../helpers/registryDeliveryHashes';
 import { isValidStackName } from '../utils/validation';
+import {
+  resolveComposeEnvForContent,
+  resolveComposeEnvForDiscovery,
+} from '../helpers/registryDeliveryComposeEnv';
 
 const ATTESTATION_AUD = 'registry-delivery';
 const ATTESTATION_TTL_SECONDS = 900;
@@ -51,7 +55,7 @@ export interface RegistryDeliveryDiscoverResponse {
 export class RegistryDeliveryService {
   private static instance: RegistryDeliveryService | null = null;
   private readonly targetSessionId = crypto.randomBytes(16).toString('hex');
-  private readonly consumedJtis = new Set<string>();
+  private readonly consumedJtis = new Map<string, number>();
   private readonly maxConsumedJtis = 10_000;
 
   static getInstance(): RegistryDeliveryService {
@@ -131,14 +135,25 @@ export class RegistryDeliveryService {
     return decoded;
   }
 
-  consumeAttestationJti(jti: string): void {
+  private evictExpiredJtis(now = Date.now()): void {
+    for (const [jti, expiresAt] of this.consumedJtis) {
+      if (expiresAt <= now) {
+        this.consumedJtis.delete(jti);
+      }
+    }
+  }
+
+  consumeAttestationJti(jti: string, expiresAtMs?: number): void {
+    const now = Date.now();
+    this.evictExpiredJtis(now);
     if (this.consumedJtis.has(jti)) {
       throw new Error('Attestation already consumed');
     }
     if (this.consumedJtis.size >= this.maxConsumedJtis) {
       throw new Error('Attestation replay store at capacity');
     }
-    this.consumedJtis.add(jti);
+    const expiresAt = expiresAtMs ?? now + ATTESTATION_TTL_SECONDS * 1000;
+    this.consumedJtis.set(jti, expiresAt);
   }
 
   /** @deprecated Use parseAttestation at the middleware and consumeAttestationJti at the seam. */
@@ -154,6 +169,18 @@ export class RegistryDeliveryService {
 
   async discoverOnTarget(request: RegistryDeliveryDiscoverRequest): Promise<RegistryDeliveryDiscoverResponse> {
     const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const stackName = request.stack ?? request.stackName;
+    if (
+      request.sourceKind === 'restore-candidate'
+      || request.sourceKind === 'live-project'
+      || request.gitApply === true
+    ) {
+      if (typeof stackName !== 'string' || !isValidStackName(stackName)) {
+        throw new Error('Invalid stack name');
+      }
+      request.stack = stackName;
+    }
+
     let referencedHosts: string[] = [];
     let sourceHash = request.sourceHash;
     let prepId = request.prepId;
@@ -163,7 +190,10 @@ export class RegistryDeliveryService {
       prepId = prepared.prepId;
       sourceHash = prepared.sourceHash;
       const payloadPath = PreparedSourceStore.getInstance().peekPayloadPath(prepId);
-      const discovery = discoverRegistryReferences(payloadPath, request.envVars ?? {});
+      const discovery = discoverRegistryReferences(
+        payloadPath,
+        resolveComposeEnvForDiscovery(payloadPath, request.envVars),
+      );
       referencedHosts = discovery.referencedHosts;
     } else if (request.sourceKind === 'body-content' && typeof request.composeContent === 'string') {
       const MAX_COMPOSE_CONTENT_BYTES = 2 * 1024 * 1024;
@@ -173,7 +203,7 @@ export class RegistryDeliveryService {
       sourceHash = hashComposeBodyContent(request.composeContent);
       const discovery = discoverRegistryReferencesFromComposeContent(
         request.composeContent,
-        request.envVars ?? {},
+        resolveComposeEnvForContent(request.envVars),
       );
       referencedHosts = discovery.referencedHosts;
     } else if (request.stack) {
@@ -190,7 +220,10 @@ export class RegistryDeliveryService {
       if (!sourceHash || request.sourceKind === 'live-project') {
         sourceHash = hashProjectSource(projectDir);
       }
-      const discovery = discoverRegistryReferences(projectDir, request.envVars ?? {});
+      const discovery = discoverRegistryReferences(
+        projectDir,
+        resolveComposeEnvForDiscovery(projectDir, request.envVars),
+      );
       referencedHosts = discovery.referencedHosts;
     }
 

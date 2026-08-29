@@ -27,18 +27,34 @@ export function hashProjectSource(projectDir: string): string {
   for (const name of COMPOSE_FILENAMES) {
     const filePath = path.resolve(baseResolved, name);
     if (!filePath.startsWith(baseResolved + path.sep)) continue;
-    try {
-      const content = fs.readFileSync(filePath);
-      hash.update(name);
-      hash.update('\0');
-      hash.update(content);
-      hash.update('\n');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw error;
-    }
+    const content = readRegularFileSync(filePath, baseResolved);
+    if (!content) continue;
+    hash.update(name);
+    hash.update('\0');
+    hash.update(content);
+    hash.update('\n');
   }
   return hash.digest('hex');
+}
+
+function readRegularFileSync(filePath: string, baseResolved: string): Buffer | null {
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(baseResolved + path.sep)) return null;
+  try {
+    const fd = fs.openSync(resolved, 'r');
+    try {
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile()) return null;
+      const buf = Buffer.alloc(stat.size);
+      fs.readSync(fd, buf, 0, stat.size, 0);
+      return buf;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
 }
 
 function hashDirectoryTree(rootDir: string, hash: crypto.Hash, current = ''): void {
@@ -58,9 +74,11 @@ function hashDirectoryTree(rootDir: string, hash: crypto.Hash, current = ''): vo
       continue;
     }
     if (!entry.isFile()) continue;
+    const content = readRegularFileSync(filePath, baseResolved);
+    if (!content) continue;
     hash.update(rel.split(path.sep).join('/'));
     hash.update('\0');
-    hash.update(fs.readFileSync(filePath));
+    hash.update(content);
     hash.update('\n');
   }
 }

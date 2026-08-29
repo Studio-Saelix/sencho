@@ -114,7 +114,7 @@ export class RegistryDeliveryReconciler {
           break;
         }
 
-        const hubNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const hubNodeId = nodeId;
         importRegistryDeliveryEvidencePage(hubNodeId, deliverySourceId, page.events);
 
         cursor = page.nextCursor;

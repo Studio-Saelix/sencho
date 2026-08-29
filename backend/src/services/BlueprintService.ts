@@ -17,6 +17,7 @@ import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import { LicenseService } from './LicenseService';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions, describePolicyBlock, triggerPostDeployScan } from '../helpers/policyGate';
 import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
+import { getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -577,6 +578,7 @@ export class BlueprintService {
                     throw err;
                 }
             },
+            getRegistryDeliveryLockContext(),
         );
         return lock.ran ? { ran: true } : { ran: false, existingAction: lock.existing.action };
     }

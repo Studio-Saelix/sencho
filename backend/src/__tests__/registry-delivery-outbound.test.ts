@@ -30,6 +30,7 @@ vi.mock('../services/PilotTunnelManager', () => ({
 }));
 
 let augmentJsonBodyForRegistryDelivery: typeof import('../helpers/registryDeliveryOutbound').augmentJsonBodyForRegistryDelivery;
+let wouldAttemptRegistryDelivery: typeof import('../helpers/registryDeliveryOutbound').wouldAttemptRegistryDelivery;
 
 describe('registryDeliveryOutbound', () => {
   beforeEach(async () => {
@@ -41,7 +42,7 @@ describe('registryDeliveryOutbound', () => {
   });
 
   beforeEach(async () => {
-    ({ augmentJsonBodyForRegistryDelivery } = await import('../helpers/registryDeliveryOutbound'));
+    ({ augmentJsonBodyForRegistryDelivery, wouldAttemptRegistryDelivery } = await import('../helpers/registryDeliveryOutbound'));
     const delivery = RegistryDeliveryService.getInstance();
     vi.spyOn(delivery, 'isProxyTransportConfidential').mockImplementation(
       () => mockIsProxyConfidential(),
@@ -90,6 +91,43 @@ describe('registryDeliveryOutbound', () => {
     });
 
     expect(result).toEqual({ ok: true, body, augmented: false });
+    expect(mockAxiosPost).not.toHaveBeenCalled();
+  });
+
+  it('returns false from wouldAttemptRegistryDelivery when remote lacks capability', async () => {
+    mockRemoteAdvertises.mockResolvedValue(false);
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const node = DatabaseService.getInstance().getNode(nodeId)!;
+
+    const result = await wouldAttemptRegistryDelivery(
+      nodeId,
+      node,
+      'POST',
+      '/api/stacks/demo/deploy',
+    );
+
+    expect(result).toBe(false);
+  });
+
+  it('returns aborted when discover is cancelled', async () => {
+    mockRemoteAdvertises.mockResolvedValue(true);
+    mockAxiosPost.mockImplementation(() => new Promise(() => {}));
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const node = DatabaseService.getInstance().getNode(nodeId)!;
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await augmentJsonBodyForRegistryDelivery({
+      method: 'POST',
+      apiPath: '/api/stacks/demo/deploy',
+      nodeId,
+      node,
+      target: { apiUrl: 'http://remote:1852', apiToken: 'token' },
+      body: {},
+      abortSignal: controller.signal,
+    });
+
+    expect(result).toEqual({ ok: false, status: 499, error: 'Request aborted' });
     expect(mockAxiosPost).not.toHaveBeenCalled();
   });
 
