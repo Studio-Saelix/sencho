@@ -3,6 +3,10 @@ import path from 'path';
 
 import { loadDotEnv } from '../services/ImageUpdateService';
 
+function isSafeComposeEnvKey(key: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
+}
+
 /**
  * Merge compose variable maps with Docker Compose precedence:
  * request overrides, then .env, then process.env overrides both.
@@ -14,7 +18,9 @@ export function mergeComposeEnvVars(
   const merged: Record<string, string> = { ...dotEnv };
   if (requestEnv) {
     for (const [key, value] of Object.entries(requestEnv)) {
-      if (typeof value === 'string') merged[key] = value;
+      if (typeof value === 'string' && isSafeComposeEnvKey(key)) {
+        merged[key] = value;
+      }
     }
   }
   for (const [key, value] of Object.entries(process.env)) {

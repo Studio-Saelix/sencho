@@ -11,15 +11,17 @@ export function runDockerCompose(
   const resolvedCwd = path.resolve(cwd);
   const managedBase = path.resolve(managedAreaBase());
   const tmpBase = path.resolve(os.tmpdir());
-  const allowedCwd = resolvedCwd.startsWith(managedBase + path.sep)
-    || resolvedCwd.startsWith(tmpBase + path.sep)
-    ? resolvedCwd
-    : null;
-  if (!allowedCwd) {
+  // Canonical inline js/path-injection barrier, kept in the same scope as the
+  // spawn cwd sink below. CodeQL does not credit a barrier separated from the
+  // sink by the Promise-executor closure, so spawn is hoisted out of it.
+  if (
+    !resolvedCwd.startsWith(managedBase + path.sep)
+    && !resolvedCwd.startsWith(tmpBase + path.sep)
+  ) {
     return Promise.resolve({ code: -1, stdout: '', stderr: 'Invalid working directory' });
   }
+  const child = spawn('docker', args, { cwd: resolvedCwd });
   return new Promise((resolve) => {
-    const child = spawn('docker', args, { cwd: allowedCwd });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
