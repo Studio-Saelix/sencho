@@ -17,6 +17,7 @@ import { sendGitSourceError, webhookPullStatus } from '../utils/gitSourceHttp';
 import { sanitizeForLog } from '../utils/safeLog';
 import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
+import { auditActorUsername } from '../helpers/auditActor';
 
 // Reasonable upper bounds so a caller cannot flood the service with huge
 // payloads. Generous compared to anything a real Git provider emits.
@@ -378,7 +379,7 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       autoApplyOnWebhook,
       autoDeployOnApply,
       auditContext: {
-        username: req.user?.username ?? 'unknown',
+        username: auditActorUsername(req),
         method: req.method,
         path: req.originalUrl,
         ipAddress: req.ip || 'unknown',

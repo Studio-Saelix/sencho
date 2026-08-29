@@ -521,6 +521,45 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
         })).rejects.toMatchObject({ code: 'GIT_ERROR' });
     });
 
+    it('records SSH trust audit with the supplied actor and no key material', async () => {
+        mockSuccessfulClone();
+        const insertSpy = vi.spyOn(DatabaseService.getInstance(), 'insertAuditLog');
+        const svc = GitSourceService.getInstance();
+        const deployKey = '-----BEGIN OPENSSH PRIVATE KEY-----\nfixture-audit\n-----END OPENSSH PRIVATE KEY-----\n';
+        const keyBase64 = 'AAAAC3NzaC1lZDI1NTE5AAAAIGb3JzL3Rlc3Q=';
+        const knownHosts = `127.0.0.1 ssh-ed25519 ${keyBase64}`;
+        const derived = `SHA256:${crypto.createHash('sha256').update(Buffer.from(keyBase64, 'base64')).digest('base64').replace(/=+$/, '')}`;
+        await svc.upsert({
+            stackName: 'ssh-trust-audit',
+            repoUrl: 'git@github.com:example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'deploy_key',
+            deployKey,
+            sshKnownHostsEntry: knownHosts,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+            auditContext: {
+                username: 'fleet-operator',
+                method: 'PUT',
+                path: '/api/stacks/ssh-trust-audit/git-source',
+                ipAddress: '127.0.0.1',
+            },
+        });
+        expect(insertSpy).toHaveBeenCalledWith(expect.objectContaining({
+            username: 'fleet-operator',
+            summary: expect.stringContaining('git_source.ssh_trust_created'),
+        }));
+        const entry = insertSpy.mock.calls[0]?.[0];
+        expect(entry?.summary).toContain(derived);
+        expect(entry?.summary).not.toContain(deployKey);
+        expect(entry?.summary).not.toContain(knownHosts);
+        insertSpy.mockRestore();
+    });
+
     it('rejects auto_deploy_on_apply without auto_apply_on_webhook', async () => {
         const svc = GitSourceService.getInstance();
         await expect(svc.upsert({

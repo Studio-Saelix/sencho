@@ -28,6 +28,7 @@ import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
 import { insertHistory } from '../services/gitops/history';
 import type { GitOpsApplicationRow } from '../services/gitops/types';
+import { PROXY_DEPLOY_ACTOR_HEADER, PROXY_DEPLOY_SOURCE_HEADER } from '../services/license-headers';
 
 /** A minimal live Direct application row for GitOps read-path fixtures. */
 function directApplicationFixture(id: string, stackName: string): GitOpsApplicationRow {
@@ -1882,6 +1883,31 @@ describe('SSH deploy-key route validation', () => {
             deployKey,
             sshKnownHostsEntry: knownHosts,
             sshHostKeyFingerprint: 'SHA256:fixtureFingerprint',
+        }));
+        upsertSpy.mockRestore();
+    });
+
+    it('forwards proxied deploy actor into upsert auditContext', async () => {
+        const upsertSpy = vi.spyOn(GitSourceService.getInstance(), 'upsert')
+            .mockResolvedValue({} as Awaited<ReturnType<typeof GitSourceService.prototype.upsert>>);
+        const nodeToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${nodeToken}`)
+            .set(PROXY_DEPLOY_ACTOR_HEADER, 'fleet-operator')
+            .set(PROXY_DEPLOY_SOURCE_HEADER, 'from_git')
+            .send({
+                repo_url: sshRepoUrl,
+                branch: 'main',
+                compose_path: 'compose.yaml',
+                auth_type: 'deploy_key',
+                deploy_key: deployKey,
+                ssh_known_hosts_entry: knownHosts,
+                ssh_host_key_fingerprint: 'SHA256:fixtureFingerprint',
+            });
+        expect(res.status).toBe(200);
+        expect(upsertSpy).toHaveBeenCalledWith(expect.objectContaining({
+            auditContext: expect.objectContaining({ username: 'fleet-operator' }),
         }));
         upsertSpy.mockRestore();
     });

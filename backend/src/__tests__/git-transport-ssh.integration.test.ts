@@ -5,7 +5,7 @@
  * drives the real `nativeGitTransport` through GIT_SSH_COMMAND (no mocks).
  */
 import { spawn, spawnSync } from 'child_process';
-import { promises as fs, mkdtempSync, readFileSync, writeFileSync } from 'fs';
+import { promises as fs, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import net from 'net';
 import os from 'os';
 import path from 'path';
@@ -91,6 +91,32 @@ interface SshGitFixture {
 
 const DEFAULT_SSH_PORT = 22;
 
+async function canBindPort(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+        const server = net.createServer();
+        server.once('error', () => resolve(false));
+        server.listen(port, '127.0.0.1', () => {
+            server.close(() => resolve(true));
+        });
+    });
+}
+
+function keyMaterialFromPublicLine(publicLine: string): string | null {
+    const parts = publicLine.trim().split(/\s+/);
+    return parts.length >= 2 ? parts[1] : null;
+}
+
+function assertFixtureHostKey(port: number, hostKeyPublicLine: string, scanned: Awaited<ReturnType<typeof scanHostKeys>>): void {
+    const expectedMaterial = keyMaterialFromPublicLine(hostKeyPublicLine);
+    if (!expectedMaterial) {
+        throw new Error('fixture host key is malformed');
+    }
+    const matched = scanned.some((key) => key.line.includes(expectedMaterial));
+    if (!matched) {
+        throw new Error(`Port ${port} is not served by the test sshd fixture; another SSH listener may be bound on loopback.`);
+    }
+}
+
 async function startSshGitServer(bareDir: string, port: number): Promise<Omit<SshGitFixture, 'repoUrlScp' | 'repoUrlSsh' | 'mainSha'>> {
     const sshRoot = mkdtempSync(path.join(os.tmpdir(), 'sencho-ssh-sshd-'));
     const deploy = generateKeyPair(sshRoot, 'deploy');
@@ -130,14 +156,17 @@ async function startSshGitServer(bareDir: string, port: number): Promise<Omit<Ss
     try {
         await waitForPort('127.0.0.1', port);
     } catch (e) {
-        // sshd reports its own startup failures on stderr; without this the only
-        // CI signal is an opaque port timeout. Kill first so no orphan holds the
-        // port and turns the next run into a misleading "address already in use".
         child.kill('SIGKILL');
+        try {
+            rmSync(sshRoot, { recursive: true, force: true });
+        } catch {
+            // best effort
+        }
         throw new Error(`sshd did not come up on port ${port}: ${stderr.trim() || '(no stderr)'}`, { cause: e });
     }
 
     const scanned = await scanHostKeys('127.0.0.1', port);
+    assertFixtureHostKey(port, hostKey.publicLine, scanned);
     const knownHostsEntry = scanned.map((k) => k.line).join('\n');
 
     return {
@@ -155,7 +184,6 @@ async function startSshGitServer(bareDir: string, port: number): Promise<Omit<Ss
 
 describe.skipIf(!gitAvailable() || !sshdAvailable())('SSH deploy-key native git transport (real git, real sshd, strict host keys)', () => {
     let fixture: SshGitFixture;
-    let standardPortFixture: SshGitFixture | null = null;
     const workspaces: string[] = [];
     let scratchDirs: string[] = [];
 
@@ -172,24 +200,13 @@ describe.skipIf(!gitAvailable() || !sshdAvailable())('SSH deploy-key native git 
             repoUrlSsh: `ssh://${sshUser}@127.0.0.1:${nonstandardPort}${repo.bareDir}`,
             scratchDirs: [...scratchDirs, ...sshd.scratchDirs],
         };
-        try {
-            const standardSshd = await startSshGitServer(repo.bareDir, DEFAULT_SSH_PORT);
-            standardPortFixture = {
-                ...standardSshd,
-                mainSha: repo.mainSha,
-                repoUrlScp: `${sshUser}@127.0.0.1:${repo.bareDir}`,
-                repoUrlSsh: `ssh://${sshUser}@127.0.0.1${repo.bareDir}`,
-                scratchDirs: [...scratchDirs, ...standardSshd.scratchDirs],
-            };
-        } catch {
-            standardPortFixture = null;
-        }
     });
 
     afterAll(async () => {
         fixture?.close?.();
-        standardPortFixture?.close?.();
-        await Promise.all(scratchDirs.map((d) => fs.rm(d, { recursive: true, force: true })));
+        if (fixture?.scratchDirs) {
+            await Promise.all(fixture.scratchDirs.map((d) => fs.rm(d, { recursive: true, force: true })));
+        }
     });
 
     afterEach(async () => {
@@ -243,20 +260,6 @@ describe.skipIf(!gitAvailable() || !sshdAvailable())('SSH deploy-key native git 
         expect(resolved.commitSha).toBe(fixture.mainSha);
     });
 
-    it.skipIf(!standardPortFixture)('resolves over scp-style URL on the default SSH port', async () => {
-        const active = standardPortFixture!;
-        const workspaceRoot = await makeWorkspace();
-        const sshAuth = { privateKey: active.deployPrivateKey, knownHostsEntry: active.knownHostsEntry };
-        const resolved = await nativeGitTransport.resolveRef({
-            repoUrl: active.repoUrlScp,
-            ref: 'main',
-            sshAuth,
-            timeoutMs: 20_000,
-            workspaceRoot,
-        });
-        expect(resolved.commitSha).toBe(active.mainSha);
-    });
-
     it('classifies a wrong deploy key as AUTH_FAILED', async () => {
         const workspaceRoot = await makeWorkspace();
         const failure = await nativeGitTransport
@@ -290,5 +293,56 @@ describe.skipIf(!gitAvailable() || !sshdAvailable())('SSH deploy-key native git 
         expect(isTransportFailure(failure)).toBe(true);
         if (!isTransportFailure(failure)) throw new Error('unreachable');
         expect(classifyGitFailure(failure).code).toBe('SSH_HOST_KEY_FAILED');
+    });
+});
+
+describe.skipIf(!gitAvailable() || !sshdAvailable())('SSH deploy-key transport on the default SSH port', () => {
+    let fixture: SshGitFixture;
+    const workspaces: string[] = [];
+
+    beforeAll(async () => {
+        if (!(await canBindPort(DEFAULT_SSH_PORT))) {
+            throw new Error(`Port ${DEFAULT_SSH_PORT} is already in use; the default-port SSH integration requires loopback port ${DEFAULT_SSH_PORT} to be free.`);
+        }
+        const repo = buildBareRepo();
+        const sshUser = os.userInfo().username;
+        const sshd = await startSshGitServer(repo.bareDir, DEFAULT_SSH_PORT);
+        fixture = {
+            ...sshd,
+            mainSha: repo.mainSha,
+            repoUrlScp: `${sshUser}@127.0.0.1:${repo.bareDir}`,
+            repoUrlSsh: `ssh://${sshUser}@127.0.0.1${repo.bareDir}`,
+            scratchDirs: [...repo.scratchDirs, ...sshd.scratchDirs],
+        };
+    });
+
+    afterAll(async () => {
+        fixture?.close?.();
+        if (fixture?.scratchDirs) {
+            await Promise.all(fixture.scratchDirs.map((d) => fs.rm(d, { recursive: true, force: true })));
+        }
+    });
+
+    afterEach(async () => {
+        await Promise.all(workspaces.splice(0).map((w) => fs.rm(w, { recursive: true, force: true })));
+    });
+
+    async function makeWorkspace(): Promise<string> {
+        const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-ssh-ws-'));
+        workspaces.push(dir);
+        return dir;
+    }
+
+    it('resolves over scp-style URL on the default SSH port', async () => {
+        const workspaceRoot = await makeWorkspace();
+        const sshAuth = { privateKey: fixture.deployPrivateKey, knownHostsEntry: fixture.knownHostsEntry };
+        const resolved = await nativeGitTransport.resolveRef({
+            repoUrl: fixture.repoUrlScp,
+            ref: 'main',
+            sshAuth,
+            timeoutMs: 20_000,
+            workspaceRoot,
+        });
+        expect(resolved.commitSha).toBe(fixture.mainSha);
     });
 });

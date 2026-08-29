@@ -62,6 +62,7 @@ import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describeP
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import { auditActorUsername } from '../helpers/auditActor';
 import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import {
   ImageUpdateService,
@@ -1177,7 +1178,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       autoApplyOnWebhook,
       autoDeployOnApply,
       auditContext: {
-        username: req.user?.username ?? 'unknown',
+        username: auditActorUsername(req),
         method: req.method,
         path: req.originalUrl,
         ipAddress: req.ip || 'unknown',
