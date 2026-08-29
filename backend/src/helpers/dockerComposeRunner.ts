@@ -14,11 +14,12 @@ export function runDockerCompose(
   // Canonical inline js/path-injection barrier, kept in the same scope as the
   // spawn cwd sink below. CodeQL does not credit a barrier separated from the
   // sink by the Promise-executor closure, so spawn is hoisted out of it.
-  if (
-    !resolvedCwd.startsWith(managedBase + path.sep)
-    && !resolvedCwd.startsWith(tmpBase + path.sep)
-  ) {
-    return Promise.resolve({ code: -1, stdout: '', stderr: 'Invalid working directory' });
+  // Two sequential single-condition guards, not one compound negated-AND,
+  // since CodeQL's barrier-guard recognizer only credits the simple shape.
+  if (!resolvedCwd.startsWith(managedBase + path.sep)) {
+    if (!resolvedCwd.startsWith(tmpBase + path.sep)) {
+      return Promise.resolve({ code: -1, stdout: '', stderr: 'Invalid working directory' });
+    }
   }
   const child = spawn('docker', args, { cwd: resolvedCwd });
   return new Promise((resolve) => {

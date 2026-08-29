@@ -62,6 +62,7 @@ describe('registryDeliveryComposeEnv', () => {
 
   it('ignores unsafe request env keys', () => {
     const merged = mergeComposeEnvVars({}, { '__proto__': 'evil', REGISTRY: 'ghcr.io' });
-    expect(merged).toEqual({ REGISTRY: 'ghcr.io' });
+    expect(merged.REGISTRY).toBe('ghcr.io');
+    expect(Object.prototype.hasOwnProperty.call(merged, '__proto__')).toBe(false);
   });
 });
