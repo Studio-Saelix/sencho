@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { apiFetch } from '@/lib/api';
+import { isSupportedGitRepoUrl, UNSUPPORTED_GIT_REPO_URL_MESSAGE } from '@/lib/gitRepoUrl';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useNodes } from '@/context/NodeContext';
 import { toast } from '@/components/ui/toast-store';
@@ -27,8 +28,10 @@ export interface GitSource {
   context_dir: string | null;
   sync_env: boolean;
   env_path: string | null;
-  auth_type: 'none' | 'token';
+  auth_type: 'none' | 'token' | 'deploy_key';
   has_token: boolean;
+  has_deploy_key: boolean;
+  ssh_host_key_fingerprint: string | null;
   auto_apply_on_webhook: boolean;
   auto_deploy_on_apply: boolean;
   last_applied_commit_sha: string | null;
@@ -118,8 +121,11 @@ export function GitSourcePanel({
   const [composePaths, setComposePaths] = useState<string[]>(['compose.yaml']);
   const [contextDir, setContextDir] = useState('');
   const [syncEnv, setSyncEnv] = useState(false);
-  const [authType, setAuthType] = useState<'none' | 'token'>('none');
+  const [authType, setAuthType] = useState<'none' | 'token' | 'deploy_key'>('none');
   const [token, setToken] = useState('');
+  const [deployKey, setDeployKey] = useState('');
+  const [sshKnownHostsEntry, setSshKnownHostsEntry] = useState('');
+  const [sshHostKeyFingerprint, setSshHostKeyFingerprint] = useState('');
   const [applyModeOverride, setApplyModeOverride] = useState<ApplyMode | null>(null);
 
   const [pull, setPull] = useState<PullResult | null>(null);
@@ -143,6 +149,9 @@ export function GitSourcePanel({
     setSyncEnv(false);
     setAuthType('none');
     setToken('');
+    setDeployKey('');
+    setSshKnownHostsEntry('');
+    setSshHostKeyFingerprint('');
     setApplyModeOverride(null);
   }, []);
 
@@ -165,6 +174,9 @@ export function GitSourcePanel({
           setSyncEnv(data.sync_env);
           setAuthType(data.auth_type);
           setToken('');
+          setDeployKey('');
+          setSshKnownHostsEntry('');
+          setSshHostKeyFingerprint('');
           setApplyModeOverride(null);
         }
       } else if (res.status === 404) {
@@ -201,8 +213,9 @@ export function GitSourcePanel({
       toast.error('Repository URL, ref, and at least one compose file are required.');
       return;
     }
-    if (!/^https:\/\//i.test(repoUrl.trim())) {
-      toast.error('Only HTTPS repository URLs are supported.');
+    const trimmedUrl = repoUrl.trim();
+    if (!isSupportedGitRepoUrl(trimmedUrl)) {
+      toast.error(UNSUPPORTED_GIT_REPO_URL_MESSAGE);
       return;
     }
     setSaving(true);
@@ -223,12 +236,20 @@ export function GitSourcePanel({
       if (authType === 'token' && token !== '') {
         body.token = token;
       }
+      if (authType === 'deploy_key') {
+        if (deployKey !== '') body.deploy_key = deployKey;
+        if (sshKnownHostsEntry !== '') body.ssh_known_hosts_entry = sshKnownHostsEntry;
+        if (sshHostKeyFingerprint !== '') body.ssh_host_key_fingerprint = sshHostKeyFingerprint;
+      }
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`, {
         method: 'PUT',
         body: JSON.stringify(body),
       });
       if (res.ok) {
         setToken('');
+        setDeployKey('');
+        setSshKnownHostsEntry('');
+        setSshHostKeyFingerprint('');
         setApplyModeOverride(null);
         toast.success('Git source saved.');
         onSourceChanged?.();
@@ -263,6 +284,10 @@ export function GitSourcePanel({
         auth_type: authType,
       };
       if (authType === 'token' && token !== '') body.token = token;
+      if (authType === 'deploy_key') {
+        if (deployKey !== '') body.deploy_key = deployKey;
+        if (sshKnownHostsEntry !== '') body.ssh_known_hosts_entry = sshKnownHostsEntry;
+      }
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/browse`, {
         method: 'POST',
         body: JSON.stringify(body),
@@ -472,6 +497,7 @@ export function GitSourcePanel({
 
                   <GitSourceFields
                     variant="edit"
+                    stackName={stackName}
                     disabled={!canEdit || saving}
                     repoUrl={repoUrl}
                     branch={branch}
@@ -480,7 +506,12 @@ export function GitSourcePanel({
                     syncEnv={syncEnv}
                     authType={authType}
                     token={token}
+                    deployKey={deployKey}
+                    sshKnownHostsEntry={sshKnownHostsEntry}
+                    sshHostKeyFingerprint={sshHostKeyFingerprint}
                     hasStoredToken={source?.has_token ?? false}
+                    hasStoredDeployKey={source?.has_deploy_key ?? false}
+                    storedHostKeyFingerprint={source?.ssh_host_key_fingerprint ?? null}
                     applyMode={applyMode}
                     onRepoUrlChange={setRepoUrl}
                     onBranchChange={setBranch}
@@ -489,6 +520,9 @@ export function GitSourcePanel({
                     onSyncEnvChange={setSyncEnv}
                     onAuthTypeChange={setAuthType}
                     onTokenChange={setToken}
+                    onDeployKeyChange={setDeployKey}
+                    onSshKnownHostsEntryChange={setSshKnownHostsEntry}
+                    onSshHostKeyFingerprintChange={setSshHostKeyFingerprint}
                     onApplyModeChange={setApplyModeOverride}
                     onBrowse={browseRepo}
                   />

@@ -11,6 +11,12 @@ import {
 } from './credentialHelper';
 import { isTransportFailure, type TransportFailure } from './errors';
 import type { FetchRequest, FetchResult, GitTransport, ResolveRequest, ResolveResult } from './types';
+import {
+    buildSshCommand,
+    parseRepoTransportUrl,
+    type ParsedRepoUrl,
+} from './sshTrust';
+import { writeDeployKey, writeKnownHosts } from './sshCredentialFiles';
 
 /**
  * Native git transport: every Git operation is an `execFile`-style spawn of
@@ -261,7 +267,12 @@ async function prepareWorkspace(root: string): Promise<WorkspaceLayout> {
     return { metaDir, hooksDir, homeDir };
 }
 
-function buildEnv(homeDir: string, token?: string | null, helperPath?: string | null): NodeJS.ProcessEnv {
+function buildEnv(
+    homeDir: string,
+    token?: string | null,
+    helperPath?: string | null,
+    sshCommand?: string | null,
+): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = {
         ...process.env,
         GIT_CONFIG_NOSYSTEM: '1',
@@ -289,6 +300,9 @@ function buildEnv(homeDir: string, token?: string | null, helperPath?: string | 
         // value so no workspace path character can change how git's shell
         // parses it. See credentialHelper.ts.
         env[GIT_HELPER_PATH_ENV_VAR] = helperPath;
+    }
+    if (sshCommand) {
+        env.GIT_SSH_COMMAND = sshCommand;
     }
     return env;
 }
@@ -395,12 +409,16 @@ async function resolveCaArgs(layout: WorkspaceLayout): Promise<string[]> {
  * Config shared by every invocation. With no helper, credential.helper is
  * explicitly cleared so nothing from the environment can answer prompts.
  */
-async function commonArgs(layout: WorkspaceLayout, helperPath: string | null): Promise<string[]> {
+async function commonArgs(layout: WorkspaceLayout, helperPath: string | null, ssh: boolean): Promise<string[]> {
     const args = [
         '-c', 'protocol.allow=never',
-        '-c', 'protocol.https.allow=always',
-        '-c', `core.hooksPath=${layout.hooksDir.split(path.sep).join('/')}`,
     ];
+    if (ssh) {
+        args.push('-c', 'protocol.ssh.allow=always');
+    } else {
+        args.push('-c', 'protocol.https.allow=always');
+    }
+    args.push('-c', `core.hooksPath=${layout.hooksDir.split(path.sep).join('/')}`);
     if (process.platform === 'win32') {
         // With every config channel neutralized above, git falls back to its
         // build-default TLS backend, which on Git for Windows can be
@@ -438,13 +456,18 @@ async function commonArgs(layout: WorkspaceLayout, helperPath: string | null): P
 async function prepareInvocation(
     workspaceRoot: string,
     token?: string | null,
+    sshAuth?: ResolveRequest['sshAuth'],
 ): Promise<{ layout: WorkspaceLayout; env: NodeJS.ProcessEnv; baseArgs: string[] }> {
     const layout = await prepareWorkspace(workspaceRoot);
+    let sshCommand: string | null = null;
+    if (sshAuth) {
+        const keyPath = await writeDeployKey(layout.metaDir, sshAuth.privateKey);
+        const knownPath = await writeKnownHosts(layout.metaDir, sshAuth.knownHostsEntry);
+        sshCommand = buildSshCommand(keyPath, knownPath);
+    }
     const helperPath = token ? await writeCredentialHelper(layout.metaDir) : null;
-    const env = buildEnv(layout.homeDir, token, helperPath);
-    // The same helperPath drives the env export and the config arg, so the two
-    // cannot describe different worlds.
-    const baseArgs = await commonArgs(layout, helperPath);
+    const env = buildEnv(layout.homeDir, token, helperPath, sshCommand);
+    const baseArgs = await commonArgs(layout, helperPath, Boolean(sshAuth));
     return { layout, env, baseArgs };
 }
 
@@ -454,17 +477,19 @@ function invalidUrl(host: string, hasToken: boolean): TransportFailure {
     return { transportFailure: true as const, reason: 'invalid-url', host, hasToken };
 }
 
-function assertValidRepoUrl(repoUrl: string, hasToken: boolean): URL {
-    let url: URL;
-    try {
-        url = new URL(repoUrl);
-    } catch {
+function assertValidRepoUrl(repoUrl: string, hasToken: boolean): ParsedRepoUrl {
+    const parsed = parseRepoTransportUrl(repoUrl);
+    if (!parsed) {
         throw invalidUrl('unknown', hasToken);
     }
-    if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) {
-        throw invalidUrl(url.host || 'unknown', hasToken);
+    return parsed;
+}
+
+function repoHostLabel(repo: ParsedRepoUrl): string {
+    if (repo.kind === 'ssh' && repo.port && repo.port !== 22) {
+        return `${repo.host}:${repo.port}`;
     }
-    return url;
+    return repo.host;
 }
 
 /**
@@ -604,29 +629,28 @@ interface ResolvedRemoteRefs {
  * tag's raw line already points at the commit.
  */
 async function lsRemoteRefs(
-    url: URL,
+    repo: ParsedRepoUrl,
     ref: string,
     env: NodeJS.ProcessEnv,
     baseArgs: string[],
     timeoutMs: number,
     hasToken: boolean,
 ): Promise<ResolvedRemoteRefs> {
+    const host = repoHostLabel(repo);
     let res: RunResult;
     try {
         res = await runGit(
-            [...baseArgs, 'ls-remote', url.href, `refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`],
+            [...baseArgs, 'ls-remote', repo.href, `refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`],
             { env, timeoutMs: Math.min(timeoutMs, LS_REMOTE_MAX_MS) },
         );
     } catch (e) {
-        // A resolution-phase timeout must classify like any other network
-        // timeout, not leak the internal flagged error to callers.
         if (isTimeoutError(e)) {
-            throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+            throw { transportFailure: true as const, reason: 'timeout', host, hasToken } satisfies TransportFailure;
         }
         throw e;
     }
     if (res.exitCode !== 0) {
-        throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: baseArgs, host: url.host, hasToken } satisfies TransportFailure;
+        throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: baseArgs, host, hasToken } satisfies TransportFailure;
     }
     const found: ResolvedRemoteRefs = { branchSha: null, tagSha: null };
     for (const line of res.stdout.split(/\r?\n/)) {
@@ -667,6 +691,7 @@ export async function verifyFastForward(req: {
     ancestorSha: string;
     descendantSha: string;
     token?: string | null;
+    sshAuth?: ResolveRequest['sshAuth'];
     timeoutMs?: number;
     workspaceRoot: string;
     maxBytes: number;
@@ -675,18 +700,19 @@ export async function verifyFastForward(req: {
     const descendant = req.descendantSha.toLowerCase();
     if (ancestor === descendant) return true;
 
-    const hasToken = Boolean(req.token);
+    const hasToken = Boolean(req.token) || Boolean(req.sshAuth);
     await ensureBinaryReady(hasToken);
-    const url = assertValidRepoUrl(req.repoUrl, hasToken);
+    const repo = assertValidRepoUrl(req.repoUrl, hasToken);
+    const host = repoHostLabel(repo);
     const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const deadline = Date.now() + timeoutMs;
     const remainingMs = (): number => Math.max(1, deadline - Date.now());
     const assertTimeBudget = (): void => {
         if (Date.now() >= deadline) {
-            throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+            throw { transportFailure: true as const, reason: 'timeout', host, hasToken } satisfies TransportFailure;
         }
     };
-    const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token);
+    const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token, req.sshAuth);
     const repoDir = path.join(req.workspaceRoot, 'ff-check');
     await fs.mkdir(repoDir, { recursive: true });
 
@@ -700,7 +726,7 @@ export async function verifyFastForward(req: {
 
     const throwIfSizeExceeded = (): void => {
         if (sizeExceeded) {
-            throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
+            throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
         }
     };
 
@@ -718,13 +744,13 @@ export async function verifyFastForward(req: {
             } catch (e) {
                 throwIfSizeExceeded();
                 if (isTimeoutError(e)) {
-                    throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+                    throw { transportFailure: true as const, reason: 'timeout', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
-                throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), argv: args, host: url.host, hasToken } satisfies TransportFailure;
+                throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), argv: args, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
             }
             throwIfSizeExceeded();
             if (res.exitCode !== 0) {
-                throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: args, host: url.host, hasToken } satisfies TransportFailure;
+                throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: args, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
             }
             return res;
         };
@@ -736,7 +762,7 @@ export async function verifyFastForward(req: {
                 stderr: res.stderr,
                 exitCode: res.exitCode,
                 argv,
-                host: url.host,
+                host: repoHostLabel(repo),
                 hasToken,
             } satisfies TransportFailure;
         };
@@ -754,14 +780,14 @@ export async function verifyFastForward(req: {
             } catch (e) {
                 throwIfSizeExceeded();
                 if (isTimeoutError(e)) {
-                    throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+                    throw { transportFailure: true as const, reason: 'timeout', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
                 throw {
                     transportFailure: true as const,
                     reason: 'exit',
                     stderr: e instanceof Error ? e.message : String(e),
                     argv: args,
-                    host: url.host,
+                    host: repoHostLabel(repo),
                     hasToken,
                 } satisfies TransportFailure;
             }
@@ -777,7 +803,7 @@ export async function verifyFastForward(req: {
         };
 
         await materialize([...baseArgs, 'init']);
-        await materialize([...baseArgs, 'fetch', '--depth=1', url.href, descendant]);
+        await materialize([...baseArgs, 'fetch', '--depth=1', repo.href, descendant]);
 
         const countReachable = async (): Promise<number> => {
             const argv = [...baseArgs, 'rev-list', '--count', descendant];
@@ -793,7 +819,7 @@ export async function verifyFastForward(req: {
                     stderr: `unexpected rev-list output: ${listed.stdout}`,
                     exitCode: listed.exitCode,
                     argv,
-                    host: url.host,
+                    host: repoHostLabel(repo),
                     hasToken,
                 } satisfies TransportFailure;
             }
@@ -815,7 +841,7 @@ export async function verifyFastForward(req: {
                 stderr: `unexpected shallow-repository output: ${shallow.stdout}`,
                 exitCode: shallow.exitCode,
                 argv,
-                host: url.host,
+                host: repoHostLabel(repo),
                 hasToken,
             } satisfies TransportFailure;
         };
@@ -838,7 +864,7 @@ export async function verifyFastForward(req: {
                 return -1;
             });
             if (sizeExceeded || finalSize < 0 || finalSize > req.maxBytes) {
-                throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
+                throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
             }
         };
 
@@ -861,11 +887,11 @@ export async function verifyFastForward(req: {
             }
 
             if (fetchRounds >= MAX_FF_FETCH_ROUNDS) {
-                throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+                throw { transportFailure: true as const, reason: 'timeout', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
             }
 
             const previousCount = reachableCount;
-            await materialize([...baseArgs, 'fetch', `--deepen=${deepenStep}`, url.href, descendant]);
+            await materialize([...baseArgs, 'fetch', `--deepen=${deepenStep}`, repo.href, descendant]);
             fetchRounds += 1;
             reachableCount = await countReachable();
 
@@ -874,14 +900,14 @@ export async function verifyFastForward(req: {
                     await assertWithinSizeBudget();
                     return false;
                 }
-                throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+                throw { transportFailure: true as const, reason: 'timeout', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
             }
 
             deepenStep = Math.min(deepenStep * 2, MAX_FF_DEEPEN_STEP);
         }
     } finally {
         watchdog.stop();
-        await awaitKillConfirmed(breachKill, `size-breach kill for ${url.host}`);
+        await awaitKillConfirmed(breachKill, `size-breach kill for ${repoHostLabel(repo)}`);
         await fs.rm(repoDir, { recursive: true, force: true }).catch((e: unknown) => {
             console.warn(`[GitSource:transport] failed to remove fast-forward scratch repo ${repoDir}: ${e instanceof Error ? e.message : String(e)}`);
         });
@@ -890,9 +916,9 @@ export async function verifyFastForward(req: {
 
 export const nativeGitTransport: GitTransport = {
     async resolveRef(req: ResolveRequest): Promise<ResolveResult> {
-        const hasToken = Boolean(req.token);
+        const hasToken = Boolean(req.token) || Boolean(req.sshAuth);
         await ensureBinaryReady(hasToken);
-        const url = assertValidRepoUrl(req.repoUrl, hasToken);
+        const repo = assertValidRepoUrl(req.repoUrl, hasToken);
 
         if (SHA_PATTERN.test(req.ref)) {
             // A full SHA is self-resolving: the immutable identity IS the
@@ -902,24 +928,24 @@ export const nativeGitTransport: GitTransport = {
             return { commitSha: req.ref.toLowerCase(), kind: 'sha' };
         }
 
-        assertValidRef(req.ref, url.host, hasToken);
-        const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token);
+        assertValidRef(req.ref, repoHostLabel(repo), hasToken);
+        const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token, req.sshAuth);
         const found = await lsRemoteRefs(
-            url, req.ref, env, baseArgs,
+            repo, req.ref, env, baseArgs,
             req.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasToken,
         );
         if (found.branchSha) return { commitSha: found.branchSha, kind: 'branch' };
         if (found.tagSha) return { commitSha: found.tagSha, kind: 'tag' };
-        throw { transportFailure: true as const, reason: 'ref-not-found', host: url.host, hasToken } satisfies TransportFailure;
+        throw { transportFailure: true as const, reason: 'ref-not-found', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
     },
 
     async fetchAtCommit(req: FetchRequest): Promise<FetchResult> {
-        const hasToken = Boolean(req.token);
+        const hasToken = Boolean(req.token) || Boolean(req.sshAuth);
         await ensureBinaryReady(hasToken);
-        const url = assertValidRepoUrl(req.repoUrl, hasToken);
-        assertValidRef(req.ref, url.host, hasToken);
+        const repo = assertValidRepoUrl(req.repoUrl, hasToken);
+        assertValidRef(req.ref, repoHostLabel(repo), hasToken);
 
-        const { layout, env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token);
+        const { layout, env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token, req.sshAuth);
         const checkout = path.join(req.workspaceRoot, 'repo');
         const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -952,22 +978,22 @@ export const nativeGitTransport: GitTransport = {
                 } catch (e) {
                     // A size breach wins over the timeout wording.
                     if (sizeExceeded) {
-                        throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
+                        throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                     }
                     if (isTimeoutError(e)) {
-                        throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+                        throw { transportFailure: true as const, reason: 'timeout', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                     }
-                    throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), argv: args, host: url.host, hasToken } satisfies TransportFailure;
+                    throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), argv: args, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
                 // A watchdog-triggered SIGKILL settles runGit's promise via the
                 // child's normal 'close' event (code null -> exitCode -1), not
                 // a rejection, so this is the common path for an in-flight
                 // breach and must check sizeExceeded before the generic mapping.
                 if (sizeExceeded) {
-                    throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
+                    throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
                 if (res.exitCode !== 0) {
-                    throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: args, host: url.host, hasToken } satisfies TransportFailure;
+                    throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: args, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
                 return res;
             };
@@ -979,7 +1005,7 @@ export const nativeGitTransport: GitTransport = {
                 // SHA (GitHub does by default); a refusal surfaces as a
                 // non-zero `git fetch` here and classifies as UNSUPPORTED_REF.
                 await materialize([...baseArgs, 'init', checkout]);
-                await materialize([...baseArgs, '-C', checkout, 'fetch', '--depth=1', url.href, req.ref]);
+                await materialize([...baseArgs, '-C', checkout, 'fetch', '--depth=1', repo.href, req.ref]);
                 await materialize([...baseArgs, '-C', checkout, 'checkout', '--detach', req.ref]);
             } else {
                 // A bare name works for both branches and tags: `--branch`
@@ -992,7 +1018,7 @@ export const nativeGitTransport: GitTransport = {
                 await materialize([
                     ...baseArgs, 'clone',
                     '--depth=1', '--single-branch', '--no-tags', '--no-recurse-submodules',
-                    '--branch', branchArg, url.href, checkout,
+                    '--branch', branchArg, repo.href, checkout,
                 ]);
             }
 
@@ -1005,20 +1031,20 @@ export const nativeGitTransport: GitTransport = {
                 });
                 actual = head.stdout.trim().toLowerCase();
                 if (!SHA_PATTERN.test(actual)) {
-                    throw { transportFailure: true as const, reason: 'exit', stderr: `unexpected rev-parse output: ${head.stdout}`, exitCode: head.exitCode, host: url.host, hasToken } satisfies TransportFailure;
+                    throw { transportFailure: true as const, reason: 'exit', stderr: `unexpected rev-parse output: ${head.stdout}`, exitCode: head.exitCode, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
             } catch (e) {
                 if (isTransportFailure(e)) throw e;
                 if (isTimeoutError(e)) {
-                    throw { transportFailure: true as const, reason: 'timeout', host: url.host, hasToken } satisfies TransportFailure;
+                    throw { transportFailure: true as const, reason: 'timeout', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
-                throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), host: url.host, hasToken } satisfies TransportFailure;
+                throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
             }
 
             if (actual !== req.commitSha.toLowerCase()) {
                 // The branch tip moved between resolution and fetch. Refuse
                 // rather than materialize content nobody reviewed.
-                throw { transportFailure: true as const, reason: 'tip-changed', host: url.host, hasToken } satisfies TransportFailure;
+                throw { transportFailure: true as const, reason: 'tip-changed', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
             }
 
             // Deterministic final measure: a breach landing between the last
@@ -1031,13 +1057,13 @@ export const nativeGitTransport: GitTransport = {
                 return -1;
             });
             if (sizeExceeded || finalSize < 0 || finalSize > req.maxBytes) {
-                throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: url.host, hasToken } satisfies TransportFailure;
+                throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
             }
 
             return { commitSha: actual, dir: checkout };
         } finally {
             watchdog.stop();
-            await awaitKillConfirmed(breachKill, `size-breach kill for ${url.host}`);
+            await awaitKillConfirmed(breachKill, `size-breach kill for ${repoHostLabel(repo)}`);
         }
     },
 };

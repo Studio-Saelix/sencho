@@ -9,6 +9,7 @@
 import { test, expect, Page } from '@playwright/test';
 import { loginAs } from './helpers';
 import { gitAvailable, buildFixtureRepo, serveRepos, fullProjectFiles, multiFileFiles, refusalFiles } from './gitServer.helper';
+import { sshGitFixtureAvailable, startSshGitFixture, type SshGitE2eFixture } from './sshGit.helper';
 
 const TEST_STACK = 'e2e-git-source-stack';
 
@@ -64,14 +65,14 @@ test.describe('Git Sources', () => {
     await expect(page.locator('[data-stacks-loaded="true"]')).toBeAttached({ timeout: 15_000 });
   });
 
-  test('rejects non-HTTPS repository URLs client-side', async ({ page }) => {
+  test('rejects unsupported repository URL schemes client-side', async ({ page }) => {
     await openGitSourcePanel(page);
 
-    await page.locator('#git-source-repo').fill('git@github.com:org/repo.git');
+    await page.locator('#git-source-repo').fill('http://github.com/org/repo.git');
     await page.locator('#git-source-branch').fill('main');
     await page.getByRole('dialog').getByRole('button', { name: /^Save$/ }).click();
 
-    await expect(page.getByText(/Only HTTPS repository URLs are supported/i)).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText(/Use an https:\/\/ URL or an SSH URL/i)).toBeVisible({ timeout: 5_000 });
   });
 
   test('surfaces reachability error on save with unreachable repo', async ({ page }) => {
@@ -241,15 +242,15 @@ test.describe('Create stack from Git', () => {
     await expect(page.getByRole('dialog').getByRole('tab', { name: /From Git/i })).toBeVisible();
   });
 
-  test('From Git tab rejects non-HTTPS URLs client-side', async ({ page }) => {
+  test('From Git tab rejects unsupported URL schemes client-side', async ({ page }) => {
     await openCreateStackDialog(page);
     await page.getByRole('dialog').getByRole('tab', { name: /From Git/i }).click();
 
     await page.locator('#create-git-stack-name').fill(CREATE_FROM_GIT_STACK);
-    await page.locator('#git-source-repo').fill('git@github.com:org/repo.git');
+    await page.locator('#git-source-repo').fill('http://github.com/org/repo.git');
     await page.locator('#git-source-branch').fill('main');
     await page.getByRole('dialog').getByRole('button', { name: /Create from Git/i }).click();
-    await expect(page.getByText(/Only HTTPS repository URLs are supported/i)).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText(/Use an https:\/\/ URL or an SSH URL/i)).toBeVisible({ timeout: 5_000 });
   });
 
   test('backend rejects .git/config compose_path on from-git', async ({ page }) => {
@@ -644,5 +645,55 @@ test.describe('Git Sources complete-project materialization (local git server)',
 
     await page.setViewportSize({ width: 375, height: 812 });
     await expect(applyBtn).toBeVisible();
+  });
+});
+
+test.describe('Git Sources SSH deploy key (real backend)', () => {
+  test.skip(!sshGitFixtureAvailable(), 'requires git and openssh-server');
+
+  let fixture: SshGitE2eFixture;
+
+  test.beforeAll(async ({ browser }) => {
+    fixture = await startSshGitFixture(22224);
+    const page = await browser.newPage();
+    await loginAs(page);
+    await deleteTestStackViaApi(page);
+    await createTestStackViaApi(page);
+    await page.close();
+  });
+
+  test.afterAll(async ({ browser }) => {
+    fixture?.close();
+    const page = await browser.newPage();
+    await loginAs(page);
+    await deleteTestStackViaApi(page);
+    await page.close();
+  });
+
+  test.beforeEach(async ({ page }) => {
+    await loginAs(page);
+    await expect(page.getByRole('button', { name: 'Create Stack' })).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('[data-stacks-loaded="true"]')).toBeAttached({ timeout: 15_000 });
+  });
+
+  test('probes host key, saves deploy key, and redacts credentials on GET', async ({ page }) => {
+    await openGitSourcePanel(page);
+    await page.locator('#git-source-repo').fill(fixture.repoUrlSsh);
+    await page.locator('#git-source-branch').fill('main');
+    await page.getByRole('button', { name: 'Deploy key (SSH)' }).click();
+    await page.getByRole('button', { name: 'Fetch host key fingerprint' }).click();
+    await expect(page.getByText(fixture.firstFingerprint, { exact: true })).toBeVisible({ timeout: 15_000 });
+    await page.locator('textarea').fill(fixture.deployPrivateKey);
+    await page.getByRole('dialog').getByRole('button', { name: /^Save$/ }).click();
+    await expect(page.getByText('Git source saved.')).toBeVisible({ timeout: 30_000 });
+
+    const getBody = await page.evaluate(async (name) => {
+      const res = await fetch(`/api/stacks/${name}/git-source`, { credentials: 'include' });
+      return res.json();
+    }, TEST_STACK);
+    expect(getBody.auth_type).toBe('deploy_key');
+    expect(getBody.has_deploy_key).toBe(true);
+    expect(getBody.ssh_host_key_fingerprint).toBe(fixture.firstFingerprint);
+    expect(JSON.stringify(getBody)).not.toContain('BEGIN OPENSSH');
   });
 });

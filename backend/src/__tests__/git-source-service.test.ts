@@ -475,6 +475,164 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
         expect(row?.auth_type).toBe('none');
     });
 
+    it('derives SSH host key fingerprint server-side on deploy_key upsert', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const keyBase64 = 'AAAAC3NzaC1lZDI1NTE5AAAAIGb3JzL3Rlc3Q=';
+        const knownHosts = `127.0.0.1 ssh-ed25519 ${keyBase64}`;
+        const derived = `SHA256:${crypto.createHash('sha256').update(Buffer.from(keyBase64, 'base64')).digest('base64').replace(/=+$/, '')}`;
+        await svc.upsert({
+            stackName: 'ssh-trust-stack',
+            repoUrl: 'git@github.com:example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'deploy_key',
+            deployKey: '-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n',
+            sshKnownHostsEntry: knownHosts,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        const row = DatabaseService.getInstance().getGitSource('ssh-trust-stack');
+        expect(row?.ssh_host_key_fingerprint).toBe(derived);
+    });
+
+    it('rejects a client fingerprint that does not match the trusted host key entry', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const keyBase64 = 'AAAAC3NzaC1lZDI1NTE5AAAAIGb3JzL3Rlc3Q=';
+        const knownHosts = `127.0.0.1 ssh-ed25519 ${keyBase64}`;
+        await expect(svc.upsert({
+            stackName: 'ssh-trust-mismatch',
+            repoUrl: 'git@github.com:example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'deploy_key',
+            deployKey: '-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n',
+            sshKnownHostsEntry: knownHosts,
+            sshHostKeyFingerprint: 'SHA256:wrongFingerprintValue',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        })).rejects.toMatchObject({ code: 'GIT_ERROR' });
+    });
+
+    it('records SSH trust audit with the supplied actor and no key material', async () => {
+        mockSuccessfulClone();
+        const insertSpy = vi.spyOn(DatabaseService.getInstance(), 'insertAuditLog');
+        const svc = GitSourceService.getInstance();
+        const deployKey = '-----BEGIN OPENSSH PRIVATE KEY-----\nfixture-audit\n-----END OPENSSH PRIVATE KEY-----\n';
+        const keyBase64 = 'AAAAC3NzaC1lZDI1NTE5AAAAIGb3JzL3Rlc3Q=';
+        const knownHosts = `127.0.0.1 ssh-ed25519 ${keyBase64}`;
+        const derived = `SHA256:${crypto.createHash('sha256').update(Buffer.from(keyBase64, 'base64')).digest('base64').replace(/=+$/, '')}`;
+        await svc.upsert({
+            stackName: 'ssh-trust-audit',
+            repoUrl: 'git@github.com:example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'deploy_key',
+            deployKey,
+            sshKnownHostsEntry: knownHosts,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+            auditContext: {
+                username: 'fleet-operator',
+                method: 'PUT',
+                path: '/api/stacks/ssh-trust-audit/git-source',
+                ipAddress: '127.0.0.1',
+            },
+        });
+        expect(insertSpy).toHaveBeenCalledWith(expect.objectContaining({
+            username: 'fleet-operator',
+            summary: expect.stringContaining('git_source.ssh_trust_created'),
+        }));
+        const entry = insertSpy.mock.calls[0]?.[0];
+        expect(entry?.summary).toContain(derived);
+        expect(entry?.summary).not.toContain(deployKey);
+        expect(entry?.summary).not.toContain(knownHosts);
+        insertSpy.mockRestore();
+    });
+
+    it('records SSH trust rotation when replacing known_hosts without resending the deploy key', async () => {
+        mockSuccessfulClone();
+        const { CryptoService } = await import('../services/CryptoService');
+        const insertSpy = vi.spyOn(DatabaseService.getInstance(), 'insertAuditLog');
+        const svc = GitSourceService.getInstance();
+        const deployKey = '-----BEGIN OPENSSH PRIVATE KEY-----\nrotation-fixture\n-----END OPENSSH PRIVATE KEY-----\n';
+        const keyBase64A = 'AAAAC3NzaC1lZDI1NTE5AAAAIGb3JzL3Rlc3Q=';
+        const keyBase64B = 'AAAAC3NzaC1lZDI1NTE5AAAAIHRvdGF0ZWtleWZpeHR1cmVtYXRlcmlhbA==';
+        const knownHostsA = `127.0.0.1 ssh-ed25519 ${keyBase64A}`;
+        const knownHostsB = `github.com ssh-ed25519 ${keyBase64B}`;
+        const derivedB = `SHA256:${crypto.createHash('sha256').update(Buffer.from(keyBase64B, 'base64')).digest('base64').replace(/=+$/, '')}`;
+        const auditContext = {
+            username: 'trust-rotator',
+            method: 'PUT',
+            path: '/api/stacks/ssh-trust-rotate/git-source',
+            ipAddress: '127.0.0.1',
+        };
+        const baseUpsert = {
+            repoUrl: 'git@github.com:example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'deploy_key' as const,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+            auditContext,
+        };
+
+        await svc.upsert({
+            ...baseUpsert,
+            stackName: 'ssh-trust-rotate',
+            deployKey,
+            sshKnownHostsEntry: knownHostsA,
+        });
+
+        insertSpy.mockClear();
+
+        await svc.upsert({
+            ...baseUpsert,
+            stackName: 'ssh-trust-rotate',
+            sshKnownHostsEntry: knownHostsB,
+        });
+
+        const row = DatabaseService.getInstance().getGitSource('ssh-trust-rotate');
+        expect(row?.ssh_host_key_fingerprint).toBe(derivedB);
+        expect(row?.ssh_known_hosts_entry).toBe(knownHostsB);
+        expect(CryptoService.getInstance().decrypt(row!.encrypted_deploy_key!)).toBe(deployKey);
+
+        expect(insertSpy).toHaveBeenCalledTimes(1);
+        expect(insertSpy).toHaveBeenCalledWith(expect.objectContaining({
+            username: 'trust-rotator',
+            summary: expect.stringContaining('git_source.ssh_trust_rotated'),
+        }));
+        const rotatedEntry = insertSpy.mock.calls[0]?.[0];
+        expect(rotatedEntry?.summary).toContain(derivedB);
+        expect(rotatedEntry?.summary).not.toContain(deployKey);
+        expect(rotatedEntry?.summary).not.toContain(knownHostsB);
+        expect(JSON.stringify(insertSpy.mock.calls)).not.toContain('git_source.ssh_trust_created');
+
+        insertSpy.mockClear();
+
+        await svc.upsert({
+            ...baseUpsert,
+            stackName: 'ssh-trust-rotate',
+            sshKnownHostsEntry: knownHostsB,
+        });
+
+        expect(insertSpy).not.toHaveBeenCalled();
+        insertSpy.mockRestore();
+    });
+
     it('rejects auto_deploy_on_apply without auto_apply_on_webhook', async () => {
         const svc = GitSourceService.getInstance();
         await expect(svc.upsert({
@@ -2456,7 +2614,7 @@ describe('GitSourceService managed-area lifecycle', () => {
             sync_env: false,
             env_path: null,
             auth_type: 'none',
-            encrypted_token: null,
+            encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -2511,7 +2669,7 @@ describe('GitSourceService managed-area lifecycle', () => {
             sync_env: false,
             env_path: null,
             auth_type: 'none',
-            encrypted_token: null,
+            encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -2651,7 +2809,7 @@ describe('GitSourceService managed-area lifecycle', () => {
             sync_env: false,
             env_path: null,
             auth_type: 'none',
-            encrypted_token: null,
+            encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -2682,7 +2840,7 @@ describe('GitSourceService managed-area lifecycle', () => {
             sync_env: false,
             env_path: null,
             auth_type: 'none',
-            encrypted_token: null,
+            encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -2715,7 +2873,7 @@ describe('GitSourceService legacy pending apply (migration path)', () => {
             sync_env: false,
             env_path: null,
             auth_type: 'none',
-            encrypted_token: null,
+            encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -2993,7 +3151,7 @@ describe('GitSourceService classified plan fingerprint', () => {
             sync_env: false,
             env_path: null,
             auth_type: 'none',
-            encrypted_token: null,
+            encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,

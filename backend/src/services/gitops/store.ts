@@ -265,13 +265,15 @@ export class GitOpsStore {
       `INSERT INTO gitops_create_checkpoints (
         application_id, stack_name, phase, generation_id, operation_id, repo_url, branch,
         compose_path, compose_paths_json, context_dir, sync_env, env_path, auth_type,
-        encrypted_token, auto_apply_on_webhook, auto_deploy_on_apply, commit_sha,
+        encrypted_token, encrypted_deploy_key, ssh_known_hosts_entry, ssh_host_key_fingerprint,
+        auto_apply_on_webhook, auto_deploy_on_apply, commit_sha,
         applied_spec_json, created_managed_root, created_at, updated_at
-      ) VALUES (${Array(21).fill('?').join(', ')})`,
+      ) VALUES (${Array(24).fill('?').join(', ')})`,
     ).run(
       row.application_id, row.stack_name, row.phase, row.generation_id, row.operation_id,
       row.repo_url, row.branch, row.compose_path, row.compose_paths_json, row.context_dir,
-      row.sync_env, row.env_path, row.auth_type, row.encrypted_token, row.auto_apply_on_webhook,
+      row.sync_env, row.env_path, row.auth_type, row.encrypted_token, row.encrypted_deploy_key,
+      row.ssh_known_hosts_entry, row.ssh_host_key_fingerprint, row.auto_apply_on_webhook,
       row.auto_deploy_on_apply, row.commit_sha, row.applied_spec_json, row.created_managed_root,
       row.created_at, row.updated_at,
     );

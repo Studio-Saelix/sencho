@@ -156,6 +156,46 @@ async function openStubbedChangePlan(page: Page, stackName: string) {
   await expect(page.getByTestId('git-plan-op').first()).toBeVisible({ timeout: 10_000 });
 }
 
+test.describe('git source authentication docs screenshots', () => {
+  test.use({ viewport: { width: 1920, height: 1080 } });
+
+  test('git source panel with deploy key controls', async ({ page }) => {
+    await loginAs(page);
+    const stackName = 'docs-git-panel';
+    await createStack(page, stackName);
+    await page.goto('/');
+    await page.getByText(stackName).first().click();
+    await page.getByRole('button', { name: /Git Source/i }).click();
+    await expect(page.getByRole('dialog').getByRole('heading', { name: /git source/i })).toBeVisible();
+    await page.locator('#git-source-repo').fill('git@github.com:example/demo.git');
+    await page.getByRole('button', { name: 'Deploy key (SSH)' }).click();
+    await expect(page.getByRole('button', { name: 'Fetch host key fingerprint' })).toBeVisible();
+    const dialog = page.getByRole('dialog');
+    await dialog.screenshot({
+      path: path.join(DOCS_IMAGES, 'git-sources', 'panel.png'),
+    });
+    await page.evaluate(async (name) => {
+      await fetch(`/api/stacks/${name}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
+    }, stackName);
+  });
+
+  test('create stack from git tab with deploy key options', async ({ page }) => {
+    await loginAs(page);
+    await page.getByRole('button', { name: 'Create Stack' }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('tab', { name: 'From Git' }).click();
+    await expect(dialog.getByText('HTTPS OR SSH REPOS')).toBeVisible();
+    await dialog.getByRole('button', { name: 'Deploy key (SSH)' }).click();
+    await expect(dialog.getByRole('button', { name: 'Fetch host key fingerprint' })).toBeVisible();
+    await dialog.screenshot({
+      path: path.join(DOCS_IMAGES, 'git-sources', 'create-from-git-tab.png'),
+    });
+    await dialog.screenshot({
+      path: path.join(DOCS_IMAGES, 'stack-management', 'create-stack-git.png'),
+    });
+  });
+});
+
 test.describe('classified change-plan docs screenshots', () => {
   test.use({ viewport: { width: 1920, height: 1080 } });
 

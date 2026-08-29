@@ -65,13 +65,6 @@ function envelopeFor(checkpoint: GitOpsCreateCheckpointRow) {
 }
 
 /**
- * Three states, because the two callers need opposite fail-safe directions.
- *
- * Teardown must not treat "cannot tell" as absent, or it would skip a directory
- * that is really there. Completion must not treat it as present, or it would
- * mark a create live on the strength of a failed stat.
- */
-/**
  * Clear a settled create's staging marker, reporting rather than throwing.
  *
  * The checkpoint is only dropped once this succeeds, because a marker left
@@ -94,6 +87,13 @@ async function clearSettledMarker(stackName: string, managedRoot: string): Promi
   }
 }
 
+/**
+ * Three states, because the two callers need opposite fail-safe directions.
+ *
+ * Teardown must not treat "cannot tell" as absent, or it would skip a directory
+ * that is really there. Completion must not treat it as present, or it would
+ * mark a create live on the strength of a failed stat.
+ */
 async function stackDirState(stackName: string): Promise<'present' | 'absent' | 'unknown'> {
   try {
     const base = FileSystemService.getInstance().getBaseDir();
@@ -262,8 +262,11 @@ async function resolveOne(checkpoint: GitOpsCreateCheckpointRow): Promise<Create
           context_dir: checkpoint.context_dir,
           sync_env: checkpoint.sync_env === 1,
           env_path: checkpoint.env_path,
-          auth_type: checkpoint.auth_type as 'none' | 'token',
+          auth_type: checkpoint.auth_type as 'none' | 'token' | 'deploy_key',
           encrypted_token: checkpoint.encrypted_token,
+          encrypted_deploy_key: checkpoint.encrypted_deploy_key,
+          ssh_known_hosts_entry: checkpoint.ssh_known_hosts_entry,
+          ssh_host_key_fingerprint: checkpoint.ssh_host_key_fingerprint,
           auto_apply_on_webhook: checkpoint.auto_apply_on_webhook === 1,
           auto_deploy_on_apply: checkpoint.auto_deploy_on_apply === 1,
           last_applied_commit_sha: checkpoint.commit_sha,
