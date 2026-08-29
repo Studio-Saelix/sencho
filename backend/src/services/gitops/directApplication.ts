@@ -228,6 +228,9 @@ export function buildCreateCheckpointRow(args: {
   identity: DirectSourceIdentity;
   authType: string;
   encryptedToken: string | null;
+  encryptedDeployKey?: string | null;
+  sshKnownHostsEntry?: string | null;
+  sshHostKeyFingerprint?: string | null;
   autoApplyOnWebhook: boolean;
   autoDeployOnApply: boolean;
   commitSha: string;
@@ -251,6 +254,9 @@ export function buildCreateCheckpointRow(args: {
     env_path: args.config.syncEnv ? args.config.envPath : null,
     auth_type: args.authType,
     encrypted_token: args.encryptedToken,
+    encrypted_deploy_key: args.encryptedDeployKey ?? null,
+    ssh_known_hosts_entry: args.sshKnownHostsEntry ?? null,
+    ssh_host_key_fingerprint: args.sshHostKeyFingerprint ?? null,
     auto_apply_on_webhook: args.autoApplyOnWebhook ? 1 : 0,
     auto_deploy_on_apply: args.autoDeployOnApply ? 1 : 0,
     commit_sha: args.commitSha,

@@ -499,7 +499,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                         </div>
                     </ModalBody>
                     <ModalFooter
-                        hint="HTTPS REPOS ONLY"
+                        hint="HTTPS OR SSH REPOS"
                         secondary={
                             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={creatingFromGit}>
                                 Cancel

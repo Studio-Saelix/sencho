@@ -475,6 +475,52 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
         expect(row?.auth_type).toBe('none');
     });
 
+    it('derives SSH host key fingerprint server-side on deploy_key upsert', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const keyBase64 = 'AAAAC3NzaC1lZDI1NTE5AAAAIGb3JzL3Rlc3Q=';
+        const knownHosts = `127.0.0.1 ssh-ed25519 ${keyBase64}`;
+        const derived = `SHA256:${crypto.createHash('sha256').update(Buffer.from(keyBase64, 'base64')).digest('base64').replace(/=+$/, '')}`;
+        await svc.upsert({
+            stackName: 'ssh-trust-stack',
+            repoUrl: 'git@github.com:example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'deploy_key',
+            deployKey: '-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n',
+            sshKnownHostsEntry: knownHosts,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        const row = DatabaseService.getInstance().getGitSource('ssh-trust-stack');
+        expect(row?.ssh_host_key_fingerprint).toBe(derived);
+    });
+
+    it('rejects a client fingerprint that does not match the trusted host key entry', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const keyBase64 = 'AAAAC3NzaC1lZDI1NTE5AAAAIGb3JzL3Rlc3Q=';
+        const knownHosts = `127.0.0.1 ssh-ed25519 ${keyBase64}`;
+        await expect(svc.upsert({
+            stackName: 'ssh-trust-mismatch',
+            repoUrl: 'git@github.com:example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'deploy_key',
+            deployKey: '-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n',
+            sshKnownHostsEntry: knownHosts,
+            sshHostKeyFingerprint: 'SHA256:wrongFingerprintValue',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        })).rejects.toMatchObject({ code: 'GIT_ERROR' });
+    });
+
     it('rejects auto_deploy_on_apply without auto_apply_on_webhook', async () => {
         const svc = GitSourceService.getInstance();
         await expect(svc.upsert({

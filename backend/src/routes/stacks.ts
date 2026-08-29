@@ -1176,6 +1176,12 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
         : null,
       autoApplyOnWebhook,
       autoDeployOnApply,
+      auditContext: {
+        username: req.user?.username ?? 'unknown',
+        method: req.method,
+        path: req.originalUrl,
+        ipAddress: req.ip || 'unknown',
+      },
     });
 
     invalidateNodeCaches(req.nodeId);

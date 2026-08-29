@@ -377,6 +377,12 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       sshHostKeyFingerprint: typeof ssh_host_key_fingerprint === 'string' ? ssh_host_key_fingerprint : undefined,
       autoApplyOnWebhook,
       autoDeployOnApply,
+      auditContext: {
+        username: req.user?.username ?? 'unknown',
+        method: req.method,
+        path: req.originalUrl,
+        ipAddress: req.ip || 'unknown',
+      },
     });
 
     // The cached /stacks/statuses payload carries the source label; drop it

@@ -31,6 +31,7 @@ import type { NotificationCategory } from './NotificationService';
 import { classifyGitFailure, isTransportFailure } from './git/errors';
 import type { RefKind, SshDeployKeyAuth } from './git/types';
 import { nativeGitTransport, verifyFastForward } from './git/nativeGitTransport';
+import { fingerprintFromKnownHostsLine } from './git/sshTrust';
 import { GitOpsStore } from './gitops/store';
 import { GitOpsTransitions, GitOpsTransitionError } from './gitops/transitions';
 import {
@@ -172,6 +173,12 @@ export interface UpsertInput {
     sshHostKeyFingerprint?: string | null;
     autoApplyOnWebhook: boolean;
     autoDeployOnApply: boolean;
+    auditContext?: {
+        username: string;
+        method: string;
+        path: string;
+        ipAddress: string;
+    };
 }
 
 export interface CreateStackFromGitInput {
@@ -189,6 +196,12 @@ export interface CreateStackFromGitInput {
     sshHostKeyFingerprint?: string | null;
     autoApplyOnWebhook: boolean;
     autoDeployOnApply: boolean;
+    auditContext?: {
+        username: string;
+        method: string;
+        path: string;
+        ipAddress: string;
+    };
 }
 
 export interface CreateStackFromGitResult {
@@ -579,6 +592,57 @@ export class GitSourceService {
 
     // ─── CRUD ────────────────────────────────────────────────────────────────
 
+    private resolveSshTrustFromKnownHostsEntry(
+        knownHostsEntry: string,
+        clientFingerprint?: string | null,
+    ): { sshKnownHostsEntry: string; sshHostKeyFingerprint: string } {
+        const sshKnownHostsEntry = knownHostsEntry.trim();
+        const derived = fingerprintFromKnownHostsLine(sshKnownHostsEntry);
+        if (!derived) {
+            throw new GitSourceError('GIT_ERROR', 'SSH known_hosts entry is invalid or incomplete.');
+        }
+        const trimmedClient = clientFingerprint?.trim();
+        if (trimmedClient && trimmedClient !== derived) {
+            throw new GitSourceError('GIT_ERROR', 'SSH host key fingerprint does not match the trusted key entry.');
+        }
+        return { sshKnownHostsEntry, sshHostKeyFingerprint: derived };
+    }
+
+    private recordSshTrustAudit(args: {
+        stackName: string;
+        username: string;
+        method: string;
+        path: string;
+        ipAddress: string;
+        fingerprint: string;
+        action: 'created' | 'rotated';
+    }): void {
+        try {
+            DatabaseService.getInstance().insertAuditLog({
+                timestamp: Date.now(),
+                username: args.username,
+                method: args.method,
+                path: args.path,
+                status_code: 200,
+                node_id: null,
+                ip_address: args.ipAddress,
+                summary: `git_source.ssh_trust_${args.action}: stack=${args.stackName} fingerprint=${args.fingerprint}`,
+            });
+        } catch (err) {
+            console.warn('[GitSource] SSH trust audit write failed:', sanitizeForLog(String(err)));
+        }
+    }
+
+    private maybeRecordSshTrustAudit(
+        auditContext: UpsertInput['auditContext'],
+        stackName: string,
+        fingerprint: string,
+        action: 'created' | 'rotated',
+    ): void {
+        if (!auditContext) return;
+        this.recordSshTrustAudit({ ...auditContext, stackName, fingerprint, action });
+    }
+
     private resolveTransportAuth(src: Pick<StackGitSource, 'auth_type' | 'encrypted_token' | 'encrypted_deploy_key' | 'ssh_known_hosts_entry'>): {
         token?: string | null;
         sshAuth?: SshDeployKeyAuth | null;
@@ -631,9 +695,16 @@ export class GitSourceService {
             if (input.sshKnownHostsEntry === undefined) {
                 sshKnownHostsEntry = existing?.ssh_known_hosts_entry ?? null;
                 sshHostKeyFingerprint = existing?.ssh_host_key_fingerprint ?? null;
+            } else if (input.sshKnownHostsEntry === null || input.sshKnownHostsEntry.trim() === '') {
+                sshKnownHostsEntry = null;
+                sshHostKeyFingerprint = null;
             } else {
-                sshKnownHostsEntry = input.sshKnownHostsEntry?.trim() || null;
-                sshHostKeyFingerprint = input.sshHostKeyFingerprint?.trim() || null;
+                const trust = this.resolveSshTrustFromKnownHostsEntry(
+                    input.sshKnownHostsEntry,
+                    input.sshHostKeyFingerprint,
+                );
+                sshKnownHostsEntry = trust.sshKnownHostsEntry;
+                sshHostKeyFingerprint = trust.sshHostKeyFingerprint;
             }
             if (!encryptedDeployKey || !sshKnownHostsEntry) {
                 throw new GitSourceError(
@@ -784,6 +855,23 @@ export class GitSourceService {
                 });
             }
         })();
+
+        if (
+            input.authType === 'deploy_key'
+            && input.sshKnownHostsEntry !== undefined
+            && sshKnownHostsEntry
+            && sshHostKeyFingerprint
+        ) {
+            const priorKnownHosts = existing?.ssh_known_hosts_entry ?? null;
+            if (priorKnownHosts !== sshKnownHostsEntry) {
+                this.maybeRecordSshTrustAudit(
+                    input.auditContext,
+                    input.stackName,
+                    sshHostKeyFingerprint,
+                    priorKnownHosts ? 'rotated' : 'created',
+                );
+            }
+        }
 
         return this.get(input.stackName)!;
     }
@@ -2690,14 +2778,23 @@ export class GitSourceService {
             });
             const staged: { candidateRelPath: string | null } = { candidateRelPath: null };
 
-            if (input.authType === 'deploy_key') {
-                if (!input.deployKey?.trim() || !input.sshKnownHostsEntry?.trim()) {
-                    throw new GitSourceError(
-                        'GIT_ERROR',
-                        'Deploy key authentication requires a private key and a trusted SSH host key.',
-                    );
-                }
-            }
+            const createDeployKeyTrust = input.authType === 'deploy_key'
+                ? (() => {
+                    if (!input.deployKey?.trim() || !input.sshKnownHostsEntry?.trim()) {
+                        throw new GitSourceError(
+                            'GIT_ERROR',
+                            'Deploy key authentication requires a private key and a trusted SSH host key.',
+                        );
+                    }
+                    return {
+                        encryptedDeployKey: this.crypto.encrypt(input.deployKey.trim()),
+                        ...this.resolveSshTrustFromKnownHostsEntry(
+                            input.sshKnownHostsEntry,
+                            input.sshHostKeyFingerprint,
+                        ),
+                    };
+                })()
+                : null;
 
             // 1. Fetch from git BEFORE touching disk or DB. If the fetch
             //    fails there is nothing to clean up. The onClone hook stages
@@ -2707,11 +2804,11 @@ export class GitSourceService {
             let fetched: FetchResult;
             const createFetchAuth = input.authType === 'token'
                 ? { token: input.token }
-                : input.authType === 'deploy_key'
+                : createDeployKeyTrust
                     ? {
                         sshAuth: {
-                            privateKey: input.deployKey ?? '',
-                            knownHostsEntry: input.sshKnownHostsEntry ?? '',
+                            privateKey: input.deployKey!.trim(),
+                            knownHostsEntry: createDeployKeyTrust.sshKnownHostsEntry,
                         },
                     }
                     : { token: null };
@@ -2925,6 +3022,9 @@ export class GitSourceService {
                             encryptedToken: input.authType === 'token' && input.token
                                 ? this.crypto.encrypt(input.token)
                                 : null,
+                            encryptedDeployKey: createDeployKeyTrust?.encryptedDeployKey ?? null,
+                            sshKnownHostsEntry: createDeployKeyTrust?.sshKnownHostsEntry ?? null,
+                            sshHostKeyFingerprint: createDeployKeyTrust?.sshHostKeyFingerprint ?? null,
                             autoApplyOnWebhook: input.autoApplyOnWebhook,
                             autoDeployOnApply: input.autoDeployOnApply,
                             commitSha: fetched.commitSha,
@@ -2979,11 +3079,6 @@ export class GitSourceService {
                 const encryptedToken = input.authType === 'token' && input.token
                     ? this.crypto.encrypt(input.token)
                     : null;
-                const encryptedDeployKey = input.authType === 'deploy_key' && input.deployKey
-                    ? this.crypto.encrypt(input.deployKey)
-                    : null;
-                const sshKnownHostsEntry = input.authType === 'deploy_key' ? (input.sshKnownHostsEntry?.trim() || null) : null;
-                const sshHostKeyFingerprint = input.authType === 'deploy_key' ? (input.sshHostKeyFingerprint?.trim() || null) : null;
                 const hash = this.hashContent(fetched.composeFiles, fetched.envContent);
                 // The source row, the applied pointers, and the checkpoint
                 // advance together. This commit is the success boundary: once
@@ -3001,9 +3096,9 @@ export class GitSourceService {
                     env_path: input.syncEnv ? input.envPath : null,
                     auth_type: input.authType,
                     encrypted_token: encryptedToken,
-                    encrypted_deploy_key: encryptedDeployKey,
-                    ssh_known_hosts_entry: sshKnownHostsEntry,
-                    ssh_host_key_fingerprint: sshHostKeyFingerprint,
+                    encrypted_deploy_key: createDeployKeyTrust?.encryptedDeployKey ?? null,
+                    ssh_known_hosts_entry: createDeployKeyTrust?.sshKnownHostsEntry ?? null,
+                    ssh_host_key_fingerprint: createDeployKeyTrust?.sshHostKeyFingerprint ?? null,
                     auto_apply_on_webhook: input.autoApplyOnWebhook,
                     auto_deploy_on_apply: input.autoDeployOnApply,
                     last_applied_commit_sha: fetched.commitSha,
@@ -3086,6 +3181,14 @@ export class GitSourceService {
                 console.log(`[GitSource] Created stack ${input.stackName} from ${repoHost(input.repoUrl)} at ${fetched.commitSha.slice(0, 7)}`);
                 if (diag) {
                     console.log(`[GitSource:diag] createStackFromGit ok stack=${input.stackName} sha=${fetched.commitSha.slice(0, 7)} envWritten=${envWritten} warnings=${fetched.warnings.length}`);
+                }
+                if (createDeployKeyTrust?.sshHostKeyFingerprint) {
+                    this.maybeRecordSshTrustAudit(
+                        input.auditContext,
+                        input.stackName,
+                        createDeployKeyTrust.sshHostKeyFingerprint,
+                        'created',
+                    );
                 }
                 return { source, commitSha: fetched.commitSha, envWritten, warnings: fetched.warnings };
             } catch (e) {

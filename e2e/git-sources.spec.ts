@@ -74,6 +74,59 @@ test.describe('Git Sources', () => {
     await expect(page.getByText(/Use an https:\/\/ URL or an SSH URL/i)).toBeVisible({ timeout: 5_000 });
   });
 
+  test('probes SSH host keys, shows fingerprint, and submits deploy key configuration', async ({ page }) => {
+    await openGitSourcePanel(page);
+    await page.locator('#git-source-repo').fill('git@github.com:example/private.git');
+    await page.locator('#git-source-branch').fill('main');
+    await page.getByRole('button', { name: 'Deploy key (SSH)' }).click();
+
+    await page.route('**/api/git-sources/ssh-host-key', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          host: 'github.com',
+          port: 22,
+          keys: [{
+            keyType: 'ssh-ed25519',
+            fingerprint: 'SHA256:E2EProbeFingerprint',
+            line: 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGb3JzL3Rlc3Q=',
+          }],
+        }),
+      });
+    });
+
+    await page.getByRole('button', { name: 'Fetch host key fingerprint' }).click();
+    await expect(page.getByText('SHA256:E2EProbeFingerprint')).toBeVisible({ timeout: 5_000 });
+
+    await page.locator('textarea').fill('-----BEGIN OPENSSH PRIVATE KEY-----\ne2e-fixture\n-----END OPENSSH PRIVATE KEY-----\n');
+
+    let savedBody: Record<string, unknown> | null = null;
+    await page.route(`**/api/stacks/${TEST_STACK}/git-source`, async (route) => {
+      if (route.request().method() === 'PUT') {
+        savedBody = route.request().postDataJSON() as Record<string, unknown>;
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            stack_name: TEST_STACK,
+            auth_type: 'deploy_key',
+            has_deploy_key: true,
+            ssh_host_key_fingerprint: 'SHA256:E2EProbeFingerprint',
+          }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.getByRole('dialog').getByRole('button', { name: /^Save$/ }).click();
+    await expect.poll(() => savedBody?.auth_type).toBe('deploy_key');
+    expect(savedBody?.deploy_key).toContain('BEGIN OPENSSH PRIVATE KEY');
+    expect(savedBody?.ssh_known_hosts_entry).toContain('github.com ssh-ed25519');
+    expect(savedBody?.ssh_host_key_fingerprint).toBe('SHA256:E2EProbeFingerprint');
+  });
+
   test('surfaces reachability error on save with unreachable repo', async ({ page }) => {
     await openGitSourcePanel(page);
 

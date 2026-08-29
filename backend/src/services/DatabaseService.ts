@@ -1176,6 +1176,7 @@ export class DatabaseService {
         this.migrateGitSourceManifest();
         this.migrateGitSourceChangePlan();
         this.migrateGitOpsRecoveryColumns();
+        this.migrateGitOpsCreateCheckpointSshDeployKey();
         this.migrateNodeUpdateSkips();
         this.migrateStackAlertServiceScope();
 
@@ -2604,6 +2605,12 @@ stmt.run('gitops_schema_version', '1');
         this.tryAddColumn('stack_update_recovery_generations', 'gitops_generation_id', 'TEXT');
         this.tryAddColumn('stack_update_recovery_generations', 'gitops_artifact_set_id', 'TEXT');
         this.tryAddColumn('stack_update_recovery_generations', 'gitops_source_acceptance_ref', 'TEXT');
+    }
+
+    private migrateGitOpsCreateCheckpointSshDeployKey(): void {
+        this.tryAddColumn('gitops_create_checkpoints', 'encrypted_deploy_key', 'TEXT');
+        this.tryAddColumn('gitops_create_checkpoints', 'ssh_known_hosts_entry', 'TEXT');
+        this.tryAddColumn('gitops_create_checkpoints', 'ssh_host_key_fingerprint', 'TEXT');
     }
 
     private migrateGitSourceMultiFile(): void {
