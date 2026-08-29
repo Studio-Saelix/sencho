@@ -42,7 +42,7 @@ jobs:
         run: npm ci
 
       - name: Free loopback SSH port 22 for default-port integration
-        run: sudo systemctl stop ssh.socket ssh.service 2>/dev/null || sudo service ssh stop 2>/dev/null || true
+        run: bash scripts/ci-free-loopback-ssh-port.sh 22
 
       - name: Build (TypeScript)
         working-directory: ./backend
@@ -210,7 +210,7 @@ jobs:
           NODE_EXTRA_CA_CERTS: ${{ github.workspace }}/e2e/fixtures/git-ca.pem
 
       - name: Free loopback SSH port 22 for SSH deploy-key E2E
-        run: sudo systemctl stop ssh.socket ssh.service 2>/dev/null || sudo service ssh stop 2>/dev/null || true
+        run: bash scripts/ci-free-loopback-ssh-port.sh 22
 
       - name: Run E2E tests
         # `--project=chromium` is explicit because playwright.config.ts also
