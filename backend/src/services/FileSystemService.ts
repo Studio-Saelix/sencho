@@ -1486,6 +1486,37 @@ export class FileSystemService {
     }
   }
 
+  /**
+   * Copy managed backup-slot files into destDir for registry-delivery preparation.
+   * Skips integrity markers; only regular compose and env files are copied.
+   */
+  async copyBackupSlotToDir(stackName: string, destDir: string): Promise<void> {
+    const backupRoot = path.resolve(getBackupBaseDir());
+    const backupDir = path.resolve(backupRoot, String(this.nodeId), stackName);
+    if (!backupDir.startsWith(backupRoot + path.sep)) {
+      throw Object.assign(new Error('Path escapes backup directory'), { code: 'INVALID_PATH' });
+    }
+    await fsPromises.mkdir(destDir, { recursive: true, mode: 0o700 });
+    const items = await fsPromises.readdir(backupDir);
+    for (const item of items) {
+      if (item === '.checksums' || item === '.timestamp') continue;
+      const src = path.resolve(backupDir, item);
+      if (!src.startsWith(backupDir + path.sep)) continue;
+      const stat = await fsPromises.lstat(src);
+      if (!stat.isFile() || stat.isSymbolicLink()) continue;
+      const dest = path.join(destDir, item);
+      await fsPromises.copyFile(src, dest, fsPromises.constants.COPYFILE_EXCL).catch(async (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EEXIST') {
+          await fsPromises.unlink(dest);
+          await fsPromises.copyFile(src, dest);
+          return;
+        }
+        throw err;
+      });
+      await fsPromises.chmod(dest, 0o600);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Stack-scoped file explorer methods
   // ---------------------------------------------------------------------------

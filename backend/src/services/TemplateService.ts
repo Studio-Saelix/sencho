@@ -3,6 +3,7 @@ import YAML from 'yaml';
 import { DatabaseService } from './DatabaseService';
 import { CacheService } from './CacheService';
 import { isDebugEnabled } from '../utils/debug';
+import { isValidStackName } from '../utils/validation';
 
 
 interface TemplateEnv {
@@ -365,6 +366,9 @@ export class TemplateService {
     }
 
     public generateComposeFromTemplate(template: Template, serviceName: string): string {
+        if (!isValidStackName(serviceName)) {
+            throw new Error('Invalid service name');
+        }
         const service: ComposeServiceDefinition = { restart: 'unless-stopped' };
 
         if (template.image) {

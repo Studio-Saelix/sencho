@@ -20,6 +20,7 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import type { TransportFailure } from '../services/git/errors';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
+import { StackOpLockService } from '../services/StackOpLockService';
 import {
     buildGenerationRow,
     directSourceIdentity,
@@ -123,6 +124,8 @@ beforeEach(() => {
     mockRecoveryGet.mockReset();
     mockRecoveryLinkGateOrRetain.mockReset();
     mockRecoveryGet.mockReturnValue({ id: 'rec-test-1', is_current: 1 });
+
+    StackOpLockService.resetForTests();
 
     // Wipe persisted git sources between tests
     const db = DatabaseService.getInstance();
@@ -1416,6 +1419,7 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
             'git_apply',
             'system:webhook',
             expect.any(Function),
+            undefined,
         );
 
         runExclusive.mockRestore();

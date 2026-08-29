@@ -36,7 +36,13 @@ const {
   mockBuildUnifiedHeldImagePredicate,
   mockGetRecovery,
   mockFsStat,
-} = vi.hoisted(() => ({
+  mockCleanupDockerAuthTempDir,
+  mockCreateDockerAuthTempDir,
+  mockRecordRegistryDeliveryEvent,
+  mockPreparedSourceFinalize,
+} = vi.hoisted(() => {
+  const mockCleanupDockerAuthTempDir = vi.fn();
+  return {
   mockSpawn: vi.fn(),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
   mockGetLegacyOrphanContainersByStack: vi.fn().mockResolvedValue([]),
@@ -89,6 +95,35 @@ const {
   mockBuildUnifiedHeldImagePredicate: vi.fn().mockReturnValue(() => false),
   mockGetRecovery: vi.fn().mockReturnValue(undefined),
   mockFsStat: vi.fn().mockResolvedValue({ isDirectory: () => true }),
+  mockCleanupDockerAuthTempDir,
+  mockCreateDockerAuthTempDir: vi.fn(() => ({
+    dirPath: '/tmp/sencho-docker-test',
+    kind: 'local' as const,
+    cleanup: mockCleanupDockerAuthTempDir,
+  })),
+  mockRecordRegistryDeliveryEvent: vi.fn(),
+  mockPreparedSourceFinalize: vi.fn(),
+  };
+});
+
+vi.mock('../helpers/dockerAuthTempDir', () => ({
+  createDockerAuthTempDir: mockCreateDockerAuthTempDir,
+}));
+
+vi.mock('../helpers/registryDeliveryEvidence', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../helpers/registryDeliveryEvidence')>();
+  return {
+    ...actual,
+    recordRegistryDeliveryEvent: (...args: unknown[]) => mockRecordRegistryDeliveryEvent(...args),
+  };
+});
+
+vi.mock('../services/preparedSourceStore', () => ({
+  PreparedSourceStore: {
+    getInstance: () => ({
+      finalize: (...args: unknown[]) => mockPreparedSourceFinalize(...args),
+    }),
+  },
 }));
 
 vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
@@ -1301,6 +1336,7 @@ describe('ComposeService - withRegistryAuth', () => {
   it('creates temp config dir when registries exist', async () => {
     mockGetRegistries.mockReturnValue([{ url: 'https://registry.example.com', username: 'user', password: 'pass' }]);
     mockResolveDockerConfig.mockResolvedValue({ config: { auths: { 'registry.example.com': { auth: 'dXNlcjpwYXNz' } } }, warnings: [] });
+    mockGetGlobalSettings.mockReturnValue({ delivery_source_id: 'test-delivery-source' });
     setupAutoCloseSpawn();
     mockListContainers.mockResolvedValue([]);
 
@@ -1310,10 +1346,8 @@ describe('ComposeService - withRegistryAuth', () => {
     await vi.advanceTimersByTimeAsync(3100);
     await promise;
 
-    expect(mockMkdtempSync).toHaveBeenCalled();
-    expect(mockWriteFileSync).toHaveBeenCalled();
-    expect(mockUnlinkSync).toHaveBeenCalled();
-    expect(mockRmdirSync).toHaveBeenCalled();
+    expect(mockCreateDockerAuthTempDir).toHaveBeenCalled();
+    expect(mockCleanupDockerAuthTempDir).toHaveBeenCalled();
   });
 
   it('surfaces resolveDockerConfig warnings to the WebSocket output', async () => {
@@ -1338,7 +1372,8 @@ describe('ComposeService - withRegistryAuth', () => {
 
   it('cleans up temp dir even on command failure', async () => {
     mockGetRegistries.mockReturnValue([{ url: 'https://registry.example.com' }]);
-    mockResolveDockerConfig.mockResolvedValue({ config: { auths: {} }, warnings: [] });
+    mockResolveDockerConfig.mockResolvedValue({ config: { auths: { 'registry.example.com': { auth: 'dGVzdA==' } } }, warnings: [] });
+    mockGetGlobalSettings.mockReturnValue({ delivery_source_id: 'test-delivery-source' });
 
     // Make spawn fail
     mockSpawn.mockImplementation(() => {
@@ -1356,7 +1391,100 @@ describe('ComposeService - withRegistryAuth', () => {
     await vi.runAllTimersAsync();
     const error = await result;
     expect(error).not.toBeNull();
-    expect(mockUnlinkSync).toHaveBeenCalled();
+    expect(mockCleanupDockerAuthTempDir).toHaveBeenCalled();
+  });
+});
+
+describe('ComposeService - registry delivery cleanup logging', () => {
+  const deliveryEnvelope = {
+    attestation: 'test-token',
+    auths: [],
+    notAfter: Date.now() + 60_000,
+    deliverySourceId: 'delivery-src-1',
+  };
+
+  async function deployWithDeliveryContext(): Promise<void> {
+    const { runWithRegistryDeliveryContext } = await import('../helpers/registryDeliveryContext');
+    const svc = ComposeService.getInstance(1);
+    await runWithRegistryDeliveryContext({
+      envelope: deliveryEnvelope,
+      nodeId: 1,
+      stack: 'my-stack',
+      stage: 'stack-deploy',
+      seamResult: { auths: { 'registry.example.com': { auth: 'dGVzdA==' } }, prepId: 'prep-1' },
+      seamSettled: true,
+    }, async () => {
+      const promise = svc.deployStack('my-stack');
+      await vi.advanceTimersByTimeAsync(3100);
+      await promise;
+    });
+  }
+
+  beforeEach(() => {
+    mockGetRegistries.mockReturnValue([]);
+    mockGetGlobalSettings.mockReturnValue({ delivery_source_id: 'delivery-src-1' });
+    mockCleanupDockerAuthTempDir.mockReset();
+    mockCleanupDockerAuthTempDir.mockImplementation(() => undefined);
+    mockRecordRegistryDeliveryEvent.mockReset();
+    mockPreparedSourceFinalize.mockReset();
+    mockPreparedSourceFinalize.mockImplementation(() => undefined);
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+  });
+
+  it('logs cleanup failure when evidence records successfully', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mockCleanupDockerAuthTempDir.mockImplementation(() => {
+      throw new Error('cleanup failed');
+    });
+
+    await deployWithDeliveryContext();
+
+    expect(mockRecordRegistryDeliveryEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'cleanup_failed',
+    }));
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Registry delivery temp dir cleanup failed'),
+      expect.any(String),
+      'cleanup failed',
+    );
+    errorSpy.mockRestore();
+  });
+
+  it('logs both cleanup and evidence failures without changing deploy success', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mockCleanupDockerAuthTempDir.mockImplementation(() => {
+      throw new Error('cleanup failed');
+    });
+    mockRecordRegistryDeliveryEvent.mockImplementation(() => {
+      throw new Error('evidence failed');
+    });
+
+    await deployWithDeliveryContext();
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Registry delivery cleanup and evidence both failed'),
+      expect.any(String),
+      'evidence failed',
+      'cleanup failed',
+    );
+    errorSpy.mockRestore();
+  });
+
+  it('logs prepared-source finalization failure without changing deploy success', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mockPreparedSourceFinalize.mockImplementation(() => {
+      throw new Error('finalize failed');
+    });
+
+    await deployWithDeliveryContext();
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Registry delivery prepared-source finalize failed'),
+      'prep-1',
+      'finalize failed',
+    );
+    errorSpy.mockRestore();
   });
 });
 
@@ -1541,6 +1669,39 @@ describe('ComposeService - idle-output stall backstop', () => {
 
     proc.emit('close', 0);
     await promise;
+  });
+
+  it('terminates compose when the registry delivery abort signal fires', async () => {
+    const { runWithRegistryDeliveryContext } = await import('../helpers/registryDeliveryContext');
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    const abortController = new AbortController();
+
+    const svc = ComposeService.getInstance(1);
+    const result = runWithRegistryDeliveryContext(
+      {
+        envelope: {
+          attestation: 'unused',
+          auths: [],
+          notAfter: Date.now() + 60_000,
+          deliverySourceId: 'test',
+        },
+        nodeId: 1,
+        stack: 'my-stack',
+        stage: 'stack-deploy',
+        abortSignal: abortController.signal,
+      },
+      () => svc.runCommand('my-stack', 'restart'),
+    ).then(() => null, (e: Error) => e);
+
+    await waitForSpawn();
+    abortController.abort();
+    proc.emit('close', null);
+
+    const error = await result;
+    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(error).not.toBeNull();
+    expect((error as Error).message).toContain('OPERATION_ABORTED');
   });
 
   it('falls back to the default stall window when the env value is invalid', async () => {

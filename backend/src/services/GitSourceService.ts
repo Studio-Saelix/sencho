@@ -1,5 +1,4 @@
 import { promises as fsPromises, existsSync } from 'fs';
-import { spawn } from 'child_process';
 import crypto from 'crypto';
 import os from 'os';
 import path from 'path';
@@ -43,9 +42,12 @@ import {
     stackManagedRoot,
 } from './gitops/directApplication';
 import type { GitOpsApplicationRow } from './gitops/types';
-import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readStagingMarker, writeStagingMarker } from './gitops/createStagingMarker';
+import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readStagingMarker, validateCandidateRelPath, writeStagingMarker } from './gitops/createStagingMarker';
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops/createCleanup';
 import { managedAreaBase } from './gitops/managedPaths';
+import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
+import { copyPreparedPayloadDirectory } from '../helpers/registryDeliveryMaterialize';
+import { runDockerCompose as spawnDockerCompose } from '../helpers/dockerComposeRunner';
 
 /**
  * GitSourceService - fetch compose files from a Git repository and apply
@@ -1222,9 +1224,9 @@ export class GitSourceService {
         const startedAt = Date.now();
         const diag = isDebugEnabled();
         if (diag) {
-            console.log(
-                `[GitSource:diag] fetch start host=${sanitizeForLog(repoHost(repoUrl))} branch=${sanitizeForLog(branch)} files=${composePaths.length} envSync=${envPath ? 'true' : 'false'}`
-            );
+            console.log(sanitizeForLog(
+                `[GitSource:diag] fetch start host=${repoHost(repoUrl)} branch=${branch} files=${composePaths.length} envSync=${envPath ? 'true' : 'false'}`,
+            ));
         }
 
         try {
@@ -1544,26 +1546,8 @@ export class GitSourceService {
         };
     }
 
-    private runDockerCompose(args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
-        return new Promise((resolve) => {
-            const child = spawn('docker', args, { cwd });
-            let stdout = '';
-            let stderr = '';
-            const timer = setTimeout(() => {
-                try { child.kill('SIGKILL'); } catch { /* best effort */ }
-                resolve({ code: -1, stdout, stderr: stderr + '\nValidation timed out.' });
-            }, timeoutMs);
-            child.stdout.on('data', d => { stdout += d.toString(); });
-            child.stderr.on('data', d => { stderr += d.toString(); });
-            child.on('close', (code) => {
-                clearTimeout(timer);
-                resolve({ code: code ?? -1, stdout, stderr });
-            });
-            child.on('error', (err) => {
-                clearTimeout(timer);
-                resolve({ code: -1, stdout, stderr: stderr + '\n' + err.message });
-            });
-        });
+    private runDockerCompose(args: string[], cwd: string, timeoutMs: number) {
+        return spawnDockerCompose(args, cwd, timeoutMs);
     }
 
     // ─── Hashing + diff ──────────────────────────────────────────────────────
@@ -2205,6 +2189,7 @@ export class GitSourceService {
             'git_apply',
             opts.actor ?? 'system:git-source',
             () => this.applyLocked(stackName, commitSha, opts),
+            getRegistryDeliveryLockContext(),
         );
         if (!lock.ran) {
             throw new GitSourceError(
@@ -2348,6 +2333,15 @@ export class GitSourceService {
 
             // The staged candidate must still exist and be complete; a deleted
             // candidate (or a node restart that swept it) invalidates the pull.
+            const deliveryPrepId = getRegistryDeliveryContext()?.envelope.prepId;
+            if (deliveryPrepId) {
+                await this.restoreApplyFromPreparedGitCandidate(
+                    deliveryPrepId,
+                    stackName,
+                    commitSha,
+                    pending.candidateRelPath,
+                );
+            }
             const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
             const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, pending.candidateRelPath);
             try {
@@ -2801,6 +2795,7 @@ export class GitSourceService {
             //    the complete-project candidate inside the clone lifecycle.
             const manifestSvc = GitProjectManifestService.getInstance();
             const materialization: { value: MaterializationResult | null } = { value: null };
+            const deliveryPrepId = getRegistryDeliveryContext()?.envelope.prepId;
             let fetched: FetchResult;
             const createFetchAuth = input.authType === 'token'
                 ? { token: input.token }
@@ -2813,31 +2808,43 @@ export class GitSourceService {
                     }
                     : { token: null };
             try {
-                fetched = await this.fetchFromGit({
-                    repoUrl: input.repoUrl,
-                    branch: input.branch,
-                    composePaths: input.composePaths,
-                    envPath: input.syncEnv ? input.envPath : null,
-                    ...createFetchAuth,
-                    onClone: async (cloneDir, commitSha, envContent) => {
-                        // The candidate path is recorded before the build that
-                        // creates it, so a crash mid-build still names exactly one
-                        // directory this operation owns.
-                        staged.candidateRelPath = candidateRelPathForSha(commitSha);
-                        await writeStagingMarker(managedRoot, {
-                            schemaVersion: 1,
-                            operationId: gitopsOperationId,
-                            rootPreexisted,
-                            candidateRelPath: staged.candidateRelPath,
-                            createdAt: Date.now(),
-                        });
-                        materialization.value = await this.buildMaterialization(input.stackName, cloneDir, commitSha, {
-                            compose_paths: input.composePaths,
-                            context_dir: input.contextDir,
-                            sync_env: input.syncEnv,
-                        }, envContent);
-                    },
-                });
+                if (deliveryPrepId) {
+                    const restored = await this.restoreCreateFromPreparedGitCandidate(
+                        deliveryPrepId,
+                        managedRoot,
+                        rootPreexisted,
+                        gitopsOperationId,
+                        staged,
+                    );
+                    fetched = restored.fetched;
+                    materialization.value = restored.materialization;
+                } else {
+                    fetched = await this.fetchFromGit({
+                        repoUrl: input.repoUrl,
+                        branch: input.branch,
+                        composePaths: input.composePaths,
+                        envPath: input.syncEnv ? input.envPath : null,
+                        ...createFetchAuth,
+                        onClone: async (cloneDir, commitSha, envContent) => {
+                            // The candidate path is recorded before the build that
+                            // creates it, so a crash mid-build still names exactly one
+                            // directory this operation owns.
+                            staged.candidateRelPath = candidateRelPathForSha(commitSha);
+                            await writeStagingMarker(managedRoot, {
+                                schemaVersion: 1,
+                                operationId: gitopsOperationId,
+                                rootPreexisted,
+                                candidateRelPath: staged.candidateRelPath,
+                                createdAt: Date.now(),
+                            });
+                            materialization.value = await this.buildMaterialization(input.stackName, cloneDir, commitSha, {
+                                compose_paths: input.composePaths,
+                                context_dir: input.contextDir,
+                                sync_env: input.syncEnv,
+                            }, envContent);
+                        },
+                    });
+                }
             } catch (e) {
                 // Materialization refuses routinely, not just on crashes. The
                 // marker has to come off with the staged files, or it would
@@ -3681,6 +3688,201 @@ export class GitSourceService {
             );
         } catch (error) {
             console.error('[GitSource] Failed to record activity for %s:', sanitizeForLog(stackName), error);
+        }
+    }
+
+    // ─── Registry delivery preparation ─────────────────────────────────────
+
+    private async loadPreparedGitCandidate(
+        prepId: string,
+        managedRoot: string,
+        expectations?: { commitSha?: string; candidateRelPath?: string },
+    ): Promise<import('../helpers/registryDeliveryGitCandidate').GitCandidatePreparedMeta> {
+        const { PreparedSourceStore } = await import('./preparedSourceStore');
+        const {
+            installGitCandidatePayloadToManagedRoot,
+            readGitCandidatePreparedMeta,
+        } = await import('../helpers/registryDeliveryGitCandidate');
+        const payloadPath = PreparedSourceStore.getInstance().peekPayloadPath(prepId);
+        const meta = await readGitCandidatePreparedMeta(payloadPath);
+        if (!meta.materialization.validation.ok) {
+            throw new GitSourceError(
+                'GIT_ERROR',
+                `Compose validation failed: ${meta.materialization.validation.error ?? 'unknown'}`,
+            );
+        }
+        if (expectations?.commitSha && meta.commitSha !== expectations.commitSha) {
+            throw new GitSourceError('GIT_ERROR', 'Prepared git candidate commit mismatch');
+        }
+        if (expectations?.candidateRelPath && meta.candidateRelPath !== expectations.candidateRelPath) {
+            throw new GitSourceError('GIT_ERROR', 'Prepared git candidate path mismatch');
+        }
+        await installGitCandidatePayloadToManagedRoot(payloadPath, managedRoot, meta.candidateRelPath);
+        return meta;
+    }
+
+    private async restoreCreateFromPreparedGitCandidate(
+        prepId: string,
+        managedRoot: string,
+        rootPreexisted: boolean,
+        gitopsOperationId: string,
+        staged: { candidateRelPath: string | null },
+    ): Promise<{ fetched: FetchResult; materialization: MaterializationResult }> {
+        const { fetchResultFromPreparedMeta } = await import('../helpers/registryDeliveryGitCandidate');
+        const meta = await this.loadPreparedGitCandidate(prepId, managedRoot);
+        staged.candidateRelPath = meta.candidateRelPath;
+        await writeStagingMarker(managedRoot, {
+            schemaVersion: 1,
+            operationId: gitopsOperationId,
+            rootPreexisted,
+            candidateRelPath: staged.candidateRelPath,
+            createdAt: Date.now(),
+        });
+        return {
+            fetched: fetchResultFromPreparedMeta(meta),
+            materialization: meta.materialization,
+        };
+    }
+
+    private async restoreApplyFromPreparedGitCandidate(
+        prepId: string,
+        stackName: string,
+        commitSha: string,
+        candidateRelPath: string,
+    ): Promise<void> {
+        const managedRoot = path.resolve(stackManagedRoot(stackName));
+        await this.loadPreparedGitCandidate(prepId, managedRoot, { commitSha, candidateRelPath });
+    }
+
+    public async prepareRegistryDeliveryFromGit(
+        input: CreateStackFromGitInput,
+    ): Promise<{ prepId: string; sourceHash: string }> {
+        const materialization: { value: MaterializationResult | null } = { value: null };
+        const fetched = await this.fetchFromGit({
+            repoUrl: input.repoUrl,
+            branch: input.branch,
+            composePaths: input.composePaths,
+            envPath: input.syncEnv ? input.envPath : null,
+            token: input.token,
+            onClone: async (cloneDir, commitSha, envContent) => {
+                materialization.value = await this.buildMaterialization(
+                    input.stackName,
+                    cloneDir,
+                    commitSha,
+                    {
+                        compose_paths: input.composePaths,
+                        context_dir: input.contextDir,
+                        sync_env: input.syncEnv,
+                    },
+                    envContent,
+                );
+            },
+        });
+        if (!materialization.value?.validation.ok) {
+            throw new GitSourceError(
+                'GIT_ERROR',
+                `Compose validation failed: ${materialization.value?.validation.error ?? 'unknown'}`,
+            );
+        }
+        const managedRoot = path.resolve(stackManagedRoot(input.stackName));
+        const candidateRel = materialization.value.candidateRelPath;
+        const pathReason = validateCandidateRelPath(candidateRel, managedRoot);
+        if (pathReason) {
+            throw new GitSourceError('GIT_ERROR', pathReason);
+        }
+        const candidateAbs = path.resolve(managedRoot, candidateRel);
+        if (!candidateAbs.startsWith(managedRoot + path.sep)) {
+            throw new GitSourceError('GIT_ERROR', 'Invalid candidate path');
+        }
+        const stagingDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-regprep-'));
+        try {
+            await copyPreparedPayloadDirectory(candidateAbs, stagingDir);
+            const { writeGitCandidatePreparedMeta } = await import('../helpers/registryDeliveryGitCandidate');
+            await writeGitCandidatePreparedMeta(stagingDir, {
+                version: 1,
+                commitSha: fetched.commitSha,
+                resolvedRefKind: fetched.resolvedRefKind,
+                candidateRelPath: materialization.value.candidateRelPath,
+                composeFiles: fetched.composeFiles,
+                envContent: fetched.envContent,
+                materialization: materialization.value,
+                warnings: fetched.warnings,
+            });
+            const { hashDeliverySourceDir } = await import('../helpers/registryDeliveryHashes');
+            const { PreparedSourceStore } = await import('./preparedSourceStore');
+            const sourceHash = hashDeliverySourceDir(stagingDir);
+            const entry = await PreparedSourceStore.getInstance().prepareFromDirectory(
+                'git-candidate',
+                sourceHash,
+                stagingDir,
+            );
+            return { prepId: entry.prepId, sourceHash };
+        } catch (error) {
+            await fsPromises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+            throw error;
+        } finally {
+            const rmTarget = path.resolve(candidateAbs);
+            if (rmTarget.startsWith(managedRoot + path.sep)) {
+                // Canonical js/path-injection barrier inline with the rm sink.
+                await fsPromises.rm(rmTarget, { recursive: true, force: true }).catch(() => undefined);
+            }
+        }
+    }
+
+    public async prepareRegistryDeliveryFromPending(
+        stackName: string,
+    ): Promise<{ prepId: string; sourceHash: string }> {
+        const src = DatabaseService.getInstance().getGitSource(stackName);
+        if (!src?.pending_commit_sha || !src.pending_compose_content) {
+            throw new GitSourceError('GIT_ERROR', 'No pending pull to prepare');
+        }
+        const pending = this.decodePendingCompose(src.pending_compose_content);
+        if (!pending.candidateRelPath || pending.inventory === null) {
+            throw new GitSourceError('GIT_ERROR', 'No staged candidate for pending apply');
+        }
+        const envContent = src.pending_env_content !== null
+            ? this.crypto.decrypt(src.pending_env_content)
+            : null;
+        const managedRoot = path.resolve(stackManagedRoot(stackName));
+        const pathReason = validateCandidateRelPath(pending.candidateRelPath, managedRoot);
+        if (pathReason) {
+            throw new GitSourceError('GIT_ERROR', pathReason);
+        }
+        const candidateAbs = path.resolve(managedRoot, pending.candidateRelPath);
+        if (!candidateAbs.startsWith(managedRoot + path.sep)) {
+            throw new GitSourceError('GIT_ERROR', 'Invalid candidate path');
+        }
+        const stagingDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-regprep-'));
+        try {
+            await copyPreparedPayloadDirectory(candidateAbs, stagingDir);
+            const { writeGitCandidatePreparedMeta } = await import('../helpers/registryDeliveryGitCandidate');
+            await writeGitCandidatePreparedMeta(stagingDir, {
+                version: 1,
+                commitSha: src.pending_commit_sha,
+                resolvedRefKind: priorFetchIdentity(this.gitopsApplicationFor(stackName))?.kind ?? 'branch',
+                candidateRelPath: pending.candidateRelPath,
+                composeFiles: pending.files,
+                envContent,
+                materialization: {
+                    inventory: pending.inventory,
+                    contextCopyPlans: [],
+                    candidateRelPath: pending.candidateRelPath,
+                    validation: { ok: true },
+                },
+                warnings: [],
+            });
+            const { hashDeliverySourceDir } = await import('../helpers/registryDeliveryHashes');
+            const { PreparedSourceStore } = await import('./preparedSourceStore');
+            const sourceHash = hashDeliverySourceDir(stagingDir);
+            const entry = await PreparedSourceStore.getInstance().prepareFromDirectory(
+                'git-candidate',
+                sourceHash,
+                stagingDir,
+            );
+            return { prepId: entry.prepId, sourceHash };
+        } catch (error) {
+            await fsPromises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+            throw error;
         }
     }
 

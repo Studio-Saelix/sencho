@@ -44,6 +44,11 @@ describe('JSON frame roundtrip', () => {
         expect(close.t).toBe('ws_close');
     });
 
+    it('roundtrips an http_cancel frame', () => {
+        const decoded = decodeJsonFrame(encodeJsonFrame({ t: 'http_cancel', s: 12 }));
+        expect(decoded).toEqual({ t: 'http_cancel', s: 12 });
+    });
+
     it('rejects malformed JSON', () => {
         expect(() => decodeJsonFrame('not json')).toThrow();
     });

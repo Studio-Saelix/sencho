@@ -79,6 +79,7 @@ export class PilotTunnelManager extends EventEmitter {
     private static instance: PilotTunnelManager;
     private bridges: Map<number, PilotTunnelBridge> = new Map();
     private bridgeKinds: Map<number, BridgeKind> = new Map();
+    private tunnelConfidential: Map<number, boolean> = new Map();
     private softWarned = false;
 
     private constructor() {
@@ -104,6 +105,7 @@ export class PilotTunnelManager extends EventEmitter {
             }
             PilotTunnelManager.instance.bridges.clear();
             PilotTunnelManager.instance.bridgeKinds.clear();
+            PilotTunnelManager.instance.tunnelConfidential.clear();
         }
         PilotTunnelManager.instance = undefined as unknown as PilotTunnelManager;
     }
@@ -125,13 +127,19 @@ export class PilotTunnelManager extends EventEmitter {
      *
      * Resolves once the loopback HTTP server is listening.
      */
-    public async registerTunnel(nodeId: number, ws: WebSocket, agentVersion?: string): Promise<void> {
+    public async registerTunnel(
+        nodeId: number,
+        ws: WebSocket,
+        agentVersion?: string,
+        tunnelConfidential = false,
+    ): Promise<void> {
         const existing = this.bridges.get(nodeId);
         const replaced = existing != null;
         if (existing) {
             existing.close(PilotCloseCode.Replaced, 'replaced by newer tunnel');
             this.bridges.delete(nodeId);
             this.bridgeKinds.delete(nodeId);
+            this.tunnelConfidential.delete(nodeId);
         }
 
         // Hard cap: only counts tunnels for *other* nodes since we just
@@ -158,6 +166,7 @@ export class PilotTunnelManager extends EventEmitter {
             if (this.bridges.get(nodeId) === bridge) {
                 this.bridges.delete(nodeId);
                 this.bridgeKinds.delete(nodeId);
+                this.tunnelConfidential.delete(nodeId);
                 DatabaseService.getInstance().updateNodeStatus(nodeId, 'offline');
                 this.emit('tunnel-down', nodeId);
             }
@@ -166,6 +175,7 @@ export class PilotTunnelManager extends EventEmitter {
 
         this.bridges.set(nodeId, bridge);
         this.bridgeKinds.set(nodeId, 'pilot');
+        this.tunnelConfidential.set(nodeId, tunnelConfidential);
         const db = DatabaseService.getInstance();
         db.updateNodeStatus(nodeId, 'online');
         db.updateNode(nodeId, {
@@ -177,6 +187,11 @@ export class PilotTunnelManager extends EventEmitter {
             console.log('[PilotMgr:diag] Tunnel registered:', { nodeId, active: this.bridges.size });
         }
         this.emit('tunnel-up', nodeId);
+    }
+
+    /** Whether the active pilot tunnel was established over confidential transport. */
+    public isTunnelConfidential(nodeId: number): boolean {
+        return this.tunnelConfidential.get(nodeId) === true;
     }
 
     /**

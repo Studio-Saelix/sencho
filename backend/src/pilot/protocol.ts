@@ -78,6 +78,7 @@ export type JsonFrame =
     | HttpReqEndFrame
     | HttpResFrame
     | HttpResEndFrame
+    | HttpCancelFrame
     | HttpErrorFrame
     | WsOpenFrame
     | WsAcceptFrame
@@ -119,6 +120,12 @@ export interface HttpResFrame {
 
 export interface HttpResEndFrame {
     t: 'http_res_end';
+    s: number;
+}
+
+/** Primary -> agent: cancel an in-flight loopback HTTP request (client disconnect). */
+export interface HttpCancelFrame {
+    t: 'http_cancel';
     s: number;
 }
 

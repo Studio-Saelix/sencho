@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { CryptoService } from './CryptoService';
 import { isSeverityAtLeast } from '../utils/severity';
 import { evaluatePolicyRisk, policyInputs, type PolicyBlockReason } from '../utils/policy-risk';
@@ -1146,6 +1147,7 @@ export class DatabaseService {
         this.migrateEncryptNodeTokens();
         this.migrateSSOColumns();
         this.migrateRegistries();
+        this.migrateRegistryDelivery();
         this.migrateRoleAssignments();
         this.migrateNotificationRoutes();
         this.migrateNotificationRoutesNodeId();
@@ -2333,6 +2335,62 @@ stmt.run('gitops_schema_version', '1');
                 updated_at INTEGER NOT NULL
             );
         `);
+    }
+
+    private migrateRegistryDelivery(): void {
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS registry_delivery_events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT UNIQUE NOT NULL,
+                delivery_source_id TEXT NOT NULL,
+                stack TEXT,
+                op TEXT,
+                attestation_jti TEXT,
+                prep_id_sha256 TEXT,
+                temp_dir_id TEXT,
+                event_type TEXT NOT NULL,
+                source_hash TEXT,
+                pruned_through_seq INTEGER,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_registry_delivery_events_source_seq
+                ON registry_delivery_events(delivery_source_id, seq);
+
+            CREATE TABLE IF NOT EXISTS registry_delivery_imported_events (
+                event_id TEXT NOT NULL,
+                delivery_source_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                hub_node_id_snapshot INTEGER NOT NULL,
+                stack TEXT,
+                op TEXT,
+                attestation_jti TEXT,
+                prep_id_sha256 TEXT,
+                temp_dir_id TEXT,
+                event_type TEXT NOT NULL,
+                source_hash TEXT,
+                pruned_through_seq INTEGER,
+                created_at INTEGER NOT NULL,
+                imported_at INTEGER NOT NULL,
+                PRIMARY KEY (delivery_source_id, event_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS registry_delivery_import_cursor (
+                delivery_source_id TEXT PRIMARY KEY,
+                last_seq INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+        `);
+
+        const existing = this.db.prepare(
+            'SELECT value FROM global_settings WHERE key = ?',
+        ).get('delivery_source_id') as { value: string } | undefined;
+        if (!existing) {
+            const id = crypto.randomUUID();
+            this.db.prepare(
+                'INSERT INTO global_settings (key, value) VALUES (?, ?)',
+            ).run('delivery_source_id', id);
+            this.cachedGlobalSettings = null;
+        }
     }
 
     private migrateRoleAssignments(): void {
@@ -6070,6 +6128,149 @@ stmt.run('gitops_schema_version', '1');
         this.flushAuditLogBuffer();
         const cutoff = Date.now() - (daysToKeep * 24 * 60 * 60 * 1000);
         this.db.prepare('DELETE FROM audit_log WHERE timestamp < ?').run(cutoff);
+    }
+
+    public insertRegistryDeliveryEvent(params: {
+        deliverySourceId: string;
+        eventType: string;
+        stack?: string | null;
+        op?: string | null;
+        attestationJti?: string | null;
+        prepIdSha256?: string | null;
+        tempDirId?: string | null;
+        sourceHash?: string | null;
+        prunedThroughSeq?: number | null;
+    }): number {
+        const eventId = crypto.randomUUID();
+        const createdAt = Date.now();
+        const result = this.db.prepare(`
+            INSERT INTO registry_delivery_events (
+                event_id, delivery_source_id, stack, op, attestation_jti,
+                prep_id_sha256, temp_dir_id, event_type, source_hash, pruned_through_seq, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+            eventId,
+            params.deliverySourceId,
+            params.stack ?? null,
+            params.op ?? null,
+            params.attestationJti ?? null,
+            params.prepIdSha256 ?? null,
+            params.tempDirId ?? null,
+            params.eventType,
+            params.sourceHash ?? null,
+            params.prunedThroughSeq ?? null,
+            createdAt,
+        );
+        return Number(result.lastInsertRowid);
+    }
+
+    public listRegistryDeliveryEvents(
+        deliverySourceId: string,
+        afterSeq: number,
+        limit: number,
+    ): import('../types/registryDeliveryEvidence').RegistryDeliveryEventRow[] {
+        return this.db.prepare(`
+            SELECT seq, event_id, delivery_source_id, stack, op, attestation_jti,
+                   prep_id_sha256, temp_dir_id, event_type, source_hash, pruned_through_seq, created_at
+            FROM registry_delivery_events
+            WHERE delivery_source_id = ? AND seq > ?
+            ORDER BY seq ASC
+            LIMIT ?
+        `).all(deliverySourceId, afterSeq, limit) as import('../types/registryDeliveryEvidence').RegistryDeliveryEventRow[];
+    }
+
+    public getRegistryDeliveryImportCursor(deliverySourceId: string): number {
+        const row = this.db.prepare(
+            'SELECT last_seq FROM registry_delivery_import_cursor WHERE delivery_source_id = ?',
+        ).get(deliverySourceId) as { last_seq: number } | undefined;
+        return row?.last_seq ?? 0;
+    }
+
+    public importRegistryDeliveryEventPage(
+        hubNodeIdSnapshot: number,
+        deliverySourceId: string,
+        events: import('../types/registryDeliveryEvidence').RegistryDeliveryEventRow[],
+    ): { imported: number; lastSeq: number } {
+        if (events.length === 0) {
+            return {
+                imported: 0,
+                lastSeq: this.getRegistryDeliveryImportCursor(deliverySourceId),
+            };
+        }
+
+        const importPage = this.db.transaction((rows: import('../types/registryDeliveryEvidence').RegistryDeliveryEventRow[]) => {
+            const insert = this.db.prepare(`
+                INSERT OR IGNORE INTO registry_delivery_imported_events (
+                    event_id, delivery_source_id, seq, hub_node_id_snapshot,
+                    stack, op, attestation_jti, prep_id_sha256, temp_dir_id,
+                    event_type, source_hash, pruned_through_seq, created_at, imported_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `);
+            let imported = 0;
+            let maxSeq = this.getRegistryDeliveryImportCursor(deliverySourceId);
+            const now = Date.now();
+            for (const row of rows) {
+                const result = insert.run(
+                    row.event_id,
+                    deliverySourceId,
+                    row.seq,
+                    hubNodeIdSnapshot,
+                    row.stack,
+                    row.op,
+                    row.attestation_jti,
+                    row.prep_id_sha256,
+                    row.temp_dir_id,
+                    row.event_type,
+                    row.source_hash,
+                    row.pruned_through_seq,
+                    row.created_at,
+                    now,
+                );
+                if (result.changes > 0) imported += 1;
+                if (row.seq > maxSeq) maxSeq = row.seq;
+            }
+            this.db.prepare(`
+                INSERT INTO registry_delivery_import_cursor (delivery_source_id, last_seq, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(delivery_source_id) DO UPDATE SET
+                    last_seq = CASE
+                        WHEN excluded.last_seq > registry_delivery_import_cursor.last_seq
+                        THEN excluded.last_seq
+                        ELSE registry_delivery_import_cursor.last_seq
+                    END,
+                    updated_at = excluded.updated_at
+            `).run(deliverySourceId, maxSeq, now);
+            return { imported, lastSeq: maxSeq };
+        });
+
+        return importPage(events);
+    }
+
+    public cleanupOldDeliveryEvents(daysToKeep = 90): number {
+        const deliverySourceId = this.getGlobalSettings().delivery_source_id;
+        if (!deliverySourceId) return 0;
+
+        const cutoff = Date.now() - (daysToKeep * 24 * 60 * 60 * 1000);
+        const maxPruned = this.db.prepare(`
+            SELECT MAX(seq) as maxSeq FROM registry_delivery_events
+            WHERE delivery_source_id = ? AND created_at < ?
+        `).get(deliverySourceId, cutoff) as { maxSeq: number | null } | undefined;
+        const prunedThrough = maxPruned?.maxSeq ?? null;
+        if (prunedThrough === null) return 0;
+
+        const result = this.db.prepare(`
+            DELETE FROM registry_delivery_events
+            WHERE delivery_source_id = ? AND created_at < ?
+        `).run(deliverySourceId, cutoff);
+
+        if (result.changes > 0) {
+            this.insertRegistryDeliveryEvent({
+                deliverySourceId,
+                eventType: 'retention_gap',
+                prunedThroughSeq: prunedThrough,
+            });
+        }
+        return result.changes;
     }
 
     public getAuditLogsInRange(from: number, to: number, limit?: number): AuditLogEntry[] {

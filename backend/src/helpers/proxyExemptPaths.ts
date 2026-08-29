@@ -63,6 +63,7 @@ export const HUB_ONLY_PREFIXES: readonly string[] = [
   '/api/secrets/',
   '/api/blueprints/',
   '/api/node-labels/',
+  '/api/registry-delivery/',
 ];
 
 /** Returns true when the path is hub-only and must not be proxied to a remote node. */

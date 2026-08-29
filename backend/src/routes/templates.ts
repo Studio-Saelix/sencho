@@ -14,7 +14,44 @@ import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
+import { materializePreparedSourceToStack } from '../helpers/registryDeliveryMaterialize';
+import { StackOpLockService } from '../services/StackOpLockService';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
+
+function tryAcquireRegistryDeliveryLock(
+  req: Request,
+  res: Response,
+  stackName: string,
+): boolean {
+  if (!getRegistryDeliveryContext()) return true;
+  const lockContext = getRegistryDeliveryLockContext();
+  if (!lockContext) {
+    res.status(400).json({ error: 'Registry delivery lock context missing' });
+    return false;
+  }
+  const user = req.user?.username ?? 'system';
+  const result = StackOpLockService.getInstance().tryAcquire(
+    req.nodeId,
+    stackName,
+    'deploy',
+    user,
+    lockContext,
+  );
+  if (!result.acquired) {
+    res.status(409).json({
+      error: `${stackName} is already busy`,
+      code: 'stack_op_in_progress',
+      inProgress: {
+        action: result.existing.action,
+        startedAt: result.existing.startedAt,
+        user: result.existing.user,
+      },
+    });
+    return false;
+  }
+  return true;
+}
 
 export const templatesRouter = Router();
 
@@ -68,6 +105,8 @@ templatesRouter.post('/refresh-cache', authMiddleware, (req: Request, res: Respo
 templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:create')) return;
   if (!requirePermission(req, res, 'stack:deploy')) return;
+  let needsDeliveryLock = false;
+  let lockedStackName: string | null = null;
   try {
     const { stackName, template, envVars, skip_scan } = req.body;
 
@@ -85,6 +124,12 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
     if (!isPathWithinBase(stackPath, baseDir)) {
       return res.status(400).json({ error: 'Invalid stack path' });
     }
+
+    needsDeliveryLock = Boolean(getRegistryDeliveryContext());
+    if (needsDeliveryLock && !tryAcquireRegistryDeliveryLock(req, res, stackName)) {
+      return;
+    }
+    lockedStackName = stackName;
 
     try {
       await fsPromises.access(stackPath);
@@ -118,13 +163,17 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
 
     await fsService.createStack(stackName);
 
-    const composeYaml = templateService.generateComposeFromTemplate(template, stackName);
-    await fsService.saveStackContent(stackName, composeYaml);
+    const deliveryPrepId = getRegistryDeliveryContext()?.envelope.prepId;
+    if (deliveryPrepId) {
+      await materializePreparedSourceToStack(deliveryPrepId, req.nodeId, stackName);
+    } else {
+      const composeYaml = templateService.generateComposeFromTemplate(template, stackName);
+      await fsService.saveStackContent(stackName, composeYaml);
 
-    if (envVars && Object.keys(envVars).length > 0) {
-      const envString = templateService.generateEnvString(envVars);
-      const defaultEnvPath = path.join(stackPath, '.env');
-      await fsPromises.writeFile(defaultEnvPath, envString, 'utf-8');
+      if (envVars && Object.keys(envVars).length > 0) {
+        const envString = templateService.generateEnvString(envVars);
+        await fsService.saveEnvContent(stackName, envString);
+      }
     }
 
     try {
@@ -190,5 +239,9 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
     const message = getErrorMessage(error, 'Failed to deploy template');
     console.error('[Templates] Deploy error:', message);
     res.status(500).json({ error: message });
+  } finally {
+    if (needsDeliveryLock && lockedStackName) {
+      StackOpLockService.getInstance().release(req.nodeId, lockedStackName);
+    }
   }
 });

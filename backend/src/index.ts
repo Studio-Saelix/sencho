@@ -3,6 +3,7 @@ import './types/express';
 import { authGate, auditLog } from './middleware/authGate';
 import { enforceApiTokenScope } from './middleware/apiTokenScope';
 import { hubOnlyGuard } from './middleware/hubOnlyGuard';
+import { registryDeliveryMiddleware } from './middleware/registryDelivery';
 import { errorHandler } from './middleware/errorHandler';
 import { createApp } from './app';
 import { createRemoteProxyMiddleware } from './proxy/remoteNodeProxy';
@@ -59,6 +60,7 @@ import { secretsRouter } from './routes/secrets';
 import { diagnosticsRouter } from './routes/diagnostics';
 import { dependencyMapRouter } from './routes/dependencyMap';
 import { networkingRouter } from './routes/networking';
+import { registryDeliveryRouter } from './routes/registryDelivery';
 
 // Suppress [DEP0060] DeprecationWarning emitted by http-proxy@1.18.1 which calls
 // util._extend internally. The warning fires at runtime when createProxyServer() is
@@ -99,6 +101,9 @@ app.use('/api', enforceApiTokenScope);
 // node-authority boundary that the UI hides. See helpers/proxyExemptPaths.ts
 // for the prefix list and middleware/hubOnlyGuard.ts for the rationale.
 app.use('/api', hubOnlyGuard);
+
+// Registry delivery envelope capture/scrub on classified target routes.
+app.use('/api', registryDeliveryMiddleware);
 
 // Remote Node HTTP Proxy (see proxy/remoteNodeProxy.ts). Mounted BEFORE the
 // per-group routers so a request targeting a remote node short-circuits into
@@ -153,6 +158,7 @@ app.use('/api/dashboard', dashboardRouter);
 app.use('/api/diagnostics', diagnosticsRouter);
 app.use('/api/dependency-map', dependencyMapRouter);
 app.use('/api/networking', networkingRouter);
+app.use('/api/registry-delivery', registryDeliveryRouter);
 app.use('/api/nodes', nodesRouter);
 app.use('/api/stacks', stackActivityRouter);
 app.use('/api/stacks', stacksRouter);

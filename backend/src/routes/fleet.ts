@@ -32,6 +32,7 @@ import { validateStackPatternForRedos } from '../helpers/stackPattern';
 
 export { validateStackPatternForRedos } from '../helpers/stackPattern';
 import { getErrorMessage } from '../utils/errors';
+import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
 import { parseIntParam } from '../utils/parseIntParam';
 import { parseRequestedTargetVersion, pickCompareTarget } from '../utils/targetVersion';
 import { buildTargetImageRef, isRepinBlocked, type ImagePinKind } from '../helpers/selfUpdateCompose';
@@ -2813,12 +2814,23 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
   }
   const ctx = buildRemoteProxyContext(node);
   if (!ctx) throw new SnapshotProxyTargetError(formatNoTargetError(node));
+  const apiPath = `/api/stacks/${encodeURIComponent(stackName)}/deploy`;
+  const augmented = await prepareOutboundRegistryDeliveryBody({
+    method: 'POST',
+    apiPath,
+    nodeId: node.id,
+    body: {},
+  });
+  if (!augmented.ok) {
+    throw new Error(augmented.error);
+  }
   const deployRes = await fetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/deploy`, {
     method: 'POST',
     headers: {
       ...ctx.headers,
       ...deployProvenanceHeaders('fleet_snapshot', 'system:fleet-snapshot'),
     },
+    body: JSON.stringify(augmented.body),
     signal: AbortSignal.timeout(30000),
   });
   if (!deployRes.ok) throw await remoteStackError('Failed to redeploy stack', deployRes);

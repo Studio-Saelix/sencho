@@ -21,10 +21,16 @@ export function stackOpSkipMessage(stackName: string, existingAction: StackOpAct
   return `Skipped "${stackName}": another operation (${existingAction}) is already in progress.`;
 }
 
+export interface StackOpLockContext {
+  opId?: string;
+  kind?: string;
+}
+
 export interface StackOpLock {
   action: StackOpAction;
   startedAt: number;
   user: string;
+  context?: StackOpLockContext;
 }
 
 interface AcquireSuccess {
@@ -60,11 +66,12 @@ export class StackOpLockService {
     stackName: string,
     action: StackOpAction,
     user: string,
+    context?: StackOpLockContext,
   ): AcquireResult {
     const k = this.key(nodeId, stackName);
     const existing = this.locks.get(k);
     if (existing) return { acquired: false, existing };
-    this.locks.set(k, { action, startedAt: Date.now(), user });
+    this.locks.set(k, { action, startedAt: Date.now(), user, context });
     return { acquired: true };
   }
 
@@ -114,8 +121,9 @@ export class StackOpLockService {
     action: StackOpAction,
     user: string,
     fn: () => Promise<T>,
+    context?: StackOpLockContext,
   ): Promise<{ ran: true; result: T } | { ran: false; existing: StackOpLock }> {
-    const acquired = this.tryAcquire(nodeId, stackName, action, user);
+    const acquired = this.tryAcquire(nodeId, stackName, action, user, context);
     if (!acquired.acquired) return { ran: false, existing: acquired.existing };
     try {
       const result = await fn();
