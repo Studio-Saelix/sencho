@@ -175,7 +175,6 @@ export class RegistryDeliveryService {
 
   async discoverOnTarget(request: RegistryDeliveryDiscoverRequest): Promise<RegistryDeliveryDiscoverResponse> {
     const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
-    const stackName = request.stack ?? request.stackName;
     if (
       request.sourceKind === 'restore-candidate'
       || request.sourceKind === 'live-project'
