@@ -28,6 +28,10 @@ describe('gitSourceStatus', () => {
         expect(gitSourceStatus('UNSUPPORTED_REF')).toBe(400);
     });
 
+    it('maps SSH_HOST_KEY_FAILED to 400', () => {
+        expect(gitSourceStatus('SSH_HOST_KEY_FAILED')).toBe(400);
+    });
+
     it('maps NETWORK_TIMEOUT to 504', () => {
         expect(gitSourceStatus('NETWORK_TIMEOUT')).toBe(504);
     });

@@ -9,6 +9,7 @@ import { Checkbox } from '../ui/checkbox';
 import { GitSourceFields, type ApplyMode } from '../stack/GitSourceFields';
 import type { GitBrowseResult } from '../stack/GitComposeFilePicker';
 import { apiFetch } from '@/lib/api';
+import { isSupportedGitRepoUrl, UNSUPPORTED_GIT_REPO_URL_MESSAGE } from '@/lib/gitRepoUrl';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
 import { cn } from '@/lib/utils';
@@ -69,11 +70,15 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
     const [gitComposePaths, setGitComposePaths] = useState<string[]>(['compose.yaml']);
     const [gitContextDir, setGitContextDir] = useState('');
     const [gitSyncEnv, setGitSyncEnv] = useState(false);
-    const [gitAuthType, setGitAuthType] = useState<'none' | 'token'>('none');
+    const [gitAuthType, setGitAuthType] = useState<'none' | 'token' | 'deploy_key'>('none');
     const [gitToken, setGitToken] = useState('');
+    const [gitDeployKey, setGitDeployKey] = useState('');
+    const [gitSshKnownHostsEntry, setGitSshKnownHostsEntry] = useState('');
+    const [gitSshHostKeyFingerprint, setGitSshHostKeyFingerprint] = useState('');
     const [gitApplyMode, setGitApplyMode] = useState<ApplyMode>('review');
     const [gitDeployNow, setGitDeployNow] = useState(false);
     const [creatingFromGit, setCreatingFromGit] = useState(false);
+    const [gitSubmitError, setGitSubmitError] = useState<string | null>(null);
 
     const resetCreateFromGitForm = () => {
         setNewStackName('');
@@ -84,8 +89,12 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
         setGitSyncEnv(false);
         setGitAuthType('none');
         setGitToken('');
+        setGitDeployKey('');
+        setGitSshKnownHostsEntry('');
+        setGitSshHostKeyFingerprint('');
         setGitApplyMode('review');
         setGitDeployNow(false);
+        setGitSubmitError(null);
     };
 
     const browseGitRepo = async (): Promise<GitBrowseResult | null> => {
@@ -100,6 +109,10 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                 auth_type: gitAuthType,
             };
             if (gitAuthType === 'token' && gitToken !== '') body.token = gitToken;
+            if (gitAuthType === 'deploy_key') {
+                if (gitDeployKey !== '') body.deploy_key = gitDeployKey;
+                if (gitSshKnownHostsEntry !== '') body.ssh_known_hosts_entry = gitSshKnownHostsEntry;
+            }
             const res = await apiFetch('/git-sources/browse', {
                 method: 'POST',
                 body: JSON.stringify(body),
@@ -171,16 +184,18 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
 
     const handleCreateStackFromGit = async () => {
         const stackName = newStackName.trim();
+        setGitSubmitError(null);
         if (!stackName) {
-            toast.error('Stack name is required.');
+            setGitSubmitError('Stack name is required.');
             return;
         }
         if (!gitRepoUrl.trim() || !gitBranch.trim() || gitComposePaths.length === 0) {
-            toast.error('Repository URL, branch, and at least one compose file are required.');
+            setGitSubmitError('Repository URL, branch, and at least one compose file are required.');
             return;
         }
-        if (!/^https:\/\//i.test(gitRepoUrl.trim())) {
-            toast.error('Only HTTPS repository URLs are supported.');
+        const trimmedUrl = gitRepoUrl.trim();
+        if (!isSupportedGitRepoUrl(trimmedUrl)) {
+            setGitSubmitError(UNSUPPORTED_GIT_REPO_URL_MESSAGE);
             return;
         }
         const sourceNodeId = activeNode?.id;
@@ -203,6 +218,11 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
             };
             if (gitAuthType === 'token' && gitToken !== '') {
                 body.token = gitToken;
+            }
+            if (gitAuthType === 'deploy_key') {
+                body.deploy_key = gitDeployKey;
+                body.ssh_known_hosts_entry = gitSshKnownHostsEntry;
+                body.ssh_host_key_fingerprint = gitSshHostKeyFingerprint;
             }
             const response = await apiFetch('/stacks/from-git', {
                 method: 'POST',
@@ -238,7 +258,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
             await onStackCreated(stackName, sourceNodeId);
         } catch (error) {
             console.error('Failed to create stack from Git:', error);
-            toast.error((error as Error)?.message || 'Failed to create stack from Git.');
+            setGitSubmitError((error as Error)?.message || 'Failed to create stack from Git.');
         } finally {
             toast.dismiss(loadingId);
             setCreatingFromGit(false);
@@ -448,7 +468,12 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                             syncEnv={gitSyncEnv}
                             authType={gitAuthType}
                             token={gitToken}
+                            deployKey={gitDeployKey}
+                            sshKnownHostsEntry={gitSshKnownHostsEntry}
+                            sshHostKeyFingerprint={gitSshHostKeyFingerprint}
                             hasStoredToken={false}
+                            hasStoredDeployKey={false}
+                            storedHostKeyFingerprint={null}
                             applyMode={gitApplyMode}
                             onRepoUrlChange={setGitRepoUrl}
                             onBranchChange={setGitBranch}
@@ -457,6 +482,9 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                             onSyncEnvChange={setGitSyncEnv}
                             onAuthTypeChange={setGitAuthType}
                             onTokenChange={setGitToken}
+                            onDeployKeyChange={setGitDeployKey}
+                            onSshKnownHostsEntryChange={setGitSshKnownHostsEntry}
+                            onSshHostKeyFingerprintChange={setGitSshHostKeyFingerprint}
                             onApplyModeChange={setGitApplyMode}
                             onBrowse={browseGitRepo}
                         />
@@ -472,9 +500,19 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                                 Deploy after create
                             </Label>
                         </div>
+
+                        {gitSubmitError && (
+                            <div
+                                data-testid="create-from-git-error"
+                                className="rounded-md border border-destructive/30 bg-destructive/[0.06] px-3 py-2 text-[12px] leading-relaxed text-destructive"
+                                role="alert"
+                            >
+                                {gitSubmitError}
+                            </div>
+                        )}
                     </ModalBody>
                     <ModalFooter
-                        hint="HTTPS REPOS ONLY"
+                        hint="HTTPS OR SSH REPOS"
                         secondary={
                             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={creatingFromGit}>
                                 Cancel

@@ -59,11 +59,11 @@ The **From Git** tab clones a public or private repository and treats its compos
 Fill in:
 
 - **Stack Name**: same naming rules as the Empty tab.
-- **Repository URL**: HTTPS only. SSH URLs are not supported.
+- **Repository URL**: HTTPS (`https://github.com/org/repo.git`) or SSH (`git@github.com:org/repo.git`, or `ssh://git@host:port/path` for nonstandard ports).
 - **Branch**: defaults to `main`.
 - **Compose files**: one or more paths inside the repository, merged in the listed order. Defaults to `compose.yaml`. Browse the repository tree to pick them, or type a path. An optional **Project directory** sets the base for relative paths.
 - **Also sync sibling .env file**: when checked, a `.env` next to the primary compose file is pulled along with it.
-- **Authentication**: pick **Public (no auth)** or **Personal Access Token** for private repos.
+- **Authentication**: pick **Public (no auth)** for public repos, **Personal Access Token** for private HTTPS repos, or **SSH deploy key** for private SSH repos (with host-key fingerprint verification).
 - **Apply behavior**: controls what happens on future webhook pulls:
   - **Review only**: diffs surface in the sidebar; you apply manually.
   - **Auto-write files**: pulls write to disk; you redeploy manually.

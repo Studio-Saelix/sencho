@@ -603,10 +603,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       // the stack_name field from the buffered JSON. Non-stack-scoped creates
       // (no stack_name in body) pass through without evidence.
       if (isAlertCreateRoute(req) && req.user?.role !== 'admin' && req.user?.role !== 'node-admin') {
-        const globalGrantsEdit =
-          req.user?.role != null
-          && (ROLE_PERMISSIONS[req.user.role]?.includes('stack:edit') ?? false);
-        if (!globalGrantsEdit) {
+        if (!userHasGlobalStackEdit(req)) {
           const stackName = req.rawBody ? parseBodyStackName(req.rawBody) : null;
           if (stackName === undefined) {
             // Body is non-empty but not valid JSON; client error, not auth.
@@ -615,21 +612,12 @@ export function createRemoteProxyMiddleware(): RequestHandler {
             return;
           }
           if (stackName) {
-            const evidenceSupported = await remoteAdvertisesCapability(
-              req.nodeId,
-              SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
-            );
-            if (!evidenceSupported) {
-              res.status(403).json({
-                error: `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
-              });
-              return;
-            }
+            if (!await remoteSupportsScopedStackEdit(req, res, node)) return;
             if (!checkPermission(req, 'stack:edit', 'stack', stackName)) {
               res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
               return;
             }
-            req.proxyScopedStackEvidence = { stackName, actions: ['stack:edit'] };
+            attachScopedStackEditEvidence(req, stackName);
           }
         }
       }
@@ -638,58 +626,63 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       // auto-heal has no pre-existing body buffering, so this gate handles
       // its own encoding rejection and buffering.
       if (isAutoHealCreateRoute(req) && req.user?.role !== 'admin' && req.user?.role !== 'node-admin') {
-        const globalGrantsEdit =
-          req.user?.role != null
-          && (ROLE_PERMISSIONS[req.user.role]?.includes('stack:edit') ?? false);
-        if (!globalGrantsEdit) {
-          if (hasNonIdentityContentEncoding(req)) {
-            await drainRequestBody(req);
-            console.error('[remoteNodeProxy] auto-heal body rejected: compressed encoding');
-            res.status(415).json({
-              error: 'Compressed request bodies are not supported for remote auto-heal creates',
-              code: 'encoding_unsupported',
-            });
-            return;
-          }
-          try {
-            req.rawBody = await bufferRequestBody(req, AUTO_HEAL_PROXY_BODY_LIMIT);
-          } catch (err) {
-            const status = Number((err as { status?: number }).status);
-            if (status === 413) {
-              console.error('[remoteNodeProxy] auto-heal body rejected as too large:', err);
-              res.status(413).json({ error: 'Auto-heal payload too large', code: 'entity_too_large' });
-              return;
-            }
-            if (status === 400) {
-              console.error('[remoteNodeProxy] auto-heal body incomplete:', err);
-              res.status(400).json({ error: 'Incomplete request body' });
-              return;
-            }
-            throw err;
-          }
-          const stackName = parseBodyStackName(req.rawBody);
+        if (!userHasGlobalStackEdit(req)) {
+          const rawBody = await bufferProxyJsonBody(req, res, PROXY_JSON_BODY_LIMIT, {
+            logPrefix: '[remoteNodeProxy] auto-heal',
+            encodingError: 'Compressed request bodies are not supported for remote auto-heal creates',
+            tooLargeError: 'Auto-heal payload too large',
+          });
+          if (!rawBody) return;
+          req.rawBody = rawBody;
+          const stackName = parseBodyStackName(rawBody);
           if (stackName === undefined) {
             console.error('[remoteNodeProxy] auto-heal body is not valid JSON');
             res.status(400).json({ error: 'Request body is not valid JSON' });
             return;
           }
           if (stackName) {
-            const evidenceSupported = await remoteAdvertisesCapability(
-              req.nodeId,
-              SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
-            );
-            if (!evidenceSupported) {
-              res.status(403).json({
-                error: `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
-              });
-              return;
-            }
+            if (!await remoteSupportsScopedStackEdit(req, res, node)) return;
             if (!checkPermission(req, 'stack:edit', 'stack', stackName)) {
               res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
               return;
             }
-            req.proxyScopedStackEvidence = { stackName, actions: ['stack:edit'] };
+            attachScopedStackEditEvidence(req, stackName);
           }
+        }
+      }
+
+      // POST /git-sources/ssh-host-key scoped-evidence gate: stack_name lives in
+      // the JSON body, so classifyStackApiPath cannot authorize the edit flow.
+      if (isSshHostKeyProbeRoute(req)) {
+        const rawBody = await bufferProxyJsonBody(req, res, PROXY_JSON_BODY_LIMIT, {
+          logPrefix: '[remoteNodeProxy] ssh-host-key',
+          encodingError: 'Compressed request bodies are not supported for remote SSH host key probes',
+          tooLargeError: 'SSH host key probe payload too large',
+        });
+        if (!rawBody) return;
+        req.rawBody = rawBody;
+        const stackName = parseBodyStackName(rawBody);
+        if (stackName === undefined) {
+          console.error('[remoteNodeProxy] ssh-host-key body is not valid JSON');
+          res.status(400).json({ error: 'Request body is not valid JSON' });
+          return;
+        }
+        if (stackName) {
+          if (!checkPermission(req, 'stack:edit', 'stack', stackName)) {
+            res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+            return;
+          }
+          if (
+            req.user?.role !== 'admin'
+            && req.user?.role !== 'node-admin'
+            && !userHasGlobalStackEdit(req)
+          ) {
+            if (!await remoteSupportsScopedStackEdit(req, res, node)) return;
+            attachScopedStackEditEvidence(req, stackName);
+          }
+        } else if (!checkPermission(req, 'stack:create')) {
+          res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+          return;
         }
       }
 
@@ -883,15 +876,20 @@ function isAlertCreateRoute(req: Request): boolean {
   return req.method === 'POST' && /^\/alerts\/?$/.test(req.path);
 }
 
-/** Same default as express.json(); remote alert creates must not exceed it. */
-const ALERT_PROXY_BODY_LIMIT = 100 * 1024;
+/** Max request body size for buffered JSON proxy gates (same as express.json()). */
+const PROXY_JSON_BODY_LIMIT = 100 * 1024;
 
-/** Same limit for auto-heal policy creates. */
-const AUTO_HEAL_PROXY_BODY_LIMIT = 100 * 1024;
+/** Same default as express.json(); remote alert creates must not exceed it. */
+const ALERT_PROXY_BODY_LIMIT = PROXY_JSON_BODY_LIMIT;
 
 /** POST /auto-heal/policies (path is post-/api strip). */
 function isAutoHealCreateRoute(req: Request): boolean {
   return req.method === 'POST' && /^\/auto-heal\/policies\/?$/.test(req.path);
+}
+
+/** POST /git-sources/ssh-host-key (path is post-/api strip). */
+function isSshHostKeyProbeRoute(req: Request): boolean {
+  return req.method === 'POST' && /^\/git-sources\/ssh-host-key\/?$/.test(req.path);
 }
 
 /** POST /image-updates/refresh with no stack-name segment (node-wide, not per-stack). */
@@ -919,6 +917,62 @@ function parseBodyStackName(rawBody: Buffer): string | null | undefined {
 
 /** Max time to wait for leftover body bytes after a size/encoding reject. */
 const DRAIN_TIMEOUT_MS = 5_000;
+
+function userHasGlobalStackEdit(req: Request): boolean {
+  return req.user?.role != null
+    && (ROLE_PERMISSIONS[req.user.role]?.includes('stack:edit') ?? false);
+}
+
+async function remoteSupportsScopedStackEdit(
+  req: Request,
+  res: Response,
+  node: { name: string },
+): Promise<boolean> {
+  const evidenceSupported = await remoteAdvertisesCapability(
+    req.nodeId,
+    SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
+  );
+  if (!evidenceSupported) {
+    res.status(403).json({
+      error: `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
+    });
+    return false;
+  }
+  return true;
+}
+
+function attachScopedStackEditEvidence(req: Request, stackName: string): void {
+  req.proxyScopedStackEvidence = { stackName, actions: ['stack:edit'] };
+}
+
+async function bufferProxyJsonBody(
+  req: Request,
+  res: Response,
+  limit: number,
+  labels: { logPrefix: string; encodingError: string; tooLargeError: string },
+): Promise<Buffer | null> {
+  if (hasNonIdentityContentEncoding(req)) {
+    await drainRequestBody(req);
+    res.status(415).json({ error: labels.encodingError, code: 'encoding_unsupported' });
+    return null;
+  }
+  try {
+    return await bufferRequestBody(req, limit);
+  } catch (err) {
+    const status = Number((err as { status?: number }).status);
+    if (status === 413) {
+      console.error(`${labels.logPrefix} body rejected as too large:`, err);
+      res.status(413).json({ error: labels.tooLargeError, code: 'entity_too_large' });
+      return null;
+    }
+    if (status === 400) {
+      console.error(`${labels.logPrefix} body incomplete:`, err);
+      res.status(400).json({ error: 'Incomplete request body' });
+      return null;
+    }
+    throw err;
+  }
+}
 
 /** Error with HTTP status for the alert-body gate catch mapper. */
 function alertBodyError(message: string, status: number): Error {

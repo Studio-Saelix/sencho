@@ -18,6 +18,7 @@
 export type TransportFacingCode =
     | 'REPO_NOT_FOUND'
     | 'AUTH_FAILED'
+    | 'SSH_HOST_KEY_FAILED'
     | 'REF_NOT_FOUND'
     | 'UNSUPPORTED_REF'
     | 'NETWORK_TIMEOUT'
@@ -104,7 +105,7 @@ export function classifyGitFailure(
     // stderr guessing.
     switch (failure.reason) {
         case 'invalid-url':
-            return { code: 'GIT_ERROR', message: 'Unsupported repository URL. Use an https:// URL without embedded credentials.' };
+            return { code: 'GIT_ERROR', message: 'Unsupported repository URL. Use https:// or SSH (git@host:org/repo.git or ssh://) without embedded credentials.' };
         case 'invalid-ref':
             return { code: 'GIT_ERROR', message: 'Unsupported ref name. Use a branch name, a tag name, or a full commit SHA as the remote reports it.' };
         case 'git-missing':
@@ -140,6 +141,20 @@ export function classifyGitFailure(
             code: 'REPO_NOT_FOUND',
             message: PRIVATE_REPO_HINT,
         };
+    }
+    if (/host key verification failed|remotely changed the ssh host key|no matching host key found|offending key for ip|host key mismatch/.test(raw)) {
+        return {
+            code: 'SSH_HOST_KEY_FAILED',
+            message: 'SSH host key verification failed. The server key changed or is not trusted. Review the fingerprint and update host trust if you intend to accept the new key.',
+        };
+    }
+    if (/permission denied \(publickey|publickey denied|no supported authentication methods/.test(raw)) {
+        return failure.hasToken
+            ? { code: 'AUTH_FAILED', message: 'Repository authentication failed. Check your deploy key or token.' }
+            : {
+                code: 'REPO_NOT_FOUND',
+                message: PRIVATE_REPO_HINT,
+            };
     }
     if (/authentication failed|\b40[13]\b/.test(raw)) {
         return failure.hasToken
