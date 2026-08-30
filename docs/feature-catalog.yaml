@@ -1,0 +1,374 @@
+# Canonical feature catalog — Sencho tier reconciliation (SEN-549)
+# Source of truth. No internal Linear IDs (SEN-NNN) stored here.
+# Internal planning provenance lives in Linear, not in committed files.
+# Schema: id, name, tier (community|admiral|internal), availability (shipped|planned|internal),
+#         category, publicName, publicRoadmapKey, summary, description, limitation,
+#         featured (bool), homepageOrder (int when featured=true)
+# Cross-field invariant: tier: internal iff availability: internal.
+
+version: '1'
+schema: 'canonical-v1'
+
+entries:
+  # ===== Core Compose & Deployments (Community) =====
+  - id: compose-editor
+    name: Compose editor and stack management
+    tier: community
+    availability: shipped
+    category: compose-deploy
+    publicName: Compose editor, templates, Git sources
+    publicRoadmapKey: compose-editor
+    summary: Manage, edit, and deploy Compose stacks from YAML or templates.
+    description: Monaco YAML editor with syntax validation, multi-file Compose from Git sources, drift detection for documentation, and ordered multi-file Compose flows.
+    limitation: ''
+    featured: true
+    homepageOrder: 1
+
+  - id: git-pull-preview
+    name: Git pull preview and apply flow
+    tier: community
+    availability: shipped
+    category: compose-deploy
+    publicName: Git pull preview and apply
+    publicRoadmapKey: git-pull-preview
+    summary: Preview and apply changes from Git source before deploying.
+    featured: false
+
+  - id: atomic-deploy-rollback
+    name: Atomic deployments and rollback
+    tier: community
+    availability: shipped
+    category: compose-deploy
+    publicName: Atomic deploys + rollback
+    publicRoadmapKey: atomic-deploy-rollback
+    summary: Atomic updates with health-gated rollback support.
+    description: Standard and atomic deploy/update workflows, rollback support, health-gated updates, stalled update detection and recovery.
+    limitation: ''
+    featured: true
+    homepageOrder: 2
+
+  # ===== Fleet & Orchestration (Community) =====
+  - id: multi-node-fleet
+    name: Multi-node fleet visibility
+    tier: community
+    availability: shipped
+    category: fleet-orchestration
+    publicName: Multi-node fleet visibility
+    publicRoadmapKey: multi-node-fleet
+    summary: Visibility into nodes, stacks, and containers across a fleet.
+    description: Multi-node support, proxy-connected nodes, pilot agent-connected nodes, node enrollment, node compatibility checks.
+    limitation: ''
+    featured: true
+    homepageOrder: 3
+
+  - id: fleet-sync-baseline
+    name: Fleet Sync (policy replication)
+    tier: community
+    availability: shipped
+    category: fleet-orchestration
+    publicName: Fleet Sync (policy replication)
+    publicRoadmapKey: fleet-sync-baseline
+    summary: Replicate security policies, suppressions, and acknowledgements across nodes.
+    limitation: 'Baseline Fleet Sync is Community; additional governance enforcement is Admiral-planned.'
+    featured: true
+    homepageOrder: 4
+
+  - id: blueprint-reconcile
+    name: Blueprints and drift reconciliation
+    tier: community
+    availability: shipped
+    category: fleet-orchestration
+    publicName: Blueprints + drift detection + reconciliation
+    publicRoadmapKey: blueprint-reconcile
+    summary: Declarative fleet state with drift detection, manual reconciliation, and label-based node targeting.
+    description: Blueprints, label-based targeting, drift detection, drift notification and correction, manual reconciliation with Apply Now, stateful deployment review.
+    limitation: ''
+    featured: false
+
+  # ===== Security Foundations (Community) =====
+  - id: rbac-five-role
+    name: Full built-in RBAC
+    tier: community
+    availability: shipped
+    category: security-foundation
+    publicName: Full built-in RBAC (Admin, Viewer, Deployer, Node Admin, Auditor)
+    publicRoadmapKey: rbac-five-role
+    summary: Five built-in roles with per-resource scoped assignments.
+    description: Admin, Viewer, Deployer, Node Admin, Auditor roles; per-resource scoped assignments; unlimited users.
+    limitation: ''
+    featured: true
+    homepageOrder: 5
+
+  - id: fleet-secrets
+    name: Fleet Secrets (encrypted env bundles)
+    tier: community
+    availability: shipped
+    category: security-foundation
+    publicName: Fleet Secrets (encrypted env bundles)
+    publicRoadmapKey: fleet-secrets
+    summary: Encrypted versioned environment bundles for fleet-wide secrets.
+    limitation: 'Core encrypted/versioned fleet workflow is Community per SEN-451.'
+    featured: true
+    homepageOrder: 6
+
+  - id: deploy-enforcement
+    name: Deploy enforcement policies
+    tier: community
+    availability: shipped
+    category: security-foundation
+    publicName: Deploy enforcement policies (CVE gate)
+    publicRoadmapKey: deploy-enforcement
+    summary: Block deploys based on vulnerability scanning results.
+    featured: false
+
+  # ===== Identity & Access (Community / Admiral split) =====
+  - id: custom-oidc-ssenders
+    name: Custom OIDC and SSO presets
+    tier: community
+    availability: shipped
+    category: identity-access
+    publicName: Custom OIDC + Google/GitHub/Okta SSO
+    publicRoadmapKey: custom-oidc-sso
+    summary: Self-hosted identity with any OIDC IdP and one-click presets.
+    description: Custom OIDC SSO, Google, GitHub, Okta presets; 2FA/MFA; recovery codes.
+    limitation: 'LDAP / Active Directory requires Admiral tier per SEN-321.'
+    featured: true
+    homepageOrder: 7
+
+  - id: ldap-ad
+    name: LDAP / Active Directory
+    tier: admiral
+    availability: shipped
+    category: identity-access
+    publicName: LDAP / Active Directory
+    publicRoadmapKey: ldap-ad
+    summary: Enterprise identity integration for organizational assurance.
+    description: LDAP / Active Directory identity provider integration.
+    limitation: 'Requires Admiral (paid) license; handled by requireTierForSsoProvider in backend middleware.'
+    featured: true
+    homepageOrder: 8
+
+  # ===== Audit & Evidence (Community partial / Admiral full) =====
+  - id: audit-log-14day
+    name: Recent activity log (14-day window)
+    tier: community
+    availability: shipped
+    category: identity-access
+    publicName: Recent audit window (14 days)
+    publicRoadmapKey: audit-log-14day
+    summary: Basic audit visibility for recent actions.
+    description: Basic audit log with 14-day retention; visible to Community users.
+    limitation: 'Full audit log with export, anomaly detection, and extended retention requires Admiral.'
+    featured: false
+
+  - id: audit-log-full
+    name: Full audit log (export, anomaly detection, retention)
+    tier: admiral
+    availability: shipped
+    category: identity-access
+    publicName: Full audit log (export + anomaly detection)
+    publicRoadmapKey: audit-log-full
+    summary: Durable audit evidence with export, anomaly detection, and retention.
+    description: Full audit log with export, anomaly detection, retention policies; managed audit evidence.
+    limitation: 'Paid-only; requires Admiral license. Enforced by requirePaid in auditLog routes.'
+    featured: true
+    homepageOrder: 9
+
+  # ===== Security Scanning & Policy (Community core / Admiral planned) =====
+  - id: scan-on-demand
+    name: On-demand vulnerability scanning
+    tier: community
+    availability: shipped
+    category: security-foundation
+    publicName: On-demand vulnerability scanning
+    publicRoadmapKey: scan-on-demand
+    summary: Scan stacks and nodes for CVEs with suppression and acknowledgment.
+    description: On-demand scanning, node-wide scanning, CVE suppressions, misconfiguration acknowledgements, deploy enforcement policies, SARIF export, scan policy packs.
+    limitation: ''
+    featured: true
+    homepageOrder: 10
+
+  - id: change-review-planned
+    name: Compose Change Review
+    tier: admiral
+    availability: planned
+    category: security-foundation
+    publicName: Change Review (planned)
+    publicRoadmapKey: change-review-planned
+    summary: Required approval workflow for Compose changes before deployment.
+    description: Governance layer requiring approvals before deploy; linked to SEN-257.
+    limitation: 'Approved roadmap; not yet shipped. Explicit Planned label in all public surfaces.'
+    featured: true
+    homepageOrder: 11
+
+  # ===== Fleet Operations (Community core / Admiral planned) =====
+  - id: fleet-actions-bulk
+    name: Fleet Actions and bulk operations
+    tier: community
+    availability: shipped
+    category: fleet-orchestration
+    publicName: Fleet Actions + bulk operations
+    publicRoadmapKey: fleet-actions-bulk
+    summary: Bulk stack lifecycle actions across nodes.
+    description: Bulk actions on stacks, labels, fleet-wide schedules.
+    limitation: ''
+    featured: true
+    homepageOrder: 12
+
+  - id: protected-stacks-planned
+    name: Protected Stacks / Nodes
+    tier: admiral
+    availability: planned
+    category: fleet-orchestration
+    publicName: Protected stacks / nodes (planned)
+    publicRoadmapKey: protected-stacks-planned
+    summary: Protected stacks and nodes with maintenance windows and break-glass.
+    description: Protected workflows, maintenance windows, freezes, break-glass; linked to SEN-259.
+    limitation: 'Planned Admiral capability; not yet available in public matrix as shipped.'
+    featured: true
+    homepageOrder: 13
+
+  - id: fleet-readiness-planned
+    name: Fleet Readiness Score
+    tier: admiral
+    availability: planned
+    category: fleet-orchestration
+    publicName: Fleet Readiness Score (planned)
+    publicRoadmapKey: fleet-readiness-planned
+    summary: Organizational readiness score for fleet health and compliance.
+    limitation: 'Planned; linked to SEN-262.'
+    featured: false
+
+  # ===== Governance & Policy (Community core / Admiral planned) =====
+  - id: api-tokens
+    name: API tokens
+    tier: community
+    availability: shipped
+    category: identity-access
+    publicName: API tokens for CI/CD
+    publicRoadmapKey: api-tokens
+    summary: Long-lived machine credentials for automation.
+    limitation: ''
+    featured: true
+    homepageOrder: 14
+
+  - id: policy-pack-planned
+    name: Policy Pack Assignment
+    tier: admiral
+    availability: planned
+    category: governance
+    publicName: Policy pack assignment (planned)
+    publicRoadmapKey: policy-pack-planned
+    summary: Organization-wide policy pack enforcement with governed exceptions.
+    limitation: 'Planned; linked to SEN-403.'
+    featured: false
+
+  # ===== Recovery (Community basic / Admiral managed) =====
+  - id: manual-snapshots
+    name: Manual fleet snapshots
+    tier: community
+    availability: shipped
+    category: recovery
+    publicName: Manual fleet snapshots
+    publicRoadmapKey: manual-snapshots
+    summary: User-initiated fleet-wide backups.
+    limitation: ''
+    featured: false
+
+  - id: recovery-vault
+    name: Recovery Vault (managed off-site snapshots)
+    tier: admiral
+    availability: shipped
+    category: recovery
+    publicName: Recovery Vault (managed off-site)
+    publicRoadmapKey: recovery-vault
+    summary: Managed recovery service with durable off-site storage.
+    description: Recovery vault with managed storage, verification, monitoring, retention, and restore-readiness evidence.
+    limitation: 'Requires Admiral; managed continuity pillar.'
+    featured: true
+    homepageOrder: 15
+
+  # ===== Business Assurance (Admiral only) =====
+  - id: hardened-build
+    name: Hardened Build image channel
+    tier: admiral
+    availability: shipped
+    category: assurance
+    publicName: Hardened Build image channel
+    publicRoadmapKey: hardened-build
+    summary: Supported release channel with defined supply chain and support commitment.
+    limitation: 'Admiral entitlement; never a headline reason to purchase.'
+    featured: true
+    homepageOrder: 16
+
+  - id: priority-support
+    name: Priority Studio Saelix support
+    tier: admiral
+    availability: shipped
+    category: assurance
+    publicName: Priority email support
+    publicRoadmapKey: priority-support
+    summary: Accountable support commitment for Admiral customers.
+    limitation: 'Requires Admiral.'
+    featured: false
+
+  - id: incident-timeline-planned
+    name: Incident Timeline
+    tier: admiral
+    availability: planned
+    category: assurance
+    publicName: Incident Timeline (planned)
+    publicRoadmapKey: incident-timeline-planned
+    summary: Durable incident timeline and service context.
+    limitation: 'Planned; linked to SEN-260.'
+    featured: false
+
+  # ===== Registration & Registry (Community core / Admiral ECR temporary) =====
+  - id: docker-hub-ghcr-custom
+    name: Local registry credentials (Docker Hub, GHCR, custom)
+    tier: community
+    availability: shipped
+    category: security-foundation
+    publicName: Local registry credentials
+    publicRoadmapKey: docker-hub-ghcr-custom
+    summary: Store and manage registry authentication.
+    limitation: ''
+    featured: false
+
+  - id: ecr-admiral-temporary
+    name: AWS ECR registry credentials
+    tier: admiral
+    availability: shipped
+    category: security-foundation
+    publicName: AWS ECR registry credentials (temporary availability)
+    publicRoadmapKey: ecr-admiral-temporary
+    summary: AWS Elastic Container Registry authentication.
+    description: Temporary Admiral access to AWS ECR registry credentials; not positioned as core value.
+    limitation: 'Temporary availability; must not be positioned as core Admiral value in public copy.'
+    featured: false
+
+  # ===== Internal / Experimental (not public) =====
+  - id: mesh-routing
+    name: Mesh / Routing
+    tier: internal
+    availability: internal
+    category: internal
+    publicName: Mesh / Routing (internal)
+    publicRoadmapKey: mesh-routing
+    summary: ''
+    description: Internal experimental feature; not public tier; separate graduation decision required.
+    limitation: 'Internal; excluded from all public matrices. Must remain hidden until graduation decision lands.'
+    featured: false
+    homepageOrder: 99
+  - id: experimental-flag
+    name: SENCHO_EXPERIMENTAL
+    tier: internal
+    availability: internal
+    category: internal
+    publicName: 'SENCHO_EXPERIMENTAL (internal discovery gate)'
+    publicRoadmapKey: experimental-flag
+    summary: Internal feature discovery gate; not a tier.
+    description: Feature flag controlling internal feature visibility; must not be used as user-facing marketing.
+    limitation: 'Not a public tier; never advertised in public comparison or docs.'
+    featured: false
+    homepageOrder: 100
