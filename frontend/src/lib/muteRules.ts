@@ -111,7 +111,7 @@ export function nodeMuteUpdatesDraft(nodeId: number, nodeName: string): MuteRule
     return {
         name: `Mute ${nodeName} update notifications`,
         node_id: nodeId,
-        categories: ['image_update_available', 'node_update_available', 'update_started'],
+        categories: ['image_update_available', 'node_update_available', 'dev_build_update_available', 'update_started'],
     };
 }
 

@@ -36,6 +36,13 @@ describe('notificationVisibility', () => {
     expect(countVisibleUnread([monitor, update])).toBe(2);
   });
 
+  it('shows unread dev_build_update_available', () => {
+    const n = notif({ category: 'dev_build_update_available' });
+    expect(isPanelHiddenNotification(n)).toBe(false);
+    expect(isVisibleUnread(n)).toBe(true);
+    expect(countVisibleUnread([n])).toBe(1);
+  });
+
   it('shows scheduler image_update_applied (system actor, not human)', () => {
     const n = notif({ category: 'image_update_applied', actor_username: 'system:scheduler' });
     expect(isPanelHiddenNotification(n)).toBe(false);

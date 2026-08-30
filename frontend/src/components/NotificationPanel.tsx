@@ -153,7 +153,8 @@ export function NotificationPanel({
     );
 
     const hasNodeUpdateNotifs = useMemo(
-        () => notifications.some((n) => !n.is_read && n.category === 'node_update_available'),
+        () => notifications.some((n) => !n.is_read
+            && (n.category === 'node_update_available' || n.category === 'dev_build_update_available')),
         [notifications],
     );
 
