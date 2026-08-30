@@ -208,8 +208,15 @@ export function NodeUpdatesSheet({
         }
     };
 
-    const upToDate = updateStatuses.filter(s => !s.updateAvailable && (!s.updateStatus || s.updateStatus === 'completed')).length;
-    const available = updateStatuses.filter(s => s.updateAvailable && !s.updateStatus).length;
+    // Dev availability tracks build freshness by digest, not the stable
+    // semver compare target, so it is counted separately from stableAvailable.
+    // A dev row's updateAvailable is always false (fleet.ts), so upToDate must
+    // exclude it too, or a dev-pinned node with a build available would render
+    // as "Up to date".
+    const stableAvailable = updateStatuses.filter(s => s.updateAvailable && !s.updateStatus).length;
+    const devAvailable = updateStatuses.filter(s => s.devBuildUpdateAvailable && !s.updateStatus).length;
+    const totalAvailable = stableAvailable + devAvailable;
+    const upToDate = updateStatuses.filter(s => !s.updateAvailable && !s.devBuildUpdateAvailable && (!s.updateStatus || s.updateStatus === 'completed')).length;
     const updating = updateStatuses.filter(s => s.updateStatus === 'updating').length;
     const failed = updateStatuses.filter(s => s.updateStatus === 'failed' || s.updateStatus === 'timeout').length;
     const updatableRemoteCount = updateStatuses.filter(s => s.updateAvailable && !s.updateStatus && s.type === 'remote').length;
@@ -222,11 +229,11 @@ export function NodeUpdatesSheet({
 
     const meta = updateStatuses.length === 0
         ? 'No nodes'
-        : `${updateStatuses.length} nodes · ${available} update${available === 1 ? '' : 's'} available`;
+        : `${updateStatuses.length} nodes · ${totalAvailable} update${totalAvailable === 1 ? '' : 's'} available`;
 
     const footerContext = updateStatuses.length === 0
         ? undefined
-        : (gatewayLabel ? `Latest version ${gatewayLabel}` : `${available} update${available === 1 ? '' : 's'} available`);
+        : (gatewayLabel ? `Latest version ${gatewayLabel}` : `${totalAvailable} update${totalAvailable === 1 ? '' : 's'} available`);
 
     const secondaryActions = isAdmin && updatableRemoteCount > 0
         ? [{
@@ -236,7 +243,9 @@ export function NodeUpdatesSheet({
         }]
         : undefined;
 
-    const showChangelogDot = available > 0 && !hasSeenChangelog;
+    // A dev build has no release changelog entry, so only a stable release
+    // lights the changelog dot.
+    const showChangelogDot = stableAvailable > 0 && !hasSeenChangelog;
 
     const showSkip = (s: NodeUpdateStatus) =>
         s.updateAvailable && !s.updateStatus && isAdmin && isValidVersion(s.version) && isValidVersion(s.latestVersion);
@@ -347,7 +356,7 @@ export function NodeUpdatesSheet({
                                 </div>
                             </div>
                             <div className="px-2">
-                                <div className="text-lg font-medium tabular-nums tracking-tight text-stat-value">{available}</div>
+                                <div className="text-lg font-medium tabular-nums tracking-tight text-stat-value">{totalAvailable}</div>
                                 <div className="text-[10px] text-stat-subtitle flex items-center justify-center gap-1">
                                     <CircleAlert className="w-3 h-3 text-warning" strokeWidth={1.5} /> Available
                                 </div>
@@ -405,7 +414,9 @@ export function NodeUpdatesSheet({
                                         {formatVersion(s.version) ?? <span className="text-muted-foreground/50 italic text-[10px]">unknown</span>}
                                     </span>
                                     <span className="text-xs font-mono tabular-nums">
-                                        {formatVersion(s.latestVersion) ?? <span className="text-muted-foreground/50 italic text-[10px]">unknown</span>}
+                                        {s.isDevImage
+                                            ? <span className="text-muted-foreground/70 italic text-[10px]">Integration build</span>
+                                            : formatVersion(s.latestVersion) ?? <span className="text-muted-foreground/50 italic text-[10px]">unknown</span>}
                                     </span>
                                     <div className="flex justify-end items-center gap-1">
                                         {s.updateStatus && (
@@ -421,7 +432,7 @@ export function NodeUpdatesSheet({
                                                 onDismiss={isAdmin ? () => dismissNodeUpdate(s.nodeId) : undefined}
                                             />
                                         )}
-                                        {!s.updateStatus && !s.updateAvailable && !s.skipActive && (
+                                        {!s.updateStatus && !s.updateAvailable && !s.devBuildUpdateAvailable && !s.skipActive && (
                                             <Badge className="text-[10px] px-1.5 py-0 h-5 shrink-0 whitespace-nowrap bg-success-muted text-success border-success/30">
                                                 <Check className="w-2.5 h-2.5 mr-0.5" /> Up to date
                                             </Badge>
@@ -448,7 +459,7 @@ export function NodeUpdatesSheet({
                                                 className="text-[10px] px-1.5 py-0 h-5 bg-muted text-muted-foreground border-card-border/40"
                                             />
                                         )}
-                                        {s.updateAvailable && !s.updateStatus && !s.skipActive && !(s.updateBlocked && s.imageChannel !== 'hardened') && isAdmin && (
+                                        {(s.updateAvailable || s.devBuildUpdateAvailable) && !s.updateStatus && !s.skipActive && !(s.updateBlocked && s.imageChannel !== 'hardened') && isAdmin && (
                                             <Button
                                                 variant="outline"
                                                 size="sm"
@@ -509,7 +520,7 @@ export function NodeUpdatesSheet({
                                                 Skip
                                             </Button>
                                         )}
-                                        {s.updateAvailable && !s.updateStatus && !s.skipActive && !(s.updateBlocked && s.imageChannel !== 'hardened') && !isAdmin && (
+                                        {(s.updateAvailable || s.devBuildUpdateAvailable) && !s.updateStatus && !s.skipActive && !(s.updateBlocked && s.imageChannel !== 'hardened') && !isAdmin && (
                                             <Badge className="text-[10px] px-1.5 py-0 h-5 bg-warning/15 text-warning border-warning/30">
                                                 <CircleAlert className="w-2.5 h-2.5 mr-0.5" /> Available
                                             </Badge>

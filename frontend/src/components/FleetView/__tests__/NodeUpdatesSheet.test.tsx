@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, within, fireEvent, waitFor } from '@testing-library/react';
 
 const apiFetchMock = vi.fn();
 vi.mock('@/lib/api', () => ({ apiFetch: (...a: unknown[]) => apiFetchMock(...a) }));
@@ -301,6 +301,74 @@ describe('NodeUpdatesSheet', () => {
     expect(screen.getByRole('button', { name: /Update all/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Update$/ })).toBeInTheDocument();
     expect(screen.getByLabelText('Retry update')).toBeInTheDocument();
+  });
+
+  const DEV_STATUSES: NodeUpdateStatus[] = [
+    { nodeId: 1, name: 'Local', type: 'local', version: '1.0.0', latestVersion: '1.1.0', updateAvailable: false, updateStatus: null, isDevImage: true, devBuildUpdateAvailable: true },
+    { nodeId: 2, name: 'Edge', type: 'remote', version: '1.0.0', latestVersion: '1.1.0', updateAvailable: true, updateStatus: null },
+  ];
+
+  it('counts stable and dev availability separately in the summary and meta text', () => {
+    render(<NodeUpdatesSheet {...baseProps({ updateStatuses: DEV_STATUSES })} />);
+    // 2 total available (1 stable + 1 dev).
+    expect(screen.getByText('2')).toBeInTheDocument();
+  });
+
+  it('does not light the changelog dot from a dev-only update', () => {
+    const devOnly: NodeUpdateStatus[] = [
+      { nodeId: 1, name: 'Local', type: 'local', version: '1.0.0', latestVersion: '1.1.0', updateAvailable: false, updateStatus: null, isDevImage: true, devBuildUpdateAvailable: true },
+    ];
+    render(<NodeUpdatesSheet {...baseProps({ updateStatuses: devOnly })} />);
+    const changelogTab = screen.getByRole('tab', { name: /Changelog/ });
+    expect(changelogTab.querySelector('.animate-ping')).toBeNull();
+  });
+
+  it('lights the changelog dot from a stable-only update', () => {
+    render(<NodeUpdatesSheet {...baseProps()} />);
+    const changelogTab = screen.getByRole('tab', { name: /Changelog/ });
+    expect(changelogTab.querySelector('.animate-ping')).not.toBeNull();
+  });
+
+  it('does not show the per-row Up to date badge for a dev row with a build available', () => {
+    render(<NodeUpdatesSheet {...baseProps({ updateStatuses: DEV_STATUSES })} />);
+    const row = screen.getByText('Local').closest('.grid') as HTMLElement;
+    // The summary section always renders a static "Up to date" category
+    // label regardless of count, so this must be scoped to the row itself.
+    expect(within(row).queryByText('Up to date')).not.toBeInTheDocument();
+  });
+
+  it('shows Integration build instead of a stable version in the Latest column for a dev row', () => {
+    render(<NodeUpdatesSheet {...baseProps({ updateStatuses: DEV_STATUSES })} />);
+    expect(screen.getByText('Integration build')).toBeInTheDocument();
+  });
+
+  it('shows the Update action for an admin on a dev-available row', () => {
+    const triggerNodeUpdate = vi.fn();
+    render(<NodeUpdatesSheet {...baseProps({ updateStatuses: DEV_STATUSES, triggerNodeUpdate })} />);
+    const buttons = screen.getAllByRole('button', { name: /Update$/ });
+    // One for the dev row (nodeId 1), one for the stable row (nodeId 2).
+    expect(buttons).toHaveLength(2);
+    fireEvent.click(buttons[0]);
+    expect(triggerNodeUpdate).toHaveBeenCalledWith(1);
+  });
+
+  it('shows the read-only Available badge for a non-admin on a dev-available row', () => {
+    render(<NodeUpdatesSheet {...baseProps({ updateStatuses: DEV_STATUSES, isAdmin: false })} />);
+    expect(screen.getAllByText('Available').length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: /Update$/ })).not.toBeInTheDocument();
+  });
+
+  it('excludes a dev row from Update all and Skip (both remain stable-only)', () => {
+    render(<NodeUpdatesSheet {...baseProps({ updateStatuses: DEV_STATUSES })} />);
+    // Only the remote stable row (nodeId 2) counts toward Update all.
+    expect(screen.getByRole('button', { name: 'Update all (1)' })).toBeInTheDocument();
+    // Skip requires updateAvailable (stable), which is false for the dev row,
+    // so it never renders one, even though the stable "Edge" row legitimately
+    // gets one in this same fixture.
+    const devRow = screen.getByText('Local').closest('.grid') as HTMLElement;
+    expect(within(devRow).queryByRole('button', { name: 'Skip' })).not.toBeInTheDocument();
+    const stableRow = screen.getByText('Edge').closest('.grid') as HTMLElement;
+    expect(within(stableRow).getByRole('button', { name: 'Skip' })).toBeInTheDocument();
   });
 
   it('toasts when a recheck is throttled by the server (rechecked:false)', async () => {
