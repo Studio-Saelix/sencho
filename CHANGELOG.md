@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 * allow chmod on protected stack files ([#1772](https://github.com/Studio-Saelix/sencho/issues/1772)) ([a826cd3](https://github.com/Studio-Saelix/sencho/commit/a826cd398dceb5d3466e2ecbf7f9d1f4c488093c))
+  - In mixed-version fleets, chmod runs on the target node's own Sencho instance. An updated hub proxying an older remote still returns 409 `PROTECTED_FILE` on that remote until it is updated.
+  - Windows stat reports `0o666` for `0o600` (Node distinguishes writable vs read-only, not modes); Linux/Docker QA is authoritative.
 * **auth:** align WebSocket token_version checks with HTTP ([#1744](https://github.com/Studio-Saelix/sencho/issues/1744)) ([a74905f](https://github.com/Studio-Saelix/sencho/commit/a74905ff1ed7a7309a899eddd612fab56246ea02))
 * **auth:** gate scoped JWTs on container-exec WebSocket ([#1741](https://github.com/Studio-Saelix/sencho/issues/1741)) ([ce4b91e](https://github.com/Studio-Saelix/sencho/commit/ce4b91e90f1ca7c6a45ac200ebf831260ee015ac))
 * **auth:** keep active sessions alive and add stay-signed-in ([#1711](https://github.com/Studio-Saelix/sencho/issues/1711)) ([681ecc7](https://github.com/Studio-Saelix/sencho/commit/681ecc7047818345220150ed8a18b3259d1d283f))
