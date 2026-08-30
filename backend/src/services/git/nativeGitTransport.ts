@@ -532,20 +532,16 @@ async function commonArgs(
         args.push('-c', 'protocol.ssh.allow=always');
     } else {
         args.push('-c', 'protocol.https.allow=always');
-        // Cross-host redirect protection uses TWO layers (both must agree):
-        // (1) Host-scoped credential helper: only emits PAT when git requests
-        //     the configured repository host. Redirect to different host = no
-        //     credentials = follow-up fetch fails with standard TLS/not-found.
-        // (2) Post-failure validation: classifyRedirectStderr parses stderr
-        //     for Location headers on non-zero exit and validates each hop via
-        //     validateRedirectHop (same-host allowed; cross-host blocked when
-        //     allowedHost is set; forbidden hosts always refused).
-        // We do NOT disable git's redirect following (followRedirects=false)
-        // because that denies legitimate same-host redirects and prevents the
-        // stderr parser from seeing Location headers needed to validate.
-        // Cross-host redirects to untrusted hosts receive no credentials and
-        // are caught by (1); same-host redirects proceed; failed redirects
-        // are caught by (2).
+        // B1: Always disable git's redirect following for HTTPS. Git will refuse
+        // the redirect and report the Location header in stderr with a non-zero
+        // exit code. classifyRedirectStderr then validates the destination:
+        // - Same-host redirects: retry with redirects enabled
+        // - Cross-host redirects: reject as redirect-scope (PAT never sent)
+        // - Forbidden hosts: reject as redirect-scope
+        // This enforces the redirect boundary for BOTH authenticated (PAT
+        // protected by credential helper) and unauthenticated (no silent success)
+        // sources. Same-host redirects are retried automatically.
+        args.push('-c', 'http.followRedirects=false');
         // Cross-host redirect safety is enforced by the host-scoped credential
         // helper (see credentialHelper.ts): the helper reads host/port from
         // stdin and only emits the PAT when the requested host matches the
@@ -792,10 +788,90 @@ async function lsRemoteRefs(
         throw e;
     }
     if (res.exitCode !== 0) {
-        // If the failure followed a cross-host or forbidden redirect, surface
-        // it as a redirect-scope failure rather than a generic exit error.
-        // The destination is parsed from git's stderr, so no pre-flight
-        // network call is required.
+        // B1: If the failure followed a same-host redirect, retry with
+        // http.followRedirects=true to allow the legitimate same-host
+        // redirect to complete. Cross-host and forbidden-host redirects
+        // are rejected via classifyRedirectStderr before any retry.
+        const redirectFailure = classifyRedirectStderr(res.stderr, repo.href, allowedHost, hasToken);
+        if (redirectFailure) throw redirectFailure;
+        const sameHostTarget = extractFinalRedirectLocation(res.stderr, repo.href);
+        if (sameHostTarget && isSameHostRedirect(repo.href, sameHostTarget)) {
+            // Same-host redirect: retry with redirects enabled
+            const retryArgs = baseArgs.filter((a, i) => !(a === 'http.followRedirects=false' && baseArgs[i - 1] === '-c'));
+            return await lsRemoteRefsWithArgs(
+                repo, ref, env, retryArgs, timeoutMs, hasToken, allowedHost,
+            );
+        }
+        throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: baseArgs, host, hasToken } satisfies TransportFailure;
+    }
+    const found: ResolvedRemoteRefs = { branchSha: null, tagSha: null };
+    for (const line of res.stdout.split(/\r?\n/)) {
+        const tabIndex = line.indexOf('\t');
+        if (tabIndex === -1) continue;
+        const sha = line.slice(0, tabIndex).trim();
+        if (!SHA_PATTERN.test(sha)) continue;
+        const full = line.slice(tabIndex + 1).trim();
+        if (full === `refs/heads/${ref}`) {
+            found.branchSha = sha.toLowerCase();
+        } else if (full === `refs/tags/${ref}^{}`) {
+            found.tagSha = sha.toLowerCase();
+        } else if (full === `refs/tags/${ref}` && found.tagSha === null) {
+            found.tagSha = sha.toLowerCase();
+        }
+    }
+    return found;
+}
+
+/** Extract the final redirect target from git's stderr Location chain. Exported. */
+
+/**
+ * True when the redirect destination is on the same host (and port) as the
+ * original URL. Used to decide whether a followRedirects=false failure is a
+ * legitimate same-host redirect (retry with redirects enabled) or a
+ * cross-host/forbidden redirect (reject).
+ */
+export function isSameHostRedirect(fromUrl: string, toUrl: string): boolean {
+    try {
+        const from = new URL(fromUrl);
+        const to = new URL(toUrl);
+        if (from.protocol !== to.protocol) return false;
+        if (from.hostname.toLowerCase() !== to.hostname.toLowerCase()) return false;
+        const fromPort = from.port || (from.protocol === 'https:' ? '443' : '80');
+        const toPort = to.port || (to.protocol === 'https:' ? '443' : '80');
+        return fromPort === toPort;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Internal helper: re-run ls-remote with a different argv (typically with
+ * http.followRedirects=true to allow a same-host retry). Same result shape
+ * as lsRemoteRefs.
+ */
+async function lsRemoteRefsWithArgs(
+    repo: ParsedRepoUrl,
+    ref: string,
+    env: NodeJS.ProcessEnv,
+    baseArgs: string[],
+    timeoutMs: number,
+    hasToken: boolean,
+    allowedHost: string | null,
+): Promise<ResolvedRemoteRefs> {
+    const host = repoHostLabel(repo);
+    let res: RunResult;
+    try {
+        res = await runGit(
+            [...baseArgs, 'ls-remote', repo.href, `refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`],
+            { env, timeoutMs: Math.min(timeoutMs, LS_REMOTE_MAX_MS) },
+        );
+    } catch (e) {
+        if (isTimeoutError(e)) {
+            throw { transportFailure: true as const, reason: 'timeout', host, hasToken } satisfies TransportFailure;
+        }
+        throw e;
+    }
+    if (res.exitCode !== 0) {
         const redirectFailure = classifyRedirectStderr(res.stderr, repo.href, allowedHost, hasToken);
         if (redirectFailure) throw redirectFailure;
         throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: baseArgs, host, hasToken } satisfies TransportFailure;

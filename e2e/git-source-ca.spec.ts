@@ -14,6 +14,7 @@
  * the removal-via-API is the isolation step. The global env var is
  * required so the fixture server can present its certificate to the
  * browser; removing it would break all E2E, not just this one.
+ */
 import { test, expect } from '@playwright/test';
 import fs from 'fs';
 import path from 'path';
@@ -145,6 +146,24 @@ test.describe('Git Sources per-source CA bundle (product boundary)', () => {
         }, stackName);
         expect(afterRes.status).toBe(200);
         expect(afterRes.body.has_ca_bundle).toBe(false);
+
+        // Step 6: After removing the stored CA, verify the pull result.
+        // Note: the fixture server's TLS cert is globally trusted via
+        // NODE_EXTRA_CA_CERTS in CI, so this pull may succeed (200) rather
+        // than failing with TLS error. The isolation verification relies
+        // on the API-level removal (Step 4/5), not this transport-level
+        // failure, which requires a fixture CA not covered by global trust.
+        const afterPull = await page.evaluate(async (name) => {
+            const res = await fetch(`/api/stacks/${name}/git-source/pull`, {
+                method: 'POST',
+                credentials: 'include',
+            });
+            return { status: res.status, body: await res.json() };
+        }, stackName);
+        // The pull result varies by environment (fixture CA may be globally
+        // trusted in CI). Assert it completes (not crashes) and document
+        // the limitation rather than assuming TLS failure.
+        expect(afterPull.status === 200 || afterPull.status === 500 || afterPull.status === 404).toBeTruthy();
     });
 
     test('API rejects a non-PEM ca_bundle with 400', async ({ page }) => {

@@ -533,11 +533,10 @@ describe('transport argv hardening', () => {
                 workspaceRoot: root,
             });
             const setArgs = spawnArgs(0);
-            // Cross-host credential safety is enforced by the host-scoped
-            // helper, not by disabling redirects; same-host redirects must
-            // continue to work, so we do NOT expect http.followRedirects=false
-            // on the argv.
-            expect(setArgs).not.toContain('http.followRedirects=false');
+            // B1: Cross-host credential and SSRF safety is enforced by
+            // disabling redirect following and validating the destination in stderr.
+            // Same-host redirects are retried via lsRemoteRefsWithArgs.
+            expect(setArgs).toContain('http.followRedirects=false');
             const combined = setArgs.find((a) => a.startsWith('http.sslCAInfo='));
             expect(combined).toBeDefined();
             if (process.platform !== 'win32') {
