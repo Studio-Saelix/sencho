@@ -22,6 +22,10 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   mockGetLatestVersion,
   mockGetLatestVersionInfo,
   mockGetSenchoVersion,
+  mockGetPinInfo,
+  mockGetIdentity,
+  mockGetAuthForRegistry,
+  mockDetectSelfDevBuildUpdate,
 } = vi.hoisted(() => ({
   mockGetGlobalSettings: vi.fn().mockReturnValue({}),
   mockGetNodes: vi.fn().mockReturnValue([]),
@@ -57,6 +61,16 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   mockGetLatestVersion: vi.fn().mockResolvedValue(null),
   mockGetLatestVersionInfo: vi.fn().mockResolvedValue(null),
   mockGetSenchoVersion: vi.fn().mockReturnValue(null),
+  // Default: no known compose pin, so checkSenchoVersion() falls through
+  // unchanged and checkSenchoDevBuild() is a no-op, matching pre-existing
+  // test expectations.
+  mockGetPinInfo: vi.fn().mockResolvedValue(null),
+  mockGetIdentity: vi.fn().mockReturnValue({
+    containerId: null, containerName: null, composeProjectName: null,
+    imageId: null, networkNames: [], volumeNames: [],
+  }),
+  mockGetAuthForRegistry: vi.fn().mockResolvedValue(null),
+  mockDetectSelfDevBuildUpdate: vi.fn().mockResolvedValue({ kind: 'up_to_date' }),
 }));
 
 vi.mock('../services/DatabaseService', () => ({
@@ -125,6 +139,34 @@ vi.mock('../services/NotificationService', () => ({
   },
 }));
 
+vi.mock('../services/SelfUpdateService', () => ({
+  default: {
+    getInstance: () => ({
+      getPinInfo: mockGetPinInfo,
+    }),
+  },
+}));
+
+vi.mock('../services/SelfIdentityService', () => ({
+  default: {
+    getInstance: () => ({
+      getIdentity: mockGetIdentity,
+    }),
+  },
+}));
+
+vi.mock('../services/RegistryService', () => ({
+  RegistryService: {
+    getInstance: () => ({
+      getAuthForRegistry: mockGetAuthForRegistry,
+    }),
+  },
+}));
+
+vi.mock('../services/selfDevBuildDetect', () => ({
+  detectSelfDevBuildUpdate: (...args: unknown[]) => mockDetectSelfDevBuildUpdate(...args),
+}));
+
 vi.mock('../services/NodeRegistry', () => ({
   NodeRegistry: {
     getInstance: () => ({
@@ -165,6 +207,13 @@ beforeEach(() => {
   (MonitorService as any).instance = undefined;
   _resetHostAlertSuppressionStateForTests();
   mockGetSystemState.mockReturnValue(null);
+  mockGetPinInfo.mockResolvedValue(null);
+  mockGetIdentity.mockReturnValue({
+    containerId: null, containerName: null, composeProjectName: null,
+    imageId: null, networkNames: [], volumeNames: [],
+  });
+  mockGetAuthForRegistry.mockResolvedValue(null);
+  mockDetectSelfDevBuildUpdate.mockResolvedValue({ kind: 'up_to_date' });
 });
 
 // si.mem() returns active/available alongside used (used counts reclaimable page
@@ -1375,6 +1424,202 @@ describe('MonitorService - Sencho version check', () => {
     mockGetLatestVersionInfo.mockResolvedValueOnce({ version: '0.94.0', publishPending: false });
     await runEvaluate();
     expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.94.0'));
+  });
+});
+
+describe('MonitorService - Sencho dev build check', () => {
+  const DEV_PIN = { pinKind: 'floating' as const, composeImageRef: 'ghcr.io/studio-saelix/sencho-dev:dev', filePath: '/compose/docker-compose.yml' };
+  const DEV_SHA_PIN = { pinKind: 'floating' as const, composeImageRef: 'ghcr.io/studio-saelix/sencho-dev:dev-abc1234', filePath: '/compose/docker-compose.yml' };
+  const DEV_DIGEST_PIN = { pinKind: 'digest' as const, composeImageRef: `ghcr.io/studio-saelix/sencho-dev@sha256:${'a'.repeat(64)}`, filePath: '/compose/docker-compose.yml' };
+  const STABLE_PIN = { pinKind: 'semver' as const, composeImageRef: 'ghcr.io/studio-saelix/sencho:0.97.1', filePath: '/compose/docker-compose.yml' };
+
+  /** In-memory system_state so get/set round-trip within one evaluation. */
+  function wireStatefulSystemState(seed: Record<string, string> = {}) {
+    const store: Record<string, string> = { ...seed };
+    mockGetSystemState.mockImplementation((key: string) => store[key] ?? null);
+    mockSetSystemState.mockImplementation((key: string, value: string) => { store[key] = value; });
+    return store;
+  }
+
+  async function runEvaluate(): Promise<void> {
+    await (MonitorService.getInstance() as any).evaluate();
+  }
+
+  /**
+   * checkSenchoDevBuild() is cadence-gated (5 or 30 minutes), so back-to-back
+   * calls in a single test are otherwise short-circuited before the detector
+   * ever runs. Tests that exercise a second check bypass the gate directly;
+   * tests targeting the gate itself assert `lastDevBuildCheckGateMs` instead.
+   */
+  function bypassCadenceGate() {
+    (MonitorService.getInstance() as any).lastDevBuildCheckAt = 0;
+  }
+
+  function devBuildCalls(): unknown[][] {
+    return mockDispatchAlert.mock.calls.filter(
+      (args: unknown[]) => args[1] === 'dev_build_update_available',
+    );
+  }
+
+  beforeEach(() => {
+    mockGetGlobalSettings.mockReturnValue({});
+    mockGetNodes.mockReturnValue([]);
+    mockGetStackAlerts.mockReturnValue([]);
+    mockGetIdentity.mockReturnValue({
+      containerId: null, containerName: null, composeProjectName: null,
+      imageId: 'deadbeefcafe0000', networkNames: [], volumeNames: [],
+    });
+  });
+
+  it('dispatches and persists dedup state on first detected update', async () => {
+    const store = wireStatefulSystemState();
+    mockGetPinInfo.mockResolvedValue(DEV_PIN);
+    mockDetectSelfDevBuildUpdate.mockResolvedValue({ kind: 'update', digest: 'sha256:d1' });
+
+    await runEvaluate();
+
+    expect(devBuildCalls()).toHaveLength(1);
+    expect(devBuildCalls()[0][2]).toContain('ghcr.io/studio-saelix/sencho-dev:dev');
+    expect(store.sencho_dev_build_available_digest).toBe('sha256:d1');
+    expect(store.last_sencho_dev_build_notified_digest).toBe('sha256:d1');
+  });
+
+  it('does not re-notify for the same digest (dedup)', async () => {
+    const store = wireStatefulSystemState();
+    mockGetPinInfo.mockResolvedValue(DEV_PIN);
+    mockDetectSelfDevBuildUpdate.mockResolvedValue({ kind: 'update', digest: 'sha256:d1' });
+    await runEvaluate();
+    expect(devBuildCalls()).toHaveLength(1);
+
+    bypassCadenceGate();
+    await runEvaluate();
+
+    expect(devBuildCalls()).toHaveLength(1);
+    expect(store.sencho_dev_build_available_digest).toBe('sha256:d1');
+    expect(store.last_sencho_dev_build_notified_digest).toBe('sha256:d1');
+  });
+
+  it('notifies again when a later digest appears', async () => {
+    const store = wireStatefulSystemState();
+    mockGetPinInfo.mockResolvedValue(DEV_PIN);
+    mockDetectSelfDevBuildUpdate.mockResolvedValue({ kind: 'update', digest: 'sha256:d1' });
+    await runEvaluate();
+
+    bypassCadenceGate();
+    mockDetectSelfDevBuildUpdate.mockResolvedValue({ kind: 'update', digest: 'sha256:d2' });
+    await runEvaluate();
+
+    expect(devBuildCalls()).toHaveLength(2);
+    expect(store.sencho_dev_build_available_digest).toBe('sha256:d2');
+    expect(store.last_sencho_dev_build_notified_digest).toBe('sha256:d2');
+  });
+
+  it('clears the availability key when up to date', async () => {
+    const store = wireStatefulSystemState({ sencho_dev_build_available_digest: 'sha256:old' });
+    mockGetPinInfo.mockResolvedValue(DEV_PIN);
+    mockDetectSelfDevBuildUpdate.mockResolvedValue({ kind: 'up_to_date' });
+
+    await runEvaluate();
+
+    expect(store.sencho_dev_build_available_digest).toBe('');
+    expect(devBuildCalls()).toHaveLength(0);
+  });
+
+  it('does not touch state when inconclusive, and uses the short cadence gate for the next check', async () => {
+    const store = wireStatefulSystemState({ sencho_dev_build_available_digest: 'sha256:existing' });
+    mockGetPinInfo.mockResolvedValue(DEV_PIN);
+    mockDetectSelfDevBuildUpdate.mockResolvedValue({ kind: 'inconclusive', reason: 'registry unreachable' });
+
+    await runEvaluate();
+
+    expect(store.sencho_dev_build_available_digest).toBe('sha256:existing');
+    expect(store.last_sencho_dev_build_notified_digest).toBeUndefined();
+    expect(devBuildCalls()).toHaveLength(0);
+    expect((MonitorService.getInstance() as any).lastDevBuildCheckGateMs).toBe(5 * 60 * 1000);
+  });
+
+  it('keeps the availability key set but leaves the notified key unchanged when the dispatch is not persisted, and retries next check', async () => {
+    const store = wireStatefulSystemState();
+    mockGetPinInfo.mockResolvedValue(DEV_PIN);
+    mockDetectSelfDevBuildUpdate.mockResolvedValue({ kind: 'update', digest: 'sha256:d1' });
+    mockDispatchAlert.mockResolvedValueOnce({ persisted: false });
+
+    await runEvaluate();
+
+    expect(store.sencho_dev_build_available_digest).toBe('sha256:d1');
+    expect(store.last_sencho_dev_build_notified_digest).toBeUndefined();
+    expect(devBuildCalls()).toHaveLength(1);
+    expect((MonitorService.getInstance() as any).lastDevBuildCheckGateMs).toBe(5 * 60 * 1000);
+
+    bypassCadenceGate();
+    mockDispatchAlert.mockResolvedValueOnce({ persisted: true });
+    await runEvaluate();
+
+    expect(devBuildCalls()).toHaveLength(2);
+    expect(store.last_sencho_dev_build_notified_digest).toBe('sha256:d1');
+  });
+
+  it('makes no registry call for an immutable dev-<sha> tag', async () => {
+    mockGetPinInfo.mockResolvedValue(DEV_SHA_PIN);
+
+    await runEvaluate();
+
+    expect(mockDetectSelfDevBuildUpdate).not.toHaveBeenCalled();
+    expect(mockSetSystemState).not.toHaveBeenCalled();
+    expect(devBuildCalls()).toHaveLength(0);
+  });
+
+  it('makes no registry call for a digest-pinned dev-repo ref', async () => {
+    mockGetPinInfo.mockResolvedValue(DEV_DIGEST_PIN);
+
+    await runEvaluate();
+
+    expect(mockDetectSelfDevBuildUpdate).not.toHaveBeenCalled();
+    expect(mockSetSystemState).not.toHaveBeenCalled();
+    expect(devBuildCalls()).toHaveLength(0);
+  });
+
+  it('is a no-op for a stable-pinned node, and leaves the existing stable version-update behavior unchanged', async () => {
+    mockGetPinInfo.mockResolvedValue(STABLE_PIN);
+    mockGetSenchoVersion.mockReturnValueOnce('0.45.0');
+    mockGetLatestVersionInfo.mockResolvedValueOnce({ version: '0.46.0', publishPending: false });
+
+    await runEvaluate();
+
+    expect(mockDetectSelfDevBuildUpdate).not.toHaveBeenCalled();
+    expect(devBuildCalls()).toHaveLength(0);
+    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.46.0'));
+  });
+
+  it('suppresses the stable version-update notification for a dev-repo :dev pin even when a stable update is available', async () => {
+    mockGetPinInfo.mockResolvedValue(DEV_PIN);
+    mockGetSenchoVersion.mockReturnValueOnce('0.45.0');
+    mockGetLatestVersionInfo.mockResolvedValueOnce({ version: '0.46.0', publishPending: false });
+    mockDetectSelfDevBuildUpdate.mockResolvedValue({ kind: 'up_to_date' });
+
+    await runEvaluate();
+
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.anything());
+  });
+
+  it('suppresses the stable version-update notification for an immutable dev-<sha> pin', async () => {
+    mockGetPinInfo.mockResolvedValue(DEV_SHA_PIN);
+    mockGetSenchoVersion.mockReturnValueOnce('0.45.0');
+    mockGetLatestVersionInfo.mockResolvedValueOnce({ version: '0.46.0', publishPending: false });
+
+    await runEvaluate();
+
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.anything());
+  });
+
+  it('suppresses the stable version-update notification for a digest-pinned dev-repo ref', async () => {
+    mockGetPinInfo.mockResolvedValue(DEV_DIGEST_PIN);
+    mockGetSenchoVersion.mockReturnValueOnce('0.45.0');
+    mockGetLatestVersionInfo.mockResolvedValueOnce({ version: '0.46.0', publishPending: false });
+
+    await runEvaluate();
+
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.anything());
   });
 });
 
