@@ -33,20 +33,24 @@ jobs:
           repositories: sencho-website
           permission-contents: read
 
+      # The root checkout must come first. actions/checkout cleans its
+      # destination, so running it after the nested one deletes website-checkout.
+      - uses: actions/checkout@v4
+
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/sencho-website
           token: ${{ steps.app-token.outputs.token }}
           path: website-checkout
-      - uses: actions/checkout@v4
       - name: Install root dependencies
         run: npm ci
       - name: Canonical validation
         run: node scripts/website-catalog/canonical-validate.mjs
-      - name: Generate and compare snapshot
-        run: |
-          node scripts/website-catalog/sync-feature-catalog.mjs --website-dir website-checkout
-          # Compare checksums against committed website snapshot
-          node scripts/website-catalog/check-website-drift.mjs --website-dir website-checkout
+      # Compare the canonical catalog against the snapshot the website has
+      # actually committed. Do not run sync-feature-catalog here: it rewrites
+      # that snapshot from the canonical file, so the comparison would only
+      # ever read back what it just wrote and could never report drift.
+      - name: Compare against the committed website snapshot
+        run: node scripts/website-catalog/check-website-drift.mjs --website-dir website-checkout
       - name: Verify no internal identifiers in canonical file
         run: node scripts/website-catalog/test-catalog-no-leak.mjs

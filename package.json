@@ -7,6 +7,9 @@
     "test": "cd backend && npm test",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
+    "catalog:validate": "node scripts/website-catalog/canonical-validate.mjs",
+    "catalog:sync": "node scripts/website-catalog/sync-feature-catalog.mjs",
+    "catalog:drift": "node scripts/website-catalog/check-website-drift.mjs",
     "prepare": "husky"
   },
   "repository": {

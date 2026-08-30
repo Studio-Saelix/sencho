@@ -13,6 +13,7 @@ import yaml from 'js-yaml';
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
+import os from 'os';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 
@@ -69,7 +70,7 @@ function main() {
 
   if (websiteRef && !websiteDir) {
     // Clone to temp dir
-    const tmp = fs.mkdtempSync(path.join(require('os').tmpdir(), 'sencho-website-'));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-website-'));
     execFileSync('git', ['clone', '--depth', '1', '--branch', websiteRef,
       'https://github.com/Studio-Saelix/sencho-website.git', tmp],
       { stdio: 'pipe' });
@@ -111,7 +112,10 @@ function main() {
 
   if (cleanup) fs.rmSync(cleanup, { recursive: true, force: true });
 
-  if (currentChecksum === committedChecksum) {
+  // The snapshot file must match the canonical projection, and the metadata
+  // must describe that same file. Trusting the metadata alone would let a
+  // hand-edited or stale snapshot pass beside a freshly written meta.json.
+  if (currentChecksum === committedChecksum && snapChecksum === committedChecksum) {
     console.log(`OK: no drift. checksum=${currentChecksum.slice(0, 12)}...`);
     process.exit(0);
   } else {
@@ -119,6 +123,9 @@ function main() {
     console.error(`  current canonical checksum: ${currentChecksum}`);
     console.error(`  committed snapshot checksum: ${committedChecksum ?? '(none)'}`);
     console.error(`  committed file checksum:    ${snapChecksum}`);
+    console.error('');
+    console.error('Regenerate the website snapshot and commit src/data/ in the website repo:');
+    console.error('  npm run catalog:sync -- --website-dir <path-to-sencho-website>');
     process.exit(1);
   }
 }

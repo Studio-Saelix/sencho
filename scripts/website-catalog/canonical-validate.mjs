@@ -36,7 +36,11 @@ function readCatalog() {
 
 function main() {
   const doc = readCatalog();
-  const entries = Array.isArray(doc.entries) ? doc.entries : [];
+  if (!Array.isArray(doc.entries)) {
+    console.error('FAIL: catalog has no entries array.');
+    process.exit(1);
+  }
+  const entries = doc.entries;
   const ids = new Set();
 
   for (const [i, entry] of entries.entries()) {
