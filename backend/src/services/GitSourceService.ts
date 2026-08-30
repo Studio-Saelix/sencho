@@ -176,6 +176,7 @@ export interface UpsertInput {
     sshKnownHostsEntry?: string | null;
     sshHostKeyFingerprint?: string | null;
     caBundle?: string | null;  // undefined = keep existing, '' = clear, non-empty = replace
+    removeCaBundle?: boolean;  // explicit user-initiated revocation; overrides caBundle omission
     autoApplyOnWebhook: boolean;
     autoDeployOnApply: boolean;
     auditContext?: {
@@ -678,7 +679,16 @@ export class GitSourceService {
         return { token: null, caBundlePem };
     }
 
-    private resolveEncryptedCaBundle(caBundle: string | null | undefined, existing?: StackGitSource): string | null {
+    private resolveEncryptedCaBundle(
+        caBundle: string | null | undefined,
+        removeCaBundle: boolean | undefined,
+        existing?: StackGitSource,
+    ): string | null {
+        // Explicit revocation always wins, even when the field is omitted:
+        // the operator clicked "Remove stored CA" and the value field is
+        // left empty (matching the write-only input), so we must not silently
+        // preserve the stored bundle.
+        if (removeCaBundle === true) return null;
         if (caBundle === undefined) return existing?.encrypted_ca_bundle ?? null;
         if (caBundle === null || caBundle === '') return null;
         const validated = validateCaBundlePem(caBundle);
@@ -705,7 +715,7 @@ export class GitSourceService {
         let encryptedDeployKey: string | null = null;
         let sshKnownHostsEntry: string | null = null;
         let sshHostKeyFingerprint: string | null = null;
-        const encryptedCaBundle = this.resolveEncryptedCaBundle(input.caBundle, existing);
+        const encryptedCaBundle = this.resolveEncryptedCaBundle(input.caBundle, input.removeCaBundle, existing);
         const caBundlePem = this.decryptCaBundlePem(encryptedCaBundle);
 
         if (input.authType === 'none') {
@@ -2837,7 +2847,7 @@ export class GitSourceService {
                 })()
                 : null;
 
-            const encryptedCaBundle = this.resolveEncryptedCaBundle(input.caBundle);
+            const encryptedCaBundle = this.resolveEncryptedCaBundle(input.caBundle, undefined);
             const caBundlePem = this.decryptCaBundlePem(encryptedCaBundle);
 
             // 1. Fetch from git BEFORE touching disk or DB. If the fetch
@@ -3811,7 +3821,7 @@ export class GitSourceService {
         input: CreateStackFromGitInput,
     ): Promise<{ prepId: string; sourceHash: string }> {
         const materialization: { value: MaterializationResult | null } = { value: null };
-        const encryptedCaBundle = this.resolveEncryptedCaBundle(input.caBundle);
+        const encryptedCaBundle = this.resolveEncryptedCaBundle(input.caBundle, undefined);
         const caBundlePem = this.decryptCaBundlePem(encryptedCaBundle);
         const fetched = await this.fetchFromGit({
             repoUrl: input.repoUrl,

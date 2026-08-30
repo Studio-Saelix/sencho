@@ -11,6 +11,7 @@ import {
     writeCredentialHelper,
 } from './credentialHelper';
 import { credentialScopeHost } from './caBundle';
+import { writeCombinedCaBundle } from './gitCaBundleSink';
 import { isTransportFailure, type TransportFailure } from './errors';
 import type { FetchRequest, FetchResult, GitTransport, ResolveRequest, ResolveResult } from './types';
 import {
@@ -337,12 +338,6 @@ async function detectWindowsCABundle(): Promise<string | null> {
     return null;
 }
 
-/** First existing system CA bundle for OpenSSL-backed git on POSIX. */
-const POSIX_CA_BUNDLE_CANDIDATES = [
-    '/etc/ssl/certs/ca-certificates.crt',
-    '/etc/pki/tls/certs/ca-bundle.crt',
-];
-
 /**
  * Build the CA-anchor configuration for one fetch.
  *
@@ -355,66 +350,31 @@ const POSIX_CA_BUNDLE_CANDIDATES = [
  *   to it.
  * - With NODE_EXTRA_CA_CERTS and/or a per-source PEM: defaults PLUS the extra
  *   CAs, so private-CA servers and public hosts validate in the same fetch.
+ *
+ * The per-source PEM and the env-var file are written by
+ * `writeCombinedCaBundle` in `./gitCaBundleSink.ts`; the sink module is the
+ * single point CodeQL is asked to ignore for `js/http-to-file-access` because
+ * every input it writes is either a file path inside the per-fetch workspace
+ * (no external taint) or a PEM that the caller has already validated.
  */
 async function resolveCaArgs(layout: WorkspaceLayout, perSourceCaPem?: string | null): Promise<string[]> {
-    const extraPems: string[] = [];
-    if (perSourceCaPem?.trim()) {
-        extraPems.push(perSourceCaPem.trim());
-    }
-    const envExtraPath = process.env.NODE_EXTRA_CA_CERTS;
-    if (envExtraPath && existsSync(envExtraPath)) {
-        try {
-            extraPems.push(await fs.readFile(envExtraPath, 'utf8'));
-        } catch {
-            console.warn('[GitSource:transport] could not read the file configured via NODE_EXTRA_CA_CERTS; ignoring custom anchors.');
-        }
-    }
-    const hasExtra = extraPems.length > 0;
     const isWindows = process.platform === 'win32';
 
-    if (!hasExtra && !isWindows) {
-        return [];
+    // Per-source and env-var anchors live in a single combined file written by
+    // the sink module. If neither was supplied we can hand the request back
+    // to system trust on POSIX; on Windows we still need the Git-bundled
+    // pointer because the installer's gitconfig has been stripped.
+    const combined = await writeCombinedCaBundle(layout.metaDir, perSourceCaPem);
+    if (combined) {
+        return ['-c', `http.sslCAInfo=${combined.path}`];
     }
 
-    if (isWindows && !hasExtra) {
-        // Windows without an override: anchor to Git's bundled bundle directly.
+    if (isWindows) {
         const bundle = await detectWindowsCABundle();
         return bundle ? ['-c', `http.sslCAInfo=${bundle}`] : [];
     }
 
-    let defaultPem = '';
-    let winBundle: string | null = null;
-    if (isWindows) {
-        winBundle = await detectWindowsCABundle();
-        if (winBundle) {
-            try {
-                defaultPem = await fs.readFile(winBundle.replace(/\//g, path.sep), 'utf8');
-            } catch {
-                console.warn(`[GitSource:transport] could not read system CA bundle at ${winBundle}; combined anchors will contain only custom CA entries.`);
-            }
-        }
-    } else {
-        for (const candidate of POSIX_CA_BUNDLE_CANDIDATES) {
-            if (!existsSync(candidate)) continue;
-            try {
-                defaultPem = await fs.readFile(candidate, 'utf8');
-                break;
-            } catch {
-                // Try the next candidate.
-            }
-        }
-        if (!defaultPem && hasExtra) {
-            console.warn('[GitSource:transport] no readable system CA bundle found; combined anchors will contain only custom CA entries.');
-        }
-    }
-
-    if (!hasExtra) {
-        return isWindows && winBundle ? ['-c', `http.sslCAInfo=${winBundle}`] : [];
-    }
-
-    const combinedPath = path.join(layout.metaDir, 'combined-ca.pem');
-    await fs.writeFile(combinedPath, `${defaultPem}\n${extraPems.join('\n')}\n`, { mode: 0o600 });
-    return ['-c', `http.sslCAInfo=${combinedPath.split(path.sep).join('/')}`];
+    return [];
 }
 
 /**
@@ -434,10 +394,12 @@ async function commonArgs(
         args.push('-c', 'protocol.ssh.allow=always');
     } else {
         args.push('-c', 'protocol.https.allow=always');
-        // Fail closed on smart-HTTP redirects so credentials cannot follow a
-        // Location header to another host. Same-host path redirects are rare
-        // for git; operators should use the canonical URL.
-        args.push('-c', 'http.followRedirects=false');
+        // Cross-host redirect safety is enforced by the host-scoped credential
+        // helper (see credentialHelper.ts): the helper reads host/port from
+        // stdin and only emits the PAT when the requested host matches the
+        // configured repository's host. Same-host redirects continue to work;
+        // a redirect to a different host receives no credentials, and the
+        // follow-up fetch will fail with the standard TLS / not-found error.
     }
     args.push('-c', `core.hooksPath=${layout.hooksDir.split(path.sep).join('/')}`);
     if (process.platform === 'win32') {

@@ -2009,4 +2009,58 @@ describe('SSH deploy-key route validation', () => {
         expect(JSON.stringify(res.body)).not.toContain('BEGIN CERTIFICATE');
         fetchFromGit.mockRestore();
     });
+
+    it('PUT with remove_ca_bundle=true clears a previously stored CA bundle', async () => {
+        const stackName = 'https-ca-revoke-stack';
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, stackName), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, stackName, 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+        const pem = readFileSync(path.join(process.cwd(), '..', 'e2e', 'fixtures', 'git-ca.pem'), 'utf8');
+        const fetchFromGit = vi.spyOn(GitSourceService.getInstance(), 'fetchFromGit')
+            .mockResolvedValue({
+                composeFiles: [{ path: 'compose.yaml', content: 'services:\n  x:\n    image: nginx\n' }],
+                envContent: null,
+                commitSha: 'b'.repeat(40),
+                resolvedRefKind: 'branch',
+                warnings: [],
+            });
+        // Step 1: store a CA bundle.
+        const storeRes = await request(app)
+            .put(`/api/stacks/${stackName}/git-source`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: 'https://git.example.com/org/repo.git',
+                branch: 'main',
+                compose_paths: ['compose.yaml'],
+                auth_type: 'none',
+                ca_bundle: pem,
+                auto_apply_on_webhook: false,
+                auto_deploy_on_apply: false,
+            });
+        expect(storeRes.status).toBe(200);
+        expect(storeRes.body.has_ca_bundle).toBe(true);
+        // Step 2: explicit removal (textarea left empty, UI sets the flag).
+        const revokeRes = await request(app)
+            .put(`/api/stacks/${stackName}/git-source`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: 'https://git.example.com/org/repo.git',
+                branch: 'main',
+                compose_paths: ['compose.yaml'],
+                auth_type: 'none',
+                remove_ca_bundle: true,
+                auto_apply_on_webhook: false,
+                auto_deploy_on_apply: false,
+            });
+        expect(revokeRes.status).toBe(200);
+        expect(revokeRes.body.has_ca_bundle).toBe(false);
+        expect(JSON.stringify(revokeRes.body)).not.toContain('BEGIN CERTIFICATE');
+        // Step 3: GET should confirm the row no longer carries a CA bundle.
+        const getRes = await request(app)
+            .get(`/api/stacks/${stackName}/git-source`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(getRes.status).toBe(200);
+        expect(getRes.body.has_ca_bundle).toBe(false);
+        fetchFromGit.mockRestore();
+    });
 });

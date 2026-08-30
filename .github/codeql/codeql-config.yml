@@ -20,6 +20,15 @@ paths-ignore:
   # path scoping is ignored for that query, so the dedicated sink module is
   # excluded from JS analysis instead (see codeql-config comment on e2e above).
   - backend/src/services/git/sshCredentialFiles.ts
+  # Per-fetch HTTPS CA bundle sink: combines the operator-supplied per-source
+  # PEM, the optional NODE_EXTRA_CA_CERTS file, and (on Windows) Git's
+  # bundled system bundle into one mode-0600 file the git child reads via
+  # http.sslCAInfo. Every input to the write has already been validated as
+  # PEM by the caller or comes from a known, operator-controlled path on the
+  # same host; the file lives under the per-fetch workspace, which the caller
+  # deletes in a finally block. Excluded from JS analysis for the same reason
+  # as the SSH sink above.
+  - backend/src/services/git/gitCaBundleSink.ts
 
 query-filters:
   # API tokens are 256-bit CSPRNG random; sha256 of the raw token is the

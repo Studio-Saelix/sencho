@@ -490,6 +490,10 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                             onTokenChange={setGitToken}
                             onDeployKeyChange={setGitDeployKey}
                             onCaBundleChange={setGitCaBundle}
+                            onRemoveCaBundle={() => {
+                                /* No stored CA in the create flow; the prop is required
+                                 * so the same component can be reused. */
+                            }}
                             onSshKnownHostsEntryChange={setGitSshKnownHostsEntry}
                             onSshHostKeyFingerprintChange={setGitSshHostKeyFingerprint}
                             onApplyModeChange={setGitApplyMode}

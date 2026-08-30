@@ -65,6 +65,8 @@ export interface GitSourceFieldsProps extends GitSourceFieldsState {
   onTokenChange: (value: string) => void;
   onDeployKeyChange: (value: string) => void;
   onCaBundleChange: (value: string) => void;
+  /** Explicit revocation: the operator clicked "Remove stored CA". Sends `remove_ca_bundle: true` on the next save. */
+  onRemoveCaBundle: () => void;
   onSshKnownHostsEntryChange: (value: string) => void;
   onSshHostKeyFingerprintChange: (value: string) => void;
   onApplyModeChange: (value: ApplyMode) => void;
@@ -112,6 +114,7 @@ export function GitSourceFields({
   onTokenChange,
   onDeployKeyChange,
   onCaBundleChange,
+  onRemoveCaBundle,
   onSshKnownHostsEntryChange,
   onSshHostKeyFingerprintChange,
   onApplyModeChange,
@@ -374,7 +377,7 @@ export function GitSourceFields({
           <Label htmlFor="git-source-ca-bundle">Custom CA certificate (optional)</Label>
           <textarea
             id="git-source-ca-bundle"
-            placeholder={hasStoredCaBundle ? 'CA bundle stored (paste to replace or clear)' : 'Paste PEM certificate(s) for a private CA'}
+            placeholder={hasStoredCaBundle ? 'CA bundle stored (paste to replace)' : 'Paste PEM certificate(s) for a private CA'}
             value={caBundle}
             onChange={(e) => onCaBundleChange(e.target.value)}
             disabled={disabled}
@@ -383,6 +386,22 @@ export function GitSourceFields({
           <p className="text-[11px] text-stat-subtitle">
             By default Sencho trusts the system certificate store. Add a custom CA when your git server uses a private certificate authority. The bundle is encrypted at rest and never returned from the API.
           </p>
+          {hasStoredCaBundle && (
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={disabled}
+                onClick={onRemoveCaBundle}
+              >
+                Remove stored CA
+              </Button>
+              <span className="text-[11px] text-stat-subtitle">
+                Revokes trust for this CA on the next save. The textarea starts empty, so saving without changes will keep the stored CA.
+              </span>
+            </div>
+          )}
         </div>
       )}
 

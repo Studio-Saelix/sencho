@@ -309,6 +309,7 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       ssh_known_hosts_entry,
       ssh_host_key_fingerprint,
       ca_bundle,
+      remove_ca_bundle,
       auto_apply_on_webhook,
       auto_deploy_on_apply,
     } = req.body ?? {};
@@ -371,6 +372,10 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       res.status(400).json({ error: 'ca_bundle must contain one or more PEM certificates' });
       return;
     }
+    if (remove_ca_bundle !== undefined && typeof remove_ca_bundle !== 'boolean') {
+      res.status(400).json({ error: 'remove_ca_bundle must be a boolean' });
+      return;
+    }
     const autoApplyOnWebhook = auto_apply_on_webhook === true;
     const autoDeployOnApply = auto_deploy_on_apply === true;
     if (autoDeployOnApply && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
@@ -403,6 +408,7 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       sshKnownHostsEntry: typeof ssh_known_hosts_entry === 'string' ? ssh_known_hosts_entry : undefined,
       sshHostKeyFingerprint: typeof ssh_host_key_fingerprint === 'string' ? ssh_host_key_fingerprint : undefined,
       caBundle: typeof ca_bundle === 'string' ? ca_bundle : undefined,
+      removeCaBundle: remove_ca_bundle === true,
       autoApplyOnWebhook,
       autoDeployOnApply,
       auditContext: {

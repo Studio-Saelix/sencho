@@ -2,12 +2,13 @@
  * Proves per-source CA bundles work without the process-wide NODE_EXTRA_CA_CERTS bridge.
  */
 import { spawn, spawnSync } from 'child_process';
-import { promises as fs, mkdtempSync, readFileSync, writeFileSync } from 'fs';
+import { promises as fs, readFileSync } from 'fs';
 import https from 'https';
 import os from 'os';
 import path from 'path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { nativeGitTransport } from '../services/git/nativeGitTransport';
+import { buildBareRepo } from './__helpers__/gitFixture';
 
 function gitAvailable(): boolean {
     return spawnSync('git', ['--version'], { stdio: 'ignore' }).status === 0;
@@ -15,25 +16,6 @@ function gitAvailable(): boolean {
 
 const FIXTURES_DIR = path.resolve(__dirname, '..', '..', '..', 'e2e', 'fixtures');
 const CA_PEM = readFileSync(path.join(FIXTURES_DIR, 'git-ca.pem'), 'utf8');
-
-function buildBareRepo(): string {
-    const srcDir = mkdtempSync(path.join(os.tmpdir(), 'sencho-ca-src-'));
-    const run = (args: string[]) => {
-        const r = spawnSync('git', args, { cwd: srcDir, encoding: 'utf8' });
-        if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr}`);
-    };
-    run(['init', '-b', 'main']);
-    run(['config', 'user.email', 'ca-test@sencho.test']);
-    run(['config', 'user.name', 'Sencho CA Test']);
-    writeFileSync(path.join(srcDir, 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
-    run(['add', '-A']);
-    run(['commit', '-m', 'fixture']);
-    const bareRoot = mkdtempSync(path.join(os.tmpdir(), 'sencho-ca-bare-'));
-    const bareDir = path.join(bareRoot, 'repo.git');
-    const clone = spawnSync('git', ['clone', '--bare', '--quiet', srcDir, bareDir], { encoding: 'utf8' });
-    if (clone.status !== 0) throw new Error(`git clone --bare failed: ${clone.stderr}`);
-    return bareDir;
-}
 
 function serveRepo(bareDir: string): Promise<{ url: string; close: () => void }> {
     return new Promise((resolve, reject) => {
@@ -95,7 +77,7 @@ describe.skipIf(!gitAvailable())('per-source private CA transport (real git)', (
     const workspaces: string[] = [];
 
     beforeAll(async () => {
-        const bareDir = buildBareRepo();
+        const bareDir = buildBareRepo({ srcPrefix: 'sencho-ca-src-', barePrefix: 'sencho-ca-bare-', userEmail: 'ca-test@sencho.test', userName: 'Sencho CA Test' });
         const served = await serveRepo(bareDir);
         repoUrl = served.url;
         closeServer = served.close;

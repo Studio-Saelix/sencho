@@ -433,6 +433,48 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
         expect(row?.encrypted_ca_bundle).not.toBe(pem);
     });
 
+    it('explicitly removes a stored CA bundle when removeCaBundle is true, even when caBundle is omitted', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const pem = '-----BEGIN CERTIFICATE-----\nTEST-CA-PEM\n-----END CERTIFICATE-----\n';
+        // Step 1: store a CA bundle.
+        await svc.upsert({
+            stackName: 'ca-revoke-stack',
+            repoUrl: 'https://git.example.com/org/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            caBundle: pem,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        let row = DatabaseService.getInstance().getGitSource('ca-revoke-stack');
+        expect(row?.encrypted_ca_bundle).toBeTruthy();
+        // Step 2: simulate the operator clicking "Remove stored CA": the
+        // textarea is left empty and the UI sends removeCaBundle: true with
+        // caBundle omitted. The stored CA must be cleared.
+        const updated = await svc.upsert({
+            stackName: 'ca-revoke-stack',
+            repoUrl: 'https://git.example.com/org/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            removeCaBundle: true,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        expect(updated.has_ca_bundle).toBe(false);
+        expect(JSON.stringify(updated)).not.toContain('TEST-CA-PEM');
+        row = DatabaseService.getInstance().getGitSource('ca-revoke-stack');
+        expect(row?.encrypted_ca_bundle).toBeNull();
+    });
+
     it('preserves an existing token when update omits token (undefined)', async () => {
         mockSuccessfulClone();
         const svc = GitSourceService.getInstance();

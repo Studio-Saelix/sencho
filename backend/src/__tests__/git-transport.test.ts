@@ -40,6 +40,7 @@ import {
 } from '../services/git/credentialHelper';
 import * as gitBinary from '../services/git/gitBinary';
 import { nativeGitTransport, REF_MAX_LEN, startSizeWatchdog, verifyFastForward } from '../services/git/nativeGitTransport';
+import { GIT_ALLOWED_HOST_ENV_VAR } from '../services/git/credentialHelper';
 
 const GIT_EXEC_PATH_STUB = 'C:/Program Files/Git/mingw64/libexec/git-core';
 
@@ -410,6 +411,41 @@ describe('transport argv hardening', () => {
         }
     });
 
+    it('exports the configured HTTPS host[:port] to the credential helper so a cross-host redirect cannot match', async () => {
+        scriptSpawn([{ stdout: `${SHA_A}\trefs/heads/main\n` }]);
+        const root = await makeWorkspace();
+        try {
+            await nativeGitTransport.resolveRef({
+                repoUrl: 'https://git.example.com/example/repo.git',
+                ref: 'main',
+                token: 'sekrit',
+                timeoutMs: 5000,
+                workspaceRoot: root,
+            });
+            const env = spawnEnv(0);
+            expect(env[GIT_ALLOWED_HOST_ENV_VAR]).toBe('git.example.com');
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('does not export the allowed host when no token is supplied (no credentials to scope)', async () => {
+        scriptSpawn([{ stdout: `${SHA_A}\trefs/heads/main\n` }]);
+        const root = await makeWorkspace();
+        try {
+            await nativeGitTransport.resolveRef({
+                repoUrl: 'https://git.example.com/example/repo.git',
+                ref: 'main',
+                timeoutMs: 5000,
+                workspaceRoot: root,
+            });
+            const env = spawnEnv(0);
+            expect(env[GIT_ALLOWED_HOST_ENV_VAR]).toBeUndefined();
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
     it('combines NODE_EXTRA_CA_CERTS with platform defaults into http.sslCAInfo when set (dev/E2E bridge)', async () => {
         const caPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-git-ca-test-')), 'ca.pem');
         await fs.writeFile(caPath, '-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n');
@@ -497,7 +533,11 @@ describe('transport argv hardening', () => {
                 workspaceRoot: root,
             });
             const setArgs = spawnArgs(0);
-            expect(setArgs).toContain('http.followRedirects=false');
+            // Cross-host credential safety is enforced by the host-scoped
+            // helper, not by disabling redirects; same-host redirects must
+            // continue to work, so we do NOT expect http.followRedirects=false
+            // on the argv.
+            expect(setArgs).not.toContain('http.followRedirects=false');
             const combined = setArgs.find((a) => a.startsWith('http.sslCAInfo='));
             expect(combined).toBeDefined();
             if (process.platform !== 'win32') {

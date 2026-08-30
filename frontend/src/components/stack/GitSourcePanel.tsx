@@ -126,6 +126,10 @@ export function GitSourcePanel({
   const [token, setToken] = useState('');
   const [deployKey, setDeployKey] = useState('');
   const [caBundle, setCaBundle] = useState('');
+  // Set true when the operator clicks "Remove stored CA". The next save
+  // sends remove_ca_bundle: true alongside the empty caBundle value, so
+  // the backend clears the stored PEM even though the field is empty.
+  const [removeCaBundle, setRemoveCaBundle] = useState(false);
   const [sshKnownHostsEntry, setSshKnownHostsEntry] = useState('');
   const [sshHostKeyFingerprint, setSshHostKeyFingerprint] = useState('');
   const [applyModeOverride, setApplyModeOverride] = useState<ApplyMode | null>(null);
@@ -153,6 +157,7 @@ export function GitSourcePanel({
     setToken('');
     setDeployKey('');
     setCaBundle('');
+    setRemoveCaBundle(false);
     setSshKnownHostsEntry('');
     setSshHostKeyFingerprint('');
     setApplyModeOverride(null);
@@ -179,6 +184,7 @@ export function GitSourcePanel({
           setToken('');
           setDeployKey('');
           setCaBundle('');
+          setRemoveCaBundle(false);
           setSshKnownHostsEntry('');
           setSshHostKeyFingerprint('');
           setApplyModeOverride(null);
@@ -246,6 +252,7 @@ export function GitSourcePanel({
         if (sshHostKeyFingerprint !== '') body.ssh_host_key_fingerprint = sshHostKeyFingerprint;
       }
       if (caBundle !== '') body.ca_bundle = caBundle;
+      if (removeCaBundle) body.remove_ca_bundle = true;
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`, {
         method: 'PUT',
         body: JSON.stringify(body),
@@ -254,6 +261,7 @@ export function GitSourcePanel({
         setToken('');
         setDeployKey('');
         setCaBundle('');
+        setRemoveCaBundle(false);
         setSshKnownHostsEntry('');
         setSshHostKeyFingerprint('');
         setApplyModeOverride(null);
@@ -530,7 +538,14 @@ export function GitSourcePanel({
                     onAuthTypeChange={setAuthType}
                     onTokenChange={setToken}
                     onDeployKeyChange={setDeployKey}
-                    onCaBundleChange={setCaBundle}
+                    onCaBundleChange={(value) => {
+                        setCaBundle(value);
+                        // Typing a new PEM should not also send the explicit
+                        // revocation flag from a prior Remove click; the new
+                        // value is what the operator wants to keep.
+                        if (removeCaBundle) setRemoveCaBundle(false);
+                    }}
+                    onRemoveCaBundle={() => setRemoveCaBundle(true)}
                     onSshKnownHostsEntryChange={setSshKnownHostsEntry}
                     onSshHostKeyFingerprintChange={setSshHostKeyFingerprint}
                     onApplyModeChange={setApplyModeOverride}
