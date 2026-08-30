@@ -409,6 +409,30 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
         expect(row?.encrypted_token).not.toBe('ghp_secret_token_value');
     });
 
+    it('stores an encrypted CA bundle and exposes has_ca_bundle without leaking PEM', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const pem = '-----BEGIN CERTIFICATE-----\nTEST-CA-PEM\n-----END CERTIFICATE-----\n';
+        const created = await svc.upsert({
+            stackName: 'ca-stack',
+            repoUrl: 'https://git.example.com/org/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            caBundle: pem,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        expect(created.has_ca_bundle).toBe(true);
+        expect(JSON.stringify(created)).not.toContain('TEST-CA-PEM');
+        const row = DatabaseService.getInstance().getGitSource('ca-stack');
+        expect(row?.encrypted_ca_bundle).toBeTruthy();
+        expect(row?.encrypted_ca_bundle).not.toBe(pem);
+    });
+
     it('preserves an existing token when update omits token (undefined)', async () => {
         mockSuccessfulClone();
         const svc = GitSourceService.getInstance();
@@ -2619,6 +2643,7 @@ describe('GitSourceService managed-area lifecycle', () => {
             env_path: null,
             auth_type: 'none',
             encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -2674,6 +2699,7 @@ describe('GitSourceService managed-area lifecycle', () => {
             env_path: null,
             auth_type: 'none',
             encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -2814,6 +2840,7 @@ describe('GitSourceService managed-area lifecycle', () => {
             env_path: null,
             auth_type: 'none',
             encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -2845,6 +2872,7 @@ describe('GitSourceService managed-area lifecycle', () => {
             env_path: null,
             auth_type: 'none',
             encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -2878,6 +2906,7 @@ describe('GitSourceService legacy pending apply (migration path)', () => {
             env_path: null,
             auth_type: 'none',
             encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -3156,6 +3185,7 @@ describe('GitSourceService classified plan fingerprint', () => {
             env_path: null,
             auth_type: 'none',
             encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,

@@ -31,6 +31,7 @@ export interface GitSource {
   auth_type: 'none' | 'token' | 'deploy_key';
   has_token: boolean;
   has_deploy_key: boolean;
+  has_ca_bundle: boolean;
   ssh_host_key_fingerprint: string | null;
   auto_apply_on_webhook: boolean;
   auto_deploy_on_apply: boolean;
@@ -124,6 +125,7 @@ export function GitSourcePanel({
   const [authType, setAuthType] = useState<'none' | 'token' | 'deploy_key'>('none');
   const [token, setToken] = useState('');
   const [deployKey, setDeployKey] = useState('');
+  const [caBundle, setCaBundle] = useState('');
   const [sshKnownHostsEntry, setSshKnownHostsEntry] = useState('');
   const [sshHostKeyFingerprint, setSshHostKeyFingerprint] = useState('');
   const [applyModeOverride, setApplyModeOverride] = useState<ApplyMode | null>(null);
@@ -150,6 +152,7 @@ export function GitSourcePanel({
     setAuthType('none');
     setToken('');
     setDeployKey('');
+    setCaBundle('');
     setSshKnownHostsEntry('');
     setSshHostKeyFingerprint('');
     setApplyModeOverride(null);
@@ -175,6 +178,7 @@ export function GitSourcePanel({
           setAuthType(data.auth_type);
           setToken('');
           setDeployKey('');
+          setCaBundle('');
           setSshKnownHostsEntry('');
           setSshHostKeyFingerprint('');
           setApplyModeOverride(null);
@@ -241,6 +245,7 @@ export function GitSourcePanel({
         if (sshKnownHostsEntry !== '') body.ssh_known_hosts_entry = sshKnownHostsEntry;
         if (sshHostKeyFingerprint !== '') body.ssh_host_key_fingerprint = sshHostKeyFingerprint;
       }
+      if (caBundle !== '') body.ca_bundle = caBundle;
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`, {
         method: 'PUT',
         body: JSON.stringify(body),
@@ -248,6 +253,7 @@ export function GitSourcePanel({
       if (res.ok) {
         setToken('');
         setDeployKey('');
+        setCaBundle('');
         setSshKnownHostsEntry('');
         setSshHostKeyFingerprint('');
         setApplyModeOverride(null);
@@ -288,6 +294,7 @@ export function GitSourcePanel({
         if (deployKey !== '') body.deploy_key = deployKey;
         if (sshKnownHostsEntry !== '') body.ssh_known_hosts_entry = sshKnownHostsEntry;
       }
+      if (caBundle !== '') body.ca_bundle = caBundle;
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/browse`, {
         method: 'POST',
         body: JSON.stringify(body),
@@ -507,10 +514,12 @@ export function GitSourcePanel({
                     authType={authType}
                     token={token}
                     deployKey={deployKey}
+                    caBundle={caBundle}
                     sshKnownHostsEntry={sshKnownHostsEntry}
                     sshHostKeyFingerprint={sshHostKeyFingerprint}
                     hasStoredToken={source?.has_token ?? false}
                     hasStoredDeployKey={source?.has_deploy_key ?? false}
+                    hasStoredCaBundle={source?.has_ca_bundle ?? false}
                     storedHostKeyFingerprint={source?.ssh_host_key_fingerprint ?? null}
                     applyMode={applyMode}
                     onRepoUrlChange={setRepoUrl}
@@ -521,6 +530,7 @@ export function GitSourcePanel({
                     onAuthTypeChange={setAuthType}
                     onTokenChange={setToken}
                     onDeployKeyChange={setDeployKey}
+                    onCaBundleChange={setCaBundle}
                     onSshKnownHostsEntryChange={setSshKnownHostsEntry}
                     onSshHostKeyFingerprintChange={setSshHostKeyFingerprint}
                     onApplyModeChange={setApplyModeOverride}

@@ -5,10 +5,12 @@ import path from 'path';
 import { ensureGitBinary, getGitExecPath } from './gitBinary';
 import {
     CREDENTIAL_HELPER_CONFIG_VALUE,
+    GIT_ALLOWED_HOST_ENV_VAR,
     GIT_HELPER_PATH_ENV_VAR,
     GIT_TOKEN_ENV_VAR,
     writeCredentialHelper,
 } from './credentialHelper';
+import { credentialScopeHost } from './caBundle';
 import { isTransportFailure, type TransportFailure } from './errors';
 import type { FetchRequest, FetchResult, GitTransport, ResolveRequest, ResolveResult } from './types';
 import {
@@ -272,6 +274,7 @@ function buildEnv(
     token?: string | null,
     helperPath?: string | null,
     sshCommand?: string | null,
+    allowedHost?: string | null,
 ): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = {
         ...process.env,
@@ -300,6 +303,9 @@ function buildEnv(
         // value so no workspace path character can change how git's shell
         // parses it. See credentialHelper.ts.
         env[GIT_HELPER_PATH_ENV_VAR] = helperPath;
+    }
+    if (allowedHost) {
+        env[GIT_ALLOWED_HOST_ENV_VAR] = allowedHost;
     }
     if (sshCommand) {
         env.GIT_SSH_COMMAND = sshCommand;
@@ -347,12 +353,23 @@ const POSIX_CA_BUNDLE_CANDIDATES = [
  *   lets OpenSSL use system trust; Windows pins Git's own bundled bundle,
  *   because stripping system gitconfig also strips the installer's pointer
  *   to it.
- * - With NODE_EXTRA_CA_CERTS: defaults PLUS the extra CAs, so the dev/E2E
- *   fixture server and public hosts validate in the same process state.
+ * - With NODE_EXTRA_CA_CERTS and/or a per-source PEM: defaults PLUS the extra
+ *   CAs, so private-CA servers and public hosts validate in the same fetch.
  */
-async function resolveCaArgs(layout: WorkspaceLayout): Promise<string[]> {
-    const extraPath = process.env.NODE_EXTRA_CA_CERTS;
-    const hasExtra = Boolean(extraPath && existsSync(extraPath));
+async function resolveCaArgs(layout: WorkspaceLayout, perSourceCaPem?: string | null): Promise<string[]> {
+    const extraPems: string[] = [];
+    if (perSourceCaPem?.trim()) {
+        extraPems.push(perSourceCaPem.trim());
+    }
+    const envExtraPath = process.env.NODE_EXTRA_CA_CERTS;
+    if (envExtraPath && existsSync(envExtraPath)) {
+        try {
+            extraPems.push(await fs.readFile(envExtraPath, 'utf8'));
+        } catch {
+            console.warn('[GitSource:transport] could not read the file configured via NODE_EXTRA_CA_CERTS; ignoring custom anchors.');
+        }
+    }
+    const hasExtra = extraPems.length > 0;
     const isWindows = process.platform === 'win32';
 
     if (!hasExtra && !isWindows) {
@@ -373,7 +390,7 @@ async function resolveCaArgs(layout: WorkspaceLayout): Promise<string[]> {
             try {
                 defaultPem = await fs.readFile(winBundle.replace(/\//g, path.sep), 'utf8');
             } catch {
-                console.warn(`[GitSource:transport] could not read system CA bundle at ${winBundle}; combined anchors will contain only NODE_EXTRA_CA_CERTS entries.`);
+                console.warn(`[GitSource:transport] could not read system CA bundle at ${winBundle}; combined anchors will contain only custom CA entries.`);
             }
         }
     } else {
@@ -386,22 +403,17 @@ async function resolveCaArgs(layout: WorkspaceLayout): Promise<string[]> {
                 // Try the next candidate.
             }
         }
-        if (!defaultPem) {
-            console.warn('[GitSource:transport] no readable system CA bundle found; combined anchors will contain only NODE_EXTRA_CA_CERTS entries.');
+        if (!defaultPem && hasExtra) {
+            console.warn('[GitSource:transport] no readable system CA bundle found; combined anchors will contain only custom CA entries.');
         }
     }
 
-    let extraPem = '';
-    try {
-        extraPem = await fs.readFile(extraPath as string, 'utf8');
-    } catch {
-        console.warn('[GitSource:transport] could not read the file configured via NODE_EXTRA_CA_CERTS; ignoring custom anchors.');
-        // Windows still has working defaults; fall back to them instead of
-        // dropping every anchor.
+    if (!hasExtra) {
         return isWindows && winBundle ? ['-c', `http.sslCAInfo=${winBundle}`] : [];
     }
+
     const combinedPath = path.join(layout.metaDir, 'combined-ca.pem');
-    await fs.writeFile(combinedPath, `${defaultPem}\n${extraPem}`, { mode: 0o600 });
+    await fs.writeFile(combinedPath, `${defaultPem}\n${extraPems.join('\n')}\n`, { mode: 0o600 });
     return ['-c', `http.sslCAInfo=${combinedPath.split(path.sep).join('/')}`];
 }
 
@@ -409,7 +421,12 @@ async function resolveCaArgs(layout: WorkspaceLayout): Promise<string[]> {
  * Config shared by every invocation. With no helper, credential.helper is
  * explicitly cleared so nothing from the environment can answer prompts.
  */
-async function commonArgs(layout: WorkspaceLayout, helperPath: string | null, ssh: boolean): Promise<string[]> {
+async function commonArgs(
+    layout: WorkspaceLayout,
+    helperPath: string | null,
+    ssh: boolean,
+    perSourceCaPem?: string | null,
+): Promise<string[]> {
     const args = [
         '-c', 'protocol.allow=never',
     ];
@@ -417,6 +434,10 @@ async function commonArgs(layout: WorkspaceLayout, helperPath: string | null, ss
         args.push('-c', 'protocol.ssh.allow=always');
     } else {
         args.push('-c', 'protocol.https.allow=always');
+        // Fail closed on smart-HTTP redirects so credentials cannot follow a
+        // Location header to another host. Same-host path redirects are rare
+        // for git; operators should use the canonical URL.
+        args.push('-c', 'http.followRedirects=false');
     }
     args.push('-c', `core.hooksPath=${layout.hooksDir.split(path.sep).join('/')}`);
     if (process.platform === 'win32') {
@@ -428,7 +449,7 @@ async function commonArgs(layout: WorkspaceLayout, helperPath: string | null, ss
         // git is OpenSSL-backed and unaffected by this flag's absence.
         args.push('-c', 'http.sslBackend=openssl');
     }
-    args.push(...await resolveCaArgs(layout));
+    args.push(...await resolveCaArgs(layout, perSourceCaPem));
     if (helperPath !== null) {
         // A fixed value: the helper's path reaches git through the child env
         // instead of being interpolated here, so a workspace path containing
@@ -455,8 +476,10 @@ async function commonArgs(layout: WorkspaceLayout, helperPath: string | null, ss
  */
 async function prepareInvocation(
     workspaceRoot: string,
+    repoUrl: string,
     token?: string | null,
     sshAuth?: ResolveRequest['sshAuth'],
+    caBundlePem?: string | null,
 ): Promise<{ layout: WorkspaceLayout; env: NodeJS.ProcessEnv; baseArgs: string[] }> {
     const layout = await prepareWorkspace(workspaceRoot);
     let sshCommand: string | null = null;
@@ -466,8 +489,12 @@ async function prepareInvocation(
         sshCommand = buildSshCommand(keyPath, knownPath);
     }
     const helperPath = token ? await writeCredentialHelper(layout.metaDir) : null;
-    const env = buildEnv(layout.homeDir, token, helperPath, sshCommand);
-    const baseArgs = await commonArgs(layout, helperPath, Boolean(sshAuth));
+    const parsed = parseRepoTransportUrl(repoUrl);
+    const allowedHost = parsed?.kind === 'https' && token
+        ? credentialScopeHost(parsed.host)
+        : null;
+    const env = buildEnv(layout.homeDir, token, helperPath, sshCommand, allowedHost);
+    const baseArgs = await commonArgs(layout, helperPath, Boolean(sshAuth), caBundlePem);
     return { layout, env, baseArgs };
 }
 
@@ -692,6 +719,7 @@ export async function verifyFastForward(req: {
     descendantSha: string;
     token?: string | null;
     sshAuth?: ResolveRequest['sshAuth'];
+    caBundlePem?: string | null;
     timeoutMs?: number;
     workspaceRoot: string;
     maxBytes: number;
@@ -712,7 +740,9 @@ export async function verifyFastForward(req: {
             throw { transportFailure: true as const, reason: 'timeout', host, hasToken } satisfies TransportFailure;
         }
     };
-    const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token, req.sshAuth);
+    const { env, baseArgs } = await prepareInvocation(
+        req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
+    );
     const repoDir = path.join(req.workspaceRoot, 'ff-check');
     await fs.mkdir(repoDir, { recursive: true });
 
@@ -929,7 +959,9 @@ export const nativeGitTransport: GitTransport = {
         }
 
         assertValidRef(req.ref, repoHostLabel(repo), hasToken);
-        const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token, req.sshAuth);
+        const { env, baseArgs } = await prepareInvocation(
+            req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
+        );
         const found = await lsRemoteRefs(
             repo, req.ref, env, baseArgs,
             req.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasToken,
@@ -945,7 +977,9 @@ export const nativeGitTransport: GitTransport = {
         const repo = assertValidRepoUrl(req.repoUrl, hasToken);
         assertValidRef(req.ref, repoHostLabel(repo), hasToken);
 
-        const { layout, env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token, req.sshAuth);
+        const { layout, env, baseArgs } = await prepareInvocation(
+            req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
+        );
         const checkout = path.join(req.workspaceRoot, 'repo');
         const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 

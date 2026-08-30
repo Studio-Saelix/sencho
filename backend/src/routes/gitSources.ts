@@ -17,6 +17,7 @@ import { sendGitSourceError, webhookPullStatus } from '../utils/gitSourceHttp';
 import { sanitizeForLog } from '../utils/safeLog';
 import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
+import { validateCaBundlePem } from '../services/git/caBundle';
 import { auditActorUsername } from '../helpers/auditActor';
 
 // Reasonable upper bounds so a caller cannot flood the service with huge
@@ -34,6 +35,7 @@ const MAX_TOKEN_LENGTH = 8192;
  * re-entering a stored PAT.
  */
 const MAX_DEPLOY_KEY_LENGTH = 16384;
+const MAX_CA_BUNDLE_LENGTH = 65536;
 
 async function handleBrowse(
   req: Request,
@@ -41,8 +43,9 @@ async function handleBrowse(
   storedToken: string | null,
   storedDeployKey: string | null,
   storedKnownHosts: string | null,
+  storedCaBundle: string | null,
 ): Promise<void> {
-  const { repo_url, branch, auth_type, token, deploy_key, ssh_known_hosts_entry } = req.body ?? {};
+  const { repo_url, branch, auth_type, token, deploy_key, ssh_known_hosts_entry, ca_bundle } = req.body ?? {};
   if (typeof repo_url !== 'string' || !repo_url.trim()) {
     res.status(400).json({ error: 'repo_url is required' });
     return;
@@ -72,6 +75,10 @@ async function handleBrowse(
     res.status(400).json({ error: 'deploy_key is too long' });
     return;
   }
+  if (typeof ca_bundle === 'string' && ca_bundle.length > MAX_CA_BUNDLE_LENGTH) {
+    res.status(400).json({ error: 'ca_bundle is too long' });
+    return;
+  }
   const explicitToken = typeof token === 'string' && token.trim() ? token : null;
   const effectiveToken = auth_type === 'token' ? (explicitToken ?? storedToken) : null;
   const explicitDeployKey = typeof deploy_key === 'string' && deploy_key.trim() ? deploy_key : null;
@@ -81,11 +88,18 @@ async function handleBrowse(
       ? ssh_known_hosts_entry.trim()
       : storedKnownHosts)
     : null;
+  const explicitCaBundle = typeof ca_bundle === 'string' && ca_bundle.trim() ? ca_bundle.trim() : null;
+  const effectiveCaBundle = explicitCaBundle ?? storedCaBundle;
+  if (explicitCaBundle && !validateCaBundlePem(explicitCaBundle)) {
+    res.status(400).json({ error: 'ca_bundle must contain one or more PEM certificates' });
+    return;
+  }
   const listParams: {
     repoUrl: string;
     branch: string;
     token?: string | null;
     sshAuth?: { privateKey: string; knownHostsEntry: string };
+    caBundlePem?: string | null;
   } = {
     repoUrl: repo_url.trim(),
     branch: branch.trim(),
@@ -94,6 +108,9 @@ async function handleBrowse(
     listParams.token = effectiveToken;
   } else if (auth_type === 'deploy_key' && effectiveDeployKey && effectiveKnownHosts) {
     listParams.sshAuth = { privateKey: effectiveDeployKey, knownHostsEntry: effectiveKnownHosts };
+  }
+  if (effectiveCaBundle) {
+    listParams.caBundlePem = effectiveCaBundle;
   }
   try {
     const result = await GitSourceService.getInstance().listRepoTree(listParams);
@@ -194,7 +211,7 @@ gitSourcesRouter.get('/history', async (req: Request, res: Response): Promise<vo
 // creating a stack from Git.
 gitSourcesRouter.post('/browse', async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'stack:create')) return;
-  await handleBrowse(req, res, null, null, null);
+  await handleBrowse(req, res, null, null, null, null);
 });
 
 /**
@@ -291,6 +308,7 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       deploy_key,
       ssh_known_hosts_entry,
       ssh_host_key_fingerprint,
+      ca_bundle,
       auto_apply_on_webhook,
       auto_deploy_on_apply,
     } = req.body ?? {};
@@ -345,6 +363,14 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       res.status(400).json({ error: 'deploy_key is too long' });
       return;
     }
+    if (typeof ca_bundle === 'string' && ca_bundle.length > MAX_CA_BUNDLE_LENGTH) {
+      res.status(400).json({ error: 'ca_bundle is too long' });
+      return;
+    }
+    if (typeof ca_bundle === 'string' && ca_bundle.trim() && !validateCaBundlePem(ca_bundle)) {
+      res.status(400).json({ error: 'ca_bundle must contain one or more PEM certificates' });
+      return;
+    }
     const autoApplyOnWebhook = auto_apply_on_webhook === true;
     const autoDeployOnApply = auto_deploy_on_apply === true;
     if (autoDeployOnApply && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
@@ -376,6 +402,7 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       deployKey: typeof deploy_key === 'string' ? deploy_key : undefined,
       sshKnownHostsEntry: typeof ssh_known_hosts_entry === 'string' ? ssh_known_hosts_entry : undefined,
       sshHostKeyFingerprint: typeof ssh_host_key_fingerprint === 'string' ? ssh_host_key_fingerprint : undefined,
+      caBundle: typeof ca_bundle === 'string' ? ca_bundle : undefined,
       autoApplyOnWebhook,
       autoDeployOnApply,
       auditContext: {
@@ -574,5 +601,6 @@ stackGitSourceRouter.post('/:stackName/git-source/browse', async (req: Request, 
   const storedToken = src?.encrypted_token ? CryptoService.getInstance().decrypt(src.encrypted_token) : null;
   const storedDeployKey = src?.encrypted_deploy_key ? CryptoService.getInstance().decrypt(src.encrypted_deploy_key) : null;
   const storedKnownHosts = src?.ssh_known_hosts_entry ?? null;
-  await handleBrowse(req, res, storedToken, storedDeployKey, storedKnownHosts);
+  const storedCaBundle = src?.encrypted_ca_bundle ? CryptoService.getInstance().decrypt(src.encrypted_ca_bundle) : null;
+  await handleBrowse(req, res, storedToken, storedDeployKey, storedKnownHosts, storedCaBundle);
 });

@@ -35,6 +35,7 @@ export type TransportFailureReason =
     | 'tip-changed'
     | 'size'
     | 'timeout'
+    | 'redirect-scope'
     | 'exit';
 
 interface TransportFailureBase {
@@ -59,6 +60,7 @@ export type TransportFailure = TransportFailureBase & (
     | { reason: 'tip-changed' }
     | { reason: 'size'; maxBytes: number }
     | { reason: 'timeout' }
+    | { reason: 'redirect-scope' }
     | { reason: 'exit'; stderr?: string; exitCode?: number; /** Full child argv, attached for debug diagnostics only. */ argv?: string[] }
 );
 
@@ -125,11 +127,23 @@ export function classifyGitFailure(
             };
         case 'timeout':
             return { code: 'NETWORK_TIMEOUT', message: `Timed out reaching${dest}.` };
+        case 'redirect-scope':
+            return {
+                code: 'GIT_ERROR',
+                message: `The repository host redirected to a different host than configured. Credentials were not sent to the redirect target. Use the final repository URL directly, or contact the server operator.`,
+            };
         default:
             break;
     }
 
     const raw = redactCredentials((failure.stderr ?? '').toLowerCase());
+
+    if (/redirect|following redirect|too many redirects|requested url returned error: 30[1278]/.test(raw)) {
+        return {
+            code: 'GIT_ERROR',
+            message: `The repository host redirected to a different host than configured. Credentials were not sent to the redirect target. Use the final repository URL directly, or contact the server operator.`,
+        };
+    }
 
     // Auth-shaped refusals. Native git phrases these two ways: with a token
     // it gets "Authentication failed for '<url>'"; without one it cannot even
@@ -186,8 +200,14 @@ export function classifyGitFailure(
 
     // TLS failures before generic network wording, so certificate problems do
     // not read as connectivity problems.
-    if (/ssl certificate problem|server certificate verification failed|certificate subject name|unable to get local issuer certificate|self[- ]signed certificate/.test(raw)) {
-        return { code: 'GIT_ERROR', message: `TLS certificate error reaching${dest}. The host certificate could not be verified.` };
+    if (/certificate has expired|certificate is not yet valid/.test(raw)) {
+        return { code: 'GIT_ERROR', message: `TLS certificate error reaching${dest}. The host certificate is expired or not yet valid.` };
+    }
+    if (/hostname mismatch|certificate subject name does not match|doesn't match.*altnames|subject alternative name/.test(raw)) {
+        return { code: 'GIT_ERROR', message: `TLS certificate error reaching${dest}. The certificate hostname does not match the repository URL.` };
+    }
+    if (/ssl certificate problem|server certificate verification failed|unable to get local issuer certificate|self[- ]signed certificate|unknown ca|certificate signed by unknown authority/.test(raw)) {
+        return { code: 'GIT_ERROR', message: `TLS certificate error reaching${dest}. The host certificate could not be verified. If this server uses a private CA, upload the CA certificate on the git source.` };
     }
 
     // Network family.

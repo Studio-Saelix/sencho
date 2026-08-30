@@ -482,6 +482,38 @@ describe('transport argv hardening', () => {
         }
     });
 
+    it('combines a per-source CA PEM into http.sslCAInfo without NODE_EXTRA_CA_CERTS', async () => {
+        const prev = process.env.NODE_EXTRA_CA_CERTS;
+        delete process.env.NODE_EXTRA_CA_CERTS;
+        try {
+            scriptSpawn([{ stdout: `${SHA_A}\trefs/heads/main\n` }]);
+            const root = await makeWorkspace();
+            const perSourcePem = '-----BEGIN CERTIFICATE-----\nPER-SOURCE-CA-MARKER\n-----END CERTIFICATE-----\n';
+            await nativeGitTransport.resolveRef({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: 'main',
+                caBundlePem: perSourcePem,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+            });
+            const setArgs = spawnArgs(0);
+            expect(setArgs).toContain('http.followRedirects=false');
+            const combined = setArgs.find((a) => a.startsWith('http.sslCAInfo='));
+            expect(combined).toBeDefined();
+            if (process.platform !== 'win32') {
+                const combinedBody = await fs.readFile(
+                    (combined as string).slice('http.sslCAInfo='.length).replace(/\//g, path.sep),
+                    'utf8',
+                );
+                expect(combinedBody).toContain('PER-SOURCE-CA-MARKER');
+            }
+            await fs.rm(root, { recursive: true, force: true });
+        } finally {
+            if (prev === undefined) delete process.env.NODE_EXTRA_CA_CERTS;
+            else process.env.NODE_EXTRA_CA_CERTS = prev;
+        }
+    });
+
     it.each([
         ['plain http', 'http://github.com/example/repo.git'],
         ['embedded userinfo', 'https://user:pass@github.com/example/repo.git'],

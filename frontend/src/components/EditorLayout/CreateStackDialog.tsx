@@ -73,6 +73,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
     const [gitAuthType, setGitAuthType] = useState<'none' | 'token' | 'deploy_key'>('none');
     const [gitToken, setGitToken] = useState('');
     const [gitDeployKey, setGitDeployKey] = useState('');
+    const [gitCaBundle, setGitCaBundle] = useState('');
     const [gitSshKnownHostsEntry, setGitSshKnownHostsEntry] = useState('');
     const [gitSshHostKeyFingerprint, setGitSshHostKeyFingerprint] = useState('');
     const [gitApplyMode, setGitApplyMode] = useState<ApplyMode>('review');
@@ -90,6 +91,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
         setGitAuthType('none');
         setGitToken('');
         setGitDeployKey('');
+        setGitCaBundle('');
         setGitSshKnownHostsEntry('');
         setGitSshHostKeyFingerprint('');
         setGitApplyMode('review');
@@ -113,6 +115,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                 if (gitDeployKey !== '') body.deploy_key = gitDeployKey;
                 if (gitSshKnownHostsEntry !== '') body.ssh_known_hosts_entry = gitSshKnownHostsEntry;
             }
+            if (gitCaBundle !== '') body.ca_bundle = gitCaBundle;
             const res = await apiFetch('/git-sources/browse', {
                 method: 'POST',
                 body: JSON.stringify(body),
@@ -224,6 +227,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                 body.ssh_known_hosts_entry = gitSshKnownHostsEntry;
                 body.ssh_host_key_fingerprint = gitSshHostKeyFingerprint;
             }
+            if (gitCaBundle !== '') body.ca_bundle = gitCaBundle;
             const response = await apiFetch('/stacks/from-git', {
                 method: 'POST',
                 body: JSON.stringify(body),
@@ -469,10 +473,12 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                             authType={gitAuthType}
                             token={gitToken}
                             deployKey={gitDeployKey}
+                            caBundle={gitCaBundle}
                             sshKnownHostsEntry={gitSshKnownHostsEntry}
                             sshHostKeyFingerprint={gitSshHostKeyFingerprint}
                             hasStoredToken={false}
                             hasStoredDeployKey={false}
+                            hasStoredCaBundle={false}
                             storedHostKeyFingerprint={null}
                             applyMode={gitApplyMode}
                             onRepoUrlChange={setGitRepoUrl}
@@ -483,6 +489,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                             onAuthTypeChange={setGitAuthType}
                             onTokenChange={setGitToken}
                             onDeployKeyChange={setGitDeployKey}
+                            onCaBundleChange={setGitCaBundle}
                             onSshKnownHostsEntryChange={setGitSshKnownHostsEntry}
                             onSshHostKeyFingerprintChange={setGitSshHostKeyFingerprint}
                             onApplyModeChange={setGitApplyMode}

@@ -207,6 +207,14 @@ Use an `ssh://` URL when the Git server listens on a nonstandard port (for examp
 
 Switching authentication back to **Public (no auth)** or to a token clears the stored deploy key and host-key trust.
 
+### Private HTTPS with a custom CA
+
+Self-hosted Git servers often use TLS certificates signed by a private certificate authority. By default, Sencho trusts the system certificate store on the host running the fetch. When your git server uses a private CA, paste the CA certificate (PEM) in **Custom CA certificate** on the Git source form.
+
+Sencho combines your CA with the system trust anchors (it does not replace them), so public hosts such as GitHub continue to validate normally. The CA bundle is encrypted at rest and is never returned after save.
+
+Leave the field empty when the server uses a publicly trusted certificate.
+
 ## Local edits vs Git
 
 Sencho classifies every managed path against the last applied generation and the live disk.
