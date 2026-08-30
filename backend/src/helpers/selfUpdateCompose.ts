@@ -1,5 +1,6 @@
 import { parse, parseDocument } from 'yaml';
 import semver from 'semver';
+import { normalizeImageRepository } from './imageChannel';
 
 /**
  * How the Sencho service's compose `image:` is pinned. Drives the Fleet
@@ -76,6 +77,40 @@ export function isValidImageRef(ref: string): boolean {
   if (!ref || ref.length > 512) return false;
   if (/\s/.test(ref)) return false;
   return /^[a-zA-Z0-9][a-zA-Z0-9._\-/:@]*$/.test(ref);
+}
+
+/**
+ * True for any reference to the `studio-saelix/sencho-dev` repository on
+ * `ghcr.io`, including digest-pinned references and the immutable `dev-<sha>`
+ * tag. Normalizes the image reference to the bare repository string and
+ * compares against the canonical Sencho dev repository identifier.
+ */
+export function isSenchoDevRepository(imageRef: string): boolean {
+  const normalized = normalizeImageRepository(imageRef);
+  return normalized === 'ghcr.io/studio-saelix/sencho-dev';
+}
+
+/**
+ * True only when the image reference points to the Sencho dev repository with
+ * the floating `dev` tag, not digest-pinned. This predicate identifies the
+ * canonical floating tag that users configure for auto-update detection.
+ */
+export function isSenchoDevFloatingTag(imageRef: string): boolean {
+  if (!isSenchoDevRepository(imageRef)) return false;
+
+  const ref = imageRef?.trim();
+  if (!ref) return false;
+
+  // A digest pin disqualifies the reference (e.g., `@sha256:...`)
+  if (ref.includes('@sha256:') || ref.startsWith('sha256:')) return false;
+
+  // Extract the tag using the same logic as classifyImagePin.
+  const lastSlash = ref.lastIndexOf('/');
+  const lastColon = ref.lastIndexOf(':');
+  // A colon after the last slash is a tag separator; before it is a registry port.
+  const tag = lastColon > lastSlash ? ref.slice(lastColon + 1) : '';
+
+  return tag === 'dev';
 }
 
 /**
