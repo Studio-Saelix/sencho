@@ -11,6 +11,7 @@ import { isValidVersion, getSenchoVersion } from './CapabilityRegistry';
 import { getLatestVersionInfo } from '../utils/version-check';
 import { getHostMemory } from '../helpers/hostMemory';
 import { isDebugEnabled } from '../utils/debug';
+import { sanitizeForLog } from '../utils/safeLog';
 import { withTimeout, TimeoutError } from '../utils/withTimeout';
 import SelfUpdateService from './SelfUpdateService';
 import SelfIdentityService from './SelfIdentityService';
@@ -709,7 +710,7 @@ export class MonitorService {
             }
 
             if (result.kind === 'inconclusive') {
-                if (isDebugEnabled()) console.debug(`[Monitor:diag] Sencho dev-build check inconclusive: ${result.reason}`);
+                if (isDebugEnabled()) console.debug(`[Monitor:diag] Sencho dev-build check inconclusive: ${sanitizeForLog(result.reason)}`);
                 this.lastDevBuildCheckAt = Date.now();
                 this.lastDevBuildCheckGateMs = 5 * 60 * 1000;
                 return;
