@@ -78,6 +78,10 @@ Fleet can update semver pins directly from the [Node updates](/features/remote-u
 
 Check [GitHub Releases](https://github.com/studio-saelix/sencho/releases) for available versions and changelogs.
 
+<Note>
+  Pinning to the `sencho-dev:dev` integration image instead of a release tag is a separate, unsigned track meant for pre-release testing, not this upgrade flow. See [Verifying images · Integration tag](/operations/verifying-images#integration-tag-post-merge-pre-release) and [Remote Updates · Updating the local (gateway) node](/features/remote-updates#updating-the-local-gateway-node) for how detection and the in-app update action work there, and how it differs from **Reapply configuration** (which recreates from the current Compose project without pulling a new image at all).
+</Note>
+
 ---
 
 ## Version policy

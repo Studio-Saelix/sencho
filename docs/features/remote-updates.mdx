@@ -71,6 +71,8 @@ Eligible admins can also run the same procedure from the Compose editor: on Senc
 
 Updating the gateway is special because the dashboard is hosted by the very container that is about to restart. Clicking **Update** on the local row, or **Update to vX.Y.Z** on the Local card, opens a confirmation dialog (kicker **LOCAL · UPDATE**, title **Update local node**, with **Cancel** and **Update & restart** buttons) before anything happens on disk. The body text depends on how the compose file pins the image: for a semver pin it names the exact rewrite (for example, "This install pins `saelix/sencho:0.94.1`. Updating rewrites it to `saelix/sencho:0.95.0`..."); for a floating tag it reads more generally ("Pulls Sencho v0.95.0 and restarts the server..."). Both variants end with the same note that the dashboard briefly disconnects and reconnects automatically.
 
+A node pinned to the `sencho-dev:dev` integration image gets a third variant instead: kicker **LOCAL · DEV UPDATE**, stating the `:dev` reference will be pulled and recreated without rewriting the pinned tag, plus a note that integration images are unsigned and carry no release attestations. Dev-build detection and its update action are local-node only: a remote node's dev-image status is not surfaced in Fleet, since a full compose image reference is not exposed for remotes (see [Pinned image tags](#pinned-image-tags)).
+
 <Note>
   If the local node is running the Admiral **Hardened Build** image instead of a Community image, clicking **Update** here runs a different, entitlement-gated switch flow instead of the compose-repin steps below: it requires an authenticated browser session (not an API token) and can fail with its own codes (`entitlement_denied`, `preflight_mismatch`, `compose_unavailable`, `registry_access_unavailable`) surfaced on the same **Failed** badge. See [Licensing · Feature breakdown](/features/licensing#feature-breakdown) for what Hardened Build is.
 </Note>
@@ -97,7 +99,7 @@ If the new container does not come up within 5 minutes, the overlay surfaces a *
 
 ## Pinned image tags
 
-Fleet self-update respects how each node compose file declares the Sencho image. Semver pins are rewritten to the target release before recreate. Floating tags such as latest are pulled without changing the compose file. Digest pins and unresolved interpolated values block automatic updates; those rows show a **Pinned** badge instead of an **Update** button.
+Fleet self-update respects how each node compose file declares the Sencho image. Semver pins are rewritten to the target release before recreate. Floating tags such as `latest` and `sencho-dev:dev` are pulled without changing the compose file. Digest pins and unresolved interpolated values block automatic updates; those rows show a **Pinned** badge instead of an **Update** button. A reference to the `sencho-dev` repository is always treated as an integration image, whether pinned to `:dev`, the immutable `:dev-<sha>`, or a digest, and never compared against the stable release train.
 
 The image pull always runs before any compose rewrite, so a failed pull never leaves the compose file half-updated.
 
