@@ -210,7 +210,9 @@ export class MonitorService {
     // exits; see backend/src/services/DockerEventService.ts.
 
     private static readonly SENCHO_UPDATE_NOTIFIED_KEY = 'last_sencho_update_notified_version';
-    private static readonly SENCHO_DEV_BUILD_AVAILABLE_KEY = 'sencho_dev_build_available_digest';
+    // Public: the Fleet route reads this same key to derive devBuildUpdateAvailable
+    // without a second polling loop.
+    static readonly SENCHO_DEV_BUILD_AVAILABLE_KEY = 'sencho_dev_build_available_digest';
     private static readonly SENCHO_DEV_BUILD_NOTIFIED_KEY = 'last_sencho_dev_build_notified_digest';
 
     // Cadence gate for checkSenchoDevBuild(): 30 minutes after a conclusive
