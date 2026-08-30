@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import fs from 'fs';
 import yaml from 'js-yaml';
-
-const CATALOG_FILE = 'docs/feature-catalog.yaml';
+import path from 'path';
+import { fileURLToPath } from 'url';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CATALOG_FILE = path.resolve(__dirname, '../../docs/feature-catalog.yaml');
 const PROHIBITED_KEYS = ['linear', 'evidence', 'internalNote', 'route', 'service'];
 
 const text = fs.readFileSync(CATALOG_FILE, 'utf8');

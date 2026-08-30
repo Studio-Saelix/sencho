@@ -7,8 +7,11 @@
  */
 import yaml from 'js-yaml';
 import fs from 'fs';
+import path from 'path';
 
-const CATALOG_FILE = 'docs/feature-catalog.yaml';
+import { fileURLToPath } from 'url';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CATALOG_FILE = path.resolve(__dirname, '../../docs/feature-catalog.yaml');
 
 const VALID_TIERS = new Set(['community', 'admiral', 'internal']);
 const VALID_AVAILABILITY = new Set(['shipped', 'planned', 'internal']);

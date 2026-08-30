@@ -14,8 +14,10 @@ import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
+import { fileURLToPath } from 'url';
 
-const CANONICAL_FILE = 'docs/feature-catalog.yaml';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CANONICAL_FILE = path.resolve(__dirname, '../../docs/feature-catalog.yaml');
 const PUBLIC_FIELDS = new Set([
   'id', 'publicName', 'summary', 'description', 'category',
   'tier', 'availability', 'featured', 'homepageOrder', 'publicRoadmapKey',

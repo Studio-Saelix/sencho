@@ -14,8 +14,10 @@ import yaml from 'js-yaml';
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
+import { fileURLToPath } from 'url';
 
-const CANONICAL_FILE = 'docs/feature-catalog.yaml';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CANONICAL_FILE = path.resolve(__dirname, '../../docs/feature-catalog.yaml');
 const SCHEMA_VERSION = '1';
 const OUTPUT_SNAPSHOT = 'catalog-snapshot.yaml';
 const OUTPUT_META = 'catalog-snapshot.meta.json';
