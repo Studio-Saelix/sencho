@@ -785,14 +785,17 @@ async function classifyManifest(
 }
 
 /**
- * Compare local image digests to the registry's current manifest for a tag.
- * Any candidate that equals the remote primary or is a member of that primary's
- * index counts as current (Docker often lists a stale index digest ahead of the
- * current one). `platform` is the local image's Os/Architecture (from
- * `docker image inspect`), required to safely match against an index's platform
- * descriptors; without it, an index mismatch is an error rather than a
- * speculative match. Never retries against the mutable tag once a primary
- * digest is established: classification always targets that digest.
+ * Compare local image digests to the registry's current manifest for a tag,
+ * returning the probe's primary digest alongside the verdict so a caller that
+ * needs both (e.g. a self-build detector reporting the new digest) does not
+ * have to re-probe the mutable tag. Any candidate that equals the remote
+ * primary or is a member of that primary's index counts as current (Docker
+ * often lists a stale index digest ahead of the current one). `platform` is
+ * the local image's Os/Architecture (from `docker image inspect`), required
+ * to safely match against an index's platform descriptors; without it, an
+ * index mismatch is an error rather than a speculative match. Never retries
+ * against the mutable tag once a primary digest is established:
+ * classification always targets that digest.
  *
  * `update` is returned only after a successful, complete remote classification
  * with no candidate matching the primary, an exact member, or a same-platform
@@ -805,16 +808,20 @@ async function classifyManifest(
  * instead. Empty/all-malformed candidates, unknown platform when platform
  * matching is required, an index with no runnable content for the local
  * platform at all (including an empty or fully-filtered index), and
- * classification failures also return `error`.
+ * classification failures also return `error`. `primaryDigest` is present
+ * once a valid primary digest has been read from the registry, including on
+ * `error` results from a later classification failure; it is absent only
+ * when the local candidate digests are malformed, the probe itself failed,
+ * or the registry's primary digest fails validation.
  */
-export async function compareLocalToRemoteTag(
+export async function compareLocalToRemoteTagDetailed(
     localDigests: readonly string[],
     registry: string,
     repo: string,
     tag: string,
     platform: { os: string; architecture: string },
     credentials?: RegistryCredentials | null,
-): Promise<DigestComparisonResult> {
+): Promise<{ kind: 'match' | 'update' | 'error'; primaryDigest?: string; reason?: string }> {
     const candidates = localDigests.filter((d) => SHA256_DIGEST_RE.test(d));
     if (candidates.length === 0) {
         return { kind: 'error', reason: 'Local digest is malformed or truncated' };
@@ -829,21 +836,21 @@ export async function compareLocalToRemoteTag(
     if (!SHA256_DIGEST_RE.test(primaryDigest)) {
         return { kind: 'error', reason: `Registry returned a malformed digest for ${ref}` };
     }
-    if (candidateSet.has(primaryDigest.toLowerCase())) return { kind: 'match' };
+    if (candidateSet.has(primaryDigest.toLowerCase())) return { kind: 'match', primaryDigest };
 
     let classification: ManifestClassification;
     try {
         classification = await classifyManifest(registry, repo, primaryDigest, contentType, body, authHeaders, ref);
     } catch (e) {
-        return { kind: 'error', reason: getErrorMessage(e, `Failed to classify remote manifest for ${ref}`) };
+        return { kind: 'error', primaryDigest, reason: getErrorMessage(e, `Failed to classify remote manifest for ${ref}`) };
     }
 
-    if (classification.kind === 'single') return { kind: 'update' };
+    if (classification.kind === 'single') return { kind: 'update', primaryDigest };
 
-    if (classification.exactDigests.some((d) => candidateSet.has(d.toLowerCase()))) return { kind: 'match' };
+    if (classification.exactDigests.some((d) => candidateSet.has(d.toLowerCase()))) return { kind: 'match', primaryDigest };
 
     if (!platform.os || !platform.architecture) {
-        return { kind: 'error', reason: `Local image platform is unknown; cannot verify multi-arch membership for ${ref}` };
+        return { kind: 'error', primaryDigest, reason: `Local image platform is unknown; cannot verify multi-arch membership for ${ref}` };
     }
 
     const platformDescriptors = classification.descriptors.filter(
@@ -860,16 +867,32 @@ export async function compareLocalToRemoteTag(
         // content, since nothing else claims a different one; that is the one
         // case where reporting `update` instead of failing closed is safe.
         if (classification.exactDigests.length === 0) {
-            return { kind: 'error', reason: `Remote image index has no ${platform.os}/${platform.architecture} variant for ${ref}` };
+            return { kind: 'error', primaryDigest, reason: `Remote image index has no ${platform.os}/${platform.architecture} variant for ${ref}` };
         }
         if (classification.descriptors.length > 0) {
-            return { kind: 'error', reason: `Remote image index has no confirmed ${platform.os}/${platform.architecture} variant for ${ref}` };
+            return { kind: 'error', primaryDigest, reason: `Remote image index has no confirmed ${platform.os}/${platform.architecture} variant for ${ref}` };
         }
-        return { kind: 'update' };
+        return { kind: 'update', primaryDigest };
     }
 
     const isMember = platformDescriptors.some((d) => candidateSet.has(d.digest.toLowerCase()));
-    return isMember ? { kind: 'match' } : { kind: 'update' };
+    return isMember ? { kind: 'match', primaryDigest } : { kind: 'update', primaryDigest };
+}
+
+/**
+ * Verdict-only view of {@link compareLocalToRemoteTagDetailed} for callers
+ * that never need the primary digest.
+ */
+export async function compareLocalToRemoteTag(
+    localDigests: readonly string[],
+    registry: string,
+    repo: string,
+    tag: string,
+    platform: { os: string; architecture: string },
+    credentials?: RegistryCredentials | null,
+): Promise<DigestComparisonResult> {
+    const result = await compareLocalToRemoteTagDetailed(localDigests, registry, repo, tag, platform, credentials);
+    return result.kind === 'error' ? { kind: 'error', reason: result.reason ?? 'Unknown error' } : { kind: result.kind };
 }
 
 export type TagListCode =

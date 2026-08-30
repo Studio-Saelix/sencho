@@ -64,6 +64,7 @@ import {
   selectLocalRepoDigest,
   selectLocalRepoDigests,
   compareLocalToRemoteTag,
+  compareLocalToRemoteTagDetailed,
   MANIFEST_CLASSIFICATION_CACHE_TTL_MS,
   MANIFEST_INDEX_DESCRIPTOR_CAP,
   MANIFEST_INDEX_MAX_DEPTH,
@@ -1527,5 +1528,67 @@ describe('compareLocalToRemoteTag', () => {
 
     const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result.kind).toBe('error');
+  });
+
+  // ─── compareLocalToRemoteTagDetailed ───────────────────────
+  //
+  // Same comparison engine as compareLocalToRemoteTag, sharing the fixtures
+  // and route helpers above, but asserting the extra primaryDigest field and
+  // that compareLocalToRemoteTag itself no longer leaks it.
+
+  describe('compareLocalToRemoteTagDetailed', () => {
+    /** HEAD the tag for INDEX_DIGEST, then serve its index body on the pinned GET. */
+    const routeExpandableIndex = routePrimaryDigest(INDEX_DIGEST, { [INDEX_DIGEST]: STANDARD_INDEX_BODY });
+    /** HEAD the tag for INDEX_DIGEST; every digest-pinned GET fails. */
+    const routeHeadOnly = routePrimaryDigest(INDEX_DIGEST, {});
+
+    it('performs exactly one manifest probe and returns the primary digest alongside kind: match', async () => {
+      route = routeHeadOnly;
+      const result = await compareLocalToRemoteTagDetailed([INDEX_DIGEST], REGISTRY, REPO, TAG, AMD64);
+      expect(result).toEqual({ kind: 'match', primaryDigest: INDEX_DIGEST });
+      expect(calls.filter((c) => c.url.includes('/manifests/'))).toHaveLength(1);
+    });
+
+    it('returns the primary digest alongside kind: update when every local candidate is stale', async () => {
+      route = routeExpandableIndex;
+      const result = await compareLocalToRemoteTagDetailed([STALE_INDEX], REGISTRY, REPO, TAG, AMD64);
+      expect(result).toEqual({ kind: 'update', primaryDigest: INDEX_DIGEST });
+    });
+
+    it('returns the primary digest alongside kind: error from a classification failure', async () => {
+      // Digest-pinned GET fails: classification cannot complete.
+      route = routeHeadOnly;
+      const result = await compareLocalToRemoteTagDetailed([STALE_INDEX], REGISTRY, REPO, TAG, AMD64);
+      expect(result.kind).toBe('error');
+      expect(result.primaryDigest).toBe(INDEX_DIGEST);
+      expect(result.reason).toBeTruthy();
+    });
+
+    it('omits the primary digest on an early error before any probe (malformed local digest)', async () => {
+      const result = await compareLocalToRemoteTagDetailed(['not-a-digest'], REGISTRY, REPO, TAG, AMD64);
+      expect(result).toEqual({ kind: 'error', reason: expect.any(String) });
+      expect(result.primaryDigest).toBeUndefined();
+    });
+
+    it('compareLocalToRemoteTag wraps the detailed result and drops primaryDigest on match', async () => {
+      route = routeHeadOnly;
+      const result = await compareLocalToRemoteTag([INDEX_DIGEST], REGISTRY, REPO, TAG, AMD64);
+      expect(Object.keys(result)).toEqual(['kind']);
+      expect(result).toEqual({ kind: 'match' });
+    });
+
+    it('compareLocalToRemoteTag wraps the detailed result and drops primaryDigest on update', async () => {
+      route = routeExpandableIndex;
+      const result = await compareLocalToRemoteTag([STALE_INDEX], REGISTRY, REPO, TAG, AMD64);
+      expect(Object.keys(result)).toEqual(['kind']);
+      expect(result).toEqual({ kind: 'update' });
+    });
+
+    it('compareLocalToRemoteTag wraps the detailed result and keeps only kind + reason on error', async () => {
+      route = (url) => tokenOk(url) ?? { statusCode: 500, headers: {} };
+      const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
+      expect(result.kind).toBe('error');
+      expect(Object.keys(result).sort()).toEqual(['kind', 'reason']);
+    });
   });
 });
