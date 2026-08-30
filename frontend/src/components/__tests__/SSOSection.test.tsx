@@ -381,4 +381,16 @@ describe('SSOSection role sync toggle', () => {
       expect(JSON.parse(putBody as string)).toEqual({ enabled: false });
     });
   });
+
+  it('helper copy explains the narrowed sync behavior (only admin/viewer, granular preserved)', async () => {
+    mockBaseSsoLoad();
+    render(<SSOSection />);
+    await waitFor(() => {
+      expect(getRoleSyncSwitch()).not.toBeNull();
+    });
+    const label = screen.getByText(/IdP role synchronization/);
+    expect(label).toBeInTheDocument();
+    // Confirm the revised explanation is present: granular roles stay manual
+    expect(screen.getByText(/granular roles \(deployer, node-admin, auditor\) remain manually authoritative/i)).toBeInTheDocument();
+  });
 });
