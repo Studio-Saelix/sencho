@@ -1,11 +1,17 @@
 /**
- * Regression coverage for the no-repin invariant on a floating-tag self-update
- * (the dev-build "Update now" path: triggerUpdate() called with neither
- * targetVersion nor targetImageRef, exactly as executeClaimedCommunityUpdate
- * invokes it for a :dev image). The worst-case failure mode is silently
- * repinning the compose file to a stable tag; this proves the actual
- * SelfUpdateService decision, not a mock standing in for it, pulls the
- * compose-declared ref unchanged and never stages or copies a compose rewrite.
+ * Regression coverage for the no-repin invariant on a floating-tag self-update.
+ *
+ * The Fleet dev-build update reaches SelfUpdateService WITH a targetVersion
+ * even though the frontend omits one: the route substitutes the stable compare
+ * target (resolveUpdateTarget in routes/fleet.ts) and forwards it through
+ * ImageOperationService. So the guard that actually protects a :dev install is
+ * not the absence of a target, it is the `pinKind === 'semver'` test inside the
+ * repin branch. The worst-case failure is silently rewriting the compose file
+ * from :dev to a stable tag, which would move the install off the dev channel.
+ *
+ * These exercise the real SelfUpdateService decision rather than a mock
+ * standing in for it, and pair the floating cases with a semver case so the
+ * negative assertions cannot pass vacuously.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -34,6 +40,12 @@ vi.mock('fs', async (importOriginal) => {
 });
 
 const DEV_IMAGE_REF = 'ghcr.io/studio-saelix/sencho-dev:dev';
+const SEMVER_IMAGE_REF = 'saelix/sencho:0.93.3';
+const WORKING_DIR = '/opt/sencho';
+const COMPOSE_FILE = '/opt/sencho/docker-compose.yml';
+// The stable release the Fleet route resolves and forwards when the caller
+// (a dev-image update) supplies no target of its own.
+const RESOLVED_TARGET = '0.99.0';
 
 // Mirrors SelfUpdateService's private ComposeContext shape (not exported), so
 // the test-only field poke below stays structurally checked against drift.
@@ -46,44 +58,103 @@ type TestComposeContext = {
   hostBindMounts: Array<{ source: string; destination: string }>;
 };
 
+/** The argv SelfUpdateService hands the helper container, or null if unspawned. */
+function helperArgs(): string[] | null {
+  const call = mockExecFile.mock.calls[0] as [string, string[]] | undefined;
+  return call ? call[1] : null;
+}
+
 describe('SelfUpdateService.triggerUpdate (no-repin invariant)', () => {
   let SelfUpdateService: typeof import('../services/SelfUpdateService').default;
 
-  beforeEach(async () => {
+  /** Point the service at a compose project declaring `composeImageRef`. */
+  async function setupWithComposeImage(composeImageRef: string): Promise<void> {
     vi.clearAllMocks();
-    mockExecFileAsync.mockResolvedValue({ stdout: '', stderr: '' });
+    // `docker pull` yields nothing; the throwaway `cat` container returns the
+    // compose file, which is what the fresh pin resolution actually parses.
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+      args[0] === 'pull'
+        ? { stdout: '', stderr: '' }
+        : { stdout: `services:\n  sencho:\n    image: ${composeImageRef}\n`, stderr: '' },
+    );
     ({ default: SelfUpdateService } = await import('../services/SelfUpdateService'));
     (SelfUpdateService.getInstance() as unknown as { composeContext: TestComposeContext }).composeContext = {
-      workingDir: '/opt/sencho',
-      configFiles: '/opt/sencho/docker-compose.yml',
+      workingDir: WORKING_DIR,
+      configFiles: COMPOSE_FILE,
       serviceName: 'sencho',
-      imageName: DEV_IMAGE_REF,
+      imageName: composeImageRef,
       dataDirHost: '/opt/sencho/data',
       hostBindMounts: [],
     };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
   });
 
-  it('pulls the current dev image unchanged and never stages a compose rewrite', async () => {
-    await SelfUpdateService.getInstance().triggerUpdate();
+  it('keeps a :dev pin on its own tag when the route forwards a stable target', async () => {
+    await setupWithComposeImage(DEV_IMAGE_REF);
 
-    // No targetVersion/targetImageRef means the repin branch never runs, so the
-    // exact compose-declared ref is pulled: no re-resolution, no tag rewrite.
+    // The production call shape: Fleet resolved a stable compare target and
+    // forwarded it, so the repin branch runs and must decline on a floating pin.
+    await SelfUpdateService.getInstance().triggerUpdate({ targetVersion: RESOLVED_TARGET });
+
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       'docker',
       ['pull', DEV_IMAGE_REF],
       expect.objectContaining({ timeout: 300_000 }),
     );
-
-    // The staged compose patch is only ever written on the repin branch.
+    // The forwarded stable version must never become the pulled reference.
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith(
+      'docker',
+      ['pull', expect.stringContaining(RESOLVED_TARGET)],
+      expect.anything(),
+    );
+    // A staged compose patch is written only when a repin is committed.
     expect(mockWriteFileSync).not.toHaveBeenCalled();
 
-    // The recreate helper mounts the working dir read-only (repinWritable is
-    // only set when a composeCopy is staged) and its command has no cp step.
-    expect(mockExecFile).toHaveBeenCalledTimes(1);
-    const [, helperArgs] = mockExecFile.mock.calls[0] as [string, string[]];
-    expect(helperArgs).toContain('/opt/sencho:/opt/sencho:ro');
-    expect(helperArgs).not.toContain('/opt/sencho:/opt/sencho:rw');
-    const composeCmd = helperArgs[helperArgs.length - 1];
-    expect(composeCmd).not.toContain('cp ');
+    const args = helperArgs();
+    expect(args).not.toBeNull();
+    expect(args).toContain(`${WORKING_DIR}:${WORKING_DIR}:ro`);
+    expect(args).not.toContain(`${WORKING_DIR}:${WORKING_DIR}:rw`);
+    expect(args![args!.length - 1]).not.toContain('cp ');
+  });
+
+  it('pulls the current dev image unchanged when no target is supplied at all', async () => {
+    await setupWithComposeImage(DEV_IMAGE_REF);
+
+    // The legacy pull-current path (no target anywhere) skips the repin branch
+    // outright rather than declining inside it.
+    await SelfUpdateService.getInstance().triggerUpdate();
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      'docker',
+      ['pull', DEV_IMAGE_REF],
+      expect.objectContaining({ timeout: 300_000 }),
+    );
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expect(helperArgs()).toContain(`${WORKING_DIR}:${WORKING_DIR}:ro`);
+  });
+
+  it('still repins a semver pin to the target (the assertions above are not vacuous)', async () => {
+    await setupWithComposeImage(SEMVER_IMAGE_REF);
+
+    await SelfUpdateService.getInstance().triggerUpdate({ targetVersion: RESOLVED_TARGET });
+
+    // Contrast case: a semver pin is exactly what the floating pin must not do.
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      'docker',
+      ['pull', `saelix/sencho:${RESOLVED_TARGET}`],
+      expect.objectContaining({ timeout: 300_000 }),
+    );
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('.sencho-compose-patch'),
+      expect.stringContaining(`saelix/sencho:${RESOLVED_TARGET}`),
+      'utf8',
+    );
+
+    const args = helperArgs();
+    expect(args).toContain(`${WORKING_DIR}:${WORKING_DIR}:rw`);
+    expect(args![args!.length - 1]).toContain('cp ');
   });
 });
