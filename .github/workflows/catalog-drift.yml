@@ -12,6 +12,11 @@ on:
     paths:
       - 'docs/feature-catalog.yaml'
       - 'scripts/website-catalog/**'
+  # Drift can also be introduced from the website side, which changes nothing
+  # in this repository and so triggers none of the filters above. Check daily
+  # so an edited or reverted snapshot cannot sit undetected.
+  schedule:
+    - cron: '17 6 * * *'
   workflow_dispatch:
 
 permissions:
