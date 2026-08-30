@@ -1,10 +1,9 @@
 /**
  * Live redirect fixture: prove that a cross-host redirect during a clone
  * receives no credentials from the host-scoped helper and the fetch fails
- * closed. The audit verdict on PR #1870 called out the audit-program
- * requirement to "re-resolve and revalidate redirect destination and
- * credential scope" rather than blanket disabling redirects; this test pins
- * the behavior.
+ * closed. Cross-host credential safety is enforced by the host-scoped
+ * helper, not by disabling redirects: same-host redirects must continue to
+ * work, so this test pins both halves of the contract.
  */
 import { spawn, spawnSync } from 'child_process';
 import { promises as fs, readFileSync } from 'fs';
