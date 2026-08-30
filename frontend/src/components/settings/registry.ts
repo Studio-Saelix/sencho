@@ -102,6 +102,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         tier: null,
         scope: 'global',
         adminOnly: true,
+        hiddenOnRemote: true,
     },
     {
         id: 'api-tokens',

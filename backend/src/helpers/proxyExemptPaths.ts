@@ -26,7 +26,8 @@ export function isProxyExemptPath(path: string): boolean {
 // Path prefixes that are hub-only: they must be served on the instance you are
 // signed into and never proxied to a remote node. This covers state owned by
 // the local hub (centralized audit, fleet schedules, notification routing
-// rules, the admin-only aggregated logs feed and its stream counters) and
+// rules, the admin-only aggregated logs feed and its stream counters), SSO
+// configuration and authentication mode (control-plane identity state), and
 // private registry credentials, which are stored and managed per instance.
 // Blueprints and node labels are hub-owned too: the hub is the only instance
 // that holds the desired-state definitions and the label set its placement
@@ -64,13 +65,16 @@ export const HUB_ONLY_PREFIXES: readonly string[] = [
   '/api/blueprints/',
   '/api/node-labels/',
   '/api/registry-delivery/',
+  '/api/sso/',
 ];
 
 /** Returns true when the path is hub-only and must not be proxied to a remote node. */
 export function isHubOnlyPath(path: string): boolean {
+  const normalized = path.toLowerCase();
   for (const prefix of HUB_ONLY_PREFIXES) {
-    if (path.startsWith(prefix)) return true;
-    if (path === prefix.slice(0, -1)) return true;
+    const normalizedPrefix = prefix.toLowerCase();
+    if (normalized.startsWith(normalizedPrefix)) return true;
+    if (normalized === normalizedPrefix.slice(0, -1)) return true;
   }
   return false;
 }

@@ -151,4 +151,9 @@ describe('reachability', () => {
     expect(isSettingsSectionHidden('sso', nodeAdmin)).toBe(true);
     expect(isSettingsSectionHidden('recovery', nodeAdmin)).toBe(true);
   });
+
+  it('hides SSO for admins when a remote node is active', () => {
+    const adminRemote = ctx({ isAdmin: true, isRemote: true });
+    expect(isSettingsSectionHidden('sso', adminRemote)).toBe(true);
+  });
 });

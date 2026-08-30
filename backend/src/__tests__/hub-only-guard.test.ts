@@ -22,19 +22,39 @@ describe('hubOnlyGuard', () => {
   let app: import('express').Express;
   let authHeader: string;
   let remoteNodeId: number;
+  let proxyRemoteNodeId: number;
+  let pilotRemoteNodeId: number;
 
   beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ app } = await import('../index'));
 
     const { DatabaseService } = await import('../services/DatabaseService');
-    remoteNodeId = DatabaseService.getInstance().addNode({
+    const db = DatabaseService.getInstance();
+    remoteNodeId = db.addNode({
       name: 'hub-only-remote',
       type: 'remote',
       compose_dir: '/tmp',
       is_default: false,
       api_url: 'http://127.0.0.1:1',
       api_token: 'hub-only-token',
+    });
+    proxyRemoteNodeId = db.addNode({
+      name: 'hub-only-sso-proxy',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/tmp',
+      is_default: false,
+      api_url: 'http://127.0.0.1:1',
+      api_token: 'hub-only-sso-proxy-token',
+    });
+    pilotRemoteNodeId = db.addNode({
+      name: 'hub-only-sso-pilot',
+      type: 'remote',
+      mode: 'pilot_agent',
+      compose_dir: '/tmp',
+      is_default: false,
+      api_token: 'hub-only-sso-pilot-token',
     });
 
     const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
@@ -285,5 +305,67 @@ describe('hubOnlyGuard', () => {
       .set('x-node-id', String(remoteNodeId));
 
     expect(res.body?.code).not.toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects mixed-case /api/Secrets with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/Secrets')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  const ssoCases = [
+    { method: 'get' as const, path: '/api/sso/config' },
+    { method: 'get' as const, path: '/api/sso/config/ldap' },
+    { method: 'put' as const, path: '/api/sso/config/ldap', body: { enabled: true } },
+    { method: 'delete' as const, path: '/api/sso/config/ldap' },
+    { method: 'post' as const, path: '/api/sso/config/ldap/test' },
+    { method: 'get' as const, path: '/api/sso/config/role-sync' },
+    { method: 'put' as const, path: '/api/sso/config/role-sync', body: { enabled: true } },
+    { method: 'get' as const, path: '/api/sso/auth-mode' },
+    { method: 'put' as const, path: '/api/sso/auth-mode', body: { mode: 'local_and_sso' } },
+  ];
+
+  for (const remoteLabel of ['proxy', 'pilot_agent'] as const) {
+    const nodeIdForLabel = () => (remoteLabel === 'proxy' ? proxyRemoteNodeId : pilotRemoteNodeId);
+
+    for (const { method, path, body } of ssoCases) {
+      it(`rejects ${method.toUpperCase()} ${path} with 403 for ${remoteLabel} remote node`, async () => {
+        const req = request(app)[method](path)
+          .set('Authorization', authHeader)
+          .set('x-node-id', String(nodeIdForLabel()));
+        if (body !== undefined) {
+          req.send(body);
+        }
+        const res = await req;
+
+        expect(res.status).toBe(403);
+        expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+      });
+    }
+  }
+
+  it('rejects mixed-case GET /api/SSO/config with 403 for proxy remote node', async () => {
+    const res = await request(app)
+      .get('/api/SSO/config')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(proxyRemoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('returns guard 403 (not proxy 503) for pilot_agent without a live tunnel', async () => {
+    const res = await request(app)
+      .get('/api/sso/config')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(pilotRemoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+    expect(res.status).not.toBe(503);
   });
 });

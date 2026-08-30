@@ -181,7 +181,7 @@ describe('SSOSection role sync toggle', () => {
     });
     render(<SSOSection />);
     await waitFor(() => {
-      expect(mockedFetch).toHaveBeenCalledWith('/sso/config/role-sync');
+      expect(mockedFetch).toHaveBeenCalledWith('/sso/config/role-sync', { localOnly: true });
     });
     await waitFor(() => {
       const roleSyncToggle = getRoleSyncSwitch();
@@ -250,7 +250,7 @@ describe('SSOSection role sync toggle', () => {
 
     render(<SSOSection />);
     await waitFor(() => {
-      expect(mockedFetch).toHaveBeenCalledWith('/sso/config/role-sync');
+      expect(mockedFetch).toHaveBeenCalledWith('/sso/config/role-sync', { localOnly: true });
     });
 
     // Wait for the toggle to load, then click it
@@ -332,24 +332,18 @@ describe('SSOSection role sync toggle', () => {
     });
   });
 
-  it('active-instance targeting: role-sync apiFetch calls do not pass localOnly', async () => {
+  it('hub-local targeting: every apiFetch call passes localOnly: true', async () => {
     mockBaseSsoLoad((path: string) => {
       if (path === '/sso/config/role-sync') return res(true, { enabled: false });
       return undefined;
     });
     render(<SSOSection />);
     await waitFor(() => {
-      // Find the role-sync GET call
-      const calls = mockedFetch.mock.calls;
-      const roleSyncCalls = calls.filter(([path]) => path === '/sso/config/role-sync');
-      expect(roleSyncCalls.length).toBeGreaterThan(0);
-      // Assert no localOnly: true in any role-sync call (opts may be undefined
-      // on the mount GET, which is fine: the point is it never targets the hub)
-      for (const [, opts] of roleSyncCalls) {
-        const rest = opts as { localOnly?: boolean } | undefined;
-        expect(rest?.localOnly).not.toBe(true);
-      }
+      expect(mockedFetch.mock.calls.length).toBeGreaterThan(0);
     });
+    for (const [, opts] of mockedFetch.mock.calls) {
+      expect((opts as { localOnly?: boolean } | undefined)?.localOnly).toBe(true);
+    }
   });
 
   it('exact payload: PUT sends only { enabled: boolean }', async () => {
@@ -372,7 +366,7 @@ describe('SSOSection role sync toggle', () => {
 
     render(<SSOSection />);
     await waitFor(() => {
-      expect(mockedFetch).toHaveBeenCalledWith('/sso/config/role-sync');
+      expect(mockedFetch).toHaveBeenCalledWith('/sso/config/role-sync', { localOnly: true });
     });
 
     // Wait for the ON toggle to load, then click to turn off
