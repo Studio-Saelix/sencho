@@ -25,8 +25,8 @@ import { validateCaBundlePem } from './caBundle';
 
 const COMBINED_FILENAME = 'combined-ca.pem';
 
-/** Read and validate the platform system CA bundle, if available. */
-async function readSystemCaBundle(): Promise<string | null> {
+/** Read and validate the platform system CA bundle, if available. Exported for test injection. */
+export async function readSystemCaBundle(): Promise<string | null> {
     if (process.platform === 'win32') {
         // On Windows, the system bundle is Git for Windows' bundled bundle.
         // We replicate the logic from detectWindowsCABundle here to avoid
@@ -86,6 +86,7 @@ async function readSystemCaBundle(): Promise<string | null> {
 export async function writeCombinedCaBundle(
     metaDir: string,
     perSourceCaPem: string | null | undefined,
+    systemCaPem?: string | null,
 ): Promise<{ path: string } | null> {
     const customChunks: string[] = [];
 
@@ -116,7 +117,21 @@ export async function writeCombinedCaBundle(
     // We have custom anchors: include system anchors so that private CAs
     // AUGMENT rather than REPLACE system trust (mirrors Node's
     // NODE_EXTRA_CA_CERTS add-not-replace semantics).
-    const systemCa = await readSystemCaBundle();
+    // We have custom anchors: include system anchors so that private CAs
+    // AUGMENT rather than REPLACE system trust (mirrors Node's
+    // NODE_EXTRA_CA_CERTS add-not-replace semantics). The optional
+    // `systemCaPem` parameter is a test injection point: `undefined`
+    // means "read the platform bundle" (production), a string means
+    // "use this controlled fixture" (test), and `null` means "explicitly
+    // skip" (negative-control test).
+    let systemCa: string | null = null;
+    if (systemCaPem === null) {
+        // Explicit skip: negative-control path.
+    } else if (systemCaPem !== undefined) {
+        systemCa = validateCaBundlePem(systemCaPem);
+    } else {
+        systemCa = await readSystemCaBundle();
+    }
     if (systemCa) customChunks.unshift(systemCa);
 
     const target = path.join(metaDir, COMBINED_FILENAME);

@@ -532,6 +532,20 @@ async function commonArgs(
         args.push('-c', 'protocol.ssh.allow=always');
     } else {
         args.push('-c', 'protocol.https.allow=always');
+        // Cross-host redirect protection uses TWO layers (both must agree):
+        // (1) Host-scoped credential helper: only emits PAT when git requests
+        //     the configured repository host. Redirect to different host = no
+        //     credentials = follow-up fetch fails with standard TLS/not-found.
+        // (2) Post-failure validation: classifyRedirectStderr parses stderr
+        //     for Location headers on non-zero exit and validates each hop via
+        //     validateRedirectHop (same-host allowed; cross-host blocked when
+        //     allowedHost is set; forbidden hosts always refused).
+        // We do NOT disable git's redirect following (followRedirects=false)
+        // because that denies legitimate same-host redirects and prevents the
+        // stderr parser from seeing Location headers needed to validate.
+        // Cross-host redirects to untrusted hosts receive no credentials and
+        // are caught by (1); same-host redirects proceed; failed redirects
+        // are caught by (2).
         // Cross-host redirect safety is enforced by the host-scoped credential
         // helper (see credentialHelper.ts): the helper reads host/port from
         // stdin and only emits the PAT when the requested host matches the

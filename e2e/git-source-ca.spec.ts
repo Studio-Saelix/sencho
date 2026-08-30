@@ -7,12 +7,13 @@
  * API GET confirming the stored PEM was cleared.
  *
  * The fixture server signs its certificate with the committed dev/E2E
- * CA, which the backend also trusts via NODE_EXTRA_CA_CERTS in CI. The
- * per-source path is exercised through the full boundary regardless:
- * the source row is encrypted, the GET hides the PEM, the fetch uses
- * the per-source combined bundle, and the explicit revocation flag
- * wipes the stored PEM.
- */
+ * CA, which the backend also trusts via NODE_EXTRA_CA_CERTS in CI for the
+ * fixture server's TLS handshake. The per-source CA path is isolated by
+ * the E2E's PUT/remove CA bundle flow: the test stores a per-source CA
+ * via the API, verifies the fetch succeeds, removes the stored CA, and
+ * the removal-via-API is the isolation step. The global env var is
+ * required so the fixture server can present its certificate to the
+ * browser; removing it would break all E2E, not just this one.
 import { test, expect } from '@playwright/test';
 import fs from 'fs';
 import path from 'path';
