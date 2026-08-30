@@ -6,6 +6,7 @@ import { useNodes } from '@/context/NodeContext';
 import { cordonNode, uncordonNode } from '@/lib/nodesApi';
 import { toast } from '@/components/ui/toast-store';
 import { ConfirmModal } from '@/components/ui/modal';
+import { BusyButton } from '@/components/ui/busy-button';
 import { formatBytes } from '@/lib/utils';
 import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from '@/components/FleetView/nodeUtils';
 import { NodeDetailsSheet } from '@/components/FleetView/NodeDetailsSheet';
@@ -144,18 +145,17 @@ function NodeCard({ node, isActive, isDevImage, onOpen }: { node: FleetNode; isA
 // for a local, admin, dev-build-available node.
 function DevBuildUpdateAction({ nodeId, onUpdate, updating }: { nodeId: number; onUpdate: (nodeId: number) => void; updating: boolean }) {
   return (
-    <button
-      type="button"
+    <BusyButton
+      pending={updating}
+      busyLabel="Triggering..."
       onClick={() => onUpdate(nodeId)}
-      disabled={updating}
-      className="flex min-h-11 w-full items-center justify-center gap-2 rounded-[12px] bg-brand font-mono text-[12px] uppercase tracking-[0.14em] text-brand-foreground disabled:opacity-60"
+      // ghost has no background/shadow of its own, so the brand classes below
+      // are the only visual styling; the hover: overrides null out ghost's hover tint.
+      variant="ghost"
+      className="min-h-11 w-full rounded-[12px] bg-brand font-mono text-[12px] uppercase tracking-[0.14em] text-brand-foreground hover:bg-brand hover:text-brand-foreground disabled:opacity-60"
     >
-      {updating ? (
-        <><Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.5} /> Triggering...</>
-      ) : (
-        <><FlaskConical className="h-3.5 w-3.5" strokeWidth={1.5} /> Update dev build</>
-      )}
-    </button>
+      <FlaskConical strokeWidth={1.5} /> Update dev build
+    </BusyButton>
   );
 }
 
