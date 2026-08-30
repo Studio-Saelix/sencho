@@ -17,9 +17,9 @@ if (!doc || !Array.isArray(doc.entries)) fail('catalog has no entries array');
 else {
   for (const entry of doc.entries) {
     const id = entry?.id || '(unknown)';
-    if (entry.linear) fail(`entry[${id}] contains prohibited linear: ${entry.linear}`);
-    if (entry.evidence) fail(`entry[${id}] contains prohibited evidence`);
-    if (entry.internalNote) fail(`entry[${id}] contains prohibited internalNote`);
+    for (const key of PROHIBITED_KEYS) {
+      if (entry[key]) fail(`entry[${id}] contains prohibited ${key}`);
+    }
     for (const [k, v] of Object.entries(entry)) {
       if (typeof v === 'string' && /SEN-[0-9]+/.test(v))
         fail(`entry[${id}] key "${k}" has SEN-NNN: "${v}"`);
