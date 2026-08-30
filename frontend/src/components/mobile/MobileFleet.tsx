@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { ChevronRight, Loader2 } from 'lucide-react';
+import { ChevronRight, FlaskConical, Loader2 } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
@@ -9,7 +9,10 @@ import { ConfirmModal } from '@/components/ui/modal';
 import { formatBytes } from '@/lib/utils';
 import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from '@/components/FleetView/nodeUtils';
 import { NodeDetailsSheet } from '@/components/FleetView/NodeDetailsSheet';
-import type { FleetNode } from '@/components/FleetView/types';
+import { LocalUpdateConfirmDialog } from '@/components/FleetView/LocalUpdateConfirmDialog';
+import { ReconnectingOverlay } from '@/components/FleetView/ReconnectingOverlay';
+import { useFleetUpdateStatus } from '@/components/FleetView/hooks/useFleetUpdateStatus';
+import type { FleetNode, NodeUpdateStatus } from '@/components/FleetView/types';
 import { Bar, BackChip, Kicker, Masthead, MBtn, SectionHead, StateDot, StatePill } from './mobile-ui';
 import type { Tone as UiTone } from './mobile-ui';
 
@@ -94,7 +97,7 @@ function StatCell({ label, value }: { label: string; value: string }) {
   );
 }
 
-function NodeCard({ node, isActive, onOpen }: { node: FleetNode; isActive: boolean; onOpen: () => void }) {
+function NodeCard({ node, isActive, isDevImage, onOpen }: { node: FleetNode; isActive: boolean; isDevImage: boolean; onOpen: () => void }) {
   const tone = nodeTone(node);
   const local = node.type === 'local';
   const stateLabel = node.status !== 'online' ? 'offline' : isCritical(node) ? 'critical' : 'online';
@@ -118,6 +121,11 @@ function NodeCard({ node, isActive, onOpen }: { node: FleetNode; isActive: boole
             active
           </span>
         ) : null}
+        {isDevImage ? (
+          <span className="flex items-center gap-1 rounded-[5px] bg-warning/[0.12] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-warning">
+            <FlaskConical className="h-2.5 w-2.5" strokeWidth={1.5} /> integration
+          </span>
+        ) : null}
         <Kicker className={tone === 'destructive' ? 'text-destructive' : tone === 'warning' ? 'text-warning' : 'text-stat-subtitle'}>
           {node.cordoned ? 'cordoned' : stateLabel}
         </Kicker>
@@ -127,6 +135,26 @@ function NodeCard({ node, isActive, onOpen }: { node: FleetNode; isActive: boole
         <StatCell label="cpu" value={node.status === 'online' && node.systemStats ? `${getNodeCpu(node).toFixed(0)}%` : '--'} />
         <StatCell label="mem" value={node.status === 'online' && node.systemStats ? `${getNodeMem(node).toFixed(0)}%` : '--'} />
       </div>
+    </button>
+  );
+}
+
+// Sibling to NodeCard's outer <button>, never nested inside it (a nested
+// <button> is invalid HTML and breaks touch semantics). Only ever rendered
+// for a local, admin, dev-build-available node.
+function DevBuildUpdateAction({ nodeId, onUpdate, updating }: { nodeId: number; onUpdate: (nodeId: number) => void; updating: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onUpdate(nodeId)}
+      disabled={updating}
+      className="flex min-h-11 w-full items-center justify-center gap-2 rounded-[12px] bg-brand font-mono text-[12px] uppercase tracking-[0.14em] text-brand-foreground disabled:opacity-60"
+    >
+      {updating ? (
+        <><Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.5} /> Triggering...</>
+      ) : (
+        <><FlaskConical className="h-3.5 w-3.5" strokeWidth={1.5} /> Update dev build</>
+      )}
     </button>
   );
 }
@@ -291,6 +319,8 @@ function NodeDetail({
 export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: MobileFleetProps) {
   const { nodes, loading, lastSyncAt, refetch } = useMobileFleet();
   const { activeNode } = useNodes();
+  const { isAdmin } = useAuth();
+  const updateStatus = useFleetUpdateStatus();
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -298,17 +328,63 @@ export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: Mo
     return () => clearInterval(id);
   }, []);
 
+  useEffect(() => {
+    // Mirrors useMobileFleet's own polling style above; mobile has no
+    // reapply trigger, so only the update-trigger/dev-build path needs
+    // this data.
+    void updateStatus.fetchUpdateStatus();
+    const id = setInterval(() => void updateStatus.fetchUpdateStatus(), 30_000);
+    return () => clearInterval(id);
+    // Depend on the memoized fetchUpdateStatus callback alone, not the whole
+    // updateStatus object (a new reference every render): per this repo's
+    // React dependency-trap rule, adding the object would re-run this effect
+    // on every render and thrash the interval.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [updateStatus.fetchUpdateStatus]);
+
+  const updateStatusByNodeId = new Map<number, NodeUpdateStatus>(
+    updateStatus.updateStatuses.map(s => [s.nodeId, s]),
+  );
+
+  const confirmStatus = updateStatus.localUpdateConfirm !== null
+    ? updateStatusByNodeId.get(updateStatus.localUpdateConfirm)
+    : undefined;
+
+  const overlays = (
+    <>
+      {updateStatus.reconnecting && (
+        <ReconnectingOverlay
+          preUpdateStartedAt={updateStatus.preUpdateStartedAt}
+          mode={updateStatus.reconnectMode}
+        />
+      )}
+      <LocalUpdateConfirmDialog
+        open={updateStatus.localUpdateConfirm !== null}
+        onOpenChange={(open) => { if (!open) updateStatus.setLocalUpdateConfirm(null); }}
+        onConfirm={updateStatus.confirmLocalUpdate}
+        imagePinKind={confirmStatus?.imagePinKind}
+        composeImageRef={confirmStatus?.composeImageRef}
+        targetImageRef={confirmStatus?.targetImageRef}
+        targetVersion={confirmStatus?.latestVersion}
+        isDevImage={confirmStatus?.isDevImage}
+      />
+    </>
+  );
+
   const selected = selectedId !== null ? nodes.find(n => n.id === selectedId) ?? null : null;
   if (selected) {
     return (
-      <NodeDetail
-        node={selected}
-        now={now}
-        onBack={() => setSelectedId(null)}
-        onInspectNode={onInspectNode}
-        onInspectStack={onInspectStack}
-        onCordonChange={() => void refetch()}
-      />
+      <>
+        <NodeDetail
+          node={selected}
+          now={now}
+          onBack={() => setSelectedId(null)}
+          onInspectNode={onInspectNode}
+          onInspectStack={onInspectStack}
+          onCordonChange={() => void refetch()}
+        />
+        {overlays}
+      </>
     );
   }
 
@@ -328,42 +404,57 @@ export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: Mo
   const syncLabel = lastSyncAt ? `last sync ${formatAgo(now - lastSyncAt)}` : 'connecting…';
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <Masthead
-        kicker="fleet · overview"
-        state={label}
-        stateTone={tone}
-        live={level !== 'healthy'}
-        meta={`${nodes.length} ${nodes.length === 1 ? 'node' : 'nodes'} · ${totalStacks} stacks · ${syncLabel}`}
-        right={headerActions}
-      />
+    <>
+      <div className="flex h-full min-h-0 flex-col">
+        <Masthead
+          kicker="fleet · overview"
+          state={label}
+          stateTone={tone}
+          live={level !== 'healthy'}
+          meta={`${nodes.length} ${nodes.length === 1 ? 'node' : 'nodes'} · ${totalStacks} stacks · ${syncLabel}`}
+          right={headerActions}
+        />
 
-      <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden p-[14px] [&>*+*]:mt-[14px]">
-        <div className="flex items-stretch divide-x divide-hairline overflow-hidden rounded-[12px] border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
-          <StatCell label="running" value={`${running}`} />
-          <StatCell label="cpu" value={onlineNodes.length > 0 ? `${avgCpu.toFixed(0)}%` : '--'} />
-          <StatCell label="mem" value={memTotal > 0 ? `${memPct.toFixed(0)}%` : '--'} />
+        <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden p-[14px] [&>*+*]:mt-[14px]">
+          <div className="flex items-stretch divide-x divide-hairline overflow-hidden rounded-[12px] border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
+            <StatCell label="running" value={`${running}`} />
+            <StatCell label="cpu" value={onlineNodes.length > 0 ? `${avgCpu.toFixed(0)}%` : '--'} />
+            <StatCell label="mem" value={memTotal > 0 ? `${memPct.toFixed(0)}%` : '--'} />
+          </div>
+
+          {loading && nodes.length === 0 ? (
+            <div className="flex items-center justify-center py-10 text-stat-subtitle">
+              <Loader2 className="h-5 w-5 animate-spin" strokeWidth={1.5} />
+            </div>
+          ) : nodes.length === 0 ? (
+            <p className="px-1 py-4 font-mono text-[12px] text-stat-subtitle">No nodes configured.</p>
+          ) : (
+            <div className="flex flex-col gap-2.5">
+              {nodes.map(node => {
+                const nodeUpdateStatus = updateStatusByNodeId.get(node.id);
+                return (
+                  <div key={node.id} className="flex flex-col gap-2.5">
+                    <NodeCard
+                      node={node}
+                      isActive={activeNode?.id === node.id}
+                      isDevImage={Boolean(nodeUpdateStatus?.isDevImage)}
+                      onOpen={() => setSelectedId(node.id)}
+                    />
+                    {nodeUpdateStatus?.devBuildUpdateAvailable && isAdmin && (
+                      <DevBuildUpdateAction
+                        nodeId={node.id}
+                        onUpdate={updateStatus.triggerNodeUpdate}
+                        updating={updateStatus.updatingNodeId === node.id}
+                      />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
-
-        {loading && nodes.length === 0 ? (
-          <div className="flex items-center justify-center py-10 text-stat-subtitle">
-            <Loader2 className="h-5 w-5 animate-spin" strokeWidth={1.5} />
-          </div>
-        ) : nodes.length === 0 ? (
-          <p className="px-1 py-4 font-mono text-[12px] text-stat-subtitle">No nodes configured.</p>
-        ) : (
-          <div className="flex flex-col gap-2.5">
-            {nodes.map(node => (
-              <NodeCard
-                key={node.id}
-                node={node}
-                isActive={activeNode?.id === node.id}
-                onOpen={() => setSelectedId(node.id)}
-              />
-            ))}
-          </div>
-        )}
       </div>
-    </div>
+      {overlays}
+    </>
   );
 }
