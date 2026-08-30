@@ -70,8 +70,13 @@ describe('writeCombinedCaBundle', () => {
         const result = await writeCombinedCaBundle(metaDir, SAMPLE_CA_A);
         expect(result).not.toBeNull();
         const body = await fs.readFile(result!.path, 'utf8');
-        // Both certificates should be present in the combined file.
-        expect(body.split('-----BEGIN CERTIFICATE-----').length - 1).toBe(2);
+        // System CA bundle + per-source PEM + NODE_EXTRA_CA_CERTS file
+        // (system CA bundle is now included when custom anchors are present)
+        const certCount = body.split('-----BEGIN CERTIFICATE-----').length - 1;
+        expect(certCount).toBeGreaterThanOrEqual(2);
+        // Both custom certificates should be present in the combined file.
+        expect(body).toContain('MIIBkTCB+wIJAKHHCgVZU1w0MA0GCSqGSIb3DQEBCwUAMBQxEjAQBgNVBAMMCWxv'); // SAMPLE_CA_A
+        expect(body).toContain('QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo='); // SAMPLE_CA_B
     });
 
     it('drops a NODE_EXTRA_CA_CERTS file that is not valid PEM rather than writing it through', async () => {

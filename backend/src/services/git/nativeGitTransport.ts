@@ -314,6 +314,141 @@ function buildEnv(
     return env;
 }
 
+// ─── Redirect policy ────────────────────────────────────────────────────────
+
+/**
+ * Maximum number of redirect hops we tolerate before failing closed.
+ * The value matches curl's default (-: 50) for HTTP and most Git providers
+ * never exceed a single redirect; a tight cap protects against loops.
+ */
+const MAX_REDIRECT_HOPS = 5;
+
+/**
+ * Pull every `Location: <url>` value out of git's stderr (curl/git prints the
+ * hop chain when redirects are followed) and return the *final* destination
+ * as an absolute URL. Returns null when the chain has no Location lines or
+ * when any link cannot be resolved against the previous one. The chain length
+ * is capped at MAX_REDIRECT_HOPS to bound the parse cost.
+ */
+export function extractFinalRedirectLocation(stderr: string, originalUrl: string): string | null {
+    let current = originalUrl;
+    let hops = 0;
+    let last: string | null = null;
+    for (const match of stderr.matchAll(/(?:^|\n)\s*Location:\s*(\S+)/gi)) {
+        if (hops >= MAX_REDIRECT_HOPS) return null;
+        const next = resolveLocation(current, match[1]);
+        if (!next) return null;
+        current = next;
+        last = next;
+        hops += 1;
+    }
+    return last;
+}
+
+/**
+ * Pull every `Location: <url>` value out of git's stderr and validate each
+ * hop against the redirect policy. Returns a classified TransportFailure
+ * when any hop violates the policy, or null when the chain is clean. The
+ * function is intentionally tolerant of an empty chain: when no Location
+ * header was logged, there is nothing to validate, and the caller can
+ * proceed with its normal classification.
+ */
+export function classifyRedirectStderr(
+    stderr: string,
+    originalUrl: string,
+    allowedHost: string | null,
+    hasToken: boolean,
+): TransportFailure | null {
+    if (!/Location:\s*\S+/i.test(stderr)) return null;
+    let current = originalUrl;
+    let hops = 0;
+    for (const match of stderr.matchAll(/(?:^|\n)\s*Location:\s*(\S+)/gi)) {
+        if (hops >= MAX_REDIRECT_HOPS) {
+            return { transportFailure: true as const, reason: 'redirect-scope', host: originalUrl, hasToken } satisfies TransportFailure;
+        }
+        const next = resolveLocation(current, match[1]);
+        if (!next) {
+            return { transportFailure: true as const, reason: 'redirect-scope', host: originalUrl, hasToken } satisfies TransportFailure;
+        }
+        try {
+            validateRedirectHop(current, next, allowedHost);
+        } catch (e) {
+            if (isTransportFailure(e)) return e;
+            throw e;
+        }
+        current = next;
+        hops += 1;
+    }
+    return null;
+}
+
+/**
+ * Public DNS-suffix set is impractical to ship, so we treat well-known
+ * dangerous ranges instead. Loopback (127/8, ::1, localhost) and the RFC 1918
+ * private ranges block attempts to redirect an authenticated fetch to a host
+ * that can talk to internal services the operator's browser cannot.
+ */
+function isForbiddenRedirectHost(host: string): boolean {
+    const lower = host.toLowerCase();
+    if (lower === 'localhost' || lower === 'localhost.localdomain') return true;
+    if (lower.startsWith('127.') || lower === '::1' || lower === '0:0:0:0:0:0:0:1') return true;
+    if (lower.startsWith('10.')) return true;
+    if (lower.startsWith('172.')) {
+        const parts = lower.split('.');
+        const second = Number(parts[1]);
+        if (Number.isFinite(second) && second >= 16 && second <= 31) return true;
+    }
+    if (lower.startsWith('192.168.')) return true;
+    if (lower.startsWith('169.254.')) return true;
+    if (lower.startsWith('fe80:') || lower.startsWith('fc') || lower.startsWith('fd')) return true;
+    return false;
+}
+
+/**
+ * Validate a single redirect hop's destination.
+ * Same-host redirects are always allowed; cross-host redirects require the
+ * caller's allowedHost to match; any redirect to a forbidden or non-HTTPS
+ * destination fails closed.
+ */
+function validateRedirectHop(
+    fromUrl: string,
+    toUrl: string,
+    allowedHost: string | null,
+): void {
+    let fromParsed: URL;
+    let toParsed: URL;
+    try {
+        fromParsed = new URL(fromUrl);
+        toParsed = new URL(toUrl);
+    } catch {
+        throw { transportFailure: true as const, reason: 'redirect-scope', host: fromUrl, hasToken: Boolean(allowedHost) } satisfies TransportFailure;
+    }
+    if (fromParsed.protocol === 'https:' && toParsed.protocol !== 'https:') {
+        throw { transportFailure: true as const, reason: 'redirect-scope', host: fromUrl, hasToken: Boolean(allowedHost) } satisfies TransportFailure;
+    }
+    if (isForbiddenRedirectHost(toParsed.hostname)) {
+        throw { transportFailure: true as const, reason: 'redirect-scope', host: fromUrl, hasToken: Boolean(allowedHost) } satisfies TransportFailure;
+    }
+    if (allowedHost) {
+        const toScope = credentialScopeHost(toParsed.hostname, toParsed.port ? Number(toParsed.port) : undefined);
+        if (toScope !== allowedHost) {
+            throw { transportFailure: true as const, reason: 'redirect-scope', host: fromUrl, hasToken: true } satisfies TransportFailure;
+        }
+    }
+}
+
+/**
+ * Parse a Location header (absolute or relative) against a base URL.
+ * Returns null on parse failure so the caller can fail closed.
+ */
+function resolveLocation(baseUrl: string, location: string): string | null {
+    try {
+        return new URL(location, baseUrl).toString();
+    } catch {
+        return null;
+    }
+}
+
 /**
  * Windows-only: locate the CA bundle bundled with Git for Windows. Stripping
  * system gitconfig (GIT_CONFIG_NOSYSTEM) also strips the installer's
@@ -344,10 +479,10 @@ async function detectWindowsCABundle(): Promise<string | null> {
  * Mirrors Node's own NODE_EXTRA_CA_CERTS semantics (extra anchors ADDED to
  * the defaults, never replacing them) by writing a combined PEM bundle into
  * the fetch workspace's `.meta` dir:
- * - No NODE_EXTRA_CA_CERTS: production posture. POSIX passes nothing and
- *   lets OpenSSL use system trust; Windows pins Git's own bundled bundle,
- *   because stripping system gitconfig also strips the installer's pointer
- *   to it.
+ * - No NODE_EXTRA_CA_CERTS and no per-source PEM: production posture.
+ *   POSIX passes nothing and lets OpenSSL use system trust; Windows pins
+ *   Git's own bundled bundle, because stripping system gitconfig also
+ *   strips the installer's pointer to it.
  * - With NODE_EXTRA_CA_CERTS and/or a per-source PEM: defaults PLUS the extra
  *   CAs, so private-CA servers and public hosts validate in the same fetch.
  *
@@ -361,14 +496,17 @@ async function resolveCaArgs(layout: WorkspaceLayout, perSourceCaPem?: string | 
     const isWindows = process.platform === 'win32';
 
     // Per-source and env-var anchors live in a single combined file written by
-    // the sink module. If neither was supplied we can hand the request back
-    // to system trust on POSIX; on Windows we still need the Git-bundled
-    // pointer because the installer's gitconfig has been stripped.
+    // the sink module. The sink now includes system anchors when custom
+    // anchors are present, so we only need to handle the "no custom anchors"
+    // case specially for Windows.
     const combined = await writeCombinedCaBundle(layout.metaDir, perSourceCaPem);
     if (combined) {
         return ['-c', `http.sslCAInfo=${combined.path}`];
     }
 
+    // No custom anchors: on POSIX we pass nothing (system trust applies
+    // directly via OpenSSL). On Windows we still need the Git-bundled
+    // pointer because GIT_CONFIG_NOSYSTEM stripped the installer's config.
     if (isWindows) {
         const bundle = await detectWindowsCABundle();
         return bundle ? ['-c', `http.sslCAInfo=${bundle}`] : [];
@@ -442,7 +580,7 @@ async function prepareInvocation(
     token?: string | null,
     sshAuth?: ResolveRequest['sshAuth'],
     caBundlePem?: string | null,
-): Promise<{ layout: WorkspaceLayout; env: NodeJS.ProcessEnv; baseArgs: string[] }> {
+): Promise<{ layout: WorkspaceLayout; env: NodeJS.ProcessEnv; baseArgs: string[]; allowedHost: string | null }> {
     const layout = await prepareWorkspace(workspaceRoot);
     let sshCommand: string | null = null;
     if (sshAuth) {
@@ -457,7 +595,7 @@ async function prepareInvocation(
         : null;
     const env = buildEnv(layout.homeDir, token, helperPath, sshCommand, allowedHost);
     const baseArgs = await commonArgs(layout, helperPath, Boolean(sshAuth), caBundlePem);
-    return { layout, env, baseArgs };
+    return { layout, env, baseArgs, allowedHost };
 }
 
 // ─── Input validation ────────────────────────────────────────────────────────
@@ -624,6 +762,7 @@ async function lsRemoteRefs(
     baseArgs: string[],
     timeoutMs: number,
     hasToken: boolean,
+    allowedHost: string | null = null,
 ): Promise<ResolvedRemoteRefs> {
     const host = repoHostLabel(repo);
     let res: RunResult;
@@ -639,6 +778,12 @@ async function lsRemoteRefs(
         throw e;
     }
     if (res.exitCode !== 0) {
+        // If the failure followed a cross-host or forbidden redirect, surface
+        // it as a redirect-scope failure rather than a generic exit error.
+        // The destination is parsed from git's stderr, so no pre-flight
+        // network call is required.
+        const redirectFailure = classifyRedirectStderr(res.stderr, repo.href, allowedHost, hasToken);
+        if (redirectFailure) throw redirectFailure;
         throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: baseArgs, host, hasToken } satisfies TransportFailure;
     }
     const found: ResolvedRemoteRefs = { branchSha: null, tagSha: null };
@@ -921,12 +1066,20 @@ export const nativeGitTransport: GitTransport = {
         }
 
         assertValidRef(req.ref, repoHostLabel(repo), hasToken);
+
+        // Compute the credential scope host for the configured repository.
+        // The credential helper (see credentialHelper.ts) refuses to emit
+        // credentials for any other host, but we additionally pre-classify
+        // redirect-scope failures here so the operator gets a clear message
+        // when git follows a redirect to a different host.
+        const allowedHost = hasToken && repo.kind === 'https' ? credentialScopeHost(repo.host) : null;
+
         const { env, baseArgs } = await prepareInvocation(
             req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
         );
         const found = await lsRemoteRefs(
             repo, req.ref, env, baseArgs,
-            req.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasToken,
+            req.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasToken, allowedHost,
         );
         if (found.branchSha) return { commitSha: found.branchSha, kind: 'branch' };
         if (found.tagSha) return { commitSha: found.tagSha, kind: 'tag' };
@@ -939,7 +1092,11 @@ export const nativeGitTransport: GitTransport = {
         const repo = assertValidRepoUrl(req.repoUrl, hasToken);
         assertValidRef(req.ref, repoHostLabel(repo), hasToken);
 
-        const { layout, env, baseArgs } = await prepareInvocation(
+        // The credential scope host is set inside prepareInvocation via
+        // GIT_ALLOWED_HOST_ENV_VAR so the credential helper refuses to emit
+        // credentials for any other host. Redirects to a different host are
+        // caught by classifyRedirectStderr in the failure path below.
+        const { layout, env, baseArgs, allowedHost } = await prepareInvocation(
             req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
         );
         const checkout = path.join(req.workspaceRoot, 'repo');
@@ -979,6 +1136,12 @@ export const nativeGitTransport: GitTransport = {
                     if (isTimeoutError(e)) {
                         throw { transportFailure: true as const, reason: 'timeout', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                     }
+                    // Non-zero exit may follow a redirect. Check stderr for
+                    // redirect-scope failures before reporting a generic exit error.
+                    const redirectFailureCatch = classifyRedirectStderr(
+                        e instanceof Error ? e.message : String(e), repo.href, allowedHost, hasToken,
+                    );
+                    if (redirectFailureCatch) throw redirectFailureCatch;
                     throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), argv: args, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
                 // A watchdog-triggered SIGKILL settles runGit's promise via the
@@ -989,6 +1152,10 @@ export const nativeGitTransport: GitTransport = {
                     throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
                 if (res.exitCode !== 0) {
+                    // Non-zero exit may follow a redirect. Check stderr for
+                    // redirect-scope failures before reporting a generic exit error.
+                    const redirectFailureExit = classifyRedirectStderr(res.stderr, repo.href, allowedHost, hasToken);
+                    if (redirectFailureExit) throw redirectFailureExit;
                     throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: args, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
                 return res;
