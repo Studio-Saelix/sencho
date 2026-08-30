@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
     Server, Cpu, MemoryStick, HardDrive, ChevronDown, ChevronRight,
     Layers, Wifi, WifiOff, AlertTriangle, Download, Loader2,
-    MoreVertical, Ban, Pencil, Trash2, Info,
+    MoreVertical, Ban, Pencil, Trash2, Info, FlaskConical,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -257,6 +257,11 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
                                         Skipped
                                     </Badge>
                                 )}
+                                {updateStatus?.isDevImage && (
+                                    <Badge className="text-[10px] px-1.5 py-0 h-4 bg-warning/15 text-warning border-warning/30 shrink-0">
+                                        <FlaskConical className="w-2.5 h-2.5 mr-0.5" strokeWidth={1.5} /> Integration image
+                                    </Badge>
+                                )}
                                 {isOnline && isCritical(node) && (
                                     <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
                                         <AlertTriangle className="w-2.5 h-2.5 mr-0.5" /> Critical
@@ -354,6 +359,27 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
                                 <><Loader2 className="w-3 h-3 mr-1.5 animate-spin" />Triggering...</>
                             ) : (
                                 <><Download className="w-3 h-3 mr-1.5" strokeWidth={1.5} />{formattedLatest ? `Update to ${formattedLatest}` : 'Update'}</>
+                            )}
+                        </Button>
+                    </div>
+                )}
+
+                {/* Dev-build update button: mutating action, admin only, same requireAdmin
+                    route as the stable update above. No skipActive term: the backend
+                    already clears skipActive for a dev row (fleet.ts), so adding it here
+                    would reintroduce that stale-skip leak. */}
+                {isOnline && updateStatus?.devBuildUpdateAvailable && !updateStatus.updateStatus && onUpdate && isAdmin && (
+                    <div className="mt-3 pt-3 border-t border-border/50">
+                        <Button
+                            size="sm"
+                            className="w-full h-7 text-xs bg-brand text-brand-foreground hover:bg-brand/90 border-0"
+                            onClick={() => onUpdate(node.id)}
+                            disabled={updatingNodeId === node.id}
+                        >
+                            {updatingNodeId === node.id ? (
+                                <><Loader2 className="w-3 h-3 mr-1.5 animate-spin" />Triggering...</>
+                            ) : (
+                                <><FlaskConical className="w-3 h-3 mr-1.5" strokeWidth={1.5} />Update dev build</>
                             )}
                         </Button>
                     </div>

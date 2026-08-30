@@ -15,6 +15,7 @@ import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { StackOpLockService } from '../services/StackOpLockService';
 import SelfUpdateService, { type PinInfo } from '../services/SelfUpdateService';
+import { MonitorService } from '../services/MonitorService';
 import { getSenchoVersion, isValidVersion } from '../services/CapabilityRegistry';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin, requireNodeProxy, requireUserSession } from '../middleware/tierGates';
@@ -35,7 +36,13 @@ import { getErrorMessage } from '../utils/errors';
 import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
 import { parseIntParam } from '../utils/parseIntParam';
 import { parseRequestedTargetVersion, pickCompareTarget } from '../utils/targetVersion';
-import { buildTargetImageRef, isRepinBlocked, type ImagePinKind } from '../helpers/selfUpdateCompose';
+import {
+  buildTargetImageRef,
+  isRepinBlocked,
+  isSenchoDevFloatingTag,
+  isSenchoDevRepository,
+  type ImagePinKind,
+} from '../helpers/selfUpdateCompose';
 import { withTimeout, TimeoutError } from '../utils/withTimeout';
 import { foldNodeEstimate, type FleetEstimateTargetResult, type FleetNodeEstimate } from '../helpers/fleetEstimate';
 
@@ -1277,16 +1284,35 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         let updateBlocked = false;
         let updateBlockedReason: string | null = null;
         let imageChannel: 'community' | 'hardened' | 'unknown' | null = null;
+        // Dev-channel fields: local only. Remote nodes do not expose a full
+        // composeImageRef (see the comment above), so a remote's dev-image
+        // status cannot be determined here.
+        let isDevImage = false;
+        let devBuildUpdateAvailable = false;
         if (node.type === 'local') {
           const pin = await SelfUpdateService.getInstance().getPinInfo();
           if (pin) {
             ({ imagePinKind, composeImageRef, targetImageRef, updateBlocked, updateBlockedReason, imageChannel } =
               localPinStatusFields(pin, compareVersion, compareValid, REPIN_BLOCKED_REASON));
+            isDevImage = isSenchoDevRepository(pin.composeImageRef);
+            devBuildUpdateAvailable = isSenchoDevFloatingTag(pin.composeImageRef)
+              && Boolean(db.getSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY));
           }
         } else {
           imagePinKind = remoteImagePinKind;
           updateBlocked = remoteUpdateBlocked;
           imageChannel = remoteImageChannel;
+        }
+
+        // A dev-pinned image tracks build freshness by digest, not the stable
+        // semver compare target, and its packaged version cannot be compared
+        // against a stable release. A dev row also carries no meaningful
+        // stable skip: the stored skip predates the dev pin, or targets a
+        // stable version this node no longer tracks.
+        if (isDevImage) {
+          updateAvailable = false;
+          skipActive = false;
+          skippedVersion = null;
         }
 
         return {
@@ -1306,6 +1332,8 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           updateBlocked,
           updateBlockedReason,
           imageChannel,
+          isDevImage,
+          devBuildUpdateAvailable,
           operationKind: currentTracker?.operationKind ?? null,
           canReapplyCompose: node.type === 'local'
             ? SelfUpdateService.getInstance().isAvailable()
@@ -1329,6 +1357,8 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         skipActive: false,
         skippedVersion: null,
         ...EMPTY_PIN_STATUS,
+        isDevImage: false,
+        devBuildUpdateAvailable: false,
         operationKind: null,
         canReapplyCompose: false,
       };

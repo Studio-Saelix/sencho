@@ -142,6 +142,79 @@ describe('NodeCard', () => {
     expect(screen.queryByRole('button', { name: /Update/ })).not.toBeInTheDocument();
   });
 
+  it('shows the Integration image badge regardless of update availability', () => {
+    render(
+      <NodeCard
+        {...baseProps(onlineNode())}
+        updateStatus={{ ...updateAvailableStatus, updateAvailable: false, isDevImage: true, devBuildUpdateAvailable: false }}
+      />,
+    );
+    expect(screen.getByText('Integration image')).toBeInTheDocument();
+  });
+
+  it('does not show the Integration image badge for a non-dev node', () => {
+    render(<NodeCard {...baseProps(onlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
+    expect(screen.queryByText('Integration image')).not.toBeInTheDocument();
+  });
+
+  it('shows the dev-build update button for an admin when a dev build is available', async () => {
+    const onUpdate = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <NodeCard
+        {...baseProps(onlineNode())}
+        updateStatus={{ ...updateAvailableStatus, updateAvailable: false, isDevImage: true, devBuildUpdateAvailable: true }}
+        onUpdate={onUpdate}
+      />,
+    );
+    const button = screen.getByRole('button', { name: /Update dev build/ });
+    expect(button).toBeInTheDocument();
+    expect(screen.getByText('Integration image')).toBeInTheDocument();
+    await user.click(button);
+    expect(onUpdate).toHaveBeenCalledWith(2);
+  });
+
+  it('hides the dev-build update button for a non-admin', () => {
+    useAuthMock.mockReturnValue({ isAdmin: false, can: vi.fn(() => false) });
+    render(
+      <NodeCard
+        {...baseProps(onlineNode())}
+        updateStatus={{ ...updateAvailableStatus, updateAvailable: false, isDevImage: true, devBuildUpdateAvailable: true }}
+        onUpdate={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /Update dev build/ })).not.toBeInTheDocument();
+    expect(screen.getByText('Integration image')).toBeInTheDocument();
+  });
+
+  it('hides the dev-build update button when no dev build is available', () => {
+    render(
+      <NodeCard
+        {...baseProps(onlineNode())}
+        updateStatus={{ ...updateAvailableStatus, updateAvailable: false, isDevImage: true, devBuildUpdateAvailable: false }}
+        onUpdate={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /Update dev build/ })).not.toBeInTheDocument();
+  });
+
+  it('never shows both update buttons for a well-formed dev row (mutual exclusion by construction)', () => {
+    // The backend (fleet.ts) guarantees updateAvailable=false whenever isDevImage
+    // is true, so the two buttons' gating conditions can never both be satisfied
+    // for real data; the component intentionally adds no redundant isDevImage
+    // check to the stable button. This fixture reflects what the backend can
+    // actually send, not an artificial one.
+    render(
+      <NodeCard
+        {...baseProps(onlineNode())}
+        updateStatus={{ ...updateAvailableStatus, updateAvailable: false, isDevImage: true, devBuildUpdateAvailable: true }}
+        onUpdate={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('button', { name: /Update dev build/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Update to/ })).not.toBeInTheDocument();
+  });
+
   it('shows the networking signal badge and switches to the node on click', async () => {
     const onOpenNetworking = vi.fn();
     const user = userEvent.setup();

@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { MonitorService } from '../services/MonitorService';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -13,6 +14,16 @@ let adminAuth: string;
 let viewerAuth: string;
 let localNodeId: number;
 let db: import('../services/DatabaseService').DatabaseService;
+let SelfUpdateService: typeof import('../services/SelfUpdateService').default;
+
+function mockCompareTargetFetch() {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+    new Response(JSON.stringify({ tag_name: 'v0.99.0' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  );
+}
 
 function signToken(username: string, role: string) {
   return jwt.sign(
@@ -31,6 +42,7 @@ beforeAll(async () => {
   localNodeId = db.getNodes().find(n => n.type === 'local')!.id;
   const index = await import('../index');
   app = index.app;
+  SelfUpdateService = (await import('../services/SelfUpdateService')).default;
 });
 
 afterAll(() => {
@@ -202,5 +214,30 @@ describe('node_update_skips table lifecycle', () => {
   it('deleteNodeUpdateSkip is idempotent for missing rows', () => {
     // Should not throw when row doesn't exist
     expect(() => db.deleteNodeUpdateSkip(99999)).not.toThrow();
+  });
+});
+
+describe('stale stable skip does not leak onto a dev-pinned node', () => {
+  it('clears skipActive/skippedVersion in the response once the node is dev-pinned', async () => {
+    mockCompareTargetFetch();
+    // A skip stored while the node still tracked the stable release train.
+    db.setNodeUpdateSkip(localNodeId, '0.99.0', TEST_USERNAME);
+    vi.spyOn(SelfUpdateService.getInstance(), 'getPinInfo').mockResolvedValue({
+      pinKind: 'floating',
+      composeImageRef: 'ghcr.io/studio-saelix/sencho-dev:dev',
+      filePath: '/opt/sencho/docker-compose.yml',
+    });
+    db.setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, 'sha256:aaaa');
+
+    const res = await request(app)
+      .get('/api/fleet/update-status')
+      .set('Authorization', adminAuth);
+
+    expect(res.status).toBe(200);
+    const local = res.body.nodes.find((n: { nodeId: number }) => n.nodeId === localNodeId);
+    expect(local.skipActive).toBe(false);
+    expect(local.skippedVersion).toBeNull();
+    expect(local.isDevImage).toBe(true);
+    expect(local.devBuildUpdateAvailable).toBe(true);
   });
 });

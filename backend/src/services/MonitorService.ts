@@ -11,7 +11,14 @@ import { isValidVersion, getSenchoVersion } from './CapabilityRegistry';
 import { getLatestVersionInfo } from '../utils/version-check';
 import { getHostMemory } from '../helpers/hostMemory';
 import { isDebugEnabled } from '../utils/debug';
+import { sanitizeForLog } from '../utils/safeLog';
 import { withTimeout, TimeoutError } from '../utils/withTimeout';
+import SelfUpdateService from './SelfUpdateService';
+import SelfIdentityService from './SelfIdentityService';
+import { RegistryService } from './RegistryService';
+import { parseImageRef } from './registry-api';
+import { detectSelfDevBuildUpdate } from './selfDevBuildDetect';
+import { isSenchoDevRepository, isSenchoDevFloatingTag } from '../helpers/selfUpdateCompose';
 
 const getMetricDetails = (metric: string): { name: string, unit: string } => {
     switch (metric) {
@@ -204,6 +211,16 @@ export class MonitorService {
     // exits; see backend/src/services/DockerEventService.ts.
 
     private static readonly SENCHO_UPDATE_NOTIFIED_KEY = 'last_sencho_update_notified_version';
+    // Public: the Fleet route reads this same key to derive devBuildUpdateAvailable
+    // without a second polling loop.
+    static readonly SENCHO_DEV_BUILD_AVAILABLE_KEY = 'sencho_dev_build_available_digest';
+    private static readonly SENCHO_DEV_BUILD_NOTIFIED_KEY = 'last_sencho_dev_build_notified_digest';
+
+    // Cadence gate for checkSenchoDevBuild(): 30 minutes after a conclusive
+    // check (up_to_date, or update with a notification decision made), 5
+    // minutes after an inconclusive one so a transient failure retries soon.
+    private lastDevBuildCheckAt = 0;
+    private lastDevBuildCheckGateMs = 30 * 60 * 1000;
 
     private constructor() { }
 
@@ -375,6 +392,10 @@ export class MonitorService {
 
         // 4. Sencho version update check (cache-backed; dedup prevents re-notify)
         await this.checkSenchoVersion();
+
+        // 5. Sencho dev-build update check (only applicable when self-pinned to
+        //    the floating ghcr.io/studio-saelix/sencho-dev:dev tag)
+        await this.checkSenchoDevBuild();
     }
 
     /**
@@ -573,6 +594,14 @@ export class MonitorService {
      * next eval can retry.
      */
     private async checkSenchoVersion(): Promise<void> {
+        // A dev-repo pin (floating :dev, immutable dev-<sha>, or digest) tracks
+        // rolling builds, not stable semver releases, so the stable-release
+        // update check does not apply; checkSenchoDevBuild() covers it instead.
+        const pin = await SelfUpdateService.getInstance().getPinInfo();
+        if (pin && isSenchoDevRepository(pin.composeImageRef)) {
+            return;
+        }
+
         // getSenchoVersion() reads the packaged manifest; npm_package_version
         // is unset under `node dist/index.js` (Docker).
         const currentVersion = getSenchoVersion();
@@ -622,6 +651,100 @@ export class MonitorService {
             if (isDebugEnabled()) console.debug(`[Monitor:diag] Dispatched version notification: ${currentVersion} -> ${latest}`);
         } catch (e) {
             console.error('[MonitorService] Failed to dispatch Sencho version notification:', e);
+        }
+    }
+
+    /**
+     * Notify when the running Sencho container has fallen behind the rolling
+     * `ghcr.io/studio-saelix/sencho-dev:dev` build it is pinned to. Only
+     * applicable when the compose-declared image is that exact floating tag;
+     * a stable pin, an immutable `dev-<sha>` tag, or a digest pin returns
+     * immediately. Availability key `sencho_dev_build_available_digest`
+     * always reflects the latest detection outcome; dedup key
+     * `last_sencho_dev_build_notified_digest` prevents re-notifying for a
+     * digest already announced.
+     */
+    private async checkSenchoDevBuild(): Promise<void> {
+        try {
+            const pin = await SelfUpdateService.getInstance().getPinInfo();
+            if (!pin) return;
+            if (!isSenchoDevFloatingTag(pin.composeImageRef)) return;
+
+            if (Date.now() - this.lastDevBuildCheckAt < this.lastDevBuildCheckGateMs) {
+                return;
+            }
+
+            const imageId = SelfIdentityService.getInstance().getIdentity().imageId;
+            if (!imageId) {
+                if (isDebugEnabled()) console.debug('[Monitor:diag] Sencho dev-build check: own image id unknown; will retry sooner');
+                this.lastDevBuildCheckAt = Date.now();
+                this.lastDevBuildCheckGateMs = 5 * 60 * 1000;
+                return;
+            }
+
+            const parsed = parseImageRef(pin.composeImageRef);
+            if (!parsed) {
+                if (isDebugEnabled()) console.debug('[Monitor:diag] Sencho dev-build check: could not parse compose image ref; will retry sooner');
+                this.lastDevBuildCheckAt = Date.now();
+                this.lastDevBuildCheckGateMs = 5 * 60 * 1000;
+                return;
+            }
+
+            const credentials = await RegistryService.getInstance().getAuthForRegistry(parsed.registry);
+            const result = await detectSelfDevBuildUpdate({
+                runningImageId: imageId,
+                registry: parsed.registry,
+                repo: parsed.repo,
+                tag: parsed.tag,
+                credentials,
+            });
+
+            const db = DatabaseService.getInstance();
+
+            if (result.kind === 'up_to_date') {
+                db.setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, '');
+                this.lastDevBuildCheckAt = Date.now();
+                this.lastDevBuildCheckGateMs = 30 * 60 * 1000;
+                if (isDebugEnabled()) console.debug('[Monitor:diag] Sencho dev build is up-to-date');
+                return;
+            }
+
+            if (result.kind === 'inconclusive') {
+                if (isDebugEnabled()) console.debug(`[Monitor:diag] Sencho dev-build check inconclusive: ${sanitizeForLog(result.reason)}`);
+                this.lastDevBuildCheckAt = Date.now();
+                this.lastDevBuildCheckGateMs = 5 * 60 * 1000;
+                return;
+            }
+
+            // result.kind === 'update': availability reflects reality regardless
+            // of whether the notification itself lands.
+            db.setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, result.digest);
+
+            if (db.getSystemState(MonitorService.SENCHO_DEV_BUILD_NOTIFIED_KEY) === result.digest) {
+                if (isDebugEnabled()) console.debug('[Monitor:diag] Already notified for this Sencho dev build digest');
+                this.lastDevBuildCheckAt = Date.now();
+                this.lastDevBuildCheckGateMs = 30 * 60 * 1000;
+                return;
+            }
+
+            const { persisted } = await NotificationService.getInstance().dispatchAlert(
+                'info',
+                'dev_build_update_available',
+                'A new Sencho dev build is available on ghcr.io/studio-saelix/sencho-dev:dev. '
+                + "Use the update action on this node's Fleet card to pull and recreate.",
+            );
+
+            this.lastDevBuildCheckAt = Date.now();
+            if (persisted) {
+                db.setSystemState(MonitorService.SENCHO_DEV_BUILD_NOTIFIED_KEY, result.digest);
+                this.lastDevBuildCheckGateMs = 30 * 60 * 1000;
+            } else {
+                // Retry sooner so an unpersisted notification is not silently
+                // deduped; the availability key above already reflects reality.
+                this.lastDevBuildCheckGateMs = 5 * 60 * 1000;
+            }
+        } catch (e) {
+            console.error('[MonitorService] Failed to check Sencho dev build update:', e);
         }
     }
 

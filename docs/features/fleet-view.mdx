@@ -93,6 +93,7 @@ Every node renders as a card. The local node is pinned at the top of the grid wi
 | **Version badge** | The node's Sencho version in mono tabular numerals (e.g. `v0.76.3`). Hidden if the node cannot report a version. |
 | **Update available** badge | Warning pill shown when a newer Sencho release is published for this node. |
 | **Pinned** badge | Shown instead of **Update available** when the node's own Sencho image is pinned to a digest (or an unrecognised pin) and cannot be updated automatically from here. A tooltip explains why. |
+| **Integration image** badge | Warning pill shown, for every role, whenever the local node's Sencho image is pinned to the `sencho-dev` integration repository (see [Verifying images](/operations/verifying-images)). Persistent: it shows whether or not a newer build is currently available. |
 | **Critical** badge | Destructive pill with a triangle icon, surfaced when the online node is above 90% CPU or 90% disk. |
 | **Cordoned** badge | Warning pill with a Ban icon, surfaced when the node is cordoned. The badge tooltip carries the cordon reason or the default *Unschedulable: new blueprint deployments skip this node*. See [Fleet Federation](/features/fleet-federation) for the full cordon and pin flow. |
 | **Networking** badge | Warning pill reading `Networking · exposed`, `Networking · drift`, or `Networking · unknown exposure`, shown when the node has a stack with published ports, detected network drift, or unresolved exposure. Click it to jump to that node's Networking page. |
@@ -101,6 +102,7 @@ Every node renders as a card. The local node is pinned at the top of the grid wi
 | **Container stats grid** | Three cells: **Running** (active containers), **Stopped** (exited containers), **Stacks** (count, or `-` if the node has not reported). Hidden on offline nodes. |
 | **CPU / RAM / Disk bars** | Each row shows the metric icon, the percent (CPU) or `used / total` (RAM, Disk), and a horizontal bar that tints amber at 60%, destructive at 80% (CPU/RAM), or amber at 75% / destructive at 90% (Disk). Hidden on offline nodes. |
 | **Update to v…** button | Admin-only outline button that runs along the bottom of the card when an update is available. The label includes the latest version. |
+| **Update dev build** button | Admin-only, brand-colored button that replaces **Update to v…** when the local node is pinned to `sencho-dev:dev` and a newer integration build has been published. Pulls and recreates without rewriting the pinned tag. |
 | **Stack details** trigger | Footer button that toggles the stack drill-down. The label carries the stack count for the node. |
 
 Offline nodes render dimmed, with no stats grid, no usage bars, and no update affordance.
@@ -267,7 +269,7 @@ Four tiles tell you how the fleet is split across update states:
 | Card | Meaning |
 |------|---------|
 | **Up to date** | Nodes whose current version equals the latest published Sencho release. |
-| **Available** | Nodes with a published update they are not yet running. |
+| **Available** | Nodes with a published update they are not yet running. Combines a pending stable release with a pending dev build on a `:dev`-pinned local node. |
 | **Updating** | Nodes that are currently pulling and recreating with the new image. |
 | **Failed** | Nodes whose most-recent update attempt did not succeed (failure or timeout). |
 
@@ -280,8 +282,8 @@ The table lists every registered node, filtered by the search box at the top. Co
 | **Node** | Node name with a Monitor icon for local nodes and a Globe icon for remotes |
 | **Type** | `local` or `remote` outline pill |
 | **Current** | The node's reported Sencho version, in mono. Reads `unknown` if the node has not reported (offline, unreachable, or never connected). |
-| **Latest** | The newest published Sencho release. Highlighted when newer than Current. |
-| **Status** | Either an `Up to date` success badge, an `Update` button when a newer release is available, an icon-only **Reapply configuration** control (tooltip) for Compose-managed nodes (including up-to-date rows), an in-progress / failed badge with retry and dismiss controls, or a `Skipped` badge when the version has been deferred. |
+| **Latest** | The newest published Sencho release. Highlighted when newer than Current. Reads **Integration build** on a `:dev`-pinned local node, since a dev build has no version number to compare against. |
+| **Status** | Either an `Up to date` success badge, an `Update` button when a newer release or dev build is available, an icon-only **Reapply configuration** control (tooltip) for Compose-managed nodes (including up-to-date rows), an in-progress / failed badge with retry and dismiss controls, or a `Skipped` badge when the version has been deferred. |
 
 The latest-version label is resolved from the GitHub Releases API (with a Docker Hub fallback) and cached for 30 minutes. **Recheck** flushes the cache and re-resolves immediately. See [Remote Updates · Reapply configuration](/features/remote-updates#reapply-configuration) for what reapply does and when to use it.
 
@@ -293,7 +295,7 @@ Skipped nodes show a **Skipped vX.Y.Z** badge and an **Unskip** button. Unskippi
 
 ### Changelog tab
 
-The **Changelog** tab shows the release notes for the latest published Sencho version, fetched from the GitHub Releases page. It displays the raw release notes alongside a link to view the full release on GitHub. If the release notes cannot be loaded, a message is shown in place.
+The **Changelog** tab shows the release notes for the latest published Sencho version, fetched from the GitHub Releases page. It displays the raw release notes alongside a link to view the full release on GitHub. If the release notes cannot be loaded, a message is shown in place. A pending dev build does not light the changelog indicator or appear here: it has no release notes to show.
 
 ### What happens when you click Update
 

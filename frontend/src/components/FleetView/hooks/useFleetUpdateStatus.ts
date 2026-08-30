@@ -7,10 +7,18 @@ import { useComposeReapplyAction } from './useComposeReapplyAction';
 
 /** POST body for an update trigger: forward the target release when it is a
  *  valid version so the receiving node can repin a semver pin to it; omit
- *  otherwise so the backend falls back to its compare target. */
+ *  otherwise so the backend falls back to its compare target.
+ *
+ *  A dev image never gets a targetVersion, even when latestVersion is a
+ *  valid stable release: latestVersion there is the latest STABLE release,
+ *  unrelated to what a dev-channel update actually installs. The backend
+ *  already ignores targetVersion safely for a floating pin (it only repins
+ *  a semver-classified pin), so this is a copy-accuracy fix, not a safety
+ *  fix: without it, the button label and confirm-dialog would claim a
+ *  stable version number the update isn't installing. */
 function updateRequestInit(status: NodeUpdateStatus | undefined): RequestInit & { localOnly: true } {
     const base = { method: 'POST', localOnly: true } as const;
-    return isValidVersion(status?.latestVersion)
+    return !status?.isDevImage && isValidVersion(status?.latestVersion)
         ? { ...base, body: JSON.stringify({ targetVersion: status!.latestVersion }) }
         : base;
 }

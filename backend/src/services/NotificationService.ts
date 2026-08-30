@@ -63,6 +63,7 @@ export type NotificationCategory =
     | 'git_apply_rolled_back'
     | 'git_create'
     | 'node_update_available'
+    | 'dev_build_update_available'
     | 'system';
 
 export const ALL_NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = [
@@ -71,7 +72,7 @@ export const ALL_NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = [
     'autoheal_triggered', 'monitor_alert', 'scan_finding',
     'blueprint_deployed', 'blueprint_deployment_failed',
     'blueprint_drift_detected', 'blueprint_drift_correction_failed',
-    'node_update_available', 'system',
+    'node_update_available', 'dev_build_update_available', 'system',
 ];
 
 /** Every category that can appear in notification history / the bell panel. */

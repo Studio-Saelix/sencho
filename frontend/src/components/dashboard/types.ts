@@ -69,6 +69,7 @@ export type NotificationCategory =
     | 'health_gate_failed'
     | 'rollback_generation_released'
     | 'node_update_available'
+    | 'dev_build_update_available'
     | 'system';
 
 export interface NotificationItem {

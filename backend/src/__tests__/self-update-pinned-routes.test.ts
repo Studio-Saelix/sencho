@@ -8,6 +8,7 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { buildTargetImageRef } from '../helpers/selfUpdateCompose';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { MonitorService } from '../services/MonitorService';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -215,5 +216,70 @@ describe('GET /api/fleet/update-status pin projection', () => {
     const local = res.body.nodes.find((n: { nodeId: number }) => n.nodeId === localNodeId);
     expect(local.updateBlocked).toBe(true);
     expect(local.updateBlockedReason).toMatch(/cannot update automatically/i);
+  });
+
+  it('marks a :dev-pinned local node as a dev image and available when the digest key is set', async () => {
+    mockCompareTargetFetch();
+    mockSelfUpdateAvailable({
+      pinInfo: { pinKind: 'floating', composeImageRef: 'ghcr.io/studio-saelix/sencho-dev:dev', filePath: '/opt/sencho/docker-compose.yml' },
+    });
+    DatabaseService.getInstance().setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, 'sha256:aaaa');
+
+    const res = await request(app)
+      .get('/api/fleet/update-status')
+      .set('Authorization', adminAuth);
+
+    const local = res.body.nodes.find((n: { nodeId: number }) => n.nodeId === localNodeId);
+    expect(local.isDevImage).toBe(true);
+    expect(local.devBuildUpdateAvailable).toBe(true);
+    expect(local.updateAvailable).toBe(false);
+  });
+
+  it('marks a :dev-pinned local node as a dev image but not available when no digest key is set', async () => {
+    mockCompareTargetFetch();
+    mockSelfUpdateAvailable({
+      pinInfo: { pinKind: 'floating', composeImageRef: 'ghcr.io/studio-saelix/sencho-dev:dev', filePath: '/opt/sencho/docker-compose.yml' },
+    });
+    DatabaseService.getInstance().setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, '');
+
+    const res = await request(app)
+      .get('/api/fleet/update-status')
+      .set('Authorization', adminAuth);
+
+    const local = res.body.nodes.find((n: { nodeId: number }) => n.nodeId === localNodeId);
+    expect(local.isDevImage).toBe(true);
+    expect(local.devBuildUpdateAvailable).toBe(false);
+  });
+
+  it('marks an immutable dev-<sha> pin as a dev image but never eligible for the dev update action', async () => {
+    mockCompareTargetFetch();
+    mockSelfUpdateAvailable({
+      pinInfo: { pinKind: 'floating', composeImageRef: 'ghcr.io/studio-saelix/sencho-dev:dev-a1b2c3d', filePath: '/opt/sencho/docker-compose.yml' },
+    });
+    DatabaseService.getInstance().setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, 'sha256:aaaa');
+
+    const res = await request(app)
+      .get('/api/fleet/update-status')
+      .set('Authorization', adminAuth);
+
+    const local = res.body.nodes.find((n: { nodeId: number }) => n.nodeId === localNodeId);
+    expect(local.isDevImage).toBe(true);
+    expect(local.devBuildUpdateAvailable).toBe(false);
+  });
+
+  it('leaves a stable-pinned local node with both dev fields false', async () => {
+    mockCompareTargetFetch();
+    mockSelfUpdateAvailable({
+      pinInfo: { pinKind: 'semver', composeImageRef: 'saelix/sencho:0.83.0', filePath: '/opt/sencho/docker-compose.yml' },
+    });
+    DatabaseService.getInstance().setSystemState(MonitorService.SENCHO_DEV_BUILD_AVAILABLE_KEY, 'sha256:aaaa');
+
+    const res = await request(app)
+      .get('/api/fleet/update-status')
+      .set('Authorization', adminAuth);
+
+    const local = res.body.nodes.find((n: { nodeId: number }) => n.nodeId === localNodeId);
+    expect(local.isDevImage).toBe(false);
+    expect(local.devBuildUpdateAvailable).toBe(false);
   });
 });

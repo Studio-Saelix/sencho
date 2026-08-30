@@ -144,6 +144,8 @@ Every push to `main` publishes the current integration build so you can pull and
 The `:dev` image is not for production. It is unsigned, is never published to Docker Hub, and does not carry the SBOM, provenance, or VEX attestations described above.
 </Note>
 
+An instance pinned to `:dev` shows a persistent "Integration image" marker on its Fleet card, and Sencho notifies you when a newer build has been published to the tag, with an in-app action to pull and recreate. Detection polls the tag on a fixed interval and reflects the newest build observed, so if several builds publish in quick succession you get one notification for the latest rather than one per build.
+
 ### Preview tags (pre-merge only)
 
 Maintainers publish these from open PRs for external validation. They are unsigned and not for production.

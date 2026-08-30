@@ -1,4 +1,4 @@
-import { Download, RefreshCw } from 'lucide-react';
+import { Download, FlaskConical, RefreshCw } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { ConfirmModal } from '@/components/ui/modal';
 import { formatVersion } from '@/lib/version';
@@ -15,19 +15,24 @@ interface LocalUpdateConfirmDialogProps {
     composeImageRef?: string | null;
     targetImageRef?: string | null;
     targetVersion?: string | null;
+    /** True when the node's compose image is any sencho-dev reference. Only
+     *  meaningful in update mode; ignored for reapply. */
+    isDevImage?: boolean;
 }
 
 export function LocalUpdateConfirmDialog({
     open, onOpenChange, onConfirm, mode = 'update', nodeType = 'local',
-    imagePinKind, composeImageRef, targetImageRef, targetVersion,
+    imagePinKind, composeImageRef, targetImageRef, targetVersion, isDevImage,
 }: LocalUpdateConfirmDialogProps) {
     const isReapply = mode === 'reapply';
     const isRemoteReapply = isReapply && nodeType === 'remote';
+    const isDevUpdate = !isReapply && isDevImage;
     const versionLabel = formatVersion(targetVersion) ?? 'the latest release';
 
     let kicker = 'LOCAL · UPDATE';
     if (isRemoteReapply) kicker = 'REMOTE · REAPPLY';
     else if (isReapply) kicker = 'LOCAL · REAPPLY';
+    else if (isDevUpdate) kicker = 'LOCAL · DEV UPDATE';
 
     let body: ReactNode;
     if (isRemoteReapply) {
@@ -45,6 +50,15 @@ export function LocalUpdateConfirmDialog({
                 No newer Sencho version is selected, and Sencho will not rewrite the
                 configured image reference. The dashboard may briefly disconnect and
                 reconnects automatically when the restart completes.
+            </p>
+        );
+    } else if (isDevUpdate) {
+        body = (
+            <p className="text-sm text-stat-subtitle">
+                Pulls <code className="text-stat-value">ghcr.io/studio-saelix/sencho-dev:dev</code> and
+                restarts the server. The image reference is not rewritten. Integration
+                images are unsigned and carry no release attestations. The dashboard
+                briefly disconnects and reconnects automatically when the update completes.
             </p>
         );
     } else if (imagePinKind === 'semver' && composeImageRef && targetImageRef) {
@@ -73,6 +87,11 @@ export function LocalUpdateConfirmDialog({
                     <>
                         <RefreshCw className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
                         Reapply &amp; restart
+                    </>
+                ) : isDevUpdate ? (
+                    <>
+                        <FlaskConical className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
+                        Update &amp; restart
                     </>
                 ) : (
                     <>

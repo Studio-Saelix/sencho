@@ -18,6 +18,8 @@ import {
   isValidImageRef,
   resolveServiceImageFromContents,
   patchComposeServiceImage,
+  isSenchoDevRepository,
+  isSenchoDevFloatingTag,
 } from '../helpers/selfUpdateCompose';
 import {
   buildComposeReadArgs,
@@ -320,5 +322,107 @@ describe('buildComposeConfigValidateArgs', () => {
     expect(cmd).toContain('config');
     expect(cmd).toContain(shQuote('docker-compose.yml'));
     expect(cmd).toContain(shQuote('/opt/sencho/override.yml'));
+  });
+});
+
+describe('isSenchoDevRepository', () => {
+  it('returns true for the floating dev tag', () => {
+    expect(isSenchoDevRepository('ghcr.io/studio-saelix/sencho-dev:dev')).toBe(true);
+  });
+
+  it('returns true for an immutable dev-<sha> tag', () => {
+    expect(isSenchoDevRepository('ghcr.io/studio-saelix/sencho-dev:dev-a1b2c3d')).toBe(true);
+  });
+
+  it('returns true for a digest-pinned reference', () => {
+    expect(
+      isSenchoDevRepository('ghcr.io/studio-saelix/sencho-dev@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'),
+    ).toBe(true);
+  });
+
+  it('returns true for a reference with both tag and digest', () => {
+    expect(
+      isSenchoDevRepository('ghcr.io/studio-saelix/sencho-dev:dev@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'),
+    ).toBe(true);
+  });
+
+  it('returns false for the stable sencho repository', () => {
+    expect(isSenchoDevRepository('ghcr.io/studio-saelix/sencho:1.2.3')).toBe(false);
+  });
+
+  it('returns false for the hardened repository', () => {
+    expect(isSenchoDevRepository('ghcr.io/studio-saelix/sencho-hardened:1.2.3')).toBe(false);
+  });
+
+  it('returns false for the Docker Hub stable repository', () => {
+    expect(isSenchoDevRepository('saelix/sencho:latest')).toBe(false);
+  });
+
+  it('returns false for an unrelated image', () => {
+    expect(isSenchoDevRepository('docker.io/library/nginx:latest')).toBe(false);
+  });
+
+  it('returns false for an interpolated variable', () => {
+    expect(isSenchoDevRepository('${SENCHO_IMAGE}')).toBe(false);
+  });
+
+  it('returns false for a registry-with-port reference to an unrelated repository', () => {
+    expect(isSenchoDevRepository('localhost:5000/something:dev')).toBe(false);
+  });
+
+  it('returns false for empty or malformed references', () => {
+    expect(isSenchoDevRepository('')).toBe(false);
+    expect(isSenchoDevRepository('   ')).toBe(false);
+  });
+});
+
+describe('isSenchoDevFloatingTag', () => {
+  it('returns true only for the floating dev tag', () => {
+    expect(isSenchoDevFloatingTag('ghcr.io/studio-saelix/sencho-dev:dev')).toBe(true);
+  });
+
+  it('returns false for an immutable dev-<sha> tag (not the floating dev tag)', () => {
+    expect(isSenchoDevFloatingTag('ghcr.io/studio-saelix/sencho-dev:dev-a1b2c3d')).toBe(false);
+  });
+
+  it('returns false for a digest-pinned reference (disqualifies floating)', () => {
+    expect(
+      isSenchoDevFloatingTag('ghcr.io/studio-saelix/sencho-dev@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'),
+    ).toBe(false);
+  });
+
+  it('returns false for a reference with both tag and digest (still digest-pinned)', () => {
+    expect(
+      isSenchoDevFloatingTag('ghcr.io/studio-saelix/sencho-dev:dev@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'),
+    ).toBe(false);
+  });
+
+  it('returns false for the stable sencho repository', () => {
+    expect(isSenchoDevFloatingTag('ghcr.io/studio-saelix/sencho:1.2.3')).toBe(false);
+  });
+
+  it('returns false for the hardened repository', () => {
+    expect(isSenchoDevFloatingTag('ghcr.io/studio-saelix/sencho-hardened:1.2.3')).toBe(false);
+  });
+
+  it('returns false for the Docker Hub stable repository', () => {
+    expect(isSenchoDevFloatingTag('saelix/sencho:latest')).toBe(false);
+  });
+
+  it('returns false for an unrelated image', () => {
+    expect(isSenchoDevFloatingTag('docker.io/library/nginx:latest')).toBe(false);
+  });
+
+  it('returns false for an interpolated variable', () => {
+    expect(isSenchoDevFloatingTag('${SENCHO_IMAGE}')).toBe(false);
+  });
+
+  it('returns false for a registry-with-port reference to an unrelated repository', () => {
+    expect(isSenchoDevFloatingTag('localhost:5000/something:dev')).toBe(false);
+  });
+
+  it('returns false for empty or malformed references', () => {
+    expect(isSenchoDevFloatingTag('')).toBe(false);
+    expect(isSenchoDevFloatingTag('   ')).toBe(false);
   });
 });
