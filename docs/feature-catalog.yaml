@@ -1,5 +1,5 @@
-# Canonical feature catalog — Sencho tier reconciliation (SEN-549)
-# Source of truth. No internal Linear IDs (SEN-NNN) stored here.
+# Canonical feature catalog — Sencho tier reconciliation
+# Source of truth. No internal Linear IDs stored here.
 # Internal planning provenance lives in Linear, not in committed files.
 # Schema: id, name, tier (community|admiral|internal), availability (shipped|planned|internal),
 #         category, publicName, publicRoadmapKey, summary, description, limitation,
@@ -107,7 +107,7 @@ entries:
     publicName: Fleet Secrets (encrypted env bundles)
     publicRoadmapKey: fleet-secrets
     summary: Encrypted versioned environment bundles for fleet-wide secrets.
-    limitation: 'Core encrypted/versioned fleet workflow is Community per SEN-451.'
+    limitation: ''
     featured: true
     homepageOrder: 6
 
@@ -131,7 +131,7 @@ entries:
     publicRoadmapKey: custom-oidc-sso
     summary: Self-hosted identity with any OIDC IdP and one-click presets.
     description: Custom OIDC SSO, Google, GitHub, Okta presets; 2FA/MFA; recovery codes.
-    limitation: 'LDAP / Active Directory requires Admiral tier per SEN-321.'
+    limitation: ''
     featured: true
     homepageOrder: 7
 
@@ -196,7 +196,7 @@ entries:
     publicName: Change Review (planned)
     publicRoadmapKey: change-review-planned
     summary: Required approval workflow for Compose changes before deployment.
-    description: Governance layer requiring approvals before deploy; linked to SEN-257.
+    description: Governance layer requiring approvals before deploy.
     limitation: 'Approved roadmap; not yet shipped. Explicit Planned label in all public surfaces.'
     featured: true
     homepageOrder: 11
@@ -223,7 +223,7 @@ entries:
     publicName: Protected stacks / nodes (planned)
     publicRoadmapKey: protected-stacks-planned
     summary: Protected stacks and nodes with maintenance windows and break-glass.
-    description: Protected workflows, maintenance windows, freezes, break-glass; linked to SEN-259.
+    description: Protected workflows, maintenance windows, freezes, break-glass.
     limitation: 'Planned Admiral capability; not yet available in public matrix as shipped.'
     featured: true
     homepageOrder: 13
@@ -236,7 +236,7 @@ entries:
     publicName: Fleet Readiness Score (planned)
     publicRoadmapKey: fleet-readiness-planned
     summary: Organizational readiness score for fleet health and compliance.
-    limitation: 'Planned; linked to SEN-262.'
+    limitation: 'Planned Admiral capability; not yet available in public matrix as shipped.'
     featured: false
 
   # ===== Governance & Policy (Community core / Admiral planned) =====
@@ -260,7 +260,7 @@ entries:
     publicName: Policy pack assignment (planned)
     publicRoadmapKey: policy-pack-planned
     summary: Organization-wide policy pack enforcement with governed exceptions.
-    limitation: 'Planned; linked to SEN-403.'
+    limitation: 'Planned Admiral capability; not yet available in public matrix as shipped.'
     featured: false
 
   # ===== Recovery (Community basic / Admiral managed) =====
@@ -320,7 +320,7 @@ entries:
     publicName: Incident Timeline (planned)
     publicRoadmapKey: incident-timeline-planned
     summary: Durable incident timeline and service context.
-    limitation: 'Planned; linked to SEN-260.'
+    limitation: 'Planned Admiral capability; not yet available in public matrix as shipped.'
     featured: false
 
   # ===== Registration & Registry (Community core / Admiral ECR temporary) =====

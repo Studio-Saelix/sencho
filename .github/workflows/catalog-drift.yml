@@ -1,0 +1,36 @@
+name: Catalog Drift Check
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/feature-catalog.yaml'
+      - 'scripts/website-catalog/**'
+      - '.github/workflows/catalog-drift.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/feature-catalog.yaml'
+      - 'scripts/website-catalog/**'
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Studio-Saelix/sencho-website
+          path: website-checkout
+      - uses: actions/checkout@v4
+      - name: Install root dependencies
+        run: npm ci
+      - name: Canonical validation
+        run: node scripts/website-catalog/canonical-validate.mjs
+      - name: Generate and compare snapshot
+        run: |
+          node scripts/website-catalog/sync-feature-catalog.mjs --website-dir website-checkout
+          # Compare checksums against committed website snapshot
+          node scripts/website-catalog/check-website-drift.mjs --website-dir website-checkout
+      - name: Verify no internal identifiers in canonical file
+        run: node scripts/website-catalog/test-catalog-no-leak.mjs
