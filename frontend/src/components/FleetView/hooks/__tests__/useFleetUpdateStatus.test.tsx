@@ -248,6 +248,56 @@ describe('useFleetUpdateStatus', () => {
     vi.unstubAllGlobals();
   });
 
+  it('confirmLocalUpdate omits targetVersion for a dev image even when latestVersion is a valid stable version', async () => {
+    const devStatuses: NodeUpdateStatus[] = [
+      { ...STATUSES[0], isDevImage: true },
+      STATUSES[1],
+    ];
+    apiFetchMock.mockResolvedValue(okJson({ nodes: devStatuses }));
+    const { result } = renderHook(() => useFleetUpdateStatus());
+    await act(async () => { await result.current.fetchUpdateStatus(); });
+
+    await act(async () => { await result.current.triggerNodeUpdate(1); });
+    expect(result.current.localUpdateConfirm).toBe(1);
+
+    apiFetchMock.mockResolvedValue(okJson({ message: 'ok' }));
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(
+      new Response(JSON.stringify({ startedAt: 1000 }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )));
+
+    await act(async () => { await result.current.confirmLocalUpdate(); });
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/fleet/nodes/1/update',
+      expect.objectContaining({ method: 'POST', localOnly: true }),
+    );
+    const call = apiFetchMock.mock.calls.find(([url]) => url === '/fleet/nodes/1/update');
+    expect(call![1]).not.toHaveProperty('body');
+    vi.unstubAllGlobals();
+  });
+
+  it('confirmLocalUpdate still omits targetVersion for a dev image with no valid latestVersion', async () => {
+    const devStatuses: NodeUpdateStatus[] = [
+      { ...STATUSES[0], isDevImage: true, latestVersion: null },
+      STATUSES[1],
+    ];
+    apiFetchMock.mockResolvedValue(okJson({ nodes: devStatuses }));
+    const { result } = renderHook(() => useFleetUpdateStatus());
+    await act(async () => { await result.current.fetchUpdateStatus(); });
+
+    await act(async () => { await result.current.triggerNodeUpdate(1); });
+    apiFetchMock.mockResolvedValue(okJson({ message: 'ok' }));
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(
+      new Response(JSON.stringify({ startedAt: 1000 }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )));
+
+    await act(async () => { await result.current.confirmLocalUpdate(); });
+
+    const call = apiFetchMock.mock.calls.find(([url]) => url === '/fleet/nodes/1/update');
+    expect(call![1]).not.toHaveProperty('body');
+    vi.unstubAllGlobals();
+  });
+
   it('dismisses the reconnecting overlay when the local update resolves failed', async () => {
     apiFetchMock.mockResolvedValue(okJson({ nodes: STATUSES }));
     const { result } = renderHook(() => useFleetUpdateStatus());

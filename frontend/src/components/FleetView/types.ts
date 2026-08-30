@@ -77,6 +77,14 @@ export interface NodeUpdateStatus {
     operationKind?: 'update' | 'reapply_configuration' | null;
     /** True when this Compose-managed node can reapply its on-disk configuration. */
     canReapplyCompose?: boolean;
+    /** True when the compose-declared image is any reference to the sencho-dev
+     *  repository, including digest pins and dev-<sha>. Reflects what compose
+     *  DECLARES, not necessarily what the container is currently running if
+     *  compose was edited without a reapply. Local node only. */
+    isDevImage?: boolean;
+    /** True only when isDevImage is true, the pin is the exact floating :dev
+     *  tag, and a newer build digest has been observed. Local node only. */
+    devBuildUpdateAvailable?: boolean;
 }
 
 export type ViewMode = 'grid' | 'topology';
