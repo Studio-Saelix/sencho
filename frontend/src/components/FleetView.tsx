@@ -400,6 +400,7 @@ export function FleetView({
                 composeImageRef={confirmStatus?.composeImageRef}
                 targetImageRef={confirmStatus?.targetImageRef}
                 targetVersion={confirmStatus?.latestVersion}
+                isDevImage={confirmStatus?.isDevImage}
             />
 
             {NodeActionModals}
