@@ -533,9 +533,8 @@ describe('transport argv hardening', () => {
                 workspaceRoot: root,
             });
             const setArgs = spawnArgs(0);
-            // B1: Cross-host credential and SSRF safety is enforced by
-            // disabling redirect following and validating the destination in stderr.
-            // Same-host redirects are retried via lsRemoteRefsWithArgs.
+            // Git never follows a redirect itself; an approved destination is
+            // resolved by the preflight and retried explicitly.
             expect(setArgs).toContain('http.followRedirects=false');
             const combined = setArgs.find((a) => a.startsWith('http.sslCAInfo='));
             expect(combined).toBeDefined();

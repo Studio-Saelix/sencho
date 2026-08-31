@@ -12,6 +12,7 @@ import {
 } from './credentialHelper';
 import { credentialScopeHost } from './caBundle';
 import { writeCombinedCaBundle } from './gitCaBundleSink';
+import { looksLikeRedirectFailure, resolveRedirectedRepoUrl } from './redirectPreflight';
 import { isTransportFailure, type TransportFailure } from './errors';
 import type { FetchRequest, FetchResult, GitTransport, ResolveRequest, ResolveResult } from './types';
 import {
@@ -314,141 +315,6 @@ function buildEnv(
     return env;
 }
 
-// ─── Redirect policy ────────────────────────────────────────────────────────
-
-/**
- * Maximum number of redirect hops we tolerate before failing closed.
- * The value matches curl's default (-: 50) for HTTP and most Git providers
- * never exceed a single redirect; a tight cap protects against loops.
- */
-const MAX_REDIRECT_HOPS = 5;
-
-/**
- * Pull every `Location: <url>` value out of git's stderr (curl/git prints the
- * hop chain when redirects are followed) and return the *final* destination
- * as an absolute URL. Returns null when the chain has no Location lines or
- * when any link cannot be resolved against the previous one. The chain length
- * is capped at MAX_REDIRECT_HOPS to bound the parse cost.
- */
-export function extractFinalRedirectLocation(stderr: string, originalUrl: string): string | null {
-    let current = originalUrl;
-    let hops = 0;
-    let last: string | null = null;
-    for (const match of stderr.matchAll(/(?:^|\n)\s*Location:\s*(\S+)/gi)) {
-        if (hops >= MAX_REDIRECT_HOPS) return null;
-        const next = resolveLocation(current, match[1]);
-        if (!next) return null;
-        current = next;
-        last = next;
-        hops += 1;
-    }
-    return last;
-}
-
-/**
- * Pull every `Location: <url>` value out of git's stderr and validate each
- * hop against the redirect policy. Returns a classified TransportFailure
- * when any hop violates the policy, or null when the chain is clean. The
- * function is intentionally tolerant of an empty chain: when no Location
- * header was logged, there is nothing to validate, and the caller can
- * proceed with its normal classification.
- */
-export function classifyRedirectStderr(
-    stderr: string,
-    originalUrl: string,
-    allowedHost: string | null,
-    hasToken: boolean,
-): TransportFailure | null {
-    if (!/Location:\s*\S+/i.test(stderr)) return null;
-    let current = originalUrl;
-    let hops = 0;
-    for (const match of stderr.matchAll(/(?:^|\n)\s*Location:\s*(\S+)/gi)) {
-        if (hops >= MAX_REDIRECT_HOPS) {
-            return { transportFailure: true as const, reason: 'redirect-scope', host: originalUrl, hasToken } satisfies TransportFailure;
-        }
-        const next = resolveLocation(current, match[1]);
-        if (!next) {
-            return { transportFailure: true as const, reason: 'redirect-scope', host: originalUrl, hasToken } satisfies TransportFailure;
-        }
-        try {
-            validateRedirectHop(current, next, allowedHost);
-        } catch (e) {
-            if (isTransportFailure(e)) return e;
-            throw e;
-        }
-        current = next;
-        hops += 1;
-    }
-    return null;
-}
-
-/**
- * Public DNS-suffix set is impractical to ship, so we treat well-known
- * dangerous ranges instead. Loopback (127/8, ::1, localhost) and the RFC 1918
- * private ranges block attempts to redirect an authenticated fetch to a host
- * that can talk to internal services the operator's browser cannot.
- */
-function isForbiddenRedirectHost(host: string): boolean {
-    const lower = host.toLowerCase();
-    if (lower === 'localhost' || lower === 'localhost.localdomain') return true;
-    if (lower.startsWith('127.') || lower === '::1' || lower === '0:0:0:0:0:0:0:1') return true;
-    if (lower.startsWith('10.')) return true;
-    if (lower.startsWith('172.')) {
-        const parts = lower.split('.');
-        const second = Number(parts[1]);
-        if (Number.isFinite(second) && second >= 16 && second <= 31) return true;
-    }
-    if (lower.startsWith('192.168.')) return true;
-    if (lower.startsWith('169.254.')) return true;
-    if (lower.startsWith('fe80:') || lower.startsWith('fc') || lower.startsWith('fd')) return true;
-    return false;
-}
-
-/**
- * Validate a single redirect hop's destination.
- * Same-host redirects are always allowed; cross-host redirects require the
- * caller's allowedHost to match; any redirect to a forbidden or non-HTTPS
- * destination fails closed.
- */
-function validateRedirectHop(
-    fromUrl: string,
-    toUrl: string,
-    allowedHost: string | null,
-): void {
-    let fromParsed: URL;
-    let toParsed: URL;
-    try {
-        fromParsed = new URL(fromUrl);
-        toParsed = new URL(toUrl);
-    } catch {
-        throw { transportFailure: true as const, reason: 'redirect-scope', host: fromUrl, hasToken: Boolean(allowedHost) } satisfies TransportFailure;
-    }
-    if (fromParsed.protocol === 'https:' && toParsed.protocol !== 'https:') {
-        throw { transportFailure: true as const, reason: 'redirect-scope', host: fromUrl, hasToken: Boolean(allowedHost) } satisfies TransportFailure;
-    }
-    if (isForbiddenRedirectHost(toParsed.hostname)) {
-        throw { transportFailure: true as const, reason: 'redirect-scope', host: fromUrl, hasToken: Boolean(allowedHost) } satisfies TransportFailure;
-    }
-    if (allowedHost) {
-        const toScope = credentialScopeHost(toParsed.hostname, toParsed.port ? Number(toParsed.port) : undefined);
-        if (toScope !== allowedHost) {
-            throw { transportFailure: true as const, reason: 'redirect-scope', host: fromUrl, hasToken: true } satisfies TransportFailure;
-        }
-    }
-}
-
-/**
- * Parse a Location header (absolute or relative) against a base URL.
- * Returns null on parse failure so the caller can fail closed.
- */
-function resolveLocation(baseUrl: string, location: string): string | null {
-    try {
-        return new URL(location, baseUrl).toString();
-    } catch {
-        return null;
-    }
-}
-
 /**
  * Windows-only: locate the CA bundle bundled with Git for Windows. Stripping
  * system gitconfig (GIT_CONFIG_NOSYSTEM) also strips the installer's
@@ -492,7 +358,10 @@ async function detectWindowsCABundle(): Promise<string | null> {
  * every input it writes is either a file path inside the per-fetch workspace
  * (no external taint) or a PEM that the caller has already validated.
  */
-async function resolveCaArgs(layout: WorkspaceLayout, perSourceCaPem?: string | null): Promise<string[]> {
+async function resolveCaArgs(
+    layout: WorkspaceLayout,
+    perSourceCaPem?: string | null,
+): Promise<{ args: string[]; caPath: string | null }> {
     const isWindows = process.platform === 'win32';
 
     // Per-source and env-var anchors live in a single combined file written by
@@ -501,7 +370,7 @@ async function resolveCaArgs(layout: WorkspaceLayout, perSourceCaPem?: string | 
     // case specially for Windows.
     const combined = await writeCombinedCaBundle(layout.metaDir, perSourceCaPem);
     if (combined) {
-        return ['-c', `http.sslCAInfo=${combined.path}`];
+        return { args: ['-c', `http.sslCAInfo=${combined.path}`], caPath: combined.path };
     }
 
     // No custom anchors: on POSIX we pass nothing (system trust applies
@@ -509,10 +378,10 @@ async function resolveCaArgs(layout: WorkspaceLayout, perSourceCaPem?: string | 
     // pointer because GIT_CONFIG_NOSYSTEM stripped the installer's config.
     if (isWindows) {
         const bundle = await detectWindowsCABundle();
-        return bundle ? ['-c', `http.sslCAInfo=${bundle}`] : [];
+        return bundle ? { args: ['-c', `http.sslCAInfo=${bundle}`], caPath: bundle } : { args: [], caPath: null };
     }
 
-    return [];
+    return { args: [], caPath: null };
 }
 
 /**
@@ -524,7 +393,7 @@ async function commonArgs(
     helperPath: string | null,
     ssh: boolean,
     perSourceCaPem?: string | null,
-): Promise<string[]> {
+): Promise<{ args: string[]; caPath: string | null }> {
     const args = [
         '-c', 'protocol.allow=never',
     ];
@@ -532,22 +401,14 @@ async function commonArgs(
         args.push('-c', 'protocol.ssh.allow=always');
     } else {
         args.push('-c', 'protocol.https.allow=always');
-        // B1: Always disable git's redirect following for HTTPS. Git will refuse
-        // the redirect and report the Location header in stderr with a non-zero
-        // exit code. classifyRedirectStderr then validates the destination:
-        // - Same-host redirects: retry with redirects enabled
-        // - Cross-host redirects: reject as redirect-scope (PAT never sent)
-        // - Forbidden hosts: reject as redirect-scope
-        // This enforces the redirect boundary for BOTH authenticated (PAT
-        // protected by credential helper) and unauthenticated (no silent success)
-        // sources. Same-host redirects are retried automatically.
+        // Git never follows a redirect itself, so it can never contact a
+        // destination this process has not already approved. When a server
+        // does redirect, the caller walks the chain unauthenticated through
+        // redirectPreflight, validates every hop, and re-runs git against the
+        // approved URL. Letting git follow instead would contact the target
+        // before any policy ran, which is what makes the internal-range guard
+        // meaningful rather than after-the-fact.
         args.push('-c', 'http.followRedirects=false');
-        // Cross-host redirect safety is enforced by the host-scoped credential
-        // helper (see credentialHelper.ts): the helper reads host/port from
-        // stdin and only emits the PAT when the requested host matches the
-        // configured repository's host. Same-host redirects continue to work;
-        // a redirect to a different host receives no credentials, and the
-        // follow-up fetch will fail with the standard TLS / not-found error.
     }
     args.push('-c', `core.hooksPath=${layout.hooksDir.split(path.sep).join('/')}`);
     if (process.platform === 'win32') {
@@ -559,7 +420,8 @@ async function commonArgs(
         // git is OpenSSL-backed and unaffected by this flag's absence.
         args.push('-c', 'http.sslBackend=openssl');
     }
-    args.push(...await resolveCaArgs(layout, perSourceCaPem));
+    const ca = await resolveCaArgs(layout, perSourceCaPem);
+    args.push(...ca.args);
     if (helperPath !== null) {
         // A fixed value: the helper's path reaches git through the child env
         // instead of being interpolated here, so a workspace path containing
@@ -569,7 +431,7 @@ async function commonArgs(
     } else {
         args.push('-c', 'credential.helper=');
     }
-    return args;
+    return { args, caPath: ca.caPath };
 }
 
 /**
@@ -590,7 +452,7 @@ async function prepareInvocation(
     token?: string | null,
     sshAuth?: ResolveRequest['sshAuth'],
     caBundlePem?: string | null,
-): Promise<{ layout: WorkspaceLayout; env: NodeJS.ProcessEnv; baseArgs: string[]; allowedHost: string | null }> {
+): Promise<{ layout: WorkspaceLayout; env: NodeJS.ProcessEnv; baseArgs: string[]; allowedHost: string | null; caPath: string | null }> {
     const layout = await prepareWorkspace(workspaceRoot);
     let sshCommand: string | null = null;
     if (sshAuth) {
@@ -604,8 +466,35 @@ async function prepareInvocation(
         ? credentialScopeHost(parsed.host)
         : null;
     const env = buildEnv(layout.homeDir, token, helperPath, sshCommand, allowedHost);
-    const baseArgs = await commonArgs(layout, helperPath, Boolean(sshAuth), caBundlePem);
-    return { layout, env, baseArgs, allowedHost };
+    const { args: baseArgs, caPath } = await commonArgs(layout, helperPath, Boolean(sshAuth), caBundlePem);
+    return { layout, env, baseArgs, allowedHost, caPath };
+}
+
+/**
+ * The redirect chain for a repository, resolved and policy-checked without
+ * credentials, or null when the source does not redirect (in which case the
+ * caller keeps git's original failure). Only ever consulted after git has
+ * already refused to follow a redirect, so the normal path costs nothing.
+ */
+async function approveRedirectTarget(
+    repo: ParsedRepoUrl,
+    stderr: string,
+    allowedHost: string | null,
+    hasToken: boolean,
+    caPath: string | null,
+): Promise<string | null> {
+    if (repo.kind !== 'https' || !looksLikeRedirectFailure(stderr)) return null;
+    let caPem: string | undefined;
+    if (caPath) {
+        caPem = await fs.readFile(caPath, 'utf8').catch(() => undefined);
+    }
+    return await resolveRedirectedRepoUrl({
+        repoUrl: repo.href,
+        allowedHost,
+        hasToken,
+        reportHost: repoHostLabel(repo),
+        caPem,
+    });
 }
 
 // ─── Input validation ────────────────────────────────────────────────────────
@@ -773,107 +662,32 @@ async function lsRemoteRefs(
     timeoutMs: number,
     hasToken: boolean,
     allowedHost: string | null = null,
+    caPath: string | null = null,
 ): Promise<ResolvedRemoteRefs> {
     const host = repoHostLabel(repo);
-    let res: RunResult;
-    try {
-        res = await runGit(
-            [...baseArgs, 'ls-remote', repo.href, `refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`],
-            { env, timeoutMs: Math.min(timeoutMs, LS_REMOTE_MAX_MS) },
-        );
-    } catch (e) {
-        if (isTimeoutError(e)) {
-            throw { transportFailure: true as const, reason: 'timeout', host, hasToken } satisfies TransportFailure;
-        }
-        throw e;
-    }
-    if (res.exitCode !== 0) {
-        // B1: If the failure followed a same-host redirect, retry with
-        // http.followRedirects=true to allow the legitimate same-host
-        // redirect to complete. Cross-host and forbidden-host redirects
-        // are rejected via classifyRedirectStderr before any retry.
-        const redirectFailure = classifyRedirectStderr(res.stderr, repo.href, allowedHost, hasToken);
-        if (redirectFailure) throw redirectFailure;
-        const sameHostTarget = extractFinalRedirectLocation(res.stderr, repo.href);
-        if (sameHostTarget && isSameHostRedirect(repo.href, sameHostTarget)) {
-            // Same-host redirect: retry with redirects enabled
-            const retryArgs = baseArgs.filter((a, i) => !(a === 'http.followRedirects=false' && baseArgs[i - 1] === '-c'));
-            return await lsRemoteRefsWithArgs(
-                repo, ref, env, retryArgs, timeoutMs, hasToken, allowedHost,
+    const attempt = async (href: string): Promise<RunResult> => {
+        try {
+            return await runGit(
+                [...baseArgs, 'ls-remote', href, `refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`],
+                { env, timeoutMs: Math.min(timeoutMs, LS_REMOTE_MAX_MS) },
             );
+        } catch (e) {
+            if (isTimeoutError(e)) {
+                throw { transportFailure: true as const, reason: 'timeout', host, hasToken } satisfies TransportFailure;
+            }
+            throw e;
         }
-        throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: baseArgs, host, hasToken } satisfies TransportFailure;
-    }
-    const found: ResolvedRemoteRefs = { branchSha: null, tagSha: null };
-    for (const line of res.stdout.split(/\r?\n/)) {
-        const tabIndex = line.indexOf('\t');
-        if (tabIndex === -1) continue;
-        const sha = line.slice(0, tabIndex).trim();
-        if (!SHA_PATTERN.test(sha)) continue;
-        const full = line.slice(tabIndex + 1).trim();
-        if (full === `refs/heads/${ref}`) {
-            found.branchSha = sha.toLowerCase();
-        } else if (full === `refs/tags/${ref}^{}`) {
-            found.tagSha = sha.toLowerCase();
-        } else if (full === `refs/tags/${ref}` && found.tagSha === null) {
-            found.tagSha = sha.toLowerCase();
-        }
-    }
-    return found;
-}
+    };
 
-/** Extract the final redirect target from git's stderr Location chain. Exported. */
-
-/**
- * True when the redirect destination is on the same host (and port) as the
- * original URL. Used to decide whether a followRedirects=false failure is a
- * legitimate same-host redirect (retry with redirects enabled) or a
- * cross-host/forbidden redirect (reject).
- */
-export function isSameHostRedirect(fromUrl: string, toUrl: string): boolean {
-    try {
-        const from = new URL(fromUrl);
-        const to = new URL(toUrl);
-        if (from.protocol !== to.protocol) return false;
-        if (from.hostname.toLowerCase() !== to.hostname.toLowerCase()) return false;
-        const fromPort = from.port || (from.protocol === 'https:' ? '443' : '80');
-        const toPort = to.port || (to.protocol === 'https:' ? '443' : '80');
-        return fromPort === toPort;
-    } catch {
-        return false;
-    }
-}
-
-/**
- * Internal helper: re-run ls-remote with a different argv (typically with
- * http.followRedirects=true to allow a same-host retry). Same result shape
- * as lsRemoteRefs.
- */
-async function lsRemoteRefsWithArgs(
-    repo: ParsedRepoUrl,
-    ref: string,
-    env: NodeJS.ProcessEnv,
-    baseArgs: string[],
-    timeoutMs: number,
-    hasToken: boolean,
-    allowedHost: string | null,
-): Promise<ResolvedRemoteRefs> {
-    const host = repoHostLabel(repo);
-    let res: RunResult;
-    try {
-        res = await runGit(
-            [...baseArgs, 'ls-remote', repo.href, `refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`],
-            { env, timeoutMs: Math.min(timeoutMs, LS_REMOTE_MAX_MS) },
-        );
-    } catch (e) {
-        if (isTimeoutError(e)) {
-            throw { transportFailure: true as const, reason: 'timeout', host, hasToken } satisfies TransportFailure;
-        }
-        throw e;
+    let res = await attempt(repo.href);
+    if (res.exitCode !== 0) {
+        // git refused a redirect. Resolve and approve the destination first;
+        // an approved chain is retried once against the final URL, and a
+        // rejected one throws before that host is ever contacted.
+        const approved = await approveRedirectTarget(repo, res.stderr, allowedHost, hasToken, caPath);
+        if (approved) res = await attempt(approved);
     }
     if (res.exitCode !== 0) {
-        const redirectFailure = classifyRedirectStderr(res.stderr, repo.href, allowedHost, hasToken);
-        if (redirectFailure) throw redirectFailure;
         throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: baseArgs, host, hasToken } satisfies TransportFailure;
     }
     const found: ResolvedRemoteRefs = { branchSha: null, tagSha: null };
@@ -937,9 +751,12 @@ export async function verifyFastForward(req: {
             throw { transportFailure: true as const, reason: 'timeout', host, hasToken } satisfies TransportFailure;
         }
     };
-    const { env, baseArgs } = await prepareInvocation(
+    const { env, baseArgs, allowedHost, caPath } = await prepareInvocation(
         req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
     );
+    // Resolved once if the host refuses a redirect, then reused by the deepen
+    // rounds so they do not each re-walk the same chain.
+    let effectiveHref = repo.href;
     const repoDir = path.join(req.workspaceRoot, 'ff-check');
     await fs.mkdir(repoDir, { recursive: true });
 
@@ -1030,7 +847,17 @@ export async function verifyFastForward(req: {
         };
 
         await materialize([...baseArgs, 'init']);
-        await materialize([...baseArgs, 'fetch', '--depth=1', repo.href, descendant]);
+        try {
+            await materialize([...baseArgs, 'fetch', '--depth=1', effectiveHref, descendant]);
+        } catch (e) {
+            const stderr = isTransportFailure(e) && e.reason === 'exit' ? (e.stderr ?? '') : '';
+            const approved = stderr
+                ? await approveRedirectTarget(repo, stderr, allowedHost, hasToken, caPath)
+                : null;
+            if (!approved) throw e;
+            effectiveHref = approved;
+            await materialize([...baseArgs, 'fetch', '--depth=1', effectiveHref, descendant]);
+        }
 
         const countReachable = async (): Promise<number> => {
             const argv = [...baseArgs, 'rev-list', '--count', descendant];
@@ -1118,7 +945,7 @@ export async function verifyFastForward(req: {
             }
 
             const previousCount = reachableCount;
-            await materialize([...baseArgs, 'fetch', `--deepen=${deepenStep}`, repo.href, descendant]);
+            await materialize([...baseArgs, 'fetch', `--deepen=${deepenStep}`, effectiveHref, descendant]);
             fetchRounds += 1;
             reachableCount = await countReachable();
 
@@ -1157,19 +984,12 @@ export const nativeGitTransport: GitTransport = {
 
         assertValidRef(req.ref, repoHostLabel(repo), hasToken);
 
-        // Compute the credential scope host for the configured repository.
-        // The credential helper (see credentialHelper.ts) refuses to emit
-        // credentials for any other host, but we additionally pre-classify
-        // redirect-scope failures here so the operator gets a clear message
-        // when git follows a redirect to a different host.
-        const allowedHost = hasToken && repo.kind === 'https' ? credentialScopeHost(repo.host) : null;
-
-        const { env, baseArgs } = await prepareInvocation(
+        const { env, baseArgs, allowedHost, caPath } = await prepareInvocation(
             req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
         );
         const found = await lsRemoteRefs(
             repo, req.ref, env, baseArgs,
-            req.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasToken, allowedHost,
+            req.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasToken, allowedHost, caPath,
         );
         if (found.branchSha) return { commitSha: found.branchSha, kind: 'branch' };
         if (found.tagSha) return { commitSha: found.tagSha, kind: 'tag' };
@@ -1184,9 +1004,9 @@ export const nativeGitTransport: GitTransport = {
 
         // The credential scope host is set inside prepareInvocation via
         // GIT_ALLOWED_HOST_ENV_VAR so the credential helper refuses to emit
-        // credentials for any other host. Redirects to a different host are
-        // caught by classifyRedirectStderr in the failure path below.
-        const { layout, env, baseArgs, allowedHost } = await prepareInvocation(
+        // credentials for any other host. A refused redirect is resolved and
+        // approved by the preflight below before any retry.
+        const { layout, env, baseArgs, allowedHost, caPath } = await prepareInvocation(
             req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
         );
         const checkout = path.join(req.workspaceRoot, 'repo');
@@ -1226,12 +1046,6 @@ export const nativeGitTransport: GitTransport = {
                     if (isTimeoutError(e)) {
                         throw { transportFailure: true as const, reason: 'timeout', host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                     }
-                    // Non-zero exit may follow a redirect. Check stderr for
-                    // redirect-scope failures before reporting a generic exit error.
-                    const redirectFailureCatch = classifyRedirectStderr(
-                        e instanceof Error ? e.message : String(e), repo.href, allowedHost, hasToken,
-                    );
-                    if (redirectFailureCatch) throw redirectFailureCatch;
                     throw { transportFailure: true as const, reason: 'exit', stderr: e instanceof Error ? e.message : String(e), argv: args, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
                 // A watchdog-triggered SIGKILL settles runGit's promise via the
@@ -1242,37 +1056,50 @@ export const nativeGitTransport: GitTransport = {
                     throw { transportFailure: true as const, reason: 'size', maxBytes: req.maxBytes, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
                 if (res.exitCode !== 0) {
-                    // Non-zero exit may follow a redirect. Check stderr for
-                    // redirect-scope failures before reporting a generic exit error.
-                    const redirectFailureExit = classifyRedirectStderr(res.stderr, repo.href, allowedHost, hasToken);
-                    if (redirectFailureExit) throw redirectFailureExit;
                     throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: args, host: repoHostLabel(repo), hasToken } satisfies TransportFailure;
                 }
                 return res;
             };
 
-            if (req.refKind === 'sha') {
-                // `--branch` cannot take a bare SHA, so a pinned commit uses a
-                // third strategy: init a repo, fetch exactly that object, and
-                // check it out detached. The host must allow fetching a direct
-                // SHA (GitHub does by default); a refusal surfaces as a
-                // non-zero `git fetch` here and classifies as UNSUPPORTED_REF.
-                await materialize([...baseArgs, 'init', checkout]);
-                await materialize([...baseArgs, '-C', checkout, 'fetch', '--depth=1', repo.href, req.ref]);
-                await materialize([...baseArgs, '-C', checkout, 'checkout', '--detach', req.ref]);
-            } else {
-                // A bare name works for both branches and tags: `--branch`
-                // detaches at the named ref's commit either way, and passing a
-                // fully-qualified `refs/tags/<ref>` is rejected by git
-                // (`Remote branch ... not found`). The resolved kind is
-                // already pinned by ls-remote, and the rev-parse HEAD
-                // verification below confirms the checkout matched it.
-                const branchArg = req.ref;
-                await materialize([
-                    ...baseArgs, 'clone',
-                    '--depth=1', '--single-branch', '--no-tags', '--no-recurse-submodules',
-                    '--branch', branchArg, repo.href, checkout,
-                ]);
+            const runMaterialization = async (href: string): Promise<void> => {
+                if (req.refKind === 'sha') {
+                    // `--branch` cannot take a bare SHA, so a pinned commit uses a
+                    // third strategy: init a repo, fetch exactly that object, and
+                    // check it out detached. The host must allow fetching a direct
+                    // SHA (GitHub does by default); a refusal surfaces as a
+                    // non-zero `git fetch` here and classifies as UNSUPPORTED_REF.
+                    await materialize([...baseArgs, 'init', checkout]);
+                    await materialize([...baseArgs, '-C', checkout, 'fetch', '--depth=1', href, req.ref]);
+                    await materialize([...baseArgs, '-C', checkout, 'checkout', '--detach', req.ref]);
+                } else {
+                    // A bare name works for both branches and tags: `--branch`
+                    // detaches at the named ref's commit either way, and passing a
+                    // fully-qualified `refs/tags/<ref>` is rejected by git
+                    // (`Remote branch ... not found`). The resolved kind is
+                    // already pinned by ls-remote, and the rev-parse HEAD
+                    // verification below confirms the checkout matched it.
+                    await materialize([
+                        ...baseArgs, 'clone',
+                        '--depth=1', '--single-branch', '--no-tags', '--no-recurse-submodules',
+                        '--branch', req.ref, href, checkout,
+                    ]);
+                }
+            };
+
+            try {
+                await runMaterialization(repo.href);
+            } catch (e) {
+                // A refused redirect is the one failure worth a second attempt,
+                // and only against a destination the preflight has approved.
+                const stderr = isTransportFailure(e) && e.reason === 'exit' ? (e.stderr ?? '') : '';
+                const approved = stderr
+                    ? await approveRedirectTarget(repo, stderr, allowedHost, hasToken, caPath)
+                    : null;
+                if (!approved) throw e;
+                // The refused attempt can have left a partial checkout behind;
+                // git refuses to clone into a non-empty directory.
+                await fs.rm(checkout, { recursive: true, force: true });
+                await runMaterialization(approved);
             }
 
             let actual: string;
