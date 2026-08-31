@@ -86,10 +86,7 @@ export function looksLikeRedirectFailure(stderr: string): boolean {
  * reach the network with a destination that has not been checked. The seed URL
  * goes through it too: that check is trivially true, but routing every request
  * through one place is what makes the guarantee inspectable rather than a
- * property of the loop's shape.
- *
- * Registered as a request-forgery barrier in
- * `.github/codeql/extensions/redirectScope.model.yml`.
+ * property of the loop's shape, for a reader as much as for static analysis.
  */
 export function approvedUrl(
     url: string,
