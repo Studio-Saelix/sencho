@@ -10,7 +10,7 @@ import {
   clearMfaPendingCookie,
   reissueSessionAfterTokenBump,
 } from '../middleware/auth';
-import { authRateLimiter } from '../middleware/rateLimiters';
+import { authRateLimiter, loginAccountRateLimiter } from '../middleware/rateLimiters';
 import { requireAdmin } from '../middleware/tierGates';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -107,7 +107,7 @@ authRouter.post('/setup', authRateLimiter, async (req: Request, res: Response): 
 });
 
 // Login endpoint
-authRouter.post('/login', authRateLimiter, async (req: Request, res: Response): Promise<void> => {
+authRouter.post('/login', authRateLimiter, loginAccountRateLimiter, async (req: Request, res: Response): Promise<void> => {
   const { username, password } = req.body;
   const remember = req.body.remember === true;
 

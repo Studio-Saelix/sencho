@@ -165,7 +165,7 @@ async function startSshGitServer(bareDir: string, port: number): Promise<Omit<Ss
         throw new Error(`sshd did not come up on port ${port}: ${stderr.trim() || '(no stderr)'}`, { cause: e });
     }
 
-    const scanned = await scanHostKeys('127.0.0.1', port);
+    const scanned = await scanHostKeys('127.0.0.1', port, '127.0.0.1');
     assertFixtureHostKey(port, hostKey.publicLine, scanned);
     const knownHostsEntry = scanned.map((k) => k.line).join('\n');
 

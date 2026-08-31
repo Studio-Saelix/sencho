@@ -66,7 +66,7 @@ afterEach(() => {
 
 function mockTargetActive() {
   vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => {
-    if (id === pilotNodeId) return { apiUrl: LOOPBACK, apiToken: '' };
+    if (id === pilotNodeId) return { apiUrl: LOOPBACK, apiToken: '', trustedLoopback: true };
     return null;
   });
 }

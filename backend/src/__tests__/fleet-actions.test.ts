@@ -786,7 +786,7 @@ describe('bulk-assign orchestrator: remote fan-out', () => {
 
   it('fans out to the remote local-assign receiver with Bearer auth and the template body', async () => {
     const remoteId = addRemote('assign-remote-ok');
-    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok' });
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok', trustedLoopback: false });
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
       JSON.stringify({ created: true, results: [{ stackName: 'r1', success: true }] }),
       { status: 200, headers: { 'content-type': 'application/json' } },
@@ -814,7 +814,7 @@ describe('bulk-assign orchestrator: remote fan-out', () => {
 
   it('omits the Authorization header for a pilot-agent remote with an empty token', async () => {
     const remoteId = addRemote('assign-remote-pilot', 'pilot_agent');
-    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://127.0.0.1:9', apiToken: '' });
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://127.0.0.1:9', apiToken: '', trustedLoopback: true });
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
       JSON.stringify({ created: false, results: [{ stackName: 'p1', success: true }] }),
       { status: 200, headers: { 'content-type': 'application/json' } },
@@ -850,7 +850,7 @@ describe('bulk-assign orchestrator: remote fan-out', () => {
 
   it('treats a mixed-version remote (404 on local-assign) as a per-node failure', async () => {
     const remoteId = addRemote('assign-remote-404');
-    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok' });
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok', trustedLoopback: false });
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('Not Found', { status: 404 }));
 
     const res = await request(app)
@@ -867,7 +867,7 @@ describe('bulk-assign orchestrator: remote fan-out', () => {
 
   it('reports a transport failure as a per-node failure', async () => {
     const remoteId = addRemote('assign-remote-transport');
-    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok' });
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok', trustedLoopback: false });
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('ECONNREFUSED'));
 
     const res = await request(app)
@@ -883,7 +883,7 @@ describe('bulk-assign orchestrator: remote fan-out', () => {
 
   it('reports a malformed 200 body as a per-node failure', async () => {
     const remoteId = addRemote('assign-remote-malformed');
-    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok' });
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok', trustedLoopback: false });
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
       JSON.stringify({ created: true, results: 'not-an-array' }),
       { status: 200, headers: { 'content-type': 'application/json' } },
@@ -903,7 +903,7 @@ describe('bulk-assign orchestrator: remote fan-out', () => {
 
   it('fails a node whose 200 body returns an empty results array for a non-empty request', async () => {
     const remoteId = addRemote('assign-remote-empty');
-    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok' });
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok', trustedLoopback: false });
     // A well-shaped { created, results } body whose results are empty used to
     // pass the bare Array.isArray check and read as a successful zero-stack
     // assign. Membership validation must fail the node instead.
@@ -926,7 +926,7 @@ describe('bulk-assign orchestrator: remote fan-out', () => {
 
   it('fails a node whose results omit one of the requested stacks', async () => {
     const remoteId = addRemote('assign-remote-partial');
-    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok' });
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok', trustedLoopback: false });
     // Two stacks requested, only one row returned: a partial body the control
     // must not accept as a clean assign of the covered stack alone.
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(

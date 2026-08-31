@@ -7,7 +7,7 @@ import { DatabaseService, type Node, type StackDossierFields } from '../services
 import { ControlIdentityMismatchError, FleetSyncService, StaleSyncPushError } from '../services/FleetSyncService';
 import { MAX_SYNC_ROWS, SYNC_ERROR_CODES } from '../services/fleetSyncConstants';
 import { FleetUpdateTrackerService, type UpdateTracker, type TerminalStatus, UPDATE_TIMEOUT_MS, UPDATE_TIMEOUT_MSG, TERMINAL_TTL_MS } from '../services/FleetUpdateTrackerService';
-import { NodeRegistry } from '../services/NodeRegistry';
+import { NodeRegistry, type ProxyTarget } from '../services/NodeRegistry';
 import { computeNodeNetworkingSummary, type NodeNetworkingSummary } from '../services/network/networkingSummary';
 import DockerController from '../services/DockerController';
 import { getHostMemory, memoryToWire, type MemoryWire } from '../helpers/hostMemory';
@@ -79,6 +79,7 @@ import { buildNodeLabelInventory, VALID_LABEL_SOURCES, type NodeLabelInventory }
 import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
+import { safeRemoteFetch } from '../utils/outboundTarget';
 
 const updateTracker = FleetUpdateTrackerService.getInstance();
 /** Sync lock for remote reapply while meta is fetched (before the pollable tracker exists). */
@@ -391,9 +392,9 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
 
   try {
     const [statsRes, systemStatsRes, stacksRes] = await Promise.allSettled([
-      fetch(`${baseUrl}/api/stats`, { headers, signal: AbortSignal.timeout(10000) }),
-      fetch(`${baseUrl}/api/system/stats`, { headers, signal: AbortSignal.timeout(10000) }),
-      fetch(`${baseUrl}/api/stacks`, { headers, signal: AbortSignal.timeout(10000) }),
+      safeRemoteFetch(`${baseUrl}/api/stats`, { headers, signal: AbortSignal.timeout(10000) }, target.trustedLoopback),
+      safeRemoteFetch(`${baseUrl}/api/system/stats`, { headers, signal: AbortSignal.timeout(10000) }, target.trustedLoopback),
+      safeRemoteFetch(`${baseUrl}/api/stacks`, { headers, signal: AbortSignal.timeout(10000) }, target.trustedLoopback),
     ]);
 
     interface RemoteSystemStats {
@@ -684,7 +685,7 @@ fleetRouter.get('/configuration', authMiddleware, async (req: Request, res: Resp
         }
 
         try {
-          const resp = await fetch(
+          const resp = await safeRemoteFetch(
             `${target.apiUrl.replace(/\/$/, '')}/api/dashboard/configuration`,
             {
               headers: {
@@ -693,6 +694,7 @@ fleetRouter.get('/configuration', authMiddleware, async (req: Request, res: Resp
               },
               signal: AbortSignal.timeout(10000),
             },
+            target.trustedLoopback,
           );
           const raw = resp.ok ? (await resp.json() as ConfigurationStatus) : null;
           const configuration = raw ? normalizeRemoteConfigurationStatus(raw) : null;
@@ -703,7 +705,11 @@ fleetRouter.get('/configuration', authMiddleware, async (req: Request, res: Resp
             status: configuration ? 'online' : 'offline',
             configuration,
           };
-        } catch {
+        } catch (error: unknown) {
+          console.warn(
+            `[Fleet] Configuration fetch failed for node "${sanitizeForLog(node.name)}":`,
+            getErrorMessage(error, 'unknown'),
+          );
           return { id: node.id, name: node.name, type: 'remote', status: 'offline', configuration: null };
         }
       }),
@@ -746,12 +752,13 @@ fleetRouter.get('/dependency-map', authMiddleware, async (req: Request, res: Res
           return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: formatNoTargetError(node) };
         }
 
-        const resp = await fetch(
+        const resp = await safeRemoteFetch(
           `${target.apiUrl.replace(/\/$/, '')}/api/dependency-map/node-graph`,
           {
             headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) },
             signal: AbortSignal.timeout(15000),
           },
+          target.trustedLoopback,
         );
         if (!resp.ok) {
           const errBody = await resp.json().catch(() => null) as { error?: string } | null;
@@ -877,12 +884,13 @@ fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: R
         }
 
         const revealQs = options.revealSecrets ? '?reveal=1' : '';
-        const resp = await fetch(
+        const resp = await safeRemoteFetch(
           `${target.apiUrl.replace(/\/$/, '')}/api/system/container-labels${revealQs}`,
           {
             headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) },
             signal: AbortSignal.timeout(30000),
           },
+          target.trustedLoopback,
         );
         if (!resp.ok) {
           const errBody = await resp.json().catch(() => null) as { error?: string } | null;
@@ -986,9 +994,10 @@ fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res:
         if (!target) {
           return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: formatNoTargetError(node) };
         }
-        const resp = await fetch(
+        const resp = await safeRemoteFetch(
           `${target.apiUrl.replace(/\/$/, '')}/api/networking/summary`,
           { headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) }, signal: AbortSignal.timeout(15000) },
+          target.trustedLoopback,
         );
         if (!resp.ok) {
           return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: `Remote returned ${resp.status}` };
@@ -1036,10 +1045,10 @@ fleetRouter.get('/node/:nodeId/stacks', authMiddleware, async (req: Request, res
         res.status(503).json({ error: formatNoTargetError(node) });
         return;
       }
-      const response = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/stacks`, {
+      const response = await safeRemoteFetch(`${target.apiUrl.replace(/\/$/, '')}/api/stacks`, {
         headers: target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {},
         signal: AbortSignal.timeout(10000),
-      });
+      }, target.trustedLoopback);
       if (!response.ok) {
         res.status(502).json({ error: 'Failed to fetch stacks from remote node' });
         return;
@@ -1083,10 +1092,10 @@ fleetRouter.get('/node/:nodeId/stacks/:stackName/containers', authMiddleware, as
         res.status(503).json({ error: formatNoTargetError(node) });
         return;
       }
-      const response = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(stackName)}/containers`, {
+      const response = await safeRemoteFetch(`${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(stackName)}/containers`, {
         headers: target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {},
         signal: AbortSignal.timeout(10000),
-      });
+      }, target.trustedLoopback);
       if (!response.ok) {
         res.status(502).json({ error: 'Failed to fetch containers from remote node' });
         return;
@@ -1402,25 +1411,25 @@ fleetRouter.get('/update-status/release-notes', authMiddleware, async (req: Requ
 // sent as null/invalid), and an older remote that predates this field simply
 // ignores the extra body key and behaves as before.
 function postSystemEndpoint(
-  target: { apiUrl: string; apiToken: string },
+  target: ProxyTarget,
   endpoint: '/api/system/update' | '/api/system/reapply-compose',
   body: Record<string, unknown> = {},
 ) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
-  return fetch(`${target.apiUrl.replace(/\/$/, '')}${endpoint}`, {
+  return safeRemoteFetch(`${target.apiUrl.replace(/\/$/, '')}${endpoint}`, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10000),
-  });
+  }, target.trustedLoopback);
 }
 
-function postSystemUpdate(target: { apiUrl: string; apiToken: string }, targetVersion?: string) {
+function postSystemUpdate(target: ProxyTarget, targetVersion?: string) {
   return postSystemEndpoint(target, '/api/system/update', targetVersion ? { targetVersion } : {});
 }
 
-function postSystemReapplyCompose(target: { apiUrl: string; apiToken: string }) {
+function postSystemReapplyCompose(target: ProxyTarget) {
   return postSystemEndpoint(target, '/api/system/reapply-compose');
 }
 
@@ -2039,7 +2048,7 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
-        const response = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/fleet-actions/labels/local-stop`, {
+        const response = await safeRemoteFetch(`${target.apiUrl.replace(/\/$/, '')}/api/fleet-actions/labels/local-stop`, {
           method: 'POST',
           headers,
           body: JSON.stringify({
@@ -2048,7 +2057,7 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
             ...(allowedStacks ? { stackNames: [...allowedStacks] } : {}),
           }),
           signal: AbortSignal.timeout(60000),
-        });
+        }, target.trustedLoopback);
         if (!response.ok) {
           const err = (await response.json().catch(() => ({}))) as { error?: string };
           return { nodeId: node.id, nodeName: node.name, reachable: false, matched: false, stackResults: [], error: err.error || `Remote returned ${response.status}` };
@@ -2218,12 +2227,12 @@ fleetRouter.post('/labels/bulk-assign', authMiddleware, async (req: Request, res
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (proxyTarget.apiToken) headers.Authorization = `Bearer ${proxyTarget.apiToken}`;
-        const response = await fetch(`${proxyTarget.apiUrl.replace(/\/$/, '')}/api/fleet-actions/labels/local-assign`, {
+        const response = await safeRemoteFetch(`${proxyTarget.apiUrl.replace(/\/$/, '')}/api/fleet-actions/labels/local-assign`, {
           method: 'POST',
           headers,
           body: JSON.stringify({ label: template, stackNames: target.stackNames }),
           signal: AbortSignal.timeout(60000),
-        });
+        }, proxyTarget.trustedLoopback);
         if (!response.ok) {
           const err = (await response.json().catch(() => ({}))) as { error?: string };
           const message = err.error || `Remote returned ${response.status}`;
@@ -2452,12 +2461,12 @@ fleetRouter.post('/prune/estimate', authMiddleware, async (req: Request, res: Re
       // serialized and one failure should short-circuit later targets there.)
       const perTarget = await Promise.all(targets.map(async (target): Promise<FleetEstimateTargetResult> => {
         try {
-          const response = await fetch(`${baseUrl}/api/system/prune/estimate`, {
+          const response = await safeRemoteFetch(`${baseUrl}/api/system/prune/estimate`, {
             method: 'POST',
             headers: estimateHeaders,
             body: JSON.stringify({ target, scope }),
             signal: AbortSignal.timeout(15000),
-          });
+          }, proxyTarget.trustedLoopback);
           if (!response.ok) {
             const errBody = (await response.json().catch(() => ({}))) as { error?: string };
             return { bytes: 0, error: errBody.error || `Remote returned ${response.status}` };
@@ -2750,6 +2759,7 @@ class SnapshotProxyTargetError extends Error {
 interface RemoteProxyContext {
   baseUrl: string;
   headers: Record<string, string>;
+  trustedLoopback: boolean;
 }
 
 // Builds an error from a failed remote response so the thrown message names the
@@ -2787,7 +2797,11 @@ function buildRemoteProxyContext(node: Node): RemoteProxyContext | null {
     [PROXY_TIER_HEADER]: proxyHeaders.tier,
   };
   if (proxyTarget.apiToken) headers.Authorization = `Bearer ${proxyTarget.apiToken}`;
-  return { baseUrl: proxyTarget.apiUrl.replace(/\/$/, ''), headers };
+  return {
+    baseUrl: proxyTarget.apiUrl.replace(/\/$/, ''),
+    headers,
+    trustedLoopback: proxyTarget.trustedLoopback,
+  };
 }
 
 // Writes a snapshot stack's files back to its node. Existing stacks capture a
@@ -2814,12 +2828,12 @@ async function applySnapshotStackFiles(
 
   const ctx = buildRemoteProxyContext(node);
   if (!ctx) throw new SnapshotProxyTargetError(formatNoTargetError(node));
-  const applyRes = await fetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/fleet-snapshot-apply`, {
+  const applyRes = await safeRemoteFetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/fleet-snapshot-apply`, {
     method: 'POST',
     headers: ctx.headers,
     body: JSON.stringify({ files: applyFiles }),
     signal: AbortSignal.timeout(FLEET_SNAPSHOT_APPLY_TIMEOUT_MS),
-  });
+  }, ctx.trustedLoopback);
   if (!applyRes.ok) throw await remoteStackError('Failed to restore stack files', applyRes);
 }
 
@@ -2854,7 +2868,7 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
   if (!augmented.ok) {
     throw new Error(augmented.error);
   }
-  const deployRes = await fetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/deploy`, {
+  const deployRes = await safeRemoteFetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/deploy`, {
     method: 'POST',
     headers: {
       ...ctx.headers,
@@ -2862,7 +2876,7 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
     },
     body: JSON.stringify(augmented.body),
     signal: AbortSignal.timeout(30000),
-  });
+  }, ctx.trustedLoopback);
   if (!deployRes.ok) throw await remoteStackError('Failed to redeploy stack', deployRes);
 }
 
@@ -2899,12 +2913,12 @@ async function restoreSnapshotStackDossier(node: Node, stackName: string, fields
   }
   const ctx = buildRemoteProxyContext(node);
   if (!ctx) throw new SnapshotProxyTargetError(formatNoTargetError(node));
-  const putRes = await fetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/dossier`, {
+  const putRes = await safeRemoteFetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/dossier`, {
     method: 'PUT',
     headers: ctx.headers,
     body: JSON.stringify(fields),
     signal: AbortSignal.timeout(15000),
-  });
+  }, ctx.trustedLoopback);
   if (!putRes.ok) throw await remoteStackError('Failed to restore dossier notes', putRes);
 }
 

@@ -66,7 +66,7 @@ describe('registryDeliveryOutbound', () => {
       apiPath: '/api/stacks/demo/deploy',
       nodeId,
       node,
-      target: { apiUrl: 'http://remote:1852', apiToken: 'token' },
+      target: { apiUrl: 'http://remote:1852', apiToken: 'token', trustedLoopback: false },
       body,
     });
 
@@ -86,7 +86,7 @@ describe('registryDeliveryOutbound', () => {
       apiPath: '/api/stacks/demo/deploy',
       nodeId,
       node,
-      target: { apiUrl: 'http://remote:1852', apiToken: 'token' },
+      target: { apiUrl: 'http://remote:1852', apiToken: 'token', trustedLoopback: false },
       body,
     });
 
@@ -122,7 +122,7 @@ describe('registryDeliveryOutbound', () => {
       apiPath: '/api/stacks/demo/deploy',
       nodeId,
       node,
-      target: { apiUrl: 'http://remote:1852', apiToken: 'token' },
+      target: { apiUrl: 'http://remote:1852', apiToken: 'token', trustedLoopback: false },
       body: {},
       abortSignal: controller.signal,
     });
@@ -160,7 +160,7 @@ describe('registryDeliveryOutbound', () => {
       apiPath: '/api/stacks/demo/deploy',
       nodeId,
       node,
-      target: { apiUrl: 'http://remote:1852', apiToken: 'token' },
+      target: { apiUrl: 'http://remote:1852', apiToken: 'token', trustedLoopback: false },
       body: {},
     });
 
@@ -210,7 +210,7 @@ describe('registryDeliveryOutbound', () => {
       apiPath: '/api/stacks/demo/deploy',
       nodeId,
       node,
-      target: { apiUrl: 'http://remote:1852', apiToken: 'token' },
+      target: { apiUrl: 'http://remote:1852', apiToken: 'token', trustedLoopback: false },
       body: {},
       abortSignal: controller.signal,
     });

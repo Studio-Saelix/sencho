@@ -30,7 +30,7 @@ function parseCidrEntry(raw: string): { family: 4 | 6; address: string; prefix: 
 
 /**
  * Parse SENCHO_TRUSTED_PROXY_CIDRS once at process start. Invalid or duplicate
- * entries fail closed by returning null (treat all upgrades as non-confidential).
+ * entries fail closed by returning null, so forwarding headers are ignored.
  */
 export function getTrustedProxyBlockList(): net.BlockList | null {
   if (cachedBlockList !== undefined) {
@@ -91,12 +91,14 @@ export function isTrustedProxyPeer(peerAddress: string | undefined): boolean {
   const blockList = getTrustedProxyBlockList();
   if (!blockList) return false;
 
-  const family = net.isIP(peerAddress);
+  const mappedIpv4 = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(peerAddress)?.[1];
+  const normalizedPeer = mappedIpv4 ?? peerAddress;
+  const family = net.isIP(normalizedPeer);
   if (family === 4) {
-    return blockList.check(peerAddress, 'ipv4');
+    return blockList.check(normalizedPeer, 'ipv4');
   }
   if (family === 6) {
-    return blockList.check(peerAddress, 'ipv6');
+    return blockList.check(normalizedPeer, 'ipv6');
   }
   return false;
 }

@@ -1,4 +1,5 @@
 import type { Request } from 'express';
+import crypto from 'crypto';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
 import { COOKIE_NAME } from '../helpers/constants';
@@ -14,7 +15,8 @@ import { DatabaseService } from '../services/DatabaseService';
 //                         with a 300/min safety net to prevent resource exhaustion.
 //   Tier W   (Webhooks): CI/CD webhook triggers at 500/min (shared datacenter IPs).
 //   Tier 2   (Standard): All other endpoints at 200/min.
-//   Tier 3   (Auth):     Strict brute-force protection (5-10 attempts / 15min).
+//   Tier 3   (Auth):     Login protection at 5 attempts/IP and 20 failed
+//                         attempts/normalized account per 15 minutes.
 //
 // Enterprise adaptations:
 //   - Internal node-to-node traffic (node_proxy JWTs) bypasses all rate limiters.
@@ -192,6 +194,24 @@ export const authRateLimiter = rateLimit({
   max: process.env.NODE_ENV === 'production' ? 5 : 1000,
   standardHeaders: true,
   legacyHeaders: false,
+  message: { error: 'Too many attempts. Please try again in 15 minutes.' },
+});
+
+function loginAccountKey(req: Request): string {
+  const username = typeof req.body?.username === 'string'
+    ? req.body.username.trim().toLowerCase()
+    : '';
+  if (!username) return `login-ip:${ipKeyGenerator(req.ip || 'unknown')}`;
+  return `login-account:${crypto.createHash('sha256').update(username).digest('hex')}`;
+}
+
+export const loginAccountRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: process.env.NODE_ENV === 'production' ? 20 : 1000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: loginAccountKey,
+  skipSuccessfulRequests: true,
   message: { error: 'Too many attempts. Please try again in 15 minutes.' },
 });
 

@@ -29,6 +29,7 @@ import { GitOpsTransitions } from '../services/gitops/transitions';
 import { insertHistory } from '../services/gitops/history';
 import type { GitOpsApplicationRow } from '../services/gitops/types';
 import { PROXY_DEPLOY_ACTOR_HEADER, PROXY_DEPLOY_SOURCE_HEADER } from '../services/license-headers';
+import { withLoopbackTargetProtection } from './helpers/allowLoopbackTargets';
 
 /** A minimal live Direct application row for GitOps read-path fixtures. */
 function directApplicationFixture(id: string, stackName: string): GitOpsApplicationRow {
@@ -217,6 +218,20 @@ describe('POST /api/git-sources/browse: URL validation', () => {
         }
         expect(listRepoTree).not.toHaveBeenCalled();
         listRepoTree.mockRestore();
+    });
+
+    it('rejects repository hosts that resolve to an unsafe address', async () => {
+        const res = await withLoopbackTargetProtection(() => request(app)
+          .post('/api/git-sources/browse')
+          .set('Authorization', `Bearer ${adminToken()}`)
+          .send({
+              repo_url: 'https://127.0.0.1:9999/repo.git',
+              branch: 'main',
+              auth_type: 'none',
+          }));
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/not allowed/i);
     });
 });
 
@@ -1755,6 +1770,15 @@ describe('POST /api/git-sources/ssh-host-key', () => {
         expect(res.body.error).toMatch(/SSH repository URL/i);
     });
 
+    it('rejects host-key probes to an unsafe address', async () => {
+        const res = await withLoopbackTargetProtection(() => request(app)
+          .post('/api/git-sources/ssh-host-key')
+          .set('Authorization', `Bearer ${adminToken()}`)
+          .send({ repo_url: 'ssh://git@127.0.0.1:22/example/repo.git' }));
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/not allowed/i);
+    });
+
     it('returns scanned host keys for an SSH repository URL', async () => {
         const scanHostKeys = vi.spyOn(
             await import('../services/git/sshTrust'),
@@ -1769,12 +1793,13 @@ describe('POST /api/git-sources/ssh-host-key', () => {
         const res = await request(app)
             .post('/api/git-sources/ssh-host-key')
             .set('Authorization', `Bearer ${adminToken()}`)
-            .send({ repo_url: 'git@github.com:example/repo.git' });
+            .send({ repo_url: 'git@pinned.example:example/repo.git' });
         expect(res.status).toBe(200);
-        expect(res.body.host).toBe('github.com');
+        expect(res.body.host).toBe('pinned.example');
         expect(res.body.port).toBe(22);
         expect(res.body.keys).toHaveLength(1);
         expect(res.body.keys[0].fingerprint).toBe('SHA256:fixtureFingerprint');
+        expect(scanHostKeys).toHaveBeenCalledWith('pinned.example', 22, '93.184.216.34');
         scanHostKeys.mockRestore();
     });
 
@@ -1820,7 +1845,7 @@ describe('POST /api/git-sources/ssh-host-key', () => {
         const res = await request(app)
             .post('/api/git-sources/ssh-host-key')
             .set('Authorization', `Bearer ${adminToken()}`)
-            .send({ repo_url: 'ssh://git@git.example.com:2222/org/repo.git' });
+            .send({ repo_url: 'ssh://git@github.com:2222/org/repo.git' });
         expect(res.status).toBe(500);
         expect(res.body.error).toMatch(/Git source operation failed/i);
         scanHostKeys.mockRestore();

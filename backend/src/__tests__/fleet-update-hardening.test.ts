@@ -51,7 +51,7 @@ function mockMeta(meta: RemoteMeta) {
 
 function mockTarget() {
   vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) =>
-    id === proxyNodeId ? { apiUrl: 'http://192.168.1.99:1852', apiToken: 'proxy-token' } : null,
+    id === proxyNodeId ? { apiUrl: 'http://192.168.1.99:1852', apiToken: 'proxy-token', trustedLoopback: false } : null,
   );
 }
 

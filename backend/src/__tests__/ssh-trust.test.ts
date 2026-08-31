@@ -72,10 +72,22 @@ describe('ssh credential canonicalization', () => {
 
 describe('ssh command builder', () => {
   it('enforces strict host key checking', () => {
-    const cmd = buildSshCommand('/tmp/key', '/tmp/known_hosts');
+    const cmd = buildSshCommand('/tmp/key', '/tmp/known_hosts', {
+      address: '10.0.0.8',
+      hostKeyAlias: 'git.internal.example',
+    });
     expect(cmd).toContain('StrictHostKeyChecking=yes');
     expect(cmd).toContain('UserKnownHostsFile=/tmp/known_hosts');
     expect(cmd).toContain('IdentitiesOnly=yes');
+  });
+
+  it('pins the address while retaining the repository host identity', () => {
+    const cmd = buildSshCommand('/tmp/key', '/tmp/known_hosts', {
+      address: '10.0.0.8',
+      hostKeyAlias: '[git.internal.example]:2222',
+    });
+    expect(cmd).toContain('Hostname=10.0.0.8');
+    expect(cmd).toContain('HostKeyAlias=[git.internal.example]:2222');
   });
 });
 

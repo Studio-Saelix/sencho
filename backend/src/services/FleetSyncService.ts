@@ -5,6 +5,7 @@ import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
+import { safeAxiosTransport } from '../utils/outboundTarget';
 import {
     FleetResource,
     MAX_SYNC_ROWS,
@@ -500,6 +501,7 @@ export class FleetSyncService {
                 `${baseUrl}/api/fleet/sync/${resource}`,
                 payload,
                 {
+                    ...safeAxiosTransport(false),
                     headers: { Authorization: `Bearer ${node.api_token}` },
                     timeout: 15_000,
                 },

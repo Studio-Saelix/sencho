@@ -22,10 +22,11 @@ import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
+import { safeRemoteFetch } from '../utils/outboundTarget';
 import { formatNoTargetError } from '../utils/remoteTarget';
 import { sanitizeForLog } from '../utils/safeLog';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, type SnapshotNodeData } from '../utils/snapshot-capture';
-import { NodeRegistry } from './NodeRegistry';
+import { NodeRegistry, type ProxyTarget } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import TrivyService from './TrivyService';
 import type { ScanAllNodeImagesResult } from './TrivyService';
@@ -992,7 +993,7 @@ export class SchedulerService {
         }
         const startTime = Date.now();
         try {
-            const response = await fetch(`${baseUrl}/api/auto-update/execute`, {
+            const response = await safeRemoteFetch(`${baseUrl}/api/auto-update/execute`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -1001,7 +1002,7 @@ export class SchedulerService {
                 },
                 body: JSON.stringify({ target }),
                 signal: AbortSignal.timeout(300_000), // 5 minute timeout for long updates
-            });
+            }, proxyTarget.trustedLoopback);
 
             if (!response.ok) {
                 throw new Error(this.remoteProxyFailureMessage(nodeId, await this.remoteResponseDetail(response)));
@@ -1027,7 +1028,7 @@ export class SchedulerService {
         }
         const startTime = Date.now();
         try {
-            const response = await fetch(`${baseUrl}/api/auto-update/execute`, {
+            const response = await safeRemoteFetch(`${baseUrl}/api/auto-update/execute`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -1036,7 +1037,7 @@ export class SchedulerService {
                 },
                 body: JSON.stringify({ targets }),
                 signal: AbortSignal.timeout(300_000),
-            });
+            }, proxyTarget.trustedLoopback);
 
             // Older remotes only accept { target }. Fall back to one call per
             // stack so mixed-version fleets still complete the label schedule.
@@ -1109,7 +1110,7 @@ export class SchedulerService {
         }
     }
 
-    private requireRemoteProxyTarget(nodeId: number): { apiUrl: string; apiToken: string } {
+    private requireRemoteProxyTarget(nodeId: number): ProxyTarget {
         const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
         if (!proxyTarget) {
             throw new Error(this.remoteProxyFailureMessage(nodeId, this.noProxyTargetDetail(nodeId)));
@@ -1187,13 +1188,13 @@ export class SchedulerService {
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
         try {
-            const response = await fetch(`${baseUrl}/api/containers?all=true`, {
+            const response = await safeRemoteFetch(`${baseUrl}/api/containers?all=true`, {
                 headers: {
                     'Authorization': `Bearer ${proxyTarget.apiToken}`,
                     [PROXY_TIER_HEADER]: proxyHeaders.tier,
                 },
                 signal: AbortSignal.timeout(60_000),
-            });
+            }, proxyTarget.trustedLoopback);
             if (!response.ok) {
                 throw new Error(this.remoteProxyFailureMessage(nodeId, await this.remoteResponseDetail(response)));
             }
@@ -1218,7 +1219,7 @@ export class SchedulerService {
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
         try {
-            const response = await fetch(
+            const response = await safeRemoteFetch(
                 `${baseUrl}/api/containers/${encodeURIComponent(containerId)}/${action}`,
                 {
                     method: 'POST',
@@ -1229,6 +1230,7 @@ export class SchedulerService {
                     },
                     signal: AbortSignal.timeout(300_000),
                 },
+                proxyTarget.trustedLoopback,
             );
             if (!response.ok) {
                 throw new Error(this.remoteProxyFailureMessage(nodeId, await this.remoteResponseDetail(response)));
@@ -1260,7 +1262,7 @@ export class SchedulerService {
             if (!augmented.ok) {
                 throw new Error(augmented.error);
             }
-            const response = await fetch(`${baseUrl}/api/stacks/${routeSuffix}`, {
+            const response = await safeRemoteFetch(`${baseUrl}/api/stacks/${routeSuffix}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -1270,7 +1272,7 @@ export class SchedulerService {
                 },
                 body: JSON.stringify(augmented.body),
                 signal: AbortSignal.timeout(300_000),
-            });
+            }, proxyTarget.trustedLoopback);
             if (!response.ok) {
                 throw new Error(this.remoteProxyFailureMessage(nodeId, await this.remoteResponseDetail(response)));
             }

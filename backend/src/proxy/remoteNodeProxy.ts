@@ -53,6 +53,12 @@ import { SETTING_WRITE_PERMISSIONS } from '../routes/settings';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 import {
+  assertSafeOutboundUrl,
+  safeHttpAgent,
+  safeHttpsAgent,
+  UnsafeOutboundTargetError,
+} from '../utils/outboundTarget';
+import {
   classifyRegistryDeliveryRouteClass,
   getRegistryDeliveryTotalBodyLimit,
 } from '../helpers/registryDeliveryBodyLimits';
@@ -318,7 +324,11 @@ export function createRemoteProxyMiddleware(): RequestHandler {
     pathRewrite: (path: string) => '/api' + path,
   };
 
-  const proxy = createProxyMiddleware<Request, Response>({ ...baseOptions, on: sharedOn });
+  const createStreamingProxy = (agent?: typeof safeHttpAgent | typeof safeHttpsAgent) =>
+    createProxyMiddleware<Request, Response>({ ...baseOptions, ...(agent ? { agent } : {}), on: sharedOn });
+  const proxy = createStreamingProxy();
+  const safeHttpProxy = createStreamingProxy(safeHttpAgent);
+  const safeHttpsProxy = createStreamingProxy(safeHttpsAgent);
 
   /**
    * The identity hop: buffers the response so node ids inside it can be
@@ -328,8 +338,10 @@ export function createRemoteProxyMiddleware(): RequestHandler {
    * buffering is exactly what the streaming hop must never do. Logs, event
    * streams, and downloads keep flowing through that one untouched.
    */
-  const identityProxy = createProxyMiddleware<Request, Response>({
+  const createIdentityProxy = (agent?: typeof safeHttpAgent | typeof safeHttpsAgent) =>
+    createProxyMiddleware<Request, Response>({
     ...baseOptions,
+    ...(agent ? { agent } : {}),
     selfHandleResponse: true,
     // Bounded so a remote that sends headers and then stalls cannot pin the
     // buffered body and both sockets indefinitely. No pathFilter: the
@@ -376,6 +388,9 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       },
     },
   });
+  const identityProxy = createIdentityProxy();
+  const safeHttpIdentityProxy = createIdentityProxy(safeHttpAgent);
+  const safeHttpsIdentityProxy = createIdentityProxy(safeHttpsAgent);
 
   return (req: Request, res: Response, next: NextFunction): void => {
     // The `/api/` mount strips the `/api` prefix, so req.path is now `/auth/…`,
@@ -418,6 +433,20 @@ export function createRemoteProxyMiddleware(): RequestHandler {
     }
 
     const runGatedProxy = async (): Promise<void> => {
+      if (node.mode === 'proxy') {
+        try {
+          await assertSafeOutboundUrl(target.apiUrl);
+        } catch (error: unknown) {
+          if (!(error instanceof UnsafeOutboundTargetError)) throw error;
+          const message = error.reason === 'blocked'
+            ? 'Remote node target is not allowed.'
+            : 'Remote node target host could not be resolved.';
+          console.warn(`[Proxy] Refused remote target for node ${node.id}: ${error.reason}`);
+          res.status(502).json({ error: message });
+          return;
+        }
+      }
+
       if (isStackDownWithRemoveVolumes(req)) {
         const supported = await remoteAdvertisesCapability(req.nodeId, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY);
         if (!supported) {
@@ -779,7 +808,10 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         }
         req.gitopsIdentity = { query: prepared.search.toString(), preRewritePath: req.path };
         beginProxyTiming(req, res);
-        identityProxy(req, res, next);
+        const selectedIdentityProxy = node.mode === 'pilot_agent'
+          ? identityProxy
+          : target.apiUrl.startsWith('https:') ? safeHttpsIdentityProxy : safeHttpIdentityProxy;
+        selectedIdentityProxy(req, res, next);
         return;
       }
 
@@ -787,7 +819,10 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       if (req.registryDeliveryAbortController?.signal.aborted) {
         return;
       }
-      proxy(req, res, next);
+      const selectedProxy = node.mode === 'pilot_agent'
+        ? proxy
+        : target.apiUrl.startsWith('https:') ? safeHttpsProxy : safeHttpProxy;
+      selectedProxy(req, res, next);
     };
 
     runGatedProxy().catch(next);

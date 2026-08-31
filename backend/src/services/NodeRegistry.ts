@@ -4,6 +4,11 @@ import { EventEmitter } from 'events';
 import { DatabaseService, Node } from './DatabaseService';
 import { fetchRemoteMeta, OFFLINE_META, RemoteMeta } from './CapabilityRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
+import { assertSafeOutboundUrl, safeAxiosTransport } from '../utils/outboundTarget';
+
+export type ProxyTarget =
+    | { apiUrl: string; apiToken: ''; trustedLoopback: true }
+    | { apiUrl: string; apiToken: string; trustedLoopback: false };
 
 /**
  * NodeRegistry: Manages connections for multiple nodes.
@@ -105,18 +110,18 @@ export class NodeRegistry extends EventEmitter {
      * bridge; the bridge strips the bearer token and re-authenticates
      * implicitly via the pre-verified tunnel socket.
      */
-    public getProxyTarget(nodeId: number): { apiUrl: string; apiToken: string } | null {
+    public getProxyTarget(nodeId: number): ProxyTarget | null {
         const node = DatabaseService.getInstance().getNode(nodeId);
         if (!node || node.type !== 'remote') return null;
 
         if (node.mode === 'pilot_agent') {
             const loopbackUrl = PilotTunnelManager.getInstance().getLoopbackUrl(nodeId);
             if (!loopbackUrl) return null;
-            return { apiUrl: loopbackUrl, apiToken: '' };
+            return { apiUrl: loopbackUrl, apiToken: '', trustedLoopback: true };
         }
 
         if (!node.api_url || !node.api_token) return null;
-        return { apiUrl: node.api_url, apiToken: node.api_token };
+        return { apiUrl: node.api_url, apiToken: node.api_token, trustedLoopback: false };
     }
 
     /**
@@ -127,7 +132,7 @@ export class NodeRegistry extends EventEmitter {
     public async fetchMetaForNode(nodeId: number): Promise<RemoteMeta> {
         const target = this.getProxyTarget(nodeId);
         if (!target) return { ...OFFLINE_META };
-        return fetchRemoteMeta(target.apiUrl, target.apiToken);
+        return fetchRemoteMeta(target.apiUrl, target.apiToken, target.trustedLoopback);
     }
 
     /**
@@ -226,10 +231,16 @@ export class NodeRegistry extends EventEmitter {
 
         const baseUrl = node.api_url.replace(/\/$/, '');
         const headers = { Authorization: `Bearer ${node.api_token}` };
+        const requestConfig = {
+            ...safeAxiosTransport(false),
+            headers,
+            timeout: 8000,
+        };
 
         try {
+            await assertSafeOutboundUrl(baseUrl);
             // Step 1: Verify auth. A 401 here means wrong token - surface that clearly.
-            const authRes = await axios.get(`${baseUrl}/api/auth/check`, { headers, timeout: 8000 });
+            const authRes = await axios.get(`${baseUrl}/api/auth/check`, requestConfig);
             if (authRes.status !== 200) throw new Error(`Unexpected status ${authRes.status}`);
 
             db.updateNodeStatus(node.id, 'online');
@@ -237,9 +248,9 @@ export class NodeRegistry extends EventEmitter {
             // Step 2: Fetch Docker stats in parallel. Use allSettled so a slow or missing
             // endpoint doesn't fail the whole test - each field falls back to '-' gracefully.
             const [statsResult, sysResult, imagesResult, metaResult] = await Promise.allSettled([
-                axios.get(`${baseUrl}/api/stats`, { headers, timeout: 8000 }),
-                axios.get(`${baseUrl}/api/system/stats`, { headers, timeout: 8000 }),
-                axios.get(`${baseUrl}/api/system/images`, { headers, timeout: 8000 }),
+                axios.get(`${baseUrl}/api/stats`, requestConfig),
+                axios.get(`${baseUrl}/api/system/stats`, requestConfig),
+                axios.get(`${baseUrl}/api/system/images`, requestConfig),
                 fetchRemoteMeta(baseUrl, node.api_token!),
             ]);
 

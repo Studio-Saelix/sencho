@@ -77,6 +77,7 @@ describe('NodeRegistry.fetchMetaForNode', () => {
     vi.spyOn(reg, 'getProxyTarget').mockReturnValue({
       apiUrl: 'http://127.0.0.1:54321',
       apiToken: '',
+      trustedLoopback: true,
     });
     const axiosSpy = vi.spyOn(axios, 'get').mockResolvedValue({
       data: {
@@ -96,8 +97,10 @@ describe('NodeRegistry.fetchMetaForNode', () => {
     expect(axiosSpy).toHaveBeenCalledTimes(1);
     const url = axiosSpy.mock.calls[0][0];
     expect(url).toBe('http://127.0.0.1:54321/api/meta');
-    const init = axiosSpy.mock.calls[0][1] as { headers: Record<string, string> };
+    const init = axiosSpy.mock.calls[0][1] as { headers: Record<string, string>; httpAgent?: unknown; httpsAgent?: unknown };
     expect(init.headers).toEqual({});
+    expect(init.httpAgent).toBeUndefined();
+    expect(init.httpsAgent).toBeUndefined();
 
     db.deleteNode(nodeId);
   });
@@ -118,6 +121,7 @@ describe('NodeRegistry.fetchMetaForNode', () => {
     vi.spyOn(reg, 'getProxyTarget').mockReturnValue({
       apiUrl: 'https://remote.example.com:1852',
       apiToken: 'real-token',
+      trustedLoopback: false,
     });
     const axiosSpy = vi.spyOn(axios, 'get').mockResolvedValue({
       data: { version: '0.76.7', capabilities: [], startedAt: 1, updateError: null },
@@ -125,8 +129,10 @@ describe('NodeRegistry.fetchMetaForNode', () => {
 
     await reg.fetchMetaForNode(nodeId);
 
-    const init = axiosSpy.mock.calls[0][1] as { headers: Record<string, string> };
+    const init = axiosSpy.mock.calls[0][1] as { headers: Record<string, string>; httpAgent?: unknown; httpsAgent?: unknown };
     expect(init.headers).toEqual({ Authorization: 'Bearer real-token' });
+    expect(init.httpAgent).toBeDefined();
+    expect(init.httpsAgent).toBeDefined();
 
     db.deleteNode(nodeId);
   });

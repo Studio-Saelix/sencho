@@ -27,6 +27,9 @@ export type TransportFacingCode =
 /** Structured failure raised by the native transport; classified below. */
 export type TransportFailureReason =
     | 'invalid-url'
+    | 'unsafe-target'
+    | 'target-unresolved'
+    | 'ssh-auth-required'
     | 'invalid-ref'
     | 'git-missing'
     | 'git-old'
@@ -51,6 +54,9 @@ interface TransportFailureBase {
  */
 export type TransportFailure = TransportFailureBase & (
     | { reason: 'invalid-url' }
+    | { reason: 'unsafe-target' }
+    | { reason: 'target-unresolved' }
+    | { reason: 'ssh-auth-required' }
     | { reason: 'invalid-ref' }
     | { reason: 'git-missing'; stderr?: string }
     | { reason: 'git-old'; stderr?: string }
@@ -106,6 +112,12 @@ export function classifyGitFailure(
     switch (failure.reason) {
         case 'invalid-url':
             return { code: 'GIT_ERROR', message: 'Unsupported repository URL. Use https:// or SSH (git@host:org/repo.git or ssh://) without embedded credentials.' };
+        case 'unsafe-target':
+            return { code: 'GIT_ERROR', message: 'Repository host is not allowed.' };
+        case 'target-unresolved':
+            return { code: 'NETWORK_TIMEOUT', message: `Could not resolve${dest}. Check the repository URL and your network or DNS.` };
+        case 'ssh-auth-required':
+            return { code: 'GIT_ERROR', message: 'SSH repository URLs require a deploy key.' };
         case 'invalid-ref':
             return { code: 'GIT_ERROR', message: 'Unsupported ref name. Use a branch name, a tag name, or a full commit SHA as the remote reports it.' };
         case 'git-missing':

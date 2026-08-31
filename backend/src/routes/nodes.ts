@@ -27,6 +27,7 @@ import { logDebugTiming } from '../utils/requestTiming';
 import { BlueprintReconciler } from '../services/BlueprintReconciler';
 import { recordPlacementShift, snapshotPlacementWith } from '../services/gitops/nodePlacementProducers';
 import { projectCommittedRevisions } from '../helpers/gitopsResponse';
+import { assertSafeOutboundUrl, safeRemoteFetch, UnsafeOutboundTargetError } from '../utils/outboundTarget';
 
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
 const REMOTE_META_CACHE_TTL = 3 * 60 * 1000;
@@ -251,6 +252,17 @@ nodesRouter.post('/', enrollmentLimiter, async (req: Request, res: Response) => 
       if (!urlCheck.valid) {
         return res.status(400).json({ error: urlCheck.reason });
       }
+      try {
+        await assertSafeOutboundUrl(api_url);
+      } catch (error: unknown) {
+        if (error instanceof UnsafeOutboundTargetError) {
+          const message = error.reason === 'blocked'
+            ? 'API URL target is not allowed'
+            : 'API URL host could not be resolved';
+          return res.status(400).json({ error: message });
+        }
+        throw error;
+      }
     }
 
     const id = DatabaseService.getInstance().addNode({
@@ -380,6 +392,17 @@ nodesRouter.put('/:id', async (req: Request, res: Response) => {
       const urlCheck = isValidRemoteUrl(updates.api_url);
       if (!urlCheck.valid) {
         return res.status(400).json({ error: urlCheck.reason });
+      }
+      try {
+        await assertSafeOutboundUrl(updates.api_url);
+      } catch (error: unknown) {
+        if (error instanceof UnsafeOutboundTargetError) {
+          const message = error.reason === 'blocked'
+            ? 'API URL target is not allowed'
+            : 'API URL host could not be resolved';
+          return res.status(400).json({ error: message });
+        }
+        throw error;
       }
     }
 
@@ -590,7 +613,7 @@ nodesRouter.post('/:id/fleet-sync/reset-anchor', async (req: Request, res: Respo
     const baseUrl = node.api_url.replace(/\/$/, '');
     let peerResponse: globalThis.Response;
     try {
-      peerResponse = await fetch(`${baseUrl}/api/fleet/role/reanchor`, {
+      peerResponse = await safeRemoteFetch(`${baseUrl}/api/fleet/role/reanchor`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${node.api_token}`,
