@@ -148,7 +148,7 @@ async function awaitKillConfirmed(kill: Promise<void> | undefined, what: string)
     let timer: NodeJS.Timeout | undefined;
     const bound = new Promise<void>((resolve) => {
         timer = setTimeout(() => {
-            console.warn(`[GitSource:transport] ${what} not confirmed within ${KILL_CONFIRM_TIMEOUT_MS}ms; continuing cleanup while it may still be running`);
+            console.warn(`[GitSource:transport] ${sanitizeForLog(what)} not confirmed within ${KILL_CONFIRM_TIMEOUT_MS}ms; continuing cleanup while it may still be running`);
             resolve();
         }, KILL_CONFIRM_TIMEOUT_MS);
     });

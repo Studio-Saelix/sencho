@@ -80,6 +80,29 @@ export function looksLikeRedirectFailure(stderr: string): boolean {
     return /returned error: 30\d/i.test(stderr) || /\bredirect/i.test(stderr);
 }
 
+/**
+ * The single gate every URL passes before it is requested. Returns the URL
+ * only when it sits on `expectedScope`, and throws otherwise, so no caller can
+ * reach the network with a destination that has not been checked. The seed URL
+ * goes through it too: that check is trivially true, but routing every request
+ * through one place is what makes the guarantee inspectable rather than a
+ * property of the loop's shape.
+ *
+ * Registered as a request-forgery barrier in
+ * `.github/codeql/extensions/redirectScope.model.yml`.
+ */
+export function approvedUrl(
+    url: string,
+    expectedScope: string,
+    reportHost: string,
+    hasToken: boolean,
+): string {
+    if (redirectScopeOf(url) !== expectedScope) {
+        throw redirectScope(reportHost, hasToken);
+    }
+    return url;
+}
+
 interface ProbeResponse {
     status: number;
     location: string | null;
@@ -137,7 +160,10 @@ export async function resolveRedirectedRepoUrl(opts: {
     if (!expectedScope) throw redirectScope(opts.reportHost, opts.hasToken);
 
     const base = opts.repoUrl.replace(/\/$/, '');
-    let current = `${base}${REF_ADVERTISE_SUFFIX}?${REF_ADVERTISE_QUERY}`;
+    let current = approvedUrl(
+        `${base}${REF_ADVERTISE_SUFFIX}?${REF_ADVERTISE_QUERY}`,
+        expectedScope, opts.reportHost, opts.hasToken,
+    );
     let hops = 0;
 
     while (hops < MAX_REDIRECT_HOPS) {
@@ -160,10 +186,8 @@ export async function resolveRedirectedRepoUrl(opts: {
             return resolved;
         }
         const next = resolveLocation(current, res.location);
-        if (!next || redirectScopeOf(next) !== expectedScope) {
-            throw redirectScope(opts.reportHost, opts.hasToken);
-        }
-        current = next;
+        if (!next) throw redirectScope(opts.reportHost, opts.hasToken);
+        current = approvedUrl(next, expectedScope, opts.reportHost, opts.hasToken);
         hops += 1;
     }
     throw redirectScope(opts.reportHost, opts.hasToken);

@@ -1,5 +1,6 @@
 data_extensions:
   - .github/codeql/extensions/safeLog.model.yml
+  - .github/codeql/extensions/redirectScope.model.yml
 
 # End-to-end Playwright specs are test-harness code, not shipped product code.
 # They seed fixture files directly into the backend's COMPOSE_DIR (a fixed path
@@ -73,23 +74,6 @@ query-filters:
       id: js/request-forgery
       paths:
         - backend/src/services/NotificationService.ts
-
-  # redirectPreflight walks an HTTPS redirect chain to decide whether git may
-  # be re-run against the destination. CodeQL traces the operator's configured
-  # repository URL into the outbound request and flags request forgery. The
-  # first request goes to that configured URL, which git contacts on every
-  # fetch regardless, and every later hop is validated against that same origin
-  # (scheme, host, and port) BEFORE it is requested, so the walk cannot reach a
-  # host the operator did not configure. The probe carries no credentials and
-  # the chain is bounded to five hops. Sencho is single-tenant and self-hosted:
-  # the admin who sets the repository URL owns the server, the same trust model
-  # as the registry-api and NotificationService entries above. Excluding this
-  # file only for this query, so every other query still analyzes it and the
-  # query still catches real SSRF elsewhere.
-  - exclude:
-      id: js/request-forgery
-      paths:
-        - backend/src/services/git/redirectPreflight.ts
 
   # Same NotificationService trust-model exclusion for file data reaching
   # the outbound fetch() (js/file-access-to-http). Notification messages

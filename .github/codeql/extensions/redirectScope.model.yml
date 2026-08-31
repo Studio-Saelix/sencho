@@ -1,0 +1,21 @@
+# redirectPreflight walks an HTTPS redirect chain to decide whether git may be
+# re-run against the destination, so the operator's configured repository URL
+# necessarily reaches an outbound request and CodeQL reports request forgery.
+#
+# The guarantee the module actually provides is narrower than "the URL is
+# trusted": every URL it requests has first been through approvedUrl, which
+# returns the URL only when its origin (scheme, host, and port) matches the
+# configured repository's, and throws otherwise. The seed URL passes through it
+# as well, so there is no path to the network that skips the check, and the
+# destination of a redirect is refused before it is ever contacted.
+#
+# Modelling that function as a barrier states this to the analysis instead of
+# excluding the file, which keeps every other query analyzing the one module
+# whose job is preventing this class of bug. Same mechanism as the
+# sanitizeForLog barrier in safeLog.model.yml.
+extensions:
+  - addsTo:
+      pack: codeql/javascript-all
+      extensible: barrierModel
+    data:
+      - ["backend/src/services/git/redirectPreflight", "Member[approvedUrl].ReturnValue", "request-forgery"]
