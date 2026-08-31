@@ -167,6 +167,14 @@ describe.skipIf(!gitAvailable())('redirect destination revalidation (real git)',
         gitReachesFixture = res.status === 0 && res.stdout.includes('refs/heads/main');
         probe.close();
         openFixtures.length = 0;
+        if (!gitReachesFixture && process.env.CI) {
+            // Skipping is the right answer on a workstation that cannot do
+            // this, but in CI it would quietly retire the whole matrix and
+            // leave a green run with nothing exercised.
+            throw new Error(
+                `git cannot reach a loopback fixture, so the redirect matrix cannot run: exit ${res.status}, stderr: ${res.stderr}`,
+            );
+        }
     });
 
     afterEach(async () => {

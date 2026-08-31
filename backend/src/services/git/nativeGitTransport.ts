@@ -485,7 +485,16 @@ async function approveRedirectTarget(
     if (repo.kind !== 'https' || !looksLikeRedirectFailure(stderr)) return null;
     let caPem: string | undefined;
     if (caPath) {
-        caPem = await fs.readFile(caPath, 'utf8').catch(() => undefined);
+        try {
+            caPem = await fs.readFile(caPath, 'utf8');
+        } catch (e) {
+            // This bundle was written moments ago by this same invocation, so a
+            // read failure is a real fault, not a missing option. Probing with
+            // default trust instead would validate the operator's private-CA
+            // host against the wrong anchors, so decline the retry and say so.
+            console.warn(`[GitSource:transport] could not read the CA bundle at ${caPath} for the redirect preflight; not authorising a redirect retry: ${e instanceof Error ? e.message : String(e)}`);
+            return null;
+        }
     }
     return await resolveRedirectedRepoUrl({
         repoUrl: repo.href,
@@ -493,6 +502,22 @@ async function approveRedirectTarget(
         reportHost: repoHostLabel(repo),
         caPem,
     });
+}
+
+/**
+ * The same question asked of a materialization step, which reports through a
+ * thrown TransportFailure rather than an exit code. Kept in one place so the
+ * rule for which failures may be retried cannot drift between the fetch and
+ * fast-forward paths.
+ */
+async function approvedRedirectForError(
+    e: unknown,
+    repo: ParsedRepoUrl,
+    hasToken: boolean,
+    caPath: string | null,
+): Promise<string | null> {
+    if (!isTransportFailure(e) || e.reason !== 'exit' || !e.stderr) return null;
+    return await approveRedirectTarget(repo, e.stderr, hasToken, caPath);
 }
 
 // ─── Input validation ────────────────────────────────────────────────────────
@@ -847,10 +872,7 @@ export async function verifyFastForward(req: {
         try {
             await materialize([...baseArgs, 'fetch', '--depth=1', effectiveHref, descendant]);
         } catch (e) {
-            const stderr = isTransportFailure(e) && e.reason === 'exit' ? (e.stderr ?? '') : '';
-            const approved = stderr
-                ? await approveRedirectTarget(repo, stderr, hasToken, caPath)
-                : null;
+            const approved = await approvedRedirectForError(e, repo, hasToken, caPath);
             if (!approved) throw e;
             effectiveHref = approved;
             await materialize([...baseArgs, 'fetch', '--depth=1', effectiveHref, descendant]);
@@ -1088,10 +1110,7 @@ export const nativeGitTransport: GitTransport = {
             } catch (e) {
                 // A refused redirect is the one failure worth a second attempt,
                 // and only against a destination the preflight has approved.
-                const stderr = isTransportFailure(e) && e.reason === 'exit' ? (e.stderr ?? '') : '';
-                const approved = stderr
-                    ? await approveRedirectTarget(repo, stderr, hasToken, caPath)
-                    : null;
+                const approved = await approvedRedirectForError(e, repo, hasToken, caPath);
                 if (!approved) throw e;
                 // The refused attempt can have left a partial checkout behind;
                 // git refuses to clone into a non-empty directory.

@@ -11,7 +11,7 @@ import { readFileSync } from 'fs';
 import https from 'https';
 import path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { resolveRedirectedRepoUrl } from '../services/git/redirectPreflight';
+import { looksLikeRedirectFailure, resolveRedirectedRepoUrl } from '../services/git/redirectPreflight';
 
 const FIXTURES_DIR = path.resolve(__dirname, '..', '..', '..', 'e2e', 'fixtures');
 const CA_PEM = readFileSync(path.join(FIXTURES_DIR, 'git-ca.pem'), 'utf8');
@@ -87,6 +87,31 @@ describe('redirect preflight', () => {
         });
 
         expect(resolved).toBe(`${server.origin}/new.git`);
+    });
+
+    it('approves a same-origin redirect expressed as an absolute Location', async () => {
+        // The case above sends a relative Location; this one sends the fully
+        // qualified form, so both branches of the Location parser are covered.
+        let origin = '';
+        const server = await serve((url, res) => {
+            if (url.startsWith('/old.git/')) {
+                res.statusCode = 302;
+                res.setHeader('location', `${origin}${url.replace('/old.git/', '/moved.git/')}`);
+                res.end();
+                return;
+            }
+            ok(res);
+        });
+        origin = server.origin;
+
+        await expect(
+            resolveRedirectedRepoUrl({
+                repoUrl: `${server.origin}/old.git`,
+                hasToken: false,
+                reportHost: '127.0.0.1',
+                caPem: CA_PEM,
+            }),
+        ).resolves.toBe(`${server.origin}/moved.git`);
     });
 
     it('refuses a cross-origin redirect without ever contacting the destination', async () => {
@@ -199,6 +224,23 @@ describe('redirect preflight', () => {
                 caPem: CA_PEM,
             }),
         ).resolves.toBeNull();
+    });
+
+    it('recognises the stderr git actually emits for a refused redirect', () => {
+        // Pinned to git's real wording. git-remote-http reports a refused
+        // redirect as an HTTP error and never prints a Location header, which
+        // is why the destination has to be resolved by probing rather than by
+        // reading it out of stderr. If a git upgrade rephrases these, this
+        // fails here instead of silently making relocated repositories
+        // unreachable in production.
+        expect(looksLikeRedirectFailure(
+            "fatal: unable to access 'https://git.example.com/repo.git/': The requested URL returned error: 302",
+        )).toBe(true);
+        expect(looksLikeRedirectFailure('warning: redirecting to https://git.example.com/new.git/')).toBe(true);
+        expect(looksLikeRedirectFailure(
+            "fatal: unable to access 'https://git.example.com/repo.git/': The requested URL returned error: 404",
+        )).toBe(false);
+        expect(looksLikeRedirectFailure('fatal: Authentication failed')).toBe(false);
     });
 
     it('returns null when the probe itself cannot complete', async () => {

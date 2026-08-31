@@ -67,7 +67,14 @@ export function redirectScopeOf(url: string): string | null {
     }
 }
 
-/** True when git's stderr describes a refused redirect rather than an ordinary failure. */
+/**
+ * True when git's stderr describes a refused redirect rather than an ordinary
+ * failure. Matched against git's current wording, which
+ * `git-redirect-preflight.test.ts` pins to the literal strings git emits, so a
+ * git upgrade that rephrases them fails a test rather than quietly making
+ * relocated repositories unreachable. A miss is safe but not silent: no retry
+ * is authorised and git's own error is reported unchanged.
+ */
 export function looksLikeRedirectFailure(stderr: string): boolean {
     return /returned error: 30\d/i.test(stderr) || /\bredirect/i.test(stderr);
 }
@@ -136,10 +143,13 @@ export async function resolveRedirectedRepoUrl(opts: {
         let res: ProbeResponse;
         try {
             res = await probe(current, opts.caPem);
-        } catch {
+        } catch (e) {
             // The probe could not complete (TLS, DNS, reset). We cannot prove
             // the chain is safe, so we do not authorise a retry; the caller
-            // reports git's original error instead.
+            // reports git's original error instead. Say why, or a private CA
+            // that fails to validate is indistinguishable from a server that
+            // simply does not redirect.
+            console.warn(`[GitSource:redirect] could not probe ${opts.reportHost} for a redirect target, keeping the original git error: ${e instanceof Error ? e.message : String(e)}`);
             return null;
         }
         if (res.status < 300 || res.status >= 400 || !res.location) {

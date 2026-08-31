@@ -215,6 +215,12 @@ Sencho combines your CA with the system trust anchors (it does not replace them)
 
 Leave the field empty when the server uses a publicly trusted certificate.
 
+### Redirects
+
+Some Git servers answer with a redirect, for example when a repository moves to a canonical path. Sencho follows a redirect that stays on the same server (same scheme, host, and port) and only changes the path, so a relocated repository keeps working without you editing the URL.
+
+A redirect that points at a different server is refused, and the pull reports that the host redirected elsewhere. Sencho does not contact that other server or send it your token. If a repository has genuinely moved to a new host, update the repository URL on the Git source to the new address.
+
 ## Local edits vs Git
 
 Sencho classifies every managed path against the last applied generation and the live disk.
