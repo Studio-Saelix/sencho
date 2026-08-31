@@ -137,13 +137,6 @@ describe.skipIf(!gitAvailable())('redirect destination revalidation (real git)',
     let bareDir: string;
     let headSha: string;
     let prevExtraCaCerts: string | undefined;
-    /**
-     * Whether a spawned git can actually reach a loopback fixture. Some
-     * sandboxes permit in-process sockets but not subprocess ones, where every
-     * case below would "pass" by failing for the wrong reason. Detected once
-     * and used to skip loudly instead of asserting nothing.
-     */
-    let gitReachesFixture = false;
 
     beforeAll(async () => {
         bareDir = buildBareRepo({
@@ -156,25 +149,6 @@ describe.skipIf(!gitAvailable())('redirect destination revalidation (real git)',
             .stdout.trim().toLowerCase();
         prevExtraCaCerts = process.env.NODE_EXTRA_CA_CERTS;
         delete process.env.NODE_EXTRA_CA_CERTS;
-
-        const probe = await serveGit({ bareDir });
-        const res = spawnSync(
-            'git',
-            ['-c', `http.sslCAInfo=${path.join(FIXTURES_DIR, 'git-ca.pem')}`,
-                'ls-remote', `${probe.origin}/new.git`, 'refs/heads/main'],
-            { encoding: 'utf8', timeout: 20_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } },
-        );
-        gitReachesFixture = res.status === 0 && res.stdout.includes('refs/heads/main');
-        probe.close();
-        openFixtures.length = 0;
-        if (!gitReachesFixture && process.env.CI) {
-            // Skipping is the right answer on a workstation that cannot do
-            // this, but in CI it would quietly retire the whole matrix and
-            // leave a green run with nothing exercised.
-            throw new Error(
-                `git cannot reach a loopback fixture, so the redirect matrix cannot run: exit ${res.status}, stderr: ${res.stderr}`,
-            );
-        }
     });
 
     afterEach(async () => {
@@ -184,8 +158,7 @@ describe.skipIf(!gitAvailable())('redirect destination revalidation (real git)',
         else process.env.NODE_EXTRA_CA_CERTS = prevExtraCaCerts;
     });
 
-    it('resolves a ref through an unauthenticated same-host redirect', async (ctx) => {
-        if (!gitReachesFixture) ctx.skip();
+    it('resolves a ref through an unauthenticated same-host redirect', async () => {
         const server = await serveGit({
             bareDir,
             redirect: (self, url) => `${self.origin}${url.replace('/old.git/', '/new.git/')}`,
@@ -202,8 +175,7 @@ describe.skipIf(!gitAvailable())('redirect destination revalidation (real git)',
         expect(resolved).toEqual({ commitSha: headSha, kind: 'branch' });
     });
 
-    it('resolves a ref through an authenticated same-host redirect and sends the token to the relocated path', async (ctx) => {
-        if (!gitReachesFixture) ctx.skip();
+    it('resolves a ref through an authenticated same-host redirect and sends the token to the relocated path', async () => {
         const server = await serveGit({
             bareDir,
             requireAuth: true,
@@ -228,8 +200,7 @@ describe.skipIf(!gitAvailable())('redirect destination revalidation (real git)',
         expect(authorized.length).toBeGreaterThan(0);
     });
 
-    it('reports an authentication failure, not a redirect failure, when the token is wrong behind a same-host redirect', async (ctx) => {
-        if (!gitReachesFixture) ctx.skip();
+    it('reports an authentication failure, not a redirect failure, when the token is wrong behind a same-host redirect', async () => {
         const server = await serveGit({
             bareDir,
             requireAuth: true,
@@ -248,8 +219,7 @@ describe.skipIf(!gitAvailable())('redirect destination revalidation (real git)',
         ).rejects.toMatchObject({ transportFailure: true, reason: 'exit' });
     });
 
-    it('refuses a cross-host redirect without contacting the destination or offering it the token', async (ctx) => {
-        if (!gitReachesFixture) ctx.skip();
+    it('refuses a cross-host redirect without contacting the destination or offering it the token', async () => {
         // The destination is a fully working repository server. If the policy
         // leaked, this fetch would SUCCEED, so the rejection below cannot be an
         // artefact of a target that was broken anyway.
@@ -275,8 +245,7 @@ describe.skipIf(!gitAvailable())('redirect destination revalidation (real git)',
         expect(destination.requests).toHaveLength(0);
     });
 
-    it('proves the cross-host destination would otherwise serve the same ref', async (ctx) => {
-        if (!gitReachesFixture) ctx.skip();
+    it('proves the cross-host destination would otherwise serve the same ref', async () => {
         const destination = await serveGit({ bareDir });
         const resolved = await nativeGitTransport.resolveRef({
             repoUrl: `${destination.origin}/new.git`,

@@ -1,6 +1,7 @@
 import https from 'https';
 import type { TransportFailure } from './errors';
 import { credentialScopeHost } from './caBundle';
+import { sanitizeForLog } from '../../utils/safeLog';
 
 /**
  * Destination-aware redirect policy for HTTPS Git operations.
@@ -149,7 +150,7 @@ export async function resolveRedirectedRepoUrl(opts: {
             // reports git's original error instead. Say why, or a private CA
             // that fails to validate is indistinguishable from a server that
             // simply does not redirect.
-            console.warn(`[GitSource:redirect] could not probe ${opts.reportHost} for a redirect target, keeping the original git error: ${e instanceof Error ? e.message : String(e)}`);
+            console.warn(`[GitSource:redirect] could not probe ${sanitizeForLog(opts.reportHost)} for a redirect target, keeping the original git error: ${sanitizeForLog(e instanceof Error ? e.message : String(e))}`);
             return null;
         }
         if (res.status < 300 || res.status >= 400 || !res.location) {

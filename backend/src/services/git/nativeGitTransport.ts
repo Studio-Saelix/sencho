@@ -11,6 +11,7 @@ import {
     writeCredentialHelper,
 } from './credentialHelper';
 import { credentialScopeHost } from './caBundle';
+import { sanitizeForLog } from '../../utils/safeLog';
 import { writeCombinedCaBundle } from './gitCaBundleSink';
 import { looksLikeRedirectFailure, resolveRedirectedRepoUrl } from './redirectPreflight';
 import { isTransportFailure, type TransportFailure } from './errors';
@@ -492,7 +493,7 @@ async function approveRedirectTarget(
             // read failure is a real fault, not a missing option. Probing with
             // default trust instead would validate the operator's private-CA
             // host against the wrong anchors, so decline the retry and say so.
-            console.warn(`[GitSource:transport] could not read the CA bundle at ${caPath} for the redirect preflight; not authorising a redirect retry: ${e instanceof Error ? e.message : String(e)}`);
+            console.warn(`[GitSource:transport] could not read the CA bundle at ${sanitizeForLog(caPath)} for the redirect preflight; not authorising a redirect retry: ${sanitizeForLog(e instanceof Error ? e.message : String(e))}`);
             return null;
         }
     }
