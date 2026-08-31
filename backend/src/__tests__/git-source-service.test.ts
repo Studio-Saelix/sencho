@@ -475,6 +475,71 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
         expect(row?.encrypted_ca_bundle).toBeNull();
     });
 
+    it('saves an explicit CA removal even when the repository is unreachable without that CA', async () => {
+        // The dry-run reachability check normally runs on every save. A
+        // repository that genuinely needs its CA to be reached would fail
+        // that check the instant the CA is removed, refusing the very
+        // request meant to retire it. removeCaBundle must bypass the
+        // check so the operator's explicit intent to remove always saves.
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const pem = '-----BEGIN CERTIFICATE-----\nTEST-CA-PEM\n-----END CERTIFICATE-----\n';
+        mockResolveRef.mockImplementation(async (req: { caBundlePem?: string | null }) => {
+            if (!req.caBundlePem) {
+                throw gitFailure('unable to get local issuer certificate', false);
+            }
+            return { commitSha: 'a'.repeat(40), kind: 'branch' as const };
+        });
+        await svc.upsert({
+            stackName: 'ca-required-stack',
+            repoUrl: 'https://git.example.com/org/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            caBundle: pem,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+
+        // Sanity check: without removeCaBundle, an upsert that can no longer
+        // reach the repository is refused, proving the dry-run check itself
+        // still runs for ordinary saves.
+        await expect(svc.upsert({
+            stackName: 'ca-required-stack',
+            repoUrl: 'https://git.example.com/org/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            caBundle: null,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        })).rejects.toBeTruthy();
+
+        // The removal itself must still save.
+        const removed = await svc.upsert({
+            stackName: 'ca-required-stack',
+            repoUrl: 'https://git.example.com/org/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            removeCaBundle: true,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        expect(removed.has_ca_bundle).toBe(false);
+        const row = DatabaseService.getInstance().getGitSource('ca-required-stack');
+        expect(row?.encrypted_ca_bundle).toBeNull();
+    });
+
     it('preserves an existing token when update omits token (undefined)', async () => {
         mockSuccessfulClone();
         const svc = GitSourceService.getInstance();

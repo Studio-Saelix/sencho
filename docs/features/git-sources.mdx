@@ -29,7 +29,7 @@ The panel groups four regions:
 - **Pending update banner.** Appears at the top whenever a fetched commit is staged, however it was fetched. Its heading is the source state, so it says whether the commit is ready to apply, waiting on review, or blocked by local conflicts. Click **Review** to re-fetch the incoming commit and open the change plan.
 - **Form fields.** Repository URL, ref, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication toggle, and the apply behavior radio group.
 - **Last applied stat strip.** Shows the short SHA of the last commit Sencho applied to disk, the source state (see below), and the timestamp of the most recent successful save or pull.
-- **Footer actions.** **Remove** disconnects the source by exporting the effective compose model into a single `compose.yaml` and removing auto-discovered override files; the remaining materialized files are kept. **Pull now** fetches the configured branch, tag, or commit's current revision; **Save** or **Update** persists form changes after a reachability check passes.
+- **Footer actions.** **Remove** disconnects the source by exporting the effective compose model into a single `compose.yaml` and removing auto-discovered override files; the remaining materialized files are kept. **Pull now** fetches the configured branch, tag, or commit's current revision; **Save** or **Update** persists form changes after a reachability check passes, except removing a stored custom CA certificate, which always saves immediately so a certificate you no longer trust can always be taken out.
 
 ## Source state
 
@@ -214,6 +214,8 @@ Self-hosted Git servers often use TLS certificates signed by a private certifica
 Sencho combines your CA with the system trust anchors (it does not replace them), so public hosts such as GitHub continue to validate normally. The CA bundle is encrypted at rest and is never returned after save.
 
 Leave the field empty when the server uses a publicly trusted certificate.
+
+Removing a stored CA always saves, even if the server currently needs it to be reached: retiring a certificate you no longer trust should never be blocked by the unreachability that retiring it causes. If the server still needs a private CA afterward, the next pull reports a certificate trust error until you upload one again.
 
 ### Redirects
 

@@ -783,24 +783,33 @@ export class GitSourceService {
 
         // Dry-run reachability check before persisting. Fetches every configured
         // file so a bad path in the ordered list is caught at save time.
-        const fetchAuth = input.authType === 'token'
-            ? { token: encryptedToken ? this.crypto.decrypt(encryptedToken) : null }
-            : input.authType === 'deploy_key'
-                ? {
-                    sshAuth: {
-                        privateKey: this.crypto.decrypt(encryptedDeployKey!),
-                        knownHostsEntry: sshKnownHostsEntry!,
-                    },
-                }
-                : { token: null };
-        await this.fetchFromGit({
-            repoUrl: input.repoUrl,
-            branch: input.branch,
-            composePaths: input.composePaths,
-            envPath: input.syncEnv ? input.envPath : null,
-            ...fetchAuth,
-            caBundlePem,
-        });
+        //
+        // Skipped for an explicit CA removal: removing the one CA a server
+        // needs to be reached makes this exact fetch fail, which would refuse
+        // the removal itself with a TLS error and leave the operator unable to
+        // retire a CA they no longer trust. The intent behind
+        // `remove_ca_bundle: true` is unambiguous, so the save proceeds and the
+        // next pull reports the real reachability state.
+        if (!input.removeCaBundle) {
+            const fetchAuth = input.authType === 'token'
+                ? { token: encryptedToken ? this.crypto.decrypt(encryptedToken) : null }
+                : input.authType === 'deploy_key'
+                    ? {
+                        sshAuth: {
+                            privateKey: this.crypto.decrypt(encryptedDeployKey!),
+                            knownHostsEntry: sshKnownHostsEntry!,
+                        },
+                    }
+                    : { token: null };
+            await this.fetchFromGit({
+                repoUrl: input.repoUrl,
+                branch: input.branch,
+                composePaths: input.composePaths,
+                envPath: input.syncEnv ? input.envPath : null,
+                ...fetchAuth,
+                caBundlePem,
+            });
+        }
 
         const resolvedEnvPath = input.syncEnv ? input.envPath : null;
         // A pending pull captured the files/contextDir for the previous config. If
