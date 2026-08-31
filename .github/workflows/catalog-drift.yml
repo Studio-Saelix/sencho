@@ -1,0 +1,61 @@
+name: Catalog Drift Check
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/feature-catalog.yaml'
+      - 'scripts/website-catalog/**'
+      - '.github/workflows/catalog-drift.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/feature-catalog.yaml'
+      - 'scripts/website-catalog/**'
+  # Drift can also be introduced from the website side, which changes nothing
+  # in this repository and so triggers none of the filters above. Check daily
+  # so an edited or reverted snapshot cannot sit undetected.
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      # Mint a read-only installation token scoped to the website repository
+      # only. The default GITHUB_TOKEN cannot read Studio-Saelix/sencho-website.
+      - name: Generate GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: sencho-website
+          permission-contents: read
+
+      # The root checkout must come first. actions/checkout cleans its
+      # destination, so running it after the nested one deletes website-checkout.
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/sencho-website
+          token: ${{ steps.app-token.outputs.token }}
+          path: website-checkout
+      - name: Install root dependencies
+        run: npm ci
+      - name: Canonical validation
+        run: node scripts/website-catalog/canonical-validate.mjs
+      # Compare the canonical catalog against the snapshot the website has
+      # actually committed. Do not run sync-feature-catalog here: it rewrites
+      # that snapshot from the canonical file, so the comparison would only
+      # ever read back what it just wrote and could never report drift.
+      - name: Compare against the committed website snapshot
+        run: node scripts/website-catalog/check-website-drift.mjs --website-dir website-checkout
+      - name: Verify no internal identifiers in canonical file
+        run: node scripts/website-catalog/test-catalog-no-leak.mjs
