@@ -479,7 +479,6 @@ async function prepareInvocation(
 async function approveRedirectTarget(
     repo: ParsedRepoUrl,
     stderr: string,
-    allowedHost: string | null,
     hasToken: boolean,
     caPath: string | null,
 ): Promise<string | null> {
@@ -490,7 +489,6 @@ async function approveRedirectTarget(
     }
     return await resolveRedirectedRepoUrl({
         repoUrl: repo.href,
-        allowedHost,
         hasToken,
         reportHost: repoHostLabel(repo),
         caPem,
@@ -661,7 +659,6 @@ async function lsRemoteRefs(
     baseArgs: string[],
     timeoutMs: number,
     hasToken: boolean,
-    allowedHost: string | null = null,
     caPath: string | null = null,
 ): Promise<ResolvedRemoteRefs> {
     const host = repoHostLabel(repo);
@@ -684,7 +681,7 @@ async function lsRemoteRefs(
         // git refused a redirect. Resolve and approve the destination first;
         // an approved chain is retried once against the final URL, and a
         // rejected one throws before that host is ever contacted.
-        const approved = await approveRedirectTarget(repo, res.stderr, allowedHost, hasToken, caPath);
+        const approved = await approveRedirectTarget(repo, res.stderr, hasToken, caPath);
         if (approved) res = await attempt(approved);
     }
     if (res.exitCode !== 0) {
@@ -751,7 +748,7 @@ export async function verifyFastForward(req: {
             throw { transportFailure: true as const, reason: 'timeout', host, hasToken } satisfies TransportFailure;
         }
     };
-    const { env, baseArgs, allowedHost, caPath } = await prepareInvocation(
+    const { env, baseArgs, caPath } = await prepareInvocation(
         req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
     );
     // Resolved once if the host refuses a redirect, then reused by the deepen
@@ -852,7 +849,7 @@ export async function verifyFastForward(req: {
         } catch (e) {
             const stderr = isTransportFailure(e) && e.reason === 'exit' ? (e.stderr ?? '') : '';
             const approved = stderr
-                ? await approveRedirectTarget(repo, stderr, allowedHost, hasToken, caPath)
+                ? await approveRedirectTarget(repo, stderr, hasToken, caPath)
                 : null;
             if (!approved) throw e;
             effectiveHref = approved;
@@ -984,12 +981,12 @@ export const nativeGitTransport: GitTransport = {
 
         assertValidRef(req.ref, repoHostLabel(repo), hasToken);
 
-        const { env, baseArgs, allowedHost, caPath } = await prepareInvocation(
+        const { env, baseArgs, caPath } = await prepareInvocation(
             req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
         );
         const found = await lsRemoteRefs(
             repo, req.ref, env, baseArgs,
-            req.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasToken, allowedHost, caPath,
+            req.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasToken, caPath,
         );
         if (found.branchSha) return { commitSha: found.branchSha, kind: 'branch' };
         if (found.tagSha) return { commitSha: found.tagSha, kind: 'tag' };
@@ -1006,7 +1003,7 @@ export const nativeGitTransport: GitTransport = {
         // GIT_ALLOWED_HOST_ENV_VAR so the credential helper refuses to emit
         // credentials for any other host. A refused redirect is resolved and
         // approved by the preflight below before any retry.
-        const { layout, env, baseArgs, allowedHost, caPath } = await prepareInvocation(
+        const { layout, env, baseArgs, caPath } = await prepareInvocation(
             req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
         );
         const checkout = path.join(req.workspaceRoot, 'repo');
@@ -1093,7 +1090,7 @@ export const nativeGitTransport: GitTransport = {
                 // and only against a destination the preflight has approved.
                 const stderr = isTransportFailure(e) && e.reason === 'exit' ? (e.stderr ?? '') : '';
                 const approved = stderr
-                    ? await approveRedirectTarget(repo, stderr, allowedHost, hasToken, caPath)
+                    ? await approveRedirectTarget(repo, stderr, hasToken, caPath)
                     : null;
                 if (!approved) throw e;
                 // The refused attempt can have left a partial checkout behind;

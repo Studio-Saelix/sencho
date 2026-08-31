@@ -4,16 +4,16 @@
  * Drives the full chain - API PUT (encrypted at rest) -> API GET (project
  * exposes has_ca_bundle, never the PEM) -> real HTTPS fetch against a
  * locally-served fixture repo -> API PUT with remove_ca_bundle=true ->
- * API GET confirming the stored PEM was cleared.
+ * API GET confirming the stored PEM was cleared -> a fetch that must now
+ * fail on TLS trust.
  *
- * The fixture server signs its certificate with the committed dev/E2E
- * CA, which the backend also trusts via NODE_EXTRA_CA_CERTS in CI for the
- * fixture server's TLS handshake. The per-source CA path is isolated by
- * the E2E's PUT/remove CA bundle flow: the test stores a per-source CA
- * via the API, verifies the fetch succeeds, removes the stored CA, and
- * the removal-via-API is the isolation step. The global env var is
- * required so the fixture server can present its certificate to the
- * browser; removing it would break all E2E, not just this one.
+ * This fixture server presents a certificate signed by a SEPARATE CA that
+ * nothing else trusts: it is not the shared dev/E2E CA, so it is absent from
+ * the backend's NODE_EXTRA_CA_CERTS and from system trust. That isolation is
+ * the whole point of the spec. The stored per-source bundle is then the only
+ * thing that can make the fetch succeed, so the test fails if the CA ever
+ * stops reaching native git, and removing it must produce a real trust
+ * failure rather than a result the assertion tolerates.
  */
 import { test, expect } from '@playwright/test';
 import fs from 'fs';
@@ -22,7 +22,7 @@ import { loginAs } from './helpers';
 import { gitAvailable, buildFixtureRepo, serveRepos } from './gitServer.helper';
 
 const CA_PEM = fs.readFileSync(
-    path.join(process.cwd(), 'e2e', 'fixtures', 'git-ca.pem'),
+    path.join(process.cwd(), 'e2e', 'fixtures', 'git-private-ca.pem'),
     'utf8',
 );
 
@@ -39,7 +39,7 @@ test.describe('Git Sources per-source CA bundle (product boundary)', () => {
     test.beforeAll(async () => {
         server = await serveRepos({
             app: buildFixtureRepo(APP_FILES),
-        });
+        }, 'git-private-server');
     });
 
     test.afterAll(() => {
@@ -147,12 +147,10 @@ test.describe('Git Sources per-source CA bundle (product boundary)', () => {
         expect(afterRes.status).toBe(200);
         expect(afterRes.body.has_ca_bundle).toBe(false);
 
-        // Step 6: After removing the stored CA, verify the pull result.
-        // Note: the fixture server's TLS cert is globally trusted via
-        // NODE_EXTRA_CA_CERTS in CI, so this pull may succeed (200) rather
-        // than failing with TLS error. The isolation verification relies
-        // on the API-level removal (Step 4/5), not this transport-level
-        // failure, which requires a fixture CA not covered by global trust.
+        // Step 6: with the stored CA gone, the same fetch must now fail on
+        // certificate trust. Nothing else in the environment trusts this
+        // fixture's CA, so a success here would mean the per-source bundle was
+        // never what authorised the earlier fetch.
         const afterPull = await page.evaluate(async (name) => {
             const res = await fetch(`/api/stacks/${name}/git-source/pull`, {
                 method: 'POST',
@@ -160,10 +158,8 @@ test.describe('Git Sources per-source CA bundle (product boundary)', () => {
             });
             return { status: res.status, body: await res.json() };
         }, stackName);
-        // The pull result varies by environment (fixture CA may be globally
-        // trusted in CI). Assert it completes (not crashes) and document
-        // the limitation rather than assuming TLS failure.
-        expect(afterPull.status === 200 || afterPull.status === 500 || afterPull.status === 404).toBeTruthy();
+        expect(afterPull.status, JSON.stringify(afterPull.body)).not.toBe(200);
+        expect(JSON.stringify(afterPull.body)).toContain('TLS certificate error reaching');
     });
 
     test('API rejects a non-PEM ca_bundle with 400', async ({ page }) => {
