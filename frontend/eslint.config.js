@@ -37,4 +37,14 @@ export default defineConfig([
       'react-hooks/gating': 'warn',
     },
   },
+  {
+    // Vendored shadcn/ui components; these export a helper constant (e.g.
+    // buttonVariants) alongside the component, which eslint-plugin-react-refresh
+    // 0.5.5 now correctly flags. Downgrade to warn rather than restructure
+    // generated files.
+    files: ['src/components/ui/**/*.{ts,tsx}'],
+    rules: {
+      'react-refresh/only-export-components': 'warn',
+    },
+  },
 ])
