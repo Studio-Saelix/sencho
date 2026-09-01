@@ -27,6 +27,9 @@ blockedIpv6.addSubnet('fe80::', 10, 'ipv6');
 blockedIpv6.addSubnet('ff00::', 8, 'ipv6');
 blockedIpv6.addAddress('fd00:ec2::254', 'ipv6');
 
+const loopbackIpv4 = new net.BlockList();
+loopbackIpv4.addSubnet('127.0.0.0', 8, 'ipv4');
+
 export class UnsafeOutboundTargetError extends Error {
   public readonly reason: 'blocked' | 'unresolved';
   public readonly code = 'EACCES';
@@ -50,6 +53,22 @@ export function isBlockedOutboundAddress(address: string): boolean {
       : blockedIpv6.check(address, 'ipv6');
   }
   return true;
+}
+
+function isE2eLoopbackAllowed(address: string): boolean {
+  if (process.env.NODE_ENV !== 'test' || process.env.SENCHO_E2E_ALLOW_LOOPBACK_OUTBOUND !== 'true') {
+    return false;
+  }
+  if (net.isIPv4(address)) return loopbackIpv4.check(address, 'ipv4');
+  if (!net.isIPv6(address)) return false;
+  const mappedIpv4 = ipv4FromMappedIpv6(address);
+  return mappedIpv4
+    ? loopbackIpv4.check(mappedIpv4, 'ipv4')
+    : address === '::1';
+}
+
+function isDisallowedOutboundAddress(address: string): boolean {
+  return isBlockedOutboundAddress(address) && !isE2eLoopbackAllowed(address);
 }
 
 function ipv4FromMappedIpv6(address: string): string | null {
@@ -87,7 +106,7 @@ export async function resolveSafeOutboundHostname(
     ? hostname.slice(1, -1)
     : hostname;
   if (net.isIP(normalizedHostname) !== 0) {
-    if (isBlockedOutboundAddress(normalizedHostname)) throw new UnsafeOutboundTargetError('blocked');
+    if (isDisallowedOutboundAddress(normalizedHostname)) throw new UnsafeOutboundTargetError('blocked');
     return [{ address: normalizedHostname, family: net.isIPv4(normalizedHostname) ? 4 : 6 }];
   }
 
@@ -99,7 +118,7 @@ export async function resolveSafeOutboundHostname(
   }
   const [first, ...rest] = addresses;
   if (!first) throw new UnsafeOutboundTargetError('unresolved');
-  if (addresses.some(({ address }) => isBlockedOutboundAddress(address))) {
+  if (addresses.some(({ address }) => isDisallowedOutboundAddress(address))) {
     throw new UnsafeOutboundTargetError('blocked');
   }
   return [first, ...rest];
@@ -125,7 +144,7 @@ export function createSafeOutboundLookup(lookupAllAddresses: LookupAllAddresses)
       callback(new UnsafeOutboundTargetError('unresolved'), '', 0);
       return;
     }
-    if (addresses.some(({ address }) => isBlockedOutboundAddress(address))) {
+    if (addresses.some(({ address }) => isDisallowedOutboundAddress(address))) {
       callback(new UnsafeOutboundTargetError('blocked'), '', 0);
       return;
     }
@@ -166,7 +185,7 @@ export async function safeRemoteFetch(
       ? input.toString()
       : typeof input === 'string' ? input : input.url;
     const host = lookupHostname(new URL(raw));
-    if (net.isIP(host) !== 0 && isBlockedOutboundAddress(host)) {
+    if (net.isIP(host) !== 0 && isDisallowedOutboundAddress(host)) {
       throw new UnsafeOutboundTargetError('blocked');
     }
   }

@@ -10,7 +10,10 @@ import {
 } from '../utils/outboundTarget';
 import { withLoopbackTargetProtection } from './helpers/allowLoopbackTargets';
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
 
 describe('outbound target validation', () => {
   it.each([
@@ -54,6 +57,26 @@ describe('outbound target validation', () => {
   it('accepts private LAN targets', async () => {
     await expect(assertSafeOutboundUrl('http://192.168.1.50:1852'))
       .resolves.toMatchObject({ hostname: '192.168.1.50' });
+  });
+
+  it('allows only loopback targets when the E2E test override is active', async () => {
+    const actual = await vi.importActual<typeof import('../utils/outboundTarget')>('../utils/outboundTarget');
+    vi.stubEnv('NODE_ENV', 'test');
+    vi.stubEnv('SENCHO_E2E_ALLOW_LOOPBACK_OUTBOUND', 'true');
+
+    await expect(actual.resolveSafeOutboundHostname('127.0.0.1'))
+      .resolves.toEqual([{ address: '127.0.0.1', family: 4 }]);
+    await expect(actual.resolveSafeOutboundHostname('169.254.169.254'))
+      .rejects.toMatchObject({ reason: 'blocked' });
+  });
+
+  it('ignores the E2E loopback override outside the test environment', async () => {
+    const actual = await vi.importActual<typeof import('../utils/outboundTarget')>('../utils/outboundTarget');
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('SENCHO_E2E_ALLOW_LOOPBACK_OUTBOUND', 'true');
+
+    await expect(actual.resolveSafeOutboundHostname('127.0.0.1'))
+      .rejects.toMatchObject({ reason: 'blocked' });
   });
 
   it('rejects an unsafe address inside the connection lookup', async () => {
