@@ -68,7 +68,7 @@ export function parseSshUrl(raw: string): ParsedSshRepoUrl | null {
     if (pathname === '/' || pathname.includes('..')) return null;
     const user = url.username;
     const href = port === DEFAULT_SSH_PORT
-        ? `${user}@${url.hostname}:${pathname.slice(1)}`
+        ? `${user}@${url.hostname}:${pathname}`
         : `ssh://${user}@${url.hostname}:${port}${pathname}`;
     return { href, host: url.hostname, port, pathname };
 }
@@ -206,11 +206,11 @@ export interface ScannedHostKey {
     line: string;
 }
 
-function runSshKeyscan(host: string, port: number): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+function runSshKeyscan(address: string, port: number): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     return new Promise((resolve, reject) => {
         const args = port === DEFAULT_SSH_PORT
-            ? ['-H', host]
-            : ['-p', String(port), '-H', host];
+            ? [address]
+            : ['-p', String(port), address];
         const child = spawn('ssh-keyscan', args, { windowsHide: true });
         let stdout = '';
         let stderr = '';
@@ -231,8 +231,8 @@ function runSshKeyscan(host: string, port: number): Promise<{ stdout: string; st
 }
 
 /** Fetch host keys from the server without trusting them (probe step only). */
-export async function scanHostKeys(host: string, port: number): Promise<ScannedHostKey[]> {
-    const result = await runSshKeyscan(host, port);
+export async function scanHostKeys(host: string, port: number, address: string): Promise<ScannedHostKey[]> {
+    const result = await runSshKeyscan(address, port);
     if (result.exitCode !== 0 && !result.stdout.trim()) {
         throw new Error(result.stderr.trim() || 'ssh-keyscan failed');
     }
@@ -240,11 +240,13 @@ export async function scanHostKeys(host: string, port: number): Promise<ScannedH
     for (const line of result.stdout.split(/\r?\n/)) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
-        const fingerprint = fingerprintFromKnownHostsLine(trimmed);
-        if (!fingerprint) continue;
         const material = keyMaterialFromKnownHostsLine(trimmed);
-        const keyType = material?.keyType ?? 'unknown';
-        keys.push({ keyType, fingerprint, line: trimmed });
+        if (!material) continue;
+        const knownHost = port === DEFAULT_SSH_PORT ? host : `[${host}]:${port}`;
+        const knownHostsLine = `${knownHost} ${material.keyType} ${material.keyBase64}`;
+        const fingerprint = fingerprintFromKnownHostsLine(knownHostsLine);
+        if (!fingerprint) continue;
+        keys.push({ keyType: material.keyType, fingerprint, line: knownHostsLine });
     }
     if (keys.length === 0) {
         throw new Error('No host keys returned from ssh-keyscan');
@@ -256,17 +258,28 @@ export async function scanHostKeys(host: string, port: number): Promise<ScannedH
  * Build GIT_SSH_COMMAND / core.sshCommand value enforcing strict host-key
  * checking against our per-fetch known_hosts file and a single deploy key.
  */
-export function buildSshCommand(keyPath: string, knownHostsPath: string): string {
+function shellQuote(value: string): string {
+    return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+export function buildSshCommand(
+    keyPath: string,
+    knownHostsPath: string,
+    target: { address: string; hostKeyAlias: string },
+): string {
     const key = keyPath.split(path.sep).join('/');
     const known = knownHostsPath.split(path.sep).join('/');
-    return [
+    const args = [
         'ssh',
-        '-o', 'BatchMode=yes',
-        '-o', 'StrictHostKeyChecking=yes',
-        '-o', 'UserKnownHostsFile=' + known,
-        '-o', 'IdentitiesOnly=yes',
-        '-o', 'IdentityAgent=none',
-        '-F', '/dev/null',
-        '-i', key,
-    ].join(' ');
+        '-o BatchMode=yes',
+        '-o StrictHostKeyChecking=yes',
+        `-o ${shellQuote(`UserKnownHostsFile=${known}`)}`,
+        '-o IdentitiesOnly=yes',
+        '-o IdentityAgent=none',
+        '-F /dev/null',
+        `-i ${shellQuote(key)}`,
+    ];
+    args.push(`-o ${shellQuote(`Hostname=${target.address}`)}`);
+    args.push(`-o ${shellQuote(`HostKeyAlias=${target.hostKeyAlias}`)}`);
+    return args.join(' ');
 }

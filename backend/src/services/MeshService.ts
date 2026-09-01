@@ -20,6 +20,7 @@ import { lookupContainerIp } from '../mesh/containerLookup';
 import { STREAM_PENDING_DATA_MAX_BYTES } from '../pilot/protocol';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { isDebugEnabled } from '../utils/debug';
+import { safeRemoteFetch } from '../utils/outboundTarget';
 import { isPathWithinBase, isValidStackName, isValidRelativeStackPath } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
@@ -2518,12 +2519,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             }
         }
 
-        return await fetch(url, {
+        return await safeRemoteFetch(url, {
             method,
             headers,
             body: bodyToSend === undefined ? undefined : JSON.stringify(bodyToSend),
             signal: AbortSignal.timeout(timeoutMs),
-        });
+        }, target.trustedLoopback);
     }
 
     /**

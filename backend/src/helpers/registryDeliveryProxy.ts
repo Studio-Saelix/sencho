@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
 import type { Node } from '../services/DatabaseService';
+import type { ProxyTarget } from '../services/NodeRegistry';
 import { augmentJsonBodyForRegistryDelivery, wouldAttemptRegistryDelivery } from './registryDeliveryOutbound';
 
 export interface RegistryDeliveryProxyResult {
@@ -18,7 +19,7 @@ export async function augmentRemoteProxyWithRegistryDelivery(
   req: Request,
   nodeId: number,
   node: Node,
-  target: { apiUrl: string; apiToken: string },
+  target: ProxyTarget,
   rawBody: Buffer,
 ): Promise<RegistryDeliveryProxyResult> {
   const apiPath = `/api${req.path}`;

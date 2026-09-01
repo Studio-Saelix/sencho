@@ -31,6 +31,12 @@ describe('sshTrust URL parsing', () => {
     expect(parsed?.port).toBe(2222);
   });
 
+  it('preserves absolute paths in default-port ssh:// URLs', () => {
+    const parsed = parseSshUrl('ssh://git@host.example/abs/path/repo.git');
+    expect(parsed?.href).toBe('git@host.example:/abs/path/repo.git');
+    expect(parsed?.pathname).toBe('/abs/path/repo.git');
+  });
+
   it('classifies transport kind from mixed inputs', () => {
     expect(parseRepoTransportUrl('https://github.com/org/repo.git')?.kind).toBe('https');
     expect(parseRepoTransportUrl('git@host:org/repo.git')?.kind).toBe('ssh');
@@ -72,10 +78,22 @@ describe('ssh credential canonicalization', () => {
 
 describe('ssh command builder', () => {
   it('enforces strict host key checking', () => {
-    const cmd = buildSshCommand('/tmp/key', '/tmp/known_hosts');
+    const cmd = buildSshCommand('/tmp/key', '/tmp/known_hosts', {
+      address: '10.0.0.8',
+      hostKeyAlias: 'git.internal.example',
+    });
     expect(cmd).toContain('StrictHostKeyChecking=yes');
     expect(cmd).toContain('UserKnownHostsFile=/tmp/known_hosts');
     expect(cmd).toContain('IdentitiesOnly=yes');
+  });
+
+  it('pins the address while retaining the repository host identity', () => {
+    const cmd = buildSshCommand('/tmp/key', '/tmp/known_hosts', {
+      address: '10.0.0.8',
+      hostKeyAlias: '[git.internal.example]:2222',
+    });
+    expect(cmd).toContain('Hostname=10.0.0.8');
+    expect(cmd).toContain('HostKeyAlias=[git.internal.example]:2222');
   });
 });
 

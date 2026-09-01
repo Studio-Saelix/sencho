@@ -6,6 +6,7 @@ import helmet from 'helmet';
 import { globalApiLimiter, pollingLimiter } from './middleware/rateLimiters';
 import { conditionalJsonParser } from './middleware/jsonParser';
 import { nodeContextMiddleware } from './middleware/nodeContext';
+import { isTrustedProxyPeer } from './helpers/trustedProxyCidrs';
 import { normalizeAcceptEncoding } from './middleware/normalizeAcceptEncoding';
 import './types/express';
 
@@ -43,9 +44,8 @@ import './types/express';
 export function createApp(): express.Express {
   const app = express();
 
-  // 1. Trust the first reverse proxy (nginx, Traefik, etc.) for correct
-  // req.protocol, req.ip, and secure cookie detection behind a proxy.
-  app.set('trust proxy', 1);
+  // 1. Trust forwarding headers only from explicitly configured proxy peers.
+  app.set('trust proxy', (address: string) => isTrustedProxyPeer(address));
 
   // 2. Security headers.
   // crossOriginEmbedderPolicy: disabled because Monaco editor workers lack COEP headers.

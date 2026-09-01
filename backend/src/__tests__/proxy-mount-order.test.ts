@@ -17,6 +17,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { withLoopbackTargetProtection } from './helpers/allowLoopbackTargets';
 
 describe('remote proxy mount order', () => {
   let tmpDir: string;
@@ -63,6 +64,16 @@ describe('remote proxy mount order', () => {
     // upstream never does; absence here is consistent with a proxy error.
     expect(res.headers['x-sencho-proxy']).toBeUndefined();
     expect(res.body?.error).toMatch(/unreachable/i);
+  });
+
+  it('refuses an unsafe target from an existing node row', async () => {
+    const res = await withLoopbackTargetProtection(() => request(app)
+      .get('/api/stacks')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId)));
+
+    expect(res.status).toBe(502);
+    expect(res.body?.error).toMatch(/not allowed/i);
   });
 
   it('routes local requests (no x-node-id) to the local handler', async () => {

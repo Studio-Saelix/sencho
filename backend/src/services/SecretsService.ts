@@ -9,6 +9,7 @@ import { resolveAllEnvFilePaths } from '../routes/stacks';
 import { getErrorMessage } from '../utils/errors';
 import { formatNoTargetError } from '../utils/remoteTarget';
 import { isDebugEnabled } from '../utils/debug';
+import { safeRemoteFetch } from '../utils/outboundTarget';
 
 export type SecretKv = Record<string, string>;
 export type DiffStatus = 'added' | 'changed' | 'removed' | 'unchanged';
@@ -225,10 +226,10 @@ async function resolveEnvFileRemote(node: Node, stackName: string, basename: str
     const baseUrl = target.apiUrl.replace(/\/$/, '');
     const headers: Record<string, string> = {};
     if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
-    const res = await fetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/envs`, {
+    const res = await safeRemoteFetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/envs`, {
         headers,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    }, target.trustedLoopback);
     if (!res.ok) {
         if (res.status === 404 && basename === '.env') {
             return { absolutePath: '.env' };
@@ -268,10 +269,10 @@ async function readEnvRemote(node: Node, stackName: string, absolutePath: string
     if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
     const url = new URL(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/env`);
     if (absolutePath !== '.env') url.searchParams.set('file', absolutePath);
-    const res = await fetch(url.toString(), {
+    const res = await safeRemoteFetch(url.toString(), {
         headers,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    }, target.trustedLoopback);
     if (res.status === 404) return '';
     if (!res.ok) throw new Error(`failed to read env (HTTP ${res.status})`);
     return await res.text();
@@ -287,12 +288,12 @@ async function writeEnvRemote(node: Node, stackName: string, absolutePath: strin
     if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
     const url = new URL(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/env`);
     if (absolutePath !== '.env') url.searchParams.set('file', absolutePath);
-    const res = await fetch(url.toString(), {
+    const res = await safeRemoteFetch(url.toString(), {
         method: 'PUT',
         headers,
         body: JSON.stringify({ content }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    }, target.trustedLoopback);
     if (!res.ok) {
         const body = await res.text().catch(() => '');
         throw new Error(`failed to write env (HTTP ${res.status}${body ? ': ' + body.slice(0, 200) : ''})`);

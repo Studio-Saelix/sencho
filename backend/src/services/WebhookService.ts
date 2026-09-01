@@ -9,6 +9,7 @@ import { HealthGateService } from './HealthGateService';
 import { LicenseService } from './LicenseService';
 import { PROXY_TIER_HEADER } from './license-headers';
 import { NodeRegistry } from './NodeRegistry';
+import { safeRemoteFetch } from '../utils/outboundTarget';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
@@ -368,12 +369,12 @@ export class WebhookService {
                 }
                 bodyToSend = augmented.body;
             }
-            return await fetch(url, {
+            return await safeRemoteFetch(url, {
                 method,
                 headers,
                 body: method === 'GET' || bodyToSend === undefined ? undefined : JSON.stringify(bodyToSend),
                 signal: controller.signal,
-            });
+            }, target.trustedLoopback);
         } catch (err) {
             if (controller.signal.aborted) {
                 throw new Error('Remote node request timed out', { cause: err });

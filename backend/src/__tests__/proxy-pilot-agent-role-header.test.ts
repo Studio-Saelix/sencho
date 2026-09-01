@@ -57,7 +57,7 @@ describe('pilot-agent-mode proxy role header parity', () => {
     const registry = NodeRegistry.getInstance();
     const orig = registry.getProxyTarget.bind(registry);
     vi.spyOn(registry, 'getProxyTarget').mockImplementation((nid: number) => {
-      if (nid === pilotNodeId) return { apiUrl: `http://127.0.0.1:${port}`, apiToken: '' };
+      if (nid === pilotNodeId) return { apiUrl: `http://127.0.0.1:${port}`, apiToken: '', trustedLoopback: true };
       return orig(nid);
     });
   });

@@ -47,6 +47,7 @@ describe('MeshService.removeOverrideFromNode (remote dispatch)', () => {
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
             apiUrl: 'https://remote.example.com:1852',
             apiToken: 'remote-tok',
+            trustedLoopback: false,
         });
 
         const fetchMock = vi
@@ -82,6 +83,7 @@ describe('MeshService.removeOverrideFromNode (remote dispatch)', () => {
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
             apiUrl: 'https://remote.example.com:1852',
             apiToken: 'remote-tok',
+            trustedLoopback: false,
         });
 
         const fetchMock = vi
@@ -112,6 +114,7 @@ describe('MeshService.removeOverrideFromNode (remote dispatch)', () => {
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
             apiUrl: 'https://remote.example.com:1852',
             apiToken: 'remote-tok',
+            trustedLoopback: false,
         });
 
         vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('ECONNREFUSED'));
@@ -139,6 +142,7 @@ describe('MeshService.removeOverrideFromNode (remote dispatch)', () => {
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
             apiUrl: 'https://remote.example.com:1852',
             apiToken: 'remote-tok',
+            trustedLoopback: false,
         });
         vi.spyOn(globalThis, 'fetch').mockResolvedValue(
             new Response('another operation is already in progress', { status: 500 }),

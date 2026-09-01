@@ -97,6 +97,8 @@ Tick **Deploy after create** to run `docker compose up -d` immediately after the
 | **Authentication** | **Public (no auth)** for public repos, **Personal Access Token** for private HTTPS repos, or **SSH deploy key** for private SSH repos |
 | **Apply behavior** | See the three modes below |
 
+Private repository hosts on your LAN or VPN are supported. Sencho refuses repository targets that resolve to loopback, link-local, multicast, or selected special-use addresses.
+
 Saving runs a reachability check against the repository. If the URL is wrong, the token is invalid, the ref does not exist, or a file is missing, Sencho surfaces the error inline and nothing is persisted.
 
 ### Multiple compose files

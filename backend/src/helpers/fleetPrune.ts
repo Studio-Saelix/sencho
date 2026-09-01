@@ -2,6 +2,7 @@ import type { Node } from '../services/DatabaseService';
 import DockerController from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { safeRemoteFetch } from '../utils/outboundTarget';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import {
   PrunePlanStaleError,
@@ -343,12 +344,12 @@ async function fetchRemotePlan(node: Node, targets: FleetPruneTarget[], scope: P
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (proxyTarget.apiToken) headers.Authorization = `Bearer ${proxyTarget.apiToken}`;
   try {
-    const response = await fetch(`${proxyTarget.apiUrl.replace(/\/$/, '')}/api/system/prune/plan`, {
+    const response = await safeRemoteFetch(`${proxyTarget.apiUrl.replace(/\/$/, '')}/api/system/prune/plan`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ targets, scope }),
       signal: AbortSignal.timeout(REMOTE_PLAN_TIMEOUT_MS),
-    });
+    }, proxyTarget.trustedLoopback);
     const data: unknown = await response.json().catch(() => null);
     if (!response.ok) {
       const message = data && typeof data === 'object' && typeof (data as { error?: unknown }).error === 'string'
@@ -471,12 +472,12 @@ async function executeRemote(entry: Preflight, targets: FleetPruneTarget[], scop
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (proxyTarget.apiToken) headers.Authorization = `Bearer ${proxyTarget.apiToken}`;
   try {
-    const response = await fetch(`${proxyTarget.apiUrl.replace(/\/$/, '')}/api/system/prune/system`, {
+    const response = await safeRemoteFetch(`${proxyTarget.apiUrl.replace(/\/$/, '')}/api/system/prune/system`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ targets, scope, planFingerprint: plan.fingerprint }),
       signal: AbortSignal.timeout(REMOTE_PLAN_TIMEOUT_MS),
-    });
+    }, proxyTarget.trustedLoopback);
     const data: unknown = await response.json().catch(() => null);
     const record = data && typeof data === 'object' ? data as Record<string, unknown> : null;
     if (!response.ok) {

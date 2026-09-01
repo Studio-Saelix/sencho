@@ -1,6 +1,7 @@
 import { DatabaseService, type Node } from '../services/DatabaseService';
 import { FileSystemService } from '../services/FileSystemService';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { safeRemoteFetch } from '../utils/outboundTarget';
 import { formatNoTargetError } from '../utils/remoteTarget';
 import { getErrorMessage } from '../utils/errors';
 
@@ -89,8 +90,16 @@ async function summarizeRemoteNode(node: Node): Promise<NodeLabelSummary> {
   if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
   try {
     const [labelsRes, assignmentsRes] = await Promise.all([
-      fetch(`${base}/api/labels`, { headers, signal: AbortSignal.timeout(SUMMARY_FETCH_TIMEOUT_MS) }),
-      fetch(`${base}/api/labels/assignments`, { headers, signal: AbortSignal.timeout(SUMMARY_FETCH_TIMEOUT_MS) }),
+      safeRemoteFetch(
+        `${base}/api/labels`,
+        { headers, signal: AbortSignal.timeout(SUMMARY_FETCH_TIMEOUT_MS) },
+        target.trustedLoopback,
+      ),
+      safeRemoteFetch(
+        `${base}/api/labels/assignments`,
+        { headers, signal: AbortSignal.timeout(SUMMARY_FETCH_TIMEOUT_MS) },
+        target.trustedLoopback,
+      ),
     ]);
     if (!labelsRes.ok || !assignmentsRes.ok) {
       // Surface the remote's own error body (e.g. a token/tier message) the same

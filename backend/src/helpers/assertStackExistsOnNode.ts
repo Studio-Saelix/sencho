@@ -6,6 +6,7 @@ import { PROXY_TIER_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { isValidStackName } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
+import { safeAxiosTransport } from '../utils/outboundTarget';
 
 const REMOTE_STACKS_TIMEOUT_MS = 30_000;
 
@@ -59,6 +60,7 @@ export async function assertStackExistsOnNode(
 
   try {
     const res = await axios.get(`${baseUrl}/api/stacks`, {
+      ...safeAxiosTransport(target.trustedLoopback),
       headers,
       timeout: REMOTE_STACKS_TIMEOUT_MS,
       validateStatus: () => true,

@@ -15,10 +15,11 @@ import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelec
 import { isValidGitSourcePath, isValidStackName } from '../utils/validation';
 import { sendGitSourceError, webhookPullStatus } from '../utils/gitSourceHttp';
 import { sanitizeForLog } from '../utils/safeLog';
-import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
+import { parseStorableRepoUrl, repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { validateCaBundlePem } from '../services/git/caBundle';
 import { auditActorUsername } from '../helpers/auditActor';
+import { assertSafeOutboundHostname, resolveSafeOutboundHostname, UnsafeOutboundTargetError } from '../utils/outboundTarget';
 
 // Reasonable upper bounds so a caller cannot flood the service with huge
 // payloads. Generous compared to anything a real Git provider emits.
@@ -58,6 +59,25 @@ async function handleBrowse(
   if (repoUrlError) {
     res.status(400).json({ error: repoUrlError });
     return;
+  }
+  const parsedRepo = parseStorableRepoUrl(repo_url);
+  if (!parsedRepo.ok) {
+    res.status(400).json({ error: 'Repository URL is invalid' });
+    return;
+  }
+  const repoHostname = parsedRepo.kind === 'https' ? parsedRepo.url.hostname : parsedRepo.ssh.host;
+  try {
+    await assertSafeOutboundHostname(repoHostname);
+  } catch (error: unknown) {
+    if (error instanceof UnsafeOutboundTargetError) {
+      res.status(400).json({
+        error: error.reason === 'blocked'
+          ? 'Repository host is not allowed'
+          : 'Repository host could not be resolved',
+      });
+      return;
+    }
+    throw error;
   }
   if (branch.length > MAX_BRANCH_LENGTH) {
     res.status(400).json({ error: 'The branch, tag, or commit SHA is too long.' });
@@ -150,13 +170,22 @@ gitSourcesRouter.post('/ssh-host-key', async (req: Request, res: Response): Prom
       res.status(400).json({ error: 'Host key probe requires an SSH repository URL' });
       return;
     }
-    const keys = await scanHostKeys(parsed.host, parsed.port);
+    const [{ address }] = await resolveSafeOutboundHostname(parsed.host);
+    const keys = await scanHostKeys(parsed.host, parsed.port, address);
     res.json({
       host: parsed.host,
       port: parsed.port,
       keys,
     });
   } catch (error) {
+    if (error instanceof UnsafeOutboundTargetError) {
+      res.status(400).json({
+        error: error.reason === 'blocked'
+          ? 'Repository host is not allowed'
+          : 'Repository host could not be resolved',
+      });
+      return;
+    }
     sendGitSourceError(res, error);
   }
 });
