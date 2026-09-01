@@ -182,6 +182,39 @@ claims:
   # exercises it; nothing here is extrapolated from a different host or a
   # different node_path.
 
+  - id: https-none-branch-system-github-local
+    transport: https
+    ref: branch
+    auth: none
+    host: github
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers:
+      - Only a public, read-only repository is exercised; GitHub does not receive a token or an SSH deploy key from this attestation.
+
+  - id: https-none-tag-system-github-local
+    transport: https
+    ref: tag
+    auth: none
+    host: github
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers:
+      - Only a public, read-only repository is exercised; GitHub does not receive a token or an SSH deploy key from this attestation.
+
+  - id: https-none-sha-system-github-local
+    transport: https
+    ref: sha
+    auth: none
+    host: github
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers:
+      - Only a public, read-only repository is exercised; GitHub does not receive a token or an SSH deploy key from this attestation.
+
   - id: https-pat-branch-system-github-local
     transport: https
     ref: branch
@@ -190,27 +223,8 @@ claims:
     ca: system
     node_path: local
     support: unverified
-    qualifiers: []
-
-  - id: https-pat-tag-system-github-local
-    transport: https
-    ref: tag
-    auth: pat
-    host: github
-    ca: system
-    node_path: local
-    support: unverified
-    qualifiers: []
-
-  - id: https-pat-sha-system-github-local
-    transport: https
-    ref: sha
-    auth: pat
-    host: github
-    ca: system
-    node_path: local
-    support: unverified
-    qualifiers: []
+    qualifiers:
+      - Not attested: requires a real GitHub Personal Access Token, which this pass does not hold.
 
   - id: ssh-deploy-key-branch-na-github-local
     transport: ssh
@@ -220,7 +234,8 @@ claims:
     ca: not-applicable
     node_path: local
     support: unverified
-    qualifiers: []
+    qualifiers:
+      - Not attested: requires a real GitHub-registered SSH deploy key, which this pass does not hold.
 
   - id: https-pat-branch-system-gitea-local
     transport: https
