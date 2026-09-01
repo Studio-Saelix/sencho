@@ -184,9 +184,12 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
 #
 # The same go get also bumps google.golang.org/grpc from v1.80.0 to v1.82.1 to
 # clear GHSA-hrxh-6v49-42gf (xDS RBAC fail-open and HTTP/2 transport issues),
-# golang.org/x/text from v0.38.0 to v0.39.0 to clear CVE-2026-56852
-# (norm.Iter infinite loop on crafted input), and golang.org/x/net from
-# v0.55.0 to v0.56.0 to clear CVE-2026-46600 (dnsmessage denial of service).
+# golang.org/x/text from v0.38.0 to v0.41.0 to clear CVE-2026-56852
+# (norm.Iter infinite loop on crafted input) and satisfy x/crypto's minimum,
+# golang.org/x/net from v0.55.0 to v0.57.0 to clear CVE-2026-46600
+# (dnsmessage denial of service) and satisfy x/crypto's minimum version, and
+# golang.org/x/crypto from v0.53.0 to v0.55.0 to clear CVE-2026-56854 (SSH
+# host-key verification bypass).
 # Base image pinned by digest (same image as cli-builder above) so both
 # source builds share an identical, immutable Go toolchain.
 FROM --platform=$BUILDPLATFORM golang:1.27rc3-alpine@sha256:c5aca77a4d16cb6688dbf3ccade67eff6f05ee208bc854d060e6947f5c27e23c AS compose-builder
@@ -212,9 +215,10 @@ RUN mkdir -p /build
 # and CVE-2026-39882, bump containerd/v2 from v2.2.3 → v2.2.5 to clear
 # CVE-2026-46680 plus the CVE-2026-53488 / 53489 / 53492 cluster, bump
 # google.golang.org/grpc to v1.82.1 to clear GHSA-hrxh-6v49-42gf, and bump
-# golang.org/x/net to v0.56.0 to clear CVE-2026-46600. The containerd bump is
-# patch-level; the otel, grpc, and x/net bumps are minor security releases.
-# None introduce breaking API changes.
+# golang.org/x/net to v0.57.0 to clear CVE-2026-46600, and bump
+# golang.org/x/crypto to v0.55.0 to clear CVE-2026-56854. The containerd bump
+# is patch-level; the otel, grpc, x/net, and x/crypto bumps are minor security
+# releases. None introduce breaking API changes.
 RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
     go get go.opentelemetry.io/otel@v1.43.0 \
            go.opentelemetry.io/otel/sdk@v1.43.0 \
@@ -228,8 +232,9 @@ RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
            go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp@v1.43.0 \
            github.com/containerd/containerd/v2@v2.2.5 \
            google.golang.org/grpc@v1.82.1 \
-           golang.org/x/text@v0.39.0 \
-           golang.org/x/net@v0.56.0 \
+           golang.org/x/text@v0.41.0 \
+           golang.org/x/net@v0.57.0 \
+           golang.org/x/crypto@v0.55.0 \
            github.com/moby/go-archive@v0.3.0 && \
     go mod tidy
 
@@ -282,7 +287,7 @@ ARG APK_CACHE_BUST=unset
 # removing it also eliminates CVE-2026-33671 (picomatch ReDoS in npm).
 RUN echo "apk cache bust: ${APK_CACHE_BUST}" && \
     apk upgrade --no-cache && \
-    apk add --no-cache bash su-exec git tini openssh-client && \
+    apk add --no-cache bash su-exec git tini 'openssh-client>=10.3_p1-r1' && \
     mkdir -p /usr/local/lib/docker/cli-plugins
 
 # Copy the source-built Docker CLI and Compose plugin from their builder stages.
