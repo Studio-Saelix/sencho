@@ -41,6 +41,7 @@ import {
 import * as gitBinary from '../services/git/gitBinary';
 import { nativeGitTransport, REF_MAX_LEN, startSizeWatchdog, verifyFastForward } from '../services/git/nativeGitTransport';
 import { withLoopbackTargetProtection } from './helpers/allowLoopbackTargets';
+import { GIT_ALLOWED_HOST_ENV_VAR } from '../services/git/credentialHelper';
 
 const GIT_EXEC_PATH_STUB = 'C:/Program Files/Git/mingw64/libexec/git-core';
 
@@ -412,6 +413,41 @@ describe('transport argv hardening', () => {
         }
     });
 
+    it('exports the configured HTTPS host[:port] to the credential helper so a cross-host redirect cannot match', async () => {
+        scriptSpawn([{ stdout: `${SHA_A}\trefs/heads/main\n` }]);
+        const root = await makeWorkspace();
+        try {
+            await nativeGitTransport.resolveRef({
+                repoUrl: 'https://git.example.com/example/repo.git',
+                ref: 'main',
+                token: 'sekrit',
+                timeoutMs: 5000,
+                workspaceRoot: root,
+            });
+            const env = spawnEnv(0);
+            expect(env[GIT_ALLOWED_HOST_ENV_VAR]).toBe('git.example.com');
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('does not export the allowed host when no token is supplied (no credentials to scope)', async () => {
+        scriptSpawn([{ stdout: `${SHA_A}\trefs/heads/main\n` }]);
+        const root = await makeWorkspace();
+        try {
+            await nativeGitTransport.resolveRef({
+                repoUrl: 'https://git.example.com/example/repo.git',
+                ref: 'main',
+                timeoutMs: 5000,
+                workspaceRoot: root,
+            });
+            const env = spawnEnv(0);
+            expect(env[GIT_ALLOWED_HOST_ENV_VAR]).toBeUndefined();
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
     it('combines NODE_EXTRA_CA_CERTS with platform defaults into http.sslCAInfo when set (dev/E2E bridge)', async () => {
         const caPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-git-ca-test-')), 'ca.pem');
         await fs.writeFile(caPath, '-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n');
@@ -481,6 +517,40 @@ describe('transport argv hardening', () => {
             if (prev === undefined) delete process.env.NODE_EXTRA_CA_CERTS;
             else process.env.NODE_EXTRA_CA_CERTS = prev;
             await fs.rm(path.dirname(caPath), { recursive: true, force: true });
+        }
+    });
+
+    it('combines a per-source CA PEM into http.sslCAInfo without NODE_EXTRA_CA_CERTS', async () => {
+        const prev = process.env.NODE_EXTRA_CA_CERTS;
+        delete process.env.NODE_EXTRA_CA_CERTS;
+        try {
+            scriptSpawn([{ stdout: `${SHA_A}\trefs/heads/main\n` }]);
+            const root = await makeWorkspace();
+            const perSourcePem = '-----BEGIN CERTIFICATE-----\nPER-SOURCE-CA-MARKER\n-----END CERTIFICATE-----\n';
+            await nativeGitTransport.resolveRef({
+                repoUrl: 'https://github.com/example/repo.git',
+                ref: 'main',
+                caBundlePem: perSourcePem,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+            });
+            const setArgs = spawnArgs(0);
+            // Git never follows a redirect itself; an approved destination is
+            // resolved by the preflight and retried explicitly.
+            expect(setArgs).toContain('http.followRedirects=false');
+            const combined = setArgs.find((a) => a.startsWith('http.sslCAInfo='));
+            expect(combined).toBeDefined();
+            if (process.platform !== 'win32') {
+                const combinedBody = await fs.readFile(
+                    (combined as string).slice('http.sslCAInfo='.length).replace(/\//g, path.sep),
+                    'utf8',
+                );
+                expect(combinedBody).toContain('PER-SOURCE-CA-MARKER');
+            }
+            await fs.rm(root, { recursive: true, force: true });
+        } finally {
+            if (prev === undefined) delete process.env.NODE_EXTRA_CA_CERTS;
+            else process.env.NODE_EXTRA_CA_CERTS = prev;
         }
     });
 

@@ -16,7 +16,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
-import fs from 'fs';
+import fs, { readFileSync } from 'fs';
 import path from 'path';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
@@ -115,6 +115,7 @@ function seedGitSource(stackName: string): void {
         env_path: null,
         auth_type: 'none',
         encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
         auto_apply_on_webhook: false,
         auto_deploy_on_apply: false,
         last_applied_commit_sha: null,
@@ -1177,6 +1178,7 @@ describe('stack_git_sources manifest cache columns', () => {
             env_path: null,
             auth_type: 'none',
             encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -1977,6 +1979,7 @@ describe('SSH deploy-key route validation', () => {
             encrypted_deploy_key: CryptoService.getInstance().encrypt(deployKey),
             ssh_known_hosts_entry: knownHosts,
             ssh_host_key_fingerprint: 'SHA256:fixtureFingerprint',
+            encrypted_ca_bundle: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -1998,5 +2001,91 @@ describe('SSH deploy-key route validation', () => {
         const serialized = JSON.stringify(res.body);
         expect(serialized).not.toContain(deployKey);
         expect(serialized).not.toContain('encrypted_deploy_key');
+    });
+
+    it('PUT stores a custom CA bundle and GET exposes has_ca_bundle without returning PEM', async () => {
+        const stackName = 'https-ca-stack';
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, stackName), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, stackName, 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+        const pem = readFileSync(path.join(process.cwd(), '..', 'e2e', 'fixtures', 'git-ca.pem'), 'utf8');
+        const fetchFromGit = vi.spyOn(GitSourceService.getInstance(), 'fetchFromGit')
+            .mockResolvedValue({
+                composeFiles: [{ path: 'compose.yaml', content: 'services:\n  x:\n    image: nginx\n' }],
+                envContent: null,
+                commitSha: 'a'.repeat(40),
+                resolvedRefKind: 'branch',
+                warnings: [],
+            });
+        const res = await request(app)
+            .put(`/api/stacks/${stackName}/git-source`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: 'https://git.example.com/org/repo.git',
+                branch: 'main',
+                compose_paths: ['compose.yaml'],
+                auth_type: 'none',
+                ca_bundle: pem,
+                auto_apply_on_webhook: false,
+                auto_deploy_on_apply: false,
+            });
+        expect(res.status).toBe(200);
+        expect(res.body.has_ca_bundle).toBe(true);
+        expect(JSON.stringify(res.body)).not.toContain('BEGIN CERTIFICATE');
+        fetchFromGit.mockRestore();
+    });
+
+    it('PUT with remove_ca_bundle=true clears a previously stored CA bundle', async () => {
+        const stackName = 'https-ca-revoke-stack';
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, stackName), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, stackName, 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+        const pem = readFileSync(path.join(process.cwd(), '..', 'e2e', 'fixtures', 'git-ca.pem'), 'utf8');
+        const fetchFromGit = vi.spyOn(GitSourceService.getInstance(), 'fetchFromGit')
+            .mockResolvedValue({
+                composeFiles: [{ path: 'compose.yaml', content: 'services:\n  x:\n    image: nginx\n' }],
+                envContent: null,
+                commitSha: 'b'.repeat(40),
+                resolvedRefKind: 'branch',
+                warnings: [],
+            });
+        // Step 1: store a CA bundle.
+        const storeRes = await request(app)
+            .put(`/api/stacks/${stackName}/git-source`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: 'https://git.example.com/org/repo.git',
+                branch: 'main',
+                compose_paths: ['compose.yaml'],
+                auth_type: 'none',
+                ca_bundle: pem,
+                auto_apply_on_webhook: false,
+                auto_deploy_on_apply: false,
+            });
+        expect(storeRes.status).toBe(200);
+        expect(storeRes.body.has_ca_bundle).toBe(true);
+        // Step 2: explicit removal (textarea left empty, UI sets the flag).
+        const revokeRes = await request(app)
+            .put(`/api/stacks/${stackName}/git-source`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({
+                repo_url: 'https://git.example.com/org/repo.git',
+                branch: 'main',
+                compose_paths: ['compose.yaml'],
+                auth_type: 'none',
+                remove_ca_bundle: true,
+                auto_apply_on_webhook: false,
+                auto_deploy_on_apply: false,
+            });
+        expect(revokeRes.status).toBe(200);
+        expect(revokeRes.body.has_ca_bundle).toBe(false);
+        expect(JSON.stringify(revokeRes.body)).not.toContain('BEGIN CERTIFICATE');
+        // Step 3: GET should confirm the row no longer carries a CA bundle.
+        const getRes = await request(app)
+            .get(`/api/stacks/${stackName}/git-source`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(getRes.status).toBe(200);
+        expect(getRes.body.has_ca_bundle).toBe(false);
+        fetchFromGit.mockRestore();
     });
 });

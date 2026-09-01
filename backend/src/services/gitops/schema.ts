@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS gitops_create_checkpoints (
   encrypted_deploy_key TEXT NULL,
   ssh_known_hosts_entry TEXT NULL,
   ssh_host_key_fingerprint TEXT NULL,
+  encrypted_ca_bundle TEXT NULL,
   auto_apply_on_webhook INTEGER NOT NULL DEFAULT 0,
   auto_deploy_on_apply INTEGER NOT NULL DEFAULT 0,
   commit_sha TEXT NULL,

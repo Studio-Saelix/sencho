@@ -123,6 +123,7 @@ export type GitOpsCreateCheckpointRow = {
   encrypted_deploy_key: string | null;
   ssh_known_hosts_entry: string | null;
   ssh_host_key_fingerprint: string | null;
+  encrypted_ca_bundle: string | null;
   auto_apply_on_webhook: number;
   auto_deploy_on_apply: number;
   commit_sha: string | null;

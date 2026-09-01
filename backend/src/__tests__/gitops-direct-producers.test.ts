@@ -667,6 +667,7 @@ describe('Direct Git producers drive the revision state', () => {
       env_path: null,
       auth_type: 'none',
       encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
       auto_apply_on_webhook: false,
       auto_deploy_on_apply: false,
       last_applied_commit_sha: 'eeeeeee5',

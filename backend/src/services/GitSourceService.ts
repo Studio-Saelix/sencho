@@ -31,6 +31,7 @@ import { classifyGitFailure, isTransportFailure } from './git/errors';
 import type { RefKind, SshDeployKeyAuth } from './git/types';
 import { nativeGitTransport, verifyFastForward } from './git/nativeGitTransport';
 import { fingerprintFromKnownHostsLine } from './git/sshTrust';
+import { validateCaBundlePem } from './git/caBundle';
 import { GitOpsStore } from './gitops/store';
 import { GitOpsTransitions, GitOpsTransitionError } from './gitops/transitions';
 import {
@@ -112,6 +113,7 @@ export interface FetchParams {
     envPath?: string | null;
     token?: string | null;
     sshAuth?: SshDeployKeyAuth | null;
+    caBundlePem?: string | null;
     timeoutMs?: number;
     /**
      * Runs inside the clone lifecycle (before the temp dir is removed) so the
@@ -173,6 +175,8 @@ export interface UpsertInput {
     deployKey?: string | null;
     sshKnownHostsEntry?: string | null;
     sshHostKeyFingerprint?: string | null;
+    caBundle?: string | null;  // undefined = keep existing, '' = clear, non-empty = replace
+    removeCaBundle?: boolean;  // explicit user-initiated revocation; overrides caBundle omission
     autoApplyOnWebhook: boolean;
     autoDeployOnApply: boolean;
     auditContext?: {
@@ -196,6 +200,7 @@ export interface CreateStackFromGitInput {
     deployKey?: string | null;
     sshKnownHostsEntry?: string | null;
     sshHostKeyFingerprint?: string | null;
+    caBundle?: string | null;
     autoApplyOnWebhook: boolean;
     autoDeployOnApply: boolean;
     auditContext?: {
@@ -248,6 +253,7 @@ export interface PublicGitSource {
     auth_type: GitSourceAuthType;
     has_token: boolean;
     has_deploy_key: boolean;
+    has_ca_bundle: boolean;
     ssh_host_key_fingerprint: string | null;
     auto_apply_on_webhook: boolean;
     auto_deploy_on_apply: boolean;
@@ -568,6 +574,7 @@ export class GitSourceService {
             auth_type: src.auth_type,
             has_token: !!src.encrypted_token,
             has_deploy_key: !!src.encrypted_deploy_key,
+            has_ca_bundle: !!src.encrypted_ca_bundle,
             ssh_host_key_fingerprint: src.ssh_host_key_fingerprint ?? null,
             auto_apply_on_webhook: src.auto_apply_on_webhook,
             auto_deploy_on_apply: src.auto_deploy_on_apply,
@@ -645,25 +652,58 @@ export class GitSourceService {
         this.recordSshTrustAudit({ ...auditContext, stackName, fingerprint, action });
     }
 
-    private resolveTransportAuth(src: Pick<StackGitSource, 'auth_type' | 'encrypted_token' | 'encrypted_deploy_key' | 'ssh_known_hosts_entry'>): {
+    private resolveTransportAuth(src: Pick<StackGitSource, 'auth_type' | 'encrypted_token' | 'encrypted_deploy_key' | 'ssh_known_hosts_entry' | 'encrypted_ca_bundle'>): {
         token?: string | null;
         sshAuth?: SshDeployKeyAuth | null;
+        caBundlePem?: string | null;
     } {
+        const caBundlePem = src.encrypted_ca_bundle ? this.crypto.decrypt(src.encrypted_ca_bundle) : null;
         if (src.auth_type === 'token') {
-            return { token: src.encrypted_token ? this.crypto.decrypt(src.encrypted_token) : null };
+            return {
+                token: src.encrypted_token ? this.crypto.decrypt(src.encrypted_token) : null,
+                caBundlePem,
+            };
         }
         if (src.auth_type === 'deploy_key') {
             if (!src.encrypted_deploy_key || !src.ssh_known_hosts_entry) {
-                return { sshAuth: null };
+                return { sshAuth: null, caBundlePem };
             }
             return {
                 sshAuth: {
                     privateKey: this.crypto.decrypt(src.encrypted_deploy_key),
                     knownHostsEntry: src.ssh_known_hosts_entry,
                 },
+                caBundlePem,
             };
         }
-        return { token: null };
+        return { token: null, caBundlePem };
+    }
+
+    private resolveEncryptedCaBundle(
+        caBundle: string | null | undefined,
+        removeCaBundle: boolean | undefined,
+        existing?: StackGitSource,
+    ): string | null {
+        // Explicit revocation always wins, even when the field is omitted:
+        // the operator clicked "Remove stored CA" and the value field is
+        // left empty (matching the write-only input), so we must not silently
+        // preserve the stored bundle.
+        if (removeCaBundle === true) return null;
+        if (caBundle === undefined) return existing?.encrypted_ca_bundle ?? null;
+        if (caBundle === null || caBundle === '') return null;
+        const validated = validateCaBundlePem(caBundle);
+        if (!validated) {
+            throw new GitSourceError(
+                'GIT_ERROR',
+                'Custom CA bundle must contain one or more PEM certificates.',
+            );
+        }
+        return this.crypto.encrypt(validated);
+    }
+
+    private decryptCaBundlePem(encrypted: string | null | undefined): string | null {
+        if (!encrypted) return null;
+        return this.crypto.decrypt(encrypted);
     }
 
     public async upsert(input: UpsertInput): Promise<PublicGitSource> {
@@ -675,6 +715,8 @@ export class GitSourceService {
         let encryptedDeployKey: string | null = null;
         let sshKnownHostsEntry: string | null = null;
         let sshHostKeyFingerprint: string | null = null;
+        const encryptedCaBundle = this.resolveEncryptedCaBundle(input.caBundle, input.removeCaBundle, existing);
+        const caBundlePem = this.decryptCaBundlePem(encryptedCaBundle);
 
         if (input.authType === 'none') {
             // all null
@@ -741,23 +783,33 @@ export class GitSourceService {
 
         // Dry-run reachability check before persisting. Fetches every configured
         // file so a bad path in the ordered list is caught at save time.
-        const fetchAuth = input.authType === 'token'
-            ? { token: encryptedToken ? this.crypto.decrypt(encryptedToken) : null }
-            : input.authType === 'deploy_key'
-                ? {
-                    sshAuth: {
-                        privateKey: this.crypto.decrypt(encryptedDeployKey!),
-                        knownHostsEntry: sshKnownHostsEntry!,
-                    },
-                }
-                : { token: null };
-        await this.fetchFromGit({
-            repoUrl: input.repoUrl,
-            branch: input.branch,
-            composePaths: input.composePaths,
-            envPath: input.syncEnv ? input.envPath : null,
-            ...fetchAuth,
-        });
+        //
+        // Skipped for an explicit CA removal: removing the one CA a server
+        // needs to be reached makes this exact fetch fail, which would refuse
+        // the removal itself with a TLS error and leave the operator unable to
+        // retire a CA they no longer trust. The intent behind
+        // `remove_ca_bundle: true` is unambiguous, so the save proceeds and the
+        // next pull reports the real reachability state.
+        if (!input.removeCaBundle) {
+            const fetchAuth = input.authType === 'token'
+                ? { token: encryptedToken ? this.crypto.decrypt(encryptedToken) : null }
+                : input.authType === 'deploy_key'
+                    ? {
+                        sshAuth: {
+                            privateKey: this.crypto.decrypt(encryptedDeployKey!),
+                            knownHostsEntry: sshKnownHostsEntry!,
+                        },
+                    }
+                    : { token: null };
+            await this.fetchFromGit({
+                repoUrl: input.repoUrl,
+                branch: input.branch,
+                composePaths: input.composePaths,
+                envPath: input.syncEnv ? input.envPath : null,
+                ...fetchAuth,
+                caBundlePem,
+            });
+        }
 
         const resolvedEnvPath = input.syncEnv ? input.envPath : null;
         // A pending pull captured the files/contextDir for the previous config. If
@@ -801,6 +853,7 @@ export class GitSourceService {
                 encrypted_deploy_key: encryptedDeployKey,
                 ssh_known_hosts_entry: sshKnownHostsEntry,
                 ssh_host_key_fingerprint: sshHostKeyFingerprint,
+                encrypted_ca_bundle: encryptedCaBundle,
                 auto_apply_on_webhook: input.autoApplyOnWebhook,
                 auto_deploy_on_apply: input.autoDeployOnApply,
                 last_applied_commit_sha: existing?.last_applied_commit_sha ?? null,
@@ -1121,13 +1174,14 @@ export class GitSourceService {
             branch: string;
             token?: string | null;
             sshAuth?: SshDeployKeyAuth | null;
+            caBundlePem?: string | null;
             timeoutMs?: number;
             hasPriorHistory?: boolean;
             priorIdentity?: { commitSha: string; kind: RefKind };
         },
         fn: (dir: string, commitSha: string, warnings: string[], resolvedRefKind: RefKind) => Promise<T>,
     ): Promise<T> {
-        const { repoUrl, branch, token, sshAuth } = params;
+        const { repoUrl, branch, token, sshAuth, caBundlePem } = params;
         const timeoutMs = params.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
         const root = await createTempDir();
         const hasPriorHistory = params.hasPriorHistory === true || params.priorIdentity != null;
@@ -1138,6 +1192,7 @@ export class GitSourceService {
                 ref: branch,
                 token,
                 sshAuth,
+                caBundlePem,
                 timeoutMs,
                 workspaceRoot: root,
             });
@@ -1153,6 +1208,7 @@ export class GitSourceService {
                         descendantSha: resolved.commitSha,
                         token,
                         sshAuth,
+                        caBundlePem,
                         timeoutMs,
                         workspaceRoot: root,
                         maxBytes: maxCloneBytes(),
@@ -1168,6 +1224,7 @@ export class GitSourceService {
                 refKind: resolved.kind,
                 token,
                 sshAuth,
+                caBundlePem,
                 timeoutMs,
                 commitSha: resolved.commitSha,
                 workspaceRoot: root,
@@ -1235,6 +1292,7 @@ export class GitSourceService {
                 branch,
                 token,
                 sshAuth,
+                caBundlePem: params.caBundlePem,
                 timeoutMs: params.timeoutMs,
                 hasPriorHistory: params.hasPriorHistory,
                 priorIdentity: params.priorIdentity,
@@ -1304,7 +1362,14 @@ export class GitSourceService {
      * same clone size/timeout guards as fetch, plus a file-count cap.
      */
     public async listRepoTree(
-        params: { repoUrl: string; branch: string; token?: string | null; sshAuth?: SshDeployKeyAuth | null; timeoutMs?: number },
+        params: {
+            repoUrl: string;
+            branch: string;
+            token?: string | null;
+            sshAuth?: SshDeployKeyAuth | null;
+            caBundlePem?: string | null;
+            timeoutMs?: number;
+        },
     ): Promise<{ files: string[]; truncated: boolean; commitSha: string; warnings: string[] }> {
         return this.withClonedRepo(params, async (dir, commitSha, warnings) => {
             const { files, truncated } = await this.walkRepoFiles(dir);
@@ -1974,6 +2039,7 @@ export class GitSourceService {
             envPath: src.sync_env ? src.env_path : null,
             token: transportAuth.token,
             sshAuth: transportAuth.sshAuth,
+            caBundlePem: transportAuth.caBundlePem,
             hasPriorHistory: priorIdentity != null,
             priorIdentity,
             onClone: async (cloneDir, commitSha, envContent) => {
@@ -2790,6 +2856,9 @@ export class GitSourceService {
                 })()
                 : null;
 
+            const encryptedCaBundle = this.resolveEncryptedCaBundle(input.caBundle, undefined);
+            const caBundlePem = this.decryptCaBundlePem(encryptedCaBundle);
+
             // 1. Fetch from git BEFORE touching disk or DB. If the fetch
             //    fails there is nothing to clean up. The onClone hook stages
             //    the complete-project candidate inside the clone lifecycle.
@@ -2798,15 +2867,16 @@ export class GitSourceService {
             const deliveryPrepId = getRegistryDeliveryContext()?.envelope.prepId;
             let fetched: FetchResult;
             const createFetchAuth = input.authType === 'token'
-                ? { token: input.token }
+                ? { token: input.token, caBundlePem }
                 : createDeployKeyTrust
                     ? {
                         sshAuth: {
                             privateKey: input.deployKey!.trim(),
                             knownHostsEntry: createDeployKeyTrust.sshKnownHostsEntry,
                         },
+                        caBundlePem,
                     }
-                    : { token: null };
+                    : { token: null, caBundlePem };
             try {
                 if (deliveryPrepId) {
                     const restored = await this.restoreCreateFromPreparedGitCandidate(
@@ -3032,6 +3102,7 @@ export class GitSourceService {
                             encryptedDeployKey: createDeployKeyTrust?.encryptedDeployKey ?? null,
                             sshKnownHostsEntry: createDeployKeyTrust?.sshKnownHostsEntry ?? null,
                             sshHostKeyFingerprint: createDeployKeyTrust?.sshHostKeyFingerprint ?? null,
+                            encryptedCaBundle,
                             autoApplyOnWebhook: input.autoApplyOnWebhook,
                             autoDeployOnApply: input.autoDeployOnApply,
                             commitSha: fetched.commitSha,
@@ -3106,6 +3177,7 @@ export class GitSourceService {
                     encrypted_deploy_key: createDeployKeyTrust?.encryptedDeployKey ?? null,
                     ssh_known_hosts_entry: createDeployKeyTrust?.sshKnownHostsEntry ?? null,
                     ssh_host_key_fingerprint: createDeployKeyTrust?.sshHostKeyFingerprint ?? null,
+                    encrypted_ca_bundle: encryptedCaBundle,
                     auto_apply_on_webhook: input.autoApplyOnWebhook,
                     auto_deploy_on_apply: input.autoDeployOnApply,
                     last_applied_commit_sha: fetched.commitSha,
@@ -3758,12 +3830,15 @@ export class GitSourceService {
         input: CreateStackFromGitInput,
     ): Promise<{ prepId: string; sourceHash: string }> {
         const materialization: { value: MaterializationResult | null } = { value: null };
+        const encryptedCaBundle = this.resolveEncryptedCaBundle(input.caBundle, undefined);
+        const caBundlePem = this.decryptCaBundlePem(encryptedCaBundle);
         const fetched = await this.fetchFromGit({
             repoUrl: input.repoUrl,
             branch: input.branch,
             composePaths: input.composePaths,
             envPath: input.syncEnv ? input.envPath : null,
             token: input.token,
+            caBundlePem,
             onClone: async (cloneDir, commitSha, envContent) => {
                 materialization.value = await this.buildMaterialization(
                     input.stackName,
