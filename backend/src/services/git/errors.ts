@@ -203,7 +203,7 @@ export function classifyGitFailure(
     if (/certificate has expired|certificate is not yet valid/.test(raw)) {
         return { code: 'GIT_ERROR', message: `TLS certificate error reaching${dest}. The host certificate is expired or not yet valid.` };
     }
-    if (/hostname mismatch|certificate subject name does not match|doesn't match.*altnames|subject alternative name/.test(raw)) {
+    if (/hostname mismatch|certificate subject name does not match|doesn't match.*altnames|subject alternative name|no alternative certificate subject name/.test(raw)) {
         return { code: 'GIT_ERROR', message: `TLS certificate error reaching${dest}. The certificate hostname does not match the repository URL.` };
     }
     if (/ssl certificate problem|server certificate verification failed|unable to get local issuer certificate|self[- ]signed certificate|unknown ca|certificate signed by unknown authority/.test(raw)) {

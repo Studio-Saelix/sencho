@@ -479,6 +479,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                             hasStoredToken={false}
                             hasStoredDeployKey={false}
                             hasStoredCaBundle={false}
+                            removeCaBundle={false}
                             storedHostKeyFingerprint={null}
                             applyMode={gitApplyMode}
                             onRepoUrlChange={setGitRepoUrl}

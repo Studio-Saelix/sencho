@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
@@ -46,6 +47,8 @@ export interface GitSourceFieldsState {
   hasStoredToken: boolean;
   hasStoredDeployKey: boolean;
   hasStoredCaBundle: boolean;
+  /** Explicit revocation is armed: the next save sends `remove_ca_bundle: true`. */
+  removeCaBundle: boolean;
   storedHostKeyFingerprint: string | null;
   applyMode: ApplyMode;
 }
@@ -101,6 +104,7 @@ export function GitSourceFields({
   hasStoredToken,
   hasStoredDeployKey,
   hasStoredCaBundle,
+  removeCaBundle,
   storedHostKeyFingerprint,
   applyMode,
   disabled = false,
@@ -397,8 +401,15 @@ export function GitSourceFields({
               >
                 Remove stored CA
               </Button>
+              {removeCaBundle && (
+                <Badge variant="destructive" className="text-[10px] h-5" data-testid="git-source-ca-remove-armed">
+                  Removal armed
+                </Badge>
+              )}
               <span className="text-[11px] text-stat-subtitle">
-                Revokes trust for this CA on the next save. The textarea starts empty, so saving without changes will keep the stored CA.
+                {removeCaBundle
+                  ? 'Will revoke trust for this CA on the next save. Paste a new PEM instead to replace it.'
+                  : 'Revokes trust for this CA on the next save. The textarea starts empty, so saving without changes will keep the stored CA.'}
               </span>
             </div>
           )}

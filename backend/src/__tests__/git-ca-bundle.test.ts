@@ -34,6 +34,17 @@ describe('classifyGitFailure TLS and redirect nuance', () => {
         expect(result.message).toContain('hostname does not match');
     });
 
+    it('maps curl\'s IP-address SAN mismatch wording to the same clear TLS message', () => {
+        const result = classifyGitFailure({
+            transportFailure: true,
+            reason: 'exit',
+            host: 'git.example.com',
+            hasToken: false,
+            stderr: "SSL: no alternative certificate subject name matches target ipv4 address '172.18.0.1'",
+        });
+        expect(result.message).toContain('hostname does not match');
+    });
+
     it('maps expired certificates distinctly', () => {
         const result = classifyGitFailure({
             transportFailure: true,

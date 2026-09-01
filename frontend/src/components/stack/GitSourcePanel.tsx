@@ -523,6 +523,7 @@ export function GitSourcePanel({
                     token={token}
                     deployKey={deployKey}
                     caBundle={caBundle}
+                    removeCaBundle={removeCaBundle}
                     sshKnownHostsEntry={sshKnownHostsEntry}
                     sshHostKeyFingerprint={sshHostKeyFingerprint}
                     hasStoredToken={source?.has_token ?? false}

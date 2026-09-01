@@ -140,6 +140,19 @@ function repoUrlFromProbeUrl(probeUrl: string): string | null {
 }
 
 /**
+ * Build the ref-advertise probe URL for `repoUrl` via the `URL` API rather
+ * than string concatenation, so a `repoUrl` that already carries a query
+ * string (a signed URL, say) gets the suffix inserted into the path and the
+ * query replaced, instead of the suffix landing after the existing query.
+ */
+function refAdvertiseProbeUrl(repoUrl: string): string {
+    const parsed = new URL(repoUrl);
+    parsed.pathname = `${parsed.pathname.replace(/\/$/, '')}${REF_ADVERTISE_SUFFIX}`;
+    parsed.search = `?${REF_ADVERTISE_QUERY}`;
+    return parsed.toString();
+}
+
+/**
  * Walk the redirect chain for `repoUrl` without credentials and return the
  * repository URL it ultimately resolves to, or null when the source does not
  * redirect at all (so the caller keeps git's original failure).
@@ -156,9 +169,8 @@ export async function resolveRedirectedRepoUrl(opts: {
     const expectedScope = redirectScopeOf(opts.repoUrl);
     if (!expectedScope) throw redirectScope(opts.reportHost, opts.hasToken);
 
-    const base = opts.repoUrl.replace(/\/$/, '');
     let current = approvedUrl(
-        `${base}${REF_ADVERTISE_SUFFIX}?${REF_ADVERTISE_QUERY}`,
+        refAdvertiseProbeUrl(opts.repoUrl),
         expectedScope, opts.reportHost, opts.hasToken,
     );
     let hops = 0;

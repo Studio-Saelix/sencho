@@ -114,6 +114,24 @@ describe('redirect preflight', () => {
         ).resolves.toBe(`${server.origin}/moved.git`);
     });
 
+    it('inserts the ref-advertise suffix into the path, not after an existing query string', async () => {
+        // A repoUrl of `/repo.git?temp=1` (a signed URL, say) must not turn
+        // into `/repo.git?temp=1/info/refs?service=...`: the query has to be
+        // replaced, not appended to.
+        const server = await serve((_url, res) => ok(res));
+
+        await expect(
+            resolveRedirectedRepoUrl({
+                repoUrl: `${server.origin}/repo.git?temp=1`,
+                hasToken: true,
+                reportHost: '127.0.0.1',
+                caPem: CA_PEM,
+            }),
+        ).resolves.toBeNull();
+
+        expect(server.hits).toEqual(['/repo.git/info/refs?service=git-upload-pack']);
+    });
+
     it('refuses a cross-origin redirect without ever contacting the destination', async () => {
         // The destination is a fully working server: if the policy leaked, the
         // chain would resolve successfully rather than merely failing, so a
