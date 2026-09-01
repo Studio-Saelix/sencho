@@ -1,0 +1,30 @@
+# Retained live-evidence results for docs/git-transport-support.yaml claims
+# with `evidence.kind: live`.
+#
+# This is the reproducibility artifact for every non-automated claim: a
+# future engineer (or SEN-362's GA verification) can re-run the exact
+# procedure in scripts/git-attestation/README.md and compare against what is
+# recorded here. Never record raw credential-bearing output, tokens, deploy
+# keys, hostnames or URLs beyond generic fixture identities, or fleet
+# credentials — only structured pass/fail metadata and scrubbed commands.
+#
+# Schema (schema: attestation-v1):
+#   id: referenced by a claim's evidence.attestation.
+#   date: when the attestation ran (YYYY-MM-DD).
+#   source_commit: the Sencho commit the claim set's implementation_baseline
+#     names — a claim binds to this, not to the runtime image digest below.
+#   sencho_image_digest: the exact runtime image executed. Recorded because
+#     a runtime attestation executes an image while claims are committed
+#     from a revision; retained so the executed runtime is identifiable even
+#     though it is not what claims bind to.
+#   host: image digest (self-hosted) or service identity + note (hosted SaaS,
+#     where inventing a server version would be false).
+#   node_path: local | direct-proxy | pilot — the execution path exercised.
+#   repository / ref: the exact fixture repository and ref exercised.
+#   command: a scrubbed, non-credential-bearing description of what ran.
+#   result: success | rejected, matching the claim's evidence.outcome.
+
+version: '1'
+schema: 'attestation-v1'
+
+attestations: []

@@ -13,6 +13,7 @@
     "test:docker-integration": "vitest run --config vitest.docker-integration.config.ts",
     "test": "vitest run",
     "lint": "eslint src",
+    "matrix:render": "node scripts/git-support-matrix/render.js",
     "reset-mfa": "node dist/cli/resetMfa.js",
     "reset-password": "node dist/cli/resetPassword.js",
     "create-emergency-admin": "node dist/cli/createEmergencyAdmin.js",

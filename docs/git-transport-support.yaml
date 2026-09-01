@@ -1,0 +1,475 @@
+# Git transport support matrix — canonical source of truth (SEN-9 PR 5).
+#
+# Every entry here is a claim about one exercised combination, not an
+# independently-tested dimension: a PAT test, a tag test, and a GitLab
+# observation do not jointly prove "GitLab + PAT + tag" unless something
+# actually ran that exact combination. `docs/features/git-transport-support.mdx`
+# is generated from this file (backend/scripts/git-support-matrix/render.mjs);
+# a backend test (git-support-matrix.test.ts) enforces byte-for-byte parity
+# and validates every rule below. Internal test paths, PR numbers, and Linear
+# IDs never appear on the published page; they live here instead.
+#
+# Schema (schema: matrix-v1):
+#   implementation_baseline: the git commit this file's claims describe.
+#   claims[]: one entry per exercised (transport, ref, auth, host, ca,
+#     node_path[, port]) combination.
+#     - support: supported | unsupported | unverified
+#       - supported requires evidence with outcome: success
+#       - unsupported requires evidence with outcome: rejected (a reproducible
+#         refusal, not silence — an unsupported claim with no evidence is as
+#         unreproducible as an unproven supported one)
+#       - unverified forbids evidence entirely
+#     - evidence.kind: automated (a handle into a test file + exact test
+#       title) or live (a pointer into docs/git-transport-attestations.yaml).
+#       Every evidence record repeats all six combination dimensions, and the
+#       validator requires them to match the claim exactly — a direct-proxy
+#       result proves the direct-proxy combination, nothing else.
+#   limitations[]: named gaps, each with its operator-facing consequence.
+#   error_model[]: the transport-facing error codes this matrix covers
+#     (TransportFacingCode plus REF_DELETED and FILE_NOT_FOUND), each with
+#     its HTTP status and one-line meaning. GitOps plan-lifecycle codes
+#     (STALE_PLAN, PLAN_FINGERPRINT_REQUIRED, PLAN_BLOCKED, LEGACY_PENDING,
+#     PLAN_UNAVAILABLE, OPERATION_IN_FLIGHT) belong to reconciliation, not
+#     transport, and are listed separately so the partition is visible.
+#   attestations: pointer to the retained live-evidence file.
+
+version: '1'
+schema: 'matrix-v1'
+implementation_baseline: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+attestations: docs/git-transport-attestations.yaml
+
+claims:
+  # ===== Automated: real git, real TLS/SSH, against a local fixture server =====
+  # host: generic, node_path: local for all of these — no proxy hop, no
+  # branded host. Branded-host and non-local node-path claims live below,
+  # pending or drawn from the live attestation pass.
+
+  - id: https-pat-branch-system-generic-local
+    transport: https
+    ref: branch
+    auth: pat
+    host: generic
+    ca: system
+    node_path: local
+    support: supported
+    qualifiers:
+      - History rewritten on this ref after resolution is detected and rejected as non-fast-forward, not silently deployed.
+    evidence:
+      kind: automated
+      outcome: success
+      handles:
+        - file: backend/src/__tests__/git-transport-auth.integration.test.ts
+          title: clones a private repo end-to-end with a valid token
+        - file: backend/src/__tests__/git-transport-auth.integration.test.ts
+          title: treats a linear branch advance as a fast-forward
+        - file: backend/src/__tests__/git-transport-auth.integration.test.ts
+          title: treats a multi-commit branch advance as a fast-forward
+        - file: backend/src/__tests__/git-transport-auth.integration.test.ts
+          title: rejects rewritten history as non-fast-forward
+
+  - id: https-pat-tag-system-generic-local
+    transport: https
+    ref: tag
+    auth: pat
+    host: generic
+    ca: system
+    node_path: local
+    support: supported
+    qualifiers:
+      - Proven for both an annotated tag (peeled through its ^{} commit) and a lightweight tag.
+    evidence:
+      kind: automated
+      outcome: success
+      handles:
+        - file: backend/src/__tests__/git-transport-auth.integration.test.ts
+          title: resolves and fetches an annotated tag through the peeled commit
+        - file: backend/src/__tests__/git-transport-auth.integration.test.ts
+          title: resolves and fetches a lightweight tag
+
+  - id: https-pat-sha-system-generic-local
+    transport: https
+    ref: sha
+    auth: pat
+    host: generic
+    ca: system
+    node_path: local
+    support: supported
+    qualifiers: []
+    evidence:
+      kind: automated
+      outcome: success
+      handles:
+        - file: backend/src/__tests__/git-transport-auth.integration.test.ts
+          title: resolves and fetches a pinned commit SHA
+
+  - id: https-none-branch-persource-generic-local
+    transport: https
+    ref: branch
+    auth: none
+    host: generic
+    ca: per-source
+    node_path: local
+    support: supported
+    qualifiers:
+      - Also proven to survive a same-origin redirect (the repository relocating on the same host).
+    evidence:
+      kind: automated
+      outcome: success
+      handles:
+        - file: backend/src/__tests__/git-private-ca.integration.test.ts
+          title: clones a private-CA HTTPS repo when the per-source CA PEM is supplied
+        - file: backend/src/__tests__/git-redirect.integration.test.ts
+          title: resolves a ref through an unauthenticated same-host redirect
+
+  - id: https-pat-branch-persource-generic-local
+    transport: https
+    ref: branch
+    auth: pat
+    host: generic
+    ca: per-source
+    node_path: local
+    support: supported
+    qualifiers:
+      - Proven through a same-origin redirect; the token is forwarded to the relocated path and never offered to a different host.
+    evidence:
+      kind: automated
+      outcome: success
+      handles:
+        - file: backend/src/__tests__/git-redirect.integration.test.ts
+          title: resolves a ref through an authenticated same-host redirect and sends the token to the relocated path
+
+  - id: ssh-deploy-key-branch-na-generic-local-nonstandard-port
+    transport: ssh
+    ref: branch
+    auth: deploy-key
+    host: generic
+    ca: not-applicable
+    node_path: local
+    port: nonstandard
+    support: supported
+    qualifiers:
+      - Full round trip (resolve, fetch, and content verification) proven at this port.
+    evidence:
+      kind: automated
+      outcome: success
+      handles:
+        - file: backend/src/__tests__/git-transport-ssh.integration.test.ts
+          title: resolves and fetches over SSH with a deploy key and trusted host key
+        - file: backend/src/__tests__/git-transport-ssh.integration.test.ts
+          title: 'resolves over ssh:// with a nonstandard port'
+
+  - id: ssh-deploy-key-branch-na-generic-local-default-port
+    transport: ssh
+    ref: branch
+    auth: deploy-key
+    host: generic
+    ca: not-applicable
+    node_path: local
+    port: default
+    support: supported
+    qualifiers:
+      - Ref resolution proven at the default port; the full content fetch is proven only at a nonstandard port (see the sibling claim), not separately re-run here.
+    evidence:
+      kind: automated
+      outcome: success
+      handles:
+        - file: backend/src/__tests__/git-transport-ssh.integration.test.ts
+          title: resolves over scp-style URL on the default SSH port
+
+  # ===== Live: named Git hosts, external SaaS and self-hosted =====
+  # Filled in by the live attestation pass (docs/git-transport-attestations.yaml).
+  # A row stays `unverified` (no evidence permitted) until that pass actually
+  # exercises it; nothing here is extrapolated from a different host or a
+  # different node_path.
+
+  - id: https-pat-branch-system-github-local
+    transport: https
+    ref: branch
+    auth: pat
+    host: github
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers: []
+
+  - id: https-pat-tag-system-github-local
+    transport: https
+    ref: tag
+    auth: pat
+    host: github
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers: []
+
+  - id: https-pat-sha-system-github-local
+    transport: https
+    ref: sha
+    auth: pat
+    host: github
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers: []
+
+  - id: ssh-deploy-key-branch-na-github-local
+    transport: ssh
+    ref: branch
+    auth: deploy-key
+    host: github
+    ca: not-applicable
+    node_path: local
+    support: unverified
+    qualifiers: []
+
+  - id: https-pat-branch-system-gitea-local
+    transport: https
+    ref: branch
+    auth: pat
+    host: gitea
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers: []
+
+  - id: https-pat-tag-system-gitea-local
+    transport: https
+    ref: tag
+    auth: pat
+    host: gitea
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers: []
+
+  - id: https-pat-sha-system-gitea-local
+    transport: https
+    ref: sha
+    auth: pat
+    host: gitea
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers: []
+
+  - id: ssh-deploy-key-branch-na-gitea-local
+    transport: ssh
+    ref: branch
+    auth: deploy-key
+    host: gitea
+    ca: not-applicable
+    node_path: local
+    support: unverified
+    qualifiers: []
+
+  - id: https-pat-branch-system-forgejo-local
+    transport: https
+    ref: branch
+    auth: pat
+    host: forgejo
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers: []
+
+  - id: https-pat-tag-system-forgejo-local
+    transport: https
+    ref: tag
+    auth: pat
+    host: forgejo
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers: []
+
+  - id: https-pat-sha-system-forgejo-local
+    transport: https
+    ref: sha
+    auth: pat
+    host: forgejo
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers: []
+
+  - id: ssh-deploy-key-branch-na-forgejo-local
+    transport: ssh
+    ref: branch
+    auth: deploy-key
+    host: forgejo
+    ca: not-applicable
+    node_path: local
+    support: unverified
+    qualifiers: []
+
+  - id: https-none-branch-system-gitlab-local
+    transport: https
+    ref: branch
+    auth: none
+    host: gitlab
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers:
+      - Only a public, read-only repository is exercised; GitLab does not receive a token or an SSH deploy key from this attestation.
+
+  - id: https-none-tag-system-gitlab-local
+    transport: https
+    ref: tag
+    auth: none
+    host: gitlab
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers:
+      - Only a public, read-only repository is exercised; GitLab does not receive a token or an SSH deploy key from this attestation.
+
+  - id: https-none-sha-system-gitlab-local
+    transport: https
+    ref: sha
+    auth: none
+    host: gitlab
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers:
+      - Only a public, read-only repository is exercised; GitLab does not receive a token or an SSH deploy key from this attestation.
+
+  - id: https-none-branch-system-bitbucket-local
+    transport: https
+    ref: branch
+    auth: none
+    host: bitbucket
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers:
+      - Only a public, read-only repository is exercised; Bitbucket does not receive a token or an SSH deploy key from this attestation.
+
+  - id: https-none-tag-system-bitbucket-local
+    transport: https
+    ref: tag
+    auth: none
+    host: bitbucket
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers:
+      - Only a public, read-only repository is exercised; Bitbucket does not receive a token or an SSH deploy key from this attestation.
+
+  - id: https-none-sha-system-bitbucket-local
+    transport: https
+    ref: sha
+    auth: none
+    host: bitbucket
+    ca: system
+    node_path: local
+    support: unverified
+    qualifiers:
+      - Only a public, read-only repository is exercised; Bitbucket does not receive a token or an SSH deploy key from this attestation.
+
+  # ===== Distribution: does the same combination hold off the local node =====
+  # Scoped to host: generic (the automated fixture) so this claim isolates the
+  # node_path variable instead of compounding it with an unattested host.
+
+  - id: https-pat-branch-system-generic-direct-proxy
+    transport: https
+    ref: branch
+    auth: pat
+    host: generic
+    ca: system
+    node_path: direct-proxy
+    support: unverified
+    qualifiers: []
+
+  - id: https-pat-branch-system-generic-pilot
+    transport: https
+    ref: branch
+    auth: pat
+    host: generic
+    ca: system
+    node_path: pilot
+    support: unverified
+    qualifiers: []
+
+limitations:
+  - id: no-rate-limit-classification
+    title: No rate-limit classification
+    statement: A Git host rate-limit response (for example GitHub's secondary rate limits) is not classified as its own error state. It surfaces as an authentication failure or a generic transport error depending on the host's exact response. Wait and retry; there is no dedicated rate-limit message or backoff guidance yet.
+
+  - id: no-git-lfs
+    title: No Git LFS
+    statement: Compose and env files tracked via Git LFS are rejected rather than silently fetched as pointer stubs. Commit plain files instead.
+
+  - id: no-submodules
+    title: No submodules
+    statement: Submodule contents are not fetched. Inputs and build contexts that reference submodule contents are refused with an actionable message; a warning is shown when .gitmodules is present.
+
+  - id: no-sparse-partial-clone
+    title: No sparse or partial clone
+    statement: Every fetch materializes the complete repository at the resolved commit (shallow, single-branch); there is no sparse or partial clone for large monorepos.
+
+  - id: no-github-app-authentication
+    title: No GitHub App authentication
+    statement: Authentication is Personal Access Token or SSH deploy key only. GitHub App installation tokens are not supported.
+
+  - id: no-provider-pull-request-revisions
+    title: No provider pull/merge request revisions
+    statement: Sources track a branch, a tag, or a pinned commit SHA. A provider-specific pull request or merge request revision (for example GitHub's refs/pull/N/head) is not a supported ref shape.
+
+  - id: outbound-target-restrictions
+    title: Outbound target restrictions
+    statement: Repository targets that resolve to loopback, link-local, multicast, or selected special-use addresses are refused before any request is sent. Private hosts on an operator's own LAN or VPN are not affected by this restriction.
+
+  - id: branch-tag-name-collision
+    title: Branch/tag name collisions
+    statement: A bare ref name resolves as a branch first, then as a tag. If an operator renames a branch and a tag of the same name later appears, the source silently starts resolving the tag instead. A ref name that is also a valid 40 or 64 character hex string resolves as a commit SHA before either lookup.
+
+error_model:
+  - code: REPO_NOT_FOUND
+    label: Repository not found
+    status: 404
+    meaning: The repository does not exist, or (indistinguishably, matching GitHub's own private-repo masking) exists but is private and no usable credential was supplied.
+  - code: AUTH_FAILED
+    label: Authentication failed
+    status: 400
+    meaning: The Git host rejected the supplied credential. Mapped to 400, never 401, so an upstream Git-host auth failure never triggers the dashboard's own session logout.
+  - code: SSH_HOST_KEY_FAILED
+    label: SSH host key mismatch
+    status: 400
+    meaning: The server's SSH host key does not match the fingerprint trusted for this source.
+  - code: REF_NOT_FOUND
+    label: Ref not found
+    status: 404
+    meaning: The configured branch, tag, or commit SHA does not exist on the remote.
+  - code: REF_DELETED
+    label: Ref deleted or rewritten
+    status: 404
+    meaning: A ref that previously resolved to a commit no longer matches that history (deleted, force-pushed, or superseded by a same-named tag).
+  - code: UNSUPPORTED_REF
+    label: Commit not reachable on this host
+    status: 400
+    meaning: A pinned commit SHA that the Git host will not serve because it is not advertised by any branch or tag tip.
+  - code: NETWORK_TIMEOUT
+    label: Network timeout
+    status: 504
+    meaning: A connect, fetch, or DNS-resolution timeout, or a target the host actively refused.
+  - code: GIT_ERROR
+    label: Git error
+    status: 400
+    meaning: Any other transport failure not covered above (invalid URL, disallowed target, TLS/certificate problem, oversized repository, canceled fetch), classified with a specific operator-facing message.
+  - code: FILE_NOT_FOUND
+    label: File not found
+    status: 404
+    meaning: A configured compose or env file path does not exist on the resolved commit.
+
+reconciliation_only_codes:
+  # Not part of this transport matrix; listed so the partition of
+  # GitSourceErrorCode is visible and auditable. Owned by the GitOps
+  # change-plan lifecycle, not by repository transport.
+  - STALE_PLAN
+  - PLAN_FINGERPRINT_REQUIRED
+  - PLAN_BLOCKED
+  - LEGACY_PENDING
+  - PLAN_UNAVAILABLE
+  - OPERATION_IN_FLIGHT

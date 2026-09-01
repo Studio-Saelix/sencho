@@ -1,0 +1,82 @@
+---
+title: Git Transport Support
+sidebarTitle: Transport Support
+description: Which transports, reference types, authentication methods, and Git hosts Git Sources supports, with the evidence behind each claim.
+---
+
+<Note>
+  Git Sources, and everything on this page, is available on every tier, including Community.
+</Note>
+
+This page states exactly what Git Sources supports today: which transports, reference types, authentication methods, TLS trust modes, and Git hosts, and what happens where a combination is not supported or not yet verified. For how to configure a Git source, see [Git Sources](/features/git-sources).
+
+Every "Supported" row here is backed by a test that runs on every change to Sencho, or by a dated pass against a real instance of that host. A row marked "Not yet verified" is not a claim of failure: it means that specific combination has not been exercised yet, so it is not advertised as working. Nothing on this page is inferred from a related combination that behaved correctly.
+
+<!-- GENERATED:BEGIN — run `npm run matrix:render` in backend/ to regenerate, do not edit by hand -->
+
+## Transports
+
+| Transport | Status | Notes |
+| --- | --- | --- |
+| HTTPS | Supported | Personal Access Token for private repositories, or no credential at all for public ones. TLS verification uses the system trust store by default, or a per-source custom CA when configured. |
+| SSH | Supported | A read-only deploy key with strict host-key verification. Standard (22) and nonstandard ports are both supported. |
+
+## Reference types
+
+| Reference type | Status | Notes |
+| --- | --- | --- |
+| Branch | Supported | Tracks the head of a branch; each pull resolves and pins the exact commit. |
+| Tag | Supported | Both annotated and lightweight tags resolve to their target commit. |
+| Commit SHA | Supported | A full commit SHA is pinned directly; the Git host must advertise the commit on some branch or tag. |
+
+## Authentication
+
+| Method | Status | Notes |
+| --- | --- | --- |
+| Public (no auth) | Supported | For public repositories. |
+| Personal Access Token | Supported | Stored encrypted at rest, never returned after save. |
+| SSH deploy key | Supported | Stored encrypted at rest; the server host key is verified on every fetch. |
+
+## Git hosts
+
+| Host | HTTPS | SSH | Branch | Tag | Commit SHA | Evidence |
+| --- | --- | --- | --- | --- | --- | --- |
+| Generic (self-hosted or any Git server) | Supported | Supported | Supported | Supported | Supported | Automated, every change |
+| GitHub | Not yet verified | Not yet verified | Not yet verified | Not yet verified | Not yet verified | Pending |
+| GitLab | Not yet verified | Not yet verified | Not yet verified | Not yet verified | Not yet verified | Pending |
+| Gitea | Not yet verified | Not yet verified | Not yet verified | Not yet verified | Not yet verified | Pending |
+| Forgejo | Not yet verified | Not yet verified | Not yet verified | Not yet verified | Not yet verified | Pending |
+| Bitbucket | Not yet verified | Not yet verified | Not yet verified | Not yet verified | Not yet verified | Pending |
+
+## TLS and certificate authorities
+
+| Mode | Status | Notes |
+| --- | --- | --- |
+| System trust (default) | Supported | The host running the fetch trusts its system certificate store. |
+| Per-source custom CA | Supported | Combined with the system trust anchors, so public hosts keep validating normally. Redirects are re-resolved and only followed when they stay on the source's own host. |
+
+## Not supported
+
+- **No rate-limit classification.** A Git host rate-limit response (for example GitHub's secondary rate limits) is not classified as its own error state. It surfaces as an authentication failure or a generic transport error depending on the host's exact response. Wait and retry; there is no dedicated rate-limit message or backoff guidance yet.
+- **No Git LFS.** Compose and env files tracked via Git LFS are rejected rather than silently fetched as pointer stubs. Commit plain files instead.
+- **No submodules.** Submodule contents are not fetched. Inputs and build contexts that reference submodule contents are refused with an actionable message; a warning is shown when .gitmodules is present.
+- **No sparse or partial clone.** Every fetch materializes the complete repository at the resolved commit (shallow, single-branch); there is no sparse or partial clone for large monorepos.
+- **No GitHub App authentication.** Authentication is Personal Access Token or SSH deploy key only. GitHub App installation tokens are not supported.
+- **No provider pull/merge request revisions.** Sources track a branch, a tag, or a pinned commit SHA. A provider-specific pull request or merge request revision (for example GitHub's refs/pull/N/head) is not a supported ref shape.
+- **Outbound target restrictions.** Repository targets that resolve to loopback, link-local, multicast, or selected special-use addresses are refused before any request is sent. Private hosts on an operator's own LAN or VPN are not affected by this restriction.
+- **Branch/tag name collisions.** A bare ref name resolves as a branch first, then as a tag. If an operator renames a branch and a tag of the same name later appears, the source silently starts resolving the tag instead. A ref name that is also a valid 40 or 64 character hex string resolves as a commit SHA before either lookup.
+
+<!-- GENERATED:END -->
+
+## How these claims are verified
+
+Two kinds of evidence back the rows above:
+
+- **Automated.** A real `git` client, talking to a real local test server over HTTPS or SSH, drives the exact same code path Sencho uses in production. These tests run on every change, so a regression here fails the build before it reaches a release.
+- **Live.** A dated pass against a real instance of the named host (a public GitHub, GitLab, Gitea, Forgejo, or Bitbucket repository, or a self-hosted instance under Sencho's control). This is repeated periodically, not on every change, so its date tells you how current the result is.
+
+A host that is not listed, or a combination marked "Not yet verified," most likely still works: Git Sources speaks the standard Git smart-HTTP and SSH protocols, not anything host-specific. It simply has not been exercised as its own row yet.
+
+<Card title="Git Sources" icon="code-branch" href="/features/git-sources">
+  Configure a repository, review pull previews, and read the field-by-field reference for every setting mentioned above.
+</Card>
