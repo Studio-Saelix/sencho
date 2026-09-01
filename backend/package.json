@@ -88,7 +88,7 @@
     "otplib": "^13.4.0",
     "semver": "^7.7.4",
     "systeminformation": "^5.31.1",
-    "tar-stream": "^3.1.8",
+    "tar-stream": "3.2.0",
     "undici": "^8.10.0",
     "ws": "^8.19.0",
     "yaml": "^2.8.2",
