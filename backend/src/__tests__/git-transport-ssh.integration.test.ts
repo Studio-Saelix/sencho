@@ -13,14 +13,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { classifyGitFailure, isTransportFailure } from '../services/git/errors';
 import { nativeGitTransport } from '../services/git/nativeGitTransport';
 import { scanHostKeys } from '../services/git/sshTrust';
-
-function gitAvailable(): boolean {
-    return spawnSync('git', ['--version'], { stdio: 'ignore' }).status === 0;
-}
-
-function sshdAvailable(): boolean {
-    return spawnSync('/usr/sbin/sshd', ['-V'], { stdio: 'ignore' }).status === 0;
-}
+import { requireGitBinary, requireSshd } from './__helpers__/externalDeps';
 
 const FILE_CONTENT = 'hello from the ssh fixture repo\n';
 
@@ -182,7 +175,7 @@ async function startSshGitServer(bareDir: string, port: number): Promise<Omit<Ss
     };
 }
 
-describe.skipIf(!gitAvailable() || !sshdAvailable())('SSH deploy-key native git transport (real git, real sshd, strict host keys)', () => {
+describe.skipIf(!requireGitBinary() || !requireSshd())('SSH deploy-key native git transport (real git, real sshd, strict host keys)', () => {
     let fixture: SshGitFixture;
     const workspaces: string[] = [];
     let scratchDirs: string[] = [];
@@ -296,7 +289,7 @@ describe.skipIf(!gitAvailable() || !sshdAvailable())('SSH deploy-key native git 
     });
 });
 
-describe.skipIf(!gitAvailable() || !sshdAvailable())('SSH deploy-key transport on the default SSH port', () => {
+describe.skipIf(!requireGitBinary() || !requireSshd())('SSH deploy-key transport on the default SSH port', () => {
     let fixture: SshGitFixture;
     const workspaces: string[] = [];
 
