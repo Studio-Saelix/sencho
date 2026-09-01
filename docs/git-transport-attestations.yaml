@@ -17,14 +17,349 @@
 #     a runtime attestation executes an image while claims are committed
 #     from a revision; retained so the executed runtime is identifiable even
 #     though it is not what claims bind to.
-#   host: image digest (self-hosted) or service identity + note (hosted SaaS,
-#     where inventing a server version would be false).
+#   host: the closed enum value matching the claim (github, gitlab, gitea,
+#     forgejo, bitbucket, generic) — never a descriptive string.
+#   host_version: optional, self-hosted only — the exact image reference run.
+#     Omitted for hosted SaaS, where inventing a server version would be false.
 #   node_path: local | direct-proxy | pilot — the execution path exercised.
-#   repository / ref: the exact fixture repository and ref exercised.
+#   transport / ref / auth / ca: duplicated from the referencing claim so the
+#     validator can assert exact-dimension equality, not extrapolation.
+#   repository / ref_name: the exact fixture repository and literal ref
+#     exercised (a branch, tag, or commit, not the ref *kind*).
 #   command: a scrubbed, non-credential-bearing description of what ran.
 #   result: success | rejected, matching the claim's evidence.outcome.
 
 version: '1'
 schema: 'attestation-v1'
 
-attestations: []
+attestations:
+  # ===== Named hosts, public read-only (HTTPS, no auth) =====
+  - id: att-2026-09-01-github-branch
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: github
+    node_path: local
+    transport: https
+    ref: branch
+    auth: none
+    ca: system
+    repository: octocat/Hello-World (GitHub's own public demo repository)
+    ref_name: master
+    command: POST /api/git-sources/browse against the real Sencho instance; branch tip resolved and fetched
+    result: success
+
+  - id: att-2026-09-01-github-sha
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: github
+    node_path: local
+    transport: https
+    ref: sha
+    auth: none
+    ca: system
+    repository: octocat/Hello-World
+    ref_name: 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d (master tip)
+    command: POST /api/git-sources/browse pinning the branch tip's own commit SHA
+    result: success
+
+  - id: att-2026-09-01-gitlab-branch
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: gitlab
+    node_path: local
+    transport: https
+    ref: branch
+    auth: none
+    ca: system
+    repository: gitlab-org/gitlab-test (GitLab's own canonical test fixture repository)
+    ref_name: master
+    command: POST /api/git-sources/browse
+    result: success
+
+  - id: att-2026-09-01-gitlab-tag
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: gitlab
+    node_path: local
+    transport: https
+    ref: tag
+    auth: none
+    ca: system
+    repository: gitlab-org/gitlab-test
+    ref_name: v1.0.0 (annotated)
+    command: POST /api/git-sources/browse
+    result: success
+
+  - id: att-2026-09-01-gitlab-sha
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: gitlab
+    node_path: local
+    transport: https
+    ref: sha
+    auth: none
+    ca: system
+    repository: gitlab-org/gitlab-test
+    ref_name: 6f6d7e7ed97bb5f0054f2b1df789b39ca89b6ff9 (v1.0.0's peeled commit)
+    command: POST /api/git-sources/browse
+    result: success
+
+  - id: att-2026-09-01-bitbucket-branch
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: bitbucket
+    node_path: local
+    transport: https
+    ref: branch
+    auth: none
+    ca: system
+    repository: atlassian_tutorial/helloworld (Atlassian's own public tutorial repository)
+    ref_name: master
+    command: POST /api/git-sources/browse
+    result: success
+
+  - id: att-2026-09-01-bitbucket-sha
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: bitbucket
+    node_path: local
+    transport: https
+    ref: sha
+    auth: none
+    ca: system
+    repository: atlassian_tutorial/helloworld
+    ref_name: 65d938f39f364da3f90767e008022ffe45c562af (master tip)
+    command: POST /api/git-sources/browse
+    result: success
+
+  # ===== Self-hosted Gitea, own throwaway instance on the QA fleet =====
+  - id: att-2026-09-01-gitea-https-branch
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: gitea
+    host_version: gitea/gitea:1.22
+    node_path: local
+    transport: https
+    ref: branch
+    auth: pat
+    ca: per-source
+    repository: throwaway fixture repository on a disposable Gitea instance, torn down after this pass
+    ref_name: main
+    command: POST /api/git-sources/browse with a per-source CA bundle and a Personal Access Token
+    result: success
+
+  - id: att-2026-09-01-gitea-https-tag
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: gitea
+    host_version: gitea/gitea:1.22
+    node_path: local
+    transport: https
+    ref: tag
+    auth: pat
+    ca: per-source
+    repository: throwaway fixture repository on a disposable Gitea instance
+    ref_name: v1.0 (annotated)
+    command: POST /api/git-sources/browse
+    result: success
+
+  - id: att-2026-09-01-gitea-https-sha
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: gitea
+    host_version: gitea/gitea:1.22
+    node_path: local
+    transport: https
+    ref: sha
+    auth: pat
+    ca: per-source
+    repository: throwaway fixture repository on a disposable Gitea instance
+    ref_name: pinned commit SHA (branch tip)
+    command: POST /api/git-sources/browse
+    result: success
+
+  - id: att-2026-09-01-gitea-ssh-branch
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: gitea
+    host_version: gitea/gitea:1.22
+    node_path: local
+    transport: ssh
+    ref: branch
+    auth: deploy-key
+    ca: not-applicable
+    repository: throwaway fixture repository on a disposable Gitea instance
+    ref_name: main
+    command: POST /api/git-sources/browse with a read-only deploy key and the host key fetched via Sencho's own probe endpoint
+    result: success
+
+  - id: att-2026-09-01-gitea-ssh-tag
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: gitea
+    host_version: gitea/gitea:1.22
+    node_path: local
+    transport: ssh
+    ref: tag
+    auth: deploy-key
+    ca: not-applicable
+    repository: throwaway fixture repository on a disposable Gitea instance
+    ref_name: v1.0-light (lightweight)
+    command: POST /api/git-sources/browse
+    result: success
+
+  - id: att-2026-09-01-gitea-ssh-sha
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: gitea
+    host_version: gitea/gitea:1.22
+    node_path: local
+    transport: ssh
+    ref: sha
+    auth: deploy-key
+    ca: not-applicable
+    repository: throwaway fixture repository on a disposable Gitea instance
+    ref_name: pinned commit SHA (branch tip)
+    command: POST /api/git-sources/browse
+    result: success
+
+  # ===== Self-hosted Forgejo, own throwaway instance on the QA fleet =====
+  - id: att-2026-09-01-forgejo-https-branch
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: forgejo
+    host_version: codeberg.org/forgejo/forgejo:7
+    node_path: local
+    transport: https
+    ref: branch
+    auth: pat
+    ca: per-source
+    repository: throwaway fixture repository on a disposable Forgejo instance, torn down after this pass
+    ref_name: main
+    command: POST /api/git-sources/browse with a per-source CA bundle and a Personal Access Token
+    result: success
+
+  - id: att-2026-09-01-forgejo-https-tag
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: forgejo
+    host_version: codeberg.org/forgejo/forgejo:7
+    node_path: local
+    transport: https
+    ref: tag
+    auth: pat
+    ca: per-source
+    repository: throwaway fixture repository on a disposable Forgejo instance
+    ref_name: v1.0 (annotated)
+    command: POST /api/git-sources/browse
+    result: success
+
+  - id: att-2026-09-01-forgejo-https-sha
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: forgejo
+    host_version: codeberg.org/forgejo/forgejo:7
+    node_path: local
+    transport: https
+    ref: sha
+    auth: pat
+    ca: per-source
+    repository: throwaway fixture repository on a disposable Forgejo instance
+    ref_name: pinned commit SHA (branch tip)
+    command: POST /api/git-sources/browse
+    result: success
+
+  - id: att-2026-09-01-forgejo-ssh-branch
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: forgejo
+    host_version: codeberg.org/forgejo/forgejo:7
+    node_path: local
+    transport: ssh
+    ref: branch
+    auth: deploy-key
+    ca: not-applicable
+    repository: throwaway fixture repository on a disposable Forgejo instance
+    ref_name: main
+    command: POST /api/git-sources/browse with a read-only deploy key and the host key fetched via Sencho's own probe endpoint
+    result: success
+
+  - id: att-2026-09-01-forgejo-ssh-tag
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: forgejo
+    host_version: codeberg.org/forgejo/forgejo:7
+    node_path: local
+    transport: ssh
+    ref: tag
+    auth: deploy-key
+    ca: not-applicable
+    repository: throwaway fixture repository on a disposable Forgejo instance
+    ref_name: v1.0-light (lightweight)
+    command: POST /api/git-sources/browse
+    result: success
+
+  - id: att-2026-09-01-forgejo-ssh-sha
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: forgejo
+    host_version: codeberg.org/forgejo/forgejo:7
+    node_path: local
+    transport: ssh
+    ref: sha
+    auth: deploy-key
+    ca: not-applicable
+    repository: throwaway fixture repository on a disposable Forgejo instance
+    ref_name: pinned commit SHA (branch tip)
+    command: POST /api/git-sources/browse
+    result: success
+
+  # ===== Distribution: direct-proxy and Pilot node paths =====
+  - id: att-2026-09-01-github-direct-proxy
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: github
+    node_path: direct-proxy
+    transport: https
+    ref: branch
+    auth: none
+    ca: system
+    repository: octocat/Hello-World
+    ref_name: master
+    command: POST /api/git-sources/browse with x-node-id targeting a remote proxy-mode fleet node
+    result: success
+
+  - id: att-2026-09-01-github-pilot
+    date: '2026-09-01'
+    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+    host: github
+    node_path: pilot
+    transport: https
+    ref: branch
+    auth: none
+    ca: system
+    repository: octocat/Hello-World
+    ref_name: master
+    command: POST /api/git-sources/browse with x-node-id targeting a Pilot-agent fleet node
+    result: success
