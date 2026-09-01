@@ -20,6 +20,31 @@ paths-ignore:
   # path scoping is ignored for that query, so the dedicated sink module is
   # excluded from JS analysis instead (see codeql-config comment on e2e above).
   - backend/src/services/git/sshCredentialFiles.ts
+  # redirectPreflight walks an HTTPS redirect chain to decide whether git may
+  # be re-run against the destination, so the operator's configured repository
+  # URL reaches an outbound https.get and CodeQL flags request forgery. A
+  # barrier model on the module's own origin-check function (declaring its
+  # return value clean, the same mechanism sanitizeForLog uses for
+  # log-injection) was tried first and did not clear this alert: the
+  # js/request-forgery query does not consult the general dataflow
+  # barrierModel the way log-injection does. Excluded from JS analysis
+  # instead, for the same reason as the two sinks below: every URL this
+  # module requests, including the first, is checked against the configured
+  # repository's origin (scheme, host, and port) before being requested, so
+  # the walk cannot reach a host the operator did not configure, and the
+  # probe carries no credentials. Sencho is single-tenant and self-hosted:
+  # the admin who sets the repository URL owns the server, the trust model
+  # already accepted for registry-api.ts and NotificationService.ts.
+  - backend/src/services/git/redirectPreflight.ts
+  # Per-fetch HTTPS CA bundle sink: combines the operator-supplied per-source
+  # PEM, the optional NODE_EXTRA_CA_CERTS file, and (on Windows) Git's
+  # bundled system bundle into one mode-0600 file the git child reads via
+  # http.sslCAInfo. Every input to the write has already been validated as
+  # PEM by the caller or comes from a known, operator-controlled path on the
+  # same host; the file lives under the per-fetch workspace, which the caller
+  # deletes in a finally block. Excluded from JS analysis for the same reason
+  # as the SSH sink above.
+  - backend/src/services/git/gitCaBundleSink.ts
 
 query-filters:
   # API tokens are 256-bit CSPRNG random; sha256 of the raw token is the

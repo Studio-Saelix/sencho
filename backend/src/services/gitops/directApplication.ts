@@ -231,6 +231,7 @@ export function buildCreateCheckpointRow(args: {
   encryptedDeployKey?: string | null;
   sshKnownHostsEntry?: string | null;
   sshHostKeyFingerprint?: string | null;
+  encryptedCaBundle?: string | null;
   autoApplyOnWebhook: boolean;
   autoDeployOnApply: boolean;
   commitSha: string;
@@ -257,6 +258,7 @@ export function buildCreateCheckpointRow(args: {
     encrypted_deploy_key: args.encryptedDeployKey ?? null,
     ssh_known_hosts_entry: args.sshKnownHostsEntry ?? null,
     ssh_host_key_fingerprint: args.sshHostKeyFingerprint ?? null,
+    encrypted_ca_bundle: args.encryptedCaBundle ?? null,
     auto_apply_on_webhook: args.autoApplyOnWebhook ? 1 : 0,
     auto_deploy_on_apply: args.autoDeployOnApply ? 1 : 0,
     commit_sha: args.commitSha,

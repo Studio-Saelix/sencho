@@ -409,6 +409,137 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
         expect(row?.encrypted_token).not.toBe('ghp_secret_token_value');
     });
 
+    it('stores an encrypted CA bundle and exposes has_ca_bundle without leaking PEM', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const pem = '-----BEGIN CERTIFICATE-----\nTEST-CA-PEM\n-----END CERTIFICATE-----\n';
+        const created = await svc.upsert({
+            stackName: 'ca-stack',
+            repoUrl: 'https://git.example.com/org/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            caBundle: pem,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        expect(created.has_ca_bundle).toBe(true);
+        expect(JSON.stringify(created)).not.toContain('TEST-CA-PEM');
+        const row = DatabaseService.getInstance().getGitSource('ca-stack');
+        expect(row?.encrypted_ca_bundle).toBeTruthy();
+        expect(row?.encrypted_ca_bundle).not.toBe(pem);
+    });
+
+    it('explicitly removes a stored CA bundle when removeCaBundle is true, even when caBundle is omitted', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const pem = '-----BEGIN CERTIFICATE-----\nTEST-CA-PEM\n-----END CERTIFICATE-----\n';
+        // Step 1: store a CA bundle.
+        await svc.upsert({
+            stackName: 'ca-revoke-stack',
+            repoUrl: 'https://git.example.com/org/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            caBundle: pem,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        let row = DatabaseService.getInstance().getGitSource('ca-revoke-stack');
+        expect(row?.encrypted_ca_bundle).toBeTruthy();
+        // Step 2: simulate the operator clicking "Remove stored CA": the
+        // textarea is left empty and the UI sends removeCaBundle: true with
+        // caBundle omitted. The stored CA must be cleared.
+        const updated = await svc.upsert({
+            stackName: 'ca-revoke-stack',
+            repoUrl: 'https://git.example.com/org/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            removeCaBundle: true,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        expect(updated.has_ca_bundle).toBe(false);
+        expect(JSON.stringify(updated)).not.toContain('TEST-CA-PEM');
+        row = DatabaseService.getInstance().getGitSource('ca-revoke-stack');
+        expect(row?.encrypted_ca_bundle).toBeNull();
+    });
+
+    it('saves an explicit CA removal even when the repository is unreachable without that CA', async () => {
+        // The dry-run reachability check normally runs on every save. A
+        // repository that genuinely needs its CA to be reached would fail
+        // that check the instant the CA is removed, refusing the very
+        // request meant to retire it. removeCaBundle must bypass the
+        // check so the operator's explicit intent to remove always saves.
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        const pem = '-----BEGIN CERTIFICATE-----\nTEST-CA-PEM\n-----END CERTIFICATE-----\n';
+        mockResolveRef.mockImplementation(async (req: { caBundlePem?: string | null }) => {
+            if (!req.caBundlePem) {
+                throw gitFailure('unable to get local issuer certificate', false);
+            }
+            return { commitSha: 'a'.repeat(40), kind: 'branch' as const };
+        });
+        await svc.upsert({
+            stackName: 'ca-required-stack',
+            repoUrl: 'https://git.example.com/org/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            caBundle: pem,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+
+        // Sanity check: without removeCaBundle, an upsert that can no longer
+        // reach the repository is refused, proving the dry-run check itself
+        // still runs for ordinary saves.
+        await expect(svc.upsert({
+            stackName: 'ca-required-stack',
+            repoUrl: 'https://git.example.com/org/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            caBundle: null,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        })).rejects.toBeTruthy();
+
+        // The removal itself must still save.
+        const removed = await svc.upsert({
+            stackName: 'ca-required-stack',
+            repoUrl: 'https://git.example.com/org/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            removeCaBundle: true,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        expect(removed.has_ca_bundle).toBe(false);
+        const row = DatabaseService.getInstance().getGitSource('ca-required-stack');
+        expect(row?.encrypted_ca_bundle).toBeNull();
+    });
+
     it('preserves an existing token when update omits token (undefined)', async () => {
         mockSuccessfulClone();
         const svc = GitSourceService.getInstance();
@@ -2619,6 +2750,7 @@ describe('GitSourceService managed-area lifecycle', () => {
             env_path: null,
             auth_type: 'none',
             encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -2674,6 +2806,7 @@ describe('GitSourceService managed-area lifecycle', () => {
             env_path: null,
             auth_type: 'none',
             encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -2814,6 +2947,7 @@ describe('GitSourceService managed-area lifecycle', () => {
             env_path: null,
             auth_type: 'none',
             encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -2845,6 +2979,7 @@ describe('GitSourceService managed-area lifecycle', () => {
             env_path: null,
             auth_type: 'none',
             encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -2878,6 +3013,7 @@ describe('GitSourceService legacy pending apply (migration path)', () => {
             env_path: null,
             auth_type: 'none',
             encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,
@@ -3156,6 +3292,7 @@ describe('GitSourceService classified plan fingerprint', () => {
             env_path: null,
             auth_type: 'none',
             encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
             auto_apply_on_webhook: false,
             auto_deploy_on_apply: false,
             last_applied_commit_sha: null,

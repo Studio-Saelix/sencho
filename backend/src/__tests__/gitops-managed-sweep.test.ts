@@ -115,6 +115,7 @@ function checkpoint(applicationId: string, stackName: string): GitOpsCreateCheck
     encrypted_deploy_key: null,
     ssh_known_hosts_entry: null,
     ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
     auto_apply_on_webhook: 0,
     auto_deploy_on_apply: 0,
     commit_sha: SHA,

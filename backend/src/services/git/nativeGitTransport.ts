@@ -5,10 +5,15 @@ import path from 'path';
 import { ensureGitBinary, getGitExecPath } from './gitBinary';
 import {
     CREDENTIAL_HELPER_CONFIG_VALUE,
+    GIT_ALLOWED_HOST_ENV_VAR,
     GIT_HELPER_PATH_ENV_VAR,
     GIT_TOKEN_ENV_VAR,
     writeCredentialHelper,
 } from './credentialHelper';
+import { credentialScopeHost } from './caBundle';
+import { sanitizeForLog } from '../../utils/safeLog';
+import { writeCombinedCaBundle } from './gitCaBundleSink';
+import { looksLikeRedirectFailure, resolveRedirectedRepoUrl } from './redirectPreflight';
 import { isTransportFailure, type TransportFailure } from './errors';
 import type { FetchRequest, FetchResult, GitTransport, ResolveRequest, ResolveResult } from './types';
 import {
@@ -143,7 +148,7 @@ async function awaitKillConfirmed(kill: Promise<void> | undefined, what: string)
     let timer: NodeJS.Timeout | undefined;
     const bound = new Promise<void>((resolve) => {
         timer = setTimeout(() => {
-            console.warn(`[GitSource:transport] ${what} not confirmed within ${KILL_CONFIRM_TIMEOUT_MS}ms; continuing cleanup while it may still be running`);
+            console.warn(`[GitSource:transport] ${sanitizeForLog(what)} not confirmed within ${KILL_CONFIRM_TIMEOUT_MS}ms; continuing cleanup while it may still be running`);
             resolve();
         }, KILL_CONFIRM_TIMEOUT_MS);
     });
@@ -272,6 +277,7 @@ function buildEnv(
     token?: string | null,
     helperPath?: string | null,
     sshCommand?: string | null,
+    allowedHost?: string | null,
 ): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = {
         ...process.env,
@@ -300,6 +306,9 @@ function buildEnv(
         // value so no workspace path character can change how git's shell
         // parses it. See credentialHelper.ts.
         env[GIT_HELPER_PATH_ENV_VAR] = helperPath;
+    }
+    if (allowedHost) {
+        env[GIT_ALLOWED_HOST_ENV_VAR] = allowedHost;
     }
     if (sshCommand) {
         env.GIT_SSH_COMMAND = sshCommand;
@@ -331,85 +340,61 @@ async function detectWindowsCABundle(): Promise<string | null> {
     return null;
 }
 
-/** First existing system CA bundle for OpenSSL-backed git on POSIX. */
-const POSIX_CA_BUNDLE_CANDIDATES = [
-    '/etc/ssl/certs/ca-certificates.crt',
-    '/etc/pki/tls/certs/ca-bundle.crt',
-];
-
 /**
  * Build the CA-anchor configuration for one fetch.
  *
  * Mirrors Node's own NODE_EXTRA_CA_CERTS semantics (extra anchors ADDED to
  * the defaults, never replacing them) by writing a combined PEM bundle into
  * the fetch workspace's `.meta` dir:
- * - No NODE_EXTRA_CA_CERTS: production posture. POSIX passes nothing and
- *   lets OpenSSL use system trust; Windows pins Git's own bundled bundle,
- *   because stripping system gitconfig also strips the installer's pointer
- *   to it.
- * - With NODE_EXTRA_CA_CERTS: defaults PLUS the extra CAs, so the dev/E2E
- *   fixture server and public hosts validate in the same process state.
+ * - No NODE_EXTRA_CA_CERTS and no per-source PEM: production posture.
+ *   POSIX passes nothing and lets OpenSSL use system trust; Windows pins
+ *   Git's own bundled bundle, because stripping system gitconfig also
+ *   strips the installer's pointer to it.
+ * - With NODE_EXTRA_CA_CERTS and/or a per-source PEM: defaults PLUS the extra
+ *   CAs, so private-CA servers and public hosts validate in the same fetch.
+ *
+ * The per-source PEM and the env-var file are written by
+ * `writeCombinedCaBundle` in `./gitCaBundleSink.ts`; the sink module is the
+ * single point CodeQL is asked to ignore for `js/http-to-file-access` because
+ * every input it writes is either a file path inside the per-fetch workspace
+ * (no external taint) or a PEM that the caller has already validated.
  */
-async function resolveCaArgs(layout: WorkspaceLayout): Promise<string[]> {
-    const extraPath = process.env.NODE_EXTRA_CA_CERTS;
-    const hasExtra = Boolean(extraPath && existsSync(extraPath));
+async function resolveCaArgs(
+    layout: WorkspaceLayout,
+    perSourceCaPem?: string | null,
+): Promise<{ args: string[]; caPath: string | null }> {
     const isWindows = process.platform === 'win32';
 
-    if (!hasExtra && !isWindows) {
-        return [];
+    // Per-source and env-var anchors live in a single combined file written by
+    // the sink module. The sink now includes system anchors when custom
+    // anchors are present, so we only need to handle the "no custom anchors"
+    // case specially for Windows.
+    const combined = await writeCombinedCaBundle(layout.metaDir, perSourceCaPem);
+    if (combined) {
+        return { args: ['-c', `http.sslCAInfo=${combined.path}`], caPath: combined.path };
     }
 
-    if (isWindows && !hasExtra) {
-        // Windows without an override: anchor to Git's bundled bundle directly.
-        const bundle = await detectWindowsCABundle();
-        return bundle ? ['-c', `http.sslCAInfo=${bundle}`] : [];
-    }
-
-    let defaultPem = '';
-    let winBundle: string | null = null;
+    // No custom anchors: on POSIX we pass nothing (system trust applies
+    // directly via OpenSSL). On Windows we still need the Git-bundled
+    // pointer because GIT_CONFIG_NOSYSTEM stripped the installer's config.
     if (isWindows) {
-        winBundle = await detectWindowsCABundle();
-        if (winBundle) {
-            try {
-                defaultPem = await fs.readFile(winBundle.replace(/\//g, path.sep), 'utf8');
-            } catch {
-                console.warn(`[GitSource:transport] could not read system CA bundle at ${winBundle}; combined anchors will contain only NODE_EXTRA_CA_CERTS entries.`);
-            }
-        }
-    } else {
-        for (const candidate of POSIX_CA_BUNDLE_CANDIDATES) {
-            if (!existsSync(candidate)) continue;
-            try {
-                defaultPem = await fs.readFile(candidate, 'utf8');
-                break;
-            } catch {
-                // Try the next candidate.
-            }
-        }
-        if (!defaultPem) {
-            console.warn('[GitSource:transport] no readable system CA bundle found; combined anchors will contain only NODE_EXTRA_CA_CERTS entries.');
-        }
+        const bundle = await detectWindowsCABundle();
+        return bundle ? { args: ['-c', `http.sslCAInfo=${bundle}`], caPath: bundle } : { args: [], caPath: null };
     }
 
-    let extraPem = '';
-    try {
-        extraPem = await fs.readFile(extraPath as string, 'utf8');
-    } catch {
-        console.warn('[GitSource:transport] could not read the file configured via NODE_EXTRA_CA_CERTS; ignoring custom anchors.');
-        // Windows still has working defaults; fall back to them instead of
-        // dropping every anchor.
-        return isWindows && winBundle ? ['-c', `http.sslCAInfo=${winBundle}`] : [];
-    }
-    const combinedPath = path.join(layout.metaDir, 'combined-ca.pem');
-    await fs.writeFile(combinedPath, `${defaultPem}\n${extraPem}`, { mode: 0o600 });
-    return ['-c', `http.sslCAInfo=${combinedPath.split(path.sep).join('/')}`];
+    return { args: [], caPath: null };
 }
 
 /**
  * Config shared by every invocation. With no helper, credential.helper is
  * explicitly cleared so nothing from the environment can answer prompts.
  */
-async function commonArgs(layout: WorkspaceLayout, helperPath: string | null, ssh: boolean): Promise<string[]> {
+async function commonArgs(
+    layout: WorkspaceLayout,
+    helperPath: string | null,
+    ssh: boolean,
+    perSourceCaPem?: string | null,
+): Promise<{ args: string[]; caPath: string | null }> {
     const args = [
         '-c', 'protocol.allow=never',
     ];
@@ -417,6 +402,14 @@ async function commonArgs(layout: WorkspaceLayout, helperPath: string | null, ss
         args.push('-c', 'protocol.ssh.allow=always');
     } else {
         args.push('-c', 'protocol.https.allow=always');
+        // Git never follows a redirect itself, so it can never contact a
+        // destination this process has not already approved. When a server
+        // does redirect, the caller walks the chain unauthenticated through
+        // redirectPreflight, validates every hop, and re-runs git against the
+        // approved URL. Letting git follow instead would contact the target
+        // before any policy ran, which is what makes the internal-range guard
+        // meaningful rather than after-the-fact.
+        args.push('-c', 'http.followRedirects=false');
     }
     args.push('-c', `core.hooksPath=${layout.hooksDir.split(path.sep).join('/')}`);
     if (process.platform === 'win32') {
@@ -428,7 +421,8 @@ async function commonArgs(layout: WorkspaceLayout, helperPath: string | null, ss
         // git is OpenSSL-backed and unaffected by this flag's absence.
         args.push('-c', 'http.sslBackend=openssl');
     }
-    args.push(...await resolveCaArgs(layout));
+    const ca = await resolveCaArgs(layout, perSourceCaPem);
+    args.push(...ca.args);
     if (helperPath !== null) {
         // A fixed value: the helper's path reaches git through the child env
         // instead of being interpolated here, so a workspace path containing
@@ -438,7 +432,7 @@ async function commonArgs(layout: WorkspaceLayout, helperPath: string | null, ss
     } else {
         args.push('-c', 'credential.helper=');
     }
-    return args;
+    return { args, caPath: ca.caPath };
 }
 
 /**
@@ -455,9 +449,11 @@ async function commonArgs(layout: WorkspaceLayout, helperPath: string | null, ss
  */
 async function prepareInvocation(
     workspaceRoot: string,
+    repoUrl: string,
     token?: string | null,
     sshAuth?: ResolveRequest['sshAuth'],
-): Promise<{ layout: WorkspaceLayout; env: NodeJS.ProcessEnv; baseArgs: string[] }> {
+    caBundlePem?: string | null,
+): Promise<{ layout: WorkspaceLayout; env: NodeJS.ProcessEnv; baseArgs: string[]; allowedHost: string | null; caPath: string | null }> {
     const layout = await prepareWorkspace(workspaceRoot);
     let sshCommand: string | null = null;
     if (sshAuth) {
@@ -466,9 +462,63 @@ async function prepareInvocation(
         sshCommand = buildSshCommand(keyPath, knownPath);
     }
     const helperPath = token ? await writeCredentialHelper(layout.metaDir) : null;
-    const env = buildEnv(layout.homeDir, token, helperPath, sshCommand);
-    const baseArgs = await commonArgs(layout, helperPath, Boolean(sshAuth));
-    return { layout, env, baseArgs };
+    const parsed = parseRepoTransportUrl(repoUrl);
+    const allowedHost = parsed?.kind === 'https' && token
+        ? credentialScopeHost(parsed.host)
+        : null;
+    const env = buildEnv(layout.homeDir, token, helperPath, sshCommand, allowedHost);
+    const { args: baseArgs, caPath } = await commonArgs(layout, helperPath, Boolean(sshAuth), caBundlePem);
+    return { layout, env, baseArgs, allowedHost, caPath };
+}
+
+/**
+ * The redirect chain for a repository, resolved and policy-checked without
+ * credentials, or null when the source does not redirect (in which case the
+ * caller keeps git's original failure). Only ever consulted after git has
+ * already refused to follow a redirect, so the normal path costs nothing.
+ */
+async function approveRedirectTarget(
+    repo: ParsedRepoUrl,
+    stderr: string,
+    hasToken: boolean,
+    caPath: string | null,
+): Promise<string | null> {
+    if (repo.kind !== 'https' || !looksLikeRedirectFailure(stderr)) return null;
+    let caPem: string | undefined;
+    if (caPath) {
+        try {
+            caPem = await fs.readFile(caPath, 'utf8');
+        } catch (e) {
+            // This bundle was written moments ago by this same invocation, so a
+            // read failure is a real fault, not a missing option. Probing with
+            // default trust instead would validate the operator's private-CA
+            // host against the wrong anchors, so decline the retry and say so.
+            console.warn(`[GitSource:transport] could not read the CA bundle at ${sanitizeForLog(caPath)} for the redirect preflight; not authorising a redirect retry: ${sanitizeForLog(e instanceof Error ? e.message : String(e))}`);
+            return null;
+        }
+    }
+    return await resolveRedirectedRepoUrl({
+        repoUrl: repo.href,
+        hasToken,
+        reportHost: repoHostLabel(repo),
+        caPem,
+    });
+}
+
+/**
+ * The same question asked of a materialization step, which reports through a
+ * thrown TransportFailure rather than an exit code. Kept in one place so the
+ * rule for which failures may be retried cannot drift between the fetch and
+ * fast-forward paths.
+ */
+async function approvedRedirectForError(
+    e: unknown,
+    repo: ParsedRepoUrl,
+    hasToken: boolean,
+    caPath: string | null,
+): Promise<string | null> {
+    if (!isTransportFailure(e) || e.reason !== 'exit' || !e.stderr) return null;
+    return await approveRedirectTarget(repo, e.stderr, hasToken, caPath);
 }
 
 // ─── Input validation ────────────────────────────────────────────────────────
@@ -635,19 +685,30 @@ async function lsRemoteRefs(
     baseArgs: string[],
     timeoutMs: number,
     hasToken: boolean,
+    caPath: string | null = null,
 ): Promise<ResolvedRemoteRefs> {
     const host = repoHostLabel(repo);
-    let res: RunResult;
-    try {
-        res = await runGit(
-            [...baseArgs, 'ls-remote', repo.href, `refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`],
-            { env, timeoutMs: Math.min(timeoutMs, LS_REMOTE_MAX_MS) },
-        );
-    } catch (e) {
-        if (isTimeoutError(e)) {
-            throw { transportFailure: true as const, reason: 'timeout', host, hasToken } satisfies TransportFailure;
+    const attempt = async (href: string): Promise<RunResult> => {
+        try {
+            return await runGit(
+                [...baseArgs, 'ls-remote', href, `refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`],
+                { env, timeoutMs: Math.min(timeoutMs, LS_REMOTE_MAX_MS) },
+            );
+        } catch (e) {
+            if (isTimeoutError(e)) {
+                throw { transportFailure: true as const, reason: 'timeout', host, hasToken } satisfies TransportFailure;
+            }
+            throw e;
         }
-        throw e;
+    };
+
+    let res = await attempt(repo.href);
+    if (res.exitCode !== 0) {
+        // git refused a redirect. Resolve and approve the destination first;
+        // an approved chain is retried once against the final URL, and a
+        // rejected one throws before that host is ever contacted.
+        const approved = await approveRedirectTarget(repo, res.stderr, hasToken, caPath);
+        if (approved) res = await attempt(approved);
     }
     if (res.exitCode !== 0) {
         throw { transportFailure: true as const, reason: 'exit', stderr: res.stderr, exitCode: res.exitCode, argv: baseArgs, host, hasToken } satisfies TransportFailure;
@@ -692,6 +753,7 @@ export async function verifyFastForward(req: {
     descendantSha: string;
     token?: string | null;
     sshAuth?: ResolveRequest['sshAuth'];
+    caBundlePem?: string | null;
     timeoutMs?: number;
     workspaceRoot: string;
     maxBytes: number;
@@ -712,7 +774,12 @@ export async function verifyFastForward(req: {
             throw { transportFailure: true as const, reason: 'timeout', host, hasToken } satisfies TransportFailure;
         }
     };
-    const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token, req.sshAuth);
+    const { env, baseArgs, caPath } = await prepareInvocation(
+        req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
+    );
+    // Resolved once if the host refuses a redirect, then reused by the deepen
+    // rounds so they do not each re-walk the same chain.
+    let effectiveHref = repo.href;
     const repoDir = path.join(req.workspaceRoot, 'ff-check');
     await fs.mkdir(repoDir, { recursive: true });
 
@@ -803,7 +870,14 @@ export async function verifyFastForward(req: {
         };
 
         await materialize([...baseArgs, 'init']);
-        await materialize([...baseArgs, 'fetch', '--depth=1', repo.href, descendant]);
+        try {
+            await materialize([...baseArgs, 'fetch', '--depth=1', effectiveHref, descendant]);
+        } catch (e) {
+            const approved = await approvedRedirectForError(e, repo, hasToken, caPath);
+            if (!approved) throw e;
+            effectiveHref = approved;
+            await materialize([...baseArgs, 'fetch', '--depth=1', effectiveHref, descendant]);
+        }
 
         const countReachable = async (): Promise<number> => {
             const argv = [...baseArgs, 'rev-list', '--count', descendant];
@@ -891,7 +965,7 @@ export async function verifyFastForward(req: {
             }
 
             const previousCount = reachableCount;
-            await materialize([...baseArgs, 'fetch', `--deepen=${deepenStep}`, repo.href, descendant]);
+            await materialize([...baseArgs, 'fetch', `--deepen=${deepenStep}`, effectiveHref, descendant]);
             fetchRounds += 1;
             reachableCount = await countReachable();
 
@@ -929,10 +1003,13 @@ export const nativeGitTransport: GitTransport = {
         }
 
         assertValidRef(req.ref, repoHostLabel(repo), hasToken);
-        const { env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token, req.sshAuth);
+
+        const { env, baseArgs, caPath } = await prepareInvocation(
+            req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
+        );
         const found = await lsRemoteRefs(
             repo, req.ref, env, baseArgs,
-            req.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasToken,
+            req.timeoutMs ?? DEFAULT_TIMEOUT_MS, hasToken, caPath,
         );
         if (found.branchSha) return { commitSha: found.branchSha, kind: 'branch' };
         if (found.tagSha) return { commitSha: found.tagSha, kind: 'tag' };
@@ -945,7 +1022,13 @@ export const nativeGitTransport: GitTransport = {
         const repo = assertValidRepoUrl(req.repoUrl, hasToken);
         assertValidRef(req.ref, repoHostLabel(repo), hasToken);
 
-        const { layout, env, baseArgs } = await prepareInvocation(req.workspaceRoot, req.token, req.sshAuth);
+        // The credential scope host is set inside prepareInvocation via
+        // GIT_ALLOWED_HOST_ENV_VAR so the credential helper refuses to emit
+        // credentials for any other host. A refused redirect is resolved and
+        // approved by the preflight below before any retry.
+        const { layout, env, baseArgs, caPath } = await prepareInvocation(
+            req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
+        );
         const checkout = path.join(req.workspaceRoot, 'repo');
         const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -998,28 +1081,42 @@ export const nativeGitTransport: GitTransport = {
                 return res;
             };
 
-            if (req.refKind === 'sha') {
-                // `--branch` cannot take a bare SHA, so a pinned commit uses a
-                // third strategy: init a repo, fetch exactly that object, and
-                // check it out detached. The host must allow fetching a direct
-                // SHA (GitHub does by default); a refusal surfaces as a
-                // non-zero `git fetch` here and classifies as UNSUPPORTED_REF.
-                await materialize([...baseArgs, 'init', checkout]);
-                await materialize([...baseArgs, '-C', checkout, 'fetch', '--depth=1', repo.href, req.ref]);
-                await materialize([...baseArgs, '-C', checkout, 'checkout', '--detach', req.ref]);
-            } else {
-                // A bare name works for both branches and tags: `--branch`
-                // detaches at the named ref's commit either way, and passing a
-                // fully-qualified `refs/tags/<ref>` is rejected by git
-                // (`Remote branch ... not found`). The resolved kind is
-                // already pinned by ls-remote, and the rev-parse HEAD
-                // verification below confirms the checkout matched it.
-                const branchArg = req.ref;
-                await materialize([
-                    ...baseArgs, 'clone',
-                    '--depth=1', '--single-branch', '--no-tags', '--no-recurse-submodules',
-                    '--branch', branchArg, repo.href, checkout,
-                ]);
+            const runMaterialization = async (href: string): Promise<void> => {
+                if (req.refKind === 'sha') {
+                    // `--branch` cannot take a bare SHA, so a pinned commit uses a
+                    // third strategy: init a repo, fetch exactly that object, and
+                    // check it out detached. The host must allow fetching a direct
+                    // SHA (GitHub does by default); a refusal surfaces as a
+                    // non-zero `git fetch` here and classifies as UNSUPPORTED_REF.
+                    await materialize([...baseArgs, 'init', checkout]);
+                    await materialize([...baseArgs, '-C', checkout, 'fetch', '--depth=1', href, req.ref]);
+                    await materialize([...baseArgs, '-C', checkout, 'checkout', '--detach', req.ref]);
+                } else {
+                    // A bare name works for both branches and tags: `--branch`
+                    // detaches at the named ref's commit either way, and passing a
+                    // fully-qualified `refs/tags/<ref>` is rejected by git
+                    // (`Remote branch ... not found`). The resolved kind is
+                    // already pinned by ls-remote, and the rev-parse HEAD
+                    // verification below confirms the checkout matched it.
+                    await materialize([
+                        ...baseArgs, 'clone',
+                        '--depth=1', '--single-branch', '--no-tags', '--no-recurse-submodules',
+                        '--branch', req.ref, href, checkout,
+                    ]);
+                }
+            };
+
+            try {
+                await runMaterialization(repo.href);
+            } catch (e) {
+                // A refused redirect is the one failure worth a second attempt,
+                // and only against a destination the preflight has approved.
+                const approved = await approvedRedirectForError(e, repo, hasToken, caPath);
+                if (!approved) throw e;
+                // The refused attempt can have left a partial checkout behind;
+                // git refuses to clone into a non-empty directory.
+                await fs.rm(checkout, { recursive: true, force: true });
+                await runMaterialization(approved);
             }
 
             let actual: string;
