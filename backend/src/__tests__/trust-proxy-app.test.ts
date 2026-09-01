@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../app';
+import { isSecureRequest } from '../helpers/cookies';
 import { resetTrustedProxyBlockListCache } from '../helpers/trustedProxyCidrs';
 
 describe('Express trusted proxy configuration', () => {
@@ -33,5 +34,35 @@ describe('Express trusted proxy configuration', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.ip).toBe('203.0.113.50');
+  });
+
+  it('ignores a forwarded HTTPS scheme from an untrusted direct peer', async () => {
+    const app = createApp();
+    app.get('/request-scheme', (req, res) => {
+      res.json({ protocol: req.protocol, secure: isSecureRequest(req) });
+    });
+
+    const res = await request(app)
+      .get('/request-scheme')
+      .set('X-Forwarded-Proto', 'https');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ protocol: 'http', secure: false });
+  });
+
+  it('honors a forwarded HTTPS scheme from an allowlisted proxy peer', async () => {
+    process.env.SENCHO_TRUSTED_PROXY_CIDRS = '127.0.0.0/8';
+    resetTrustedProxyBlockListCache();
+    const app = createApp();
+    app.get('/request-scheme', (req, res) => {
+      res.json({ protocol: req.protocol, secure: isSecureRequest(req) });
+    });
+
+    const res = await request(app)
+      .get('/request-scheme')
+      .set('X-Forwarded-Proto', 'https');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ protocol: 'https', secure: true });
   });
 });

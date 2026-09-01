@@ -31,6 +31,12 @@ describe('sshTrust URL parsing', () => {
     expect(parsed?.port).toBe(2222);
   });
 
+  it('preserves absolute paths in default-port ssh:// URLs', () => {
+    const parsed = parseSshUrl('ssh://git@host.example/abs/path/repo.git');
+    expect(parsed?.href).toBe('git@host.example:/abs/path/repo.git');
+    expect(parsed?.pathname).toBe('/abs/path/repo.git');
+  });
+
   it('classifies transport kind from mixed inputs', () => {
     expect(parseRepoTransportUrl('https://github.com/org/repo.git')?.kind).toBe('https');
     expect(parseRepoTransportUrl('git@host:org/repo.git')?.kind).toBe('ssh');

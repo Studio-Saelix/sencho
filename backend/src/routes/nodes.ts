@@ -60,9 +60,7 @@ function resolvePrimaryUrl(req: Request): string {
     if (check.valid) return override.replace(/\/$/, '');
     console.warn(`[Enrollment] SENCHO_PUBLIC_URL is set but invalid (${check.reason}); falling back to request host.`);
   }
-  const forwardedProto = req.headers['x-forwarded-proto'];
-  const protoHeader = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
-  const protocol = protoHeader || req.protocol || 'http';
+  const protocol = req.protocol;
   const host = req.get('host') || 'localhost:1852';
   return `${protocol}://${host}`;
 }

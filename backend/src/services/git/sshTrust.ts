@@ -68,7 +68,7 @@ export function parseSshUrl(raw: string): ParsedSshRepoUrl | null {
     if (pathname === '/' || pathname.includes('..')) return null;
     const user = url.username;
     const href = port === DEFAULT_SSH_PORT
-        ? `${user}@${url.hostname}:${pathname.slice(1)}`
+        ? `${user}@${url.hostname}:${pathname}`
         : `ssh://${user}@${url.hostname}:${port}${pathname}`;
     return { href, host: url.hostname, port, pathname };
 }

@@ -18,6 +18,7 @@ import request from 'supertest';
 import crypto from 'crypto';
 import { parse as parseYaml } from 'yaml';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import { resetTrustedProxyBlockListCache } from '../helpers/trustedProxyCidrs';
 
 interface ComposeService {
   image: string;
@@ -221,6 +222,39 @@ describe('SENCHO_PUBLIC_URL override in mintPilotEnrollment', () => {
     // Supertest sends requests with host = `127.0.0.1:<ephemeral-port>`,
     // so the fallback URL must reflect that, not the env-var override.
     expect(parsed.services.agent.environment.SENCHO_PRIMARY_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  });
+
+  it('ignores a forwarded HTTPS scheme from an untrusted peer', async () => {
+    delete process.env.SENCHO_PUBLIC_URL;
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Cookie', adminCookie)
+      .set('Host', 'sencho.example.com')
+      .set('X-Forwarded-Proto', 'https')
+      .send({ name: 'pilot-untrusted-forwarded-scheme', type: 'remote', mode: 'pilot_agent' });
+
+    const parsed = parseYaml(res.body.enrollment.composeYaml) as ComposeFile;
+    expect(parsed.services.agent.environment.SENCHO_PRIMARY_URL).toBe('http://sencho.example.com');
+  });
+
+  it('honors a forwarded HTTPS scheme from an allowlisted proxy peer', async () => {
+    delete process.env.SENCHO_PUBLIC_URL;
+    process.env.SENCHO_TRUSTED_PROXY_CIDRS = '127.0.0.0/8';
+    resetTrustedProxyBlockListCache();
+    try {
+      const res = await request(app)
+        .post('/api/nodes')
+        .set('Cookie', adminCookie)
+        .set('Host', 'sencho.example.com')
+        .set('X-Forwarded-Proto', 'https')
+        .send({ name: 'pilot-trusted-forwarded-scheme', type: 'remote', mode: 'pilot_agent' });
+
+      const parsed = parseYaml(res.body.enrollment.composeYaml) as ComposeFile;
+      expect(parsed.services.agent.environment.SENCHO_PRIMARY_URL).toBe('https://sencho.example.com');
+    } finally {
+      delete process.env.SENCHO_TRUSTED_PROXY_CIDRS;
+      resetTrustedProxyBlockListCache();
+    }
   });
 
   it('falls back to request host when env var is malformed', async () => {
