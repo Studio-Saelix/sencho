@@ -68,6 +68,7 @@ export type GitSourceErrorCode =
     | 'UNSUPPORTED_REF'
     | 'SSH_HOST_KEY_FAILED'
     | 'FILE_NOT_FOUND'
+    | 'RATE_LIMITED'
     | 'NETWORK_TIMEOUT'
     | 'GIT_ERROR'
     | 'STALE_PLAN'

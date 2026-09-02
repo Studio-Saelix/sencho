@@ -549,10 +549,6 @@ claims:
       attestation: att-2026-09-01-github-pilot
 
 limitations:
-  - id: no-rate-limit-classification
-    title: No rate-limit classification
-    statement: A Git host rate-limit response (for example GitHub's secondary rate limits) is not classified as its own error state. It surfaces as an authentication failure or a generic transport error depending on the host's exact response. Wait and retry; there is no dedicated rate-limit message or backoff guidance yet.
-
   - id: no-git-lfs
     title: No Git LFS
     statement: Compose and env files tracked via Git LFS are rejected rather than silently fetched as pointer stubs. Commit plain files instead.
@@ -606,6 +602,10 @@ error_model:
     label: Commit not reachable on this host
     status: 400
     meaning: A pinned commit SHA that the Git host will not serve because it is not advertised by any branch or tag tip.
+  - code: RATE_LIMITED
+    label: Rate limited
+    status: 429
+    meaning: The Git host throttled the request (an HTTP 429, or a sideband message naming a rate limit or abuse-detection mechanism). Wait and retry; there is no automated backoff yet.
   - code: NETWORK_TIMEOUT
     label: Network timeout
     status: 504

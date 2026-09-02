@@ -391,8 +391,9 @@ describe('git transport support matrix', () => {
     });
 
     describe('rate limiting', () => {
-        it('is documented as a limitation, not a supported claim', () => {
-            expect(limitationIds.has('no-rate-limit-classification')).toBe(true);
+        it('is classified in the error model, not left as a documented limitation', () => {
+            expect(limitationIds.has('no-rate-limit-classification')).toBe(false);
+            expect(support.error_model.some((e) => e.code === 'RATE_LIMITED')).toBe(true);
         });
     });
 });
