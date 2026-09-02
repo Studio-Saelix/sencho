@@ -859,7 +859,7 @@ export class GitOpsTransitions {
         this.clearActive(app);
       }
       app.suspended_at = envelope.at;
-      app.pause_reason = reason;
+      app.source_suspended_reason = reason;
     });
   }
 
@@ -868,7 +868,7 @@ export class GitOpsTransitions {
     return this.mutateApp(applicationId, envelope, 'source_unsuspended', 'committed', (app) => {
       if (!app.suspended_at) throw new GitOpsTransitionError('source is not suspended');
       app.suspended_at = null;
-      app.pause_reason = null;
+      app.source_suspended_reason = null;
     });
   }
 
@@ -2298,7 +2298,7 @@ export class GitOpsTransitions {
         legacy_combined_approval_ref=?, preflight_fingerprint=?,
         latest_operation_id=?, active_operation_id=?,
         active_operation_stage=?, active_operation_at=?, active_generation_id=?,
-        pause_at=?, pause_reason=?, partial_json=?,
+        pause_at=?, pause_reason=?, source_suspended_reason=?, partial_json=?,
         failure_stage=?, failure_class=?, failure_at=?, retry_at=?, retry_count=?,
         suspended_at=?, recovery_ref=?, recovery_phase=?,
         interruption_stage=?, interruption_at=?, interruption_operation_id=?,
@@ -2315,7 +2315,7 @@ export class GitOpsTransitions {
       app.legacy_combined_approval_ref, app.preflight_fingerprint,
       app.latest_operation_id, app.active_operation_id,
       app.active_operation_stage, app.active_operation_at, app.active_generation_id,
-      app.pause_at, app.pause_reason, app.partial_json,
+      app.pause_at, app.pause_reason, app.source_suspended_reason, app.partial_json,
       app.failure_stage, app.failure_class, app.failure_at, app.retry_at, app.retry_count,
       app.suspended_at, app.recovery_ref, app.recovery_phase,
       app.interruption_stage, app.interruption_at, app.interruption_operation_id,

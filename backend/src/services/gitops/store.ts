@@ -365,12 +365,12 @@ export class GitOpsStore {
         intent_revision_id, rollout_candidate_id, rollout_generation_id, source_acceptance_ref,
         placement_approval_ref, rollout_authorization_ref, legacy_combined_approval_ref,
         preflight_fingerprint, latest_operation_id, active_operation_id, active_operation_stage,
-        active_operation_at, active_generation_id, pause_at, pause_reason, partial_json,
+        active_operation_at, active_generation_id, pause_at, pause_reason, source_suspended_reason, partial_json,
         failure_stage, failure_class, failure_at, retry_at, retry_count, suspended_at,
         recovery_ref, recovery_phase, interruption_stage, interruption_at,
         interruption_operation_id, interruption_generation_id, evidence_fresh_at,
         evidence_limitations_json, created_at, updated_at
-      ) VALUES (${Array(55).fill('?').join(', ')})`,
+      ) VALUES (${Array(56).fill('?').join(', ')})`,
     ).run(
       row.id, row.lifecycle_key, row.lifecycle_status, row.target_mode, row.stack_name, row.blueprint_id,
       row.configured_repo_url, row.repo_identity_json, row.configured_ref, row.compose_paths_json,
@@ -380,7 +380,7 @@ export class GitOpsStore {
       row.intent_revision_id, row.rollout_candidate_id, row.rollout_generation_id, row.source_acceptance_ref,
       row.placement_approval_ref, row.rollout_authorization_ref, row.legacy_combined_approval_ref,
       row.preflight_fingerprint, row.latest_operation_id, row.active_operation_id, row.active_operation_stage,
-      row.active_operation_at, row.active_generation_id, row.pause_at, row.pause_reason, row.partial_json,
+      row.active_operation_at, row.active_generation_id, row.pause_at, row.pause_reason, row.source_suspended_reason, row.partial_json,
       row.failure_stage, row.failure_class, row.failure_at, row.retry_at, row.retry_count, row.suspended_at,
       row.recovery_ref, row.recovery_phase, row.interruption_stage, row.interruption_at,
       row.interruption_operation_id, row.interruption_generation_id, row.evidence_fresh_at,

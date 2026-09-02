@@ -64,7 +64,11 @@ describe('gitops deferred state', () => {
     const app = store.getApplication('app-susp')!;
     expect(app.suspended_at).not.toBeNull();
     expect(app.accepted_generation_id).toBe(accepted);
-    expect(projectOf('app-susp').facets.source.status).toBe('source_suspended');
+    const sourceFacet = projectOf('app-susp').facets.source;
+    expect(sourceFacet.status).toBe('source_suspended');
+    if (sourceFacet.status === 'source_suspended') {
+      expect(sourceFacet.suspendedReason).toBe('operator paused sync');
+    }
     // A suspended source refuses new work rather than queueing it.
     expect(() => tx.fetchStarted('app-susp', env('op-susp-f'))).toThrow(/suspended/);
 
@@ -87,6 +91,27 @@ describe('gitops deferred state', () => {
     expect(app.active_operation_stage).toBeNull();
     expect(app.interruption_stage).toBe('fetch_started');
     expect(app.suspended_at).not.toBeNull();
+  });
+
+  it('keeps a source-suspension reason independent of an application-wide rollout pause reason', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-susp3', 'susp3-web');
+
+    tx.sourceSuspended('app-susp3', 'operator paused sync', env('op-susp3'));
+    // A later, unrelated application-wide rollout pause must not clobber the
+    // suspension reason: the two events share the application row but not
+    // its reason field.
+    tx.rolloutPaused('app-susp3', null, 'awaiting approval', env('op-pause3'));
+
+    const app = store.getApplication('app-susp3')!;
+    expect(app.source_suspended_reason).toBe('operator paused sync');
+    expect(app.pause_reason).toBe('awaiting approval');
+
+    tx.sourceUnsuspended('app-susp3', env('op-unsusp3'));
+    expect(store.getApplication('app-susp3')?.source_suspended_reason).toBeNull();
+    // Unsuspending the source must not touch the unrelated rollout pause.
+    expect(store.getApplication('app-susp3')?.pause_reason).toBe('awaiting approval');
   });
 
   it('pauses a rollout without claiming anything about health', () => {
@@ -314,6 +339,7 @@ function app(id: string, stackName: string): GitOpsApplicationRow {
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    source_suspended_reason: null,
     partial_json: null,
     failure_stage: null,
     failure_class: null,

@@ -308,6 +308,7 @@ function directApp(id: string, stackName: string): GitOpsApplicationRow {
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    source_suspended_reason: null,
     partial_json: null,
     failure_stage: null,
     failure_class: null,

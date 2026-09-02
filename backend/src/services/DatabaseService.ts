@@ -1963,6 +1963,10 @@ export class DatabaseService {
         // from the CREATE TABLE; older DBs need the additive column here.
         maybeAddCol('gitops_generations', 'resolved_ref_kind', 'TEXT NULL');
         maybeAddCol('gitops_applications', 'fetched_resolved_ref_kind', 'TEXT NULL');
+        // Source suspension reason, distinct from the rollout pause_reason
+        // existing installs already have. New installs get it from the
+        // CREATE TABLE; older DBs need the additive column here.
+        maybeAddCol('gitops_applications', 'source_suspended_reason', 'TEXT NULL');
 
         // Distributed API model columns
         maybeAddCol('nodes', 'api_url', "TEXT DEFAULT ''");
