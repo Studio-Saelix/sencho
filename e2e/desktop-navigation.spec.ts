@@ -99,33 +99,47 @@ test.describe('Desktop navigation styles', () => {
     await page.keyboard.press('Escape');
     await expect(trigger).toHaveAttribute('data-state', 'closed');
 
-    // The bar actually rotates open vs. closed, not just a duration-clamp check.
+    // The bar actually moves open vs. closed, not just a duration-clamp check.
+    // Read translate and rotate alongside transform: Tailwind v4 compiles these
+    // utilities to the standalone `translate` and `rotate` properties, so reading
+    // `transform` alone reports "none" in both states and proves nothing. Keeping
+    // transform in the snapshot means this still holds if that ever changes back.
     const bar = trigger.locator('span > span').first();
-    const closedTransform = await bar.evaluate((el) => getComputedStyle(el).transform);
+    const morphState = (el: Element) => {
+      const s = getComputedStyle(el);
+      return `${s.translate}|${s.rotate}|${s.transform}`;
+    };
+    const closedMorph = await bar.evaluate(morphState);
     await trigger.click();
     await expect(trigger).toHaveAttribute('data-state', 'open');
-    const openTransform = await bar.evaluate((el) => getComputedStyle(el).transform);
-    expect(openTransform).not.toBe(closedTransform);
+    const openMorph = await bar.evaluate(morphState);
+    expect(openMorph).not.toBe(closedMorph);
     await page.keyboard.press('Escape');
     await expect(trigger).toHaveAttribute('data-state', 'closed');
 
-    // Under normal motion, the morph bar has a non-trivial transition duration.
-    const normalDurationMs = await bar.evaluate((el) => parseFloat(getComputedStyle(el).transitionDuration) * 1000);
-    expect(normalDurationMs).toBeGreaterThan(1);
-
-    // Enable Reduced motion from Appearance settings, then confirm the clamp applies.
+    // Drive Reduced motion explicitly in both directions rather than assuming the
+    // starting state: a fresh install defaults to the Calm visual style, which
+    // turns Reduced motion on, so the clamp is already active before any toggle.
+    // The top bar stays mounted on the Settings view, so the bar can be measured
+    // from there without navigating back.
     await trigger.click();
     await page.getByRole('menuitem', { name: /^Settings$/i }).click();
     await page.getByText('Appearance', { exact: true }).first().waitFor();
-    await page.getByRole('switch', { name: 'Reduced motion' }).click();
-    await expect(page.locator('html')).toHaveAttribute('data-motion', 'reduced');
+    const reducedMotion = page.getByRole('switch', { name: 'Reduced motion' });
+    const durationMs = () => bar.evaluate((el) => parseFloat(getComputedStyle(el).transitionDuration) * 1000);
 
-    const reducedDurationMs = await trigger.locator('span > span').first()
-      .evaluate((el) => parseFloat(getComputedStyle(el).transitionDuration) * 1000);
-    expect(reducedDurationMs).toBeLessThan(1);
+    if (await reducedMotion.getAttribute('aria-checked') === 'true') {
+      await reducedMotion.click();
+    }
+    await expect(page.locator('html')).not.toHaveAttribute('data-motion', 'reduced');
+    expect(await durationMs()).toBeGreaterThan(1);
+
+    await reducedMotion.click();
+    await expect(page.locator('html')).toHaveAttribute('data-motion', 'reduced');
+    expect(await durationMs()).toBeLessThan(1);
   });
 
-  test('the Navigate panel scrolls at a constrained viewport height with no horizontal scrollbar', async ({ page }) => {
+  test('the Navigate panel has one vertical scroll owner and no horizontal scrollbar', async ({ page }) => {
     await page.setViewportSize({ width: 1200, height: 420 });
     const trigger = page.getByRole('button', { name: 'Open navigation launcher' });
     await trigger.click();
@@ -134,18 +148,35 @@ test.describe('Desktop navigation styles', () => {
     const viewport = panel.locator('[data-radix-scroll-area-viewport]');
     await expect(viewport).toBeVisible();
 
-    // The destination list overflows the constrained viewport, so the viewport's
-    // scrollable content is taller than its visible box.
-    const { scrollHeight, clientHeight, scrollWidth, clientWidth } = await viewport.evaluate((el) => ({
-      scrollHeight: el.scrollHeight,
-      clientHeight: el.clientHeight,
+    // Exactly one scroll owner: the ScrollArea viewport scrolls vertically, the
+    // outer menu only clips. This is the property that regressed before, when the
+    // menu's own overflow-hidden replaced the base dropdown's overflow-y-auto and
+    // left the panel capped but unscrollable. Asserted structurally rather than by
+    // measuring overflow, which depends on Radix having applied its available-height
+    // variable at read time and on how many destinations the account can reach.
+    const overflow = await viewport.evaluate((el) => {
+      const outer = el.closest('[role="menu"]') as HTMLElement;
+      return {
+        viewportY: getComputedStyle(el).overflowY,
+        viewportX: getComputedStyle(el).overflowX,
+        outerY: getComputedStyle(outer).overflowY,
+      };
+    });
+    expect(['auto', 'scroll']).toContain(overflow.viewportY);
+    expect(overflow.outerY).toBe('hidden');
+    expect(overflow.viewportX).not.toBe('scroll');
+
+    // No horizontal overflow, and the panel stays inside the viewport.
+    const box = await panel.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.y + box!.height).toBeLessThanOrEqual(420 + 1);
+    const { scrollWidth, clientWidth } = await viewport.evaluate((el) => ({
       scrollWidth: el.scrollWidth,
       clientWidth: el.clientWidth,
     }));
-    expect(scrollHeight).toBeGreaterThan(clientHeight);
-    expect(scrollWidth).toBeLessThanOrEqual(clientWidth + 1); // no horizontal overflow
+    expect(scrollWidth).toBeLessThanOrEqual(clientWidth + 1);
 
-    // Keyboard navigation still reaches a destination past the fold.
+    // Keyboard navigation still reaches the destinations inside the scroll region.
     await page.keyboard.press('ArrowDown');
     await expect(panel.getByRole('menuitem').first()).toBeFocused();
   });
