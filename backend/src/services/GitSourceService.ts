@@ -11,7 +11,8 @@ import { ComposeService } from './ComposeService';
 import { StackOpLockService } from './StackOpLockService';
 import { HealthGateService } from './HealthGateService';
 import { NodeRegistry } from './NodeRegistry';
-import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
+import { assertPolicyGateAllows, buildSystemPolicyGateOptions, triggerPostDeployScan } from '../helpers/policyGate';
+import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
@@ -2642,6 +2643,12 @@ export class GitSourceService {
                 `Git apply succeeded for ${stackName} (${commitSha.slice(0, 7)}, op ${pending.operationId.slice(0, 8)}, plan ${plan.fingerprint.slice(0, 12)})`,
                 actor,
             );
+            // Promotion has committed and rewritten the authoritative Compose
+            // files, so cached stats/statuses/project-name state is stale here
+            // whether or not a deploy follows. This must fire exactly once per
+            // successful promotion, from every trigger, not only the manual
+            // apply route (which used to invalidate here itself).
+            invalidateNodeCaches(nodeId);
         } else {
             throw new GitSourceError('PLAN_UNAVAILABLE', 'Pending update cannot be reviewed; pull again.');
         }
@@ -2725,6 +2732,12 @@ export class GitSourceService {
                     recoverySvc.linkGateOrRetain(recoveryId, healthGateId);
                 }
                 console.log(`[GitSource] Applied and deployed ${stackName} at ${commitSha.slice(0, 7)}`);
+                // Fire-and-forget, matching the manual apply route's prior
+                // placement: the scan runs only after a successful deploy and
+                // must never delay or fail the apply response.
+                triggerPostDeployScan(stackName, nodeId).catch((err) =>
+                    console.error(`[Security] Post-deploy scan failed for ${sanitizeForLog(stackName)}:`, err),
+                );
                 return { applied: true, deployed: true, recoveryId };
             } catch (e) {
                 // R1: do not auto-compensate. Keep applied files and leave the

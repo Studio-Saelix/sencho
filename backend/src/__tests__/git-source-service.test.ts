@@ -70,6 +70,11 @@ const {
   mockRecoveryLinkGateOrRetain: vi.fn(),
 }));
 
+const { mockInvalidateNodeCaches, mockTriggerPostDeployScan } = vi.hoisted(() => ({
+  mockInvalidateNodeCaches: vi.fn(),
+  mockTriggerPostDeployScan: vi.fn(async () => undefined),
+}));
+
 vi.mock('../services/StackUpdateRecoveryService', () => ({
   StackUpdateRecoveryService: {
     getInstance: () => ({
@@ -85,6 +90,20 @@ vi.mock('../services/StackUpdateRecoveryService', () => ({
     }),
   },
 }));
+
+vi.mock('../helpers/cacheInvalidation', async () => {
+  const actual = await vi.importActual<typeof import('../helpers/cacheInvalidation')>(
+    '../helpers/cacheInvalidation',
+  );
+  return { ...actual, invalidateNodeCaches: mockInvalidateNodeCaches };
+});
+
+vi.mock('../helpers/policyGate', async () => {
+  const actual = await vi.importActual<typeof import('../helpers/policyGate')>(
+    '../helpers/policyGate',
+  );
+  return { ...actual, triggerPostDeployScan: mockTriggerPostDeployScan };
+});
 
 
 let tmpDir: string;
@@ -2264,6 +2283,80 @@ describe('GitSourceService.apply', () => {
             saveSpy.mockRestore();
             deploySpy.mockRestore();
         }
+    });
+
+    describe('cache invalidation and post-deploy scan', () => {
+        beforeEach(() => {
+            mockInvalidateNodeCaches.mockClear();
+            mockTriggerPostDeployScan.mockClear();
+        });
+
+        it('invalidates caches once and does not scan for an apply-only commit', async () => {
+            const sha = 'f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0';
+            const svc = await seedPending('apply-only-cache', 'services:\n  x:\n    image: alpine\n', sha);
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+
+            try {
+                const result = await svc.apply('apply-only-cache', sha, { deploy: false, ...skipFingerprint });
+                expect(result.applied).toBe(true);
+                expect(result.deployed).toBe(false);
+                expect(mockInvalidateNodeCaches).toHaveBeenCalledTimes(1);
+                expect(mockTriggerPostDeployScan).not.toHaveBeenCalled();
+            } finally {
+                validateSpy.mockRestore();
+                saveSpy.mockRestore();
+            }
+        });
+
+        it('invalidates caches once and scans once for a successful apply-and-deploy', async () => {
+            const sha = 'f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1';
+            const svc = await seedPending('apply-deploy-scan', 'services:\n  x:\n    image: alpine\n', sha);
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const { HealthGateService } = await import('../services/HealthGateService');
+            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+            const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-scan');
+
+            try {
+                const result = await svc.apply('apply-deploy-scan', sha, { deploy: true, ...skipFingerprint });
+                expect(result.deployed).toBe(true);
+                expect(mockInvalidateNodeCaches).toHaveBeenCalledTimes(1);
+                expect(mockTriggerPostDeployScan).toHaveBeenCalledTimes(1);
+                expect(mockTriggerPostDeployScan).toHaveBeenCalledWith('apply-deploy-scan', expect.any(Number));
+            } finally {
+                validateSpy.mockRestore();
+                saveSpy.mockRestore();
+                deploySpy.mockRestore();
+                beginSpy.mockRestore();
+            }
+        });
+
+        it('invalidates caches once but does not scan when the deploy fails', async () => {
+            const sha = 'f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2';
+            const svc = await seedPending('apply-deploy-fail-scan', 'services:\n  x:\n    image: alpine\n', sha);
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(
+                new Error('compose up failed: docker unavailable'),
+            );
+
+            try {
+                const result = await svc.apply('apply-deploy-fail-scan', sha, { deploy: true, ...skipFingerprint });
+                expect(result.deployed).toBe(false);
+                expect(mockInvalidateNodeCaches).toHaveBeenCalledTimes(1);
+                expect(mockTriggerPostDeployScan).not.toHaveBeenCalled();
+            } finally {
+                validateSpy.mockRestore();
+                saveSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
+        });
     });
 
     it('refuses the first complete-project apply when an unowned local file collides (audit round 9 B-1)', async () => {
