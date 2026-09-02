@@ -183,6 +183,39 @@ describe('DatabaseService - cleanupOldNotifications', () => {
   });
 });
 
+describe('DatabaseService - notification history GitOps dedupe', () => {
+  it('inserts once and returns the existing row on a repeated dedupe_key', () => {
+    const first = db.addNotificationHistory(0, {
+      level: 'info',
+      message: 'source reconciled',
+      timestamp: Date.now(),
+      gitops_operation_id: 'op-1',
+      dedupe_key: 'gitops:app-1:op-1',
+    });
+    const second = db.addNotificationHistory(0, {
+      level: 'info',
+      message: 'source reconciled (retry repair)',
+      timestamp: Date.now(),
+      gitops_operation_id: 'op-1',
+      dedupe_key: 'gitops:app-1:op-1',
+    });
+
+    expect(second.id).toBe(first.id);
+    const history = db.getNotificationHistory(0, 200);
+    const matches = history.filter((n: any) => n.dedupe_key === 'gitops:app-1:op-1');
+    expect(matches).toHaveLength(1);
+    expect(matches[0].message).toBe('source reconciled');
+  });
+
+  it('allows two rows with no dedupe_key, matching existing notification behavior', () => {
+    db.addNotificationHistory(0, { level: 'info', message: 'plain a', timestamp: Date.now() });
+    db.addNotificationHistory(0, { level: 'info', message: 'plain b', timestamp: Date.now() });
+
+    const history = db.getNotificationHistory(0, 200);
+    expect(history.filter((n: any) => n.message === 'plain a' || n.message === 'plain b')).toHaveLength(2);
+  });
+});
+
 describe('DatabaseService - cleanupOldAuditLogs', () => {
   it('deletes audit logs older than specified days and retains recent ones', () => {
     const oldTimestamp = Date.now() - 120 * 24 * 60 * 60 * 1000; // 120 days ago
