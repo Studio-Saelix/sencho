@@ -18,6 +18,7 @@ import path from 'path';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { nativeGitTransport } from '../services/git/nativeGitTransport';
 import { buildBareRepo } from './__helpers__/gitFixture';
+import { requireGitBinary } from './__helpers__/externalDeps';
 
 const FIXTURES_DIR = path.resolve(__dirname, '..', '..', '..', 'e2e', 'fixtures');
 const CA_PEM = readFileSync(path.join(FIXTURES_DIR, 'git-ca.pem'), 'utf8');
@@ -26,10 +27,6 @@ const TLS_OPTS = {
     key: readFileSync(path.join(FIXTURES_DIR, 'git-server.key')),
 };
 const GOOD_TOKEN = 'correct-horse-battery-staple';
-
-function gitAvailable(): boolean {
-    return spawnSync('git', ['--version'], { stdio: 'ignore' }).status === 0;
-}
 
 interface Request { url: string; authorization: string | null }
 
@@ -133,7 +130,7 @@ async function workspace(): Promise<string> {
     return dir;
 }
 
-describe.skipIf(!gitAvailable())('redirect destination revalidation (real git)', () => {
+describe.skipIf(!requireGitBinary())('redirect destination revalidation (real git)', () => {
     let bareDir: string;
     let headSha: string;
     let prevExtraCaCerts: string | undefined;

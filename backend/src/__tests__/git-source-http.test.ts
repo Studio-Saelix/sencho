@@ -10,7 +10,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Response } from 'express';
 import { gitSourceStatus, sendGitSourceError, webhookPullStatus } from '../utils/gitSourceHttp';
-import { GitSourceError } from '../services/GitSourceService';
+import { GitSourceError, type GitSourceErrorCode } from '../services/GitSourceService';
 
 describe('gitSourceStatus', () => {
     it('maps AUTH_FAILED to 400, never 401', () => {
@@ -47,8 +47,24 @@ describe('gitSourceStatus', () => {
         expect(gitSourceStatus('PLAN_UNAVAILABLE')).toBe(409);
     });
 
-    it('maps unknown codes to 400', () => {
+    it('maps GIT_ERROR to 400', () => {
         expect(gitSourceStatus('GIT_ERROR')).toBe(400);
+    });
+
+    it('maps OPERATION_IN_FLIGHT to 409', () => {
+        expect(gitSourceStatus('OPERATION_IN_FLIGHT')).toBe(409);
+    });
+
+    it('has exactly one explicit mapping for every GitSourceErrorCode', () => {
+        const codes: GitSourceErrorCode[] = [
+            'REPO_NOT_FOUND', 'AUTH_FAILED', 'REF_NOT_FOUND', 'REF_DELETED', 'UNSUPPORTED_REF',
+            'SSH_HOST_KEY_FAILED', 'FILE_NOT_FOUND', 'NETWORK_TIMEOUT', 'GIT_ERROR', 'STALE_PLAN',
+            'PLAN_FINGERPRINT_REQUIRED', 'PLAN_BLOCKED', 'LEGACY_PENDING', 'PLAN_UNAVAILABLE',
+            'OPERATION_IN_FLIGHT',
+        ];
+        for (const code of codes) {
+            expect(typeof gitSourceStatus(code)).toBe('number');
+        }
     });
 });
 

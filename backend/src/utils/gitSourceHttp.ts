@@ -36,8 +36,16 @@ export function gitSourceStatus(code: GitSourceErrorCode): number {
       return 409;
     case 'NETWORK_TIMEOUT':
       return 504;
-    default:
+    case 'GIT_ERROR':
       return 400;
+    default: {
+      // Exhaustiveness guard: if a new code is added to the union without a
+      // case here, this becomes a compile error instead of silently mapping
+      // to 400.
+      const _exhaustive: never = code;
+      void _exhaustive;
+      return 400;
+    }
   }
 }
 
