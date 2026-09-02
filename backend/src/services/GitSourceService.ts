@@ -28,7 +28,7 @@ import type { ComposeInputEntry, GitProjectManifest, GitSourceManifestState, Inv
 import type { GitChangePlan, PublicGitChangePlan, GitChangePlanCounts, PublicGitChangePlanOperation } from '../types/gitChangePlan';
 import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
 import type { NotificationCategory } from './NotificationService';
-import { classifyGitFailure, isTransportFailure } from './git/errors';
+import { classifyGitFailure, isTransportFailure, type TransportFailureReason } from './git/errors';
 import type { RefKind, SshDeployKeyAuth } from './git/types';
 import { nativeGitTransport, verifyFastForward } from './git/nativeGitTransport';
 import { fingerprintFromKnownHostsLine } from './git/sshTrust';
@@ -83,7 +83,18 @@ export class GitSourceError extends Error {
     constructor(
         public code: GitSourceErrorCode,
         message: string,
-        public extras?: { plan?: PublicGitChangePlan; planFingerprint?: string },
+        public extras?: {
+            plan?: PublicGitChangePlan;
+            planFingerprint?: string;
+            /**
+             * The raw structured reason from the native transport failure,
+             * kept alongside the sanitized `code`/`message` operators see.
+             * Consumed by GitOps retry/backoff classification, which needs
+             * more than the public error code to tell a transient network
+             * condition from a permanent configuration one.
+             */
+            transportReason?: TransportFailureReason;
+        },
     ) {
         super(message);
         this.name = 'GitSourceError';
@@ -1260,9 +1271,9 @@ export class GitSourceService {
                 // A ref that resolved before but no longer does is a deletion
                 // or force-push, distinct from a mis-typed ref on first link.
                 if (classified.code === 'REF_NOT_FOUND' && hasPriorHistory) {
-                    throw new GitSourceError('REF_DELETED', REF_DELETED_MESSAGE);
+                    throw new GitSourceError('REF_DELETED', REF_DELETED_MESSAGE, { transportReason: e.reason });
                 }
-                throw new GitSourceError(classified.code, classified.message);
+                throw new GitSourceError(classified.code, classified.message, { transportReason: e.reason });
             }
             throw e;
         } finally {

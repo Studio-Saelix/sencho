@@ -1201,6 +1201,34 @@ describe('GitSourceService error mapping', () => {
         await expect(svc().fetchFromGit(fetchParams)).rejects.toMatchObject({ code: 'NETWORK_TIMEOUT' });
     });
 
+    it('propagates the raw transport reason onto GitSourceError.extras for retry classification', async () => {
+        mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
+            'fatal: the remote end hung up unexpectedly',
+            false,
+        ));
+        try {
+            await svc().fetchFromGit(fetchParams);
+            expect.fail('should have thrown');
+        } catch (e) {
+            expect((e as InstanceType<typeof GitSourceError>).extras?.transportReason).toBe('exit');
+        }
+    });
+
+    it('propagates a non-exit transport reason (e.g. timeout) without hardcoding to exit', async () => {
+        mockFetchAtCommit.mockRejectedValueOnce({
+            transportFailure: true as const,
+            reason: 'timeout',
+            host: 'github.com',
+            hasToken: false,
+        } satisfies TransportFailure);
+        try {
+            await svc().fetchFromGit(fetchParams);
+            expect.fail('should have thrown');
+        } catch (e) {
+            expect((e as InstanceType<typeof GitSourceError>).extras?.transportReason).toBe('timeout');
+        }
+    });
+
     it('maps a TLS certificate failure to a certificate GIT_ERROR', async () => {
         mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
             "fatal: unable to access 'https://github.com/example/repo.git/': SSL certificate problem: self-signed certificate",
