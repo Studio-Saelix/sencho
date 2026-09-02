@@ -1,10 +1,10 @@
-# Git transport support matrix — canonical source of truth (SEN-9 PR 5).
+# Git transport support matrix: canonical source of truth (SEN-9 PR 5).
 #
 # Every entry here is a claim about one exercised combination, not an
 # independently-tested dimension: a PAT test, a tag test, and a GitLab
 # observation do not jointly prove "GitLab + PAT + tag" unless something
 # actually ran that exact combination. `docs/features/git-transport-support.mdx`
-# is generated from this file (backend/scripts/git-support-matrix/render.mjs);
+# is generated from this file (backend/scripts/git-support-matrix/render.js);
 # a backend test (git-support-matrix.test.ts) enforces byte-for-byte parity
 # and validates every rule below. Internal test paths, PR numbers, and Linear
 # IDs never appear on the published page; they live here instead.
@@ -16,13 +16,13 @@
 #     - support: supported | unsupported | unverified
 #       - supported requires evidence with outcome: success
 #       - unsupported requires evidence with outcome: rejected (a reproducible
-#         refusal, not silence — an unsupported claim with no evidence is as
+#         refusal, not silence; an unsupported claim with no evidence is as
 #         unreproducible as an unproven supported one)
 #       - unverified forbids evidence entirely
 #     - evidence.kind: automated (a handle into a test file + exact test
 #       title) or live (a pointer into docs/git-transport-attestations.yaml).
 #       Every evidence record repeats all six combination dimensions, and the
-#       validator requires them to match the claim exactly — a direct-proxy
+#       validator requires them to match the claim exactly: a direct-proxy
 #       result proves the direct-proxy combination, nothing else.
 #   limitations[]: named gaps, each with its operator-facing consequence.
 #   error_model[]: the transport-facing error codes this matrix covers
@@ -40,7 +40,7 @@ attestations: docs/git-transport-attestations.yaml
 
 claims:
   # ===== Automated: real git, real TLS/SSH, against a local fixture server =====
-  # host: generic, node_path: local for all of these — no proxy hop, no
+  # host: generic, node_path: local for all of these: no proxy hop, no
   # branded host. Branded-host and non-local node-path claims live below,
   # pending or drawn from the live attestation pass.
 

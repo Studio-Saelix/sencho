@@ -45,7 +45,7 @@ function classifyCall(node: ts.CallExpression): CallShape | null {
     }
 
     // Curried form: X.skipIf(pred)(title, fn) / X.runIf(pred)(title, fn) /
-    // X.each(cases)(title, fn) — the outer call's expression is itself a
+    // X.each(cases)(title, fn): the outer call's expression is itself a
     // CallExpression whose own expression is the X.modifier access.
     if (ts.isCallExpression(expr) && ts.isPropertyAccessExpression(expr.expression) && ts.isIdentifier(expr.expression.expression)) {
         const modifier = expr.expression.name.text;
