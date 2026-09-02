@@ -219,6 +219,122 @@ describe('classifyGitFailure (native git stderr corpus)', () => {
         expect(c.code).toBe('UNSUPPORTED_REF');
     });
 
+    it.each([
+        // The HTTP shapes are verified against a real git binary talking to a
+        // fixture server (git-transport-ratelimit.integration.test.ts): git
+        // reports the status line only, never the response body.
+        ['bare 429 from the host', "fatal: unable to access 'https://h/x.git/': The requested URL returned error: 429"],
+        ['429 with trailing text', "fatal: unable to access 'https://h/x.git/': The requested URL returned error: 429 Too Many Requests"],
+        // Text a host sends through the pack stream does reach stderr as a
+        // remote: line, unlike an HTTP response body.
+        ['remote sideband rate-limit message', "remote: You have exceeded a secondary rate limit. Please wait a few minutes before you try again.\nfatal: the remote end hung up unexpectedly"],
+        ['remote sideband abuse-detection message', "remote: You have triggered an abuse detection mechanism.\nfatal: the remote end hung up unexpectedly"],
+    ])('classifies %s as RATE_LIMITED', (_label, stderr) => {
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr,
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: true,
+        });
+        expect(c.code).toBe('RATE_LIMITED');
+        expect(c.message).toMatch(/rate limited/i);
+    });
+
+    it('classifies an unambiguous rate limit as RATE_LIMITED even without a token', () => {
+        // Rule 3 (see the module header) takes precedence over rule 2's
+        // no-token private-repo masking: a throttle leaks nothing about repo
+        // existence, so it should not be reported as REPO_NOT_FOUND.
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr: "remote: You have exceeded a secondary rate limit.\nfatal: the remote end hung up unexpectedly",
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: false,
+        });
+        expect(c.code).toBe('RATE_LIMITED');
+    });
+
+    it('does not send a rate-limited operator to rotate a working credential', () => {
+        // A sideband throttle message can arrive alongside a 403 fatal line,
+        // which the auth branch below would otherwise claim. Both the code
+        // and the message are asserted: reporting RATE_LIMITED while still
+        // saying "check your token" would leave the operator with the same
+        // wrong action.
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr: "remote: You have exceeded a secondary rate limit.\nfatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 403",
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: true,
+        });
+        expect(c.code).toBe('RATE_LIMITED');
+        expect(c.message).not.toMatch(/check your token/i);
+    });
+
+    it('leaves a bare 403 with no rate-limit wording as an auth failure', () => {
+        // Guards the other direction, and pins a real constraint: git does
+        // not surface an HTTP response body, so a host that signals a
+        // throttle as a bare 403 is indistinguishable from a rejected
+        // credential. Widening the rate-limit branch to cover every 403
+        // would make a genuinely bad token read as a throttle to wait out.
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr: "fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 403",
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: true,
+        });
+        expect(c.code).toBe('AUTH_FAILED');
+    });
+
+    it('does not mistake a repository named "rate-limiter" for a rate-limit signal', () => {
+        // git's fatal line echoes the full repo URL verbatim, so an
+        // unscoped rate-limit word match would fire on the path itself. A
+        // genuinely bad token against a repo whose name happens to contain
+        // rate-limit wording must still classify as an auth failure.
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr: "fatal: unable to access 'https://github.com/acme/rate-limiter.git/': The requested URL returned error: 403",
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: true,
+        });
+        expect(c.code).toBe('AUTH_FAILED');
+    });
+
+    it('does not mistake an upload-pack progress counter for a 429 status', () => {
+        // Progress lines like "Counting objects: 100% (429/429)" reach
+        // stderr from the server sideband and can contain the literal digits
+        // 429 with no connection to an HTTP status at all.
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr: "remote: Counting objects: 100% (429/429), done.\nfatal: the remote end hung up unexpectedly",
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: false,
+        });
+        expect(c.code).toBe('NETWORK_TIMEOUT');
+    });
+
+    it('does not mistake an unrelated transient-error sideband for a rate limit', () => {
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr: "remote: Internal server error, please retry later\nfatal: the remote end hung up unexpectedly",
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: false,
+        });
+        expect(c.code).toBe('NETWORK_TIMEOUT');
+    });
+
     it('scrubs credentials from the generic fallback tail', () => {
         const c = classifyGitFailure({
             transportFailure: true as const,

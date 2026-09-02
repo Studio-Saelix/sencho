@@ -57,7 +57,6 @@ Every "Supported" row here is backed by a test that runs on every change to Senc
 
 ## Not supported
 
-- **No rate-limit classification.** A Git host rate-limit response (for example GitHub's secondary rate limits) is not classified as its own error state. It surfaces as an authentication failure or a generic transport error depending on the host's exact response. Wait and retry; there is no dedicated rate-limit message or backoff guidance yet.
 - **No Git LFS.** Compose and env files tracked via Git LFS are rejected rather than silently fetched as pointer stubs. Commit plain files instead.
 - **No submodules.** Submodule contents are not fetched. Inputs and build contexts that reference submodule contents are refused with an actionable message; a warning is shown when .gitmodules is present.
 - **No sparse or partial clone.** Every fetch materializes the complete repository at the resolved commit (shallow, single-branch); there is no sparse or partial clone for large monorepos.

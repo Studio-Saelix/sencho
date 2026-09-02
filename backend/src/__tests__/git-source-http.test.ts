@@ -36,6 +36,10 @@ describe('gitSourceStatus', () => {
         expect(gitSourceStatus('NETWORK_TIMEOUT')).toBe(504);
     });
 
+    it('maps RATE_LIMITED to 429, not to the auth or generic status', () => {
+        expect(gitSourceStatus('RATE_LIMITED')).toBe(429);
+    });
+
     it('maps PLAN_FINGERPRINT_REQUIRED to 400', () => {
         expect(gitSourceStatus('PLAN_FINGERPRINT_REQUIRED')).toBe(400);
     });
@@ -58,7 +62,7 @@ describe('gitSourceStatus', () => {
     it('has exactly one explicit mapping for every GitSourceErrorCode', () => {
         const codes: GitSourceErrorCode[] = [
             'REPO_NOT_FOUND', 'AUTH_FAILED', 'REF_NOT_FOUND', 'REF_DELETED', 'UNSUPPORTED_REF',
-            'SSH_HOST_KEY_FAILED', 'FILE_NOT_FOUND', 'NETWORK_TIMEOUT', 'GIT_ERROR', 'STALE_PLAN',
+            'SSH_HOST_KEY_FAILED', 'FILE_NOT_FOUND', 'RATE_LIMITED', 'NETWORK_TIMEOUT', 'GIT_ERROR', 'STALE_PLAN',
             'PLAN_FINGERPRINT_REQUIRED', 'PLAN_BLOCKED', 'LEGACY_PENDING', 'PLAN_UNAVAILABLE',
             'OPERATION_IN_FLIGHT',
         ];
