@@ -20,7 +20,7 @@ function makeCtx(overrides: Partial<ReachabilityContext> = {}): ReachabilityCont
 }
 
 describe('buildNavigationModel', () => {
-  it('returns exact Classic page order including Networking after Resources', () => {
+  it('returns exact page order including Networking after Resources', () => {
     const model = buildNavigationModel(makeCtx());
     expect(model.allPageItems.map((item) => item.value)).toEqual([
       'dashboard',

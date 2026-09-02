@@ -2,6 +2,7 @@ import { Fragment, type ReactNode, useMemo } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import { Menu, MoreHorizontal, Plus } from 'lucide-react';
 import { Button } from './ui/button';
+import { ScrollArea } from './ui/scroll-area';
 import { Sheet, SheetContent, SheetTrigger } from './ui/sheet';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import {
@@ -33,7 +34,7 @@ export interface TopBarNavItem {
 
 interface TopBarProps {
   activeView: string;
-  /** Flat page destinations for Classic strip and the mobile sheet. */
+  /** Flat page destinations for the mobile sheet. */
   navItems: TopBarNavItem[];
   onNavigate: (value: string) => void;
   mobileNavOpen: boolean;
@@ -74,9 +75,31 @@ function ActiveUnderline({ active }: { active: boolean }) {
   );
 }
 
-function TopBarMenuMasthead({ title }: { title: string }) {
+// Two bars that morph into an X, keyed off Radix's data-state attribute (already
+// stamped on the trigger button by DropdownMenuTrigger asChild, so no extra React
+// state is needed). A plain CSS transition, not a JS animation loop: Sencho's global
+// [data-motion="reduced"] clamp (index.css) forces transition-duration to ~0ms for
+// every element, so this automatically just swaps state under Reduced motion with
+// zero extra code. The trigger button must carry the `group` class for the
+// group-data-[state=open]: variants below to apply.
+function LauncherHamburgerIcon() {
+  // Both bars share everything but the direction they start from and rotate to.
+  const bar = cn(
+    'absolute h-[1.5px] w-3.5 rounded-full bg-current',
+    'transition-transform duration-[var(--duration-fast)] ease-[var(--ease-out-expo)]',
+    'group-data-[state=open]:translate-y-0',
+  );
   return (
-    <div className="relative overflow-hidden">
+    <span className="relative flex h-4 w-4 shrink-0 items-center justify-center" aria-hidden>
+      <span className={cn(bar, '-translate-y-[3px] group-data-[state=open]:rotate-45')} />
+      <span className={cn(bar, 'translate-y-[3px] group-data-[state=open]:-rotate-45')} />
+    </span>
+  );
+}
+
+function TopBarMenuMasthead({ title, className }: { title: string; className?: string }) {
+  return (
+    <div className={cn('relative overflow-hidden', className)}>
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-brand/[0.05] via-transparent to-transparent" />
       <div className="absolute inset-y-0 left-0 w-[2px] bg-brand/60" />
       <div className="relative flex items-center px-[var(--density-row-x)] py-[var(--density-tile-y)]">
@@ -86,6 +109,11 @@ function TopBarMenuMasthead({ title }: { title: string }) {
   );
 }
 
+// One scroll owner, not two: the outer content clips to the viewport-aware
+// max-height (from the base DropdownMenuContent) via overflow-hidden and never
+// itself scrolls; ScrollArea's Radix viewport is the sole scrolling element, so
+// the panel stays usable (masthead pinned, destination list scrolling) instead
+// of overflowing off-screen at constrained heights.
 function PanelMenuContent({
   title,
   children,
@@ -94,9 +122,11 @@ function PanelMenuContent({
   children: ReactNode;
 }) {
   return (
-    <DropdownMenuContent align="start" sideOffset={8} className="w-56 overflow-hidden rounded-md p-0">
-      {title ? <TopBarMenuMasthead title={title} /> : null}
-      <div className={cn(title && 'border-t border-card-border/60', 'p-1')}>{children}</div>
+    <DropdownMenuContent align="start" sideOffset={8} className="flex w-56 flex-col overflow-hidden rounded-md p-0">
+      {title ? <TopBarMenuMasthead title={title} className="shrink-0" /> : null}
+      <ScrollArea className="min-h-0 flex-1">
+        <div className={cn(title && 'border-t border-card-border/60', 'p-1')}>{children}</div>
+      </ScrollArea>
     </DropdownMenuContent>
   );
 }
@@ -199,32 +229,6 @@ function GroupedMenuItems({
             );
           })}
         </Fragment>
-      ))}
-    </>
-  );
-}
-
-function ClassicStrip({
-  navItems,
-  activeView,
-  showLabels,
-  onNavigate,
-}: {
-  navItems: TopBarNavItem[];
-  activeView: string;
-  showLabels: boolean;
-  onNavigate: (value: string) => void;
-}) {
-  return (
-    <>
-      {navItems.map((item) => (
-        <DesktopNavButton
-          key={item.value}
-          item={item}
-          isActive={activeView === item.value}
-          showLabels={showLabels}
-          onNavigate={onNavigate}
-        />
       ))}
     </>
   );
@@ -386,9 +390,9 @@ function CompactStrip({
             aria-label="Open navigation launcher"
             aria-current={launcherActive ? 'page' : undefined}
             data-sn-launcher-active={launcherActive ? 'true' : 'false'}
-            className={navButtonClass(launcherActive)}
+            className={cn(navButtonClass(launcherActive), 'group')}
           >
-            <Menu className="w-4 h-4 shrink-0" strokeWidth={1.5} />
+            <LauncherHamburgerIcon />
             <ActiveUnderline active={launcherActive} />
           </button>
         </DropdownMenuTrigger>
@@ -453,11 +457,7 @@ function CompactStrip({
       ) : (
         <Tooltip>
           <TooltipTrigger asChild>
-            <span
-              tabIndex={0}
-              className="inline-flex h-full shrink-0 items-stretch"
-              title={addDisabledReason}
-            >
+            <span tabIndex={0} className="inline-flex h-full shrink-0 items-stretch">
               <button
                 type="button"
                 aria-label="Add quick link"
@@ -489,7 +489,7 @@ export function TopBar({
   userMenu,
   showLabels = true,
   navAlign = 'left',
-  navMode = 'smart',
+  navMode = 'compact',
   navModel,
   quickLinks = [],
   persistedQuickLinkIds = [],
@@ -527,14 +527,6 @@ export function TopBar({
             !stripLabels && centered && 'shrink-0',
           )}
         >
-          {navMode === 'classic' && (
-            <ClassicStrip
-              navItems={navItems}
-              activeView={activeView}
-              showLabels={stripLabels}
-              onNavigate={onNavigate}
-            />
-          )}
           {navMode === 'smart' && (
             <SmartStrip
               primaryItems={primaryItems}

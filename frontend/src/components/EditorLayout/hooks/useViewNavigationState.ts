@@ -13,13 +13,14 @@ import { HUB_ONLY_VIEWS } from '@/lib/router/routeTypes';
 import { readUrlRouteState } from '@/lib/router/readUrlRouteState';
 import {
   authzReady,
+  isViewHidden,
   normalizeHiddenView,
   type ReachabilityContext,
 } from '@/lib/routing/reachability';
 import { useExperimental } from '@/hooks/useExperimental';
 import { canScheduleAny } from '@/lib/scheduledActions';
 import { buildNavigationModel } from '@/lib/navigation/buildNavigationModel';
-import type { NavDestination } from '@/lib/navigation/appNavRegistry';
+import { recommendedQuickLinkIds, type NavDestination } from '@/lib/navigation/appNavRegistry';
 
 export type { ActiveView };
 export { HUB_ONLY_VIEWS };
@@ -128,6 +129,20 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
   const navModel = useMemo(() => buildNavigationModel(reachCtx), [reachCtx]);
   const navItems = navModel.allPageItems;
 
+  // Settled default eligibility for quick-link seeding/reset: distinct from navModel's
+  // quickLinkCandidates (current-context, fail-open display filtering). Requires authzReady
+  // (role/license settled) before returning anything, so a still-loading permissions/license
+  // fetch never causes an incomplete default set to be seeded/persisted. isRemote is
+  // deliberately overridden to false: default eligibility reflects the operator's role, not
+  // which node tab happens to be open. Three of the six recommended defaults (fleet,
+  // auto-updates, scheduled-ops) are HUB_ONLY_VIEWS, and evaluating with the real isRemote
+  // would silently drop them whenever a remote node is active.
+  const defaultQuickLinkEligibility = useMemo(() => {
+    if (!authzReady(reachCtx)) return null;
+    const roleCtx: ReachabilityContext = { ...reachCtx, isRemote: false };
+    return recommendedQuickLinkIds.filter((id) => !isViewHidden(id, roleCtx));
+  }, [reachCtx]);
+
   useEffect(() => {
     if (!authzReady(reachCtx)) return;
     const normalized = normalizeHiddenView(activeView, reachCtx);
@@ -155,5 +170,6 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     navItems,
     navModel,
     reachCtx,
+    defaultQuickLinkEligibility,
   } as const;
 }

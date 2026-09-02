@@ -14,12 +14,14 @@ import { SettingsSectionContent } from '@/components/settings/SettingsSectionCon
 import { useSettingsVisibility } from '@/components/settings/useSettingsVisibility';
 import { BackChip, Kicker, Masthead } from './mobile-ui';
 import type { NavDestination } from '@/lib/navigation/appNavRegistry';
+import type { ActiveView } from '@/lib/router/routeTypes';
 
 interface MobileSettingsProps {
   headerActions: ReactNode;
   selectedSection: SectionId | null;
   onSelectedSectionChange: (section: SectionId | null) => void;
   quickLinkCandidates?: NavDestination[];
+  defaultQuickLinkEligibility?: ActiveView[] | null;
 }
 
 const NOOP = () => {};
@@ -29,6 +31,7 @@ export function MobileSettings({
   selectedSection,
   onSelectedSectionChange,
   quickLinkCandidates,
+  defaultQuickLinkEligibility,
 }: MobileSettingsProps) {
   const { activeNode } = useNodes();
   const nodeName = activeNode?.name ?? 'local';
@@ -64,6 +67,7 @@ export function MobileSettings({
             onDirtyChange={NOOP}
             showDescription
             quickLinkCandidates={quickLinkCandidates}
+            defaultQuickLinkEligibility={defaultQuickLinkEligibility}
           />
         </div>
       </div>

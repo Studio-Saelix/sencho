@@ -27,6 +27,12 @@ function renderTopBar(overrides: Partial<Parameters<typeof TopBar>[0]> = {}) {
       onMobileNavOpenChange={vi.fn()}
       notifications={null}
       userMenu={null}
+      // This file exercises Smart's labeled-strip contract (showLabels), which is
+      // meaningless in Compact mode (destinations live behind the launcher, not as
+      // visible top-bar buttons). Pin Smart here so the app's own default (Compact)
+      // doesn't silently break every test below; the "TopBar default navigation
+      // mode" describe block covers the real default.
+      navMode="smart"
       {...overrides}
     />,
   );
@@ -209,7 +215,7 @@ describe('TopBar smart and compact modes', () => {
     expect(onOpenSettings).toHaveBeenCalled();
   });
 
-  it('disables Add when persisted capacity is full even if fewer pins are visible', () => {
+  it('disables Add when persisted capacity is full even if fewer pins are visible', async () => {
     renderTopBar({
       navMode: 'compact',
       // Capacity is a count check, so the IDs only need to be distinct and unpinned-candidate free.
@@ -223,7 +229,15 @@ describe('TopBar smart and compact modes', () => {
     });
     const add = screen.getByRole('button', { name: 'Add quick link' });
     expect(add).toBeDisabled();
-    expect(add.closest('[title]')).toHaveAttribute('title', 'Remove a quick link to free a slot');
+    // No native title anywhere in the disabled control's ancestry: the Radix
+    // tooltip is the single source, fixing the former duplicate-tooltip bug.
+    expect(add.closest('[title]')).toBeNull();
+    // The wrapping span (not the disabled button) is the actual Radix TooltipTrigger,
+    // so it stays keyboard-discoverable even though the button itself is inert.
+    const trigger = add.closest('span[tabindex="0"]');
+    expect(trigger).not.toBeNull();
+    fireEvent.focus(trigger!);
+    expect(await screen.findByText('Remove a quick link to free a slot')).toBeInTheDocument();
   });
 
   it('offers Compact launcher context Add for unpinned destinations', async () => {
@@ -302,6 +316,66 @@ describe('TopBar smart and compact modes', () => {
     await user.click(screen.getByRole('button', { name: 'More navigation' }));
     fireEvent.contextMenu(await screen.findByRole('menuitem', { name: /Logs/i }));
     expect(screen.queryByRole('menuitem', { name: /Add to quick links/i })).toBeNull();
+  });
+});
+
+describe('TopBar default navigation mode', () => {
+  it('renders Compact when navMode is omitted (the app default)', () => {
+    renderTopBar({ navMode: undefined });
+    expect(screen.getByRole('button', { name: 'Open navigation launcher' })).toBeInTheDocument();
+    // Compact hides destinations behind the launcher; they are not visible top-bar text.
+    expect(screen.queryByText('Home')).not.toBeInTheDocument();
+    expect(screen.queryByText('Fleet')).not.toBeInTheDocument();
+  });
+});
+
+describe('TopBar Compact launcher hamburger', () => {
+  const launcherGroups = [
+    {
+      group: 'overview' as const,
+      label: 'Overview',
+      items: [{ value: 'dashboard' as const, label: 'Home', icon: Home }],
+    },
+  ];
+  const emptyModel = {
+    allPageItems: [],
+    primaryItems: [],
+    overflowGroups: [],
+    launcherGroups,
+    quickLinkCandidates: [],
+  };
+
+  it('carries a data-state attribute that toggles open/closed and morph-wired bars', async () => {
+    const user = userEvent.setup();
+    renderTopBar({ navMode: 'compact', navModel: emptyModel });
+    const trigger = screen.getByRole('button', { name: 'Open navigation launcher' });
+    expect(trigger).toHaveAttribute('data-state', 'closed');
+    // Without `group` on the trigger, the bars' group-data-[state=open]: selectors
+    // have no ancestor to key off and the morph silently becomes inert.
+    expect(trigger.className).toContain('group');
+
+    const bars = trigger.querySelectorAll('span > span');
+    expect(bars.length).toBeGreaterThanOrEqual(2);
+    for (const bar of bars) {
+      expect(bar.className).toContain('group-data-[state=open]:');
+    }
+
+    await user.click(trigger);
+    expect(trigger).toHaveAttribute('data-state', 'open');
+  });
+
+  it('the Navigate panel has one scroll owner: the outer content clips, the ScrollArea viewport scrolls', async () => {
+    const user = userEvent.setup();
+    renderTopBar({ navMode: 'compact', navModel: emptyModel });
+    await user.click(screen.getByRole('button', { name: 'Open navigation launcher' }));
+    const masthead = await screen.findByText('Navigate', { selector: '.font-heading' });
+    const panel = masthead.closest('[role="menu"]') as HTMLElement;
+    expect(panel).not.toBeNull();
+    expect(panel.className).toContain('overflow-hidden');
+    const viewport = panel.querySelector('[data-radix-scroll-area-viewport]');
+    expect(viewport).not.toBeNull();
+    // No horizontal scrollbar is introduced by the default ScrollArea usage.
+    expect(panel.querySelector('[data-orientation="horizontal"]')).toBeNull();
   });
 });
 

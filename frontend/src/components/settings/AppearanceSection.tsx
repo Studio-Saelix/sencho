@@ -43,9 +43,8 @@ const TOP_NAV_ALIGN_OPTIONS: { value: TopNavAlign; label: string }[] = [
 ];
 
 const TOP_NAV_MODE_OPTIONS: { value: TopNavMode; label: string }[] = [
-    { value: 'classic', label: 'Classic bar' },
-    { value: 'smart', label: 'Smart bar' },
     { value: 'compact', label: 'Compact launcher' },
+    { value: 'smart', label: 'Smart bar' },
 ];
 
 const CHART_STYLE_OPTIONS: { value: ChartStyle; label: string }[] = [
@@ -147,8 +146,10 @@ function VisualCard({
 
 export function AppearanceSection({
     quickLinkCandidates = [],
+    defaultQuickLinkEligibility,
 }: {
     quickLinkCandidates?: NavDestination[];
+    defaultQuickLinkEligibility?: ActiveView[] | null;
 }) {
     const [density, setDensity] = useDensity();
     const [chipColorMode, setChipColorMode] = useLogChipColorMode();
@@ -157,10 +158,11 @@ export function AppearanceSection({
     const [topNavMode, setTopNavMode] = useTopNavMode();
     const {
         persistedIds: quickLinkIds,
+        canReset,
         addQuickLink,
         removeQuickLink,
         resetQuickLinks,
-    } = useTopNavQuickLinks();
+    } = useTopNavQuickLinks(defaultQuickLinkEligibility);
     const persistedSet = new Set(quickLinkIds);
     const unpinnedCandidates = quickLinkCandidates.filter((item) => !persistedSet.has(item.value));
     const atCapacity = quickLinkIds.length >= MAX_QUICK_LINKS;
@@ -459,17 +461,9 @@ export function AppearanceSection({
             </SettingsSection>
 
             <SettingsSection title="Navigation" kicker="this browser">
-                {topNavMode === 'classic' ? (
-                    <SettingsCallout
-                        tone="warn"
-                        icon={<Info className="h-4 w-4" strokeWidth={1.5} />}
-                        title="Classic bar retiring"
-                        subtitle="Classic bar will be removed soon. Your preference is kept until then."
-                    />
-                ) : null}
                 <SettingsField
                     label="Navigation style"
-                    helper="Smart bar is the recommended default: primary destinations stay visible, and the rest live under More. Classic keeps the full horizontal strip. Compact launcher puts destinations in a menu with optional quick links."
+                    helper="Compact launcher is the recommended default: destinations live in a menu with optional quick links. Smart bar keeps primary destinations visible with the rest under More."
                 >
                     <SegmentedControl
                         value={topNavMode}
@@ -479,7 +473,7 @@ export function AppearanceSection({
                     />
                 </SettingsField>
 
-                {(topNavMode === 'classic' || topNavMode === 'smart') && (
+                {topNavMode === 'smart' && (
                     <SettingsField
                         label="Top navigation labels"
                         helper="Show text labels beside top navigation icons. Turn off for a more compact navigation bar."
@@ -488,7 +482,7 @@ export function AppearanceSection({
                     </SettingsField>
                 )}
 
-                {(topNavMode === 'classic' || topNavMode === 'smart') && !topNavLabels && (
+                {topNavMode === 'smart' && !topNavLabels && (
                     <SettingsField
                         label="Top navigation alignment"
                         helper="Place the icon-only navigation against the left edge or centered in the bar."
@@ -505,7 +499,7 @@ export function AppearanceSection({
                 {topNavMode === 'compact' && (
                     <SettingsField
                         label="Quick links"
-                        helper="Up to seven pinned destinations on the top bar. Defaults are a starting set; add reachable destinations here or with the trailing + on the Compact bar."
+                        helper="Up to eight pinned destinations on the top bar. Defaults are a starting set; add reachable destinations here or with the trailing + on the Compact bar."
                     >
                         <div className="flex w-full flex-col gap-2">
                             {quickLinkIds.length === 0 ? (
@@ -553,7 +547,7 @@ export function AppearanceSection({
                                 )}
                             </div>
                             <SettingsActions>
-                                <SettingsSecondaryButton type="button" onClick={resetQuickLinks}>
+                                <SettingsSecondaryButton type="button" onClick={resetQuickLinks} disabled={!canReset}>
                                     Reset to defaults
                                 </SettingsSecondaryButton>
                             </SettingsActions>
