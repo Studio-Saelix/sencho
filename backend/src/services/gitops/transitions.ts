@@ -372,28 +372,10 @@ export class GitOpsTransitions {
   applied(args: AppliedArgs): TransitionResult {
     return this.mutateApp(args.applicationId, args.envelope, 'applied', 'committed', (app) => {
       const targets = this.acceptanceTargets(app, args);
-      this.insertAcceptanceRecords(app, args);
-      app.accepted_generation_id = args.generationId;
-      app.artifact_set_id = args.artifactSetId;
-      app.latest_artifact_set_id = args.artifactSetId;
-      app.source_acceptance_ref = args.sourceAcceptanceId;
-      app.candidate_generation_id = null;
-      app.candidate_plan_blocked = 0;
-      app.review_required = 0;
-      if (args.activateCreating && app.lifecycle_status === 'creating') {
-        app.lifecycle_status = 'active';
-      }
-      this.clearActive(app);
-      this.clearAppFailure(app, ['apply', 'fetch', 'validation']);
-      this.clearInterruption(app, 'apply_started');
+      this.applySourceAcceptanceMutation(app, args);
       for (const target of targets) {
         if (app.target_mode === 'direct') {
-          target.desired_generation_id = args.generationId;
-          target.applied_generation_id = args.generationId;
-          target.expected_artifact_set_id = args.artifactSetId;
-          target.latest_artifact_set_id = args.artifactSetId;
-          target.source_acceptance_ref = args.sourceAcceptanceId;
-          target.candidate_generation_id = null;
+          this.applyTargetAcceptanceMutation(target, args);
         }
         this.store().upsertTarget(target);
       }
@@ -401,6 +383,42 @@ export class GitOpsTransitions {
       generationId: args.generationId,
       artifactSetId: args.artifactSetId,
       sourceAcceptanceRef: args.sourceAcceptanceId,
+    });
+  }
+
+  /**
+   * Mode-neutral half of `applied`: accept the candidate at the application
+   * level without binding any target. A Direct dispatch calls this before
+   * promotion; `targetApplied` binds the target only after promotion commits.
+   */
+  sourceAccepted(args: AppliedArgs): TransitionResult {
+    return this.mutateApp(args.applicationId, args.envelope, 'source_accepted', 'committed', (app) => {
+      this.requireAcceptableCandidate(app, args);
+      this.applySourceAcceptanceMutation(app, args);
+    }, {
+      generationId: args.generationId,
+      artifactSetId: args.artifactSetId,
+      sourceAcceptanceRef: args.sourceAcceptanceId,
+    });
+  }
+
+  /**
+   * Direct-only half of `applied`: bind one target to an already-accepted
+   * generation. Refuses a generation the application has not accepted, so a
+   * dispatch cannot bind a target to source content nothing authorized.
+   */
+  targetApplied(applicationId: string, nodeId: number, args: AppliedArgs): TransitionResult {
+    const app = this.requireApp(applicationId);
+    if (app.accepted_generation_id !== args.generationId) {
+      throw new GitOpsTransitionError('generation is not accepted');
+    }
+    return this.mutateTarget(applicationId, nodeId, args.envelope, 'target_applied', args.generationId, (target) => {
+      if (target.target_status !== 'active') {
+        throw new GitOpsTransitionError('cannot apply to a tombstoned target');
+      }
+      const before = { appliedGenerationId: target.applied_generation_id };
+      this.applyTargetAcceptanceMutation(target, args);
+      return { before, after: { appliedGenerationId: args.generationId } };
     });
   }
 
@@ -1893,7 +1911,8 @@ export class GitOpsTransitions {
    * Guard every precondition of `applied` and return the active targets the
    * acceptance has to bind.
    */
-  private acceptanceTargets(app: GitOpsApplicationRow, args: AppliedArgs): GitOpsTargetCurrentRow[] {
+  /** Guard every application-level precondition of accepting a candidate. */
+  private requireAcceptableCandidate(app: GitOpsApplicationRow, args: AppliedArgs): void {
     if (app.candidate_generation_id !== args.generationId) {
       throw new GitOpsTransitionError('applied generation is not the current candidate');
     }
@@ -1913,6 +1932,10 @@ export class GitOpsTransitions {
         throw new GitOpsTransitionError('live apply belongs to a different operation');
       }
     }
+  }
+
+  private acceptanceTargets(app: GitOpsApplicationRow, args: AppliedArgs): GitOpsTargetCurrentRow[] {
+    this.requireAcceptableCandidate(app, args);
     const targets = this.store().listTargets(app.id).filter((row) => row.target_status === 'active');
     if (app.target_mode === 'direct') {
       for (const target of targets) {
@@ -1922,6 +1945,34 @@ export class GitOpsTransitions {
       }
     }
     return targets;
+  }
+
+  /** The mode-neutral application-row mutation `applied` and `sourceAccepted` share. */
+  private applySourceAcceptanceMutation(app: GitOpsApplicationRow, args: AppliedArgs): void {
+    this.insertAcceptanceRecords(app, args);
+    app.accepted_generation_id = args.generationId;
+    app.artifact_set_id = args.artifactSetId;
+    app.latest_artifact_set_id = args.artifactSetId;
+    app.source_acceptance_ref = args.sourceAcceptanceId;
+    app.candidate_generation_id = null;
+    app.candidate_plan_blocked = 0;
+    app.review_required = 0;
+    if (args.activateCreating && app.lifecycle_status === 'creating') {
+      app.lifecycle_status = 'active';
+    }
+    this.clearActive(app);
+    this.clearAppFailure(app, ['apply', 'fetch', 'validation']);
+    this.clearInterruption(app, 'apply_started');
+  }
+
+  /** The Direct-only target-row mutation `applied` and `targetApplied` share. */
+  private applyTargetAcceptanceMutation(target: GitOpsTargetCurrentRow, args: AppliedArgs): void {
+    target.desired_generation_id = args.generationId;
+    target.applied_generation_id = args.generationId;
+    target.expected_artifact_set_id = args.artifactSetId;
+    target.latest_artifact_set_id = args.artifactSetId;
+    target.source_acceptance_ref = args.sourceAcceptanceId;
+    target.candidate_generation_id = null;
   }
 
   /** Seed the unresolved artifact row and the source acceptance this apply proves. */

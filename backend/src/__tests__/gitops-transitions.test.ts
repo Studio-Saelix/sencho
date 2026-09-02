@@ -520,6 +520,95 @@ describe('gitops transitions', () => {
     expect(store.getTarget('app-int', 1)?.deployed_generation_id).toBe('gen-int');
     expect(store.getTarget('app-int', 1)?.failure_stage).toBeNull();
   });
+
+  it('sourceAccepted accepts the generation without touching any target', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const env = envelope('op-sa');
+    tx.activateDirect({ application: app('app-sa', 'sa-web'), nodeId: 1, envelope: env });
+    store.insertGeneration(gen('gen-sa', 'app-sa'));
+    tx.fetchStarted('app-sa', envelope('op-f-sa'));
+    tx.fetched('app-sa', 'deadbeef', envelope('op-f-sa'));
+    tx.candidateReady('app-sa', 'gen-sa', false, envelope('op-c-sa'));
+    tx.applyStarted('app-sa', 'gen-sa', envelope('op-sa'));
+
+    const result = tx.sourceAccepted({
+      applicationId: 'app-sa',
+      generationId: 'gen-sa',
+      artifactSetId: 'art-sa',
+      sourceAcceptanceId: 'acc-sa',
+      authority: 'operator',
+      envelope: env,
+    });
+
+    expect(result.replayed).toBe(false);
+    const application = store.getApplication('app-sa')!;
+    expect(application.accepted_generation_id).toBe('gen-sa');
+    expect(application.source_acceptance_ref).toBe('acc-sa');
+    expect(application.candidate_generation_id).toBeNull();
+    // sourceAccepted is mode-neutral: it must not bind the Direct target.
+    const target = store.getTarget('app-sa', 1)!;
+    expect(target.applied_generation_id).toBeNull();
+    expect(target.desired_generation_id).toBeNull();
+    expect(target.candidate_generation_id).toBe('gen-sa');
+  });
+
+  it('targetApplied binds a Direct target only after the generation is accepted', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const env = envelope('op-ta');
+    tx.activateDirect({ application: app('app-ta', 'ta-web'), nodeId: 1, envelope: env });
+    store.insertGeneration(gen('gen-ta', 'app-ta'));
+    tx.fetchStarted('app-ta', envelope('op-f-ta'));
+    tx.fetched('app-ta', 'deadbeef', envelope('op-f-ta'));
+    tx.candidateReady('app-ta', 'gen-ta', false, envelope('op-c-ta'));
+    tx.applyStarted('app-ta', 'gen-ta', envelope('op-ta'));
+    tx.sourceAccepted({
+      applicationId: 'app-ta',
+      generationId: 'gen-ta',
+      artifactSetId: 'art-ta',
+      sourceAcceptanceId: 'acc-ta',
+      authority: 'operator',
+      envelope: env,
+    });
+
+    const result = tx.targetApplied('app-ta', 1, {
+      applicationId: 'app-ta',
+      generationId: 'gen-ta',
+      artifactSetId: 'art-ta',
+      sourceAcceptanceId: 'acc-ta',
+      authority: 'operator',
+      envelope: env,
+    });
+
+    expect(result.replayed).toBe(false);
+    const target = store.getTarget('app-ta', 1)!;
+    expect(target.applied_generation_id).toBe('gen-ta');
+    expect(target.desired_generation_id).toBe('gen-ta');
+    expect(target.candidate_generation_id).toBeNull();
+    expect(target.expected_artifact_set_id).toBe('art-ta');
+    expect(target.source_acceptance_ref).toBe('acc-ta');
+  });
+
+  it('targetApplied refuses a generation the application has not accepted', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const env = envelope('op-tar');
+    tx.activateDirect({ application: app('app-tar', 'tar-web'), nodeId: 1, envelope: env });
+    store.insertGeneration(gen('gen-tar', 'app-tar'));
+    tx.fetchStarted('app-tar', envelope('op-f-tar'));
+    tx.fetched('app-tar', 'deadbeef', envelope('op-f-tar'));
+    tx.candidateReady('app-tar', 'gen-tar', false, envelope('op-c-tar'));
+
+    expect(() => tx.targetApplied('app-tar', 1, {
+      applicationId: 'app-tar',
+      generationId: 'gen-tar',
+      artifactSetId: 'art-tar',
+      sourceAcceptanceId: 'acc-tar',
+      authority: 'operator',
+      envelope: env,
+    })).toThrow(/not accepted/);
+  });
 });
 
 function mustProject(applicationId: string) {

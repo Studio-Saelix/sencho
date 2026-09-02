@@ -68,10 +68,12 @@ export type GitOpsHistoryStage =
   | 'rollout_candidate_opened'
   | 'rollout_paused'
   | 'rollout_unpaused'
+  | 'source_accepted'
   | 'source_conflict_blocker'
   | 'source_retry_scheduled'
   | 'source_suspended'
   | 'source_unsuspended'
+  | 'target_applied'
   | 'target_tombstoned';
 
 export type HistoryInsert = {
