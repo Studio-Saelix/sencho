@@ -74,6 +74,19 @@ export interface PolicyEnforcementResult {
     trivyMissing?: boolean;
 }
 
+/**
+ * Candidate (pre-acceptance) policy outcome. Unlike the deploy-time gate,
+ * which deliberately fails open when the scanner is unavailable so an
+ * operator is never blocked from deploying, an unresolvable scanner state
+ * here is its own outcome: automatic source acceptance must not read
+ * `unavailable` as `allowed`, or a GitOps source could accept a candidate
+ * nothing actually proved safe.
+ */
+export type CandidatePolicyEvaluation =
+    | { status: 'allowed'; policy?: ScanPolicy }
+    | { status: 'blocked'; policy?: ScanPolicy; violations: PolicyViolation[] }
+    | { status: 'unavailable'; policy?: ScanPolicy; reason: string };
+
 const TRIVY_MISSING_NOTIFY_COOLDOWN_MS = 60 * 60 * 1000;
 // Growth bounded by configured-policy fanout (only stacks with an enabled
 // block_on_deploy policy can land here), not by total stack churn. Cleared
@@ -471,4 +484,26 @@ export async function enforcePolicyForImageRefs(
         sanitizeForLog(stackName), violations.length, describePolicyInputs(policyInputs(policy)), sanitizeForLog(policy.name),
     );
     return { ok: false, bypassed: false, policy, violations };
+}
+
+/**
+ * Tri-state candidate evaluation for GitOps source acceptance, built on the
+ * same evaluator the deploy-time gate uses. The caller supplies the
+ * candidate's own image refs (resolved from the staged compose, not the live
+ * stack), so this never reads compose from disk itself.
+ */
+export async function evaluateCandidatePolicy(
+    stackName: string,
+    nodeId: number,
+    imageRefs: string[],
+    opts: PolicyEnforcementOptions,
+): Promise<CandidatePolicyEvaluation> {
+    const result = await enforcePolicyForImageRefs(stackName, nodeId, imageRefs, opts);
+    if (result.trivyMissing) {
+        return { status: 'unavailable', policy: result.policy, reason: 'Vulnerability scanner is unavailable' };
+    }
+    if (!result.ok) {
+        return { status: 'blocked', policy: result.policy, violations: result.violations };
+    }
+    return { status: 'allowed', policy: result.policy };
 }

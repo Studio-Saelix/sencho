@@ -69,6 +69,7 @@ import {
   _resetTrivyMissingNotificationStateForTests,
   enforcePolicyForImageRefs,
   enforcePolicyPreDeploy,
+  evaluateCandidatePolicy,
 } from '../services/PolicyEnforcement';
 
 function mkPolicy(overrides: Partial<ScanPolicy> = {}): ScanPolicy {
@@ -794,5 +795,78 @@ describe('enforcePolicyForImageRefs - risk-based inputs (KEV / fixable / optiona
     expect(result.violations).toEqual([]);
     expect(dbStub.insertAuditLog).toHaveBeenCalledTimes(1);
     expect(dbStub.insertAuditLog.mock.calls[0][0].summary).toContain('policy.suppression_pass');
+  });
+});
+
+// Candidate (pre-acceptance) evaluation must not fail open the way the
+// deploy-time gate deliberately does: an unresolvable scanner state must
+// surface as its own `unavailable` outcome so a caller can withhold automatic
+// acceptance, rather than silently reusing `ok: true`.
+describe('evaluateCandidatePolicy', () => {
+  beforeEach(() => {
+    trivyStub.isTrivyAvailable.mockReset();
+    trivyStub.scanImagePreflight.mockReset();
+    composeStub.listStackImages.mockReset();
+    dbStub.getMatchingPolicy.mockReset();
+    dbStub.insertAuditLog.mockReset();
+    dbStub.getGlobalSettings.mockReset().mockReturnValue({});
+    dbStub.getAllVulnerabilityDetails.mockReset().mockReturnValue([]);
+    dbStub.getCveSuppressions.mockReset().mockReturnValue([]);
+    dbStub.getCveIntel.mockReset().mockReturnValue(new Map());
+    notificationStub.dispatchAlert.mockReset();
+    _resetTrivyMissingNotificationStateForTests();
+  });
+
+  it('reports allowed when no matching policy exists', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(null);
+
+    const result = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'u' });
+
+    expect(result.status).toBe('allowed');
+  });
+
+  it('reports unavailable, not allowed, when the scanner cannot be evaluated', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(false);
+
+    const result = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'u' });
+
+    expect(result.status).toBe('unavailable');
+    if (result.status === 'unavailable') {
+      expect(result.reason).toBeTruthy();
+    }
+  });
+
+  it('reports blocked when a scanned image exceeds the policy severity', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 7, highest_severity: 'CRITICAL', critical_count: 1 }));
+
+    const result = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'u' });
+
+    expect(result.status).toBe('blocked');
+    if (result.status === 'blocked') {
+      expect(result.violations).toHaveLength(1);
+    }
+  });
+
+  it('reports allowed on an authorized bypass', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 8, highest_severity: 'CRITICAL', critical_count: 1 }));
+
+    const result = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: true, actor: 'admin' });
+
+    expect(result.status).toBe('allowed');
+  });
+
+  it('never reads compose from disk; the caller supplies candidate image refs', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 9, highest_severity: 'LOW' }));
+
+    await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'u' });
+
+    expect(composeStub.listStackImages).not.toHaveBeenCalled();
   });
 });
