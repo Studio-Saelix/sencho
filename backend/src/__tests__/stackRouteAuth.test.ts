@@ -79,6 +79,21 @@ describe('classifyStackApiPath', () => {
         kind: 'named-stack', stackName: 'web', action: 'stack:edit',
       });
     });
+
+    // Load-bearing the same way as history/manifest above: without a rule
+    // here, suspend/resume/retry 403 on every remote node before the
+    // controller routes that use them exist.
+    it('maps git-source/suspend, resume, and retry to stack:edit', () => {
+      expect(classifyStackApiPath('POST', '/stacks/web/git-source/suspend')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:edit',
+      });
+      expect(classifyStackApiPath('POST', '/stacks/web/git-source/resume')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:edit',
+      });
+      expect(classifyStackApiPath('POST', '/stacks/web/git-source/retry')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:edit',
+      });
+    });
   });
 
   describe('static exclusions', () => {
