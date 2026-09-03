@@ -10,7 +10,6 @@ import { classifySourceRow, satisfiesGitOpsRead } from '../services/gitops/readA
 import { NOT_APPLICABLE_REVISION, projectStackRevision, stackResourceSet } from '../helpers/gitopsResponse';
 import { respondWithHistory } from '../helpers/gitopsHistoryPage';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
-import { triggerPostDeployScan } from '../helpers/policyGate';
 import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
 import { isValidGitSourcePath, isValidStackName } from '../utils/validation';
 import { sendGitSourceError, webhookPullStatus } from '../utils/gitSourceHttp';
@@ -563,7 +562,7 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
         requirePlanFingerprint: true,
       },
     );
-    invalidateNodeCaches(req.nodeId);
+    // Cache invalidation and the post-deploy scan now run inside GitSourceService.apply() itself.
     const shortSha = commitSha.trim().slice(0, 7);
     if (result.deployed) {
       console.log('[GitSource] Applied commit %s to %s (deployed)', sanitizeForLog(shortSha), sanitizeForLog(stackName));
@@ -573,11 +572,6 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
       console.log('[GitSource] Applied commit %s to %s', sanitizeForLog(shortSha), sanitizeForLog(stackName));
     }
     res.json(result);
-    if (result.deployed) {
-      triggerPostDeployScan(stackName, req.nodeId).catch(err =>
-        console.error(`[Security] Post-deploy scan failed for ${sanitizeForLog(stackName)}:`, err),
-      );
-    }
   } catch (error) {
     sendGitSourceError(res, error);
   }

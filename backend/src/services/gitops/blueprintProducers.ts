@@ -381,6 +381,7 @@ export function blankInlineApplication(id: string, blueprintId: number, at: numb
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    source_suspended_reason: null,
     partial_json: null,
     failure_stage: null,
     failure_class: null,

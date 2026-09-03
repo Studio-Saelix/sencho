@@ -95,6 +95,11 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   active_generation_id TEXT NULL,
   pause_at INTEGER NULL,
   pause_reason TEXT NULL,
+  -- Distinct from pause_reason: sourceSuspended/sourceUnsuspended write this
+  -- field, not the one rolloutPaused/rolloutUnpaused share across app and
+  -- target rows, so suspending a source can never clobber an unrelated
+  -- rollout pause reason (or the reverse).
+  source_suspended_reason TEXT NULL,
   partial_json TEXT NULL,
   failure_stage TEXT NULL CHECK (
     failure_stage IS NULL OR failure_stage IN (

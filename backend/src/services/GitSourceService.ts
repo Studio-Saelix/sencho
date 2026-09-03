@@ -11,7 +11,8 @@ import { ComposeService } from './ComposeService';
 import { StackOpLockService } from './StackOpLockService';
 import { HealthGateService } from './HealthGateService';
 import { NodeRegistry } from './NodeRegistry';
-import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
+import { assertPolicyGateAllows, buildSystemPolicyGateOptions, triggerPostDeployScan } from '../helpers/policyGate';
+import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
@@ -27,7 +28,7 @@ import type { ComposeInputEntry, GitProjectManifest, GitSourceManifestState, Inv
 import type { GitChangePlan, PublicGitChangePlan, GitChangePlanCounts, PublicGitChangePlanOperation } from '../types/gitChangePlan';
 import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
 import type { NotificationCategory } from './NotificationService';
-import { classifyGitFailure, isTransportFailure } from './git/errors';
+import { classifyGitFailure, isTransportFailure, type TransportFailureReason } from './git/errors';
 import type { RefKind, SshDeployKeyAuth } from './git/types';
 import { nativeGitTransport, verifyFastForward } from './git/nativeGitTransport';
 import { fingerprintFromKnownHostsLine } from './git/sshTrust';
@@ -82,7 +83,18 @@ export class GitSourceError extends Error {
     constructor(
         public code: GitSourceErrorCode,
         message: string,
-        public extras?: { plan?: PublicGitChangePlan; planFingerprint?: string },
+        public extras?: {
+            plan?: PublicGitChangePlan;
+            planFingerprint?: string;
+            /**
+             * The raw structured reason from the native transport failure,
+             * kept alongside the sanitized `code`/`message` operators see.
+             * Consumed by GitOps retry/backoff classification, which needs
+             * more than the public error code to tell a transient network
+             * condition from a permanent configuration one.
+             */
+            transportReason?: TransportFailureReason;
+        },
     ) {
         super(message);
         this.name = 'GitSourceError';
@@ -1259,9 +1271,9 @@ export class GitSourceService {
                 // A ref that resolved before but no longer does is a deletion
                 // or force-push, distinct from a mis-typed ref on first link.
                 if (classified.code === 'REF_NOT_FOUND' && hasPriorHistory) {
-                    throw new GitSourceError('REF_DELETED', REF_DELETED_MESSAGE);
+                    throw new GitSourceError('REF_DELETED', REF_DELETED_MESSAGE, { transportReason: e.reason });
                 }
-                throw new GitSourceError(classified.code, classified.message);
+                throw new GitSourceError(classified.code, classified.message, { transportReason: e.reason });
             }
             throw e;
         } finally {
@@ -2642,6 +2654,12 @@ export class GitSourceService {
                 `Git apply succeeded for ${stackName} (${commitSha.slice(0, 7)}, op ${pending.operationId.slice(0, 8)}, plan ${plan.fingerprint.slice(0, 12)})`,
                 actor,
             );
+            // Promotion has committed and rewritten the authoritative Compose
+            // files, so cached stats/statuses/project-name state is stale here
+            // whether or not a deploy follows. This must fire exactly once per
+            // successful promotion, from every trigger, not only the manual
+            // apply route (which used to invalidate here itself).
+            invalidateNodeCaches(nodeId);
         } else {
             throw new GitSourceError('PLAN_UNAVAILABLE', 'Pending update cannot be reviewed; pull again.');
         }
@@ -2725,6 +2743,12 @@ export class GitSourceService {
                     recoverySvc.linkGateOrRetain(recoveryId, healthGateId);
                 }
                 console.log(`[GitSource] Applied and deployed ${stackName} at ${commitSha.slice(0, 7)}`);
+                // Fire-and-forget, matching the manual apply route's prior
+                // placement: the scan runs only after a successful deploy and
+                // must never delay or fail the apply response.
+                triggerPostDeployScan(stackName, nodeId).catch((err) =>
+                    console.error(`[Security] Post-deploy scan failed for ${sanitizeForLog(stackName)}:`, err),
+                );
                 return { applied: true, deployed: true, recoveryId };
             } catch (e) {
                 // R1: do not auto-compensate. Keep applied files and leave the

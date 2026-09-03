@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import type { NotificationHistory } from '../services/DatabaseService';
 
 let tmpDir: string;
 let DatabaseService: any;
@@ -180,6 +181,39 @@ describe('DatabaseService - cleanupOldNotifications', () => {
     const recent = history.find((n: any) => n.message === 'recent notification');
     expect(old).toBeUndefined();
     expect(recent).toBeDefined();
+  });
+});
+
+describe('DatabaseService - notification history GitOps dedupe', () => {
+  it('inserts once and returns the existing row on a repeated dedupe_key', () => {
+    const first = db.addNotificationHistory(0, {
+      level: 'info',
+      message: 'source reconciled',
+      timestamp: Date.now(),
+      gitops_operation_id: 'op-1',
+      dedupe_key: 'gitops:app-1:op-1',
+    });
+    const second = db.addNotificationHistory(0, {
+      level: 'info',
+      message: 'source reconciled (retry repair)',
+      timestamp: Date.now(),
+      gitops_operation_id: 'op-1',
+      dedupe_key: 'gitops:app-1:op-1',
+    });
+
+    expect(second.id).toBe(first.id);
+    const history: NotificationHistory[] = db.getNotificationHistory(0, 200);
+    const matches = history.filter((n) => n.dedupe_key === 'gitops:app-1:op-1');
+    expect(matches).toHaveLength(1);
+    expect(matches[0].message).toBe('source reconciled');
+  });
+
+  it('allows two rows with no dedupe_key, matching existing notification behavior', () => {
+    db.addNotificationHistory(0, { level: 'info', message: 'plain a', timestamp: Date.now() });
+    db.addNotificationHistory(0, { level: 'info', message: 'plain b', timestamp: Date.now() });
+
+    const history: NotificationHistory[] = db.getNotificationHistory(0, 200);
+    expect(history.filter((n) => n.message === 'plain a' || n.message === 'plain b')).toHaveLength(2);
   });
 });
 

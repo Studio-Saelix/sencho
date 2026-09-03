@@ -573,6 +573,14 @@ export interface NotificationHistory {
     container_name?: string;
     actor_username?: string | null;
     suppression_match?: string | null;
+    /** The GitOps operation this notification reports on, if any. */
+    gitops_operation_id?: string | null;
+    /**
+     * Unique across all notifications when set. Lets fanout repair re-run
+     * safely: inserting the same key again is a no-op that returns the
+     * existing row instead of creating a duplicate.
+     */
+    dedupe_key?: string | null;
 }
 
 export interface FleetSnapshot {
@@ -1164,6 +1172,7 @@ export class DatabaseService {
         this.migratePolicyEvaluationColumn();
         this.migrateNotificationCategory();
         this.migrateNotificationActor();
+        this.migrateNotificationGitOpsDedupe();
         this.migrateMeshTables();
         this.migrateNodeLabels();
         this.migrateBlueprints();
@@ -1963,6 +1972,10 @@ export class DatabaseService {
         // from the CREATE TABLE; older DBs need the additive column here.
         maybeAddCol('gitops_generations', 'resolved_ref_kind', 'TEXT NULL');
         maybeAddCol('gitops_applications', 'fetched_resolved_ref_kind', 'TEXT NULL');
+        // Source suspension reason, distinct from the rollout pause_reason
+        // existing installs already have. New installs get it from the
+        // CREATE TABLE; older DBs need the additive column here.
+        maybeAddCol('gitops_applications', 'source_suspended_reason', 'TEXT NULL');
 
         // Distributed API model columns
         maybeAddCol('nodes', 'api_url', "TEXT DEFAULT ''");
@@ -2796,6 +2809,29 @@ stmt.run('gitops_schema_version', '1');
             ).run();
         } catch {
             // index already present or partial-index syntax unsupported
+        }
+    }
+
+    /**
+     * A GitOps history/operation reference and a dedupe key, so notification
+     * fanout for a settled GitOps attempt can be repaired from durable state
+     * (retried at startup after a crash between commit and fanout) without
+     * ever inserting a duplicate notification for the same attempt.
+     */
+    private migrateNotificationGitOpsDedupe(): void {
+        this.tryAddColumn('notification_history', 'gitops_operation_id', 'TEXT');
+        this.tryAddColumn('notification_history', 'dedupe_key', 'TEXT');
+        try {
+            this.db.prepare(
+                'CREATE UNIQUE INDEX IF NOT EXISTS idx_notif_history_dedupe_key ON notification_history(dedupe_key) WHERE dedupe_key IS NOT NULL'
+            ).run();
+        } catch (err) {
+            // Unlike a pure performance index, this one is the ON CONFLICT
+            // target every addNotificationHistory() insert names. If it is
+            // missing, every notification write in the product fails, not
+            // just GitOps ones, so a silent catch here would turn into an
+            // unexplained total outage instead of a diagnosable startup log.
+            console.error('[DatabaseService] Failed to create notification dedupe index:', err);
         }
     }
 
@@ -4738,8 +4774,13 @@ stmt.run('gitops_schema_version', '1');
     }
 
     public addNotificationHistory(nodeId: number, notification: Omit<NotificationHistory, 'id' | 'is_read'>): NotificationHistory {
+        const dedupeKey = notification.dedupe_key ?? null;
         const stmt = this.db.prepare(
-            'INSERT INTO notification_history (node_id, level, message, timestamp, is_read, stack_name, container_name, category, actor_username) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)'
+            `INSERT INTO notification_history (
+                node_id, level, message, timestamp, is_read, stack_name, container_name,
+                category, actor_username, gitops_operation_id, dedupe_key
+            ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING`
         );
         const result = stmt.run(
             nodeId,
@@ -4750,7 +4791,19 @@ stmt.run('gitops_schema_version', '1');
             notification.container_name ?? null,
             notification.category ?? null,
             notification.actor_username ?? null,
+            notification.gitops_operation_id ?? null,
+            dedupeKey,
         );
+
+        // A repair replaying a settled GitOps attempt must not create a
+        // duplicate notification; the conflict is not an error, it is proof
+        // this exact attempt was already reported.
+        if (result.changes === 0 && dedupeKey !== null) {
+            const existing = this.db.prepare(
+                'SELECT * FROM notification_history WHERE dedupe_key = ?',
+            ).get(dedupeKey);
+            return this.mapNotificationRow(existing);
+        }
 
         return {
             id: result.lastInsertRowid as number,
@@ -4762,6 +4815,8 @@ stmt.run('gitops_schema_version', '1');
             stack_name: notification.stack_name,
             container_name: notification.container_name,
             actor_username: notification.actor_username,
+            gitops_operation_id: notification.gitops_operation_id,
+            dedupe_key: dedupeKey,
         };
     }
 
