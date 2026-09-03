@@ -27,6 +27,7 @@ import { assertSafeOutboundHostname, resolveSafeOutboundHostname, UnsafeOutbound
 const MAX_BRANCH_LENGTH = REF_MAX_LEN;
 const MAX_ENV_PATH_LENGTH = 1024;
 const MAX_TOKEN_LENGTH = 8192;
+const MAX_SUSPEND_REASON_LENGTH = 512;
 
 /**
  * Shared handler for the "browse repository" compose-file picker: validate the
@@ -611,6 +612,64 @@ stackGitSourceRouter.post('/:stackName/git-source/dismiss-pending', async (req: 
   try {
     GitSourceService.getInstance().dismissPending(stackName, req.user?.username ?? 'unknown');
     res.json({ success: true });
+  } catch (error) {
+    sendGitSourceError(res, error);
+  }
+});
+
+stackGitSourceRouter.post('/:stackName/git-source/suspend', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const { reason: rawReason } = req.body ?? {};
+  const reason = typeof rawReason === 'string' ? rawReason : undefined;
+  if (reason !== undefined && reason.length > MAX_SUSPEND_REASON_LENGTH) {
+    res.status(400).json({ error: 'reason is too long' });
+    return;
+  }
+  try {
+    const result = await GitSourceService.getInstance().suspend(stackName, {
+      actor: req.user?.username ?? 'unknown',
+      reason,
+    });
+    res.json(result);
+  } catch (error) {
+    sendGitSourceError(res, error);
+  }
+});
+
+stackGitSourceRouter.post('/:stackName/git-source/resume', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  try {
+    const result = await GitSourceService.getInstance().resume(stackName, {
+      actor: req.user?.username ?? 'unknown',
+    });
+    res.json(result);
+  } catch (error) {
+    sendGitSourceError(res, error);
+  }
+});
+
+stackGitSourceRouter.post('/:stackName/git-source/retry', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  try {
+    const result = await GitSourceService.getInstance().retry(stackName, {
+      actor: req.user?.username ?? 'unknown',
+    });
+    res.json(result);
   } catch (error) {
     sendGitSourceError(res, error);
   }

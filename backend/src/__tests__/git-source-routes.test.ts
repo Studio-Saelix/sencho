@@ -75,6 +75,10 @@ function adminToken(): string {
     return jwt.sign({ username: TEST_USERNAME, role: 'admin' }, TEST_JWT_SECRET, { expiresIn: '1m' });
 }
 
+function viewerToken(): string {
+    return jwt.sign({ username: 'viewer', role: 'viewer' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+}
+
 beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ app } = await import('../index'));
@@ -645,6 +649,158 @@ describe('POST /api/stacks/:stackName/git-source/webhook-pull status codes', () 
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(res.status).toBe(200);
         pullSpy.mockRestore();
+    });
+});
+
+describe('POST /api/stacks/:stackName/git-source/suspend', () => {
+    it('returns 401 without auth', async () => {
+        const res = await request(app).post('/api/stacks/existing-stack/git-source/suspend');
+        expect(res.status).toBe(401);
+    });
+
+    it('returns 400 for an invalid stack name', async () => {
+        const res = await request(app)
+            .post('/api/stacks/..%2fescape/git-source/suspend')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect([400, 404]).toContain(res.status);
+    });
+
+    it('passes the reason through and returns the normalized result', async () => {
+        const suspendSpy = vi.spyOn(GitSourceService.getInstance(), 'suspend')
+            .mockResolvedValue({ outcome: 'suspended', reason: 'Reconciliation is suspended: maintenance', nextAction: 'resume' });
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/suspend')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ reason: 'maintenance' });
+        expect(res.status).toBe(200);
+        expect(res.body.outcome).toBe('suspended');
+        expect(suspendSpy).toHaveBeenCalledWith('existing-stack', expect.objectContaining({ reason: 'maintenance' }));
+        suspendSpy.mockRestore();
+    });
+
+    it('omits reason when none is given in the body', async () => {
+        const suspendSpy = vi.spyOn(GitSourceService.getInstance(), 'suspend')
+            .mockResolvedValue({ outcome: 'suspended', reason: 'Reconciliation is suspended.', nextAction: 'resume' });
+        await request(app)
+            .post('/api/stacks/existing-stack/git-source/suspend')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(suspendSpy).toHaveBeenCalledWith('existing-stack', expect.objectContaining({ reason: undefined }));
+        suspendSpy.mockRestore();
+    });
+
+    it('maps a refused suspend to 409', async () => {
+        const suspendSpy = vi.spyOn(GitSourceService.getInstance(), 'suspend')
+            .mockRejectedValue(new GitSourceError('OPERATION_IN_FLIGHT', 'Cannot suspend existing-stack: source is not live'));
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/suspend')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(res.status).toBe(409);
+        suspendSpy.mockRestore();
+    });
+
+    it('denies without the stack:edit permission', async () => {
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/suspend')
+            .set('Authorization', `Bearer ${viewerToken()}`)
+            .send({});
+        expect([401, 403]).toContain(res.status);
+    });
+
+    it('rejects an oversized reason with 400', async () => {
+        const suspendSpy = vi.spyOn(GitSourceService.getInstance(), 'suspend');
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/suspend')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ reason: 'x'.repeat(513) });
+        expect(res.status).toBe(400);
+        expect(suspendSpy).not.toHaveBeenCalled();
+        suspendSpy.mockRestore();
+    });
+});
+
+describe('POST /api/stacks/:stackName/git-source/resume', () => {
+    it('returns 401 without auth', async () => {
+        const res = await request(app).post('/api/stacks/existing-stack/git-source/resume');
+        expect(res.status).toBe(401);
+    });
+
+    it('returns 400 for an invalid stack name', async () => {
+        const res = await request(app)
+            .post('/api/stacks/..%2fescape/git-source/resume')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect([400, 404]).toContain(res.status);
+    });
+
+    it('returns the normalized result', async () => {
+        const resumeSpy = vi.spyOn(GitSourceService.getInstance(), 'resume')
+            .mockResolvedValue({ outcome: 'no_source_change', reason: 'ok', nextAction: 'none' });
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/resume')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(res.status).toBe(200);
+        expect(res.body.outcome).toBe('no_source_change');
+        expect(resumeSpy).toHaveBeenCalledWith('existing-stack', expect.objectContaining({ actor: expect.any(String) }));
+        resumeSpy.mockRestore();
+    });
+
+    it('denies without the stack:edit permission', async () => {
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/resume')
+            .set('Authorization', `Bearer ${viewerToken()}`)
+            .send({});
+        expect([401, 403]).toContain(res.status);
+    });
+});
+
+describe('POST /api/stacks/:stackName/git-source/retry', () => {
+    it('returns 401 without auth', async () => {
+        const res = await request(app).post('/api/stacks/existing-stack/git-source/retry');
+        expect(res.status).toBe(401);
+    });
+
+    it('returns 400 for an invalid stack name', async () => {
+        const res = await request(app)
+            .post('/api/stacks/..%2fescape/git-source/retry')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect([400, 404]).toContain(res.status);
+    });
+
+    it('returns the normalized result', async () => {
+        const retrySpy = vi.spyOn(GitSourceService.getInstance(), 'retry')
+            .mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/retry')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(res.status).toBe(200);
+        expect(res.body.outcome).toBe('candidate_already_fetched');
+        expect(retrySpy).toHaveBeenCalledWith('existing-stack', expect.objectContaining({ actor: expect.any(String) }));
+        retrySpy.mockRestore();
+    });
+
+    it('maps an unexpected failure to 500', async () => {
+        const retrySpy = vi.spyOn(GitSourceService.getInstance(), 'retry')
+            .mockRejectedValue(new Error('unexpected'));
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/retry')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(res.status).toBe(500);
+        retrySpy.mockRestore();
+    });
+
+    it('denies without the stack:edit permission', async () => {
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/retry')
+            .set('Authorization', `Bearer ${viewerToken()}`)
+            .send({});
+        expect([401, 403]).toContain(res.status);
     });
 });
 
