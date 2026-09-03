@@ -894,6 +894,49 @@ export class GitOpsTransitions {
   }
 
   /**
+   * Reserve a durable attempt before any side effect: a bare history
+   * insert in its own transaction, deliberately not through mutateApp, so
+   * nothing about the application row changes. A `reserved: false` return
+   * means this exact (application, operation) already reserved -- the
+   * caller reconstructs from durable state rather than repeating work.
+   */
+  reserveReconcileAttempt(applicationId: string, envelope: EventEnvelope): { reserved: boolean } {
+    return this.raw().transaction(() => {
+      const app = this.requireApp(applicationId);
+      const historyId = this.history(app, envelope, {
+        stage: 'source_reconcile_started',
+        outcome: 'committed',
+        before: {},
+        after: {},
+      });
+      return { reserved: historyId !== null };
+    })();
+  }
+
+  /**
+   * Settle a reserved attempt with its normalized outcome, the same way:
+   * a bare history insert, not a state mutation. Safe to call more than
+   * once for the same operation; a repeat is a no-op via the history
+   * dedupe index, so the first settled result is never overwritten.
+   */
+  settleReconcileAttempt(
+    applicationId: string,
+    envelope: EventEnvelope,
+    result: { outcome: string; reason: string; nextAction: string; retryAt?: number; commitSha?: string },
+  ): { settled: boolean } {
+    return this.raw().transaction(() => {
+      const app = this.requireApp(applicationId);
+      const historyId = this.history(app, envelope, {
+        stage: 'source_reconcile_settled',
+        outcome: 'committed',
+        before: {},
+        after: { ...result },
+      });
+      return { settled: historyId !== null };
+    })();
+  }
+
+  /**
    * Pause a rollout, application-wide or on one target.
    *
    * A pause says nothing about health: whatever was deployed is still deployed,

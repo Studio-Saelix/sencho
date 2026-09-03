@@ -16,6 +16,7 @@ import type {
   GitOpsCreateCheckpointRow,
   GitOpsCreatePhase,
   GitOpsGenerationRow,
+  GitOpsHistoryRow,
   GitOpsIntentRevisionRow,
   GitOpsRolloutCandidateRow,
   GitOpsTargetCurrentRow,
@@ -193,6 +194,97 @@ export class GitOpsStore {
          )
        ORDER BY a.created_at ASC`,
     ).all() as GitOpsApplicationRow[];
+  }
+
+  /**
+   * The settled result for one exact reconcile attempt, or undefined when
+   * that attempt has not settled (or never existed). Used to recover a
+   * reservation that already completed rather than repeating the work.
+   */
+  getSettledAttempt(applicationId: string, operationId: string): GitOpsHistoryRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_history
+       WHERE application_id = ? AND operation_id = ? AND stage = 'source_reconcile_settled'
+       LIMIT 1`,
+    ).get(applicationId, operationId) as GitOpsHistoryRow | undefined;
+  }
+
+  /**
+   * Every reservation with no matching settled row, oldest first: an
+   * attempt that started but never recorded a result, most likely because
+   * the process crashed between reservation and settlement. Startup
+   * recovery reconciles these from durable stage evidence rather than
+   * leaving them silently open forever.
+   */
+  listUnsettledReconcileAttempts(limit = 200): GitOpsHistoryRow[] {
+    return this.db().prepare(
+      `SELECT started.* FROM gitops_history started
+       WHERE started.stage = 'source_reconcile_started'
+         AND NOT EXISTS (
+           SELECT 1 FROM gitops_history settled
+           WHERE settled.application_id = started.application_id
+             AND settled.operation_id = started.operation_id
+             AND settled.stage = 'source_reconcile_settled'
+         )
+       ORDER BY started.created_at ASC
+       LIMIT ?`,
+    ).all(limit) as GitOpsHistoryRow[];
+  }
+
+  /**
+   * The most recently settled attempt for an application, for API and UI
+   * projection. Distinct from getSettledAttempt, which looks up one exact
+   * operation rather than the newest one.
+   */
+  latestSettledAttempt(applicationId: string): GitOpsHistoryRow | undefined {
+    // rowid (SQLite's implicit insertion-order key), not the id column: id
+    // is a random UUID and does not sort by recency the way rowid does, so
+    // it cannot break a created_at tie between two attempts settled within
+    // the same millisecond.
+    return this.db().prepare(
+      `SELECT * FROM gitops_history
+       WHERE application_id = ? AND stage = 'source_reconcile_settled'
+       ORDER BY created_at DESC, rowid DESC
+       LIMIT 1`,
+    ).get(applicationId) as GitOpsHistoryRow | undefined;
+  }
+
+  /**
+   * Direct sources whose poll time has arrived: active, not suspended, no
+   * operation in flight. Blueprint-mode applications are never polled here
+   * -- source evaluation for them is blocked at the evaluation boundary
+   * until an application-keyed source engine exists for that mode.
+   */
+  listSourcesDueForPoll(now: number, limit = 200): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE target_mode = 'direct'
+         AND lifecycle_status = 'active'
+         AND suspended_at IS NULL
+         AND active_operation_stage IS NULL
+         AND next_poll_at IS NOT NULL
+         AND next_poll_at <= ?
+       ORDER BY next_poll_at ASC
+       LIMIT ?`,
+    ).all(now, limit) as GitOpsApplicationRow[];
+  }
+
+  /**
+   * Applications with a scheduled retry that has come due: not suspended,
+   * no operation in flight. Poll eligibility and retry eligibility are
+   * deliberately separate queries, since a retry can be due on an
+   * application whose poll cadence would not otherwise select it yet.
+   */
+  listApplicationsDueForRetry(now: number, limit = 200): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE retry_at IS NOT NULL
+         AND retry_at <= ?
+         AND suspended_at IS NULL
+         AND active_operation_stage IS NULL
+       ORDER BY retry_at ASC
+       LIMIT ?`,
+    ).all(now, limit) as GitOpsApplicationRow[];
   }
 
   /** Every live target on one node, across all applications. */
