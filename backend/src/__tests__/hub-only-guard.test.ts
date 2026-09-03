@@ -368,4 +368,108 @@ describe('hubOnlyGuard', () => {
     expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
     expect(res.status).not.toBe(503);
   });
+
+  // Regression for api-tokens hub-only boundary: /api/api-tokens manages
+  // sensitive bearer material and must stay hub-only.
+  it('rejects /api/api-tokens (GET proxy) with 403', async () => {
+    const res = await request(app)
+      .get('/api/api-tokens')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(proxyRemoteNodeId));
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects /api/api-tokens (POST proxy) with 403', async () => {
+    const res = await request(app)
+      .post('/api/api-tokens')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(proxyRemoteNodeId));
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects /api/api-tokens/:id (DELETE proxy) with 403', async () => {
+    const res = await request(app)
+      .delete('/api/api-tokens/1')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(proxyRemoteNodeId));
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects /api/api-tokens (GET pilot_agent) with 403', async () => {
+    const res = await request(app)
+      .get('/api/api-tokens')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(pilotRemoteNodeId));
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects /api/api-tokens (POST pilot_agent) with 403', async () => {
+    const res = await request(app)
+      .post('/api/api-tokens')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(pilotRemoteNodeId));
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects /api/api-tokens/:id (DELETE pilot_agent) with 403', async () => {
+    const res = await request(app)
+      .delete('/api/api-tokens/1')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(pilotRemoteNodeId));
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects /api/api-tokens via ?nodeId= (Pilot mode, GET)', async () => {
+    const res = await request(app)
+      .get(`/api/api-tokens?nodeId=${pilotRemoteNodeId}`)
+      .set('Authorization', authHeader);
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects mixed-case /api/API-Tokens with 403 for proxy', async () => {
+    const res = await request(app)
+      .get('/api/API-Tokens')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(proxyRemoteNodeId));
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('lets /api/api-tokens through locally (hub-local GET)', async () => {
+    const res = await request(app)
+      .get('/api/api-tokens')
+      .set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+  });
+
+  it('lets /api/api-tokens through locally (hub-local POST creates token)', async () => {
+    const res = await request(app)
+      .post('/api/api-tokens')
+      .set('Authorization', authHeader)
+      .send({ name: 'local-test', scope: 'read-only', expires_in: 30 });
+    expect(res.status).toBe(201);
+    expect(res.body.id).toBeDefined();
+  });
+
+  it('lets /api/api-tokens through locally and deletes created token (hub-local DELETE)', async () => {
+    // Create, then delete using the returned ID for a deterministic lifecycle.
+    const postRes = await request(app)
+      .post('/api/api-tokens')
+      .set('Authorization', authHeader)
+      .send({ name: 'local-delete-test', scope: 'full-admin', expires_in: 30 });
+    expect(postRes.status).toBe(201);
+    expect(postRes.body.id).toBeDefined();
+
+    const delRes = await request(app)
+      .delete(`/api/api-tokens/${postRes.body.id}`)
+      .set('Authorization', authHeader);
+    expect(delRes.status).toBe(200);
+  });
 });
