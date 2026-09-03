@@ -73,6 +73,11 @@ export type GitOpsApplicationRow = {
   pause_reason: string | null;
   /** sourceSuspended/sourceUnsuspended's own reason field; independent of pause_reason. */
   source_suspended_reason: string | null;
+  /** Controller-owned. See gitops/SourceController.ts. */
+  source_policy: 'manual' | 'review' | 'automatic';
+  poll_interval_secs: number | null;
+  next_poll_at: number | null;
+  attempt_seq: number;
   partial_json: string | null;
   failure_stage: ApplicationFailureStage | null;
   failure_class: string | null;

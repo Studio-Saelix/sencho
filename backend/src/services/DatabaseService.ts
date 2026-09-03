@@ -1985,6 +1985,15 @@ export class DatabaseService {
         maybeAddCol('gitops_generations', 'security_policy_evidence_json', 'TEXT NULL');
         maybeAddCol('gitops_generations', 'support_requirements_json', 'TEXT NULL');
         maybeAddCol('gitops_generations', 'compatibility_requirements_json', 'TEXT NULL');
+        // Controller-owned bookkeeping (source policy, poll cadence, attempt
+        // sequence). New installs get these from the CREATE TABLE; older DBs
+        // need the additive columns here. Existing installations must not
+        // start unattended polling, so poll_interval_secs and next_poll_at
+        // stay NULL until an operator (or the migration below) sets one.
+        maybeAddCol('gitops_applications', 'source_policy', "TEXT NOT NULL DEFAULT 'manual' CHECK (source_policy IN ('manual','review','automatic'))");
+        maybeAddCol('gitops_applications', 'poll_interval_secs', 'INTEGER NULL');
+        maybeAddCol('gitops_applications', 'next_poll_at', 'INTEGER NULL');
+        maybeAddCol('gitops_applications', 'attempt_seq', 'INTEGER NOT NULL DEFAULT 0');
 
         // Distributed API model columns
         maybeAddCol('nodes', 'api_url', "TEXT DEFAULT ''");

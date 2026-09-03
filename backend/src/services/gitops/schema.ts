@@ -100,6 +100,16 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   -- target rows, so suspending a source can never clobber an unrelated
   -- rollout pause reason (or the reverse).
   source_suspended_reason TEXT NULL,
+  -- Controller-owned bookkeeping. NULL poll_interval_secs inherits the
+  -- global default; 0 disables polling for this application. next_poll_at
+  -- is the durable scheduling cursor. attempt_seq is allocated
+  -- transactionally per submission lacking a stable external delivery id.
+  source_policy TEXT NOT NULL DEFAULT 'manual' CHECK (
+    source_policy IN ('manual','review','automatic')
+  ),
+  poll_interval_secs INTEGER NULL,
+  next_poll_at INTEGER NULL,
+  attempt_seq INTEGER NOT NULL DEFAULT 0,
   partial_json TEXT NULL,
   failure_stage TEXT NULL CHECK (
     failure_stage IS NULL OR failure_stage IN (

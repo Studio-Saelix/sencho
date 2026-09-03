@@ -268,6 +268,32 @@ describe('gitops schema', () => {
     expect(populated?.source_policy_evidence_json).toBe('{"policy":"manual"}');
   });
 
+  it('defaults controller-owned columns to manual, off, and zero on a fresh application', async () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(directApp('app-ctrl', 'ctrl-web'));
+    const app = store.getApplication('app-ctrl');
+    expect(app?.source_policy).toBe('manual');
+    expect(app?.poll_interval_secs).toBeNull();
+    expect(app?.next_poll_at).toBeNull();
+    expect(app?.attempt_seq).toBe(0);
+  });
+
+  it('round-trips a configured poll interval and policy', async () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication({
+      ...directApp('app-ctrl2', 'ctrl2-web'),
+      source_policy: 'automatic',
+      poll_interval_secs: 120,
+      next_poll_at: 5000,
+      attempt_seq: 3,
+    });
+    const app = store.getApplication('app-ctrl2');
+    expect(app?.source_policy).toBe('automatic');
+    expect(app?.poll_interval_secs).toBe(120);
+    expect(app?.next_poll_at).toBe(5000);
+    expect(app?.attempt_seq).toBe(3);
+  });
+
   it('round-trips fetched_resolved_ref_kind on application fetch transitions', async () => {
     const store = GitOpsStore.getInstance();
     store.insertApplication(directApp('app-fetch-kind', 'fetch-web'));
@@ -323,6 +349,10 @@ function directApp(id: string, stackName: string): GitOpsApplicationRow {
     pause_at: null,
     pause_reason: null,
     source_suspended_reason: null,
+    source_policy: 'manual',
+    poll_interval_secs: null,
+    next_poll_at: null,
+    attempt_seq: 0,
     partial_json: null,
     failure_stage: null,
     failure_class: null,
