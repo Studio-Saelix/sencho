@@ -2236,11 +2236,11 @@ describe('GitSourceService.apply', () => {
         return svc;
     }
 
-    describe('reconcile', () => {
-        function liveApp(stackName: string) {
-            return GitOpsStore.getInstance().getLiveDirectApplication(stackName);
-        }
+    function liveApp(stackName: string) {
+        return GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+    }
 
+    describe('reconcile', () => {
         it('reports candidate_already_fetched after a fetch-intent reconcile stages a new candidate', async () => {
             const sha = 'e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1';
             mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha });
@@ -2297,6 +2297,43 @@ describe('GitSourceService.apply', () => {
             } finally {
                 validateSpy.mockRestore();
                 saveSpy.mockRestore();
+            }
+        });
+
+        it('does not report success when the source applied but the deploy failed', async () => {
+            const sha = 'e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7';
+            const svc = await seedPending('reconcile-apply-deploy-fail', 'services:\n  x:\n    image: alpine\n', sha);
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(
+                new Error('compose up failed: docker unavailable'),
+            );
+
+            try {
+                const applicationId = liveApp('reconcile-apply-deploy-fail')!.id;
+                const result = await svc.reconcile({
+                    intent: 'apply',
+                    applicationId,
+                    stackName: 'reconcile-apply-deploy-fail',
+                    trigger: 'manual',
+                    actor: 'tester',
+                    commitSha: sha,
+                    planFingerprint: '',
+                    deploy: true,
+                });
+                // The promotion itself succeeded (files landed, generation
+                // accepted), so the source facet alone reads as converged.
+                // reconcile must not let that mask the deploy failure, and must
+                // not claim the previous generation is unchanged either: it isn't.
+                expect(result.outcome).toBe('recovery_required');
+                expect(result.nextAction).toBe('view_target_results');
+                expect(result.reason).toMatch(/deploy/i);
+            } finally {
+                validateSpy.mockRestore();
+                saveSpy.mockRestore();
+                deploySpy.mockRestore();
             }
         });
 
@@ -2403,6 +2440,129 @@ describe('GitSourceService.apply', () => {
                 actor: 'tester',
             });
             expect(result.outcome).toBe('unknown');
+        });
+    });
+
+    describe('dispatchAcceptedGeneration', () => {
+        const directContext = { targetMode: 'direct', nodeId: null, bindingRevision: null } as const;
+        const manualDispatch = { trigger: 'manual', actor: 'tester' } as const;
+
+        async function acceptedGenerationFor(stackName: string) {
+            const { buildAcceptedGeneration } = await import('../services/gitops/handoff');
+            const app = liveApp(stackName)!;
+            const row = GitOpsStore.getInstance().getGeneration(app.candidate_generation_id!)!;
+            return buildAcceptedGeneration(row);
+        }
+
+        it('dispatches a direct-mode generation by driving the existing apply path', async () => {
+            const sha = 'd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1';
+            const svc = await seedPending('dispatch-direct', 'services:\n  x:\n    image: alpine\n', sha);
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+
+            try {
+                const generation = await acceptedGenerationFor('dispatch-direct');
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(result).toEqual({ status: 'dispatched' });
+            } finally {
+                validateSpy.mockRestore();
+                saveSpy.mockRestore();
+            }
+        });
+
+        it('blocks a blueprint-mode generation by delegating to BlueprintTargetAdapter', async () => {
+            const sha = 'd2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2';
+            const svc = await seedPending('dispatch-blueprint', 'services:\n  x:\n    image: alpine\n', sha);
+            const generation = await acceptedGenerationFor('dispatch-blueprint');
+
+            const result = await svc.dispatchAcceptedGeneration(
+                generation,
+                { targetMode: 'blueprint', nodeId: 1, bindingRevision: 'rev-1' },
+                manualDispatch,
+            );
+
+            expect(result).toEqual({
+                status: 'blocked',
+                reason: 'Blueprint rollout orchestration is not yet implemented.',
+            });
+        });
+
+        it('blocks and forwards the reason when the underlying apply fails', async () => {
+            const sha = 'd3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3';
+            const svc = await seedPending('dispatch-apply-fails', 'services:\n  x:\n    image: alpine\n', sha);
+            const generation = await acceptedGenerationFor('dispatch-apply-fails');
+            const staleGeneration = { ...generation, commitSha: 'ffffffffffffffffffffffffffffffffffffffff' };
+
+            const result = await svc.dispatchAcceptedGeneration(staleGeneration, directContext, manualDispatch);
+
+            expect(result).toEqual({
+                status: 'blocked',
+                reason: expect.stringMatching(/pending commit has changed/i),
+            });
+        });
+
+        it('blocks a direct-mode dispatch when the generation names an application that no longer exists', async () => {
+            const sha = 'd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4';
+            const svc = await seedPending('dispatch-no-stack', 'services:\n  x:\n    image: alpine\n', sha);
+            const generation = await acceptedGenerationFor('dispatch-no-stack');
+            const orphanGeneration = { ...generation, applicationId: 'no-such-application' };
+
+            const result = await svc.dispatchAcceptedGeneration(orphanGeneration, directContext, manualDispatch);
+
+            expect(result).toEqual({
+                status: 'blocked',
+                reason: expect.stringMatching(/no direct stack is bound/i),
+            });
+        });
+
+        it('honors an auto_deploy_on_apply source setting by requesting a deploy on dispatch', async () => {
+            const sha = 'd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5';
+            const svc = await seedPending('dispatch-auto-deploy', 'services:\n  x:\n    image: alpine\n', sha);
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run('dispatch-auto-deploy');
+
+            try {
+                const generation = await acceptedGenerationFor('dispatch-auto-deploy');
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(result).toEqual({ status: 'dispatched' });
+                expect(deploySpy).toHaveBeenCalled();
+            } finally {
+                validateSpy.mockRestore();
+                saveSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
+        });
+
+        it('blocks, rather than reporting dispatched, when an auto_deploy_on_apply dispatch applies but the deploy fails', async () => {
+            const sha = 'd6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6';
+            const svc = await seedPending('dispatch-auto-deploy-fails', 'services:\n  x:\n    image: alpine\n', sha);
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(
+                new Error('compose up failed: docker unavailable'),
+            );
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run('dispatch-auto-deploy-fails');
+
+            try {
+                const generation = await acceptedGenerationFor('dispatch-auto-deploy-fails');
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(result).toEqual({ status: 'blocked', reason: expect.stringMatching(/deploy/i) });
+            } finally {
+                validateSpy.mockRestore();
+                saveSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
         });
     });
 

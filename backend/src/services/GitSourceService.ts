@@ -36,8 +36,9 @@ import { validateCaBundlePem } from './git/caBundle';
 import { GitOpsStore } from './gitops/store';
 import { projectApplication } from './gitops/derive';
 import { outcomeFromSourceFacet, type ReconcileOutcome, type ReconcileResult } from './gitops/outcomes';
-import type { ReconcileRequest } from './gitops/triggers';
+import type { ReconcileRequest, ReconcileTrigger } from './gitops/triggers';
 import { classifyFailure } from './gitops/backoff';
+import { BlueprintTargetAdapter, type AcceptedGeneration, type DispatchContext, type DispatchResult } from './gitops/handoff';
 import { GitOpsTransitions, GitOpsTransitionError } from './gitops/transitions';
 import {
     buildCreateCheckpointRow,
@@ -2313,16 +2314,18 @@ export class GitSourceService {
             }
 
             let failure: unknown;
+            let deployError: string | undefined;
             try {
                 if (request.intent === 'fetch') {
                     await this.pullLocked(request.stackName, request.actor);
                 } else {
-                    await this.applyWithSharedLock(request.stackName, request.commitSha, {
+                    const applyResult = await this.applyWithSharedLock(request.stackName, request.commitSha, {
                         actor: request.actor,
                         deploy: request.deploy,
                         planFingerprint: request.planFingerprint,
                         requirePlanFingerprint: false,
                     });
+                    deployError = applyResult.deployError;
                 }
             } catch (e) {
                 failure = e;
@@ -2335,6 +2338,22 @@ export class GitSourceService {
                     // pullLocked directly and must not lose it from the feed.
                     this.recordGitActivity(request.stackName, 'git_pull_failed', `Git pull failed for ${request.stackName}`, request.actor, 'error');
                 }
+            }
+
+            // Promotion succeeding does not mean the reconcile succeeded: the
+            // source facet alone cannot see a failed deploy, so it would
+            // otherwise report a converged/no-change success over a stack
+            // that never came up. recovery_required, not failed_previous_intact:
+            // the generation DID change (acceptance and promotion already
+            // committed before deploy ran), so nothing here may claim it is
+            // unchanged, and nothing about the source itself needs retrying,
+            // only the target.
+            if (deployError) {
+                return {
+                    outcome: 'recovery_required',
+                    reason: `The source applied, but the deploy failed: ${deployError}`,
+                    nextAction: 'view_target_results',
+                };
             }
 
             const derived = this.deriveReconcileResult(request.stackName);
@@ -2403,6 +2422,49 @@ export class GitSourceService {
             return GitSourceService.noApplicationResult();
         }
         return outcomeFromSourceFacet(projection.facets.source);
+    }
+
+    /**
+     * Route an accepted generation to its target. Blueprint mode always
+     * blocks (BlueprintTargetAdapter; rollout orchestration does not exist
+     * yet). Direct mode has no separate generation-based promotion pipeline
+     * today, so it dispatches by driving the same reconcile()/apply path a
+     * manual or webhook apply already uses, translating the normalized
+     * ReconcileResult into the narrower dispatched/blocked shape a target
+     * adapter reports.
+     */
+    public async dispatchAcceptedGeneration(
+        generation: AcceptedGeneration,
+        context: DispatchContext,
+        opts: { trigger: ReconcileTrigger; actor: string },
+    ): Promise<DispatchResult> {
+        if (context.targetMode === 'blueprint') {
+            return new BlueprintTargetAdapter().dispatch(generation, context);
+        }
+        const app = GitOpsStore.getInstance().getApplication(generation.applicationId);
+        if (!app?.stack_name) {
+            return { status: 'blocked', reason: 'No Direct stack is bound to this application.' };
+        }
+        const source = DatabaseService.getInstance().getGitSource(app.stack_name);
+        const result = await this.reconcile({
+            intent: 'apply',
+            applicationId: generation.applicationId,
+            stackName: app.stack_name,
+            trigger: opts.trigger,
+            actor: opts.actor,
+            commitSha: generation.commitSha,
+            planFingerprint: generation.changePlanFingerprint ?? '',
+            deploy: source?.auto_deploy_on_apply ?? false,
+        });
+        // 'converged' is not produced by reconcile() today (it requires
+        // target + health evidence this source-only path does not have),
+        // but it is a declared success member of ReconcileOutcome; treating
+        // only 'no_source_change' as success would silently misreport it as
+        // blocked the day a broader derivation starts emitting it.
+        if (result.outcome === 'no_source_change' || result.outcome === 'converged') {
+            return { status: 'dispatched' };
+        }
+        return { status: 'blocked', reason: result.reason };
     }
 
     /**
