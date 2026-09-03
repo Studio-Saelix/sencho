@@ -423,8 +423,13 @@ export class GitProjectManifestService {
     async writeManifest(stackName: string, manifest: GitProjectManifest): Promise<void> {
         const dir = this.managedRoot(stackName);
         await fs.promises.mkdir(dir, { recursive: true });
-        const target = path.join(dir, MANIFEST_FILENAME);
-        const tmp = path.join(dir, `${MANIFEST_FILENAME}.tmp`);
+        // Inline barrier at the write/rename sinks (CodeQL path-injection).
+        const root = path.resolve(dir);
+        const target = path.resolve(root, MANIFEST_FILENAME);
+        const tmp = path.resolve(root, `${MANIFEST_FILENAME}.tmp`);
+        if (!target.startsWith(root + path.sep) || !tmp.startsWith(root + path.sep)) {
+            throw Object.assign(new Error('Path escapes managed project directory'), { code: 'INVALID_PATH' });
+        }
         await fs.promises.writeFile(tmp, JSON.stringify(manifest, null, 2), 'utf8');
         await fs.promises.rename(tmp, target);
     }

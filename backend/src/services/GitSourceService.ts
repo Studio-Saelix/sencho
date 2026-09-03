@@ -2737,8 +2737,14 @@ export class GitSourceService {
                     pending.candidateRelPath,
                 );
             }
-            const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-            const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, pending.candidateRelPath);
+            const managedRoot = path.resolve(stackManagedRoot(stackName));
+            const pathReason = validateCandidateRelPath(pending.candidateRelPath, managedRoot);
+            if (pathReason) throw new GitSourceError('GIT_ERROR', pathReason);
+            // Inline barrier at the access sink (CodeQL path-injection).
+            const candidateAbs = path.resolve(managedRoot, pending.candidateRelPath);
+            if (!candidateAbs.startsWith(managedRoot + path.sep)) {
+                throw new GitSourceError('GIT_ERROR', 'candidateRelPath escapes the managed root');
+            }
             try {
                 await fsPromises.access(candidateAbs);
             } catch (accessErr: unknown) {
