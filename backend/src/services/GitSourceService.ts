@@ -34,6 +34,10 @@ import { nativeGitTransport, verifyFastForward } from './git/nativeGitTransport'
 import { fingerprintFromKnownHostsLine } from './git/sshTrust';
 import { validateCaBundlePem } from './git/caBundle';
 import { GitOpsStore } from './gitops/store';
+import { projectApplication } from './gitops/derive';
+import { outcomeFromSourceFacet, type ReconcileOutcome, type ReconcileResult } from './gitops/outcomes';
+import type { ReconcileRequest } from './gitops/triggers';
+import { classifyFailure } from './gitops/backoff';
 import { GitOpsTransitions, GitOpsTransitionError } from './gitops/transitions';
 import {
     buildCreateCheckpointRow,
@@ -2248,6 +2252,157 @@ export class GitSourceService {
             ...opts,
             requirePlanFingerprint: opts.requirePlanFingerprint !== false,
         }));
+    }
+
+    /**
+     * Outcomes that prove a failure was actually persisted onto the
+     * application row. Many throw sites in pullLocked/applyLockedBody fire
+     * before any transition opens (missing config, stale commitSha, lock
+     * contention), so reconcile falls back to a classified result whenever
+     * the derived outcome is not one of these.
+     */
+    private static readonly FAILURE_REFLECTED_OUTCOMES: ReadonlySet<ReconcileOutcome> = new Set<ReconcileOutcome>([
+        'failed_previous_intact',
+        'retry_scheduled',
+        'recovery_required',
+        'blocked',
+    ]);
+
+    /** The settled result for a stack that carries no GitOps application at all. */
+    private static noApplicationResult(): ReconcileResult {
+        return { outcome: 'unknown', reason: 'No GitOps application exists for this stack.', nextAction: 'none' };
+    }
+
+    /**
+     * The controller-facing entry point: one normalized submission in,
+     * one normalized result out, for any trigger (manual, poll, retry,
+     * API, config change, startup, resume). Owns the Git mutex for the
+     * whole evaluation, calling the same private fetch/apply bodies the
+     * public pull()/apply() wrappers use, so it never nests withStackLock.
+     *
+     * Unlike the public apply route, a controller-driven apply never
+     * requires a plan fingerprint: that requirement exists so a human has
+     * seen and confirmed a diff before it applies, which does not describe
+     * an automated trigger. The controller's own policy evaluation is the
+     * safety gate instead.
+     */
+    public async reconcile(request: ReconcileRequest): Promise<ReconcileResult> {
+        return this.withStackLock(request.stackName, async () => {
+            // The same "live application" definition deriveReconcileResult and
+            // coalesceKey() use ('active' and 'creating' alike), not the narrower
+            // gitopsApplicationFor() that gates transitions: a 'creating' row must
+            // still be caught by the identity guard below, not slip past it as if
+            // there were no application at all.
+            const liveApp = GitOpsStore.getInstance().getLiveDirectApplication(request.stackName);
+
+            // Nothing to reconcile: say so rather than attempting work that
+            // could only fail.
+            if (!liveApp) {
+                return GitSourceService.noApplicationResult();
+            }
+            // Fail closed on a stale identity: coalesceKey() joins in-flight
+            // evaluations by applicationId, so silently reconciling under
+            // whatever application currently holds the stack name would let a
+            // caller's request settle against an application it never named.
+            if (liveApp.id !== request.applicationId) {
+                return {
+                    outcome: 'unknown',
+                    reason: 'The live application for this stack no longer matches the requested application id.',
+                    nextAction: 'none',
+                };
+            }
+
+            let failure: unknown;
+            try {
+                if (request.intent === 'fetch') {
+                    await this.pullLocked(request.stackName, request.actor);
+                } else {
+                    await this.applyWithSharedLock(request.stackName, request.commitSha, {
+                        actor: request.actor,
+                        deploy: request.deploy,
+                        planFingerprint: request.planFingerprint,
+                        requirePlanFingerprint: false,
+                    });
+                }
+            } catch (e) {
+                failure = e;
+                console.error(
+                    `[GitSource] reconcile(${request.intent}) failed for ${sanitizeForLog(request.stackName)}:`,
+                    e instanceof Error ? e.message : String(e),
+                );
+                if (request.intent === 'fetch') {
+                    // pull() records this on the same throw; reconcile calls
+                    // pullLocked directly and must not lose it from the feed.
+                    this.recordGitActivity(request.stackName, 'git_pull_failed', `Git pull failed for ${request.stackName}`, request.actor, 'error');
+                }
+            }
+
+            const derived = this.deriveReconcileResult(request.stackName);
+            if (failure === undefined || GitSourceService.FAILURE_REFLECTED_OUTCOMES.has(derived.outcome)) {
+                return derived;
+            }
+            return this.reconcileFailureResult(failure);
+        });
+    }
+
+    /**
+     * A truthful fallback for a reconcile failure the application row does
+     * not yet reflect. Routes through the same classifyFailure disposition
+     * table the controller's own retry/backoff logic uses, so an unretryable
+     * failure is never reported with nextAction: 'retry'.
+     */
+    private reconcileFailureResult(failure: unknown): ReconcileResult {
+        if (!(failure instanceof GitSourceError)) {
+            return {
+                outcome: 'failed_previous_intact',
+                reason: 'The reconcile attempt failed unexpectedly.',
+                nextAction: 'retry',
+            };
+        }
+        const disposition = classifyFailure({
+            kind: 'git_source_error',
+            code: failure.code,
+            transportReason: failure.extras?.transportReason,
+        });
+        switch (disposition.class) {
+            case 'supersession':
+                return { outcome: 'superseded', reason: failure.message, nextAction: 'none' };
+            case 'permanent':
+                return { outcome: 'failed_previous_intact', reason: failure.message, nextAction: 'configure_credentials' };
+            case 'operator_action_required':
+                return { outcome: 'blocked', reason: failure.message, nextAction: 'resolve_conflict' };
+            case 'reconcile':
+                return { outcome: 'unknown', reason: failure.message, nextAction: 'none' };
+            // 'degraded'/'target_*'/'blocked' are not reachable from a
+            // git_source_error classification today, but are grouped with
+            // 'transient' so this switch stays exhaustive if that changes.
+            case 'transient':
+            case 'degraded':
+            case 'target_permanent':
+            case 'target_transient':
+            case 'target_mutation_failed':
+            case 'blocked':
+                return { outcome: 'failed_previous_intact', reason: failure.message, nextAction: 'retry' };
+        }
+    }
+
+    private deriveReconcileResult(stackName: string): ReconcileResult {
+        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        if (!app) {
+            return GitSourceService.noApplicationResult();
+        }
+        const projection = projectApplication(app.id, false);
+        if (projection.targetMode === 'not_applicable') {
+            if (projection.limitations.some((l) => l.code === 'application_row_missing')) {
+                return {
+                    outcome: 'recovery_required',
+                    reason: 'The application this reconcile was resolved from is no longer present.',
+                    nextAction: 'view_target_results',
+                };
+            }
+            return GitSourceService.noApplicationResult();
+        }
+        return outcomeFromSourceFacet(projection.facets.source);
     }
 
     /**

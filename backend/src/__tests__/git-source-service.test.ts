@@ -2236,6 +2236,176 @@ describe('GitSourceService.apply', () => {
         return svc;
     }
 
+    describe('reconcile', () => {
+        function liveApp(stackName: string) {
+            return GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        }
+
+        it('reports candidate_already_fetched after a fetch-intent reconcile stages a new candidate', async () => {
+            const sha = 'e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1';
+            mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha });
+            const svc = GitSourceService.getInstance();
+            await svc.upsert({
+                stackName: 'reconcile-fetch',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+
+            try {
+                const applicationId = liveApp('reconcile-fetch')!.id;
+                const result = await svc.reconcile({
+                    intent: 'fetch',
+                    applicationId,
+                    stackName: 'reconcile-fetch',
+                    trigger: 'manual',
+                    actor: 'tester',
+                });
+                expect(result.outcome).toBe('candidate_already_fetched');
+            } finally {
+                validateSpy.mockRestore();
+            }
+        });
+
+        it('reports no_source_change after an apply-intent reconcile accepts the candidate', async () => {
+            const sha = 'e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2';
+            const svc = await seedPending('reconcile-apply', 'services:\n  x:\n    image: alpine\n', sha);
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+
+            try {
+                const applicationId = liveApp('reconcile-apply')!.id;
+                const result = await svc.reconcile({
+                    intent: 'apply',
+                    applicationId,
+                    stackName: 'reconcile-apply',
+                    trigger: 'manual',
+                    actor: 'tester',
+                    commitSha: sha,
+                    planFingerprint: '',
+                    deploy: false,
+                });
+                expect(result.outcome).toBe('no_source_change');
+            } finally {
+                validateSpy.mockRestore();
+                saveSpy.mockRestore();
+            }
+        });
+
+        it('reports a truthful failure, not the stale staged-candidate outcome, when fetch throws before touching the application row', async () => {
+            const sha = 'e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3';
+            const svc = await seedPending('reconcile-fetch-fail', 'services:\n  x:\n    image: alpine\n', sha);
+            const applicationId = liveApp('reconcile-fetch-fail')!.id;
+            // Deleting the config row makes pullLocked throw its `!src` guard,
+            // which fires before fetchStarted opens any transition: the
+            // application row is untouched by this failure.
+            DatabaseService.getInstance().deleteGitSource('reconcile-fetch-fail');
+
+            const result = await svc.reconcile({
+                intent: 'fetch',
+                applicationId,
+                stackName: 'reconcile-fetch-fail',
+                trigger: 'manual',
+                actor: 'tester',
+            });
+
+            expect(result.outcome).not.toBe('candidate_already_fetched');
+            expect(result.nextAction).not.toBe('none');
+        });
+
+        it('reports a truthful failure, not the stale staged-candidate outcome, when apply throws on a stale commitSha', async () => {
+            const sha = 'e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4';
+            const svc = await seedPending('reconcile-apply-stale-sha', 'services:\n  x:\n    image: alpine\n', sha);
+            const applicationId = liveApp('reconcile-apply-stale-sha')!.id;
+
+            const result = await svc.reconcile({
+                intent: 'apply',
+                applicationId,
+                stackName: 'reconcile-apply-stale-sha',
+                trigger: 'manual',
+                actor: 'tester',
+                commitSha: 'ffffffffffffffffffffffffffffffffffffffff',
+                planFingerprint: '',
+                deploy: false,
+            });
+
+            expect(result.outcome).not.toBe('candidate_already_fetched');
+            expect(result.nextAction).not.toBe('none');
+        });
+
+        it('fails closed instead of silently reconciling the wrong application when the requested applicationId is stale', async () => {
+            const sha = 'e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5';
+            const svc = await seedPending('reconcile-stale-app-id', 'services:\n  x:\n    image: alpine\n', sha);
+
+            const result = await svc.reconcile({
+                intent: 'fetch',
+                applicationId: 'no-longer-the-live-application',
+                stackName: 'reconcile-stale-app-id',
+                trigger: 'manual',
+                actor: 'tester',
+            });
+
+            expect(result.outcome).toBe('unknown');
+            expect(result.nextAction).toBe('none');
+            // Fails closed before doing anything: the candidate this stack had
+            // staged before the call is still exactly as it was.
+            const stillStaged = liveApp('reconcile-stale-app-id');
+            expect(stillStaged?.candidate_generation_id).toBeTruthy();
+        });
+
+        it('fails closed on a stale applicationId even when the live application is stuck in creating, not active', async () => {
+            const sha = 'e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6';
+            const svc = await seedPending('reconcile-creating-app', 'services:\n  x:\n    image: alpine\n', sha);
+            const applicationId = liveApp('reconcile-creating-app')!.id;
+            // gitopsApplicationFor() (used elsewhere to gate transitions) only
+            // recognizes 'active' rows, but getLiveDirectApplication() (used
+            // by deriveReconcileResult) recognizes 'active' and 'creating'
+            // alike. reconcile's identity guard must use the same broad
+            // definition, or a 'creating' row slips past it entirely.
+            DatabaseService.getInstance().getDb()
+                .prepare("UPDATE gitops_applications SET lifecycle_status = 'creating' WHERE id = ?")
+                .run(applicationId);
+
+            const result = await svc.reconcile({
+                intent: 'apply',
+                applicationId: 'deliberately-mismatched-id',
+                stackName: 'reconcile-creating-app',
+                trigger: 'manual',
+                actor: 'tester',
+                commitSha: 'ffffffffffffffffffffffffffffffffffffffff',
+                planFingerprint: '',
+                deploy: false,
+            });
+
+            expect(result.outcome).toBe('unknown');
+            expect(result.nextAction).toBe('none');
+            // Fails closed before doing anything: the candidate this stack
+            // had staged before the call is still exactly as it was.
+            const stillStaged = liveApp('reconcile-creating-app');
+            expect(stillStaged?.candidate_generation_id).toBeTruthy();
+        });
+
+        it('reports unknown for a stack with no GitOps application', async () => {
+            const svc = GitSourceService.getInstance();
+            const result = await svc.reconcile({
+                intent: 'fetch',
+                applicationId: 'unused',
+                stackName: 'reconcile-no-app',
+                trigger: 'manual',
+                actor: 'tester',
+            });
+            expect(result.outcome).toBe('unknown');
+        });
+    });
+
     it('throws when pending has been cleared between pull and apply', async () => {
         const svc = await seedPending('apply-cleared', 'services:\n  x:\n    image: alpine\n', 'aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1');
         DatabaseService.getInstance().clearGitSourcePending('apply-cleared');
