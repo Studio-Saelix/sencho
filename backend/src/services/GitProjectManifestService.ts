@@ -421,15 +421,19 @@ export class GitProjectManifestService {
 
     /** Atomic manifest write (tmp + rename). */
     async writeManifest(stackName: string, manifest: GitProjectManifest): Promise<void> {
-        const dir = this.managedRoot(stackName);
-        await fs.promises.mkdir(dir, { recursive: true });
-        // Inline barrier at the write/rename sinks (CodeQL path-injection).
-        const root = path.resolve(dir);
+        // Inline barrier at the mkdir/write/rename sinks (CodeQL path-injection):
+        // confine the resolved managed directory to the managed area before any
+        // filesystem call touches it, then confine the filenames joined onto it.
+        const root = path.resolve(this.managedRoot(stackName));
+        if (!root.startsWith(managedAreaBase() + path.sep)) {
+            throw Object.assign(new Error('Path escapes the managed area'), { code: 'INVALID_PATH' });
+        }
         const target = path.resolve(root, MANIFEST_FILENAME);
         const tmp = path.resolve(root, `${MANIFEST_FILENAME}.tmp`);
         if (!target.startsWith(root + path.sep) || !tmp.startsWith(root + path.sep)) {
             throw Object.assign(new Error('Path escapes managed project directory'), { code: 'INVALID_PATH' });
         }
+        await fs.promises.mkdir(root, { recursive: true });
         await fs.promises.writeFile(tmp, JSON.stringify(manifest, null, 2), 'utf8');
         await fs.promises.rename(tmp, target);
     }
