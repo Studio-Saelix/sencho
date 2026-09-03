@@ -394,13 +394,18 @@ export class GitOpsStore {
         id, application_id, commit_sha, repo_url, configured_ref, resolved_ref_kind, repo_identity_json,
         manifest_version, candidate_dir, applied_dir, expected_invocation_json,
         materialization_fingerprint, validation_ok, plan_blocked, change_plan_fingerprint,
-        operation_id, trigger, actor, previous_generation_id, redacted_limitations_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        operation_id, trigger, actor, previous_generation_id, redacted_limitations_json,
+        portable_manifest_json, compose_inputs_json, source_policy_evidence_json,
+        security_policy_evidence_json, support_requirements_json, compatibility_requirements_json,
+        created_at
+      ) VALUES (${Array(27).fill('?').join(', ')})`,
     ).run(
       row.id, row.application_id, row.commit_sha, row.repo_url, row.configured_ref, row.resolved_ref_kind, row.repo_identity_json,
       row.manifest_version, row.candidate_dir, row.applied_dir, row.expected_invocation_json,
       row.materialization_fingerprint, row.validation_ok, row.plan_blocked, row.change_plan_fingerprint,
       row.operation_id, row.trigger, row.actor, row.previous_generation_id, row.redacted_limitations_json,
+      row.portable_manifest_json, row.compose_inputs_json, row.source_policy_evidence_json,
+      row.security_policy_evidence_json, row.support_requirements_json, row.compatibility_requirements_json,
       row.created_at,
     );
   }

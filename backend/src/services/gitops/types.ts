@@ -161,6 +161,13 @@ export type GitOpsGenerationRow = {
   actor: string | null;
   previous_generation_id: string | null;
   redacted_limitations_json: string;
+  /** Portable accepted-generation contract fields. See gitops/handoff.ts. */
+  portable_manifest_json: string | null;
+  compose_inputs_json: string | null;
+  source_policy_evidence_json: string | null;
+  security_policy_evidence_json: string | null;
+  support_requirements_json: string | null;
+  compatibility_requirements_json: string | null;
   created_at: number;
 };
 

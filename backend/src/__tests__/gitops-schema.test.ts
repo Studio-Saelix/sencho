@@ -239,6 +239,35 @@ describe('gitops schema', () => {
     expect(row?.configured_ref).toBe('v1');
   });
 
+  it('round-trips the portable generation contract fields, defaulting to null for legacy rows', async () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(directApp('app-portable', 'portable-web'));
+    store.insertGeneration({
+      ...generation('gen-portable-legacy', 'app-portable'),
+    });
+    const legacy = store.getGeneration('gen-portable-legacy');
+    expect(legacy?.portable_manifest_json).toBeNull();
+    expect(legacy?.compose_inputs_json).toBeNull();
+    expect(legacy?.source_policy_evidence_json).toBeNull();
+    expect(legacy?.security_policy_evidence_json).toBeNull();
+    expect(legacy?.support_requirements_json).toBeNull();
+    expect(legacy?.compatibility_requirements_json).toBeNull();
+
+    store.insertGeneration({
+      ...generation('gen-portable-new', 'app-portable'),
+      portable_manifest_json: '{"files":[]}',
+      compose_inputs_json: '{"composeFileOrder":["compose.yaml"]}',
+      source_policy_evidence_json: '{"policy":"manual"}',
+      security_policy_evidence_json: '{"status":"allowed"}',
+      support_requirements_json: '{}',
+      compatibility_requirements_json: '{}',
+    });
+    const populated = store.getGeneration('gen-portable-new');
+    expect(populated?.portable_manifest_json).toBe('{"files":[]}');
+    expect(populated?.compose_inputs_json).toBe('{"composeFileOrder":["compose.yaml"]}');
+    expect(populated?.source_policy_evidence_json).toBe('{"policy":"manual"}');
+  });
+
   it('round-trips fetched_resolved_ref_kind on application fetch transitions', async () => {
     const store = GitOpsStore.getInstance();
     store.insertApplication(directApp('app-fetch-kind', 'fetch-web'));
@@ -362,6 +391,12 @@ function generation(id: string, applicationId: string): GitOpsGenerationRow {
     actor: 'tester',
     previous_generation_id: null,
     redacted_limitations_json: '[]',
+    portable_manifest_json: null,
+    compose_inputs_json: null,
+    source_policy_evidence_json: null,
+    security_policy_evidence_json: null,
+    support_requirements_json: null,
+    compatibility_requirements_json: null,
     created_at: 1,
   };
 }

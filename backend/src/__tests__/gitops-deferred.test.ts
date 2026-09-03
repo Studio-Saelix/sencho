@@ -382,6 +382,12 @@ function gen(id: string, applicationId: string): GitOpsGenerationRow {
     actor: 'tester',
     previous_generation_id: null,
     redacted_limitations_json: '[]',
+    portable_manifest_json: null,
+    compose_inputs_json: null,
+    source_policy_evidence_json: null,
+    security_policy_evidence_json: null,
+    support_requirements_json: null,
+    compatibility_requirements_json: null,
     created_at: 1,
   };
 }

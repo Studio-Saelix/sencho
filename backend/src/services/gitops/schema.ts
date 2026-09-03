@@ -177,6 +177,17 @@ CREATE TABLE IF NOT EXISTS gitops_generations (
   actor TEXT NULL,
   previous_generation_id TEXT NULL,
   redacted_limitations_json TEXT NOT NULL DEFAULT '[]',
+  -- Portable accepted-generation contract (content only: no node id, local
+  -- path, target mode, or secret value). Additive and nullable so existing
+  -- rows decode as an explicit limitation rather than invented evidence; a
+  -- legacy pending candidate lacking these must be re-evaluated before it
+  -- can be accepted or dispatched.
+  portable_manifest_json TEXT NULL,
+  compose_inputs_json TEXT NULL,
+  source_policy_evidence_json TEXT NULL,
+  security_policy_evidence_json TEXT NULL,
+  support_requirements_json TEXT NULL,
+  compatibility_requirements_json TEXT NULL,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_gitops_gen_app_created

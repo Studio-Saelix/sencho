@@ -1976,6 +1976,15 @@ export class DatabaseService {
         // existing installs already have. New installs get it from the
         // CREATE TABLE; older DBs need the additive column here.
         maybeAddCol('gitops_applications', 'source_suspended_reason', 'TEXT NULL');
+        // Portable accepted-generation contract fields. Additive and
+        // nullable: existing generation rows decode these as an explicit
+        // limitation rather than invented evidence.
+        maybeAddCol('gitops_generations', 'portable_manifest_json', 'TEXT NULL');
+        maybeAddCol('gitops_generations', 'compose_inputs_json', 'TEXT NULL');
+        maybeAddCol('gitops_generations', 'source_policy_evidence_json', 'TEXT NULL');
+        maybeAddCol('gitops_generations', 'security_policy_evidence_json', 'TEXT NULL');
+        maybeAddCol('gitops_generations', 'support_requirements_json', 'TEXT NULL');
+        maybeAddCol('gitops_generations', 'compatibility_requirements_json', 'TEXT NULL');
 
         // Distributed API model columns
         maybeAddCol('nodes', 'api_url', "TEXT DEFAULT ''");
