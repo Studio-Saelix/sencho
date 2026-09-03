@@ -32,6 +32,7 @@ import { sweepStaleTempDirs as sweepStaleGitTempDirs, sweepGitManifestOrphans } 
 import { assertCreatesSettled, reclassifyInterruptedOperations, resolveInterruptedCreates } from '../services/gitops/createRecovery';
 import { loadMigrationManifests, migrateDirectGitStacks, migrateInlineBlueprints } from '../services/gitops/migrate';
 import { setGitOpsEventSink } from '../services/gitops/publish';
+import { SourceController } from '../services/gitops/SourceController';
 import { NotificationService } from '../services/NotificationService';
 import { sanitizeForLog } from '../utils/safeLog';
 import { PORT } from '../helpers/constants';
@@ -287,6 +288,7 @@ export async function startServer(server: Server): Promise<void> {
   FleetSyncRetryService.getInstance().start();
   SuppressionRetractionRetryService.getInstance().start();
   ImageUpdateService.getInstance().start();
+  SourceController.getInstance().start();
   SchedulerService.getInstance().start();
   MfaService.getInstance().start();
   MeshService.getInstance().start().catch((err) => {
