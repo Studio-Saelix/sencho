@@ -1987,6 +1987,13 @@ export class GitSourceService {
         const src = db.getGitSource(stackName);
         if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
         const gitopsApp = this.gitopsApplicationFor(stackName);
+        // fetchStarted has its own suspension guard, but recordGitOps swallows
+        // its rejection (so a fetch that already touched the filesystem is never
+        // failed out from under itself), which would let a suspended source keep
+        // cloning and staging pending updates. Stop before any of that starts.
+        if (gitopsApp?.suspended_at) {
+            throw new GitSourceError('OPERATION_IN_FLIGHT', `Reconciliation is suspended for ${stackName}.`);
+        }
         const gitopsOperationId = crypto.randomUUID();
         const gitopsEnv = this.gitopsEnvelope(gitopsOperationId, actor, 'pull');
         // A fetch that starts and never terminates is worse than one that is
@@ -2256,17 +2263,20 @@ export class GitSourceService {
     }
 
     /**
-     * Outcomes that prove a failure was actually persisted onto the
-     * application row. Many throw sites in pullLocked/applyLockedBody fire
-     * before any transition opens (missing config, stale commitSha, lock
-     * contention), so reconcile falls back to a classified result whenever
-     * the derived outcome is not one of these.
+     * Outcomes the application row already reflects truthfully, so reconcile
+     * trusts the derived result over a classified fallback. Most throw sites
+     * in pullLocked/applyLockedBody fire before any transition opens (missing
+     * config, stale commitSha, lock contention) and leave the row saying
+     * nothing about the failure, which is what the fallback covers;
+     * 'suspended' belongs here because its guards throw only when the row
+     * already, correctly, says so.
      */
     private static readonly FAILURE_REFLECTED_OUTCOMES: ReadonlySet<ReconcileOutcome> = new Set<ReconcileOutcome>([
         'failed_previous_intact',
         'retry_scheduled',
         'recovery_required',
         'blocked',
+        'suspended',
     ]);
 
     /** The settled result for a stack that carries no GitOps application at all. */
@@ -2425,6 +2435,89 @@ export class GitSourceService {
     }
 
     /**
+     * Stop acting on a source without forgetting anything about it: no new
+     * fetch, acceptance, or dispatch until resumed (enforced by the
+     * suspended_at checks at the top of pullLocked/applyLockedBody, not by
+     * this method itself). Takes the per-stack mutex not to reject a
+     * concurrent fetch or apply, but because sourceSuspended interrupts and
+     * clears any in-flight operation's active state, which would corrupt a
+     * genuinely running apply's own terminal transition; a suspend queued
+     * behind one instead takes effect once that work settles.
+     *
+     * A refused suspend is surfaced as a real error rather than swallowed:
+     * silently no-op'ing here would leave an operator believing a source is
+     * suspended when it is not, which is the same false-safety failure this
+     * method exists to prevent.
+     */
+    public async suspend(stackName: string, opts: { actor: string; reason?: string }): Promise<ReconcileResult> {
+        return this.withStackLock(stackName, async () => {
+            const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            if (!app) return GitSourceService.noApplicationResult();
+            const envelope = this.gitopsEnvelope(crypto.randomUUID(), opts.actor, 'suspend');
+            const reason = opts.reason?.trim() || 'Suspended by operator.';
+            try {
+                GitOpsTransitions.getInstance().sourceSuspended(app.id, reason, envelope);
+            } catch (error) {
+                if (error instanceof GitOpsTransitionError) {
+                    throw new GitSourceError('OPERATION_IN_FLIGHT', `Cannot suspend ${stackName}: ${error.message}`);
+                }
+                throw error;
+            }
+            return this.deriveReconcileResult(stackName);
+        });
+    }
+
+    /**
+     * Resume acting on a source. Does not itself fetch; the next scheduled
+     * poll, retry, or manual reconcile picks the source back up.
+     *
+     * Unlike suspend(), a refused resume is tolerated rather than surfaced.
+     * The result is read back from the row after the attempted write, so a
+     * resume that did not take (already not suspended, the application
+     * vanished, a transient persistence failure) still truthfully reports
+     * {outcome:'suspended', nextAction:'resume'} rather than a false
+     * "resumed". The caller cannot be told the source is unsuspended when it
+     * is not, so there is no false-safety risk to mirror suspend()'s rethrow.
+     */
+    public async resume(stackName: string, opts: { actor: string }): Promise<ReconcileResult> {
+        return this.withStackLock(stackName, async () => {
+            const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            if (!app) return GitSourceService.noApplicationResult();
+            const envelope = this.gitopsEnvelope(crypto.randomUUID(), opts.actor, 'resume');
+            this.recordGitOps(stackName, 'source resume', () => {
+                GitOpsTransitions.getInstance().sourceUnsuspended(app.id, envelope);
+            });
+            return this.deriveReconcileResult(stackName);
+        });
+    }
+
+    /**
+     * An explicit, operator-initiated re-evaluation: resolves the live
+     * application server-side rather than trusting a caller-supplied id, for
+     * callers that hold only a stack name, and drives a fresh fetch-intent
+     * reconcile through it.
+     *
+     * Scope note: the 'retry' trigger this passes has no observable effect
+     * today. reconcile() never reads request.trigger, and the fetch it drives
+     * records its own hardcoded 'pull' trigger regardless of caller, so this
+     * behaves exactly like any other fetch-intent reconcile. It exists as its
+     * own entry point in anticipation of a future permanent-failure gate that
+     * is expected to check the trigger before allowing an attempt through, at
+     * which point 'retry' needs to actually reach that check.
+     */
+    public async retry(stackName: string, opts: { actor: string }): Promise<ReconcileResult> {
+        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        if (!app) return GitSourceService.noApplicationResult();
+        return this.reconcile({
+            intent: 'fetch',
+            applicationId: app.id,
+            stackName,
+            trigger: 'retry',
+            actor: opts.actor,
+        });
+    }
+
+    /**
      * Route an accepted generation to its target. Blueprint mode always
      * blocks (BlueprintTargetAdapter; rollout orchestration does not exist
      * yet). Direct mode has no separate generation-based promotion pipeline
@@ -2543,6 +2636,12 @@ export class GitSourceService {
         const db = DatabaseService.getInstance();
         const src = db.getGitSource(stackName);
         if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
+        // Same reasoning as pullLocked's guard: applyStarted's own suspension
+        // check is swallowed by recordGitOps once promotion is already
+        // underway, so stop the promotion before it starts, not after.
+        if (this.gitopsApplicationFor(stackName)?.suspended_at) {
+            throw new GitSourceError('OPERATION_IN_FLIGHT', `Reconciliation is suspended for ${stackName}.`);
+        }
 
         if (!src.pending_commit_sha || !src.pending_compose_content) {
             throw new GitSourceError('GIT_ERROR', 'No pending pull to apply. Fetch the source again.');
@@ -3806,6 +3905,15 @@ export class GitSourceService {
             if (src.last_debounce_at !== null && (now - src.last_debounce_at) < WEBHOOK_DEBOUNCE_MS) {
                 if (diag) console.log(`[GitSource:diag] webhook debounced stack=${stackName} age=${now - src.last_debounce_at}ms`);
                 return { status: 'skipped', message: 'Rate limited (debounced).' };
+            }
+            // A suspended source is a deliberate operator choice, not a
+            // failure: reporting it as one would surface as a repeated
+            // delivery failure to the Git host, and hosts disable a webhook
+            // after enough of those. pullLocked's guard would catch this too,
+            // but only by throwing an error this method would then have to
+            // reinterpret from the exception itself.
+            if (this.gitopsApplicationFor(stackName)?.suspended_at) {
+                return { status: 'skipped', message: 'Reconciliation is suspended for this source.' };
             }
 
             let pullResult: PullResult;

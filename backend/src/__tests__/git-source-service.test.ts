@@ -22,6 +22,7 @@ import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
 import { StackOpLockService } from '../services/StackOpLockService';
 import {
+    buildDirectApplicationRow,
     buildGenerationRow,
     directSourceIdentity,
     newGitOpsId,
@@ -2563,6 +2564,183 @@ describe('GitSourceService.apply', () => {
                 saveSpy.mockRestore();
                 deploySpy.mockRestore();
             }
+        });
+    });
+
+    describe('suspend / resume / retry', () => {
+        it('suspends an active source and reflects it in the reconcile result', async () => {
+            const svc = await seedPending('suspend-basic', 'services:\n  x:\n    image: alpine\n', 's1s1s1s1s1s1s1s1s1s1s1s1s1s1s1s1s1s1s1s1');
+
+            const result = await svc.suspend('suspend-basic', { actor: 'tester', reason: 'maintenance window' });
+
+            expect(result.outcome).toBe('suspended');
+            expect(result.reason).toMatch(/maintenance window/i);
+            const app = liveApp('suspend-basic');
+            expect(app?.suspended_at).toBeTruthy();
+            expect(app?.source_suspended_reason).toBe('maintenance window');
+        });
+
+        it('suspends with a default reason when none is given', async () => {
+            const svc = await seedPending('suspend-default-reason', 'services:\n  x:\n    image: alpine\n', 's2s2s2s2s2s2s2s2s2s2s2s2s2s2s2s2s2s2s2s2');
+
+            const result = await svc.suspend('suspend-default-reason', { actor: 'tester' });
+
+            expect(result.outcome).toBe('suspended');
+            expect(liveApp('suspend-default-reason')?.source_suspended_reason).toBe('Suspended by operator.');
+        });
+
+        it('falls back to the default reason when only whitespace is given', async () => {
+            const svc = await seedPending('suspend-whitespace-reason', 'services:\n  x:\n    image: alpine\n', 's9s9s9s9s9s9s9s9s9s9s9s9s9s9s9s9s9s9s9s9');
+
+            await svc.suspend('suspend-whitespace-reason', { actor: 'tester', reason: '   ' });
+
+            expect(liveApp('suspend-whitespace-reason')?.source_suspended_reason).toBe('Suspended by operator.');
+        });
+
+        it('reports unknown when suspending a stack with no GitOps application', async () => {
+            const result = await GitSourceService.getInstance().suspend('suspend-no-app', { actor: 'tester' });
+
+            expect(result.outcome).toBe('unknown');
+        });
+
+        it('surfaces a real error, rather than a silent no-op, when suspending an application that is not live', async () => {
+            const config: DirectSourceConfig = {
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+            };
+            GitOpsStore.getInstance().insertApplication(buildDirectApplicationRow({
+                id: newGitOpsId(),
+                stackName: 'suspend-creating-app',
+                config,
+                identity: directSourceIdentity(config),
+                lifecycleStatus: 'creating',
+                at: Date.now(),
+            }));
+
+            await expect(GitSourceService.getInstance().suspend('suspend-creating-app', { actor: 'tester' }))
+                .rejects.toMatchObject({ code: 'OPERATION_IN_FLIGHT' });
+        });
+
+        it('actually stops a fetch, not just the projected outcome, once suspended', async () => {
+            const svc = await seedPending('suspend-blocks-fetch', 'services:\n  x:\n    image: alpine\n', 's6s6s6s6s6s6s6s6s6s6s6s6s6s6s6s6s6s6s6s6');
+            await svc.suspend('suspend-blocks-fetch', { actor: 'tester', reason: 'pausing' });
+            mockGitClone.mockClear();
+
+            await expect(svc.pull('suspend-blocks-fetch')).rejects.toMatchObject({ code: 'OPERATION_IN_FLIGHT' });
+
+            expect(mockGitClone).not.toHaveBeenCalled();
+        });
+
+        it('actually stops an apply once suspended, even for a pending commit fetched before suspension', async () => {
+            const sha = 's7s7s7s7s7s7s7s7s7s7s7s7s7s7s7s7s7s7s7s7';
+            const svc = await seedPending('suspend-blocks-apply', 'services:\n  x:\n    image: alpine\n', sha);
+            await svc.suspend('suspend-blocks-apply', { actor: 'tester', reason: 'pausing' });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+
+            try {
+                await expect(svc.apply('suspend-blocks-apply', sha, SKIP_PLAN_FINGERPRINT))
+                    .rejects.toMatchObject({ code: 'OPERATION_IN_FLIGHT' });
+                expect(saveSpy).not.toHaveBeenCalled();
+            } finally {
+                saveSpy.mockRestore();
+            }
+        });
+
+        it('a webhook delivery to a suspended source is skipped, not reported as a failed pull', async () => {
+            const svc = await seedPending('suspend-webhook', 'services:\n  x:\n    image: alpine\n', 'scscscscscscscscscscscscscscscscscscscsc');
+            await svc.suspend('suspend-webhook', { actor: 'tester', reason: 'pausing' });
+            mockGitClone.mockClear();
+            const activitySpy = vi.spyOn(DatabaseService.getInstance(), 'addNotificationHistory');
+
+            try {
+                const result = await svc.handleWebhookPull('suspend-webhook');
+
+                expect(result.status).toBe('skipped');
+                expect(mockGitClone).not.toHaveBeenCalled();
+                expect(activitySpy).not.toHaveBeenCalled();
+            } finally {
+                activitySpy.mockRestore();
+            }
+        });
+
+        it('resumes a suspended source', async () => {
+            const svc = await seedPending('resume-basic', 'services:\n  x:\n    image: alpine\n', 's3s3s3s3s3s3s3s3s3s3s3s3s3s3s3s3s3s3s3s3');
+            await svc.suspend('resume-basic', { actor: 'tester', reason: 'pausing' });
+
+            const result = await svc.resume('resume-basic', { actor: 'tester' });
+
+            expect(result.outcome).not.toBe('suspended');
+            const app = liveApp('resume-basic');
+            expect(app?.suspended_at).toBeNull();
+            expect(app?.source_suspended_reason).toBeNull();
+        });
+
+        it('resuming a source that is not suspended is a harmless no-op, not an error', async () => {
+            const svc = await seedPending('resume-noop', 'services:\n  x:\n    image: alpine\n', 's8s8s8s8s8s8s8s8s8s8s8s8s8s8s8s8s8s8s8s8');
+
+            const result = await svc.resume('resume-noop', { actor: 'tester' });
+
+            expect(result.outcome).toBe('candidate_already_fetched');
+        });
+
+        it('pulling and applying again succeeds once a suspended source is resumed', async () => {
+            const sha = 'sbsbsbsbsbsbsbsbsbsbsbsbsbsbsbsbsbsbsbsb';
+            const svc = await seedPending('suspend-resume-roundtrip', 'services:\n  x:\n    image: alpine\n', sha);
+            await svc.suspend('suspend-resume-roundtrip', { actor: 'tester', reason: 'pausing' });
+            await expect(svc.pull('suspend-resume-roundtrip')).rejects.toMatchObject({ code: 'OPERATION_IN_FLIGHT' });
+            await expect(svc.apply('suspend-resume-roundtrip', sha, SKIP_PLAN_FINGERPRINT))
+                .rejects.toMatchObject({ code: 'OPERATION_IN_FLIGHT' });
+
+            await svc.resume('suspend-resume-roundtrip', { actor: 'tester' });
+            const pullResult = await svc.pull('suspend-resume-roundtrip');
+            expect(pullResult.candidateReady).toBe(true);
+
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+            try {
+                const applyResult = await svc.apply('suspend-resume-roundtrip', sha, SKIP_PLAN_FINGERPRINT);
+                expect(applyResult.applied).toBe(true);
+            } finally {
+                validateSpy.mockRestore();
+                saveSpy.mockRestore();
+            }
+        });
+
+        it('retries by driving a fresh fetch-intent reconcile', async () => {
+            const svc = await seedPending('retry-basic', 'services:\n  x:\n    image: alpine\n', 's5s5s5s5s5s5s5s5s5s5s5s5s5s5s5s5s5s5s5s5');
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+
+            try {
+                const result = await svc.retry('retry-basic', { actor: 'tester' });
+                expect(result.outcome).toBe('candidate_already_fetched');
+                expect(reconcileSpy).toHaveBeenCalledWith(expect.objectContaining({ trigger: 'retry', intent: 'fetch' }));
+            } finally {
+                validateSpy.mockRestore();
+                reconcileSpy.mockRestore();
+            }
+        });
+
+        it('reports unknown when retrying a stack with no GitOps application', async () => {
+            const result = await GitSourceService.getInstance().retry('retry-no-app', { actor: 'tester' });
+
+            expect(result.outcome).toBe('unknown');
+        });
+
+        it('retrying a suspended source reports suspended, not a generic unknown', async () => {
+            const svc = await seedPending('retry-while-suspended', 'services:\n  x:\n    image: alpine\n', 'sasasasasasasasasasasasasasasasasasasasa');
+            await svc.suspend('retry-while-suspended', { actor: 'tester', reason: 'pausing' });
+
+            const result = await svc.retry('retry-while-suspended', { actor: 'tester' });
+
+            expect(result.outcome).toBe('suspended');
+            expect(result.nextAction).toBe('resume');
         });
     });
 
