@@ -82,10 +82,11 @@ export interface PolicyEnforcementResult {
  * `unavailable` as `allowed`, or a GitOps source could accept a candidate
  * nothing actually proved safe.
  */
-export type CandidatePolicyEvaluation =
-    | { status: 'allowed'; policy?: ScanPolicy }
-    | { status: 'blocked'; policy?: ScanPolicy; violations: PolicyViolation[] }
-    | { status: 'unavailable'; policy?: ScanPolicy; reason: string };
+export type CandidatePolicyEvaluation = { policy?: ScanPolicy } & (
+    | { status: 'allowed' }
+    | { status: 'blocked'; violations: PolicyViolation[] }
+    | { status: 'unavailable'; reason: string }
+);
 
 const TRIVY_MISSING_NOTIFY_COOLDOWN_MS = 60 * 60 * 1000;
 // Growth bounded by configured-policy fanout (only stacks with an enabled
@@ -488,9 +489,10 @@ export async function enforcePolicyForImageRefs(
 
 /**
  * Tri-state candidate evaluation for GitOps source acceptance, built on the
- * same evaluator the deploy-time gate uses. The caller supplies the
- * candidate's own image refs (resolved from the staged compose, not the live
- * stack), so this never reads compose from disk itself.
+ * same evaluator the deploy-time gate uses, with the candidate's own image
+ * refs supplied directly rather than read from disk. Has side effects:
+ * writes a policy.bypass/policy.suppression_pass audit row when applicable,
+ * and may dispatch the once-per-hour Trivy-missing operator notification.
  */
 export async function evaluateCandidatePolicy(
     stackName: string,
@@ -498,7 +500,14 @@ export async function evaluateCandidatePolicy(
     imageRefs: string[],
     opts: PolicyEnforcementOptions,
 ): Promise<CandidatePolicyEvaluation> {
-    const result = await enforcePolicyForImageRefs(stackName, nodeId, imageRefs, opts);
+    const result = await enforcePolicyForImageRefs(stackName, nodeId, imageRefs, {
+        ...opts,
+        // Undefaulted, these attribute the audit row to a deploy path
+        // (enforcePolicyForImageRefs's own default), which never happened
+        // for a pre-acceptance candidate.
+        auditMethod: opts.auditMethod ?? 'POST',
+        auditPath: opts.auditPath ?? `/api/stacks/${stackName}/git-source/candidate`,
+    });
     if (result.trivyMissing) {
         return { status: 'unavailable', policy: result.policy, reason: 'Vulnerability scanner is unavailable' };
     }

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
 import { encodeArtifactEvidenceJson } from '../services/gitops/json';
-import { GitOpsStore } from '../services/gitops/store';
+import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { projectApplication } from '../services/gitops/derive';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
@@ -572,7 +572,7 @@ describe('gitops transitions', () => {
       envelope: env,
     });
 
-    const result = tx.targetApplied('app-ta', 1, {
+    const result = tx.targetApplied(1, {
       applicationId: 'app-ta',
       generationId: 'gen-ta',
       artifactSetId: 'art-ta',
@@ -590,6 +590,33 @@ describe('gitops transitions', () => {
     expect(target.source_acceptance_ref).toBe('acc-ta');
   });
 
+  it('targetApplied refuses to bind a target on a non-Direct application', async () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
+    const env = envelope('op-tam');
+
+    // A genuine Blueprint application: no Git identity, so the "accepted
+    // generation" and target row below are constructed directly rather than
+    // through the Direct fetch/candidate/apply path, which this mode does
+    // not have.
+    tx.activateInlineBlueprint({ application: blankInlineApplication('app-tam', 900, env.at), envelope: env });
+    store.insertGeneration(gen('gen-tam', 'app-tam'));
+    DatabaseService.getInstance().getDb().prepare(
+      "UPDATE gitops_applications SET accepted_generation_id = 'gen-tam' WHERE id = 'app-tam'",
+    ).run();
+    store.upsertTarget(emptyTargetRow('app-tam', 1, env.at));
+
+    expect(() => tx.targetApplied(1, {
+      applicationId: 'app-tam',
+      generationId: 'gen-tam',
+      artifactSetId: 'art-tam',
+      sourceAcceptanceId: 'acc-tam',
+      authority: 'operator',
+      envelope: env,
+    })).toThrow(/direct/i);
+  });
+
   it('targetApplied refuses a generation the application has not accepted', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
@@ -600,7 +627,7 @@ describe('gitops transitions', () => {
     tx.fetched('app-tar', 'deadbeef', envelope('op-f-tar'));
     tx.candidateReady('app-tar', 'gen-tar', false, envelope('op-c-tar'));
 
-    expect(() => tx.targetApplied('app-tar', 1, {
+    expect(() => tx.targetApplied(1, {
       applicationId: 'app-tar',
       generationId: 'gen-tar',
       artifactSetId: 'art-tar',

@@ -869,4 +869,16 @@ describe('evaluateCandidatePolicy', () => {
 
     expect(composeStub.listStackImages).not.toHaveBeenCalled();
   });
+
+  it('does not attribute its audit trail to a deploy that never happened', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 10, highest_severity: 'CRITICAL', critical_count: 1 }));
+
+    await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: true, actor: 'admin' });
+
+    expect(dbStub.insertAuditLog).toHaveBeenCalledTimes(1);
+    const entry = dbStub.insertAuditLog.mock.calls[0][0];
+    expect(entry.path).not.toMatch(/\/deploy$/);
+  });
 });

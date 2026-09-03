@@ -562,9 +562,7 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
         requirePlanFingerprint: true,
       },
     );
-    // Cache invalidation and the post-deploy scan now run inside
-    // GitSourceService.apply() itself, so every trigger (manual, webhook,
-    // and later poll/retry/resume) gets them, not only this route.
+    // Cache invalidation and the post-deploy scan now run inside GitSourceService.apply() itself.
     const shortSha = commitSha.trim().slice(0, 7);
     if (result.deployed) {
       console.log('[GitSource] Applied commit %s to %s (deployed)', sanitizeForLog(shortSha), sanitizeForLog(stackName));

@@ -122,7 +122,7 @@ export type SourceFacet =
   | (SourceIdentityFields & { status: 'source_superseded'; supersededGenerationId: string })
   | (SourceIdentityFields & { status: 'applying'; activeOperationId: string; activeGenerationId: string })
   | (SourceIdentityFields & { status: 'source_retry_scheduled'; retryAt: number; retryCount: number })
-  | (SourceIdentityFields & { status: 'source_suspended'; suspendedAt: number })
+  | (SourceIdentityFields & { status: 'source_suspended'; suspendedAt: number; suspendedReason: string | null })
   | (SourceIdentityFields & {
       status: 'source_failed';
       failureStage: 'fetch' | 'validation' | 'apply' | 'create';

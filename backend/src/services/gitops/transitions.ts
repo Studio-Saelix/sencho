@@ -407,12 +407,15 @@ export class GitOpsTransitions {
    * generation. Refuses a generation the application has not accepted, so a
    * dispatch cannot bind a target to source content nothing authorized.
    */
-  targetApplied(applicationId: string, nodeId: number, args: AppliedArgs): TransitionResult {
-    const app = this.requireApp(applicationId);
+  targetApplied(nodeId: number, args: AppliedArgs): TransitionResult {
+    const app = this.requireApp(args.applicationId);
+    if (app.target_mode !== 'direct') {
+      throw new GitOpsTransitionError('target application is not direct');
+    }
     if (app.accepted_generation_id !== args.generationId) {
       throw new GitOpsTransitionError('generation is not accepted');
     }
-    return this.mutateTarget(applicationId, nodeId, args.envelope, 'target_applied', args.generationId, (target) => {
+    return this.mutateTarget(args.applicationId, nodeId, args.envelope, 'target_applied', args.generationId, (target) => {
       if (target.target_status !== 'active') {
         throw new GitOpsTransitionError('cannot apply to a tombstoned target');
       }

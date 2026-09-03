@@ -2825,8 +2825,13 @@ stmt.run('gitops_schema_version', '1');
             this.db.prepare(
                 'CREATE UNIQUE INDEX IF NOT EXISTS idx_notif_history_dedupe_key ON notification_history(dedupe_key) WHERE dedupe_key IS NOT NULL'
             ).run();
-        } catch {
-            // index already present or partial-index syntax unsupported
+        } catch (err) {
+            // Unlike a pure performance index, this one is the ON CONFLICT
+            // target every addNotificationHistory() insert names. If it is
+            // missing, every notification write in the product fails, not
+            // just GitOps ones, so a silent catch here would turn into an
+            // unexplained total outage instead of a diagnosable startup log.
+            console.error('[DatabaseService] Failed to create notification dedupe index:', err);
         }
     }
 
@@ -4797,7 +4802,7 @@ stmt.run('gitops_schema_version', '1');
             const existing = this.db.prepare(
                 'SELECT * FROM notification_history WHERE dedupe_key = ?',
             ).get(dedupeKey);
-            return this.mapNotificationRow(existing as any);
+            return this.mapNotificationRow(existing);
         }
 
         return {
