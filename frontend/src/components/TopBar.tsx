@@ -97,9 +97,9 @@ function LauncherHamburgerIcon() {
   );
 }
 
-function TopBarMenuMasthead({ title, className }: { title: string; className?: string }) {
+function TopBarMenuMasthead({ title }: { title: string }) {
   return (
-    <div className={cn('relative overflow-hidden', className)}>
+    <div className="relative overflow-hidden">
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-brand/[0.05] via-transparent to-transparent" />
       <div className="absolute inset-y-0 left-0 w-[2px] bg-brand/60" />
       <div className="relative flex items-center px-[var(--density-row-x)] py-[var(--density-tile-y)]">
@@ -109,11 +109,24 @@ function TopBarMenuMasthead({ title, className }: { title: string; className?: s
   );
 }
 
-// One scroll owner, not two: the outer content clips to the viewport-aware
-// max-height (from the base DropdownMenuContent) via overflow-hidden and never
-// itself scrolls; ScrollArea's Radix viewport is the sole scrolling element, so
-// the panel stays usable (masthead pinned, destination list scrolling) instead
-// of overflowing off-screen at constrained heights.
+// One scroll owner. The popper content and the ScrollArea viewport are both
+// capped at the available height, but the content clips (overflow-hidden,
+// overriding the base DropdownMenuContent's overflow-y-auto) and only the
+// viewport scrolls.
+//
+// The viewport's cap has to be a max-height on the viewport itself. The viewport
+// is sized by `h-full` (see ui/scroll-area), and a percentage height only
+// resolves against a containing block whose height is definite. The popper
+// content is `height: auto` clamped by `max-height`, which is not definite, so
+// neither is anything sized from it, a flex item included, so `h-full` falls
+// back to auto and the viewport grows to its full content height with nothing
+// to scroll. A max-height clamps the viewport whatever its height resolves to.
+// (`<ScrollArea className="flex-1">` stays correct wherever the flex
+// container's own height is definite, as in the sheets and sidebars.)
+//
+// The masthead scrolls with the list rather than being pinned outside the
+// scroll region, so the cap needs no masthead-height arithmetic and stays
+// correct at every density setting.
 function PanelMenuContent({
   title,
   children,
@@ -122,9 +135,9 @@ function PanelMenuContent({
   children: ReactNode;
 }) {
   return (
-    <DropdownMenuContent align="start" sideOffset={8} className="flex w-56 flex-col overflow-hidden rounded-md p-0">
-      {title ? <TopBarMenuMasthead title={title} className="shrink-0" /> : null}
-      <ScrollArea className="min-h-0 flex-1">
+    <DropdownMenuContent align="start" sideOffset={8} className="w-56 overflow-hidden rounded-md p-0">
+      <ScrollArea className="[&>[data-radix-scroll-area-viewport]]:max-h-[var(--radix-dropdown-menu-content-available-height)]">
+        {title ? <TopBarMenuMasthead title={title} /> : null}
         <div className={cn(title && 'border-t border-card-border/60', 'p-1')}>{children}</div>
       </ScrollArea>
     </DropdownMenuContent>

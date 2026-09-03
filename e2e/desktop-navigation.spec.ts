@@ -139,7 +139,7 @@ test.describe('Desktop navigation styles', () => {
     expect(await durationMs()).toBeLessThan(1);
   });
 
-  test('the Navigate panel has one vertical scroll owner and no horizontal scrollbar', async ({ page }) => {
+  test('the Navigate panel actually scrolls to reach destinations below the fold', async ({ page }) => {
     await page.setViewportSize({ width: 1200, height: 420 });
     const trigger = page.getByRole('button', { name: 'Open navigation launcher' });
     await trigger.click();
@@ -148,36 +148,94 @@ test.describe('Desktop navigation styles', () => {
     const viewport = panel.locator('[data-radix-scroll-area-viewport]');
     await expect(viewport).toBeVisible();
 
-    // Exactly one scroll owner: the ScrollArea viewport scrolls vertically, the
-    // outer menu only clips. This is the property that regressed before, when the
-    // menu's own overflow-hidden replaced the base dropdown's overflow-y-auto and
-    // left the panel capped but unscrollable. Asserted structurally rather than by
-    // measuring overflow, which depends on Radix having applied its available-height
-    // variable at read time and on how many destinations the account can reach.
-    const overflow = await viewport.evaluate((el) => {
-      const outer = el.closest('[role="menu"]') as HTMLElement;
-      return {
-        viewportY: getComputedStyle(el).overflowY,
-        viewportX: getComputedStyle(el).overflowX,
-        outerY: getComputedStyle(outer).overflowY,
-      };
-    });
-    expect(['auto', 'scroll']).toContain(overflow.viewportY);
-    expect(overflow.outerY).toBe('hidden');
-    expect(overflow.viewportX).not.toBe('scroll');
+    // A shrunken nav set would trip the overflow assertion below with a confusing
+    // message, so fail here first, naming the real cause.
+    expect(await panel.getByRole('menuitem').count()).toBeGreaterThan(8);
 
-    // No horizontal overflow, and the panel stays inside the viewport.
+    // The viewport must have real internal overflow. This is the assertion that
+    // matters: the panel previously rendered at its full content height, reported
+    // scrollHeight === clientHeight, and was merely clipped by an ancestor, so it
+    // looked capped while ignoring every wheel event. Checking only the computed
+    // overflow-y properties passes in exactly that broken state.
+    const metrics = await viewport.evaluate((el) => ({
+      clientHeight: el.clientHeight,
+      scrollHeight: el.scrollHeight,
+      scrollWidth: el.scrollWidth,
+      clientWidth: el.clientWidth,
+      viewportOverflowX: getComputedStyle(el).overflowX,
+      outerOverflowY: getComputedStyle(el.closest('[role="menu"]') as HTMLElement).overflowY,
+    }));
+    expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
+
+    // Exactly one scroll owner: the outer menu clips rather than scrolling. Its
+    // scrollHeight is not asserted, because the menu's 1px border alone puts it a
+    // couple of pixels over its clientHeight without it being scrollable at all.
+    expect(metrics.outerOverflowY).toBe('hidden');
+
+    // No horizontal overflow, and the panel stays inside the browser viewport.
+    // overflow-x is checked directly, not just measured: a reserved scrollbar
+    // gutter from overflow-x: scroll would pass the width comparison below with
+    // no actual overflow present.
+    expect(metrics.viewportOverflowX).not.toBe('scroll');
+    expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth + 1);
     const box = await panel.boundingBox();
     expect(box).not.toBeNull();
     expect(box!.y + box!.height).toBeLessThanOrEqual(420 + 1);
-    const { scrollWidth, clientWidth } = await viewport.evaluate((el) => ({
-      scrollWidth: el.scrollWidth,
-      clientWidth: el.clientWidth,
-    }));
-    expect(scrollWidth).toBeLessThanOrEqual(clientWidth + 1);
 
-    // Keyboard navigation still reaches the destinations inside the scroll region.
-    await page.keyboard.press('ArrowDown');
-    await expect(panel.getByRole('menuitem').first()).toBeFocused();
+    // Keyboard reaches a destination below the fold and brings it fully into view.
+    // End rather than ArrowDown, because ArrowDown landing on the first item is
+    // stock roving focus and holds whether or not anything scrolls. Done before
+    // any pointer movement, since Radix focuses a menu item on pointermove.
+    const last = panel.getByRole('menuitem').last();
+    await page.keyboard.press('End');
+    await expect(last).toBeFocused();
+    await expect(last).toBeInViewport({ ratio: 1 });
+
+    // Back to the top so the wheel below starts from a known position.
+    await viewport.evaluate((el) => { el.scrollTop = 0; });
+
+    // Genuine mouse-wheel input over the panel must move it. Wheel input is the
+    // exact path the regression ignored, so drive it rather than assigning scrollTop.
+    const vpBox = await viewport.boundingBox();
+    await page.mouse.move(vpBox!.x + vpBox!.width / 2, vpBox!.y + vpBox!.height / 2);
+    await page.mouse.wheel(0, 200);
+    await expect.poll(() => viewport.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+
+    // ...and it moved the viewport only, leaving the outer menu at rest: an
+    // overflow-hidden element cannot be wheel-scrolled, so this is a fixed
+    // invariant rather than something to poll for.
+    expect(await panel.evaluate((el) => el.scrollTop)).toBe(0);
+
+    // Keep wheeling to the bottom rather than assuming one gesture covers the whole
+    // range, so adding destinations later cannot fail this for a reason unrelated
+    // to scrolling.
+    await expect.poll(async () => {
+      await page.mouse.wheel(0, 200);
+      return viewport.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
+    }).toBeLessThanOrEqual(1);
+
+    // The last destination is genuinely reachable by mouse, not just present.
+    await expect(last).toBeInViewport({ ratio: 1 });
+  });
+
+  test('the Navigate panel sizes to its content when the viewport is tall', async ({ page }) => {
+    // The mirror of the test above, guarding the other direction: the cap has to
+    // track the popper's available height rather than a fixed pixel value. A
+    // hardcoded cap would keep every assertion above green while needlessly
+    // cropping the panel on a roomy screen.
+    await page.setViewportSize({ width: 1400, height: 900 });
+    const trigger = page.getByRole('button', { name: 'Open navigation launcher' });
+    await trigger.click();
+
+    const panel = page.getByRole('menu').filter({ has: page.getByText('Navigate', { exact: true }) });
+    const viewport = panel.locator('[data-radix-scroll-area-viewport]');
+    await expect(viewport).toBeVisible();
+
+    // Content fits without being clipped when the viewport is roomy enough.
+    const metrics = await viewport.evaluate((el) => ({
+      clientHeight: el.clientHeight,
+      scrollHeight: el.scrollHeight,
+    }));
+    expect(metrics.scrollHeight).toBeLessThanOrEqual(metrics.clientHeight + 1);
   });
 });

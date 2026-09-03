@@ -364,16 +364,35 @@ describe('TopBar Compact launcher hamburger', () => {
     expect(trigger).toHaveAttribute('data-state', 'open');
   });
 
-  it('the Navigate panel has one scroll owner: the outer content clips, the ScrollArea viewport scrolls', async () => {
+  it('the Navigate panel caps the ScrollArea viewport, not the menu content', async () => {
     const user = userEvent.setup();
     renderTopBar({ navMode: 'compact', navModel: emptyModel });
     await user.click(screen.getByRole('button', { name: 'Open navigation launcher' }));
     const masthead = await screen.findByText('Navigate', { selector: '.font-heading' });
     const panel = masthead.closest('[role="menu"]') as HTMLElement;
     expect(panel).not.toBeNull();
-    expect(panel.className).toContain('overflow-hidden');
-    const viewport = panel.querySelector('[data-radix-scroll-area-viewport]');
+
+    // jsdom has no layout, so the real check is the e2e scroll test. This pins the
+    // exact utility carrying the cap, because renaming or dropping it silently
+    // restores the broken layout. It cannot verify where the cap lands at runtime.
+    const viewport = panel.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement;
     expect(viewport).not.toBeNull();
+    // Matched with one regex spanning both the target and the variable, not two
+    // independent toContain calls: the utility carrying the cap has to actually
+    // select the viewport, so a cap that drifts back onto an unrelated ancestor
+    // class still fails this even though each substring is present somewhere in
+    // the root's className. Tolerant of the equivalent Tailwind v4 shorthand
+    // (`max-h-(--x)` instead of `max-h-[var(--x)]`).
+    const scrollAreaRoot = viewport.parentElement as HTMLElement;
+    expect(scrollAreaRoot.className).toMatch(
+      /\[&>\[data-radix-scroll-area-viewport\]\][^\s]*--radix-dropdown-menu-content-available-height/,
+    );
+
+    // The outer content clips so it can never become a second scroll owner, and
+    // the masthead sits inside the scroll region so the cap needs no arithmetic.
+    expect(panel.className).toContain('overflow-hidden');
+    expect(viewport.contains(masthead)).toBe(true);
+
     // No horizontal scrollbar is introduced by the default ScrollArea usage.
     expect(panel.querySelector('[data-orientation="horizontal"]')).toBeNull();
   });
