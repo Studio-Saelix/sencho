@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import type { NotificationHistory } from '../services/DatabaseService';
 
 let tmpDir: string;
 let DatabaseService: any;
@@ -201,8 +202,8 @@ describe('DatabaseService - notification history GitOps dedupe', () => {
     });
 
     expect(second.id).toBe(first.id);
-    const history = db.getNotificationHistory(0, 200);
-    const matches = history.filter((n: any) => n.dedupe_key === 'gitops:app-1:op-1');
+    const history: NotificationHistory[] = db.getNotificationHistory(0, 200);
+    const matches = history.filter((n) => n.dedupe_key === 'gitops:app-1:op-1');
     expect(matches).toHaveLength(1);
     expect(matches[0].message).toBe('source reconciled');
   });
@@ -211,8 +212,8 @@ describe('DatabaseService - notification history GitOps dedupe', () => {
     db.addNotificationHistory(0, { level: 'info', message: 'plain a', timestamp: Date.now() });
     db.addNotificationHistory(0, { level: 'info', message: 'plain b', timestamp: Date.now() });
 
-    const history = db.getNotificationHistory(0, 200);
-    expect(history.filter((n: any) => n.message === 'plain a' || n.message === 'plain b')).toHaveLength(2);
+    const history: NotificationHistory[] = db.getNotificationHistory(0, 200);
+    expect(history.filter((n) => n.message === 'plain a' || n.message === 'plain b')).toHaveLength(2);
   });
 });
 

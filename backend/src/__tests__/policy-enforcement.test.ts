@@ -870,6 +870,47 @@ describe('evaluateCandidatePolicy', () => {
     expect(composeStub.listStackImages).not.toHaveBeenCalled();
   });
 
+  it('reports unavailable, not allowed, for an image reference that cannot be scanned', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+
+    const result = await evaluateCandidatePolicy('web', 1, ['not a valid ref!!'], { bypass: false, actor: 'u' });
+
+    expect(result.status).toBe('unavailable');
+    expect(trivyStub.scanImagePreflight).not.toHaveBeenCalled();
+  });
+
+  it('reports unavailable, not blocked, when the scanner throws for every image', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+    trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+
+    const result = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'u' });
+
+    expect(result.status).toBe('unavailable');
+  });
+
+  it('still reports blocked when at least one image has a genuine scanned violation', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+    trivyStub.scanImagePreflight
+      .mockRejectedValueOnce(new Error('scan process crashed'))
+      .mockResolvedValueOnce(mkScan({ id: 11, highest_severity: 'CRITICAL', critical_count: 1 }));
+
+    const result = await evaluateCandidatePolicy('web', 1, ['unreachable:1', 'nginx:1.27'], { bypass: false, actor: 'u' });
+
+    expect(result.status).toBe('blocked');
+  });
+
+  it('honors an explicit bypass even when the scanner is unavailable', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(false);
+
+    const result = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: true, actor: 'admin' });
+
+    expect(result.status).toBe('allowed');
+  });
+
   it('does not attribute its audit trail to a deploy that never happened', async () => {
     dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
     trivyStub.isTrivyAvailable.mockReturnValue(true);

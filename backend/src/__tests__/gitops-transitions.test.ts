@@ -553,6 +553,33 @@ describe('gitops transitions', () => {
     expect(target.candidate_generation_id).toBe('gen-sa');
   });
 
+  it('sourceAccepted refuses to accept a candidate while the source is suspended', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const env = envelope('op-sas');
+    tx.activateDirect({ application: app('app-sas', 'sas-web'), nodeId: 1, envelope: env });
+    store.insertGeneration(gen('gen-sas', 'app-sas'));
+    tx.fetchStarted('app-sas', envelope('op-f-sas'));
+    tx.fetched('app-sas', 'deadbeef', envelope('op-f-sas'));
+    tx.candidateReady('app-sas', 'gen-sas', false, envelope('op-c-sas'));
+    tx.applyStarted('app-sas', 'gen-sas', envelope('op-sas'));
+    tx.sourceSuspended('app-sas', 'operator paused sync', envelope('op-susp-sas'));
+
+    expect(() => tx.sourceAccepted({
+      applicationId: 'app-sas',
+      generationId: 'gen-sas',
+      artifactSetId: 'art-sas',
+      sourceAcceptanceId: 'acc-sas',
+      authority: 'operator',
+      envelope: envelope('op-sas-2'),
+    })).toThrow(/suspended/);
+
+    const application = store.getApplication('app-sas')!;
+    expect(application.accepted_generation_id).toBeNull();
+    expect(application.candidate_generation_id).toBe('gen-sas');
+    expect(application.suspended_at).not.toBeNull();
+  });
+
   it('targetApplied binds a Direct target only after the generation is accepted', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
@@ -588,6 +615,79 @@ describe('gitops transitions', () => {
     expect(target.candidate_generation_id).toBeNull();
     expect(target.expected_artifact_set_id).toBe('art-ta');
     expect(target.source_acceptance_ref).toBe('acc-ta');
+  });
+
+  it('targetApplied refuses a delayed dispatch that would erase a newer candidate', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const env = envelope('op-tan');
+    tx.activateDirect({ application: app('app-tan', 'tan-web'), nodeId: 1, envelope: env });
+    store.insertGeneration(gen('gen-tan-1', 'app-tan'));
+    tx.fetchStarted('app-tan', envelope('op-f-tan-1'));
+    tx.fetched('app-tan', 'deadbeef', envelope('op-f-tan-1'));
+    tx.candidateReady('app-tan', 'gen-tan-1', false, envelope('op-c-tan-1'));
+    tx.applyStarted('app-tan', 'gen-tan-1', envelope('op-tan'));
+    tx.sourceAccepted({
+      applicationId: 'app-tan',
+      generationId: 'gen-tan-1',
+      artifactSetId: 'art-tan-1',
+      sourceAcceptanceId: 'acc-tan-1',
+      authority: 'operator',
+      envelope: env,
+    });
+    // A newer revision arrives and supersedes generation 1 as the target's
+    // current candidate, before generation 1's dispatch ever binds a target.
+    store.insertGeneration(gen('gen-tan-2', 'app-tan'));
+    tx.fetchStarted('app-tan', envelope('op-f-tan-2'));
+    tx.fetched('app-tan', 'cafed00d', envelope('op-f-tan-2'));
+    tx.candidateReady('app-tan', 'gen-tan-2', false, envelope('op-c-tan-2'));
+
+    // Generation 1's delayed dispatch must not silently erase generation 2's
+    // candidate, even though generation 1 is (still) the accepted generation.
+    expect(() => tx.targetApplied(1, {
+      applicationId: 'app-tan',
+      generationId: 'gen-tan-1',
+      artifactSetId: 'art-tan-1',
+      sourceAcceptanceId: 'acc-tan-1',
+      authority: 'operator',
+      envelope: envelope('op-ta-delayed'),
+    })).toThrow(/candidate/);
+
+    const target = store.getTarget('app-tan', 1)!;
+    expect(target.candidate_generation_id).toBe('gen-tan-2');
+    expect(target.applied_generation_id).toBeNull();
+  });
+
+  it('targetApplied refuses a source acceptance reference that does not match what was accepted', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const env = envelope('op-tar2');
+    tx.activateDirect({ application: app('app-tar2', 'tar2-web'), nodeId: 1, envelope: env });
+    store.insertGeneration(gen('gen-tar2', 'app-tar2'));
+    tx.fetchStarted('app-tar2', envelope('op-f-tar2'));
+    tx.fetched('app-tar2', 'deadbeef', envelope('op-f-tar2'));
+    tx.candidateReady('app-tar2', 'gen-tar2', false, envelope('op-c-tar2'));
+    tx.applyStarted('app-tar2', 'gen-tar2', envelope('op-tar2'));
+    tx.sourceAccepted({
+      applicationId: 'app-tar2',
+      generationId: 'gen-tar2',
+      artifactSetId: 'art-tar2',
+      sourceAcceptanceId: 'acc-tar2-real',
+      authority: 'operator',
+      envelope: env,
+    });
+
+    expect(() => tx.targetApplied(1, {
+      applicationId: 'app-tar2',
+      generationId: 'gen-tar2',
+      artifactSetId: 'art-tar2',
+      sourceAcceptanceId: 'acc-tar2-forged',
+      authority: 'operator',
+      envelope: envelope('op-ta-forged'),
+    })).toThrow(/acceptance/);
+
+    const target = store.getTarget('app-tar2', 1)!;
+    expect(target.source_acceptance_ref).not.toBe('acc-tar2-forged');
   });
 
   it('targetApplied refuses to bind a target on a non-Direct application', async () => {

@@ -507,11 +507,28 @@ export async function evaluateCandidatePolicy(
         // for a pre-acceptance candidate.
         auditMethod: opts.auditMethod ?? 'POST',
         auditPath: opts.auditPath ?? `/api/stacks/${stackName}/git-source/candidate`,
-    });
+        // The deploy gate silently skips an unscannable ref (fail-open,
+        // since it must never block an operator's deploy on its own
+        // inability to evaluate). Candidate evaluation is the opposite: an
+        // unscannable ref must surface as evidence, not vanish, so it can be
+        // told apart from a genuinely clean scan below.
+    }, undefined, true);
+    // Only trivyMissing forgoes bypass consideration below it because it is
+    // the one path that returns bypassed: false unconditionally; every other
+    // branch of the shared evaluator already honors opts.bypass itself.
     if (result.trivyMissing) {
+        if (opts.bypass) return { status: 'allowed', policy: result.policy };
         return { status: 'unavailable', policy: result.policy, reason: 'Vulnerability scanner is unavailable' };
     }
     if (!result.ok) {
+        // A violation with no `error` is a genuine scanned policy match; one
+        // with `error` set is an invalid ref, a scan failure, or an
+        // evaluation failure -- evidence Sencho could not prove either way,
+        // not a proven violation. All-unproven must not read as `blocked`.
+        const hasGenuineViolation = result.violations.some((v) => !v.error);
+        if (!hasGenuineViolation) {
+            return { status: 'unavailable', policy: result.policy, reason: 'Candidate could not be fully evaluated' };
+        }
         return { status: 'blocked', policy: result.policy, violations: result.violations };
     }
     return { status: 'allowed', policy: result.policy };

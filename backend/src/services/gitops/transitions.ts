@@ -393,6 +393,11 @@ export class GitOpsTransitions {
    */
   sourceAccepted(args: AppliedArgs): TransitionResult {
     return this.mutateApp(args.applicationId, args.envelope, 'source_accepted', 'committed', (app) => {
+      // Unlike applied() (preserved byte-identical, predates suspension),
+      // this new entry point is the one a suspended source must refuse: no
+      // new acceptance while suspended, so the check lives here rather than
+      // in the shared requireAcceptableCandidate guard.
+      if (app.suspended_at) throw new GitOpsTransitionError('source is suspended');
       this.requireAcceptableCandidate(app, args);
       this.applySourceAcceptanceMutation(app, args);
     }, {
@@ -415,9 +420,22 @@ export class GitOpsTransitions {
     if (app.accepted_generation_id !== args.generationId) {
       throw new GitOpsTransitionError('generation is not accepted');
     }
+    // The application's accepted_generation_id does not move again until a
+    // later sourceAccepted call, so a delayed dispatch for a superseded-but-
+    // still-accepted generation would otherwise pass the check above even
+    // after a newer candidate has already been staged for this target. Only
+    // an acceptance reference this application actually recorded may bind a
+    // target; a caller passing any other id would otherwise write
+    // unverifiable authorization evidence straight onto the target row.
+    if (app.source_acceptance_ref !== args.sourceAcceptanceId) {
+      throw new GitOpsTransitionError('source acceptance reference does not match the accepted generation');
+    }
     return this.mutateTarget(args.applicationId, nodeId, args.envelope, 'target_applied', args.generationId, (target) => {
       if (target.target_status !== 'active') {
         throw new GitOpsTransitionError('cannot apply to a tombstoned target');
+      }
+      if (target.candidate_generation_id !== args.generationId) {
+        throw new GitOpsTransitionError('target candidate does not match applied generation');
       }
       const before = { appliedGenerationId: target.applied_generation_id };
       this.applyTargetAcceptanceMutation(target, args);
