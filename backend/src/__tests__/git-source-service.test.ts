@@ -26,6 +26,7 @@ import {
     buildGenerationRow,
     directSourceIdentity,
     newGitOpsId,
+    stackManagedRoot,
     type DirectSourceConfig,
 } from '../services/gitops/directApplication';
 
@@ -4898,3 +4899,120 @@ function seedDirectCandidate(stackName: string): { appId: string; generationId: 
     GitOpsTransitions.getInstance().candidateReady(appId, generationId, false, testEnvelope());
     return { appId, generationId };
 }
+
+// ── sweepOrphans claimant fixtures ─────────────────────────────────────
+
+/** A deterministic 40-char hex sha derived from a short seed. */
+function shaFromSeed(seed: string): string {
+    return seed.repeat(40).slice(0, 40);
+}
+
+/**
+ * Create a Git-backed stack, pull one update into it, and backdate the
+ * resulting candidate directory past the orphan-candidate age threshold so a
+ * claimant-blind sweep would reap it as stale. Each test then arranges only
+ * the claimant pointers it exercises before running the sweep.
+ */
+async function stageStaleCandidate(
+    stackName: string,
+    shaSeed: string,
+): Promise<{ appId: string; generationId: string; candidateAbs: string }> {
+    const svc = GitSourceService.getInstance();
+    mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha: shaFromSeed(shaSeed) });
+    const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+    try {
+        await svc.createStackFromGit({
+            stackName,
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            token: null,
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine:2\n', sha: shaFromSeed(`${shaSeed}a`) });
+        await svc.pull(stackName);
+    } finally {
+        validateSpy.mockRestore();
+    }
+    const store = GitOpsStore.getInstance();
+    const app = store.getLiveDirectApplication(stackName)!;
+    expect(app.candidate_generation_id).toBeTruthy();
+    const generation = store.getGeneration(app.candidate_generation_id!)!;
+    const candidateAbs = path.join(stackManagedRoot(stackName), generation.candidate_dir);
+    expect(fs.existsSync(candidateAbs)).toBe(true);
+    const staleMtime = (Date.now() - 25 * 60 * 60 * 1000) / 1000;
+    fs.utimesSync(candidateAbs, staleMtime, staleMtime);
+    return { appId: app.id, generationId: generation.id, candidateAbs };
+}
+
+/** Drop the application row's own pointer at its staged candidate. */
+function clearCandidatePointer(appId: string): void {
+    DatabaseService.getInstance().getDb()
+        .prepare('UPDATE gitops_applications SET candidate_generation_id = NULL WHERE id = ?')
+        .run(appId);
+}
+
+/** Drop the pending fetch record, the claimant that is independent of the application row. */
+function clearPendingFetch(stackName: string): void {
+    DatabaseService.getInstance().getDb()
+        .prepare('UPDATE stack_git_sources SET pending_commit_sha = NULL, pending_compose_content = NULL WHERE stack_name = ?')
+        .run(stackName);
+}
+
+describe('GitSourceService.sweepOrphans candidate claimant preservation', () => {
+    it('preserves a stale, complete candidate directory still referenced by the live application\'s candidate_generation_id', async () => {
+        const { candidateAbs } = await stageStaleCandidate('sweep-claims-candidate', 'c1');
+
+        await GitSourceService.getInstance().sweepOrphans();
+
+        expect(fs.existsSync(candidateAbs)).toBe(true);
+    });
+
+    it('still reaps a stale, complete candidate directory nothing on the application row references', async () => {
+        const { appId, candidateAbs } = await stageStaleCandidate('sweep-reaps-unclaimed', 'c2');
+        // Nothing on the row, and nothing pending, points at this generation
+        // any more: the exact "leftover from an earlier attempt" case the
+        // sweep exists to clean up.
+        clearCandidatePointer(appId);
+        clearPendingFetch('sweep-reaps-unclaimed');
+
+        await GitSourceService.getInstance().sweepOrphans();
+
+        expect(fs.existsSync(candidateAbs)).toBe(false);
+    });
+
+    it('preserves a stale, complete candidate directory referenced only by the pending fetch record, with no generation row yet', async () => {
+        const { appId, candidateAbs } = await stageStaleCandidate('sweep-claims-pending-only', 'c3');
+        // Simulate the row-level pointer being gone (the exact
+        // fetchedInvalid/no-live-application gap where a generation may never
+        // have existed at all) while the pending fetch record, written
+        // independently, still names this candidate.
+        clearCandidatePointer(appId);
+
+        await GitSourceService.getInstance().sweepOrphans();
+
+        expect(fs.existsSync(candidateAbs)).toBe(true);
+    });
+
+    it('preserves a stale, complete candidate directory referenced only by accepted_generation_id', async () => {
+        const { appId, generationId, candidateAbs } = await stageStaleCandidate('sweep-claims-accepted-only', 'c4');
+        // Simulate the sourceAccepted-committed-but-not-yet-promoted window:
+        // accepted_generation_id names this candidate, the row's own candidate
+        // pointer is gone, and the pending record no longer references it
+        // either, so this pointer alone must be what preserves the directory.
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE gitops_applications SET accepted_generation_id = ? WHERE id = ?')
+            .run(generationId, appId);
+        clearCandidatePointer(appId);
+        clearPendingFetch('sweep-claims-accepted-only');
+
+        await GitSourceService.getInstance().sweepOrphans();
+
+        expect(fs.existsSync(candidateAbs)).toBe(true);
+    });
+});

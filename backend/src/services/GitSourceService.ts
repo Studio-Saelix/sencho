@@ -4361,6 +4361,55 @@ export class GitSourceService {
         }
     }
 
+    /**
+     * The candidate directory basenames (e.g. "candidate-<sha>") the boot
+     * sweep must not reap for this stack: a row still points at each one, so
+     * it is still needed no matter how old or how incomplete it looks on
+     * disk. Direct-mode only, matching the candidate/generation model itself.
+     */
+    private claimedCandidateDirsFor(stackName: string): Set<string> {
+        const store = GitOpsStore.getInstance();
+        const claimed = new Set<string>();
+        const app = store.getLiveDirectApplication(stackName);
+        if (app) {
+            // candidate_generation_id names the currently staged candidate.
+            // accepted_generation_id is set by applySourceAcceptanceMutation
+            // and never cleared, so after an ordinary apply it names an
+            // already-promoted generation whose candidate directory has been
+            // moved away (harmless to check, just not load-bearing). It earns
+            // its place for the sourceAccepted-committed-but-targetApplied-
+            // not-yet-committed window, where the generation is accepted and
+            // genuinely still unpromoted on disk. Nothing calls sourceAccepted
+            // or targetApplied yet, so that is forward-looking coverage rather
+            // than dead code.
+            for (const generationId of [app.candidate_generation_id, app.accepted_generation_id]) {
+                if (!generationId) continue;
+                const generation = store.getGeneration(generationId);
+                if (generation) claimed.add(path.basename(generation.candidate_dir));
+            }
+        }
+        // The pending blob's own candidateRelPath is a third, independent
+        // claimant: it is written outside the transaction that mints a
+        // generation, so a candidate can be staged and recorded as pending
+        // with no generation row at all (fetchedInvalid) or with no live
+        // application to read a pointer from (a stack whose boot migration
+        // failed). A decode failure must not abort the sweep; it only means
+        // this extra claim is unavailable.
+        try {
+            const src = DatabaseService.getInstance().getGitSource(stackName);
+            if (src?.pending_compose_content) {
+                const pending = this.decodePendingCompose(src.pending_compose_content);
+                if (pending.candidateRelPath) claimed.add(path.basename(pending.candidateRelPath));
+            }
+        } catch (e) {
+            console.warn(
+                `[GitSource] Could not read the pending candidate reference for ${sanitizeForLog(stackName)} while computing sweep claimants:`,
+                e instanceof Error ? e.message : String(e),
+            );
+        }
+        return claimed;
+    }
+
     public async sweepOrphans(): Promise<void> {
         const fsSvc = FileSystemService.getInstance();
         const manifestSvc = GitProjectManifestService.getInstance();
@@ -4399,7 +4448,12 @@ export class GitSourceService {
                     continue;
                 }
                 await this.withStackLock(row.stack_name, () =>
-                    manifestSvc.sweepManagedArea(row.stack_name, { repoUrl: row.repo_url, branch: row.branch, stackExists: true }),
+                    manifestSvc.sweepManagedArea(row.stack_name, {
+                        repoUrl: row.repo_url,
+                        branch: row.branch,
+                        stackExists: true,
+                        claimedCandidateDirs: this.claimedCandidateDirsFor(row.stack_name),
+                    }),
                 );
             } catch (e) {
                 console.error(`[GitManifest] sweep failed for ${row.stack_name}:`, (e as Error).message);
