@@ -123,6 +123,33 @@ describe('reconcile attempt reservation and settlement', () => {
     expect(operationIds).not.toContain('op-unsettled-done');
   });
 
+  it('gets the started row for one exact attempt, or undefined when it was never reserved', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-started', 'started-web'), nodeId: 1, envelope: env('op-act-started') });
+    tx.reserveReconcileAttempt('app-started', env('op-started-1'));
+
+    expect(store.getStartedAttempt('app-started', 'op-started-1')).toBeDefined();
+    expect(store.getStartedAttempt('app-started', 'op-never-reserved')).toBeUndefined();
+  });
+
+  it('pages past a permanently unsettled row instead of returning it forever on every call with the same cursor', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-cursor', 'cursor-web'), nodeId: 1, envelope: env('op-act-cursor') });
+    tx.reserveReconcileAttempt('app-cursor', { operationId: 'op-cursor-stuck', actor: 'tester', trigger: 'manual', at: 1_000 });
+    tx.reserveReconcileAttempt('app-cursor', { operationId: 'op-cursor-next', actor: 'tester', trigger: 'manual', at: 2_000 });
+
+    const firstPage = store.listUnsettledReconcileAttempts(1);
+    expect(firstPage.map((r) => r.operation_id)).toEqual(['op-cursor-stuck']);
+    const cursor = { createdAt: firstPage[0].created_at, id: firstPage[0].id };
+    // Simulate op-cursor-stuck being permanently unrecoverable: it is never
+    // settled, so a caller must page past it using the cursor rather than
+    // seeing it again on the next call.
+    const secondPage = store.listUnsettledReconcileAttempts(1, cursor);
+    expect(secondPage.map((r) => r.operation_id)).toEqual(['op-cursor-next']);
+  });
+
   it('allocates a fresh attemptSeq-derived operation id and reserves it in one transaction', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();

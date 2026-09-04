@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { DatabaseService } from '../DatabaseService';
+import type { GitOpsHistoryCursor } from './history';
 import {
   decodeArtifactEvidenceJson,
   decodeGitOpsApprovedTargetEffectJson,
@@ -210,25 +211,54 @@ export class GitOpsStore {
   }
 
   /**
+   * The reservation row for one exact reconcile attempt, or undefined when
+   * it was never reserved. Used to recover this attempt's own recorded
+   * follower link (if any), so a follower can be settled from its
+   * leader's actual result rather than derived independently of it.
+   */
+  getStartedAttempt(applicationId: string, operationId: string): GitOpsHistoryRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_history
+       WHERE application_id = ? AND operation_id = ? AND stage = 'source_reconcile_started'
+       LIMIT 1`,
+    ).get(applicationId, operationId) as GitOpsHistoryRow | undefined;
+  }
+
+  /**
    * Every reservation with no matching settled row, oldest first: an
    * attempt that started but never recorded a result, most likely because
    * the process crashed between reservation and settlement. Startup
    * recovery reconciles these from durable stage evidence rather than
    * leaving them silently open forever.
+   *
+   * `after` pages strictly forward by (created_at, id), the same cursor
+   * shape `queryHistoryRows` uses, and is load-bearing rather than
+   * cosmetic: a row a caller cannot settle (its application vanished, a DB
+   * error) stays unsettled forever by definition, so without a cursor it
+   * would occupy the same "oldest N" window on every future call and hide
+   * every genuinely recoverable row behind it once the backlog exceeds one
+   * page.
    */
-  listUnsettledReconcileAttempts(limit = 200): GitOpsHistoryRow[] {
+  listUnsettledReconcileAttempts(limit = 200, after?: GitOpsHistoryCursor): GitOpsHistoryRow[] {
+    const clauses = ["started.stage = 'source_reconcile_started'"];
+    const params: Array<string | number> = [];
+    if (after) {
+      clauses.push('(started.created_at > ? OR (started.created_at = ? AND started.id > ?))');
+      params.push(after.createdAt, after.createdAt, after.id);
+    }
+    params.push(limit);
     return this.db().prepare(
       `SELECT started.* FROM gitops_history started
-       WHERE started.stage = 'source_reconcile_started'
+       WHERE ${clauses.join(' AND ')}
          AND NOT EXISTS (
            SELECT 1 FROM gitops_history settled
            WHERE settled.application_id = started.application_id
              AND settled.operation_id = started.operation_id
              AND settled.stage = 'source_reconcile_settled'
          )
-       ORDER BY started.created_at ASC
+       ORDER BY started.created_at ASC, started.id ASC
        LIMIT ?`,
-    ).all(limit) as GitOpsHistoryRow[];
+    ).all(...params) as GitOpsHistoryRow[];
   }
 
   /**

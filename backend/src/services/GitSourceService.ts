@@ -34,6 +34,7 @@ import { nativeGitTransport, verifyFastForward } from './git/nativeGitTransport'
 import { fingerprintFromKnownHostsLine } from './git/sshTrust';
 import { validateCaBundlePem } from './git/caBundle';
 import { GitOpsStore } from './gitops/store';
+import type { GitOpsHistoryCursor } from './gitops/history';
 import { projectApplication } from './gitops/derive';
 import { outcomeFromSourceFacet, isNextAction, isReconcileOutcome, type ReconcileOutcome, type ReconcileResult } from './gitops/outcomes';
 import { coalesceKey, deliveryKey, type ReconcileRequest, type ReconcileTrigger } from './gitops/triggers';
@@ -2286,6 +2287,20 @@ export class GitSourceService {
     }
 
     /**
+     * The settled result for a request naming an application id that is no
+     * longer the live one for its stack. Failing closed here (rather than
+     * proceeding against whatever application now holds the stack name)
+     * keeps a request from settling against an application it never named.
+     */
+    private static staleApplicationResult(): ReconcileResult {
+        return {
+            outcome: 'unknown',
+            reason: 'The live application for this stack no longer matches the requested application id.',
+            nextAction: 'none',
+        };
+    }
+
+    /**
      * In-process execution coalescing, keyed by coalesceKey(request): a
      * concurrent submission that would do exactly the same work as one
      * already running joins it as a follower instead of repeating it.
@@ -2335,7 +2350,13 @@ export class GitSourceService {
         }
 
         if (!reserved) {
-            return this.resolveAlreadyReservedAttempt(request.applicationId, envelope.operationId);
+            // A leader-by-key miss above does not yet prove no in-process
+            // leader exists, so check by operation id before falling back to
+            // durable state; otherwise a still-executing leader's real result
+            // could lose a settlement race to a stale snapshot.
+            const byOperationId = this.findInFlightByOperationId(envelope.operationId);
+            if (byOperationId) return byOperationId;
+            return this.resolveAlreadyReservedAttempt(request.applicationId, envelope.operationId, request.actor, request.trigger);
         }
 
         const promise = (async () => {
@@ -2351,6 +2372,21 @@ export class GitSourceService {
                 this.inFlightReconciles.delete(key);
             }
         }
+    }
+
+    /**
+     * Any in-process execution whose reservation minted exactly this
+     * operation id, regardless of which coalesce key it is running under.
+     * Coalesce keys and operation ids are not co-extensive (an apply's
+     * key includes its commitSha/planFingerprint/deploy, which a shared
+     * external delivery id does not carry), so two submissions can
+     * collide on operation id while running under different keys.
+     */
+    private findInFlightByOperationId(operationId: string): Promise<ReconcileResult> | undefined {
+        for (const inFlight of this.inFlightReconciles.values()) {
+            if (inFlight.operationId === operationId) return inFlight.promise;
+        }
+        return undefined;
     }
 
     /**
@@ -2406,16 +2442,123 @@ export class GitSourceService {
      * its stored result is returned rather than repeating the work. No
      * settled row means the original attempt was orphaned by a crash (in
      * this process or another); either way this call must not re-execute a
-     * fetch or apply someone else may already have run, so it reconstructs
-     * the current truthful state the same way startup recovery does.
+     * fetch or apply someone else may already have run, so it resolves
+     * from whatever is already durably recorded, settling when that
+     * yields a real answer and otherwise reporting truthfully that the
+     * outcome is not yet known rather than guessing one.
      */
-    private resolveAlreadyReservedAttempt(applicationId: string, operationId: string): ReconcileResult {
+    private resolveAlreadyReservedAttempt(applicationId: string, operationId: string, actor: string | null, trigger: string): ReconcileResult {
+        try {
+            const store = GitOpsStore.getInstance();
+            const settled = store.getSettledAttempt(applicationId, operationId);
+            if (settled) return GitSourceService.resultFromSettledAttempt(settled);
+            return this.settleFromDurableState(applicationId, operationId, actor, trigger);
+        } catch (e) {
+            console.error(
+                `[GitSource] Failed to resolve already-reserved attempt ${sanitizeForLog(operationId)} for application ${sanitizeForLog(applicationId)}:`,
+                e instanceof Error ? e.message : String(e),
+            );
+            return { outcome: 'unknown', reason: 'This attempt could not be resolved from durable state.', nextAction: 'none' };
+        }
+    }
+
+    /**
+     * Resolve one reconcile attempt purely from what is already recorded,
+     * never by re-executing a fetch or apply, settling it durably when that
+     * yields a real answer. A follower is settled from its leader; anything
+     * else is derived from the application's current row state. A follower
+     * whose leader is still unresolved is left unsettled for a later call
+     * (a future recovery pass, or the leader itself finally settling) to
+     * resolve, for the reason resolveFollowerOutcome states.
+     */
+    private settleFromDurableState(
+        applicationId: string,
+        operationId: string,
+        actor: string | null,
+        trigger: string,
+    ): ReconcileResult {
+        const started = GitOpsStore.getInstance().getStartedAttempt(applicationId, operationId);
+        // Prefer the reservation's own recorded actor/trigger over this
+        // call's, so the settled row's audit trail reflects who and what
+        // actually reserved the attempt rather than whoever happened to
+        // resolve it later.
+        const envelope: EventEnvelope = {
+            operationId,
+            actor: started?.actor ?? actor,
+            trigger: started?.trigger ?? trigger,
+            at: Date.now(),
+        };
+        const followerOf = started ? GitSourceService.followerOfFromRow(started) : undefined;
+        if (followerOf) {
+            const outcome = this.resolveFollowerOutcome(applicationId, followerOf);
+            if (!outcome.known) {
+                return { outcome: 'unknown', reason: 'This attempt is waiting on its leader to settle.', nextAction: 'none' };
+            }
+            this.settleAttempt(applicationId, envelope, outcome.result);
+            return outcome.result;
+        }
+        const result = this.deriveResultForApplication(applicationId);
+        this.settleAttempt(applicationId, envelope, result);
+        return result;
+    }
+
+    /**
+     * A follower's outcome from its leader alone: the leader's settled
+     * result when it has one. When the leader has no settled row but its
+     * own reservation genuinely exists, its fate is still unresolved
+     * (`known: false`) and must not be guessed at independently, since it
+     * could settle to something else later and the follower would then
+     * durably disagree with it. Only when the leader's own reservation
+     * cannot be found at all (nothing durable to ever wait for) does
+     * independent derivation apply, logged distinctly since it means the
+     * leader/follower agreement invariant could not be honored here.
+     */
+    private resolveFollowerOutcome(
+        applicationId: string,
+        leaderOperationId: string,
+    ): { known: true; result: ReconcileResult } | { known: false } {
         const store = GitOpsStore.getInstance();
-        const settled = store.getSettledAttempt(applicationId, operationId);
-        if (settled) return GitSourceService.resultFromSettledAttempt(settled);
+        const leaderSettled = store.getSettledAttempt(applicationId, leaderOperationId);
+        if (leaderSettled) return { known: true, result: GitSourceService.resultFromSettledAttempt(leaderSettled) };
+        if (store.getStartedAttempt(applicationId, leaderOperationId)) return { known: false };
+        console.error(
+            `[GitSource] follower's leader ${sanitizeForLog(leaderOperationId)} has no recorded reservation for application ${sanitizeForLog(applicationId)}; deriving independently`,
+        );
+        return { known: true, result: this.deriveResultForApplication(applicationId) };
+    }
+
+    /**
+     * The current truthful result for an application, independent of any
+     * specific attempt. Fails closed on a superseded application id, the
+     * same guard runReconcile applies for the identical reason.
+     */
+    private deriveResultForApplication(applicationId: string): ReconcileResult {
+        const store = GitOpsStore.getInstance();
         const app = store.getApplication(applicationId);
         if (!app?.stack_name) return GitSourceService.noApplicationResult();
+        if (store.getLiveDirectApplication(app.stack_name)?.id !== applicationId) {
+            return GitSourceService.staleApplicationResult();
+        }
         return this.deriveReconcileResult(app.stack_name);
+    }
+
+    /**
+     * The follower-link operation id recorded on a reservation, if any.
+     * Only a `GitOpsJsonError` degrades to "no link found" (logged); any
+     * other error is a bug this call must not hide by mistaking it for a
+     * genuinely link-free row, so it propagates like every other
+     * unexpected failure in this file's per-row recovery loop.
+     */
+    private static followerOfFromRow(row: GitOpsHistoryRow): string | undefined {
+        let decoded: unknown;
+        try {
+            decoded = decodeGitOpsJson(row.after_json);
+        } catch (e) {
+            if (!(e instanceof GitOpsJsonError)) throw e;
+            console.error(`[GitSource] reserved attempt ${sanitizeForLog(row.operation_id)} is not decodable JSON: ${e.message}`);
+            return undefined;
+        }
+        return isRecord(decoded) && typeof decoded.followerOf === 'string' ? decoded.followerOf : undefined;
     }
 
     /**
@@ -2462,66 +2605,95 @@ export class GitSourceService {
     /**
      * Startup recovery: settle every reconcile attempt that reserved but
      * never settled, most likely because the process crashed between the
-     * two. Never re-executes a fetch or apply -- it only records the
-     * truthful state the application row already reflects, the same
-     * derivation reconcile() itself falls back to, so a crash never
-     * leaves an attempt open forever waiting for a trigger that may not
-     * recur. Must run before SourceController starts, so no live poll or
-     * retry tick can race a recovery pass over the same attempts.
+     * two. Never re-executes a fetch or apply. Must run before
+     * SourceController starts, so no live poll or retry tick can race a
+     * recovery pass over the same attempts.
+     *
+     * Pages by cursor rather than by "still unsettled" status, so a row
+     * this run cannot recover never blocks the rest of the backlog; see
+     * listUnsettledReconcileAttempts for why that matters.
+     *
+     * Two passes. Pass 1 settles every independent (non-follower) attempt
+     * by deriving the application's current truthful state, and defers
+     * every follower rather than settling it yet, so its leader (which
+     * can only be earlier in this same backlog, since a follower's own
+     * reservation records that its leader was already in flight) gets a
+     * chance to settle first. Pass 2 then settles each deferred follower
+     * from its leader's now-settled result, so a leader and its followers
+     * always agree; a follower whose leader is still unresolved is left
+     * for a later recovery run, per resolveFollowerOutcome.
      *
      * One row failing to recover (a transient DB error, an application
-     * deleted between listing and processing) must not block every other
-     * row from recovering: each is isolated, and a poisoned row is skipped
-     * rather than retried in the same pass, since a settle failure would
-     * otherwise reappear in every subsequent page forever. Loops until a
-     * page returns nothing left to process, since the store paginates at a
-     * bounded size rather than returning everything in one call.
+     * deleted between listing and processing) is isolated: logged and
+     * counted, never allowed to block any other row.
      */
-    public async recoverUnsettledReconcileAttempts(): Promise<void> {
-        function attemptKey(row: GitOpsHistoryRow): string {
-            return `${row.application_id}:${row.operation_id}`;
-        }
-
+    public async recoverUnsettledReconcileAttempts(pageSize = 200): Promise<void> {
         const store = GitOpsStore.getInstance();
         const tx = GitOpsTransitions.getInstance();
-        const poisoned = new Set<string>();
         let recovered = 0;
         let failed = 0;
-        // Bounded passes as a last-resort guard: each pass can only shrink
-        // (a settled row never reappears, a poisoned one is skipped), so
-        // this always terminates well before the cap in practice.
-        for (let pass = 0; pass < 50; pass++) {
-            const page = store.listUnsettledReconcileAttempts().filter((row) => !poisoned.has(attemptKey(row)));
+        let stillWaiting = 0;
+        const deferredFollowers: { row: GitOpsHistoryRow; followerOf: string }[] = [];
+
+        const settle = (row: GitOpsHistoryRow, result: ReconcileResult): void => {
+            tx.settleReconcileAttempt(
+                row.application_id,
+                { operationId: row.operation_id, actor: row.actor, trigger: row.trigger, at: Date.now() },
+                result,
+            );
+            recovered++;
+        };
+        const noteFailure = (row: GitOpsHistoryRow, e: unknown): void => {
+            failed++;
+            console.error(
+                `[GitSource] Failed to recover reconcile attempt ${sanitizeForLog(row.operation_id)} for application ${sanitizeForLog(row.application_id)}:`,
+                e instanceof Error ? e.message : String(e),
+            );
+        };
+
+        // Last-resort guard: the cursor advances strictly past every page, so
+        // the loop is already bounded by the size of the backlog itself.
+        const MAX_PAGES = 10_000;
+        let cursor: GitOpsHistoryCursor | undefined;
+        let pagesRead = 0;
+        for (; pagesRead < MAX_PAGES; pagesRead++) {
+            const page = store.listUnsettledReconcileAttempts(pageSize, cursor);
             if (page.length === 0) break;
+            const last = page[page.length - 1];
+            cursor = { createdAt: last.created_at, id: last.id };
             for (const row of page) {
                 try {
-                    const app = store.getApplication(row.application_id);
-                    if (!app) {
-                        // Nothing to settle against or derive from.
-                        poisoned.add(attemptKey(row));
+                    const followerOf = GitSourceService.followerOfFromRow(row);
+                    if (followerOf) {
+                        deferredFollowers.push({ row, followerOf });
                         continue;
                     }
-                    const result = app.stack_name
-                        ? this.deriveReconcileResult(app.stack_name)
-                        : GitSourceService.noApplicationResult();
-                    tx.settleReconcileAttempt(
-                        row.application_id,
-                        { operationId: row.operation_id, actor: row.actor, trigger: row.trigger, at: Date.now() },
-                        result,
-                    );
-                    recovered++;
+                    settle(row, this.deriveResultForApplication(row.application_id));
                 } catch (e) {
-                    failed++;
-                    poisoned.add(attemptKey(row));
-                    console.error(
-                        `[GitSource] Failed to recover reconcile attempt ${sanitizeForLog(row.operation_id)} for application ${sanitizeForLog(row.application_id)}:`,
-                        e instanceof Error ? e.message : String(e),
-                    );
+                    noteFailure(row, e);
                 }
             }
+            if (page.length < pageSize) break;
         }
-        if (recovered > 0 || failed > 0) {
-            console.log(`[GitSource] Reconcile-attempt recovery: ${recovered} settled, ${failed} could not be recovered.`);
+        if (pagesRead === MAX_PAGES) {
+            console.warn(`[GitSource] Reconcile-attempt recovery stopped at its per-run page cap (${MAX_PAGES} pages); remaining rows will be retried on the next startup.`);
+        }
+
+        for (const { row, followerOf } of deferredFollowers) {
+            try {
+                const outcome = this.resolveFollowerOutcome(row.application_id, followerOf);
+                if (!outcome.known) {
+                    stillWaiting++;
+                    continue;
+                }
+                settle(row, outcome.result);
+            } catch (e) {
+                noteFailure(row, e);
+            }
+        }
+
+        if (recovered > 0 || failed > 0 || stillWaiting > 0) {
+            console.log(`[GitSource] Reconcile-attempt recovery: ${recovered} settled, ${failed} could not be recovered, ${stillWaiting} still waiting on their leader.`);
         }
     }
 
@@ -2544,11 +2716,7 @@ export class GitSourceService {
         // whatever application currently holds the stack name would let a
         // caller's request settle against an application it never named.
         if (liveApp.id !== request.applicationId) {
-            return {
-                outcome: 'unknown',
-                reason: 'The live application for this stack no longer matches the requested application id.',
-                nextAction: 'none',
-            };
+            return GitSourceService.staleApplicationResult();
         }
 
         let failure: unknown;

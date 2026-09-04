@@ -2685,6 +2685,73 @@ describe('GitSourceService.apply', () => {
                 validateSpy.mockRestore();
             }
         });
+
+        it('joins a same-delivery apply under a different coalesce key to the real in-flight leader rather than settling a stale snapshot', async () => {
+            const svc = GitSourceService.getInstance();
+            const sha = 'a6'.repeat(20);
+            mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha });
+            await svc.upsert({
+                stackName: 'reconcile-apply-delivery-race',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+            await svc.pull('reconcile-apply-delivery-race');
+            const applicationId = liveApp('reconcile-apply-delivery-race')!.id;
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            let releaseSave!: () => void;
+            const gate = new Promise<void>((resolve) => { releaseSave = resolve; });
+            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockImplementation(async () => { await gate; });
+
+            try {
+                // Two apply requests sharing a delivery id (so their
+                // operation ids collide) but differing in commitSha, which
+                // coalesceKey includes for an apply intent -- so they run
+                // under different coalesce keys despite the shared
+                // operation id.
+                const first = svc.reconcile({
+                    intent: 'apply',
+                    applicationId,
+                    stackName: 'reconcile-apply-delivery-race',
+                    trigger: 'webhook',
+                    actor: 'tester',
+                    commitSha: sha,
+                    planFingerprint: '',
+                    deploy: false,
+                    deliveryId: 'shared-delivery',
+                });
+                const second = svc.reconcile({
+                    intent: 'apply',
+                    applicationId,
+                    stackName: 'reconcile-apply-delivery-race',
+                    trigger: 'webhook',
+                    actor: 'tester',
+                    commitSha: 'ff'.repeat(20),
+                    planFingerprint: 'different-fingerprint',
+                    deploy: true,
+                    deliveryId: 'shared-delivery',
+                });
+                releaseSave();
+                const [firstResult, secondResult] = await Promise.all([first, second]);
+
+                // The second request must never have run its own apply
+                // (a different, unstaged commitSha would fail on its own
+                // terms); it must instead have joined the first's real
+                // execution and returned its actual result.
+                expect(secondResult).toEqual(firstResult);
+                expect(saveSpy).toHaveBeenCalledTimes(1);
+            } finally {
+                validateSpy.mockRestore();
+                saveSpy.mockRestore();
+            }
+        });
     });
 
     describe('dispatchAcceptedGeneration', () => {
@@ -3254,6 +3321,164 @@ describe('GitSourceService.apply', () => {
 });
 
 describe('GitSourceService.recoverUnsettledReconcileAttempts', () => {
+    it('settles a follower from its leader\'s stored result rather than deriving independently, when only the follower is unsettled', async () => {
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha: 'a1'.repeat(20) });
+        await svc.upsert({
+            stackName: 'recover-leader-follower',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('recover-leader-follower')!.id;
+        const tx = GitOpsTransitions.getInstance();
+
+        tx.reserveReconcileAttempt(applicationId, { operationId: 'leader-op', actor: 'tester', trigger: 'manual', at: Date.now() });
+        tx.reserveReconcileAttempt(
+            applicationId,
+            { operationId: 'follower-op', actor: 'tester', trigger: 'manual', at: Date.now() + 1 },
+            'leader-op',
+        );
+        // The leader settled with a specific result before the crash that
+        // orphaned only the follower. This must not match whatever
+        // independent derivation from current row state would produce, or
+        // the test cannot tell a real leader-link recovery from a
+        // coincidence.
+        tx.settleReconcileAttempt(applicationId, { operationId: 'leader-op', actor: 'tester', trigger: 'manual', at: Date.now() }, {
+            outcome: 'blocked',
+            reason: 'a specific reason only the leader would know',
+            nextAction: 'resolve_conflict',
+        });
+
+        await svc.recoverUnsettledReconcileAttempts();
+
+        const followerSettled = GitOpsStore.getInstance().getSettledAttempt(applicationId, 'follower-op');
+        expect(followerSettled).toBeDefined();
+        expect(JSON.parse(followerSettled!.after_json)).toMatchObject({
+            outcome: 'blocked',
+            reason: 'a specific reason only the leader would know',
+            nextAction: 'resolve_conflict',
+        });
+    });
+
+    it('leaves no unsettled follower after restart when both leader and follower crashed before settling', async () => {
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha: 'a2'.repeat(20) });
+        await svc.upsert({
+            stackName: 'recover-both-unsettled',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('recover-both-unsettled')!.id;
+        const tx = GitOpsTransitions.getInstance();
+        tx.reserveReconcileAttempt(applicationId, { operationId: 'leader-op-2', actor: 'tester', trigger: 'manual', at: Date.now() });
+        tx.reserveReconcileAttempt(
+            applicationId,
+            { operationId: 'follower-op-2', actor: 'tester', trigger: 'manual', at: Date.now() + 1 },
+            'leader-op-2',
+        );
+
+        await svc.recoverUnsettledReconcileAttempts();
+
+        expect(GitOpsStore.getInstance().getSettledAttempt(applicationId, 'leader-op-2')).toBeDefined();
+        expect(GitOpsStore.getInstance().getSettledAttempt(applicationId, 'follower-op-2')).toBeDefined();
+        expect(GitOpsStore.getInstance().listUnsettledReconcileAttempts().some((r) => r.application_id === applicationId)).toBe(false);
+    });
+
+    it('does not settle a follower independently when its leader also fails to settle in this same recovery pass', async () => {
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha: 'a5'.repeat(20) });
+        await svc.upsert({
+            stackName: 'recover-leader-also-fails',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('recover-leader-also-fails')!.id;
+        const tx = GitOpsTransitions.getInstance();
+        tx.reserveReconcileAttempt(applicationId, { operationId: 'leader-op-3', actor: 'tester', trigger: 'manual', at: Date.now() });
+        tx.reserveReconcileAttempt(
+            applicationId,
+            { operationId: 'follower-op-3', actor: 'tester', trigger: 'manual', at: Date.now() + 1 },
+            'leader-op-3',
+        );
+        // The application vanishes before recovery runs, so the leader's
+        // own settlement (pass 1, independent branch) will itself throw
+        // and fail, not just "not yet have happened."
+        DatabaseService.getInstance().getDb().prepare('DELETE FROM gitops_applications WHERE id = ?').run(applicationId);
+
+        await svc.recoverUnsettledReconcileAttempts();
+
+        // Neither settles: the follower must not be given an independently
+        // guessed result while its leader's own fate is still unresolved,
+        // even though the leader failed rather than merely being deferred.
+        expect(GitOpsStore.getInstance().getSettledAttempt(applicationId, 'leader-op-3')).toBeUndefined();
+        expect(GitOpsStore.getInstance().getSettledAttempt(applicationId, 'follower-op-3')).toBeUndefined();
+    });
+
+    it('drains the full backlog across multiple pages even when an earlier row can never be recovered', async () => {
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha: 'a3'.repeat(20) });
+        await svc.upsert({
+            stackName: 'recover-paginated-unrecoverable',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        const unrecoverableAppId = GitOpsStore.getInstance().getLiveDirectApplication('recover-paginated-unrecoverable')!.id;
+        const tx = GitOpsTransitions.getInstance();
+        // The oldest unsettled row's application is gone, so it can never
+        // settle. With a page size of 1, a query that keeps returning "the
+        // oldest still-unsettled row" would return only this one forever.
+        tx.reserveReconcileAttempt(unrecoverableAppId, { operationId: 'op-unrecoverable', actor: 'tester', trigger: 'manual', at: Date.now() });
+        DatabaseService.getInstance().getDb().prepare('DELETE FROM gitops_applications WHERE id = ?').run(unrecoverableAppId);
+
+        mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha: 'a4'.repeat(20) });
+        await svc.upsert({
+            stackName: 'recover-paginated-recoverable',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        const recoverableAppId = GitOpsStore.getInstance().getLiveDirectApplication('recover-paginated-recoverable')!.id;
+        tx.reserveReconcileAttempt(recoverableAppId, { operationId: 'op-recoverable', actor: 'tester', trigger: 'manual', at: Date.now() + 1 });
+
+        await svc.recoverUnsettledReconcileAttempts(1);
+
+        expect(GitOpsStore.getInstance().getSettledAttempt(recoverableAppId, 'op-recoverable')).toBeDefined();
+    });
+
     it('settles an attempt left unsettled by a crash, without re-executing a fetch', async () => {
         const sha = 'eb'.repeat(20);
         mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha });
