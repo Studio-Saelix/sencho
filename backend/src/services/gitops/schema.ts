@@ -474,6 +474,10 @@ CREATE INDEX IF NOT EXISTS idx_gitops_history_node ON gitops_history(node_id);
 CREATE INDEX IF NOT EXISTS idx_gitops_history_trigger ON gitops_history(trigger);
 CREATE INDEX IF NOT EXISTS idx_gitops_history_actor ON gitops_history(actor);
 CREATE INDEX IF NOT EXISTS idx_gitops_history_outcome ON gitops_history(outcome);
+-- listUnsettledReconcileAttempts filters on stage and orders by created_at;
+-- without this, that query (run on every startup, ahead of the server
+-- listening) scans and sorts the whole table.
+CREATE INDEX IF NOT EXISTS idx_gitops_history_stage_created ON gitops_history(stage, created_at);
 CREATE INDEX IF NOT EXISTS idx_gitops_history_repo_ref
   ON gitops_history(repo_url, configured_ref);
 CREATE INDEX IF NOT EXISTS idx_gitops_history_stack_created

@@ -40,6 +40,40 @@ export type ReconcileResult = {
   commitSha?: string;
 };
 
+/** Every ReconcileOutcome member, for runtime validation of a value read back from storage. */
+const RECONCILE_OUTCOMES: ReadonlySet<string> = new Set<ReconcileOutcome>([
+  'converged',
+  'no_source_change',
+  'candidate_already_fetched',
+  'pending_review',
+  'suspended',
+  'retry_scheduled',
+  'blocked',
+  'superseded',
+  'failed_previous_intact',
+  'recovery_required',
+  'unknown',
+]);
+
+/** Every NextAction member, for runtime validation of a value read back from storage. */
+const NEXT_ACTIONS: ReadonlySet<string> = new Set<NextAction>([
+  'none',
+  'review',
+  'resume',
+  'retry',
+  'resolve_conflict',
+  'configure_credentials',
+  'view_target_results',
+]);
+
+export function isReconcileOutcome(value: unknown): value is ReconcileOutcome {
+  return typeof value === 'string' && RECONCILE_OUTCOMES.has(value);
+}
+
+export function isNextAction(value: unknown): value is NextAction {
+  return typeof value === 'string' && NEXT_ACTIONS.has(value);
+}
+
 function commitShaOf(facet: Extract<SourceFacet, { desiredCommitSha: unknown }>): string | undefined {
   return facet.desiredCommitSha ?? facet.fetchedCommitSha ?? undefined;
 }

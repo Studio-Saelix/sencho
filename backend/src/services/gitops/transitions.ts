@@ -899,18 +899,62 @@ export class GitOpsTransitions {
    * nothing about the application row changes. A `reserved: false` return
    * means this exact (application, operation) already reserved -- the
    * caller reconstructs from durable state rather than repeating work.
+   *
+   * `followerOf` records that this reservation was made on behalf of a
+   * request that joined another, still-running attempt's execution rather
+   * than running its own: it is audit-trail linkage only, never read to
+   * change how this reservation itself behaves.
    */
-  reserveReconcileAttempt(applicationId: string, envelope: EventEnvelope): { reserved: boolean } {
+  reserveReconcileAttempt(applicationId: string, envelope: EventEnvelope, followerOf?: string): { reserved: boolean } {
+    return this.raw().transaction(() => ({
+      reserved: this.insertReconcileReservation(this.requireApp(applicationId), envelope, followerOf),
+    }))();
+  }
+
+  /**
+   * Allocate the next attemptSeq for a submission with no stable external
+   * delivery identity, and reserve its durable attempt in the same
+   * transaction, so two concurrent submissions can never mint the same
+   * operation id. Unlike reserveReconcileAttempt, this does write one
+   * column of application state (attempt_seq) -- allocation is the one
+   * thing here that is not a bare history insert, since a fresh id has to
+   * come from somewhere durable. Only the allocated id's uniqueness is
+   * load-bearing; its embedded sequence number is for traceability.
+   */
+  allocateReconcileAttempt(
+    applicationId: string,
+    actor: string | null,
+    trigger: string,
+    at: number,
+    followerOf?: string,
+  ): { operationId: string; reserved: boolean } {
     return this.raw().transaction(() => {
       const app = this.requireApp(applicationId);
-      const historyId = this.history(app, envelope, {
-        stage: 'source_reconcile_started',
-        outcome: 'committed',
-        before: {},
-        after: {},
-      });
-      return { reserved: historyId !== null };
+      const seq = app.attempt_seq + 1;
+      this.raw().prepare('UPDATE gitops_applications SET attempt_seq = ? WHERE id = ?').run(seq, applicationId);
+      const operationId = `${applicationId}:attempt:${seq}`;
+      const envelope: EventEnvelope = { operationId, actor, trigger, at };
+      return { operationId, reserved: this.insertReconcileReservation(app, envelope, followerOf) };
     })();
+  }
+
+  /**
+   * The reservation row itself, shared by reserveReconcileAttempt and
+   * allocateReconcileAttempt: a bare history insert whose dedupe index is
+   * what makes a repeat reservation report false rather than recording a
+   * second attempt.
+   */
+  private insertReconcileReservation(
+    app: GitOpsApplicationRow,
+    envelope: EventEnvelope,
+    followerOf: string | undefined,
+  ): boolean {
+    return this.history(app, envelope, {
+      stage: 'source_reconcile_started',
+      outcome: 'committed',
+      before: {},
+      after: followerOf ? { followerOf } : {},
+    }) !== null;
   }
 
   /**

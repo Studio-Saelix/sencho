@@ -35,11 +35,12 @@ import { fingerprintFromKnownHostsLine } from './git/sshTrust';
 import { validateCaBundlePem } from './git/caBundle';
 import { GitOpsStore } from './gitops/store';
 import { projectApplication } from './gitops/derive';
-import { outcomeFromSourceFacet, type ReconcileOutcome, type ReconcileResult } from './gitops/outcomes';
-import type { ReconcileRequest, ReconcileTrigger } from './gitops/triggers';
+import { outcomeFromSourceFacet, isNextAction, isReconcileOutcome, type ReconcileOutcome, type ReconcileResult } from './gitops/outcomes';
+import { coalesceKey, deliveryKey, type ReconcileRequest, type ReconcileTrigger } from './gitops/triggers';
 import { classifyFailure } from './gitops/backoff';
 import { BlueprintTargetAdapter, type AcceptedGeneration, type DispatchContext, type DispatchResult } from './gitops/handoff';
-import { GitOpsTransitions, GitOpsTransitionError } from './gitops/transitions';
+import { GitOpsTransitions, GitOpsTransitionError, type EventEnvelope } from './gitops/transitions';
+import { decodeGitOpsJson, isRecord, GitOpsJsonError } from './gitops/json';
 import {
     buildCreateCheckpointRow,
     buildDirectApplicationRow,
@@ -48,7 +49,7 @@ import {
     newGitOpsId,
     stackManagedRoot,
 } from './gitops/directApplication';
-import type { GitOpsApplicationRow } from './gitops/types';
+import type { GitOpsApplicationRow, GitOpsHistoryRow } from './gitops/types';
 import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readStagingMarker, validateCandidateRelPath, writeStagingMarker } from './gitops/createStagingMarker';
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops/createCleanup';
 import { managedAreaBase } from './gitops/managedPaths';
@@ -2285,93 +2286,319 @@ export class GitSourceService {
     }
 
     /**
+     * In-process execution coalescing, keyed by coalesceKey(request): a
+     * concurrent submission that would do exactly the same work as one
+     * already running joins it as a follower instead of repeating it.
+     * Reservation and settlement still happen once per submission (every
+     * caller gets its own durable attempt); only the fetch or apply
+     * itself is shared.
+     */
+    private readonly inFlightReconciles = new Map<string, { operationId: string; promise: Promise<ReconcileResult> }>();
+
+    /**
      * The controller-facing entry point: one normalized submission in,
      * one normalized result out, for any trigger (manual, poll, retry,
-     * API, config change, startup, resume). Owns the Git mutex for the
-     * whole evaluation, calling the same private fetch/apply bodies the
-     * public pull()/apply() wrappers use, so it never nests withStackLock.
+     * API, config change, startup, resume).
      *
-     * Unlike the public apply route, a controller-driven apply never
-     * requires a plan fingerprint: that requirement exists so a human has
-     * seen and confirmed a diff before it applies, which does not describe
-     * an automated trigger. The controller's own policy evaluation is the
-     * safety gate instead.
+     * Every submission against a real application row gets a durable
+     * attempt, reserved before any side effect and settled with the
+     * normalized result once execution finishes -- reserved but never
+     * settled is exactly what startup recovery looks for after a crash.
+     * A submission naming an application id that does not exist at all
+     * (a fabricated id, or a stack with no GitOps application) reserves
+     * nothing: there is no row to attach a durable attempt to, and the
+     * identity/no-application guards below already produce a truthful
+     * result for it without doing any work worth protecting.
      */
     public async reconcile(request: ReconcileRequest): Promise<ReconcileResult> {
-        return this.withStackLock(request.stackName, async () => {
-            // The same "live application" definition deriveReconcileResult and
-            // coalesceKey() use ('active' and 'creating' alike), not the narrower
-            // gitopsApplicationFor() that gates transitions: a 'creating' row must
-            // still be caught by the identity guard below, not slip past it as if
-            // there were no application at all.
-            const liveApp = GitOpsStore.getInstance().getLiveDirectApplication(request.stackName);
+        if (!GitOpsStore.getInstance().getApplication(request.applicationId)) {
+            return this.withStackLock(request.stackName, () => this.runReconcile(request));
+        }
 
-            // Nothing to reconcile: say so rather than attempting work that
-            // could only fail.
-            if (!liveApp) {
-                return GitSourceService.noApplicationResult();
-            }
-            // Fail closed on a stale identity: coalesceKey() joins in-flight
-            // evaluations by applicationId, so silently reconciling under
-            // whatever application currently holds the stack name would let a
-            // caller's request settle against an application it never named.
-            if (liveApp.id !== request.applicationId) {
-                return {
-                    outcome: 'unknown',
-                    reason: 'The live application for this stack no longer matches the requested application id.',
-                    nextAction: 'none',
-                };
-            }
+        const key = coalesceKey(request);
+        const leader = this.inFlightReconciles.get(key);
+        const { envelope, reserved } = this.reserveOwnAttempt(request, leader?.operationId);
 
-            let failure: unknown;
-            let deployError: string | undefined;
-            try {
-                if (request.intent === 'fetch') {
-                    await this.pullLocked(request.stackName, request.actor);
-                } else {
-                    const applyResult = await this.applyWithSharedLock(request.stackName, request.commitSha, {
-                        actor: request.actor,
-                        deploy: request.deploy,
-                        planFingerprint: request.planFingerprint,
-                        requirePlanFingerprint: false,
-                    });
-                    deployError = applyResult.deployError;
+        if (leader) {
+            // A leader in this process is always the correct source of
+            // truth for this submission, whether or not this submission's
+            // own reservation is the one that actually landed: a
+            // `reserved: false` here just means this request's operation id
+            // happens to equal the leader's own (an exact redelivery of the
+            // same external event), whose settlement the leader already
+            // owns. Falling through to a snapshot of the row instead would
+            // report the state from *before* the leader's still-running
+            // work, not the result of it.
+            const result = await leader.promise;
+            if (reserved) this.settleAttempt(request.applicationId, envelope, result);
+            return result;
+        }
+
+        if (!reserved) {
+            return this.resolveAlreadyReservedAttempt(request.applicationId, envelope.operationId);
+        }
+
+        const promise = (async () => {
+            const result = await this.withStackLock(request.stackName, () => this.runReconcile(request));
+            this.settleAttempt(request.applicationId, envelope, result);
+            return result;
+        })();
+        this.inFlightReconciles.set(key, { operationId: envelope.operationId, promise });
+        try {
+            return await promise;
+        } finally {
+            if (this.inFlightReconciles.get(key)?.promise === promise) {
+                this.inFlightReconciles.delete(key);
+            }
+        }
+    }
+
+    /**
+     * Reserve this submission's own durable attempt. A request carrying a
+     * stable external delivery id (webhook redelivery) reserves under a
+     * producer-namespaced key derived from it, so a redelivery of the same
+     * event reuses the same operation id and reports `reserved: false`
+     * rather than minting a second attempt. Any other submission has no
+     * such stable identity, so its operation id is freshly allocated from
+     * the row's own attemptSeq, which is always a first-time reservation.
+     */
+    private reserveOwnAttempt(
+        request: ReconcileRequest,
+        followerOf: string | undefined,
+    ): { envelope: EventEnvelope; reserved: boolean } {
+        const tx = GitOpsTransitions.getInstance();
+        if (request.deliveryId) {
+            const operationId = deliveryKey(request.trigger, request.intent, request.deliveryId);
+            const envelope = this.gitopsEnvelope(operationId, request.actor, request.trigger);
+            const { reserved } = tx.reserveReconcileAttempt(request.applicationId, envelope, followerOf);
+            return { envelope, reserved };
+        }
+        const allocated = tx.allocateReconcileAttempt(request.applicationId, request.actor, request.trigger, Date.now(), followerOf);
+        return {
+            envelope: this.gitopsEnvelope(allocated.operationId, request.actor, request.trigger),
+            reserved: allocated.reserved,
+        };
+    }
+
+    /**
+     * Settle a durable attempt with its already-computed result, tolerating
+     * a settlement failure rather than letting it turn a correctly-computed
+     * result (up to and including a real fetch or apply that already
+     * touched the filesystem) into a thrown error for the caller. The
+     * attempt is left unsettled on this path, which is exactly the signal
+     * startup recovery looks for, so nothing here is lost, only deferred.
+     */
+    private settleAttempt(applicationId: string, envelope: EventEnvelope, result: ReconcileResult): void {
+        try {
+            GitOpsTransitions.getInstance().settleReconcileAttempt(applicationId, envelope, result);
+        } catch (e) {
+            console.error(
+                `[GitSource] Failed to settle reconcile attempt ${sanitizeForLog(envelope.operationId)} for application ${sanitizeForLog(applicationId)}:`,
+                e instanceof Error ? e.message : String(e),
+            );
+        }
+    }
+
+    /**
+     * A submission whose operation id was already reserved elsewhere, with
+     * no leader for it running in this process: a settled row means a
+     * duplicate delivery arrived after its original attempt finished, so
+     * its stored result is returned rather than repeating the work. No
+     * settled row means the original attempt was orphaned by a crash (in
+     * this process or another); either way this call must not re-execute a
+     * fetch or apply someone else may already have run, so it reconstructs
+     * the current truthful state the same way startup recovery does.
+     */
+    private resolveAlreadyReservedAttempt(applicationId: string, operationId: string): ReconcileResult {
+        const store = GitOpsStore.getInstance();
+        const settled = store.getSettledAttempt(applicationId, operationId);
+        if (settled) return GitSourceService.resultFromSettledAttempt(settled);
+        const app = store.getApplication(applicationId);
+        if (!app?.stack_name) return GitSourceService.noApplicationResult();
+        return this.deriveReconcileResult(app.stack_name);
+    }
+
+    /**
+     * Decode a settled attempt's recorded result back into a
+     * ReconcileResult. Unreadable JSON and a well-formed-but-wrong-shaped
+     * payload are both logged: a corrupt or unexpected settled row is a
+     * storage or encoding bug an operator needs to see, not a routine
+     * response variation, matching decodeHistoryDelta's own rule for this
+     * exact column.
+     */
+    private static resultFromSettledAttempt(row: GitOpsHistoryRow): ReconcileResult {
+        const unreadable: ReconcileResult = {
+            outcome: 'unknown',
+            reason: 'The settled attempt result could not be read.',
+            nextAction: 'none',
+        };
+
+        let decoded: unknown;
+        try {
+            decoded = decodeGitOpsJson(row.after_json);
+        } catch (e) {
+            if (!(e instanceof GitOpsJsonError)) throw e;
+            console.error(`[GitSource] settled attempt ${sanitizeForLog(row.operation_id)} is not decodable JSON: ${e.message}`);
+            return unreadable;
+        }
+        if (
+            !isRecord(decoded)
+            || !isReconcileOutcome(decoded.outcome)
+            || typeof decoded.reason !== 'string'
+            || !isNextAction(decoded.nextAction)
+        ) {
+            console.error(`[GitSource] settled attempt ${sanitizeForLog(row.operation_id)} decoded to an unexpected shape`);
+            return unreadable;
+        }
+        return {
+            outcome: decoded.outcome,
+            reason: decoded.reason,
+            nextAction: decoded.nextAction,
+            retryAt: typeof decoded.retryAt === 'number' ? decoded.retryAt : undefined,
+            commitSha: typeof decoded.commitSha === 'string' ? decoded.commitSha : undefined,
+        };
+    }
+
+    /**
+     * Startup recovery: settle every reconcile attempt that reserved but
+     * never settled, most likely because the process crashed between the
+     * two. Never re-executes a fetch or apply -- it only records the
+     * truthful state the application row already reflects, the same
+     * derivation reconcile() itself falls back to, so a crash never
+     * leaves an attempt open forever waiting for a trigger that may not
+     * recur. Must run before SourceController starts, so no live poll or
+     * retry tick can race a recovery pass over the same attempts.
+     *
+     * One row failing to recover (a transient DB error, an application
+     * deleted between listing and processing) must not block every other
+     * row from recovering: each is isolated, and a poisoned row is skipped
+     * rather than retried in the same pass, since a settle failure would
+     * otherwise reappear in every subsequent page forever. Loops until a
+     * page returns nothing left to process, since the store paginates at a
+     * bounded size rather than returning everything in one call.
+     */
+    public async recoverUnsettledReconcileAttempts(): Promise<void> {
+        function attemptKey(row: GitOpsHistoryRow): string {
+            return `${row.application_id}:${row.operation_id}`;
+        }
+
+        const store = GitOpsStore.getInstance();
+        const tx = GitOpsTransitions.getInstance();
+        const poisoned = new Set<string>();
+        let recovered = 0;
+        let failed = 0;
+        // Bounded passes as a last-resort guard: each pass can only shrink
+        // (a settled row never reappears, a poisoned one is skipped), so
+        // this always terminates well before the cap in practice.
+        for (let pass = 0; pass < 50; pass++) {
+            const page = store.listUnsettledReconcileAttempts().filter((row) => !poisoned.has(attemptKey(row)));
+            if (page.length === 0) break;
+            for (const row of page) {
+                try {
+                    const app = store.getApplication(row.application_id);
+                    if (!app) {
+                        // Nothing to settle against or derive from.
+                        poisoned.add(attemptKey(row));
+                        continue;
+                    }
+                    const result = app.stack_name
+                        ? this.deriveReconcileResult(app.stack_name)
+                        : GitSourceService.noApplicationResult();
+                    tx.settleReconcileAttempt(
+                        row.application_id,
+                        { operationId: row.operation_id, actor: row.actor, trigger: row.trigger, at: Date.now() },
+                        result,
+                    );
+                    recovered++;
+                } catch (e) {
+                    failed++;
+                    poisoned.add(attemptKey(row));
+                    console.error(
+                        `[GitSource] Failed to recover reconcile attempt ${sanitizeForLog(row.operation_id)} for application ${sanitizeForLog(row.application_id)}:`,
+                        e instanceof Error ? e.message : String(e),
+                    );
                 }
-            } catch (e) {
-                failure = e;
-                console.error(
-                    `[GitSource] reconcile(${request.intent}) failed for ${sanitizeForLog(request.stackName)}:`,
-                    e instanceof Error ? e.message : String(e),
-                );
-                if (request.intent === 'fetch') {
-                    // pull() records this on the same throw; reconcile calls
-                    // pullLocked directly and must not lose it from the feed.
-                    this.recordGitActivity(request.stackName, 'git_pull_failed', `Git pull failed for ${request.stackName}`, request.actor, 'error');
-                }
             }
+        }
+        if (recovered > 0 || failed > 0) {
+            console.log(`[GitSource] Reconcile-attempt recovery: ${recovered} settled, ${failed} could not be recovered.`);
+        }
+    }
 
-            // Promotion succeeding does not mean the reconcile succeeded: the
-            // source facet alone cannot see a failed deploy, so it would
-            // otherwise report a converged/no-change success over a stack
-            // that never came up. recovery_required, not failed_previous_intact:
-            // the generation DID change (acceptance and promotion already
-            // committed before deploy ran), so nothing here may claim it is
-            // unchanged, and nothing about the source itself needs retrying,
-            // only the target.
-            if (deployError) {
-                return {
-                    outcome: 'recovery_required',
-                    reason: `The source applied, but the deploy failed: ${deployError}`,
-                    nextAction: 'view_target_results',
-                };
-            }
+    /** Body of reconcile(): the actual fetch/apply execution, under the per-stack Git mutex. */
+    private async runReconcile(request: ReconcileRequest): Promise<ReconcileResult> {
+        // The same "live application" definition deriveReconcileResult and
+        // coalesceKey() use ('active' and 'creating' alike), not the narrower
+        // gitopsApplicationFor() that gates transitions: a 'creating' row must
+        // still be caught by the identity guard below, not slip past it as if
+        // there were no application at all.
+        const liveApp = GitOpsStore.getInstance().getLiveDirectApplication(request.stackName);
 
-            const derived = this.deriveReconcileResult(request.stackName);
-            if (failure === undefined || GitSourceService.FAILURE_REFLECTED_OUTCOMES.has(derived.outcome)) {
-                return derived;
+        // Nothing to reconcile: say so rather than attempting work that
+        // could only fail.
+        if (!liveApp) {
+            return GitSourceService.noApplicationResult();
+        }
+        // Fail closed on a stale identity: coalesceKey() joins in-flight
+        // evaluations by applicationId, so silently reconciling under
+        // whatever application currently holds the stack name would let a
+        // caller's request settle against an application it never named.
+        if (liveApp.id !== request.applicationId) {
+            return {
+                outcome: 'unknown',
+                reason: 'The live application for this stack no longer matches the requested application id.',
+                nextAction: 'none',
+            };
+        }
+
+        let failure: unknown;
+        let deployError: string | undefined;
+        try {
+            if (request.intent === 'fetch') {
+                await this.pullLocked(request.stackName, request.actor);
+            } else {
+                const applyResult = await this.applyWithSharedLock(request.stackName, request.commitSha, {
+                    actor: request.actor,
+                    deploy: request.deploy,
+                    planFingerprint: request.planFingerprint,
+                    requirePlanFingerprint: false,
+                });
+                deployError = applyResult.deployError;
             }
-            return this.reconcileFailureResult(failure);
-        });
+        } catch (e) {
+            failure = e;
+            console.error(
+                `[GitSource] reconcile(${request.intent}) failed for ${sanitizeForLog(request.stackName)}:`,
+                e instanceof Error ? e.message : String(e),
+            );
+            if (request.intent === 'fetch') {
+                // pull() records this on the same throw; reconcile calls
+                // pullLocked directly and must not lose it from the feed.
+                this.recordGitActivity(request.stackName, 'git_pull_failed', `Git pull failed for ${request.stackName}`, request.actor, 'error');
+            }
+        }
+
+        // Promotion succeeding does not mean the reconcile succeeded: the
+        // source facet alone cannot see a failed deploy, so it would
+        // otherwise report a converged/no-change success over a stack
+        // that never came up. recovery_required, not failed_previous_intact:
+        // the generation DID change (acceptance and promotion already
+        // committed before deploy ran), so nothing here may claim it is
+        // unchanged, and nothing about the source itself needs retrying,
+        // only the target.
+        if (deployError) {
+            return {
+                outcome: 'recovery_required',
+                reason: `The source applied, but the deploy failed: ${deployError}`,
+                nextAction: 'view_target_results',
+            };
+        }
+
+        const derived = this.deriveReconcileResult(request.stackName);
+        if (failure === undefined || GitSourceService.FAILURE_REFLECTED_OUTCOMES.has(derived.outcome)) {
+            return derived;
+        }
+        return this.reconcileFailureResult(failure);
     }
 
     /**

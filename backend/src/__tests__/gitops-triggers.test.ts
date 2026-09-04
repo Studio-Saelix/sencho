@@ -63,14 +63,23 @@ describe('coalesceKey', () => {
   it('never joins a fetch and an apply for the same application', () => {
     expect(coalesceKey(fetchRequest())).not.toBe(coalesceKey(applyRequest()));
   });
+
+  it('does not join two fetches for the same applicationId but different stack names', () => {
+    expect(coalesceKey(fetchRequest({ stackName: 'web' })))
+      .not.toBe(coalesceKey(fetchRequest({ stackName: 'other-stack' })));
+  });
 });
 
 describe('deliveryKey', () => {
   it('namespaces the same delivery id differently per trigger', () => {
-    expect(deliveryKey('webhook', 'delivery-1')).not.toBe(deliveryKey('api', 'delivery-1'));
+    expect(deliveryKey('webhook', 'fetch', 'delivery-1')).not.toBe(deliveryKey('api', 'fetch', 'delivery-1'));
   });
 
-  it('is stable for the same trigger and delivery id', () => {
-    expect(deliveryKey('webhook', 'delivery-1')).toBe(deliveryKey('webhook', 'delivery-1'));
+  it('namespaces the same delivery id differently per intent', () => {
+    expect(deliveryKey('webhook', 'fetch', 'delivery-1')).not.toBe(deliveryKey('webhook', 'apply', 'delivery-1'));
+  });
+
+  it('is stable for the same trigger, intent, and delivery id', () => {
+    expect(deliveryKey('webhook', 'fetch', 'delivery-1')).toBe(deliveryKey('webhook', 'fetch', 'delivery-1'));
   });
 });

@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
+import { DatabaseService } from '../services/DatabaseService';
 import type { GitOpsApplicationRow } from '../services/gitops/types';
 
 let tmpDir: string;
@@ -120,6 +121,37 @@ describe('reconcile attempt reservation and settlement', () => {
     const operationIds = unsettled.filter((r) => r.application_id === 'app-unsettled').map((r) => r.operation_id);
     expect(operationIds).toContain('op-unsettled-orphan');
     expect(operationIds).not.toContain('op-unsettled-done');
+  });
+
+  it('allocates a fresh attemptSeq-derived operation id and reserves it in one transaction', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-alloc', 'alloc-web'), nodeId: 1, envelope: env('op-act-alloc') });
+    const before = store.getApplication('app-alloc')!;
+
+    const first = tx.allocateReconcileAttempt('app-alloc', 'tester', 'manual', Date.now());
+    const second = tx.allocateReconcileAttempt('app-alloc', 'tester', 'manual', Date.now());
+
+    expect(first.reserved).toBe(true);
+    expect(second.reserved).toBe(true);
+    expect(first.operationId).not.toBe(second.operationId);
+    const after = store.getApplication('app-alloc')!;
+    expect(after.attempt_seq).toBe(before.attempt_seq + 2);
+  });
+
+  it('records a follower link on a reservation made on behalf of a coalesced request', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-follower', 'follower-web'), nodeId: 1, envelope: env('op-act-follower') });
+
+    const leader = tx.allocateReconcileAttempt('app-follower', 'tester', 'manual', Date.now());
+    const follower = tx.allocateReconcileAttempt('app-follower', 'tester', 'manual', Date.now(), leader.operationId);
+
+    expect(follower.reserved).toBe(true);
+    const started = DatabaseService.getInstance().getDb()
+      .prepare("SELECT after_json FROM gitops_history WHERE application_id = ? AND operation_id = ? AND stage = 'source_reconcile_started'")
+      .get('app-follower', follower.operationId) as { after_json: string };
+    expect(JSON.parse(started.after_json)).toEqual({ followerOf: leader.operationId });
   });
 
   it('reports the most recently settled attempt even when both share the same millisecond timestamp', () => {

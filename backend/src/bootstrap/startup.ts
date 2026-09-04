@@ -28,7 +28,7 @@ import { applyPilotModeCapabilityFilter } from '../services/CapabilityRegistry';
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { PilotMetrics } from '../services/PilotMetrics';
 import { invalidateRemoteMetaCache } from '../helpers/cacheInvalidation';
-import { sweepStaleTempDirs as sweepStaleGitTempDirs, sweepGitManifestOrphans } from '../services/GitSourceService';
+import { GitSourceService, sweepStaleTempDirs as sweepStaleGitTempDirs, sweepGitManifestOrphans } from '../services/GitSourceService';
 import { assertCreatesSettled, reclassifyInterruptedOperations, resolveInterruptedCreates } from '../services/gitops/createRecovery';
 import { loadMigrationManifests, migrateDirectGitStacks, migrateInlineBlueprints } from '../services/gitops/migrate';
 import { setGitOpsEventSink } from '../services/gitops/publish';
@@ -232,6 +232,17 @@ export async function startServer(server: Server): Promise<void> {
     }
   } catch (err) {
     console.error('[GitOps] Migration of pre-existing blueprints failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+  }
+
+  // Reconcile-attempt recovery precedes the managed-area sweep and every
+  // background timer: an attempt reserved but never settled (a crash
+  // between the two) must be resolved from durable state before anything
+  // else runs, so the sweep below and SourceController's own timer never
+  // race a recovery pass over the same attempts.
+  try {
+    await GitSourceService.getInstance().recoverUnsettledReconcileAttempts();
+  } catch (err) {
+    console.error('[GitSource] Reconcile-attempt recovery failed:', err instanceof Error ? err.stack ?? err.message : String(err));
   }
 
   // The managed-area sweep follows. It preserves anything whose ownership it
