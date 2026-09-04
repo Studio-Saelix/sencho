@@ -298,6 +298,13 @@ export interface GitApplyOpts {
     requirePlanFingerprint?: boolean;
 }
 
+/**
+ * In-process executions keyed by coalesceKey(request): the operation id each
+ * one's reservation minted, and the promise a later joiner awaits instead of
+ * repeating the work.
+ */
+type InFlightMap<T> = Map<string, { operationId: string; promise: Promise<T> }>;
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const TEMP_DIR_PREFIX = 'sencho-git-';
@@ -1897,14 +1904,23 @@ export class GitSourceService {
         // concurrent delete-source + pull can land a pending row on a stack
         // whose config row has just been removed.
         const actor = opts.actor ?? 'unknown';
-        return this.withStackLock(stackName, async () => {
+        const doPull = (operationId?: string): Promise<PullResult> => this.withStackLock(stackName, async () => {
             try {
-                return await this.pullLocked(stackName, actor);
+                return await this.pullLocked(stackName, actor, operationId);
             } catch (e) {
                 this.recordGitActivity(stackName, 'git_pull_failed', `Git pull failed for ${stackName}`, actor, 'error');
                 throw e;
             }
         });
+
+        // Reservation and coalescing need a real gitops application to attach a
+        // durable attempt to, the same definition pullLocked itself uses to
+        // decide whether it has any gitops bookkeeping to do at all.
+        const gitopsApp = this.gitopsApplicationFor(stackName);
+        if (!gitopsApp) return doPull();
+
+        const request: ReconcileRequest = { intent: 'fetch', applicationId: gitopsApp.id, stackName, trigger: 'manual', actor };
+        return this.withReservedExecution(this.inFlightPulls, request, doPull);
     }
 
     /**
@@ -1984,7 +2000,7 @@ export class GitSourceService {
         });
     }
 
-    private async pullLocked(stackName: string, actor: string): Promise<PullResult> {
+    private async pullLocked(stackName: string, actor: string, operationId?: string): Promise<PullResult> {
         const db = DatabaseService.getInstance();
         const src = db.getGitSource(stackName);
         if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
@@ -1996,7 +2012,11 @@ export class GitSourceService {
         if (gitopsApp?.suspended_at) {
             throw new GitSourceError('OPERATION_IN_FLIGHT', `Reconciliation is suspended for ${stackName}.`);
         }
-        const gitopsOperationId = crypto.randomUUID();
+        // A caller that reserved a durable attempt for this fetch passes its own
+        // operation id in, so the attempt and every stage of gitops evidence it
+        // produces share one identity. A direct low-level call that reserved
+        // nothing still gets an id of its own.
+        const gitopsOperationId = operationId ?? crypto.randomUUID();
         const gitopsEnv = this.gitopsEnvelope(gitopsOperationId, actor, 'pull');
         // A fetch that starts and never terminates is worse than one that is
         // never recorded: fetchStarted refuses to open a second operation, so
@@ -2258,10 +2278,42 @@ export class GitSourceService {
         commitSha: string,
         opts: GitApplyOpts = {},
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
-        return this.withStackLock(stackName, () => this.applyWithSharedLock(stackName, commitSha, {
-            ...opts,
-            requirePlanFingerprint: opts.requirePlanFingerprint !== false,
-        }));
+        // Resolved once, with applyLockedBody's own formula (its shouldDeploy),
+        // so the coalesce key below and the deploy behavior actually executed
+        // can never disagree: two calls that resolve to different deploy
+        // behavior must never share a coalesce key, or one could silently
+        // receive the other's deployed/not-deployed result.
+        const resolvedDeploy = opts.deploy ?? DatabaseService.getInstance().getGitSource(stackName)?.auto_deploy_on_apply ?? false;
+        const finalOpts: GitApplyOpts = { ...opts, deploy: resolvedDeploy, requirePlanFingerprint: opts.requirePlanFingerprint !== false };
+        const doApply = (operationId?: string) => this.withStackLock(
+            stackName,
+            () => this.applyWithSharedLock(stackName, commitSha, finalOpts, operationId),
+        );
+
+        // Same reasoning as pull(): reservation needs a real gitops
+        // application to attach a durable attempt to.
+        const gitopsApp = this.gitopsApplicationFor(stackName);
+        if (!gitopsApp) return doApply();
+
+        const request: ReconcileRequest = {
+            intent: 'apply',
+            applicationId: gitopsApp.id,
+            stackName,
+            trigger: 'manual',
+            actor: opts.actor ?? 'unknown',
+            commitSha,
+            planFingerprint: opts.planFingerprint ?? '',
+            deploy: resolvedDeploy,
+        };
+        // A policy-bypassing apply must never coalesce with anything else:
+        // bypassPolicy changes behavior but is not part of the coalesce key (a
+        // plain policy-gate bypass has no natural identity to key on), so
+        // joining could hand a non-bypassing caller someone else's bypassed
+        // result, or silently drop an admin's explicit bypass onto a request
+        // that never asked for one. A fresh, call-local map guarantees this
+        // call can neither join an existing leader nor be joined by a later one.
+        const coalesceMap: typeof this.inFlightApplies = opts.bypassPolicy ? new Map() : this.inFlightApplies;
+        return this.withReservedExecution(coalesceMap, request, doApply);
     }
 
     /**
@@ -2308,7 +2360,20 @@ export class GitSourceService {
      * caller gets its own durable attempt); only the fetch or apply
      * itself is shared.
      */
-    private readonly inFlightReconciles = new Map<string, { operationId: string; promise: Promise<ReconcileResult> }>();
+    private readonly inFlightReconciles: InFlightMap<ReconcileResult> = new Map();
+
+    /**
+     * The same bookkeeping as inFlightReconciles, one map per non-controller
+     * producer (manual pull, manual apply): kept separate because each
+     * producer returns its own type, which cannot be synthesized from durable
+     * row state the way a ReconcileResult can. Each map coalesces concurrent
+     * calls to its own entry point for the same work; it does not coalesce,
+     * say, a manual pull() against a concurrently poll-triggered reconcile()
+     * for the same stack, a narrower scope than full cross-entry-point
+     * coalescing.
+     */
+    private readonly inFlightPulls: InFlightMap<PullResult> = new Map();
+    private readonly inFlightApplies: InFlightMap<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> = new Map();
 
     /**
      * The controller-facing entry point: one normalized submission in,
@@ -2354,13 +2419,13 @@ export class GitSourceService {
             // leader exists, so check by operation id before falling back to
             // durable state; otherwise a still-executing leader's real result
             // could lose a settlement race to a stale snapshot.
-            const byOperationId = this.findInFlightByOperationId(envelope.operationId);
+            const byOperationId = GitSourceService.findByOperationId(this.inFlightReconciles, envelope.operationId);
             if (byOperationId) return byOperationId;
             return this.resolveAlreadyReservedAttempt(request.applicationId, envelope.operationId, request.actor, request.trigger);
         }
 
         const promise = (async () => {
-            const result = await this.withStackLock(request.stackName, () => this.runReconcile(request));
+            const result = await this.withStackLock(request.stackName, () => this.runReconcile(request, envelope.operationId));
             this.settleAttempt(request.applicationId, envelope, result);
             return result;
         })();
@@ -2375,18 +2440,144 @@ export class GitSourceService {
     }
 
     /**
-     * Any in-process execution whose reservation minted exactly this
+     * The in-flight execution in `map` whose reservation minted exactly this
      * operation id, regardless of which coalesce key it is running under.
-     * Coalesce keys and operation ids are not co-extensive (an apply's
-     * key includes its commitSha/planFingerprint/deploy, which a shared
-     * external delivery id does not carry), so two submissions can
-     * collide on operation id while running under different keys.
+     * Coalesce keys and operation ids are not co-extensive (an apply's key
+     * includes its commitSha/planFingerprint/deploy, which a shared external
+     * delivery id does not carry), so two submissions can collide on operation
+     * id while running under different keys.
      */
-    private findInFlightByOperationId(operationId: string): Promise<ReconcileResult> | undefined {
-        for (const inFlight of this.inFlightReconciles.values()) {
-            if (inFlight.operationId === operationId) return inFlight.promise;
+    private static findByOperationId<T>(map: InFlightMap<T>, operationId: string): Promise<T> | undefined {
+        for (const entry of map.values()) {
+            if (entry.operationId === operationId) return entry.promise;
         }
         return undefined;
+    }
+
+    /**
+     * Reservation, coalescing, and settlement for a producer entry point that
+     * is not the controller's own reconcile() (manual pull, manual apply):
+     * `work()`'s own return value and throw behavior are preserved exactly,
+     * with only a durable attempt and its settlement added around it.
+     */
+    private async withReservedExecution<T>(
+        map: InFlightMap<T>,
+        request: ReconcileRequest,
+        work: (operationId: string) => Promise<T>,
+    ): Promise<T> {
+        const key = coalesceKey(request);
+        const leader = map.get(key);
+        const reservation = this.tryReserveOwnAttempt(request, leader?.operationId);
+        if (!reservation) return work(crypto.randomUUID());
+        const { envelope, reserved } = reservation;
+
+        if (leader) {
+            try {
+                return await leader.promise;
+            } finally {
+                // In a finally, not after the await: work() throwing is the
+                // ordinary path for a producer that preserves its own throw
+                // contract (unlike reconcile()'s runReconcile, which never
+                // rejects), so settling only after a successful await would
+                // leave this follower's own reservation permanently unsettled
+                // on every failed leader.
+                if (reserved) this.trySettleFromRowState(request.applicationId, envelope);
+            }
+        }
+
+        if (!reserved) {
+            // No producer calling this wrapper reaches here today (none pass a
+            // stable external delivery id, so reservation is always a
+            // first-time allocation), but handled rather than assumed away:
+            // another in-process execution may already own this exact
+            // operation id, in which case its real result is joined instead of
+            // running the work a second time.
+            const byOperationId = GitSourceService.findByOperationId(map, envelope.operationId);
+            if (byOperationId) return byOperationId;
+            console.warn(`[GitSource] Unexpected reservation collision for operation ${sanitizeForLog(envelope.operationId)} with no in-process leader found; proceeding without a reservation of its own.`);
+        }
+
+        const promise = this.runAndSettle(request.applicationId, envelope, work);
+        map.set(key, { operationId: envelope.operationId, promise });
+        try {
+            return await promise;
+        } finally {
+            if (map.get(key)?.promise === promise) map.delete(key);
+        }
+    }
+
+    /** Run work(), settling the reserved attempt from row state whether it succeeds or throws, propagating exactly as work() did either way. */
+    private async runAndSettle<T>(applicationId: string, envelope: EventEnvelope, work: (operationId: string) => Promise<T>): Promise<T> {
+        try {
+            return await work(envelope.operationId);
+        } finally {
+            this.trySettleFromRowState(applicationId, envelope);
+        }
+    }
+
+    /**
+     * Reserve this request's durable attempt, or report null when the
+     * reservation bookkeeping itself fails (a transient DB error, an
+     * application torn down in the window between resolving it and reserving
+     * against it). Such a failure must not turn a pull or apply that would
+     * otherwise have succeeded into a hard failure: there is nothing here
+     * worth protecting more than the operation the caller actually asked for.
+     */
+    private tryReserveOwnAttempt(
+        request: ReconcileRequest,
+        followerOf: string | undefined,
+    ): { envelope: EventEnvelope; reserved: boolean } | null {
+        try {
+            return this.reserveOwnAttempt(request, followerOf);
+        } catch (e) {
+            console.error(
+                `[GitSource] Failed to reserve a durable attempt for application ${sanitizeForLog(request.applicationId)}; proceeding without one:`,
+                e instanceof Error ? e.message : String(e),
+            );
+            return null;
+        }
+    }
+
+    /**
+     * Settle from derived row state, tolerating a failure in the derivation
+     * itself, not just in the settlement write. This also runs on the failure
+     * path, where deriving the result is an argument expression evaluated
+     * before settleAttempt's own body: without this wrapper, a derivation
+     * failure would propagate out of runAndSettle and silently replace
+     * whatever real error work() actually threw with an unrelated one.
+     */
+    private trySettleFromRowState(applicationId: string, envelope: EventEnvelope): void {
+        try {
+            this.settleAttempt(applicationId, envelope, this.deriveResultForApplication(applicationId));
+        } catch (e) {
+            console.error(
+                `[GitSource] Failed to derive a settlement result for attempt ${sanitizeForLog(envelope.operationId)} on application ${sanitizeForLog(applicationId)}:`,
+                e instanceof Error ? e.message : String(e),
+            );
+        }
+    }
+
+    /**
+     * Reservation and settlement for one webhook-driven fetch or apply step,
+     * with no coalescing map: handleWebhookPull's own debounce window plus its
+     * single per-stack lock acquisition already prevent a concurrent duplicate
+     * fetch/apply for the same stack from reaching this point, so there is
+     * normally no in-flight execution to join. A stack with no gitops
+     * application at all has nothing to reserve against, matching
+     * pullLocked/applyLockedBody's own tolerance for that case.
+     */
+    private async withWebhookAttempt<T>(
+        gitopsApp: GitOpsApplicationRow | null,
+        request: ReconcileRequest,
+        work: (operationId?: string) => Promise<T>,
+    ): Promise<T> {
+        if (!gitopsApp) return work();
+        const reservation = this.tryReserveOwnAttempt(request, undefined);
+        if (!reservation) return work();
+        if (!reservation.reserved) {
+            console.warn(`[GitSource] Unexpected reservation collision for operation ${sanitizeForLog(reservation.envelope.operationId)}; proceeding without a reservation of its own.`);
+        }
+        return this.runAndSettle(gitopsApp.id, reservation.envelope, work);
     }
 
     /**
@@ -2698,7 +2889,7 @@ export class GitSourceService {
     }
 
     /** Body of reconcile(): the actual fetch/apply execution, under the per-stack Git mutex. */
-    private async runReconcile(request: ReconcileRequest): Promise<ReconcileResult> {
+    private async runReconcile(request: ReconcileRequest, operationId?: string): Promise<ReconcileResult> {
         // The same "live application" definition deriveReconcileResult and
         // coalesceKey() use ('active' and 'creating' alike), not the narrower
         // gitopsApplicationFor() that gates transitions: a 'creating' row must
@@ -2723,14 +2914,14 @@ export class GitSourceService {
         let deployError: string | undefined;
         try {
             if (request.intent === 'fetch') {
-                await this.pullLocked(request.stackName, request.actor);
+                await this.pullLocked(request.stackName, request.actor, operationId);
             } else {
                 const applyResult = await this.applyWithSharedLock(request.stackName, request.commitSha, {
                     actor: request.actor,
                     deploy: request.deploy,
                     planFingerprint: request.planFingerprint,
                     requirePlanFingerprint: false,
-                });
+                }, operationId);
                 deployError = applyResult.deployError;
             }
         } catch (e) {
@@ -2965,6 +3156,7 @@ export class GitSourceService {
         stackName: string,
         commitSha: string,
         opts: GitApplyOpts,
+        operationId?: string,
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const lock = await StackOpLockService.getInstance().runExclusive(
@@ -2972,7 +3164,7 @@ export class GitSourceService {
             stackName,
             'git_apply',
             opts.actor ?? 'system:git-source',
-            () => this.applyLocked(stackName, commitSha, opts),
+            () => this.applyLocked(stackName, commitSha, opts, operationId),
             getRegistryDeliveryLockContext(),
         );
         if (!lock.ran) {
@@ -2997,6 +3189,7 @@ export class GitSourceService {
         stackName: string,
         commitSha: string,
         opts: GitApplyOpts,
+        operationId?: string,
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
         const started: { app: GitOpsApplicationRow | null; env: ReturnType<GitSourceService['gitopsEnvelope']> | null; settled: boolean } = {
             app: null,
@@ -3004,7 +3197,7 @@ export class GitSourceService {
             settled: false,
         };
         try {
-            return await this.applyLockedBody(stackName, commitSha, opts, started);
+            return await this.applyLockedBody(stackName, commitSha, opts, started, operationId);
         } catch (e) {
             if (started.app && started.env && !started.settled) {
                 const app = started.app;
@@ -3026,6 +3219,7 @@ export class GitSourceService {
         commitSha: string,
         opts: GitApplyOpts,
         started: { app: GitOpsApplicationRow | null; env: ReturnType<GitSourceService['gitopsEnvelope']> | null; settled: boolean },
+        operationId?: string,
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
         const diag = isDebugEnabled();
         const db = DatabaseService.getInstance();
@@ -3094,7 +3288,12 @@ export class GitSourceService {
                 sanitizeForLog(stackName), sanitizeForLog(commitSha.slice(0, 7)),
             );
         }
-        const gitopsEnv = this.gitopsEnvelope(pending.operationId, actor, 'apply');
+        // A caller that reserved a durable attempt for this apply passes its own
+        // operation id in, so the attempt and its gitops transitions
+        // (applyStarted/applied/applyFailed) share one identity. A caller that
+        // reserved none falls back to the fetch-time pending.operationId, as
+        // every caller did before reservation existed.
+        const gitopsEnv = this.gitopsEnvelope(operationId ?? pending.operationId, actor, 'apply');
         if (gitopsApp && gitopsGenerationId) {
             this.recordGitOps(stackName, 'apply start', () => {
                 GitOpsTransitions.getInstance().applyStarted(gitopsApp.id, gitopsGenerationId, gitopsEnv);
@@ -4313,13 +4512,18 @@ export class GitSourceService {
             // after enough of those. pullLocked's guard would catch this too,
             // but only by throwing an error this method would then have to
             // reinterpret from the exception itself.
-            if (this.gitopsApplicationFor(stackName)?.suspended_at) {
+            const gitopsApp = this.gitopsApplicationFor(stackName);
+            if (gitopsApp?.suspended_at) {
                 return { status: 'skipped', message: 'Reconciliation is suspended for this source.' };
             }
 
             let pullResult: PullResult;
             try {
-                pullResult = await this.pullLocked(stackName, 'system:webhook');
+                pullResult = await this.withWebhookAttempt(
+                    gitopsApp,
+                    { intent: 'fetch', applicationId: gitopsApp?.id ?? '', stackName, trigger: 'webhook', actor: 'system:webhook' },
+                    (operationId) => this.pullLocked(stackName, 'system:webhook', operationId),
+                );
             } catch (e) {
                 const msg = e instanceof GitSourceError ? `${e.code}: ${e.message}` : (e as Error).message;
                 const scrubbed = scrubCredentials(msg);
@@ -4344,11 +4548,24 @@ export class GitSourceService {
                     return { status: 'success', message: `Pending update ready at ${pullResult.commitSha.slice(0, 7)}.` };
                 }
 
-                const applied = await this.applyWithSharedLock(stackName, pullResult.commitSha, {
-                    deploy: src.auto_deploy_on_apply,
-                    actor: 'system:webhook',
-                    requirePlanFingerprint: false,
-                });
+                const applied = await this.withWebhookAttempt(
+                    gitopsApp,
+                    {
+                        intent: 'apply',
+                        applicationId: gitopsApp?.id ?? '',
+                        stackName,
+                        trigger: 'webhook',
+                        actor: 'system:webhook',
+                        commitSha: pullResult.commitSha,
+                        planFingerprint: '',
+                        deploy: src.auto_deploy_on_apply,
+                    },
+                    (operationId) => this.applyWithSharedLock(stackName, pullResult.commitSha, {
+                        deploy: src.auto_deploy_on_apply,
+                        actor: 'system:webhook',
+                        requirePlanFingerprint: false,
+                    }, operationId),
+                );
                 if (applied.deployError) {
                     // Apply wrote to disk but deploy failed. Surface it so the
                     // webhook_executions row records a degraded outcome instead

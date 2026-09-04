@@ -240,6 +240,34 @@ function mockSuccessfulClone(options: {
     return sha;
 }
 
+/**
+ * Configure a plain single-file Git source for a stack, without creating the
+ * stack itself. The caller stages the clone mock first: upsert runs a
+ * reachability fetch.
+ */
+async function configureGitSource(stackName: string): Promise<void> {
+    await GitSourceService.getInstance().upsert({
+        stackName,
+        repoUrl: 'https://github.com/example/repo.git',
+        branch: 'main',
+        composePaths: ['compose.yaml'],
+        contextDir: null,
+        syncEnv: false,
+        envPath: null,
+        authType: 'none',
+        autoApplyOnWebhook: false,
+        autoDeployOnApply: false,
+    });
+}
+
+/** Operation ids of every gitops_history row an application recorded at one stage. */
+function historyOperationIds(applicationId: string, stage: string): string[] {
+    const rows = DatabaseService.getInstance().getDb()
+        .prepare('SELECT operation_id FROM gitops_history WHERE application_id = ? AND stage = ?')
+        .all(applicationId, stage) as { operation_id: string }[];
+    return rows.map((r) => r.operation_id);
+}
+
 /** Wrap a single compose string in the ComposeFile[] shape the new APIs take. */
 function asFiles(content: string): import('../services/GitSourceService').ComposeFile[] {
     return [{ path: 'compose.yaml', content }];
@@ -1501,6 +1529,21 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
         expect(result.message).toMatch(/no git source/i);
     });
 
+    it('reserves and durably settles an attempt for a successful webhook fetch', async () => {
+        mockSuccessfulClone({ sha: '8'.repeat(40) });
+        const svc = GitSourceService.getInstance();
+        await configureGitSource('webhook-reserves');
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('webhook-reserves')!.id;
+        mockGitClone.mockClear();
+        mockSuccessfulClone({ sha: '9'.repeat(40) });
+
+        const result = await svc.handleWebhookPull('webhook-reserves');
+
+        expect(result.status).toBe('success');
+        expect(historyOperationIds(applicationId, 'source_reconcile_settled').length).toBeGreaterThanOrEqual(1);
+        expect(GitOpsStore.getInstance().listUnsettledReconcileAttempts().some((r) => r.application_id === applicationId)).toBe(false);
+    });
+
     it('runs a single clone for a concurrent webhook fan-out', async () => {
         // The original failure: N webhooks for one push each ran a full clone
         // because the debounce gate was read before the per-stack lock. The
@@ -1788,6 +1831,118 @@ describe('GitSourceService.pull', () => {
     it('rejects when no Git source is configured for the stack', async () => {
         const svc = GitSourceService.getInstance();
         await expect(svc.pull('does-not-exist')).rejects.toMatchObject({ code: 'GIT_ERROR' });
+    });
+
+    it('reserves and durably settles an attempt for a successful pull', async () => {
+        await createFromGit('pull-reserves', '2'.repeat(40));
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx:2\n', sha: '3'.repeat(40) });
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('pull-reserves')!.id;
+
+        await svc.pull('pull-reserves');
+
+        expect(historyOperationIds(applicationId, 'source_reconcile_settled').length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('coalesces two concurrent pulls for the same stack into one clone', async () => {
+        const svc = GitSourceService.getInstance();
+        await createFromGit('pull-coalesce', '4'.repeat(40));
+
+        let releaseClone!: () => void;
+        const gate = new Promise<void>((resolve) => { releaseClone = resolve; });
+        mockGitClone.mockClear();
+        mockGitClone.mockImplementation(async (args: { dir: string }) => {
+            await gate;
+            const { promises: fsp } = await import('fs');
+            const path = await import('path');
+            const composeAbs = path.join(args.dir, 'compose.yaml');
+            await fsp.mkdir(path.dirname(composeAbs), { recursive: true });
+            await fsp.writeFile(composeAbs, 'services:\n  web:\n    image: nginx:3\n', 'utf-8');
+        });
+        mockGitLog.mockResolvedValue([{ oid: '5'.repeat(40) }]);
+
+        const first = svc.pull('pull-coalesce');
+        const second = svc.pull('pull-coalesce');
+        releaseClone();
+        const [firstResult, secondResult] = await Promise.all([first, second]);
+
+        expect(mockGitClone).toHaveBeenCalledTimes(1);
+        expect(secondResult).toEqual(firstResult);
+    });
+
+    it('does not mask the real pull failure when deriving the settlement result afterward also throws', async () => {
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ sha: '1'.repeat(40) });
+        await configureGitSource('pull-mask-error');
+        // A real gitops application exists (so this call reserves an
+        // attempt), but the source config row is now gone, so pullLocked
+        // itself throws a specific, truthful error.
+        DatabaseService.getInstance().deleteGitSource('pull-mask-error');
+        const deriveSpy = vi.spyOn(svc as unknown as { deriveReconcileResult: (s: string) => unknown }, 'deriveReconcileResult')
+            .mockImplementationOnce(() => { throw new Error('derivation boom'); });
+
+        try {
+            await expect(svc.pull('pull-mask-error')).rejects.toMatchObject({
+                code: 'GIT_ERROR',
+                message: expect.stringContaining('No Git source configured'),
+            });
+        } finally {
+            deriveSpy.mockRestore();
+        }
+    });
+
+    it('proceeds without duplicating the fetch when a reservation collision is forced with no in-process leader', async () => {
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ sha: '1'.repeat(40) });
+        await configureGitSource('pull-forced-collision');
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('pull-forced-collision')!.id;
+        const nextSeq = GitOpsStore.getInstance().getApplication(applicationId)!.attempt_seq + 1;
+        const predictedOperationId = `${applicationId}:attempt:${nextSeq}`;
+        // Force the exact operation id pull() is about to allocate to
+        // already be reserved, simulating a collision with no in-process
+        // leader for it -- this must proceed gracefully, not duplicate
+        // the fetch, and not throw.
+        GitOpsTransitions.getInstance().reserveReconcileAttempt(applicationId, {
+            operationId: predictedOperationId, actor: 'someone-else', trigger: 'poll', at: Date.now(),
+        });
+        mockSuccessfulClone({ sha: '2'.repeat(40) });
+        mockGitClone.mockClear();
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+        try {
+            const result = await svc.pull('pull-forced-collision');
+            expect(result.commitSha).toBe('2'.repeat(40));
+            expect(mockGitClone).toHaveBeenCalledTimes(1);
+            expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Unexpected reservation collision'));
+        } finally {
+            warnSpy.mockRestore();
+        }
+    });
+
+    it('settles a coalesced follower\'s own attempt even when the leader\'s fetch rejects', async () => {
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ sha: '1'.repeat(40) });
+        await configureGitSource('pull-follower-settles-on-reject');
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('pull-follower-settles-on-reject')!.id;
+
+        let releaseClone!: () => void;
+        const gate = new Promise<void>((resolve) => { releaseClone = resolve; });
+        mockGitClone.mockClear();
+        mockGitClone.mockImplementation(async () => {
+            await gate;
+            throw new Error('simulated clone failure');
+        });
+
+        const first = svc.pull('pull-follower-settles-on-reject');
+        const second = svc.pull('pull-follower-settles-on-reject');
+        releaseClone();
+        await expect(first).rejects.toThrow('simulated clone failure');
+        await expect(second).rejects.toThrow('simulated clone failure');
+
+        // Both the leader's and the follower's own reservations must be
+        // durably settled; neither may be left open waiting for a crash
+        // that never happened.
+        expect(GitOpsStore.getInstance().listUnsettledReconcileAttempts().some((r) => r.application_id === applicationId)).toBe(false);
     });
 
     function generationCount(stackName: string): number {
@@ -2241,6 +2396,108 @@ describe('GitSourceService.apply', () => {
         return GitOpsStore.getInstance().getLiveDirectApplication(stackName);
     }
 
+    it('reserves and durably settles an attempt for a successful apply', async () => {
+        const sha = '6'.repeat(40);
+        const svc = await seedPending('apply-reserves', 'services:\n  x:\n    image: alpine\n', sha);
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+
+        try {
+            const applicationId = liveApp('apply-reserves')!.id;
+            await svc.apply('apply-reserves', sha, SKIP_PLAN_FINGERPRINT);
+
+            const settled = historyOperationIds(applicationId, 'source_reconcile_settled');
+            const applied = historyOperationIds(applicationId, 'applied');
+            expect(settled.length).toBeGreaterThanOrEqual(1);
+            expect(applied).toHaveLength(1);
+            expect(settled).toContain(applied[0]);
+        } finally {
+            validateSpy.mockRestore();
+            saveSpy.mockRestore();
+        }
+    });
+
+    it('coalesces two concurrent applies for the same commit into one execution', async () => {
+        const sha = '7'.repeat(40);
+        const svc = await seedPending('apply-coalesce', 'services:\n  x:\n    image: alpine\n', sha);
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        let releaseSave!: () => void;
+        const gate = new Promise<void>((resolve) => { releaseSave = resolve; });
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockImplementation(async () => { await gate; });
+
+        try {
+            const first = svc.apply('apply-coalesce', sha, SKIP_PLAN_FINGERPRINT);
+            const second = svc.apply('apply-coalesce', sha, SKIP_PLAN_FINGERPRINT);
+            releaseSave();
+            const [firstResult, secondResult] = await Promise.all([first, second]);
+
+            expect(saveSpy).toHaveBeenCalledTimes(1);
+            expect(secondResult).toEqual(firstResult);
+        } finally {
+            validateSpy.mockRestore();
+            saveSpy.mockRestore();
+        }
+    });
+
+    it('does not coalesce two concurrent applies that resolve to different deploy behavior', async () => {
+        const sha = 'ba'.repeat(20);
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha });
+        const seedValidateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        try {
+            await svc.upsert({
+                stackName: 'apply-deploy-mismatch',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                autoApplyOnWebhook: true,
+                autoDeployOnApply: true,
+            });
+            await svc.pull('apply-deploy-mismatch');
+        } finally {
+            seedValidateSpy.mockRestore();
+        }
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        let releaseSave!: () => void;
+        const gate = new Promise<void>((resolve) => { releaseSave = resolve; });
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockImplementation(async () => { await gate; });
+        const { ComposeService } = await import('../services/ComposeService');
+        const { HealthGateService } = await import('../services/HealthGateService');
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+        const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-git');
+
+        try {
+            // The stack has auto_deploy_on_apply: true. The first call
+            // leaves deploy unresolved (so it resolves to true); the
+            // second explicitly asks not to deploy. These must never
+            // share a coalesce key: if they wrongly joined, the second
+            // call would resolve successfully with the first's deployed
+            // result instead of running (or failing) on its own terms.
+            // Since they do not join, and applying clears the pending
+            // commit, the second genuinely has nothing left to apply
+            // once the first (which the per-stack lock serializes first)
+            // completes -- a real, honest failure, not a borrowed result.
+            const first = svc.apply('apply-deploy-mismatch', sha, SKIP_PLAN_FINGERPRINT);
+            const second = svc.apply('apply-deploy-mismatch', sha, { ...SKIP_PLAN_FINGERPRINT, deploy: false });
+            releaseSave();
+            const firstResult = await first;
+            expect(firstResult.deployed).toBe(true);
+            await expect(second).rejects.toMatchObject({ code: 'GIT_ERROR' });
+        } finally {
+            validateSpy.mockRestore();
+            saveSpy.mockRestore();
+            deploySpy.mockRestore();
+            beginSpy.mockRestore();
+        }
+    });
+
     describe('reconcile', () => {
         it('reports candidate_already_fetched after a fetch-intent reconcile stages a new candidate', async () => {
             const sha = 'e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1';
@@ -2510,6 +2767,79 @@ describe('GitSourceService.apply', () => {
                 expect(unsettledAttempts(applicationId)).toHaveLength(0);
             } finally {
                 validateSpy.mockRestore();
+            }
+        });
+
+        it('threads the reserved attempt\'s operation id into the generation the fetch produces', async () => {
+            const sha = 'ed'.repeat(20);
+            mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha });
+            const svc = GitSourceService.getInstance();
+            await svc.upsert({
+                stackName: 'reconcile-operation-id-threading',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+
+            try {
+                const applicationId = liveApp('reconcile-operation-id-threading')!.id;
+                await svc.reconcile({
+                    intent: 'fetch',
+                    applicationId,
+                    stackName: 'reconcile-operation-id-threading',
+                    trigger: 'manual',
+                    actor: 'tester',
+                });
+
+                const settled = settledAttempts(applicationId);
+                expect(settled).toHaveLength(1);
+                const candidateGenerationId = liveApp('reconcile-operation-id-threading')!.candidate_generation_id;
+                expect(candidateGenerationId).toBeTruthy();
+                const generation = GitOpsStore.getInstance().getGeneration(candidateGenerationId!);
+                expect(generation?.operation_id).toBe(settled[0].operation_id);
+            } finally {
+                validateSpy.mockRestore();
+            }
+        });
+
+        it('threads the reserved attempt\'s operation id into the apply-side transition an apply-intent reconcile produces', async () => {
+            const sha = 'ee'.repeat(20);
+            const svc = await seedPending('reconcile-apply-operation-id-threading', 'services:\n  x:\n    image: alpine\n', sha);
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+
+            try {
+                const applicationId = liveApp('reconcile-apply-operation-id-threading')!.id;
+                await svc.reconcile({
+                    intent: 'apply',
+                    applicationId,
+                    stackName: 'reconcile-apply-operation-id-threading',
+                    trigger: 'manual',
+                    actor: 'tester',
+                    commitSha: sha,
+                    planFingerprint: '',
+                    deploy: false,
+                });
+
+                // seedPending's own pull() reserves and settles its own fetch
+                // attempt now that pull() is wired through reservation too, so
+                // more than one settled row is expected here; only the
+                // apply-intent one needs to match the applied-stage transition.
+                const settled = settledAttempts(applicationId).map((r) => r.operation_id);
+                const applied = historyOperationIds(applicationId, 'applied');
+                expect(applied).toHaveLength(1);
+                expect(settled).toContain(applied[0]);
+            } finally {
+                validateSpy.mockRestore();
+                saveSpy.mockRestore();
             }
         });
 
