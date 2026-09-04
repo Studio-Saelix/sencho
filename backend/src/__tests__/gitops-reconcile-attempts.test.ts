@@ -140,7 +140,6 @@ describe('reconcile attempt reservation and settlement', () => {
   });
 
   it('records a follower link on a reservation made on behalf of a coalesced request', () => {
-    const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
     tx.activateDirect({ application: app('app-follower', 'follower-web'), nodeId: 1, envelope: env('op-act-follower') });
 
