@@ -2679,6 +2679,127 @@ describe('useStackActions reactive external-network retry ownership', () => {
   });
 });
 
+describe('useStackActions missing required variable guardrail message propagation', () => {
+  function okJson(payload: unknown): Response {
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  it('prefers guardrail-on renderError in missingExternalBlocksDeploy', async () => {
+    const { result } = setup();
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.endsWith('/missing-external-networks')) {
+        return okJson({
+          status: 'render_unavailable',
+          stackName: 'test-stack',
+          networks: [],
+          autoCreateEnabled: false,
+          declaredExternalCount: 0,
+          renderError: 'Deploy blocked: required environment variable DB_PASSWORD is missing. Define it in a .env or env_file, then deploy again.',
+        });
+      }
+      return okJson({});
+    });
+
+    await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    expect(toast.error).toHaveBeenCalledWith('Deploy blocked: required environment variable DB_PASSWORD is missing. Define it in a .env or env_file, then deploy again.');
+    // Should NOT have called /deploy (blocked by missingExternalBlocksDeploy)
+    expect(apiFetch).not.toHaveBeenCalledWith(expect.stringContaining('/deploy'), expect.any(Object));
+  });
+
+  it('prefers guardrail-off neutral diagnostic in missingExternalBlocksDeploy', async () => {
+    const { result } = setup();
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.endsWith('/missing-external-networks')) {
+        return okJson({
+          status: 'render_unavailable',
+          stackName: 'test-stack',
+          networks: [],
+          autoCreateEnabled: false,
+          declaredExternalCount: 0,
+          renderError: 'Required variable DB_PASSWORD has no value, so the effective model cannot be rendered.',
+        });
+      }
+      return okJson({});
+    });
+
+    await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    expect(toast.error).toHaveBeenCalledWith('Required variable DB_PASSWORD has no value, so the effective model cannot be rendered.');
+    // Should NOT have called /deploy (blocked by missingExternalBlocksDeploy)
+    expect(apiFetch).not.toHaveBeenCalledWith(expect.stringContaining('/deploy'), expect.any(Object));
+  });
+
+  it('falls back to generic message when renderError missing (older-node compatibility)', async () => {
+    const { result } = setup();
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.endsWith('/missing-external-networks')) {
+        return okJson({
+          status: 'render_unavailable',
+          stackName: 'test-stack',
+          networks: [],
+          autoCreateEnabled: false,
+          declaredExternalCount: 0,
+          // No renderError field - older node
+        });
+      }
+      return okJson({});
+    });
+
+    await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    expect(toast.error).toHaveBeenCalledWith('Sencho could not render this stack\'s Compose model to check external networks.');
+    // Should NOT have called /deploy (blocked by missingExternalBlocksDeploy)
+    expect(apiFetch).not.toHaveBeenCalledWith(expect.stringContaining('/deploy'), expect.any(Object));
+  });
+
+  it('falls back to generic message when renderError is empty string', async () => {
+    const { result } = setup();
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.endsWith('/missing-external-networks')) {
+        return okJson({
+          status: 'render_unavailable',
+          stackName: 'test-stack',
+          networks: [],
+          autoCreateEnabled: false,
+          declaredExternalCount: 0,
+          renderError: '', // empty string - should fallback
+        });
+      }
+      return okJson({});
+    });
+
+    await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    expect(toast.error).toHaveBeenCalledWith('Sencho could not render this stack\'s Compose model to check external networks.');
+    // Should NOT have called /deploy (blocked by missingExternalBlocksDeploy)
+    expect(apiFetch).not.toHaveBeenCalledWith(expect.stringContaining('/deploy'), expect.any(Object));
+  });
+
+  it('does not call /deploy when guardrail blocks with exact message', async () => {
+    const { result } = setup();
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.endsWith('/missing-external-networks')) {
+        return okJson({
+          status: 'render_unavailable',
+          stackName: 'test-stack',
+          networks: [],
+          autoCreateEnabled: false,
+          declaredExternalCount: 0,
+          renderError: 'Deploy blocked: required environment variable DB_PASSWORD is missing. Define it in a .env or env_file, then deploy again.',
+        });
+      }
+      if (url.endsWith('/deploy')) {
+        return okJson({}); // This should NOT be called
+      }
+      return okJson({});
+    });
+
+    await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    expect(toast.error).toHaveBeenCalledWith('Deploy blocked: required environment variable DB_PASSWORD is missing. Define it in a .env or env_file, then deploy again.');
+    expect(apiFetch).not.toHaveBeenCalledWith(expect.stringContaining('/deploy'), expect.any(Object));
+  });
+});
+
 describe('useStackActions.refreshGitSourcePending', () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();

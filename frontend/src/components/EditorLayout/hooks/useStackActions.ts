@@ -272,6 +272,10 @@ function parseMissingExternalNetworksPayload(data: unknown): MissingExternalNetw
     autoCreateEnabled: data.autoCreateEnabled,
     stackName: data.stackName,
     networks: data.networks as MissingExternalNetworksPayload['networks'],
+    renderError:
+      typeof data.renderError === 'string' && data.renderError.length > 0
+        ? data.renderError
+        : undefined,
   };
 }
 
@@ -339,7 +343,7 @@ function missingExternalBlocksDeploy(
   envelope: MissingExternalNetworksEnvelope,
 ): string | null {
   if (envelope.status === 'render_unavailable') {
-    return 'Sencho could not render this stack\'s Compose model to check external networks.';
+    return envelope.renderError || 'Sencho could not render this stack\'s Compose model to check external networks.';
   }
   if (envelope.status === 'runtime_unavailable' && envelope.declaredExternalCount > 0) {
     return 'Sencho could not read Docker networking state to check external networks.';

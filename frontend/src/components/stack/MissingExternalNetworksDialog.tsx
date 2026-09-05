@@ -35,6 +35,7 @@ export type MissingExternalNetworksPayload = {
   autoCreateEnabled: boolean;
   stackName: string;
   networks: MissingExternalNetworkDto[];
+  renderError?: string;
 };
 
 interface MissingExternalNetworksDialogProps {
