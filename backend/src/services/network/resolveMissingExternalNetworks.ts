@@ -55,7 +55,12 @@ function isGuardrailEnabled(nodeId: number): boolean {
     return (
       DatabaseService.getInstance().getGlobalSettings()['env_block_deploy_on_missing_required'] === '1'
     );
-  } catch {
+  } catch (error) {
+    console.warn(
+      '[MissingExternalNetworks] Failed to read guardrail setting for node %s:',
+      nodeId,
+      sanitizeForLog(getErrorMessage(error, 'unknown')),
+    );
     return false;
   }
 }

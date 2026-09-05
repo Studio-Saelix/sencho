@@ -2420,7 +2420,8 @@ describe('useStackActions missing required variable guardrail message propagatio
   }
 
   it('prefers guardrail-on renderError in missingExternalBlocksDeploy', async () => {
-    const { result } = setup();
+    vi.mocked(apiFetch).mockReset();
+    const { result } = setup({ hasGuidedExternalNetworkPreflight: true });
     vi.mocked(apiFetch).mockImplementation(async (url: string) => {
       if (url.endsWith('/missing-external-networks')) {
         return okJson({
@@ -2442,7 +2443,8 @@ describe('useStackActions missing required variable guardrail message propagatio
   });
 
   it('prefers guardrail-off neutral diagnostic in missingExternalBlocksDeploy', async () => {
-    const { result } = setup();
+    vi.mocked(apiFetch).mockReset();
+    const { result } = setup({ hasGuidedExternalNetworkPreflight: true });
     vi.mocked(apiFetch).mockImplementation(async (url: string) => {
       if (url.endsWith('/missing-external-networks')) {
         return okJson({
@@ -2464,7 +2466,8 @@ describe('useStackActions missing required variable guardrail message propagatio
   });
 
   it('falls back to generic message when renderError missing (older-node compatibility)', async () => {
-    const { result } = setup();
+    vi.mocked(apiFetch).mockReset();
+    const { result } = setup({ hasGuidedExternalNetworkPreflight: true });
     vi.mocked(apiFetch).mockImplementation(async (url: string) => {
       if (url.endsWith('/missing-external-networks')) {
         return okJson({
@@ -2486,7 +2489,8 @@ describe('useStackActions missing required variable guardrail message propagatio
   });
 
   it('falls back to generic message when renderError is empty string', async () => {
-    const { result } = setup();
+    vi.mocked(apiFetch).mockReset();
+    const { result } = setup({ hasGuidedExternalNetworkPreflight: true });
     vi.mocked(apiFetch).mockImplementation(async (url: string) => {
       if (url.endsWith('/missing-external-networks')) {
         return okJson({
@@ -2508,7 +2512,8 @@ describe('useStackActions missing required variable guardrail message propagatio
   });
 
   it('does not call /deploy when guardrail blocks with exact message', async () => {
-    const { result } = setup();
+    vi.mocked(apiFetch).mockReset();
+    const { result } = setup({ hasGuidedExternalNetworkPreflight: true });
     vi.mocked(apiFetch).mockImplementation(async (url: string) => {
       if (url.endsWith('/missing-external-networks')) {
         return okJson({
