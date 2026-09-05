@@ -197,7 +197,7 @@ describe('git-source apply recovery (R1)', () => {
         v: 4,
         files: { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' },
         contextDir: null,
-        candidateRelPath: 'generations/cand',
+        candidateRelPath: 'generations/candidate-abc1234deadbeef',
         inventory: {
           inputs: [],
           refusals: [],
@@ -246,7 +246,7 @@ describe('git-source apply recovery (R1)', () => {
       version: 4,
       files: [{ path: 'compose.yaml', content: 'services:\n  web:\n    image: nginx\n' }],
       contextDir: null,
-      candidateRelPath: 'generations/cand',
+      candidateRelPath: 'generations/candidate-abc1234deadbeef',
       inventory: { inputs: [], refusals: [], buildContexts: [] },
       planFingerprint: 'fp-test',
       planSchemaVersion: GIT_CHANGE_PLAN_SCHEMA_VERSION,

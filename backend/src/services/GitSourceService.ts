@@ -34,7 +34,14 @@ import { nativeGitTransport, verifyFastForward } from './git/nativeGitTransport'
 import { fingerprintFromKnownHostsLine } from './git/sshTrust';
 import { validateCaBundlePem } from './git/caBundle';
 import { GitOpsStore } from './gitops/store';
-import { GitOpsTransitions, GitOpsTransitionError } from './gitops/transitions';
+import type { GitOpsHistoryCursor } from './gitops/history';
+import { projectApplication } from './gitops/derive';
+import { outcomeFromSourceFacet, isNextAction, isReconcileOutcome, type ReconcileOutcome, type ReconcileResult } from './gitops/outcomes';
+import { coalesceKey, deliveryKey, type ReconcileRequest, type ReconcileTrigger } from './gitops/triggers';
+import { classifyFailure } from './gitops/backoff';
+import { BlueprintTargetAdapter, type AcceptedGeneration, type DispatchContext, type DispatchResult } from './gitops/handoff';
+import { GitOpsTransitions, GitOpsTransitionError, type EventEnvelope } from './gitops/transitions';
+import { decodeGitOpsJson, isRecord, GitOpsJsonError } from './gitops/json';
 import {
     buildCreateCheckpointRow,
     buildDirectApplicationRow,
@@ -43,7 +50,7 @@ import {
     newGitOpsId,
     stackManagedRoot,
 } from './gitops/directApplication';
-import type { GitOpsApplicationRow } from './gitops/types';
+import type { GitOpsApplicationRow, GitOpsHistoryRow } from './gitops/types';
 import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readStagingMarker, validateCandidateRelPath, writeStagingMarker } from './gitops/createStagingMarker';
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops/createCleanup';
 import { managedAreaBase } from './gitops/managedPaths';
@@ -290,6 +297,13 @@ export interface GitApplyOpts {
     /** Public apply requires a fingerprint. Webhook and internal callers pass false. */
     requirePlanFingerprint?: boolean;
 }
+
+/**
+ * In-process executions keyed by coalesceKey(request): the operation id each
+ * one's reservation minted, and the promise a later joiner awaits instead of
+ * repeating the work.
+ */
+type InFlightMap<T> = Map<string, { operationId: string; promise: Promise<T> }>;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1890,14 +1904,26 @@ export class GitSourceService {
         // concurrent delete-source + pull can land a pending row on a stack
         // whose config row has just been removed.
         const actor = opts.actor ?? 'unknown';
-        return this.withStackLock(stackName, async () => {
+        const doPull = (operationId?: string): Promise<PullResult> => this.withStackLock(stackName, async () => {
             try {
-                return await this.pullLocked(stackName, actor);
+                return await this.pullLocked(stackName, actor, operationId);
             } catch (e) {
                 this.recordGitActivity(stackName, 'git_pull_failed', `Git pull failed for ${stackName}`, actor, 'error');
                 throw e;
             }
         });
+
+        // Reservation and coalescing need a real gitops application to attach a
+        // durable attempt to, the same definition pullLocked itself uses to
+        // decide whether it has any gitops bookkeeping to do at all.
+        const gitopsApp = this.gitopsApplicationFor(stackName);
+        if (!gitopsApp) {
+            this.refuseIfDetachedWithSurvivingConfig(stackName, actor, 'fetch', true);
+            return doPull();
+        }
+
+        const request: ReconcileRequest = { intent: 'fetch', applicationId: gitopsApp.id, stackName, trigger: 'manual', actor };
+        return this.withReservedExecution(this.inFlightPulls, request, doPull);
     }
 
     /**
@@ -1977,12 +2003,23 @@ export class GitSourceService {
         });
     }
 
-    private async pullLocked(stackName: string, actor: string): Promise<PullResult> {
+    private async pullLocked(stackName: string, actor: string, operationId?: string): Promise<PullResult> {
         const db = DatabaseService.getInstance();
         const src = db.getGitSource(stackName);
         if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
         const gitopsApp = this.gitopsApplicationFor(stackName);
-        const gitopsOperationId = crypto.randomUUID();
+        // fetchStarted has its own suspension guard, but recordGitOps swallows
+        // its rejection (so a fetch that already touched the filesystem is never
+        // failed out from under itself), which would let a suspended source keep
+        // cloning and staging pending updates. Stop before any of that starts.
+        if (gitopsApp?.suspended_at) {
+            throw new GitSourceError('OPERATION_IN_FLIGHT', `Reconciliation is suspended for ${stackName}.`);
+        }
+        // A caller that reserved a durable attempt for this fetch passes its own
+        // operation id in, so the attempt and every stage of gitops evidence it
+        // produces share one identity. A direct low-level call that reserved
+        // nothing still gets an id of its own.
+        const gitopsOperationId = operationId ?? crypto.randomUUID();
         const gitopsEnv = this.gitopsEnvelope(gitopsOperationId, actor, 'pull');
         // A fetch that starts and never terminates is worse than one that is
         // never recorded: fetchStarted refuses to open a second operation, so
@@ -2244,10 +2281,936 @@ export class GitSourceService {
         commitSha: string,
         opts: GitApplyOpts = {},
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
-        return this.withStackLock(stackName, () => this.applyWithSharedLock(stackName, commitSha, {
-            ...opts,
-            requirePlanFingerprint: opts.requirePlanFingerprint !== false,
-        }));
+        // Resolved once, with applyLockedBody's own formula (its shouldDeploy),
+        // so the coalesce key below and the deploy behavior actually executed
+        // can never disagree: two calls that resolve to different deploy
+        // behavior must never share a coalesce key, or one could silently
+        // receive the other's deployed/not-deployed result.
+        const resolvedDeploy = opts.deploy ?? DatabaseService.getInstance().getGitSource(stackName)?.auto_deploy_on_apply ?? false;
+        const finalOpts: GitApplyOpts = { ...opts, deploy: resolvedDeploy, requirePlanFingerprint: opts.requirePlanFingerprint !== false };
+        const doApply = (operationId?: string) => this.withStackLock(
+            stackName,
+            () => this.applyWithSharedLock(stackName, commitSha, finalOpts, operationId),
+        );
+
+        // Same reasoning as pull(): reservation needs a real gitops
+        // application to attach a durable attempt to.
+        const gitopsApp = this.gitopsApplicationFor(stackName);
+        if (!gitopsApp) {
+            this.refuseIfDetachedWithSurvivingConfig(stackName, opts.actor ?? 'unknown', 'apply', true);
+            return doApply();
+        }
+
+        const request: ReconcileRequest = {
+            intent: 'apply',
+            applicationId: gitopsApp.id,
+            stackName,
+            trigger: 'manual',
+            actor: opts.actor ?? 'unknown',
+            commitSha,
+            planFingerprint: opts.planFingerprint ?? '',
+            deploy: resolvedDeploy,
+        };
+        // A policy-bypassing apply must never coalesce with anything else:
+        // bypassPolicy changes behavior but is not part of the coalesce key (a
+        // plain policy-gate bypass has no natural identity to key on), so
+        // joining could hand a non-bypassing caller someone else's bypassed
+        // result, or silently drop an admin's explicit bypass onto a request
+        // that never asked for one. A fresh, call-local map guarantees this
+        // call can neither join an existing leader nor be joined by a later one.
+        const coalesceMap: typeof this.inFlightApplies = opts.bypassPolicy ? new Map() : this.inFlightApplies;
+        return this.withReservedExecution(coalesceMap, request, doApply);
+    }
+
+    /**
+     * Outcomes the application row already reflects truthfully, so reconcile
+     * trusts the derived result over a classified fallback. Most throw sites
+     * in pullLocked/applyLockedBody fire before any transition opens (missing
+     * config, stale commitSha, lock contention) and leave the row saying
+     * nothing about the failure, which is what the fallback covers;
+     * 'suspended' belongs here because its guards throw only when the row
+     * already, correctly, says so.
+     */
+    private static readonly FAILURE_REFLECTED_OUTCOMES: ReadonlySet<ReconcileOutcome> = new Set<ReconcileOutcome>([
+        'failed_previous_intact',
+        'retry_scheduled',
+        'recovery_required',
+        'blocked',
+        'suspended',
+    ]);
+
+    /** The settled result for a stack that carries no GitOps application at all. */
+    private static noApplicationResult(): ReconcileResult {
+        return { outcome: 'unknown', reason: 'No GitOps application exists for this stack.', nextAction: 'none' };
+    }
+
+    /**
+     * The settled result for a request naming an application id that is no
+     * longer the live one for its stack. Failing closed here (rather than
+     * proceeding against whatever application now holds the stack name)
+     * keeps a request from settling against an application it never named.
+     */
+    private static staleApplicationResult(): ReconcileResult {
+        return {
+            outcome: 'unknown',
+            reason: 'The live application for this stack no longer matches the requested application id.',
+            nextAction: 'none',
+        };
+    }
+
+    /**
+     * In-process execution coalescing, keyed by coalesceKey(request): a
+     * concurrent submission that would do exactly the same work as one
+     * already running joins it as a follower instead of repeating it.
+     * Reservation and settlement still happen once per submission (every
+     * caller gets its own durable attempt); only the fetch or apply
+     * itself is shared.
+     */
+    private readonly inFlightReconciles: InFlightMap<ReconcileResult> = new Map();
+
+    /**
+     * The same bookkeeping as inFlightReconciles, one map per non-controller
+     * producer (manual pull, manual apply): kept separate because each
+     * producer returns its own type, which cannot be synthesized from durable
+     * row state the way a ReconcileResult can. Each map coalesces concurrent
+     * calls to its own entry point for the same work; it does not coalesce,
+     * say, a manual pull() against a concurrently poll-triggered reconcile()
+     * for the same stack, a narrower scope than full cross-entry-point
+     * coalescing.
+     */
+    private readonly inFlightPulls: InFlightMap<PullResult> = new Map();
+    private readonly inFlightApplies: InFlightMap<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> = new Map();
+
+    /**
+     * The controller-facing entry point: one normalized submission in,
+     * one normalized result out, for any trigger (manual, poll, retry,
+     * API, config change, startup, resume).
+     *
+     * Every submission against a real application row gets a durable
+     * attempt, reserved before any side effect and settled with the
+     * normalized result once execution finishes -- reserved but never
+     * settled is exactly what startup recovery looks for after a crash.
+     * A submission naming an application id that does not exist at all
+     * (a fabricated id, or a stack with no GitOps application) reserves
+     * nothing: there is no row to attach a durable attempt to, and the
+     * identity/no-application guards below already produce a truthful
+     * result for it without doing any work worth protecting.
+     */
+    public async reconcile(request: ReconcileRequest): Promise<ReconcileResult> {
+        if (!GitOpsStore.getInstance().getApplication(request.applicationId)) {
+            return this.withStackLock(request.stackName, () => this.runReconcile(request));
+        }
+
+        const key = coalesceKey(request);
+        const leader = this.inFlightReconciles.get(key);
+        const { envelope, reserved } = this.reserveOwnAttempt(request, leader?.operationId);
+
+        if (leader) {
+            // A leader in this process is always the correct source of
+            // truth for this submission, whether or not this submission's
+            // own reservation is the one that actually landed: a
+            // `reserved: false` here just means this request's operation id
+            // happens to equal the leader's own (an exact redelivery of the
+            // same external event), whose settlement the leader already
+            // owns. Falling through to a snapshot of the row instead would
+            // report the state from *before* the leader's still-running
+            // work, not the result of it.
+            const result = await leader.promise;
+            if (reserved) this.settleAttempt(request.applicationId, envelope, result);
+            return result;
+        }
+
+        if (!reserved) {
+            // A leader-by-key miss above does not yet prove no in-process
+            // leader exists, so check by operation id before falling back to
+            // durable state; otherwise a still-executing leader's real result
+            // could lose a settlement race to a stale snapshot.
+            const byOperationId = GitSourceService.findByOperationId(this.inFlightReconciles, envelope.operationId);
+            if (byOperationId) return byOperationId;
+            return this.resolveAlreadyReservedAttempt(request.applicationId, envelope.operationId, request.actor, request.trigger);
+        }
+
+        const promise = (async () => {
+            const result = await this.withStackLock(request.stackName, () => this.runReconcile(request, envelope.operationId));
+            this.settleAttempt(request.applicationId, envelope, result);
+            return result;
+        })();
+        this.inFlightReconciles.set(key, { operationId: envelope.operationId, promise });
+        try {
+            return await promise;
+        } finally {
+            if (this.inFlightReconciles.get(key)?.promise === promise) {
+                this.inFlightReconciles.delete(key);
+            }
+        }
+    }
+
+    /**
+     * The in-flight execution in `map` whose reservation minted exactly this
+     * operation id, regardless of which coalesce key it is running under.
+     * Coalesce keys and operation ids are not co-extensive (an apply's key
+     * includes its commitSha/planFingerprint/deploy, which a shared external
+     * delivery id does not carry), so two submissions can collide on operation
+     * id while running under different keys.
+     */
+    private static findByOperationId<T>(map: InFlightMap<T>, operationId: string): Promise<T> | undefined {
+        for (const entry of map.values()) {
+            if (entry.operationId === operationId) return entry.promise;
+        }
+        return undefined;
+    }
+
+    /**
+     * Reservation, coalescing, and settlement for a producer entry point that
+     * is not the controller's own reconcile() (manual pull, manual apply):
+     * `work()`'s own return value and throw behavior are preserved exactly,
+     * with only a durable attempt and its settlement added around it.
+     */
+    private async withReservedExecution<T>(
+        map: InFlightMap<T>,
+        request: ReconcileRequest,
+        work: (operationId: string) => Promise<T>,
+    ): Promise<T> {
+        const key = coalesceKey(request);
+        const leader = map.get(key);
+        // Reserved before checking for a leader, deliberately: every
+        // submission gets its own durable attempt, even a follower whose
+        // side effect is fully covered by the leader's own reservation. A
+        // follower's reservation failure therefore refuses that caller's
+        // call even though the leader's work is durably tracked and
+        // completes normally. Accepted rather than special-cased: "every
+        // submission durably tracked" is a simpler invariant to reason
+        // about than "unless it happens to be a follower".
+        const { envelope, reserved } = this.reserveOwnAttemptOrFailClosed(request, leader?.operationId);
+
+        if (leader) {
+            try {
+                return await leader.promise;
+            } finally {
+                // In a finally, not after the await: work() throwing is the
+                // ordinary path for a producer that preserves its own throw
+                // contract (unlike reconcile()'s runReconcile, which never
+                // rejects), so settling only after a successful await would
+                // leave this follower's own reservation permanently unsettled
+                // on every failed leader.
+                if (reserved) this.trySettleFromRowState(request.applicationId, envelope);
+            }
+        }
+
+        if (!reserved) {
+            // No producer calling this wrapper reaches here today (none pass a
+            // stable external delivery id, so reservation is always a
+            // first-time allocation), but handled rather than assumed away:
+            // another in-process execution may already own this exact
+            // operation id, in which case its real result is joined instead of
+            // running the work a second time.
+            const byOperationId = GitSourceService.findByOperationId(map, envelope.operationId);
+            if (byOperationId) return byOperationId;
+            console.warn(`[GitSource] Unexpected reservation collision for operation ${sanitizeForLog(envelope.operationId)} with no in-process leader found; proceeding without a reservation of its own.`);
+        }
+
+        const promise = this.runAndSettle(request.applicationId, envelope, work);
+        map.set(key, { operationId: envelope.operationId, promise });
+        try {
+            return await promise;
+        } finally {
+            if (map.get(key)?.promise === promise) map.delete(key);
+        }
+    }
+
+    /** Run work(), settling the reserved attempt from row state whether it succeeds or throws, propagating exactly as work() did either way. */
+    private async runAndSettle<T>(applicationId: string, envelope: EventEnvelope, work: (operationId: string) => Promise<T>): Promise<T> {
+        try {
+            return await work(envelope.operationId);
+        } finally {
+            this.trySettleFromRowState(applicationId, envelope);
+        }
+    }
+
+    /**
+     * Reserve this request's durable attempt, failing closed when the
+     * reservation bookkeeping itself fails: no fetch, apply, promotion, or
+     * deploy may run without a durable record of it, so a failure here stops
+     * the operation rather than letting it proceed as an untracked side
+     * effect. Two failure shapes, reported differently: an application torn
+     * down in the window between resolving it and reserving against it (a
+     * GitOpsTransitionError from requireApp) can never succeed on retry, so
+     * it gets its own message; anything else (a transient DB error) is worth
+     * retrying. The refusal is recorded to the stack's own activity history
+     * as well as the server console, since it is itself an event an operator
+     * needs to see later. Callers (an HTTP route, or handleWebhookPull's own
+     * try/catch) already handle a thrown GitSourceError the same way they
+     * handle any other failure from the work itself.
+     */
+    private reserveOwnAttemptOrFailClosed(
+        request: ReconcileRequest,
+        followerOf: string | undefined,
+    ): { envelope: EventEnvelope; reserved: boolean } {
+        try {
+            return this.reserveOwnAttempt(request, followerOf);
+        } catch (e) {
+            console.error(
+                `[GitSource] Failed to reserve a durable attempt for application ${sanitizeForLog(request.applicationId)}; refusing to proceed without one:`,
+                e instanceof Error ? e.stack ?? e.message : String(e),
+            );
+            const isFetch = request.intent === 'fetch';
+            this.recordGitActivity(
+                request.stackName,
+                isFetch ? 'git_pull_failed' : 'git_apply_failed',
+                `Git ${request.intent} for ${request.stackName} was refused: could not durably record the attempt.`,
+                request.actor,
+                'error',
+            );
+            if (e instanceof GitOpsTransitionError) {
+                throw new GitSourceError(
+                    'GIT_ERROR',
+                    `This stack's GitOps tracking is unavailable; reconfigure the source before ${isFetch ? 'pulling' : 'applying'} again.`,
+                );
+            }
+            throw new GitSourceError('GIT_ERROR', 'Could not durably record this operation. Please try again.');
+        }
+    }
+
+    /**
+     * Refuse (fail closed) a fetch or apply against a stack whose GitOps
+     * application was explicitly detached while its git-source config
+     * still survives -- the narrow crash window between detach()'s two
+     * transactional writes (applicationTombstoned then deleteGitSource),
+     * not routine operation. A completed, successful detach leaves the
+     * SAME detached tombstone with NO surviving config row, so this
+     * checks both: a detached tombstone alone is not enough, or this
+     * would misfire on every ordinary detach and produce a false,
+     * unactionable message instead of pullLocked/applyLockedBody's own
+     * correct "No Git source configured" error. Call only once the
+     * live-app lookup has already missed: a stack that never had GitOps
+     * tracking at all (the legitimate pre-migration case) is not refused
+     * here, only one whose tracking existed, was detached, and left its
+     * config behind -- silently acting on that surviving config would be
+     * the exact untracked-operation condition this delivery exists to
+     * eliminate, the same property reserveOwnAttemptOrFailClosed
+     * protects, just reached through a missing reservation target rather
+     * than a reservation failure. Detached only, not deleted: two
+     * production paths tombstone an application as deleted while
+     * deliberately preserving its git-source row so a future upsert or
+     * migration can rebuild from it, so refusing on that state would be
+     * permanent and unrecoverable rather than a narrow, self-correcting
+     * window. See GitOpsStore.hasDetachedDirectApplication.
+     */
+    private refuseIfDetachedWithSurvivingConfig(stackName: string, actor: string, intent: 'fetch' | 'apply', recordActivity: boolean): void {
+        if (!DatabaseService.getInstance().getGitSource(stackName)) return;
+        if (!GitOpsStore.getInstance().hasDetachedDirectApplication(stackName)) return;
+        const message = `This stack's GitOps tracking was removed but its Git source configuration still exists; delete the Git source configuration to finish detaching before ${intent === 'fetch' ? 'pulling' : 'applying'} again.`;
+        if (recordActivity) {
+            this.recordGitActivity(stackName, intent === 'fetch' ? 'git_pull_failed' : 'git_apply_failed', message, actor, 'error');
+        }
+        throw new GitSourceError('GIT_ERROR', message);
+    }
+
+    /**
+     * Settle from derived row state, tolerating a failure in the derivation
+     * itself, not just in the settlement write. This also runs on the failure
+     * path, where deriving the result is an argument expression evaluated
+     * before settleAttempt's own body: without this wrapper, a derivation
+     * failure would propagate out of runAndSettle and silently replace
+     * whatever real error work() actually threw with an unrelated one.
+     */
+    private trySettleFromRowState(applicationId: string, envelope: EventEnvelope): void {
+        try {
+            this.settleAttempt(applicationId, envelope, this.deriveResultForApplication(applicationId));
+        } catch (e) {
+            console.error(
+                `[GitSource] Failed to derive a settlement result for attempt ${sanitizeForLog(envelope.operationId)} on application ${sanitizeForLog(applicationId)}:`,
+                e instanceof Error ? e.message : String(e),
+            );
+        }
+    }
+
+    /**
+     * Reservation and settlement for one webhook-driven fetch or apply step,
+     * with no coalescing map: handleWebhookPull's own debounce window plus its
+     * single per-stack lock acquisition already prevent a concurrent duplicate
+     * fetch/apply for the same stack from reaching this point, so there is
+     * normally no in-flight execution to join. A stack with no gitops
+     * application at all has nothing to reserve against, matching
+     * pullLocked/applyLockedBody's own tolerance for that case.
+     */
+    private async withWebhookAttempt<T>(
+        gitopsApp: GitOpsApplicationRow | null,
+        request: ReconcileRequest,
+        work: (operationId?: string) => Promise<T>,
+    ): Promise<T> {
+        if (!gitopsApp) return work();
+        const { envelope, reserved } = this.reserveOwnAttemptOrFailClosed(request, undefined);
+        if (!reserved) {
+            console.warn(`[GitSource] Unexpected reservation collision for operation ${sanitizeForLog(envelope.operationId)}; proceeding without a reservation of its own.`);
+        }
+        return this.runAndSettle(gitopsApp.id, envelope, work);
+    }
+
+    /**
+     * Reserve this submission's own durable attempt. A request carrying a
+     * stable external delivery id (webhook redelivery) reserves under a
+     * producer-namespaced key derived from it, so a redelivery of the same
+     * event reuses the same operation id and reports `reserved: false`
+     * rather than minting a second attempt. Any other submission has no
+     * such stable identity, so its operation id is freshly allocated from
+     * the row's own attemptSeq, which is always a first-time reservation.
+     */
+    private reserveOwnAttempt(
+        request: ReconcileRequest,
+        followerOf: string | undefined,
+    ): { envelope: EventEnvelope; reserved: boolean } {
+        const tx = GitOpsTransitions.getInstance();
+        if (request.deliveryId) {
+            const operationId = deliveryKey(request.trigger, request.intent, request.deliveryId);
+            const envelope = this.gitopsEnvelope(operationId, request.actor, request.trigger);
+            const { reserved } = tx.reserveReconcileAttempt(request.applicationId, envelope, followerOf);
+            return { envelope, reserved };
+        }
+        const allocated = tx.allocateReconcileAttempt(request.applicationId, request.actor, request.trigger, Date.now(), followerOf);
+        return {
+            envelope: this.gitopsEnvelope(allocated.operationId, request.actor, request.trigger),
+            reserved: allocated.reserved,
+        };
+    }
+
+    /**
+     * Settle a durable attempt with its already-computed result, tolerating
+     * a settlement failure rather than letting it turn a correctly-computed
+     * result (up to and including a real fetch or apply that already
+     * touched the filesystem) into a thrown error for the caller. The
+     * attempt is left unsettled on this path, which is exactly the signal
+     * startup recovery looks for, so nothing here is lost, only deferred.
+     */
+    private settleAttempt(applicationId: string, envelope: EventEnvelope, result: ReconcileResult): void {
+        try {
+            GitOpsTransitions.getInstance().settleReconcileAttempt(applicationId, envelope, result);
+        } catch (e) {
+            console.error(
+                `[GitSource] Failed to settle reconcile attempt ${sanitizeForLog(envelope.operationId)} for application ${sanitizeForLog(applicationId)}:`,
+                e instanceof Error ? e.message : String(e),
+            );
+        }
+    }
+
+    /**
+     * A submission whose operation id was already reserved elsewhere, with
+     * no leader for it running in this process: a settled row means a
+     * duplicate delivery arrived after its original attempt finished, so
+     * its stored result is returned rather than repeating the work. No
+     * settled row means the original attempt was orphaned by a crash (in
+     * this process or another); either way this call must not re-execute a
+     * fetch or apply someone else may already have run, so it resolves
+     * from whatever is already durably recorded, settling when that
+     * yields a real answer and otherwise reporting truthfully that the
+     * outcome is not yet known rather than guessing one.
+     */
+    private resolveAlreadyReservedAttempt(applicationId: string, operationId: string, actor: string | null, trigger: string): ReconcileResult {
+        try {
+            const store = GitOpsStore.getInstance();
+            const settled = store.getSettledAttempt(applicationId, operationId);
+            if (settled) return GitSourceService.resultFromSettledAttempt(settled);
+            return this.settleFromDurableState(applicationId, operationId, actor, trigger);
+        } catch (e) {
+            console.error(
+                `[GitSource] Failed to resolve already-reserved attempt ${sanitizeForLog(operationId)} for application ${sanitizeForLog(applicationId)}:`,
+                e instanceof Error ? e.message : String(e),
+            );
+            return { outcome: 'unknown', reason: 'This attempt could not be resolved from durable state.', nextAction: 'none' };
+        }
+    }
+
+    /**
+     * Resolve one reconcile attempt purely from what is already recorded,
+     * never by re-executing a fetch or apply, settling it durably when that
+     * yields a real answer. A follower is settled from its leader; anything
+     * else is derived from the application's current row state. A follower
+     * whose leader is still unresolved is left unsettled for a later call
+     * (a future recovery pass, or the leader itself finally settling) to
+     * resolve, for the reason resolveFollowerOutcome states.
+     */
+    private settleFromDurableState(
+        applicationId: string,
+        operationId: string,
+        actor: string | null,
+        trigger: string,
+    ): ReconcileResult {
+        const started = GitOpsStore.getInstance().getStartedAttempt(applicationId, operationId);
+        // Prefer the reservation's own recorded actor/trigger over this
+        // call's, so the settled row's audit trail reflects who and what
+        // actually reserved the attempt rather than whoever happened to
+        // resolve it later.
+        const envelope: EventEnvelope = {
+            operationId,
+            actor: started?.actor ?? actor,
+            trigger: started?.trigger ?? trigger,
+            at: Date.now(),
+        };
+        const followerOf = started ? GitSourceService.followerOfFromRow(started) : undefined;
+        if (followerOf) {
+            const outcome = this.resolveFollowerOutcome(applicationId, followerOf);
+            if (!outcome.known) {
+                return { outcome: 'unknown', reason: 'This attempt is waiting on its leader to settle.', nextAction: 'none' };
+            }
+            this.settleAttempt(applicationId, envelope, outcome.result);
+            return outcome.result;
+        }
+        const result = this.deriveResultForApplication(applicationId);
+        this.settleAttempt(applicationId, envelope, result);
+        return result;
+    }
+
+    /**
+     * A follower's outcome from its leader alone: the leader's settled
+     * result when it has one. When the leader has no settled row but its
+     * own reservation genuinely exists, its fate is still unresolved
+     * (`known: false`) and must not be guessed at independently, since it
+     * could settle to something else later and the follower would then
+     * durably disagree with it. Only when the leader's own reservation
+     * cannot be found at all (nothing durable to ever wait for) does
+     * independent derivation apply, logged distinctly since it means the
+     * leader/follower agreement invariant could not be honored here.
+     */
+    private resolveFollowerOutcome(
+        applicationId: string,
+        leaderOperationId: string,
+    ): { known: true; result: ReconcileResult } | { known: false } {
+        const store = GitOpsStore.getInstance();
+        const leaderSettled = store.getSettledAttempt(applicationId, leaderOperationId);
+        if (leaderSettled) return { known: true, result: GitSourceService.resultFromSettledAttempt(leaderSettled) };
+        if (store.getStartedAttempt(applicationId, leaderOperationId)) return { known: false };
+        console.error(
+            `[GitSource] follower's leader ${sanitizeForLog(leaderOperationId)} has no recorded reservation for application ${sanitizeForLog(applicationId)}; deriving independently`,
+        );
+        return { known: true, result: this.deriveResultForApplication(applicationId) };
+    }
+
+    /**
+     * The current truthful result for an application, independent of any
+     * specific attempt. Fails closed on a superseded application id, the
+     * same guard runReconcile applies for the identical reason.
+     */
+    private deriveResultForApplication(applicationId: string): ReconcileResult {
+        const store = GitOpsStore.getInstance();
+        const app = store.getApplication(applicationId);
+        if (!app?.stack_name) return GitSourceService.noApplicationResult();
+        if (store.getLiveDirectApplication(app.stack_name)?.id !== applicationId) {
+            return GitSourceService.staleApplicationResult();
+        }
+        return this.deriveReconcileResult(app.stack_name);
+    }
+
+    /**
+     * The follower-link operation id recorded on a reservation, if any.
+     * Only a `GitOpsJsonError` degrades to "no link found" (logged); any
+     * other error is a bug this call must not hide by mistaking it for a
+     * genuinely link-free row, so it propagates like every other
+     * unexpected failure in this file's per-row recovery loop.
+     */
+    private static followerOfFromRow(row: GitOpsHistoryRow): string | undefined {
+        let decoded: unknown;
+        try {
+            decoded = decodeGitOpsJson(row.after_json);
+        } catch (e) {
+            if (!(e instanceof GitOpsJsonError)) throw e;
+            console.error(`[GitSource] reserved attempt ${sanitizeForLog(row.operation_id)} is not decodable JSON: ${e.message}`);
+            return undefined;
+        }
+        return isRecord(decoded) && typeof decoded.followerOf === 'string' ? decoded.followerOf : undefined;
+    }
+
+    /**
+     * Decode a settled attempt's recorded result back into a
+     * ReconcileResult. Unreadable JSON and a well-formed-but-wrong-shaped
+     * payload are both logged: a corrupt or unexpected settled row is a
+     * storage or encoding bug an operator needs to see, not a routine
+     * response variation, matching decodeHistoryDelta's own rule for this
+     * exact column.
+     */
+    private static resultFromSettledAttempt(row: GitOpsHistoryRow): ReconcileResult {
+        const unreadable: ReconcileResult = {
+            outcome: 'unknown',
+            reason: 'The settled attempt result could not be read.',
+            nextAction: 'none',
+        };
+
+        let decoded: unknown;
+        try {
+            decoded = decodeGitOpsJson(row.after_json);
+        } catch (e) {
+            if (!(e instanceof GitOpsJsonError)) throw e;
+            console.error(`[GitSource] settled attempt ${sanitizeForLog(row.operation_id)} is not decodable JSON: ${e.message}`);
+            return unreadable;
+        }
+        if (
+            !isRecord(decoded)
+            || !isReconcileOutcome(decoded.outcome)
+            || typeof decoded.reason !== 'string'
+            || !isNextAction(decoded.nextAction)
+        ) {
+            console.error(`[GitSource] settled attempt ${sanitizeForLog(row.operation_id)} decoded to an unexpected shape`);
+            return unreadable;
+        }
+        return {
+            outcome: decoded.outcome,
+            reason: decoded.reason,
+            nextAction: decoded.nextAction,
+            retryAt: typeof decoded.retryAt === 'number' ? decoded.retryAt : undefined,
+            commitSha: typeof decoded.commitSha === 'string' ? decoded.commitSha : undefined,
+        };
+    }
+
+    /**
+     * Startup recovery: settle every reconcile attempt that reserved but
+     * never settled, most likely because the process crashed between the
+     * two. Never re-executes a fetch or apply. Must run before
+     * SourceController starts, so no live poll or retry tick can race a
+     * recovery pass over the same attempts.
+     *
+     * Pages by cursor rather than by "still unsettled" status, so a row
+     * this run cannot recover never blocks the rest of the backlog; see
+     * listUnsettledReconcileAttempts for why that matters.
+     *
+     * Two passes. Pass 1 settles every independent (non-follower) attempt
+     * by deriving the application's current truthful state, and defers
+     * every follower rather than settling it yet, so its leader (which
+     * can only be earlier in this same backlog, since a follower's own
+     * reservation records that its leader was already in flight) gets a
+     * chance to settle first. Pass 2 then settles each deferred follower
+     * from its leader's now-settled result, so a leader and its followers
+     * always agree; a follower whose leader is still unresolved is left
+     * for a later recovery run, per resolveFollowerOutcome.
+     *
+     * One row failing to recover (a transient DB error, an application
+     * deleted between listing and processing) is isolated: logged and
+     * counted, never allowed to block any other row.
+     */
+    public async recoverUnsettledReconcileAttempts(pageSize = 200): Promise<void> {
+        const store = GitOpsStore.getInstance();
+        const tx = GitOpsTransitions.getInstance();
+        let recovered = 0;
+        let failed = 0;
+        let stillWaiting = 0;
+        const deferredFollowers: { row: GitOpsHistoryRow; followerOf: string }[] = [];
+
+        const settle = (row: GitOpsHistoryRow, result: ReconcileResult): void => {
+            tx.settleReconcileAttempt(
+                row.application_id,
+                { operationId: row.operation_id, actor: row.actor, trigger: row.trigger, at: Date.now() },
+                result,
+            );
+            recovered++;
+        };
+        const noteFailure = (row: GitOpsHistoryRow, e: unknown): void => {
+            failed++;
+            console.error(
+                `[GitSource] Failed to recover reconcile attempt ${sanitizeForLog(row.operation_id)} for application ${sanitizeForLog(row.application_id)}:`,
+                e instanceof Error ? e.message : String(e),
+            );
+        };
+
+        // Last-resort guard: the cursor advances strictly past every page, so
+        // the loop is already bounded by the size of the backlog itself.
+        const MAX_PAGES = 10_000;
+        let cursor: GitOpsHistoryCursor | undefined;
+        let pagesRead = 0;
+        for (; pagesRead < MAX_PAGES; pagesRead++) {
+            const page = store.listUnsettledReconcileAttempts(pageSize, cursor);
+            if (page.length === 0) break;
+            const last = page[page.length - 1];
+            cursor = { createdAt: last.created_at, id: last.id };
+            for (const row of page) {
+                try {
+                    const followerOf = GitSourceService.followerOfFromRow(row);
+                    if (followerOf) {
+                        deferredFollowers.push({ row, followerOf });
+                        continue;
+                    }
+                    settle(row, this.deriveResultForApplication(row.application_id));
+                } catch (e) {
+                    noteFailure(row, e);
+                }
+            }
+            if (page.length < pageSize) break;
+        }
+        if (pagesRead === MAX_PAGES) {
+            console.warn(`[GitSource] Reconcile-attempt recovery stopped at its per-run page cap (${MAX_PAGES} pages); remaining rows will be retried on the next startup.`);
+        }
+
+        for (const { row, followerOf } of deferredFollowers) {
+            try {
+                const outcome = this.resolveFollowerOutcome(row.application_id, followerOf);
+                if (!outcome.known) {
+                    stillWaiting++;
+                    continue;
+                }
+                settle(row, outcome.result);
+            } catch (e) {
+                noteFailure(row, e);
+            }
+        }
+
+        if (recovered > 0 || failed > 0 || stillWaiting > 0) {
+            console.log(`[GitSource] Reconcile-attempt recovery: ${recovered} settled, ${failed} could not be recovered, ${stillWaiting} still waiting on their leader.`);
+        }
+    }
+
+    /** Body of reconcile(): the actual fetch/apply execution, under the per-stack Git mutex. */
+    private async runReconcile(request: ReconcileRequest, operationId?: string): Promise<ReconcileResult> {
+        // The same "live application" definition deriveReconcileResult and
+        // coalesceKey() use ('active' and 'creating' alike), not the narrower
+        // gitopsApplicationFor() that gates transitions: a 'creating' row must
+        // still be caught by the identity guard below, not slip past it as if
+        // there were no application at all.
+        const liveApp = GitOpsStore.getInstance().getLiveDirectApplication(request.stackName);
+
+        // Nothing to reconcile: say so rather than attempting work that
+        // could only fail.
+        if (!liveApp) {
+            return GitSourceService.noApplicationResult();
+        }
+        // Fail closed on a stale identity: coalesceKey() joins in-flight
+        // evaluations by applicationId, so silently reconciling under
+        // whatever application currently holds the stack name would let a
+        // caller's request settle against an application it never named.
+        if (liveApp.id !== request.applicationId) {
+            return GitSourceService.staleApplicationResult();
+        }
+
+        let failure: unknown;
+        let deployError: string | undefined;
+        try {
+            if (request.intent === 'fetch') {
+                await this.pullLocked(request.stackName, request.actor, operationId);
+            } else {
+                const applyResult = await this.applyWithSharedLock(request.stackName, request.commitSha, {
+                    actor: request.actor,
+                    deploy: request.deploy,
+                    planFingerprint: request.planFingerprint,
+                    requirePlanFingerprint: false,
+                }, operationId);
+                deployError = applyResult.deployError;
+            }
+        } catch (e) {
+            failure = e;
+            console.error(
+                `[GitSource] reconcile(${request.intent}) failed for ${sanitizeForLog(request.stackName)}:`,
+                e instanceof Error ? e.message : String(e),
+            );
+            if (request.intent === 'fetch') {
+                // pull() records this on the same throw; reconcile calls
+                // pullLocked directly and must not lose it from the feed.
+                this.recordGitActivity(request.stackName, 'git_pull_failed', `Git pull failed for ${request.stackName}`, request.actor, 'error');
+            }
+        }
+
+        // Promotion succeeding does not mean the reconcile succeeded: the
+        // source facet alone cannot see a failed deploy, so it would
+        // otherwise report a converged/no-change success over a stack
+        // that never came up. recovery_required, not failed_previous_intact:
+        // the generation DID change (acceptance and promotion already
+        // committed before deploy ran), so nothing here may claim it is
+        // unchanged, and nothing about the source itself needs retrying,
+        // only the target.
+        if (deployError) {
+            return {
+                outcome: 'recovery_required',
+                reason: `The source applied, but the deploy failed: ${deployError}`,
+                nextAction: 'view_target_results',
+            };
+        }
+
+        const derived = this.deriveReconcileResult(request.stackName);
+        if (failure === undefined || GitSourceService.FAILURE_REFLECTED_OUTCOMES.has(derived.outcome)) {
+            return derived;
+        }
+        return this.reconcileFailureResult(failure);
+    }
+
+    /**
+     * A truthful fallback for a reconcile failure the application row does
+     * not yet reflect. Routes through the same classifyFailure disposition
+     * table the controller's own retry/backoff logic uses, so an unretryable
+     * failure is never reported with nextAction: 'retry'.
+     */
+    private reconcileFailureResult(failure: unknown): ReconcileResult {
+        if (!(failure instanceof GitSourceError)) {
+            return {
+                outcome: 'failed_previous_intact',
+                reason: 'The reconcile attempt failed unexpectedly.',
+                nextAction: 'retry',
+            };
+        }
+        const disposition = classifyFailure({
+            kind: 'git_source_error',
+            code: failure.code,
+            transportReason: failure.extras?.transportReason,
+        });
+        switch (disposition.class) {
+            case 'supersession':
+                return { outcome: 'superseded', reason: failure.message, nextAction: 'none' };
+            case 'permanent':
+                return { outcome: 'failed_previous_intact', reason: failure.message, nextAction: 'configure_credentials' };
+            case 'operator_action_required':
+                return { outcome: 'blocked', reason: failure.message, nextAction: 'resolve_conflict' };
+            case 'reconcile':
+                return { outcome: 'unknown', reason: failure.message, nextAction: 'none' };
+            // 'degraded'/'target_*'/'blocked' are not reachable from a
+            // git_source_error classification today, but are grouped with
+            // 'transient' so this switch stays exhaustive if that changes.
+            case 'transient':
+            case 'degraded':
+            case 'target_permanent':
+            case 'target_transient':
+            case 'target_mutation_failed':
+            case 'blocked':
+                return { outcome: 'failed_previous_intact', reason: failure.message, nextAction: 'retry' };
+        }
+    }
+
+    private deriveReconcileResult(stackName: string): ReconcileResult {
+        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        if (!app) {
+            return GitSourceService.noApplicationResult();
+        }
+        const projection = projectApplication(app.id, false);
+        if (projection.targetMode === 'not_applicable') {
+            if (projection.limitations.some((l) => l.code === 'application_row_missing')) {
+                return {
+                    outcome: 'recovery_required',
+                    reason: 'The application this reconcile was resolved from is no longer present.',
+                    nextAction: 'view_target_results',
+                };
+            }
+            return GitSourceService.noApplicationResult();
+        }
+        return outcomeFromSourceFacet(projection.facets.source);
+    }
+
+    /**
+     * Stop acting on a source without forgetting anything about it: no new
+     * fetch, acceptance, or dispatch until resumed (enforced by the
+     * suspended_at checks at the top of pullLocked/applyLockedBody, not by
+     * this method itself). Takes the per-stack mutex not to reject a
+     * concurrent fetch or apply, but because sourceSuspended interrupts and
+     * clears any in-flight operation's active state, which would corrupt a
+     * genuinely running apply's own terminal transition; a suspend queued
+     * behind one instead takes effect once that work settles.
+     *
+     * A refused suspend is surfaced as a real error rather than swallowed:
+     * silently no-op'ing here would leave an operator believing a source is
+     * suspended when it is not, which is the same false-safety failure this
+     * method exists to prevent.
+     */
+    public async suspend(stackName: string, opts: { actor: string; reason?: string }): Promise<ReconcileResult> {
+        return this.withStackLock(stackName, async () => {
+            const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            if (!app) return GitSourceService.noApplicationResult();
+            const envelope = this.gitopsEnvelope(crypto.randomUUID(), opts.actor, 'suspend');
+            const reason = opts.reason?.trim() || 'Suspended by operator.';
+            try {
+                GitOpsTransitions.getInstance().sourceSuspended(app.id, reason, envelope);
+            } catch (error) {
+                if (error instanceof GitOpsTransitionError) {
+                    throw new GitSourceError('OPERATION_IN_FLIGHT', `Cannot suspend ${stackName}: ${error.message}`);
+                }
+                throw error;
+            }
+            return this.deriveReconcileResult(stackName);
+        });
+    }
+
+    /**
+     * Resume acting on a source. Does not itself fetch; the next scheduled
+     * poll, retry, or manual reconcile picks the source back up.
+     *
+     * Unlike suspend(), a refused resume is tolerated rather than surfaced.
+     * The result is read back from the row after the attempted write, so a
+     * resume that did not take (already not suspended, the application
+     * vanished, a transient persistence failure) still truthfully reports
+     * {outcome:'suspended', nextAction:'resume'} rather than a false
+     * "resumed". The caller cannot be told the source is unsuspended when it
+     * is not, so there is no false-safety risk to mirror suspend()'s rethrow.
+     */
+    public async resume(stackName: string, opts: { actor: string }): Promise<ReconcileResult> {
+        return this.withStackLock(stackName, async () => {
+            const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            if (!app) return GitSourceService.noApplicationResult();
+            const envelope = this.gitopsEnvelope(crypto.randomUUID(), opts.actor, 'resume');
+            this.recordGitOps(stackName, 'source resume', () => {
+                GitOpsTransitions.getInstance().sourceUnsuspended(app.id, envelope);
+            });
+            return this.deriveReconcileResult(stackName);
+        });
+    }
+
+    /**
+     * An explicit, operator-initiated re-evaluation: resolves the live
+     * application server-side rather than trusting a caller-supplied id, for
+     * callers that hold only a stack name, and drives a fresh fetch-intent
+     * reconcile through it.
+     *
+     * Scope note: the 'retry' trigger this passes has no observable effect
+     * today. reconcile() never reads request.trigger, and the fetch it drives
+     * records its own hardcoded 'pull' trigger regardless of caller, so this
+     * behaves exactly like any other fetch-intent reconcile. It exists as its
+     * own entry point in anticipation of a future permanent-failure gate that
+     * is expected to check the trigger before allowing an attempt through, at
+     * which point 'retry' needs to actually reach that check.
+     */
+    public async retry(stackName: string, opts: { actor: string }): Promise<ReconcileResult> {
+        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        if (!app) return GitSourceService.noApplicationResult();
+        return this.reconcile({
+            intent: 'fetch',
+            applicationId: app.id,
+            stackName,
+            trigger: 'retry',
+            actor: opts.actor,
+        });
+    }
+
+    /**
+     * Route an accepted generation to its target. Blueprint mode always
+     * blocks (BlueprintTargetAdapter; rollout orchestration does not exist
+     * yet). Direct mode has no separate generation-based promotion pipeline
+     * today, so it dispatches by driving the same reconcile()/apply path a
+     * manual or webhook apply already uses, translating the normalized
+     * ReconcileResult into the narrower dispatched/blocked shape a target
+     * adapter reports.
+     */
+    public async dispatchAcceptedGeneration(
+        generation: AcceptedGeneration,
+        context: DispatchContext,
+        opts: { trigger: ReconcileTrigger; actor: string },
+    ): Promise<DispatchResult> {
+        if (context.targetMode === 'blueprint') {
+            return new BlueprintTargetAdapter().dispatch(generation, context);
+        }
+        const app = GitOpsStore.getInstance().getApplication(generation.applicationId);
+        if (!app?.stack_name) {
+            return { status: 'blocked', reason: 'No Direct stack is bound to this application.' };
+        }
+        const source = DatabaseService.getInstance().getGitSource(app.stack_name);
+        const result = await this.reconcile({
+            intent: 'apply',
+            applicationId: generation.applicationId,
+            stackName: app.stack_name,
+            trigger: opts.trigger,
+            actor: opts.actor,
+            commitSha: generation.commitSha,
+            planFingerprint: generation.changePlanFingerprint ?? '',
+            deploy: source?.auto_deploy_on_apply ?? false,
+        });
+        // 'converged' is not produced by reconcile() today (it requires
+        // target + health evidence this source-only path does not have),
+        // but it is a declared success member of ReconcileOutcome; treating
+        // only 'no_source_change' as success would silently misreport it as
+        // blocked the day a broader derivation starts emitting it.
+        if (result.outcome === 'no_source_change' || result.outcome === 'converged') {
+            return { status: 'dispatched' };
+        }
+        return { status: 'blocked', reason: result.reason };
     }
 
     /**
@@ -2260,6 +3223,7 @@ export class GitSourceService {
         stackName: string,
         commitSha: string,
         opts: GitApplyOpts,
+        operationId?: string,
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const lock = await StackOpLockService.getInstance().runExclusive(
@@ -2267,7 +3231,7 @@ export class GitSourceService {
             stackName,
             'git_apply',
             opts.actor ?? 'system:git-source',
-            () => this.applyLocked(stackName, commitSha, opts),
+            () => this.applyLocked(stackName, commitSha, opts, operationId),
             getRegistryDeliveryLockContext(),
         );
         if (!lock.ran) {
@@ -2292,6 +3256,7 @@ export class GitSourceService {
         stackName: string,
         commitSha: string,
         opts: GitApplyOpts,
+        operationId?: string,
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
         const started: { app: GitOpsApplicationRow | null; env: ReturnType<GitSourceService['gitopsEnvelope']> | null; settled: boolean } = {
             app: null,
@@ -2299,7 +3264,7 @@ export class GitSourceService {
             settled: false,
         };
         try {
-            return await this.applyLockedBody(stackName, commitSha, opts, started);
+            return await this.applyLockedBody(stackName, commitSha, opts, started, operationId);
         } catch (e) {
             if (started.app && started.env && !started.settled) {
                 const app = started.app;
@@ -2321,11 +3286,18 @@ export class GitSourceService {
         commitSha: string,
         opts: GitApplyOpts,
         started: { app: GitOpsApplicationRow | null; env: ReturnType<GitSourceService['gitopsEnvelope']> | null; settled: boolean },
+        operationId?: string,
     ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
         const diag = isDebugEnabled();
         const db = DatabaseService.getInstance();
         const src = db.getGitSource(stackName);
         if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
+        // Same reasoning as pullLocked's guard: applyStarted's own suspension
+        // check is swallowed by recordGitOps once promotion is already
+        // underway, so stop the promotion before it starts, not after.
+        if (this.gitopsApplicationFor(stackName)?.suspended_at) {
+            throw new GitSourceError('OPERATION_IN_FLIGHT', `Reconciliation is suspended for ${stackName}.`);
+        }
 
         if (!src.pending_commit_sha || !src.pending_compose_content) {
             throw new GitSourceError('GIT_ERROR', 'No pending pull to apply. Fetch the source again.');
@@ -2383,7 +3355,12 @@ export class GitSourceService {
                 sanitizeForLog(stackName), sanitizeForLog(commitSha.slice(0, 7)),
             );
         }
-        const gitopsEnv = this.gitopsEnvelope(pending.operationId, actor, 'apply');
+        // A caller that reserved a durable attempt for this apply passes its own
+        // operation id in, so the attempt and its gitops transitions
+        // (applyStarted/applied/applyFailed) share one identity. A caller that
+        // reserved none falls back to the fetch-time pending.operationId, as
+        // every caller did before reservation existed.
+        const gitopsEnv = this.gitopsEnvelope(operationId ?? pending.operationId, actor, 'apply');
         if (gitopsApp && gitopsGenerationId) {
             this.recordGitOps(stackName, 'apply start', () => {
                 GitOpsTransitions.getInstance().applyStarted(gitopsApp.id, gitopsGenerationId, gitopsEnv);
@@ -2421,8 +3398,14 @@ export class GitSourceService {
                     pending.candidateRelPath,
                 );
             }
-            const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-            const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, pending.candidateRelPath);
+            const managedRoot = path.resolve(stackManagedRoot(stackName));
+            const pathReason = validateCandidateRelPath(pending.candidateRelPath, managedRoot);
+            if (pathReason) throw new GitSourceError('GIT_ERROR', pathReason);
+            // Inline barrier at the access sink (CodeQL path-injection).
+            const candidateAbs = path.resolve(managedRoot, pending.candidateRelPath);
+            if (!candidateAbs.startsWith(managedRoot + path.sep)) {
+                throw new GitSourceError('GIT_ERROR', 'candidateRelPath escapes the managed root');
+            }
             try {
                 await fsPromises.access(candidateAbs);
             } catch (accessErr: unknown) {
@@ -3445,6 +4428,55 @@ export class GitSourceService {
         }
     }
 
+    /**
+     * The candidate directory basenames (e.g. "candidate-<sha>") the boot
+     * sweep must not reap for this stack: a row still points at each one, so
+     * it is still needed no matter how old or how incomplete it looks on
+     * disk. Direct-mode only, matching the candidate/generation model itself.
+     */
+    private claimedCandidateDirsFor(stackName: string): Set<string> {
+        const store = GitOpsStore.getInstance();
+        const claimed = new Set<string>();
+        const app = store.getLiveDirectApplication(stackName);
+        if (app) {
+            // candidate_generation_id names the currently staged candidate.
+            // accepted_generation_id is set by applySourceAcceptanceMutation
+            // and never cleared, so after an ordinary apply it names an
+            // already-promoted generation whose candidate directory has been
+            // moved away (harmless to check, just not load-bearing). It earns
+            // its place for the sourceAccepted-committed-but-targetApplied-
+            // not-yet-committed window, where the generation is accepted and
+            // genuinely still unpromoted on disk. Nothing calls sourceAccepted
+            // or targetApplied yet, so that is forward-looking coverage rather
+            // than dead code.
+            for (const generationId of [app.candidate_generation_id, app.accepted_generation_id]) {
+                if (!generationId) continue;
+                const generation = store.getGeneration(generationId);
+                if (generation) claimed.add(path.basename(generation.candidate_dir));
+            }
+        }
+        // The pending blob's own candidateRelPath is a third, independent
+        // claimant: it is written outside the transaction that mints a
+        // generation, so a candidate can be staged and recorded as pending
+        // with no generation row at all (fetchedInvalid) or with no live
+        // application to read a pointer from (a stack whose boot migration
+        // failed). A decode failure must not abort the sweep; it only means
+        // this extra claim is unavailable.
+        try {
+            const src = DatabaseService.getInstance().getGitSource(stackName);
+            if (src?.pending_compose_content) {
+                const pending = this.decodePendingCompose(src.pending_compose_content);
+                if (pending.candidateRelPath) claimed.add(path.basename(pending.candidateRelPath));
+            }
+        } catch (e) {
+            console.warn(
+                `[GitSource] Could not read the pending candidate reference for ${sanitizeForLog(stackName)} while computing sweep claimants:`,
+                e instanceof Error ? e.message : String(e),
+            );
+        }
+        return claimed;
+    }
+
     public async sweepOrphans(): Promise<void> {
         const fsSvc = FileSystemService.getInstance();
         const manifestSvc = GitProjectManifestService.getInstance();
@@ -3483,7 +4515,12 @@ export class GitSourceService {
                     continue;
                 }
                 await this.withStackLock(row.stack_name, () =>
-                    manifestSvc.sweepManagedArea(row.stack_name, { repoUrl: row.repo_url, branch: row.branch, stackExists: true }),
+                    manifestSvc.sweepManagedArea(row.stack_name, {
+                        repoUrl: row.repo_url,
+                        branch: row.branch,
+                        stackExists: true,
+                        claimedCandidateDirs: this.claimedCandidateDirsFor(row.stack_name),
+                    }),
                 );
             } catch (e) {
                 console.error(`[GitManifest] sweep failed for ${row.stack_name}:`, (e as Error).message);
@@ -3590,10 +4627,38 @@ export class GitSourceService {
                 if (diag) console.log(`[GitSource:diag] webhook debounced stack=${stackName} age=${now - src.last_debounce_at}ms`);
                 return { status: 'skipped', message: 'Rate limited (debounced).' };
             }
+            // A suspended source is a deliberate operator choice, not a
+            // failure: reporting it as one would surface as a repeated
+            // delivery failure to the Git host, and hosts disable a webhook
+            // after enough of those. pullLocked's guard would catch this too,
+            // but only by throwing an error this method would then have to
+            // reinterpret from the exception itself.
+            const gitopsApp = this.gitopsApplicationFor(stackName);
+            if (gitopsApp?.suspended_at) {
+                return { status: 'skipped', message: 'Reconciliation is suspended for this source.' };
+            }
+            if (!gitopsApp) {
+                try {
+                    this.refuseIfDetachedWithSurvivingConfig(stackName, 'system:webhook', 'fetch', false);
+                } catch (e) {
+                    // A permanent state, not a transient failure: reported as
+                    // skipped rather than error, matching the suspended-source
+                    // precedent above, since every future delivery would
+                    // otherwise report error and risk the host disabling the
+                    // webhook for a condition retrying can never resolve.
+                    const msg = e instanceof GitSourceError ? e.message : (e as Error).message;
+                    console.warn(`[GitSource] Webhook delivery skipped for ${sanitizeForLog(stackName)}: ${sanitizeForLog(msg)}`);
+                    return { status: 'skipped', message: msg };
+                }
+            }
 
             let pullResult: PullResult;
             try {
-                pullResult = await this.pullLocked(stackName, 'system:webhook');
+                pullResult = await this.withWebhookAttempt(
+                    gitopsApp,
+                    { intent: 'fetch', applicationId: gitopsApp?.id ?? '', stackName, trigger: 'webhook', actor: 'system:webhook' },
+                    (operationId) => this.pullLocked(stackName, 'system:webhook', operationId),
+                );
             } catch (e) {
                 const msg = e instanceof GitSourceError ? `${e.code}: ${e.message}` : (e as Error).message;
                 const scrubbed = scrubCredentials(msg);
@@ -3618,11 +4683,24 @@ export class GitSourceService {
                     return { status: 'success', message: `Pending update ready at ${pullResult.commitSha.slice(0, 7)}.` };
                 }
 
-                const applied = await this.applyWithSharedLock(stackName, pullResult.commitSha, {
-                    deploy: src.auto_deploy_on_apply,
-                    actor: 'system:webhook',
-                    requirePlanFingerprint: false,
-                });
+                const applied = await this.withWebhookAttempt(
+                    gitopsApp,
+                    {
+                        intent: 'apply',
+                        applicationId: gitopsApp?.id ?? '',
+                        stackName,
+                        trigger: 'webhook',
+                        actor: 'system:webhook',
+                        commitSha: pullResult.commitSha,
+                        planFingerprint: '',
+                        deploy: src.auto_deploy_on_apply,
+                    },
+                    (operationId) => this.applyWithSharedLock(stackName, pullResult.commitSha, {
+                        deploy: src.auto_deploy_on_apply,
+                        actor: 'system:webhook',
+                        requirePlanFingerprint: false,
+                    }, operationId),
+                );
                 if (applied.deployError) {
                     // Apply wrote to disk but deploy failed. Surface it so the
                     // webhook_executions row records a degraded outcome instead

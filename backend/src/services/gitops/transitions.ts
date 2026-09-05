@@ -894,6 +894,93 @@ export class GitOpsTransitions {
   }
 
   /**
+   * Reserve a durable attempt before any side effect: a bare history
+   * insert in its own transaction, deliberately not through mutateApp, so
+   * nothing about the application row changes. A `reserved: false` return
+   * means this exact (application, operation) already reserved -- the
+   * caller reconstructs from durable state rather than repeating work.
+   *
+   * `followerOf` records that this reservation was made on behalf of a
+   * request that joined another, still-running attempt's execution rather
+   * than running its own: it is audit-trail linkage only, never read to
+   * change how this reservation itself behaves.
+   */
+  reserveReconcileAttempt(applicationId: string, envelope: EventEnvelope, followerOf?: string): { reserved: boolean } {
+    return this.raw().transaction(() => ({
+      reserved: this.insertReconcileReservation(this.requireApp(applicationId), envelope, followerOf),
+    }))();
+  }
+
+  /**
+   * Allocate the next attemptSeq for a submission with no stable external
+   * delivery identity, and reserve its durable attempt in the same
+   * transaction, so two concurrent submissions can never mint the same
+   * operation id. Unlike reserveReconcileAttempt, this does write one
+   * column of application state (attempt_seq) -- allocation is the one
+   * thing here that is not a bare history insert, since a fresh id has to
+   * come from somewhere durable. Only the allocated id's uniqueness is
+   * load-bearing; its embedded sequence number is for traceability.
+   */
+  allocateReconcileAttempt(
+    applicationId: string,
+    actor: string | null,
+    trigger: string,
+    at: number,
+    followerOf?: string,
+  ): { operationId: string; reserved: boolean } {
+    return this.raw().transaction(() => {
+      const app = this.requireApp(applicationId);
+      const seq = app.attempt_seq + 1;
+      this.raw().prepare('UPDATE gitops_applications SET attempt_seq = ? WHERE id = ?').run(seq, applicationId);
+      const operationId = `${applicationId}:attempt:${seq}`;
+      const envelope: EventEnvelope = { operationId, actor, trigger, at };
+      return { operationId, reserved: this.insertReconcileReservation(app, envelope, followerOf) };
+    })();
+  }
+
+  /**
+   * The reservation row itself, shared by reserveReconcileAttempt and
+   * allocateReconcileAttempt: a bare history insert whose dedupe index is
+   * what makes a repeat reservation report false rather than recording a
+   * second attempt.
+   */
+  private insertReconcileReservation(
+    app: GitOpsApplicationRow,
+    envelope: EventEnvelope,
+    followerOf: string | undefined,
+  ): boolean {
+    return this.history(app, envelope, {
+      stage: 'source_reconcile_started',
+      outcome: 'committed',
+      before: {},
+      after: followerOf ? { followerOf } : {},
+    }) !== null;
+  }
+
+  /**
+   * Settle a reserved attempt with its normalized outcome, the same way:
+   * a bare history insert, not a state mutation. Safe to call more than
+   * once for the same operation; a repeat is a no-op via the history
+   * dedupe index, so the first settled result is never overwritten.
+   */
+  settleReconcileAttempt(
+    applicationId: string,
+    envelope: EventEnvelope,
+    result: { outcome: string; reason: string; nextAction: string; retryAt?: number; commitSha?: string },
+  ): { settled: boolean } {
+    return this.raw().transaction(() => {
+      const app = this.requireApp(applicationId);
+      const historyId = this.history(app, envelope, {
+        stage: 'source_reconcile_settled',
+        outcome: 'committed',
+        before: {},
+        after: { ...result },
+      });
+      return { settled: historyId !== null };
+    })();
+  }
+
+  /**
    * Pause a rollout, application-wide or on one target.
    *
    * A pause says nothing about health: whatever was deployed is still deployed,
@@ -2319,7 +2406,8 @@ export class GitOpsTransitions {
         legacy_combined_approval_ref=?, preflight_fingerprint=?,
         latest_operation_id=?, active_operation_id=?,
         active_operation_stage=?, active_operation_at=?, active_generation_id=?,
-        pause_at=?, pause_reason=?, source_suspended_reason=?, partial_json=?,
+        pause_at=?, pause_reason=?, source_suspended_reason=?,
+        source_policy=?, poll_interval_secs=?, next_poll_at=?, attempt_seq=?, partial_json=?,
         failure_stage=?, failure_class=?, failure_at=?, retry_at=?, retry_count=?,
         suspended_at=?, recovery_ref=?, recovery_phase=?,
         interruption_stage=?, interruption_at=?, interruption_operation_id=?,
@@ -2336,7 +2424,8 @@ export class GitOpsTransitions {
       app.legacy_combined_approval_ref, app.preflight_fingerprint,
       app.latest_operation_id, app.active_operation_id,
       app.active_operation_stage, app.active_operation_at, app.active_generation_id,
-      app.pause_at, app.pause_reason, app.source_suspended_reason, app.partial_json,
+      app.pause_at, app.pause_reason, app.source_suspended_reason,
+      app.source_policy, app.poll_interval_secs, app.next_poll_at, app.attempt_seq, app.partial_json,
       app.failure_stage, app.failure_class, app.failure_at, app.retry_at, app.retry_count,
       app.suspended_at, app.recovery_ref, app.recovery_phase,
       app.interruption_stage, app.interruption_at, app.interruption_operation_id,

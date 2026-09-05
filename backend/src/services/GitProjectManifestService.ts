@@ -421,10 +421,19 @@ export class GitProjectManifestService {
 
     /** Atomic manifest write (tmp + rename). */
     async writeManifest(stackName: string, manifest: GitProjectManifest): Promise<void> {
-        const dir = this.managedRoot(stackName);
-        await fs.promises.mkdir(dir, { recursive: true });
-        const target = path.join(dir, MANIFEST_FILENAME);
-        const tmp = path.join(dir, `${MANIFEST_FILENAME}.tmp`);
+        // Inline barrier at the mkdir/write/rename sinks (CodeQL path-injection):
+        // confine the resolved managed directory to the managed area before any
+        // filesystem call touches it, then confine the filenames joined onto it.
+        const root = path.resolve(this.managedRoot(stackName));
+        if (!root.startsWith(managedAreaBase() + path.sep)) {
+            throw Object.assign(new Error('Path escapes the managed area'), { code: 'INVALID_PATH' });
+        }
+        const target = path.resolve(root, MANIFEST_FILENAME);
+        const tmp = path.resolve(root, `${MANIFEST_FILENAME}.tmp`);
+        if (!target.startsWith(root + path.sep) || !tmp.startsWith(root + path.sep)) {
+            throw Object.assign(new Error('Path escapes managed project directory'), { code: 'INVALID_PATH' });
+        }
+        await fs.promises.mkdir(root, { recursive: true });
         await fs.promises.writeFile(tmp, JSON.stringify(manifest, null, 2), 'utf8');
         await fs.promises.rename(tmp, target);
     }
@@ -1268,12 +1277,15 @@ export class GitProjectManifestService {
      * is finalized; an uncommitted promotion restores the prior generation.
      * A third state is treated as an operator edit, so recovery declines and
      * flags migration_required. Interrupted detach snapshots are restored first.
+     * `claimedCandidateDirs` holds candidate directory basenames a database row
+     * still points at; the orphan pass leaves those alone whatever their age or
+     * completeness (see `GitSourceService.claimedCandidateDirsFor`).
      */
     async sweepManagedArea(
         stackName: string,
-        opts: { repoUrl: string; branch: string; stackExists: boolean },
+        opts: { repoUrl: string; branch: string; stackExists: boolean; claimedCandidateDirs?: ReadonlySet<string> },
     ): Promise<void> {
-        const { repoUrl, branch, stackExists } = opts;
+        const { repoUrl, branch, stackExists, claimedCandidateDirs } = opts;
         if (!stackExists) {
             await this.deleteManagedArea(stackName);
             return;
@@ -1359,7 +1371,7 @@ export class GitProjectManifestService {
             }
         }
 
-        // Orphan candidates: incomplete or stale.
+        // Orphan candidates: incomplete or stale, and claimed by no row.
         const dir = this.generationsDir(stackName);
         try {
             const entries = await fs.promises.readdir(dir, { withFileTypes: true });
@@ -1367,6 +1379,13 @@ export class GitProjectManifestService {
             const areaBase = managedAreaBase();
             for (const entry of entries) {
                 if (!entry.isDirectory() || !entry.name.startsWith('candidate-')) continue;
+                // A claimed candidate is still needed regardless of age or
+                // completeness. Recovery runs first and settles any unsettled
+                // attempt, but these claims live on the application and source
+                // rows rather than on the attempt, and recovery never clears
+                // them: they are the durable ownership record that makes
+                // "recover before cleaning up" actually safe.
+                if (claimedCandidateDirs?.has(entry.name)) continue;
                 const abs = path.resolve(dir, entry.name);
                 // Inline containment barrier at the removal sink (see
                 // `managedAreaBase`): the analyzer credits this literal

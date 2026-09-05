@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { DatabaseService } from '../DatabaseService';
+import type { GitOpsHistoryCursor } from './history';
 import {
   decodeArtifactEvidenceJson,
   decodeGitOpsApprovedTargetEffectJson,
@@ -16,6 +17,7 @@ import type {
   GitOpsCreateCheckpointRow,
   GitOpsCreatePhase,
   GitOpsGenerationRow,
+  GitOpsHistoryRow,
   GitOpsIntentRevisionRow,
   GitOpsRolloutCandidateRow,
   GitOpsTargetCurrentRow,
@@ -131,6 +133,29 @@ export class GitOpsStore {
     ).get(stackName) as GitOpsApplicationRow | undefined;
   }
 
+  /**
+   * Whether a detached Direct application exists for this stack name,
+   * distinct from "no application was ever created" (the legitimate
+   * pre-migration case, where a stack's git-source config predates
+   * GitOps tracking entirely). `detached` only, matching
+   * getDetachedDirectApplication above and for the same reason:
+   * `deleted` is not a safe signal here. Two production paths tombstone
+   * an application as `deleted` while deliberately preserving its
+   * git-source row so a future upsert or migration can rebuild from it
+   * (`gitops/createRecovery.ts`'s checkpointless-create sweep, and
+   * `gitops/migrate.ts`'s `tombstoned_missing_stack` outcome) --
+   * treating that state as a refusal would be permanent and
+   * unrecoverable, since neither upsert() nor migration currently mints
+   * a fresh application once a matching migration checkpoint exists.
+   * `detach()` itself deletes the git-source row in the same transaction
+   * as tombstoning (`detached`), so the window this method exists to
+   * catch (tracking removed, config surviving) is a crash between those
+   * two writes, not routine operation.
+   */
+  hasDetachedDirectApplication(stackName: string): boolean {
+    return this.getDetachedDirectApplication(stackName) !== undefined;
+  }
+
   /** Direct applications that never reached their success boundary. */
   listCreatingDirectApplications(): GitOpsApplicationRow[] {
     return this.db().prepare(
@@ -193,6 +218,126 @@ export class GitOpsStore {
          )
        ORDER BY a.created_at ASC`,
     ).all() as GitOpsApplicationRow[];
+  }
+
+  /**
+   * The settled result for one exact reconcile attempt, or undefined when
+   * that attempt has not settled (or never existed). Used to recover a
+   * reservation that already completed rather than repeating the work.
+   */
+  getSettledAttempt(applicationId: string, operationId: string): GitOpsHistoryRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_history
+       WHERE application_id = ? AND operation_id = ? AND stage = 'source_reconcile_settled'
+       LIMIT 1`,
+    ).get(applicationId, operationId) as GitOpsHistoryRow | undefined;
+  }
+
+  /**
+   * The reservation row for one exact reconcile attempt, or undefined when
+   * it was never reserved. Used to recover this attempt's own recorded
+   * follower link (if any), so a follower can be settled from its
+   * leader's actual result rather than derived independently of it.
+   */
+  getStartedAttempt(applicationId: string, operationId: string): GitOpsHistoryRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_history
+       WHERE application_id = ? AND operation_id = ? AND stage = 'source_reconcile_started'
+       LIMIT 1`,
+    ).get(applicationId, operationId) as GitOpsHistoryRow | undefined;
+  }
+
+  /**
+   * Every reservation with no matching settled row, oldest first: an
+   * attempt that started but never recorded a result, most likely because
+   * the process crashed between reservation and settlement. Startup
+   * recovery reconciles these from durable stage evidence rather than
+   * leaving them silently open forever.
+   *
+   * `after` pages strictly forward by (created_at, id), the same cursor
+   * shape `queryHistoryRows` uses, and is load-bearing rather than
+   * cosmetic: a row a caller cannot settle (its application vanished, a DB
+   * error) stays unsettled forever by definition, so without a cursor it
+   * would occupy the same "oldest N" window on every future call and hide
+   * every genuinely recoverable row behind it once the backlog exceeds one
+   * page.
+   */
+  listUnsettledReconcileAttempts(limit = 200, after?: GitOpsHistoryCursor): GitOpsHistoryRow[] {
+    const clauses = ["started.stage = 'source_reconcile_started'"];
+    const params: Array<string | number> = [];
+    if (after) {
+      clauses.push('(started.created_at > ? OR (started.created_at = ? AND started.id > ?))');
+      params.push(after.createdAt, after.createdAt, after.id);
+    }
+    params.push(limit);
+    return this.db().prepare(
+      `SELECT started.* FROM gitops_history started
+       WHERE ${clauses.join(' AND ')}
+         AND NOT EXISTS (
+           SELECT 1 FROM gitops_history settled
+           WHERE settled.application_id = started.application_id
+             AND settled.operation_id = started.operation_id
+             AND settled.stage = 'source_reconcile_settled'
+         )
+       ORDER BY started.created_at ASC, started.id ASC
+       LIMIT ?`,
+    ).all(...params) as GitOpsHistoryRow[];
+  }
+
+  /**
+   * The most recently settled attempt for an application, for API and UI
+   * projection. Distinct from getSettledAttempt, which looks up one exact
+   * operation rather than the newest one.
+   */
+  latestSettledAttempt(applicationId: string): GitOpsHistoryRow | undefined {
+    // rowid (SQLite's implicit insertion-order key), not the id column: id
+    // is a random UUID and does not sort by recency the way rowid does, so
+    // it cannot break a created_at tie between two attempts settled within
+    // the same millisecond.
+    return this.db().prepare(
+      `SELECT * FROM gitops_history
+       WHERE application_id = ? AND stage = 'source_reconcile_settled'
+       ORDER BY created_at DESC, rowid DESC
+       LIMIT 1`,
+    ).get(applicationId) as GitOpsHistoryRow | undefined;
+  }
+
+  /**
+   * Direct sources whose poll time has arrived: active, not suspended, no
+   * operation in flight. Blueprint-mode applications are never polled here
+   * -- source evaluation for them is blocked at the evaluation boundary
+   * until an application-keyed source engine exists for that mode.
+   */
+  listSourcesDueForPoll(now: number, limit = 200): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE target_mode = 'direct'
+         AND lifecycle_status = 'active'
+         AND suspended_at IS NULL
+         AND active_operation_stage IS NULL
+         AND next_poll_at IS NOT NULL
+         AND next_poll_at <= ?
+       ORDER BY next_poll_at ASC
+       LIMIT ?`,
+    ).all(now, limit) as GitOpsApplicationRow[];
+  }
+
+  /**
+   * Applications with a scheduled retry that has come due: not suspended,
+   * no operation in flight. Poll eligibility and retry eligibility are
+   * deliberately separate queries, since a retry can be due on an
+   * application whose poll cadence would not otherwise select it yet.
+   */
+  listApplicationsDueForRetry(now: number, limit = 200): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE retry_at IS NOT NULL
+         AND retry_at <= ?
+         AND suspended_at IS NULL
+         AND active_operation_stage IS NULL
+       ORDER BY retry_at ASC
+       LIMIT ?`,
+    ).all(now, limit) as GitOpsApplicationRow[];
   }
 
   /** Every live target on one node, across all applications. */
@@ -365,12 +510,13 @@ export class GitOpsStore {
         intent_revision_id, rollout_candidate_id, rollout_generation_id, source_acceptance_ref,
         placement_approval_ref, rollout_authorization_ref, legacy_combined_approval_ref,
         preflight_fingerprint, latest_operation_id, active_operation_id, active_operation_stage,
-        active_operation_at, active_generation_id, pause_at, pause_reason, source_suspended_reason, partial_json,
+        active_operation_at, active_generation_id, pause_at, pause_reason, source_suspended_reason,
+        source_policy, poll_interval_secs, next_poll_at, attempt_seq, partial_json,
         failure_stage, failure_class, failure_at, retry_at, retry_count, suspended_at,
         recovery_ref, recovery_phase, interruption_stage, interruption_at,
         interruption_operation_id, interruption_generation_id, evidence_fresh_at,
         evidence_limitations_json, created_at, updated_at
-      ) VALUES (${Array(56).fill('?').join(', ')})`,
+      ) VALUES (${Array(60).fill('?').join(', ')})`,
     ).run(
       row.id, row.lifecycle_key, row.lifecycle_status, row.target_mode, row.stack_name, row.blueprint_id,
       row.configured_repo_url, row.repo_identity_json, row.configured_ref, row.compose_paths_json,
@@ -380,7 +526,8 @@ export class GitOpsStore {
       row.intent_revision_id, row.rollout_candidate_id, row.rollout_generation_id, row.source_acceptance_ref,
       row.placement_approval_ref, row.rollout_authorization_ref, row.legacy_combined_approval_ref,
       row.preflight_fingerprint, row.latest_operation_id, row.active_operation_id, row.active_operation_stage,
-      row.active_operation_at, row.active_generation_id, row.pause_at, row.pause_reason, row.source_suspended_reason, row.partial_json,
+      row.active_operation_at, row.active_generation_id, row.pause_at, row.pause_reason, row.source_suspended_reason,
+      row.source_policy, row.poll_interval_secs, row.next_poll_at, row.attempt_seq, row.partial_json,
       row.failure_stage, row.failure_class, row.failure_at, row.retry_at, row.retry_count, row.suspended_at,
       row.recovery_ref, row.recovery_phase, row.interruption_stage, row.interruption_at,
       row.interruption_operation_id, row.interruption_generation_id, row.evidence_fresh_at,
@@ -394,13 +541,18 @@ export class GitOpsStore {
         id, application_id, commit_sha, repo_url, configured_ref, resolved_ref_kind, repo_identity_json,
         manifest_version, candidate_dir, applied_dir, expected_invocation_json,
         materialization_fingerprint, validation_ok, plan_blocked, change_plan_fingerprint,
-        operation_id, trigger, actor, previous_generation_id, redacted_limitations_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        operation_id, trigger, actor, previous_generation_id, redacted_limitations_json,
+        portable_manifest_json, compose_inputs_json, source_policy_evidence_json,
+        security_policy_evidence_json, support_requirements_json, compatibility_requirements_json,
+        created_at
+      ) VALUES (${Array(27).fill('?').join(', ')})`,
     ).run(
       row.id, row.application_id, row.commit_sha, row.repo_url, row.configured_ref, row.resolved_ref_kind, row.repo_identity_json,
       row.manifest_version, row.candidate_dir, row.applied_dir, row.expected_invocation_json,
       row.materialization_fingerprint, row.validation_ok, row.plan_blocked, row.change_plan_fingerprint,
       row.operation_id, row.trigger, row.actor, row.previous_generation_id, row.redacted_limitations_json,
+      row.portable_manifest_json, row.compose_inputs_json, row.source_policy_evidence_json,
+      row.security_policy_evidence_json, row.support_requirements_json, row.compatibility_requirements_json,
       row.created_at,
     );
   }

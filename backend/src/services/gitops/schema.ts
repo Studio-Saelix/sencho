@@ -100,6 +100,16 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   -- target rows, so suspending a source can never clobber an unrelated
   -- rollout pause reason (or the reverse).
   source_suspended_reason TEXT NULL,
+  -- Controller-owned bookkeeping. NULL poll_interval_secs inherits the
+  -- global default; 0 disables polling for this application. next_poll_at
+  -- is the durable scheduling cursor. attempt_seq is allocated
+  -- transactionally per submission lacking a stable external delivery id.
+  source_policy TEXT NOT NULL DEFAULT 'manual' CHECK (
+    source_policy IN ('manual','review','automatic')
+  ),
+  poll_interval_secs INTEGER NULL,
+  next_poll_at INTEGER NULL,
+  attempt_seq INTEGER NOT NULL DEFAULT 0,
   partial_json TEXT NULL,
   failure_stage TEXT NULL CHECK (
     failure_stage IS NULL OR failure_stage IN (
@@ -177,6 +187,17 @@ CREATE TABLE IF NOT EXISTS gitops_generations (
   actor TEXT NULL,
   previous_generation_id TEXT NULL,
   redacted_limitations_json TEXT NOT NULL DEFAULT '[]',
+  -- Portable accepted-generation contract (content only: no node id, local
+  -- path, target mode, or secret value). Additive and nullable so existing
+  -- rows decode as an explicit limitation rather than invented evidence; a
+  -- legacy pending candidate lacking these must be re-evaluated before it
+  -- can be accepted or dispatched.
+  portable_manifest_json TEXT NULL,
+  compose_inputs_json TEXT NULL,
+  source_policy_evidence_json TEXT NULL,
+  security_policy_evidence_json TEXT NULL,
+  support_requirements_json TEXT NULL,
+  compatibility_requirements_json TEXT NULL,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_gitops_gen_app_created
@@ -453,6 +474,10 @@ CREATE INDEX IF NOT EXISTS idx_gitops_history_node ON gitops_history(node_id);
 CREATE INDEX IF NOT EXISTS idx_gitops_history_trigger ON gitops_history(trigger);
 CREATE INDEX IF NOT EXISTS idx_gitops_history_actor ON gitops_history(actor);
 CREATE INDEX IF NOT EXISTS idx_gitops_history_outcome ON gitops_history(outcome);
+-- listUnsettledReconcileAttempts filters on stage and orders by created_at;
+-- without this, that query (run on every startup, ahead of the server
+-- listening) scans and sorts the whole table.
+CREATE INDEX IF NOT EXISTS idx_gitops_history_stage_created ON gitops_history(stage, created_at);
 CREATE INDEX IF NOT EXISTS idx_gitops_history_repo_ref
   ON gitops_history(repo_url, configured_ref);
 CREATE INDEX IF NOT EXISTS idx_gitops_history_stack_created

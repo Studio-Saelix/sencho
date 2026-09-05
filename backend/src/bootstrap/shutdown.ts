@@ -9,6 +9,7 @@ import { FleetSyncRetryService } from '../services/FleetSyncRetryService';
 import { SuppressionRetractionRetryService } from '../services/SuppressionRetractionRetryService';
 import { DockerEventManager } from '../services/DockerEventManager';
 import { ImageUpdateService } from '../services/ImageUpdateService';
+import { SourceController } from '../services/gitops/SourceController';
 import { SchedulerService } from '../services/SchedulerService';
 import { MfaService } from '../services/MfaService';
 import { MeshService } from '../services/MeshService';
@@ -48,6 +49,9 @@ export function installShutdownHandlers(server: Server): void {
       }
       try { ImageUpdateService.getInstance().stop(); } catch (e) {
         console.warn('[Shutdown] ImageUpdateService cleanup failed:', (e as Error).message);
+      }
+      try { SourceController.getInstance().stop(); } catch (e) {
+        console.warn('[Shutdown] SourceController cleanup failed:', (e as Error).message);
       }
       try { SchedulerService.getInstance().stop(); } catch (e) {
         console.warn('[Shutdown] SchedulerService cleanup failed:', (e as Error).message);
