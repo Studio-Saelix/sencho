@@ -46,6 +46,12 @@ export type LoadFileOptions = {
   // buffers have been reverted via setters that have not re-rendered yet, so
   // hasUnsavedChanges() would still see the pre-discard values.
   skipUnsavedCheck?: boolean;
+  // Pin the whole load chain (compose, env, backup, containers, services) to
+  // this node. A number targets that node; null targets the local node;
+  // undefined follows the active node. loadFileOnNode always sets it so a load
+  // started for node N cannot retarget to whatever node another tab made
+  // active mid-request.
+  nodeId?: number | null;
 };
 
 export function useOverlayState() {
