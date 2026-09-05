@@ -1917,7 +1917,10 @@ export class GitSourceService {
         // durable attempt to, the same definition pullLocked itself uses to
         // decide whether it has any gitops bookkeeping to do at all.
         const gitopsApp = this.gitopsApplicationFor(stackName);
-        if (!gitopsApp) return doPull();
+        if (!gitopsApp) {
+            this.refuseIfDetachedWithSurvivingConfig(stackName, actor, 'fetch', true);
+            return doPull();
+        }
 
         const request: ReconcileRequest = { intent: 'fetch', applicationId: gitopsApp.id, stackName, trigger: 'manual', actor };
         return this.withReservedExecution(this.inFlightPulls, request, doPull);
@@ -2293,7 +2296,10 @@ export class GitSourceService {
         // Same reasoning as pull(): reservation needs a real gitops
         // application to attach a durable attempt to.
         const gitopsApp = this.gitopsApplicationFor(stackName);
-        if (!gitopsApp) return doApply();
+        if (!gitopsApp) {
+            this.refuseIfDetachedWithSurvivingConfig(stackName, opts.actor ?? 'unknown', 'apply', true);
+            return doApply();
+        }
 
         const request: ReconcileRequest = {
             intent: 'apply',
@@ -2467,9 +2473,15 @@ export class GitSourceService {
     ): Promise<T> {
         const key = coalesceKey(request);
         const leader = map.get(key);
-        const reservation = this.tryReserveOwnAttempt(request, leader?.operationId);
-        if (!reservation) return work(crypto.randomUUID());
-        const { envelope, reserved } = reservation;
+        // Reserved before checking for a leader, deliberately: every
+        // submission gets its own durable attempt, even a follower whose
+        // side effect is fully covered by the leader's own reservation. A
+        // follower's reservation failure therefore refuses that caller's
+        // call even though the leader's work is durably tracked and
+        // completes normally. Accepted rather than special-cased: "every
+        // submission durably tracked" is a simpler invariant to reason
+        // about than "unless it happens to be a follower".
+        const { envelope, reserved } = this.reserveOwnAttemptOrFailClosed(request, leader?.operationId);
 
         if (leader) {
             try {
@@ -2516,26 +2528,82 @@ export class GitSourceService {
     }
 
     /**
-     * Reserve this request's durable attempt, or report null when the
-     * reservation bookkeeping itself fails (a transient DB error, an
-     * application torn down in the window between resolving it and reserving
-     * against it). Such a failure must not turn a pull or apply that would
-     * otherwise have succeeded into a hard failure: there is nothing here
-     * worth protecting more than the operation the caller actually asked for.
+     * Reserve this request's durable attempt, failing closed when the
+     * reservation bookkeeping itself fails: no fetch, apply, promotion, or
+     * deploy may run without a durable record of it, so a failure here stops
+     * the operation rather than letting it proceed as an untracked side
+     * effect. Two failure shapes, reported differently: an application torn
+     * down in the window between resolving it and reserving against it (a
+     * GitOpsTransitionError from requireApp) can never succeed on retry, so
+     * it gets its own message; anything else (a transient DB error) is worth
+     * retrying. The refusal is recorded to the stack's own activity history
+     * as well as the server console, since it is itself an event an operator
+     * needs to see later. Callers (an HTTP route, or handleWebhookPull's own
+     * try/catch) already handle a thrown GitSourceError the same way they
+     * handle any other failure from the work itself.
      */
-    private tryReserveOwnAttempt(
+    private reserveOwnAttemptOrFailClosed(
         request: ReconcileRequest,
         followerOf: string | undefined,
-    ): { envelope: EventEnvelope; reserved: boolean } | null {
+    ): { envelope: EventEnvelope; reserved: boolean } {
         try {
             return this.reserveOwnAttempt(request, followerOf);
         } catch (e) {
             console.error(
-                `[GitSource] Failed to reserve a durable attempt for application ${sanitizeForLog(request.applicationId)}; proceeding without one:`,
-                e instanceof Error ? e.message : String(e),
+                `[GitSource] Failed to reserve a durable attempt for application ${sanitizeForLog(request.applicationId)}; refusing to proceed without one:`,
+                e instanceof Error ? e.stack ?? e.message : String(e),
             );
-            return null;
+            const isFetch = request.intent === 'fetch';
+            this.recordGitActivity(
+                request.stackName,
+                isFetch ? 'git_pull_failed' : 'git_apply_failed',
+                `Git ${request.intent} for ${request.stackName} was refused: could not durably record the attempt.`,
+                request.actor,
+                'error',
+            );
+            if (e instanceof GitOpsTransitionError) {
+                throw new GitSourceError(
+                    'GIT_ERROR',
+                    `This stack's GitOps tracking is unavailable; reconfigure the source before ${isFetch ? 'pulling' : 'applying'} again.`,
+                );
+            }
+            throw new GitSourceError('GIT_ERROR', 'Could not durably record this operation. Please try again.');
         }
+    }
+
+    /**
+     * Refuse (fail closed) a fetch or apply against a stack whose GitOps
+     * application was explicitly detached while its git-source config
+     * still survives -- the narrow crash window between detach()'s two
+     * transactional writes (applicationTombstoned then deleteGitSource),
+     * not routine operation. A completed, successful detach leaves the
+     * SAME detached tombstone with NO surviving config row, so this
+     * checks both: a detached tombstone alone is not enough, or this
+     * would misfire on every ordinary detach and produce a false,
+     * unactionable message instead of pullLocked/applyLockedBody's own
+     * correct "No Git source configured" error. Call only once the
+     * live-app lookup has already missed: a stack that never had GitOps
+     * tracking at all (the legitimate pre-migration case) is not refused
+     * here, only one whose tracking existed, was detached, and left its
+     * config behind -- silently acting on that surviving config would be
+     * the exact untracked-operation condition this delivery exists to
+     * eliminate, the same property reserveOwnAttemptOrFailClosed
+     * protects, just reached through a missing reservation target rather
+     * than a reservation failure. Detached only, not deleted: two
+     * production paths tombstone an application as deleted while
+     * deliberately preserving its git-source row so a future upsert or
+     * migration can rebuild from it, so refusing on that state would be
+     * permanent and unrecoverable rather than a narrow, self-correcting
+     * window. See GitOpsStore.hasDetachedDirectApplication.
+     */
+    private refuseIfDetachedWithSurvivingConfig(stackName: string, actor: string, intent: 'fetch' | 'apply', recordActivity: boolean): void {
+        if (!DatabaseService.getInstance().getGitSource(stackName)) return;
+        if (!GitOpsStore.getInstance().hasDetachedDirectApplication(stackName)) return;
+        const message = `This stack's GitOps tracking was removed but its Git source configuration still exists; delete the Git source configuration to finish detaching before ${intent === 'fetch' ? 'pulling' : 'applying'} again.`;
+        if (recordActivity) {
+            this.recordGitActivity(stackName, intent === 'fetch' ? 'git_pull_failed' : 'git_apply_failed', message, actor, 'error');
+        }
+        throw new GitSourceError('GIT_ERROR', message);
     }
 
     /**
@@ -2572,12 +2640,11 @@ export class GitSourceService {
         work: (operationId?: string) => Promise<T>,
     ): Promise<T> {
         if (!gitopsApp) return work();
-        const reservation = this.tryReserveOwnAttempt(request, undefined);
-        if (!reservation) return work();
-        if (!reservation.reserved) {
-            console.warn(`[GitSource] Unexpected reservation collision for operation ${sanitizeForLog(reservation.envelope.operationId)}; proceeding without a reservation of its own.`);
+        const { envelope, reserved } = this.reserveOwnAttemptOrFailClosed(request, undefined);
+        if (!reserved) {
+            console.warn(`[GitSource] Unexpected reservation collision for operation ${sanitizeForLog(envelope.operationId)}; proceeding without a reservation of its own.`);
         }
-        return this.runAndSettle(gitopsApp.id, reservation.envelope, work);
+        return this.runAndSettle(gitopsApp.id, envelope, work);
     }
 
     /**
@@ -4569,6 +4636,20 @@ export class GitSourceService {
             const gitopsApp = this.gitopsApplicationFor(stackName);
             if (gitopsApp?.suspended_at) {
                 return { status: 'skipped', message: 'Reconciliation is suspended for this source.' };
+            }
+            if (!gitopsApp) {
+                try {
+                    this.refuseIfDetachedWithSurvivingConfig(stackName, 'system:webhook', 'fetch', false);
+                } catch (e) {
+                    // A permanent state, not a transient failure: reported as
+                    // skipped rather than error, matching the suspended-source
+                    // precedent above, since every future delivery would
+                    // otherwise report error and risk the host disabling the
+                    // webhook for a condition retrying can never resolve.
+                    const msg = e instanceof GitSourceError ? e.message : (e as Error).message;
+                    console.warn(`[GitSource] Webhook delivery skipped for ${sanitizeForLog(stackName)}: ${sanitizeForLog(msg)}`);
+                    return { status: 'skipped', message: msg };
+                }
             }
 
             let pullResult: PullResult;

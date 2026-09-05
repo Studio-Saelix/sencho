@@ -133,6 +133,29 @@ export class GitOpsStore {
     ).get(stackName) as GitOpsApplicationRow | undefined;
   }
 
+  /**
+   * Whether a detached Direct application exists for this stack name,
+   * distinct from "no application was ever created" (the legitimate
+   * pre-migration case, where a stack's git-source config predates
+   * GitOps tracking entirely). `detached` only, matching
+   * getDetachedDirectApplication above and for the same reason:
+   * `deleted` is not a safe signal here. Two production paths tombstone
+   * an application as `deleted` while deliberately preserving its
+   * git-source row so a future upsert or migration can rebuild from it
+   * (`gitops/createRecovery.ts`'s checkpointless-create sweep, and
+   * `gitops/migrate.ts`'s `tombstoned_missing_stack` outcome) --
+   * treating that state as a refusal would be permanent and
+   * unrecoverable, since neither upsert() nor migration currently mints
+   * a fresh application once a matching migration checkpoint exists.
+   * `detach()` itself deletes the git-source row in the same transaction
+   * as tombstoning (`detached`), so the window this method exists to
+   * catch (tracking removed, config surviving) is a crash between those
+   * two writes, not routine operation.
+   */
+  hasDetachedDirectApplication(stackName: string): boolean {
+    return this.getDetachedDirectApplication(stackName) !== undefined;
+  }
+
   /** Direct applications that never reached their success boundary. */
   listCreatingDirectApplications(): GitOpsApplicationRow[] {
     return this.db().prepare(

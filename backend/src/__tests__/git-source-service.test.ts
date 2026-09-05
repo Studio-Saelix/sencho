@@ -1530,6 +1530,91 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
         expect(result.message).toMatch(/no git source/i);
     });
 
+    it('fails closed and does not clone when reservation itself fails', async () => {
+        mockSuccessfulClone({ sha: '2'.repeat(40) });
+        const svc = GitSourceService.getInstance();
+        await configureGitSource('webhook-reservation-fails-closed');
+        mockGitClone.mockClear();
+        const reserveSpy = vi.spyOn(GitOpsTransitions.prototype, 'allocateReconcileAttempt')
+            .mockImplementationOnce(() => { throw new Error('simulated reservation failure'); });
+
+        try {
+            const result = await svc.handleWebhookPull('webhook-reservation-fails-closed');
+            expect(result.status).toBe('error');
+            expect(mockGitClone).not.toHaveBeenCalled();
+        } finally {
+            reserveSpy.mockRestore();
+        }
+    });
+
+    it('fails closed and does not clone when the application was detached but the source config survives', async () => {
+        mockSuccessfulClone({ sha: '3'.repeat(40) });
+        const svc = GitSourceService.getInstance();
+        await configureGitSource('webhook-tombstoned-app');
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('webhook-tombstoned-app')!.id;
+        GitOpsTransitions.getInstance().applicationTombstoned(applicationId, 'detached', {
+            operationId: 'op-detach-3', actor: 'tester', trigger: 'test', at: Date.now(),
+        });
+        mockGitClone.mockClear();
+
+        const result = await svc.handleWebhookPull('webhook-tombstoned-app');
+
+        // Skipped, not error: this is a permanent state, and reporting it
+        // as a delivery failure on every future push risks the Git host
+        // disabling the webhook for a condition retrying can never fix.
+        expect(result.status).toBe('skipped');
+        expect(result.message).toMatch(/GitOps tracking was removed/);
+        expect(mockGitClone).not.toHaveBeenCalled();
+    });
+
+    it('fails closed on the auto-apply step alone: the fetch settles, the apply reservation fails, and no apply proceeds', async () => {
+        mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha: '6'.repeat(40) });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+        try {
+            await svc.upsert({
+                stackName: 'webhook-apply-reservation-fails-closed',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                autoApplyOnWebhook: true,
+                autoDeployOnApply: false,
+            });
+        } finally {
+            validateSpy.mockRestore();
+        }
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('webhook-apply-reservation-fails-closed')!.id;
+
+        // First call (the fetch) reserves normally; the second (the
+        // auto-apply) fails, isolating the apply-stage reservation path.
+        const originalAllocate = GitOpsTransitions.prototype.allocateReconcileAttempt;
+        const reserveSpy = vi.spyOn(GitOpsTransitions.prototype, 'allocateReconcileAttempt')
+            .mockImplementationOnce(function (this: GitOpsTransitions, ...args: Parameters<typeof originalAllocate>) {
+                return originalAllocate.apply(this, args);
+            })
+            .mockImplementationOnce(() => { throw new Error('simulated apply reservation failure'); });
+
+        try {
+            const result = await svc.handleWebhookPull('webhook-apply-reservation-fails-closed');
+            expect(result.status).toBe('error');
+            expect(saveSpy).not.toHaveBeenCalled();
+            // The fetch attempt settled normally; only the apply attempt
+            // never got as far as being reserved at all.
+            const unsettled = GitOpsStore.getInstance().listUnsettledReconcileAttempts()
+                .filter((r) => r.application_id === applicationId);
+            expect(unsettled).toHaveLength(0);
+        } finally {
+            saveSpy.mockRestore();
+            reserveSpy.mockRestore();
+        }
+    });
+
     it('reserves and durably settles an attempt for a successful webhook fetch', async () => {
         mockSuccessfulClone({ sha: '8'.repeat(40) });
         const svc = GitSourceService.getInstance();
@@ -1869,6 +1954,102 @@ describe('GitSourceService.pull', () => {
 
         expect(mockGitClone).toHaveBeenCalledTimes(1);
         expect(secondResult).toEqual(firstResult);
+    });
+
+    it('fails closed and does not clone when reservation itself fails', async () => {
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ sha: '1'.repeat(40) });
+        await configureGitSource('pull-reservation-fails-closed');
+        mockGitClone.mockClear();
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('pull-reservation-fails-closed')!.id;
+        const reserveSpy = vi.spyOn(GitOpsTransitions.prototype, 'allocateReconcileAttempt')
+            .mockImplementationOnce(() => { throw new Error('simulated reservation failure'); });
+
+        try {
+            await expect(svc.pull('pull-reservation-fails-closed')).rejects.toMatchObject({ code: 'GIT_ERROR' });
+            expect(mockGitClone).not.toHaveBeenCalled();
+            expect(historyOperationIds(applicationId, 'source_reconcile_started')).toHaveLength(0);
+        } finally {
+            reserveSpy.mockRestore();
+        }
+    });
+
+    it('fails closed and does not clone when the application was detached but the source config survives', async () => {
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ sha: '1'.repeat(40) });
+        await configureGitSource('pull-tombstoned-app');
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('pull-tombstoned-app')!.id;
+        GitOpsTransitions.getInstance().applicationTombstoned(applicationId, 'detached', {
+            operationId: 'op-detach-1', actor: 'tester', trigger: 'test', at: Date.now(),
+        });
+        expect(DatabaseService.getInstance().getGitSource('pull-tombstoned-app')).toBeDefined();
+        mockGitClone.mockClear();
+        const activitySpy = vi.spyOn(DatabaseService.getInstance(), 'addNotificationHistory');
+
+        try {
+            await expect(svc.pull('pull-tombstoned-app')).rejects.toMatchObject({
+                code: 'GIT_ERROR',
+                message: expect.stringContaining('GitOps tracking was removed'),
+            });
+            expect(mockGitClone).not.toHaveBeenCalled();
+            expect(historyOperationIds(applicationId, 'source_reconcile_started')).toHaveLength(0);
+            expect(activitySpy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+                category: 'git_pull_failed',
+                stack_name: 'pull-tombstoned-app',
+            }));
+        } finally {
+            activitySpy.mockRestore();
+        }
+    });
+
+    it('does not refuse a pull for an application tombstoned as deleted, since that state is deliberately preserved for a future rebuild', async () => {
+        // Two production paths (the checkpointless-create sweep, and
+        // migration's tombstoned_missing_stack outcome) tombstone an
+        // application as 'deleted' while intentionally keeping the
+        // git-source row so a later upsert or migration can rebuild from
+        // it. Treating that state as a refusal, as an earlier version of
+        // this check did, would be permanent and unrecoverable: neither
+        // upsert() nor migration currently mints a fresh application
+        // once a matching checkpoint exists, so the operator would have
+        // no way to clear it.
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ sha: '4'.repeat(40) });
+        await configureGitSource('pull-deleted-app-not-refused');
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('pull-deleted-app-not-refused')!.id;
+        GitOpsTransitions.getInstance().applicationTombstoned(applicationId, 'deleted', {
+            operationId: 'op-delete-1', actor: 'tester', trigger: 'test', at: Date.now(),
+        });
+        mockGitClone.mockClear();
+
+        const result = await svc.pull('pull-deleted-app-not-refused');
+
+        expect(result.commitSha).toBe('4'.repeat(40));
+        expect(mockGitClone).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls through to the ordinary no-source error for a completed detach, not the detach-in-progress message', async () => {
+        // detach() commits applicationTombstoned('detached') and
+        // deleteGitSource in one transaction, so a routine, fully
+        // successful detach leaves exactly this state: a detached
+        // tombstone with NO surviving source row. The detach-in-progress
+        // refusal must not fire here, or every previously-detached stack
+        // name would get a false, unactionable message instead of the
+        // real, correct "no source configured" error.
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ sha: '5'.repeat(40) });
+        await configureGitSource('pull-completed-detach');
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('pull-completed-detach')!.id;
+        GitOpsTransitions.getInstance().applicationTombstoned(applicationId, 'detached', {
+            operationId: 'op-detach-4', actor: 'tester', trigger: 'test', at: Date.now(),
+        });
+        DatabaseService.getInstance().deleteGitSource('pull-completed-detach');
+        mockGitClone.mockClear();
+
+        await expect(svc.pull('pull-completed-detach')).rejects.toMatchObject({
+            code: 'GIT_ERROR',
+            message: 'No Git source configured for this stack.',
+        });
+        expect(mockGitClone).not.toHaveBeenCalled();
     });
 
     it('does not mask the real pull failure when deriving the settlement result afterward also throws', async () => {
@@ -2396,6 +2577,61 @@ describe('GitSourceService.apply', () => {
     function liveApp(stackName: string) {
         return GitOpsStore.getInstance().getLiveDirectApplication(stackName);
     }
+
+    it('fails closed and does not write or deploy when reservation itself fails, even for a deploying apply', async () => {
+        const sha = 'df'.repeat(20);
+        const svc = await seedPending('apply-reservation-fails-closed', 'services:\n  x:\n    image: alpine\n', sha);
+        const applicationId = liveApp('apply-reservation-fails-closed')!.id;
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const { ComposeService } = await import('../services/ComposeService');
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack');
+        const startedBefore = historyOperationIds(applicationId, 'source_reconcile_started').length;
+        const reserveSpy = vi.spyOn(GitOpsTransitions.prototype, 'allocateReconcileAttempt')
+            .mockImplementationOnce(() => { throw new Error('simulated reservation failure'); });
+
+        try {
+            await expect(svc.apply('apply-reservation-fails-closed', sha, { ...SKIP_PLAN_FINGERPRINT, deploy: true }))
+                .rejects.toMatchObject({ code: 'GIT_ERROR' });
+            expect(saveSpy).not.toHaveBeenCalled();
+            expect(deploySpy).not.toHaveBeenCalled();
+            // No new attempt at all, settled or unsettled: reservation
+            // itself never landed, so there is nothing new to track.
+            expect(historyOperationIds(applicationId, 'source_reconcile_started')).toHaveLength(startedBefore);
+        } finally {
+            saveSpy.mockRestore();
+            deploySpy.mockRestore();
+            reserveSpy.mockRestore();
+        }
+    });
+
+    it('fails closed and does not write when the application was detached but the pending commit survives', async () => {
+        const sha = 'db'.repeat(20);
+        const svc = await seedPending('apply-tombstoned-app', 'services:\n  x:\n    image: alpine\n', sha);
+        const applicationId = liveApp('apply-tombstoned-app')!.id;
+        GitOpsTransitions.getInstance().applicationTombstoned(applicationId, 'detached', {
+            operationId: 'op-detach-2', actor: 'tester', trigger: 'test', at: Date.now(),
+        });
+        expect(DatabaseService.getInstance().getGitSource('apply-tombstoned-app')?.pending_commit_sha).toBe(sha);
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+        const activitySpy = vi.spyOn(DatabaseService.getInstance(), 'addNotificationHistory');
+
+        try {
+            await expect(svc.apply('apply-tombstoned-app', sha, SKIP_PLAN_FINGERPRINT)).rejects.toMatchObject({
+                code: 'GIT_ERROR',
+                message: expect.stringContaining('GitOps tracking was removed'),
+            });
+            expect(saveSpy).not.toHaveBeenCalled();
+            expect(activitySpy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+                category: 'git_apply_failed',
+                stack_name: 'apply-tombstoned-app',
+            }));
+        } finally {
+            saveSpy.mockRestore();
+            activitySpy.mockRestore();
+        }
+    });
 
     it('reserves and durably settles an attempt for a successful apply', async () => {
         const sha = '6'.repeat(40);
