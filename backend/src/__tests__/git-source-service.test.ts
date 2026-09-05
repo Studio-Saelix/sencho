@@ -2925,6 +2925,61 @@ describe('GitSourceService.apply', () => {
             expect(stillStaged?.candidate_generation_id).toBeTruthy();
         });
 
+        it('fails closed instead of silently applying under the current live application when the requested applicationId still exists but was superseded', async () => {
+            const sha = 'e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7';
+            const svc = await seedPending('reconcile-apply-superseded-id', 'services:\n  x:\n    image: alpine\n', sha);
+            const staleApplicationId = liveApp('reconcile-apply-superseded-id')!.id;
+            // A real row that used to be live for this stack, not a
+            // fabricated id: this is the exact gap the existing stale-id
+            // tests (using ids that never existed as any row) do not cover,
+            // since GitOpsStore.getApplication finds this row just fine.
+            GitOpsTransitions.getInstance().applicationTombstoned(staleApplicationId, 'detached', {
+                operationId: 'op-supersede-1', actor: 'tester', trigger: 'test', at: Date.now(),
+            });
+            const config: DirectSourceConfig = {
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+            };
+            GitOpsStore.getInstance().insertApplication(buildDirectApplicationRow({
+                id: newGitOpsId(),
+                stackName: 'reconcile-apply-superseded-id',
+                config,
+                identity: directSourceIdentity(config),
+                lifecycleStatus: 'active',
+                at: Date.now(),
+            }));
+            const newLiveId = liveApp('reconcile-apply-superseded-id')!.id;
+            expect(newLiveId).not.toBe(staleApplicationId);
+
+            const applySpy = vi.spyOn(
+                svc as unknown as { applyWithSharedLock: (...args: unknown[]) => Promise<unknown> },
+                'applyWithSharedLock',
+            );
+
+            try {
+                const result = await svc.reconcile({
+                    intent: 'apply',
+                    applicationId: staleApplicationId,
+                    stackName: 'reconcile-apply-superseded-id',
+                    trigger: 'manual',
+                    actor: 'tester',
+                    commitSha: 'ffffffffffffffffffffffffffffffffffffffff',
+                    planFingerprint: '',
+                    deploy: false,
+                });
+
+                expect(result.outcome).toBe('unknown');
+                expect(result.nextAction).toBe('none');
+                expect(applySpy).not.toHaveBeenCalled();
+            } finally {
+                applySpy.mockRestore();
+            }
+        });
+
         it('reports unknown for a stack with no GitOps application', async () => {
             const svc = GitSourceService.getInstance();
             const result = await svc.reconcile({
@@ -3119,6 +3174,166 @@ describe('GitSourceService.apply', () => {
                 expect(settled).toHaveLength(2);
                 expect(new Set(settled.map((r) => r.operation_id)).size).toBe(2);
                 expect(unsettledAttempts(applicationId)).toHaveLength(0);
+            } finally {
+                validateSpy.mockRestore();
+            }
+        });
+
+        it('coalesces a concurrent manual pull and a controller-triggered reconcile into one clone, each with its own complete settled history and a follower-to-leader link', async () => {
+            const newSha = 'f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1';
+            mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha: 'f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0' });
+            const svc = GitSourceService.getInstance();
+            await configureGitSource('pull-reconcile-coalesce');
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+
+            const releaseClone = gatedClone();
+            mockGitLog.mockResolvedValue([{ oid: newSha }]);
+
+            try {
+                const applicationId = liveApp('pull-reconcile-coalesce')!.id;
+                // Two different producers, one a manual pull() and the other
+                // a controller poll driving reconcile(), submitting for the
+                // exact same live application: coalesceKey() does not vary
+                // by trigger or producer, so this must join into one clone
+                // rather than each running its own.
+                const manualPull = svc.pull('pull-reconcile-coalesce');
+                const controllerReconcile = svc.reconcile({
+                    intent: 'fetch',
+                    applicationId,
+                    stackName: 'pull-reconcile-coalesce',
+                    trigger: 'poll',
+                    actor: 'system:source-controller',
+                });
+                releaseClone();
+                const [pullResult, reconcileResult] = await Promise.all([manualPull, controllerReconcile]);
+
+                expect(mockGitClone).toHaveBeenCalledTimes(1);
+                expect(pullResult.commitSha).toBe(newSha);
+                expect(pullResult.candidateReady).toBe(true);
+                expect(reconcileResult.outcome).toBe('candidate_already_fetched');
+
+                // Two complete histories: each caller reserved and settled
+                // its own durable attempt, neither left dangling.
+                const settled = settledAttempts(applicationId);
+                expect(settled).toHaveLength(2);
+                const settledOperationIds = settled.map((r) => r.operation_id);
+                expect(new Set(settledOperationIds).size).toBe(2);
+                expect(unsettledAttempts(applicationId)).toHaveLength(0);
+
+                // A follower-to-leader link: exactly one of the two
+                // reservations recorded that it was made on behalf of the
+                // other.
+                const started = DatabaseService.getInstance().getDb()
+                    .prepare("SELECT operation_id, after_json FROM gitops_history WHERE application_id = ? AND stage = 'source_reconcile_started'")
+                    .all(applicationId) as { operation_id: string; after_json: string }[];
+                const followerLinks = started
+                    .map((r) => (JSON.parse(r.after_json) as { followerOf?: string }).followerOf)
+                    .filter((followerOf): followerOf is string => followerOf !== undefined);
+                expect(followerLinks).toHaveLength(1);
+                expect(settledOperationIds).toContain(followerLinks[0]);
+            } finally {
+                validateSpy.mockRestore();
+            }
+        });
+
+        it('settles a fetch-intent reconcile durably with the same classified result it returns, even for a pre-transition failure the row does not yet reflect', async () => {
+            const svc = GitSourceService.getInstance();
+            mockSuccessfulClone({ sha: '3'.repeat(40) });
+            await configureGitSource('reconcile-pretransition-failure');
+            const applicationId = liveApp('reconcile-pretransition-failure')!.id;
+            // Deletes the config row pullLocked itself checks for, before
+            // any transition table write, so the row state alone (a
+            // generic row-derivation, with no notion of this failure) would
+            // misreport the outcome as an unremarkable "never reconciled"
+            // rather than the real, classified failure the caller receives.
+            DatabaseService.getInstance().deleteGitSource('reconcile-pretransition-failure');
+
+            const result = await svc.reconcile({
+                intent: 'fetch',
+                applicationId,
+                stackName: 'reconcile-pretransition-failure',
+                trigger: 'poll',
+                actor: 'system:source-controller',
+            });
+
+            expect(result.outcome).not.toBe('unknown');
+            const settled = settledAttempts(applicationId);
+            expect(settled).toHaveLength(1);
+            expect(JSON.parse(settled[0].after_json)).toEqual(result);
+        });
+
+        it('does not re-execute a redelivered request whose original attempt was reserved but never settled', async () => {
+            const sha = 'dededededededededededededededededededede';
+            mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha });
+            const svc = GitSourceService.getInstance();
+            await configureGitSource('reconcile-orphaned-redelivery');
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+
+            try {
+                const applicationId = liveApp('reconcile-orphaned-redelivery')!.id;
+                const request = {
+                    intent: 'fetch' as const,
+                    applicationId,
+                    stackName: 'reconcile-orphaned-redelivery',
+                    trigger: 'webhook' as const,
+                    actor: 'tester',
+                    deliveryId: 'delivery-orphaned',
+                };
+                await svc.reconcile(request);
+                // Simulate a crash between reservation and settlement: the
+                // original attempt's reservation survives, but its
+                // settlement row never got written, and no in-process
+                // leader remains for it in this fresh call.
+                DatabaseService.getInstance().getDb()
+                    .prepare("DELETE FROM gitops_history WHERE application_id = ? AND stage = 'source_reconcile_settled'")
+                    .run(applicationId);
+                mockGitClone.mockClear();
+
+                const redeliveryResult = await svc.reconcile(request);
+
+                expect(mockGitClone).not.toHaveBeenCalled();
+                expect(redeliveryResult.outcome).not.toBe('unknown');
+            } finally {
+                validateSpy.mockRestore();
+            }
+        });
+
+        it('resolves a redelivery from its own settled history rather than an unrelated leader that happens to be running under the shared coalesce key', async () => {
+            const sha = 'cececececececececececececececececececece';
+            mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha });
+            const svc = GitSourceService.getInstance();
+            await configureGitSource('reconcile-redelivery-vs-unrelated-leader');
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+
+            try {
+                const applicationId = liveApp('reconcile-redelivery-vs-unrelated-leader')!.id;
+                const request = {
+                    intent: 'fetch' as const,
+                    applicationId,
+                    stackName: 'reconcile-redelivery-vs-unrelated-leader',
+                    trigger: 'webhook' as const,
+                    actor: 'tester',
+                    deliveryId: 'delivery-vs-unrelated-leader',
+                };
+                const first = await svc.reconcile(request);
+
+                // A completely unrelated fetch (a plain manual pull, no
+                // deliveryId) becomes the in-process leader registered
+                // under this application's shared fetch coalesce key,
+                // which does not vary by deliveryId or trigger.
+                const releaseClone = gatedClone();
+                mockGitLog.mockResolvedValue([{ oid: 'dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf' }]);
+                const unrelatedPull = svc.pull('reconcile-redelivery-vs-unrelated-leader');
+
+                // A redelivery of the original event arrives while that
+                // unrelated pull is still running: it must resolve from its
+                // own settled history, not from the unrelated in-flight
+                // leader it happens to find under the shared key.
+                const redelivery = await svc.reconcile(request);
+                releaseClone();
+                await unrelatedPull;
+
+                expect(redelivery).toEqual(first);
             } finally {
                 validateSpy.mockRestore();
             }
