@@ -25,6 +25,14 @@ export interface MissingExternalNetworksEnvelope {
   networks: MissingExternalNetwork[];
   /** Count of external network declarations when the model rendered; 0 otherwise. */
   declaredExternalCount: number;
+  /**
+   * Present when the model could not be rendered due to a missing required variable or
+   * another compose-config failure. When `env_block_deploy_on_missing_required` is enabled,
+   * contains the exact guardrail message naming the missing variable(s). Otherwise
+   * contains a neutral diagnostic. Undefined when the model rendered successfully or
+   * when the render error was a Docker spawn/timeout failure.
+   */
+  renderError?: string;
 }
 
 const MAX_RENDER_ERROR = 600;
@@ -42,9 +50,20 @@ function isAutoCreateEnabled(nodeId: number): boolean {
   }
 }
 
+function isGuardrailEnabled(nodeId: number): boolean {
+  try {
+    return (
+      DatabaseService.getInstance().getGlobalSettings()['env_block_deploy_on_missing_required'] === '1'
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function renderModel(
   nodeId: number,
   stackName: string,
+  guardrailEnabled: boolean,
 ): Promise<{ model: EffectiveModel | null; renderError: string | null }> {
   try {
     const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
@@ -61,11 +80,23 @@ async function renderModel(
       }
     }
     const missing = parseMissingRequiredVars(result.stderr);
+    if (missing.length > 0) {
+      if (guardrailEnabled) {
+        const plural = missing.length > 1;
+        return {
+          model: null,
+          renderError: `Deploy blocked: required environment variable${plural ? 's' : ''} ${missing.join(', ')} ` +
+            `${plural ? 'are' : 'is'} missing. Define ${plural ? 'them' : 'it'} in a .env or env_file, then deploy again.`,
+        };
+      }
+      return {
+        model: null,
+        renderError: `Required variable${missing.length > 1 ? 's' : ''} ${missing.join(', ')} ${missing.length > 1 ? 'have' : 'has'} no value, so the effective model cannot be rendered.`,
+      };
+    }
     return {
       model: null,
-      renderError: missing.length
-        ? `Required variable${missing.length > 1 ? 's' : ''} ${missing.join(', ')} ${missing.length > 1 ? 'have' : 'has'} no value, so the effective model cannot be rendered.`
-        : 'Sencho could not render the effective Compose model. Check the compose and env files for a YAML syntax error, an unresolved include or merge, or a required variable with no value.',
+      renderError: 'Sencho could not render the effective Compose model. Check the compose and env files for a YAML syntax error, an unresolved include or merge, or a required variable with no value.',
     };
   } catch (err) {
     const msg = redactSensitiveText(getErrorMessage(err, 'docker compose could not be started.'))
@@ -81,7 +112,8 @@ export async function resolveMissingExternalNetworks(
   stackName: string,
 ): Promise<MissingExternalNetworksEnvelope> {
   const autoCreateEnabled = isAutoCreateEnabled(nodeId);
-  const { model } = await renderModel(nodeId, stackName);
+  const guardrailEnabled = isGuardrailEnabled(nodeId);
+  const { model, renderError } = await renderModel(nodeId, stackName, guardrailEnabled);
   if (!model) {
     return {
       status: 'render_unavailable',
@@ -89,6 +121,7 @@ export async function resolveMissingExternalNetworks(
       stackName,
       networks: [],
       declaredExternalCount: 0,
+      renderError: renderError ?? undefined,
     };
   }
 
