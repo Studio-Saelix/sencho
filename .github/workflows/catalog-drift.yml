@@ -40,9 +40,9 @@ jobs:
 
       # The root checkout must come first. actions/checkout cleans its
       # destination, so running it after the nested one deletes website-checkout.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: ${{ github.repository_owner }}/sencho-website
           token: ${{ steps.app-token.outputs.token }}
