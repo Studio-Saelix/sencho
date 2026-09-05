@@ -3,7 +3,7 @@ title: Global Search
 description: Jump to any page, node, or stack from anywhere in the app with a single keystroke.
 ---
 
-The **global search palette** lets you move around Sencho without reaching for the mouse. It covers the reachable page destinations for your tier and role (the same page list Classic top navigation, Smart primary and More, and mobile navigation use), every configured node, and every stack on every online node in your fleet. Compact launcher can also open **Settings** from its menu; Settings is not a palette page row.
+The **global search palette** lets you move around Sencho without reaching for the mouse. It covers the reachable page destinations for your tier and role (the same page list top navigation and mobile navigation use), every configured node, and every stack on every online node in your fleet. Compact launcher can also open **Settings** from its menu; Settings is not a palette page row.
 
 <Frame>
   <img src="/images/global-search/palette-pages.png" alt="Sencho global search palette open with no query over the blurred dashboard, the Pages group listing Home, Fleet, Resources, Networking, Security, and App Store each with a leading icon, with a scrollbar indicating more entries below." />
@@ -26,7 +26,7 @@ The palette groups results into three sections.
 
 | Group | What it contains | What happens when you pick one |
 |-------|------------------|--------------------------------|
-| **Pages** | The reachable page destinations for your tier and role (the same set Classic / Smart / mobile navigation use). **Home**, **Resources**, **Networking**, **Security**, and **App Store** appear for signed-in operators; **Fleet** appears when your role holds the `node:read` permission; **Logs**, **Update**, **Schedules**, and **Console** appear for admins; **Audit** appears for any role with the `system:audit` permission. See [RBAC & User Management](/features/rbac) for the full permission matrix. | Navigates to that page |
+| **Pages** | The reachable page destinations for your tier and role (the same set top navigation and mobile navigation use). **Home**, **Resources**, **Networking**, **Security**, and **App Store** appear for signed-in operators; **Fleet** appears when your role holds the `node:read` permission; **Logs**, **Update**, **Schedules**, and **Console** appear for admins; **Audit** appears for any role with the `system:audit` permission. See [RBAC & User Management](/features/rbac) for the full permission matrix. | Navigates to that page |
 | **Nodes** | Every node in your fleet, with a green dot for online and a grey dot for offline. The currently active node carries a small **ACTIVE** chip on the right. | Switches the active node without leaving the current page |
 | **Stacks** | Every compose stack on every online node, matched on the compose filename (extension included). | Switches to the stack's node and opens it in the editor |
 

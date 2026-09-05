@@ -3,22 +3,24 @@ import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
 
 export const TOP_NAV_MODE_KEY = 'sencho.appearance.topNavMode';
 
-export type TopNavMode = 'classic' | 'smart' | 'compact';
+export type TopNavMode = 'smart' | 'compact';
 
-const VALID: ReadonlySet<string> = new Set(['classic', 'smart', 'compact']);
+const VALID: ReadonlySet<string> = new Set(['smart', 'compact']);
 
-/** Missing or invalid storage resolves to Smart (recommended default). */
+/** Recommended default, and the fallback for missing, invalid, or legacy ('classic') storage. */
+const DEFAULT_MODE: TopNavMode = 'compact';
+
 export function parseTopNavMode(raw: string | null): TopNavMode {
   if (raw && VALID.has(raw)) return raw as TopNavMode;
-  return 'smart';
+  return DEFAULT_MODE;
 }
 
 function readStored(): TopNavMode {
-  if (typeof window === 'undefined') return 'smart';
+  if (typeof window === 'undefined') return DEFAULT_MODE;
   try {
     return parseTopNavMode(window.localStorage.getItem(TOP_NAV_MODE_KEY));
   } catch {
-    return 'smart';
+    return DEFAULT_MODE;
   }
 }
 
