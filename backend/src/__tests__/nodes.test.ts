@@ -10,6 +10,7 @@ import { NodeRegistry } from '../services/NodeRegistry';
 import { CacheService } from '../services/CacheService';
 import { DatabaseService } from '../services/DatabaseService';
 import { nodeContextMiddleware } from '../middleware/nodeContext';
+import { resolveNodeId } from '../helpers/resolveNodeId';
 
 /** Mint a Bearer for a non-admin user, creating the row if needed so
  *  authMiddleware (which resolves the role from the DB) sees the real role. */
@@ -392,6 +393,56 @@ describe('nodeContextMiddleware nodeId validation (M-2)', () => {
     const { status, nextCalled } = run(req);
     expect(status).toBe(404);
     expect(nextCalled).toBe(false);
+  });
+});
+
+describe('resolveNodeId (shared by nodeContextMiddleware and conditionalJsonParser)', () => {
+  it('prefers the x-node-id header over ?nodeId= when both are present', () => {
+    const req = { headers: { 'x-node-id': '5' }, query: { nodeId: '7' } };
+    expect(resolveNodeId(req)).toBe(5);
+  });
+
+  it('falls through to ?nodeId= when the header is malformed', () => {
+    const req = { headers: { 'x-node-id': 'abc' }, query: { nodeId: '7' } };
+    expect(resolveNodeId(req)).toBe(7);
+  });
+
+  it('falls back to the default node when neither header nor query is present', () => {
+    const req = { headers: {}, query: {} };
+    expect(resolveNodeId(req)).toBe(NodeRegistry.getInstance().getDefaultNodeId());
+  });
+
+  it('rejects a numeric id with a trailing suffix rather than accepting its numeric prefix', () => {
+    // Deliberately stricter than the pre-refactor per-middleware parsers,
+    // which accepted parseInt('5abc', 10) === 5 silently. The shared
+    // resolver's round-trip check now treats this as malformed.
+    const req = { headers: { 'x-node-id': '5abc' }, query: {} };
+    expect(resolveNodeId(req)).toBe(NodeRegistry.getInstance().getDefaultNodeId());
+  });
+
+  it('only warns about a malformed id when warnOnMalformed is requested', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const req = { headers: { 'x-node-id': 'abc' }, query: {} };
+
+    resolveNodeId(req);
+    expect(warnSpy).not.toHaveBeenCalled();
+
+    resolveNodeId(req, { warnOnMalformed: true });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+
+    warnSpy.mockRestore();
+  });
+
+  it('treats a repeated x-node-id header (comma-joined by Node) as malformed, not as its numeric prefix', () => {
+    // Node folds duplicate headers into one comma-joined string rather than
+    // an array, so this never reaches the request as ['1', '2'].
+    const req = { headers: { 'x-node-id': '1, 2' }, query: {} };
+    expect(resolveNodeId(req)).toBe(NodeRegistry.getInstance().getDefaultNodeId());
+  });
+
+  it('treats an array-style ?nodeId= as malformed rather than stringifying it', () => {
+    const req = { headers: {}, query: { nodeId: ['1', '2'] } };
+    expect(resolveNodeId(req)).toBe(NodeRegistry.getInstance().getDefaultNodeId());
   });
 });
 
