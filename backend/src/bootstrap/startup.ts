@@ -100,6 +100,33 @@ function clearSelfContainerNotificationRouting(): void {
 }
 
 /**
+ * Reconcile-attempt recovery, then the managed-area sweep, in that fixed
+ * order: an attempt reserved but never settled (a crash between the two)
+ * must be resolved from durable state before the sweep or
+ * SourceController's own timer (started later in startServer, after
+ * registry delivery recovery settles per AUD-36) can race a recovery pass
+ * over the same attempts. Exported so this ordering is directly testable
+ * without driving the rest of startServer's unrelated service
+ * initialization.
+ */
+export async function runGitOpsSourceRecovery(): Promise<void> {
+  try {
+    await GitSourceService.getInstance().recoverUnsettledReconcileAttempts();
+  } catch (err) {
+    console.error('[GitSource] Reconcile-attempt recovery failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+  }
+
+  // The managed-area sweep follows. It preserves anything whose ownership it
+  // cannot prove, so a failure here can only leave files behind, never remove
+  // the wrong ones, and retrying next boot is safe.
+  try {
+    await sweepGitManifestOrphans();
+  } catch (err) {
+    console.warn('[GitManifest] Managed-area sweep failed:', err instanceof Error ? err.message : String(err));
+  }
+}
+
+/**
  * Run the startup sequence: stack-directory migration, service initialization,
  * background watchdogs, then bind the HTTP server. The caller passes the
  * already-constructed server so tests can import the module without binding a
@@ -234,25 +261,9 @@ export async function startServer(server: Server): Promise<void> {
     console.error('[GitOps] Migration of pre-existing blueprints failed:', err instanceof Error ? err.stack ?? err.message : String(err));
   }
 
-  // Reconcile-attempt recovery precedes the managed-area sweep and every
-  // background timer: an attempt reserved but never settled (a crash
-  // between the two) must be resolved from durable state before anything
-  // else runs, so the sweep below and SourceController's own timer never
-  // race a recovery pass over the same attempts.
-  try {
-    await GitSourceService.getInstance().recoverUnsettledReconcileAttempts();
-  } catch (err) {
-    console.error('[GitSource] Reconcile-attempt recovery failed:', err instanceof Error ? err.stack ?? err.message : String(err));
-  }
-
-  // The managed-area sweep follows. It preserves anything whose ownership it
-  // cannot prove, so a failure here can only leave files behind, never remove
-  // the wrong ones, and retrying next boot is safe.
-  try {
-    await sweepGitManifestOrphans();
-  } catch (err) {
-    console.warn('[GitManifest] Managed-area sweep failed:', err instanceof Error ? err.message : String(err));
-  }
+  // Both steps must settle before SourceController starts below; see that
+  // function's own doc comment for why.
+  await runGitOpsSourceRecovery();
 
   // Registry delivery recovery sweeps must settle before any mutation-capable
   // producer starts (AUD-36).
