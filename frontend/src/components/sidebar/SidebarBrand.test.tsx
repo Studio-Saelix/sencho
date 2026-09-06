@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { SidebarBrand, chipDetail } from './SidebarBrand';
+import { SidebarBrand } from './SidebarBrand';
+import { chipDetail } from './chipDetail';
 import type { BuildInfo } from '@/context/BuildInfoProvider';
 
 function info(channel: BuildInfo['channel']): BuildInfo {
