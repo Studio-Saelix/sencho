@@ -288,6 +288,27 @@ async function cleanupStackDir(name: string) {
 
 const SKIP_PLAN_FINGERPRINT = { requirePlanFingerprint: false as const };
 
+describe('GitSourceService.shortOperationId', () => {
+    function shortOperationId(operationId: string): string {
+        return (GitSourceService as unknown as { shortOperationId: (id: string) => string }).shortOperationId(operationId);
+    }
+
+    it('discriminates between reserved attempts on the same application, unlike a fixed-width prefix', () => {
+        const appId = '4457ddc3-3eb0-444e-902c-7e65d355b36b';
+        expect(shortOperationId(`${appId}:attempt:1`)).toBe('1');
+        expect(shortOperationId(`${appId}:attempt:2`)).toBe('2');
+    });
+
+    it('uses the delivery-key suffix for a webhook-triggered reservation', () => {
+        expect(shortOperationId('webhook:fetch:delivery-abc')).toBe('delivery-abc');
+    });
+
+    it('falls back to a prefix for a plain UUID with no colon', () => {
+        const uuid = '29ec01cd-4129-4c4c-a5f2-4e2368f44490';
+        expect(shortOperationId(uuid)).toBe(uuid.slice(0, 8));
+    });
+});
+
 describe('GitSourceService.hashContent', () => {
     it('produces stable hashes for identical inputs', () => {
         const svc = GitSourceService.getInstance();
@@ -1974,6 +1995,23 @@ describe('GitSourceService.pull', () => {
         await svc.pull('pull-reserves');
 
         expect(historyOperationIds(applicationId, 'source_reconcile_settled').length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('stamps the pending fetch record with the same operation id the reserved attempt used, not an independent one', async () => {
+        await createFromGit('pull-pending-lineage', '2'.repeat(40));
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx:2\n', sha: '3'.repeat(40) });
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('pull-pending-lineage')!.id;
+
+        await svc.pull('pull-pending-lineage');
+
+        const [reservedOperationId] = historyOperationIds(applicationId, 'source_reconcile_started');
+        expect(reservedOperationId).toBeTruthy();
+        const row = DatabaseService.getInstance().getGitSource('pull-pending-lineage');
+        const decoded = (svc as unknown as {
+            decodePendingCompose: (raw: string) => { operationId: string | null };
+        }).decodePendingCompose(row!.pending_compose_content!);
+        expect(decoded.operationId).toBe(reservedOperationId);
     });
 
     it('coalesces two concurrent pulls for the same stack into one clone', async () => {

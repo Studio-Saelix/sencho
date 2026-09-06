@@ -1899,6 +1899,18 @@ export class GitSourceService {
 
     // ─── Pull / apply ────────────────────────────────────────────────────────
 
+    /**
+     * A short, log-friendly token for an operation id. A reserved id
+     * (`<applicationId>:attempt:<seq>` or `<trigger>:<intent>:<deliveryId>`)
+     * repeats the same prefix across every attempt on one stack, so only the
+     * suffix after the last colon tells two attempts apart. A plain UUID has
+     * no such suffix, so its leading characters are used instead.
+     */
+    private static shortOperationId(operationId: string): string {
+        const lastColon = operationId.lastIndexOf(':');
+        return lastColon === -1 ? operationId.slice(0, 8) : operationId.slice(lastColon + 1);
+    }
+
     public async pull(stackName: string, opts: { actor?: string } = {}): Promise<PullResult> {
         // Guarded by the per-stack mutex (see withStackLock). Without this, a
         // concurrent delete-source + pull can land a pending row on a stack
@@ -2131,7 +2143,6 @@ export class GitSourceService {
         const prior = priorRead;
         if (prior) manifestSummary = manifestSvc.summaryFrom(prior);
 
-        const operationId = crypto.randomUUID();
         let plan: GitChangePlan | null = null;
         if (materialization.value?.inventory) {
             plan = await this.computeChangePlan({
@@ -2233,7 +2244,13 @@ export class GitSourceService {
                 {
                     fingerprint: plan?.fingerprint ?? '',
                     schemaVersion: GIT_CHANGE_PLAN_SCHEMA_VERSION,
-                    operationId,
+                    // This fetch attempt's own id, not an independent one:
+                    // applyLockedBody falls back to pending.operationId for
+                    // its gitops transitions when its caller reserved no
+                    // attempt, so that fallback has to inherit the real fetch
+                    // attempt's lineage rather than an identity nothing else
+                    // knows about.
+                    operationId: gitopsOperationId,
                     reviewedLive: plan ? this.reviewedLiveFromPlan(plan) : [],
                 },
             ),
@@ -2249,7 +2266,7 @@ export class GitSourceService {
                 this.recordGitActivity(
                     stackName,
                     'git_plan_blocked',
-                    `Git plan blocked for ${stackName} (${shortSha}, op ${operationId.slice(0, 8)}, plan ${fpPrefix})`,
+                    `Git plan blocked for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
                     actor,
                     'warning',
                 );
@@ -2257,7 +2274,7 @@ export class GitSourceService {
                 this.recordGitActivity(
                     stackName,
                     'git_pull_ready',
-                    `Git pull ready for ${stackName} (${shortSha}, op ${operationId.slice(0, 8)}, plan ${fpPrefix})`,
+                    `Git pull ready for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
                     actor,
                 );
             }
@@ -3532,8 +3549,12 @@ export class GitSourceService {
         // operation id in, so the attempt and its gitops transitions
         // (applyStarted/applied/applyFailed) share one identity. A caller that
         // reserved none falls back to the fetch-time pending.operationId, as
-        // every caller did before reservation existed.
-        const gitopsEnv = this.gitopsEnvelope(operationId ?? pending.operationId, actor, 'apply');
+        // every caller did before reservation existed. The activity messages
+        // below reuse this same value, not pending.operationId directly, so
+        // they report the id the durable evidence for this apply actually
+        // carries rather than the earlier fetch attempt's.
+        const applyOperationId = operationId ?? pending.operationId;
+        const gitopsEnv = this.gitopsEnvelope(applyOperationId, actor, 'apply');
         if (gitopsApp && gitopsGenerationId) {
             this.recordGitOps(stackName, 'apply start', () => {
                 GitOpsTransitions.getInstance().applyStarted(gitopsApp.id, gitopsGenerationId, gitopsEnv);
@@ -3646,7 +3667,7 @@ export class GitSourceService {
                     { plan: publicPlan, planFingerprint: plan.fingerprint },
                 );
             }
-            const blockedPlanActivity = `Git plan blocked for ${stackName} (${commitSha.slice(0, 7)}, op ${pending.operationId.slice(0, 8)}, plan ${plan.fingerprint.slice(0, 12)})`;
+            const blockedPlanActivity = `Git plan blocked for ${stackName} (${commitSha.slice(0, 7)}, op ${GitSourceService.shortOperationId(applyOperationId)}, plan ${plan.fingerprint.slice(0, 12)})`;
             if (plan.blocked) {
                 this.upsertGitPlanDrift(stackName, plan);
                 db.setGitSourceLastPlan(stackName, plan.fingerprint, 'blocked');
@@ -3785,7 +3806,7 @@ export class GitSourceService {
                     this.recordGitActivity(
                         stackName,
                         'git_apply_rolled_back',
-                        `Git apply rolled back for ${stackName} (${commitSha.slice(0, 7)}, op ${pending.operationId.slice(0, 8)}, plan ${plan.fingerprint.slice(0, 12)})`,
+                        `Git apply rolled back for ${stackName} (${commitSha.slice(0, 7)}, op ${GitSourceService.shortOperationId(applyOperationId)}, plan ${plan.fingerprint.slice(0, 12)})`,
                         actor,
                         'warning',
                     );
@@ -3794,7 +3815,7 @@ export class GitSourceService {
                     this.recordGitActivity(
                         stackName,
                         'git_apply_failed',
-                        `Git apply failed for ${stackName} (${commitSha.slice(0, 7)}, op ${pending.operationId.slice(0, 8)}, plan ${plan.fingerprint.slice(0, 12)})`,
+                        `Git apply failed for ${stackName} (${commitSha.slice(0, 7)}, op ${GitSourceService.shortOperationId(applyOperationId)}, plan ${plan.fingerprint.slice(0, 12)})`,
                         actor,
                         'error',
                     );
@@ -3807,7 +3828,7 @@ export class GitSourceService {
             this.recordGitActivity(
                 stackName,
                 'git_apply',
-                `Git apply succeeded for ${stackName} (${commitSha.slice(0, 7)}, op ${pending.operationId.slice(0, 8)}, plan ${plan.fingerprint.slice(0, 12)})`,
+                `Git apply succeeded for ${stackName} (${commitSha.slice(0, 7)}, op ${GitSourceService.shortOperationId(applyOperationId)}, plan ${plan.fingerprint.slice(0, 12)})`,
                 actor,
             );
             // Promotion has committed and rewritten the authoritative Compose
@@ -4415,20 +4436,19 @@ export class GitSourceService {
                 }
 
                 rowInserted = true;
-                const operationId = crypto.randomUUID();
                 if (completeProjectManifest && materialization.value && recordedCreatePlan) {
                     db.setGitSourceLastPlan(input.stackName, recordedCreatePlan.fingerprint, 'applied');
                     this.recordGitActivity(
                         input.stackName,
                         'git_create',
-                        `Git create succeeded for ${input.stackName} (${fetched.commitSha.slice(0, 7)}, op ${operationId.slice(0, 8)}, plan ${recordedCreatePlan.fingerprint.slice(0, 12)})`,
+                        `Git create succeeded for ${input.stackName} (${fetched.commitSha.slice(0, 7)}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${recordedCreatePlan.fingerprint.slice(0, 12)})`,
                         'system:git-source',
                     );
                 } else {
                     this.recordGitActivity(
                         input.stackName,
                         'git_create',
-                        `Git create succeeded for ${input.stackName} (${fetched.commitSha.slice(0, 7)}, op ${operationId.slice(0, 8)})`,
+                        `Git create succeeded for ${input.stackName} (${fetched.commitSha.slice(0, 7)}, op ${GitSourceService.shortOperationId(gitopsOperationId)})`,
                         'system:git-source',
                     );
                 }
