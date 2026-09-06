@@ -12,6 +12,34 @@ function isWebhookAction(value: unknown): value is WebhookAction {
   return typeof value === 'string' && (VALID_WEBHOOK_ACTIONS as readonly string[]).includes(value);
 }
 
+// Recognized per-delivery identity headers, in priority order. This
+// endpoint is a generic HMAC-signed trigger, not a provider-specific
+// receiver, so a well-known provider header is the only delivery identity
+// available, and only when the caller happens to send one. The value is a
+// plain traceability breadcrumb on git-pull's failure log lines (see
+// GitSourceService.handleWebhookPull); nothing consumes it structurally.
+//
+// Each header is still the provider's actual per-delivery identity rather
+// than a webhook- or connection-level id that stays constant across every
+// delivery from that source: GitHub's X-GitHub-Delivery GUID changes per
+// delivery (it is stable only across redeliveries of the same delivery);
+// GitLab's is Webhook-ID, the modern name for its Idempotency-Key, not
+// X-Gitlab-Event-UUID, which tracks recursive-trigger chains and can
+// repeat across genuinely distinct events; Bitbucket's is X-Request-UUID,
+// not X-Hook-UUID, which identifies the webhook configuration itself.
+// Picking the wrong one yields a breadcrumb that looks meaningful in logs
+// but is the same value on every push.
+const DELIVERY_ID_HEADERS = ['x-github-delivery', 'webhook-id', 'idempotency-key', 'x-request-uuid', 'x-webhook-delivery-id'] as const;
+
+function deliveryIdFromHeaders(headers: Request['headers']): string | undefined {
+  for (const name of DELIVERY_ID_HEADERS) {
+    const value = headers[name];
+    const first = Array.isArray(value) ? value[0] : value;
+    if (first) return first;
+  }
+  return undefined;
+}
+
 export const webhooksRouter = Router();
 
 webhooksRouter.get('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
@@ -193,6 +221,7 @@ webhooksRouter.post('/:id/trigger', webhookTriggerLimiter, async (req: Request, 
       action = overrideAction;
     }
     const triggerSource = req.headers['user-agent'] || req.ip || null;
+    const deliveryId = deliveryIdFromHeaders(req.headers);
 
     // Execute asynchronously; return 202 immediately.
     res.status(202).json({ message: 'Webhook accepted', action });
@@ -202,7 +231,7 @@ webhooksRouter.post('/:id/trigger', webhookTriggerLimiter, async (req: Request, 
     // dispatch the action still completes and recordExecution swallows the
     // FK error from the CASCADE. atomic is unconditionally true, so the
     // deploy/pull paths always run in atomic mode here.
-    svc.execute(webhook, action, triggerSource, true).catch(err => {
+    svc.execute(webhook, action, triggerSource, true, deliveryId).catch(err => {
       console.error(`[Webhooks] Execution error for webhook ${id}:`, err);
     });
   } catch (error) {

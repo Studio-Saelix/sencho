@@ -96,6 +96,7 @@ export class WebhookService {
         action: string,
         triggerSource: string | null,
         atomic?: boolean,
+        deliveryId?: string,
     ): Promise<ExecutionResult> {
         if (webhook.id === undefined) {
             throw new Error('Webhook must be loaded from the database before execution');
@@ -111,10 +112,14 @@ export class WebhookService {
         }
 
         if (node.type === 'remote') {
+            // Not forwarded to the remote node today: carrying a delivery id
+            // would mean extending the remote-proxy contract itself, a wider
+            // change than a log breadcrumb warrants. A remote git-pull
+            // behaves exactly as before, just without the breadcrumb.
             return this.executeRemote(webhookId, nodeId, webhook.stack_name, action, triggerSource, atomic);
         }
 
-        return this.executeLocal(webhookId, nodeId, webhook.stack_name, action, triggerSource, atomic);
+        return this.executeLocal(webhookId, nodeId, webhook.stack_name, action, triggerSource, atomic, deliveryId);
     }
 
     public maskSecret(secret: string): string {
@@ -129,6 +134,7 @@ export class WebhookService {
         action: string,
         triggerSource: string | null,
         atomic?: boolean,
+        deliveryId?: string,
     ): Promise<ExecutionResult> {
         const stacks = await FileSystemService.getInstance(nodeId).getStacks();
         if (!stacks.includes(stackName)) {
@@ -142,7 +148,7 @@ export class WebhookService {
             // git-pull pulls then deploys through GitSourceService, which holds
             // the per-stack lock itself; locking here too would self-conflict.
             if (action === 'git-pull') {
-                return this.executeLocalGitPull(webhookId, stackName, action, triggerSource, startTime);
+                return this.executeLocalGitPull(webhookId, stackName, action, triggerSource, startTime, deliveryId);
             }
             const lockAction = WEBHOOK_LOCK_ACTION[action];
             if (!lockAction) throw new Error(`Unknown action: ${action}`);
@@ -225,8 +231,9 @@ export class WebhookService {
         action: string,
         triggerSource: string | null,
         startTime: number,
+        deliveryId?: string,
     ): Promise<ExecutionResult> {
-        const result = await GitSourceService.getInstance().handleWebhookPull(stackName);
+        const result = await GitSourceService.getInstance().handleWebhookPull(stackName, deliveryId);
         const durationMs = Date.now() - startTime;
         if (result.status === 'error') {
             this.recordExecution(webhookId, action, 'failure', triggerSource, durationMs, result.message);

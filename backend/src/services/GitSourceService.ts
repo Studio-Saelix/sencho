@@ -2672,6 +2672,24 @@ export class GitSourceService {
      * normally no in-flight execution to join. A stack with no gitops
      * application at all has nothing to reserve against, matching
      * pullLocked/applyLockedBody's own tolerance for that case.
+     *
+     * request never carries a deliveryId here, deliberately: routing a
+     * webhook attempt's reservation through deliveryKey's fixed
+     * `trigger:intent:deliveryId` operation id, instead of a fresh
+     * allocation per attempt, made a redelivery's real work invisible. Its
+     * entire durable history write silently no-ops against the dedupe index
+     * the first attempt already claimed, even though the redelivery still
+     * ran a real fetch, apply, and deploy. Recognizing a redelivery
+     * correctly needs settlement to reflect the real classified outcome
+     * (not generic row-state derivation) for both a settled and an
+     * orphaned-unsettled prior attempt, and the latter path
+     * (resolveAlreadyReservedAttempt's settleFromDurableState fallback) is
+     * shared with reconcile()'s own recovery, so it is a separately scoped,
+     * wider-blast-radius follow-up. Until then a redelivery re-running its
+     * fetch or apply stays harmless exactly as it always was: fetching
+     * again is idempotent, applying the same commit again is a no-op past
+     * the first successful apply, and every attempt still gets its own
+     * durable history entry.
      */
     private async withWebhookAttempt<T>(
         gitopsApp: GitOpsApplicationRow | null,
@@ -4761,8 +4779,15 @@ export class GitSourceService {
     /**
      * Invoked by the webhook dispatcher. Returns a short status string to
      * record in webhook_executions. Enforces the per-source debounce.
+     * deliveryId, when the caller has one (a recognized provider delivery
+     * header), is a plain traceability breadcrumb appended to the pull and
+     * apply failure log lines only (not the debounce/suspended/detached
+     * skip paths, and not the activity feed). It never reaches reservation,
+     * settlement, or dedup, which still rely on the debounce window alone,
+     * exactly as they always have (see withWebhookAttempt's own doc comment
+     * for why recognizing a true redelivery is a separate follow-up).
      */
-    public async handleWebhookPull(stackName: string): Promise<{ status: 'success' | 'skipped' | 'error'; message: string }> {
+    public async handleWebhookPull(stackName: string, deliveryId?: string): Promise<{ status: 'success' | 'skipped' | 'error'; message: string }> {
         // Run the whole critical section under a single lock acquisition so a
         // concurrent fan-out (N webhooks for one push) serializes AND re-reads
         // last_debounce_at after acquiring the lock. The first request stamps
@@ -4771,6 +4796,7 @@ export class GitSourceService {
         // successful fetch, so a transient failure stays immediately retriable.
         return this.withStackLock<{ status: 'success' | 'skipped' | 'error'; message: string }>(stackName, async () => {
             const diag = isDebugEnabled();
+            const deliverySuffix = deliveryId ? ` (delivery ${sanitizeForLog(deliveryId)})` : '';
             const db = DatabaseService.getInstance();
             const src = db.getGitSource(stackName);
             if (!src) {
@@ -4818,7 +4844,7 @@ export class GitSourceService {
                 const msg = e instanceof GitSourceError ? `${e.code}: ${e.message}` : (e as Error).message;
                 const scrubbed = scrubCredentials(msg);
                 this.recordGitActivity(stackName, 'git_pull_failed', `Git pull failed for ${stackName}`, 'system:webhook', 'error');
-                console.error(`[GitSource] Webhook pull failed for ${sanitizeForLog(stackName)}: ${sanitizeForLog(scrubbed)}`);
+                console.error(`[GitSource] Webhook pull failed for ${sanitizeForLog(stackName)}${deliverySuffix}: ${sanitizeForLog(scrubbed)}`);
                 return { status: 'error', message: scrubbed };
             }
             try {
@@ -4870,7 +4896,7 @@ export class GitSourceService {
                 // Unattended path: record the failure server-side so an operator
                 // can diagnose without diag mode, since the Git provider only
                 // logs the HTTP status.
-                console.error(`[GitSource] Webhook pull failed for ${sanitizeForLog(stackName)}: ${sanitizeForLog(scrubbed)}`);
+                console.error(`[GitSource] Webhook pull failed for ${sanitizeForLog(stackName)}${deliverySuffix}: ${sanitizeForLog(scrubbed)}`);
                 return { status: 'error', message: scrubbed };
             }
         });

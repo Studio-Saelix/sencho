@@ -1630,6 +1630,52 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
         expect(GitOpsStore.getInstance().listUnsettledReconcileAttempts().some((r) => r.application_id === applicationId)).toBe(false);
     });
 
+    it('gives a redelivery its own durable history entry rather than colliding on a shared delivery-id key', async () => {
+        const sha = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1';
+        mockSuccessfulClone({ sha });
+        const svc = GitSourceService.getInstance();
+        await configureGitSource('webhook-delivery-recorded');
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('webhook-delivery-recorded')!.id;
+
+        const first = await svc.handleWebhookPull('webhook-delivery-recorded', 'delivery-xyz');
+        expect(first.status).toBe('success');
+
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE stack_git_sources SET last_debounce_at = ? WHERE stack_name = ?')
+            .run(Date.now() - 999_999, 'webhook-delivery-recorded');
+        mockGitClone.mockClear();
+
+        // The delivery id is a log breadcrumb only and never reaches
+        // reservation (see withWebhookAttempt's own doc comment), so a
+        // redelivery re-runs the fetch and gets its own durable history
+        // entry instead of colliding on a shared delivery-keyed operation
+        // id the dedupe index would silently drop.
+        const redelivery = await svc.handleWebhookPull('webhook-delivery-recorded', 'delivery-xyz');
+
+        expect(mockGitClone).toHaveBeenCalledTimes(1);
+        expect(redelivery.status).toBe('success');
+
+        expect(new Set(historyOperationIds(applicationId, 'source_reconcile_started')).size).toBe(2);
+        expect(historyOperationIds(applicationId, 'source_reconcile_settled')).toHaveLength(2);
+    });
+
+    it('logs the recognized delivery id as a traceability breadcrumb when a webhook pull fails', async () => {
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ sha: '6'.repeat(40) });
+        await configureGitSource('webhook-delivery-breadcrumb');
+        mockGitClone.mockClear();
+        mockGitClone.mockRejectedValueOnce(new Error('simulated network failure'));
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        try {
+            const result = await svc.handleWebhookPull('webhook-delivery-breadcrumb', 'delivery-log-1');
+            expect(result.status).toBe('error');
+            expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('(delivery delivery-log-1)'));
+        } finally {
+            errorSpy.mockRestore();
+        }
+    });
+
     it('runs a single clone for a concurrent webhook fan-out', async () => {
         // The original failure: N webhooks for one push each ran a full clone
         // because the debounce gate was read before the per-stack lock. The
