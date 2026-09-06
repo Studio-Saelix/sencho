@@ -1621,6 +1621,41 @@ describe('MonitorService - Sencho dev build check', () => {
 
     expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.anything());
   });
+
+  // C1: update eligibility is compose-declared. A dev *running* identity must
+  // not make a stable-declared pin eligible for the dev-build detector, and an
+  // unknown running identity must still gate before any registry call. These
+  // two disagreement directions pin that the running identity surfaced by
+  // SelfIdentityService never changes update behavior.
+  it('does not treat a stable-declared pin as eligible even when the running identity is a dev build', async () => {
+    // beforeEach() already mints a dev running imageId; the declared pin is stable.
+    // Reset the version-update inputs: an earlier suppression test queues a
+    // once-value that a stable-pin run would otherwise drain into the version
+    // path, which is not what this test observes.
+    mockGetLatestVersionInfo.mockReset();
+    mockGetPinInfo.mockResolvedValue(STABLE_PIN);
+
+    await runEvaluate();
+
+    expect(mockDetectSelfDevBuildUpdate).not.toHaveBeenCalled();
+    expect(devBuildCalls()).toHaveLength(0);
+    expect(mockSetSystemState).not.toHaveBeenCalledWith('sencho_dev_build_available_digest', expect.anything());
+  });
+
+  it('still gates the registry comparison on a known running image id for an eligible dev-declared pin', async () => {
+    mockGetPinInfo.mockResolvedValue(DEV_PIN);
+    mockGetIdentity.mockReturnValue({
+      containerId: null, containerName: null, composeProjectName: null,
+      imageId: null, networkNames: [], volumeNames: [],
+    });
+
+    await runEvaluate();
+
+    expect(mockDetectSelfDevBuildUpdate).not.toHaveBeenCalled();
+    expect(devBuildCalls()).toHaveLength(0);
+    // Unknown running id takes the retry-sooner path, not the detector path.
+    expect((MonitorService.getInstance() as any).lastDevBuildCheckGateMs).toBe(5 * 60 * 1000);
+  });
 });
 
 // ── Per-container parallel fan-out ────────────────────────────────────

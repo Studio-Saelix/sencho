@@ -1,5 +1,10 @@
 import fs from 'fs/promises';
 import DockerController from './DockerController';
+import { classifyBuildChannel, isSenchoDevRepository, type BuildChannel } from '../helpers/selfUpdateCompose';
+import { defaultInspectImage } from './selfDevBuildDetect';
+import { parseImageRef, selectLocalRepoDigest } from './registry-api';
+import { getSenchoVersion } from './CapabilityRegistry';
+import { withTimeout } from '../utils/withTimeout';
 
 /**
  * Identifies the Docker resources that belong to the running Sencho container
@@ -20,12 +25,26 @@ import DockerController from './DockerController';
  * stays in its empty state, every `isOwn*()` returns false, and today's
  * behavior is preserved.
  */
+/** Canonical runtime build identity of the running Sencho container. */
+export interface BuildInfo {
+  version: string | null;
+  channel: BuildChannel;
+  /** The image reference the running container was started with, null when unknown. */
+  imageRef: string | null;
+  /** Running image sha256 hex (no prefix), null when unknown. */
+  imageId: string | null;
+  /** Validated registry digest or pinned `dev-<sha>` tag, null when unknown. */
+  revision: string | null;
+}
+
 class SelfIdentityService {
   private static instance: SelfIdentityService;
   private containerId: string | null = null;
   private containerName: string | null = null;
   private composeProjectName: string | null = null;
   private imageIdHex: string | null = null;
+  private imageRef: string | null = null;
+  private revision: string | null = null;
   private networkIds = new Set<string>();
   private networkNames = new Set<string>();
   private volumeNames = new Set<string>();
@@ -58,6 +77,12 @@ class SelfIdentityService {
     this.containerName = (info.Name || '').replace(/^\//, '') || null;
     this.composeProjectName = info.Config?.Labels?.['com.docker.compose.project'] ?? null;
     this.imageIdHex = SelfIdentityService.stripSha(info.Image ?? '') || null;
+    this.imageRef = info.Config?.Image ?? null;
+    // Bounded revision enrichment runs detached so it never blocks the callers
+    // awaiting initialize() (Docker event monitoring, resources discovery). Core
+    // identity above is already captured; enrichment only adds the registry
+    // digest / pinned dev-<sha> and is failure-isolated.
+    void this.enrichRevision(this.imageRef, this.imageIdHex);
 
     const nets = info.NetworkSettings?.Networks ?? {};
     for (const [name, net] of Object.entries(nets)) {
@@ -116,6 +141,53 @@ class SelfIdentityService {
       console.warn('[SelfIdentity] cgroup-resolved inspect failed:', e?.message || String(err));
       return null;
     }
+  }
+
+  /**
+   * Canonical runtime build identity. All fields are captured fields or derived
+   * synchronously from them; this read never triggers a Docker call. `revision`
+   * is populated by the detached enrichment step fired during initialize() and
+   * reads null until that resolves (or if it fails).
+   */
+  getBuildInfo(): BuildInfo {
+    return {
+      version: getSenchoVersion(),
+      channel: this.imageRef ? classifyBuildChannel(this.imageRef) : 'unknown',
+      imageRef: this.imageRef,
+      imageId: this.imageIdHex,
+      revision: this.revision,
+    };
+  }
+
+  /**
+   * Resolve the immutable revision from the running image. For a dev-repo image
+   * carrying a pinned `dev-<sha>` tag, the tag itself is the revision. Otherwise
+   * the running image's `RepoDigests` are inspected for a digest matching the
+   * running reference. Any failure (inspect rejection, timeout, no matching
+   * digest) leaves `revision` null; enrichment never throws to the caller.
+   */
+  private async enrichRevision(imageRef: string | null, imageIdHex: string | null): Promise<void> {
+    try {
+      let revision: string | null = null;
+      if (imageRef && isSenchoDevRepository(imageRef)) {
+        const tag = parseImageRef(imageRef)?.tag;
+        if (tag && /^dev-[0-9a-f]{7,40}$/.test(tag)) revision = tag;
+      }
+      if (!revision && imageRef && imageIdHex) {
+        revision = await this.resolveDigestRevision(imageRef, imageIdHex);
+      }
+      this.revision = revision;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('[SelfIdentity] build revision enrichment failed:', message);
+    }
+  }
+
+  private async resolveDigestRevision(imageRef: string, imageIdHex: string): Promise<string | null> {
+    const parsed = parseImageRef(imageRef);
+    if (!parsed) return null;
+    const inspected = await withTimeout(defaultInspectImage(imageIdHex), 2000, 'build revision inspect');
+    return selectLocalRepoDigest(inspected.RepoDigests ?? [], parsed);
   }
 
   /** True when the given container ID or name matches the running Sencho container. Accepts short or full IDs. */
@@ -205,6 +277,8 @@ class SelfIdentityService {
     this.containerName = null;
     this.composeProjectName = null;
     this.imageIdHex = null;
+    this.imageRef = null;
+    this.revision = null;
     this.networkIds.clear();
     this.networkNames.clear();
     this.volumeNames.clear();

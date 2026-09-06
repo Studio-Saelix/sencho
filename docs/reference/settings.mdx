@@ -167,8 +167,8 @@ Activate, view, or deactivate the license for this Sencho control plane, and see
 | **Sencho Admiral** | The active license on this control plane, with a tier badge. Community instances see an upgrade prompt here instead. |
 | **Recovery Vault** | Whether the current subscription includes Recovery Vault entitlement. |
 | **Hardened Build** | Switches this control plane between the Community image channel and the Admiral Hardened Build channel. Review entitlement and registry access before switching; see [Plans](/features/licensing#feature-breakdown) for what Hardened Build changes. |
-| **Current image** | The image reference this control plane is currently running, so you can confirm which channel took effect after a switch. |
-| **Channel** | The active image channel (Community or Hardened). |
+| **Current image** | The image reference this control plane is currently running, so you can confirm which channel took effect after a switch. A hardened image is shown as `Restricted` to non-administrators. |
+| **Channel** | The running image channel this control plane is on: Community, Hardened, or Unknown. Reflects the running build, not the configured target. |
 | **Customer** | The customer name on file with Lemon Squeezy (paid plans only). |
 | **Product** | The product (paid plans only). |
 | **License key** | The active key, masked to the last four characters. |
@@ -751,9 +751,15 @@ Displays instance information at a glance.
 
 | Field | Description |
 |-------|-------------|
-| **Version** | Current Sencho version. |
+| **Version** | The semantic version of this control plane instance. |
+| **Channel** | The build track this control plane is running: `Dev`, `Preview`, `Stable`, or `Unknown`. A dev build is identified here even when its packaged version still matches the previous stable release. |
+| **Current image** | The image reference this control plane was started with. A compose edit changes the configured target until the container is recreated; this row always shows the running image, never the configured one. |
+| **Revision** | The immutable digest or pinned `dev-<sha>` tag this build resolves to, or `Unknown` when it cannot be determined. |
+| **Image ID** | The first twelve characters of the running image's sha256 identifier. Click to copy the full id. Hidden when no image identity is available. |
 | **Tier** | Community or Admiral badge. |
 | **Plan Status** | active, trial, expired, or community (Admiral entitlement state, not the AGPL software license). |
 | **Instance ID** | First eight characters of the unique identifier for this Sencho control plane (used by the license server to identify it). |
+
+The Build rows describe the **control plane** instance (the Sencho you are logged in to), not remote nodes. When identity metadata is unavailable, the reference rows read `Unknown` rather than inferring a value. For a hardened image seen by a non-administrator, the reference fields read `Restricted` instead. See [Verifying images](/operations/verifying-images) for how the build tracks and immutable tags relate.
 
 The **Links** section contains Source code, AGPLv3 License, Licensing documentation, and Changelog links.

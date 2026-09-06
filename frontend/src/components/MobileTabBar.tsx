@@ -1,6 +1,7 @@
 import { Home, Layers, Radar, Clock, Settings as SettingsIcon } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useBuildInfo } from '@/hooks/useBuildInfo';
 import type { NavItem, ActiveView } from './EditorLayout/hooks/useViewNavigationState';
 import type { MobileView } from './EditorLayout/mobile-surface';
 
@@ -45,7 +46,11 @@ export function MobileTabBar({
   onNavigate,
   onSettings,
 }: MobileTabBarProps) {
+  const { buildInfo } = useBuildInfo();
+
   const has = (value: ActiveView) => navItems.some(i => i.value === value);
+  const channel = buildInfo?.channel;
+  const showPill = channel === 'dev' || channel === 'preview';
 
   const tabs: Tab[] = [
     { id: 'home', label: 'Home', icon: Home },
@@ -79,12 +84,23 @@ export function MobileTabBar({
       aria-label="Primary mobile"
       data-sn-glass="mobile-tabbar"
       className={cn(
-        'md:hidden flex shrink-0 items-stretch',
+        'md:hidden relative flex shrink-0 items-stretch',
         'border-t border-hairline',
         'bg-[color-mix(in_oklch,var(--card)_70%,transparent)] backdrop-blur-md backdrop-saturate-150',
         'pb-[max(8px,env(safe-area-inset-bottom))]',
       )}
     >
+      {showPill ? (
+        <span
+          className={
+            channel === 'dev'
+              ? 'absolute top-1.5 right-2 pointer-events-none font-mono text-[8px] leading-none uppercase tracking-[0.16em] px-1 py-0.5 rounded bg-warning/15 text-warning border border-warning/30'
+              : 'absolute top-1.5 right-2 pointer-events-none font-mono text-[8px] leading-none uppercase tracking-[0.16em] px-1 py-0.5 rounded bg-brand/15 text-brand border border-brand/30'
+          }
+        >
+          {channel === 'dev' ? 'DEV' : 'PREVIEW'}
+        </span>
+      ) : null}
       {tabs.map(tab => {
         const on = current === tab.id;
         const Icon = tab.icon;

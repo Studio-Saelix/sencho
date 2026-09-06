@@ -13,6 +13,7 @@ export const PROXY_EXEMPT_PREFIXES: readonly string[] = [
   '/api/fleet/',
   '/api/webhooks',
   '/api/meta',
+  '/api/build-info',
 ];
 
 /** Returns true when the path should bypass the remote proxy (handled locally). */
