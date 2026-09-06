@@ -15,7 +15,7 @@ export interface NavGroupBucket {
 }
 
 export interface ReachableNavigationModel {
-  /** Classic / palette / mobile page list (excludes Settings). Exact Classic order. */
+  /** Palette / mobile page list (excludes Settings). */
   allPageItems: NavDestination[];
   primaryItems: NavDestination[];
   overflowGroups: NavGroupBucket[];
@@ -54,7 +54,7 @@ export function buildNavigationModel(reachCtx: ReachabilityContext): ReachableNa
   const pages = reachable
     .filter((item) => item.smart !== 'launcher-only')
     .slice()
-    .sort((a, b) => a.classicOrder - b.classicOrder);
+    .sort((a, b) => a.navOrder - b.navOrder);
 
   const allPageItems = pages.map(toNavDestination);
   const primaryItems = pages

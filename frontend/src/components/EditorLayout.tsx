@@ -247,7 +247,6 @@ export default function EditorLayout() {
   const [topNavLabels] = useTopNavLabels();
   const [topNavAlign] = useTopNavAlign();
   const [topNavMode] = useTopNavMode();
-  const { persistedIds: quickLinkIds, addQuickLink, removeQuickLink } = useTopNavQuickLinks();
 
   // Use a ref to break the circular dependency:
   // useViewNavigationState needs onNavigateToDashboard -> resetEditorState
@@ -280,7 +279,12 @@ export default function EditorLayout() {
     navModel,
     openMuteRulesWithPrefill,
     reachCtx,
+    defaultQuickLinkEligibility,
   } = navState;
+
+  // Called after navState so it can be seeded from navState.defaultQuickLinkEligibility
+  // (settled, role- and capability-aware defaults) rather than the raw recommended list.
+  const { persistedIds: quickLinkIds, addQuickLink, removeQuickLink } = useTopNavQuickLinks(defaultQuickLinkEligibility);
 
   const visibleQuickLinks = useMemo(() => {
     const candidateSet = new Set(navModel.quickLinkCandidates.map((item) => item.value));
@@ -1125,6 +1129,7 @@ export default function EditorLayout() {
             urlHydratingStack={urlHydratingStack}
             isFileLoading={isFileLoading}
             quickLinkCandidates={navModel.quickLinkCandidates}
+            defaultQuickLinkEligibility={defaultQuickLinkEligibility}
           />
         </div>
       );
@@ -1204,6 +1209,7 @@ export default function EditorLayout() {
                 selectedSection={mobileSettingsSection}
                 onSelectedSectionChange={setMobileSettingsSection}
                 quickLinkCandidates={navModel.quickLinkCandidates}
+                defaultQuickLinkEligibility={defaultQuickLinkEligibility}
               />
             );
           case 'security':

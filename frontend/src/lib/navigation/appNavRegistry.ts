@@ -25,8 +25,8 @@ export interface NavDestination {
 
 export interface AppNavItem extends NavDestination {
   group: NavGroup;
-  /** Classic strip order (ascending). Settings uses a high value and is excluded from Classic. */
-  classicOrder: number;
+  /** Flat page-list order (ascending), used by the command palette and mobile sheet. Settings uses a high value and is excluded (launcher-only). */
+  navOrder: number;
   smart: SmartPlacement;
   quickLinkEligible: boolean;
   defaultQuickLink: boolean;
@@ -48,7 +48,7 @@ export const APP_NAV_REGISTRY: readonly AppNavItem[] = [
     label: 'Home',
     icon: Home,
     group: 'overview',
-    classicOrder: 10,
+    navOrder: 10,
     smart: 'primary',
     quickLinkEligible: true,
     defaultQuickLink: true,
@@ -58,7 +58,7 @@ export const APP_NAV_REGISTRY: readonly AppNavItem[] = [
     label: 'Fleet',
     icon: Radar,
     group: 'fleet',
-    classicOrder: 20,
+    navOrder: 20,
     smart: 'primary',
     quickLinkEligible: true,
     defaultQuickLink: true,
@@ -68,7 +68,7 @@ export const APP_NAV_REGISTRY: readonly AppNavItem[] = [
     label: 'Resources',
     icon: HardDrive,
     group: 'fleet',
-    classicOrder: 30,
+    navOrder: 30,
     smart: 'primary',
     quickLinkEligible: true,
     defaultQuickLink: true,
@@ -78,7 +78,7 @@ export const APP_NAV_REGISTRY: readonly AppNavItem[] = [
     label: 'Networking',
     icon: Network,
     group: 'fleet',
-    classicOrder: 40,
+    navOrder: 40,
     smart: 'primary',
     quickLinkEligible: true,
     defaultQuickLink: false,
@@ -88,7 +88,7 @@ export const APP_NAV_REGISTRY: readonly AppNavItem[] = [
     label: 'Security',
     icon: ShieldCheck,
     group: 'security-review',
-    classicOrder: 50,
+    navOrder: 50,
     smart: 'primary',
     quickLinkEligible: true,
     defaultQuickLink: true,
@@ -98,7 +98,7 @@ export const APP_NAV_REGISTRY: readonly AppNavItem[] = [
     label: 'App Store',
     icon: CloudDownload,
     group: 'stack-workspace',
-    classicOrder: 60,
+    navOrder: 60,
     smart: 'primary',
     quickLinkEligible: true,
     defaultQuickLink: false,
@@ -108,7 +108,7 @@ export const APP_NAV_REGISTRY: readonly AppNavItem[] = [
     label: 'Logs',
     icon: Activity,
     group: 'operations',
-    classicOrder: 70,
+    navOrder: 70,
     smart: 'overflow',
     quickLinkEligible: true,
     defaultQuickLink: false,
@@ -118,27 +118,27 @@ export const APP_NAV_REGISTRY: readonly AppNavItem[] = [
     label: 'Update',
     icon: RefreshCw,
     group: 'operations',
-    classicOrder: 80,
+    navOrder: 80,
     smart: 'overflow',
     quickLinkEligible: true,
-    defaultQuickLink: false,
+    defaultQuickLink: true,
   },
   {
     value: 'scheduled-ops',
     label: 'Schedules',
     icon: Clock,
     group: 'operations',
-    classicOrder: 90,
+    navOrder: 90,
     smart: 'overflow',
     quickLinkEligible: true,
-    defaultQuickLink: false,
+    defaultQuickLink: true,
   },
   {
     value: 'host-console',
     label: 'Console',
     icon: Terminal,
     group: 'tools',
-    classicOrder: 100,
+    navOrder: 100,
     smart: 'overflow',
     quickLinkEligible: true,
     defaultQuickLink: false,
@@ -148,7 +148,7 @@ export const APP_NAV_REGISTRY: readonly AppNavItem[] = [
     label: 'Audit',
     icon: ScrollText,
     group: 'security-review',
-    classicOrder: 110,
+    navOrder: 110,
     smart: 'overflow',
     quickLinkEligible: true,
     defaultQuickLink: false,
@@ -158,7 +158,7 @@ export const APP_NAV_REGISTRY: readonly AppNavItem[] = [
     label: 'Settings',
     icon: Settings,
     group: 'settings',
-    classicOrder: 999,
+    navOrder: 999,
     smart: 'launcher-only',
     quickLinkEligible: false,
     defaultQuickLink: false,
@@ -167,13 +167,15 @@ export const APP_NAV_REGISTRY: readonly AppNavItem[] = [
 
 /**
  * Recommended quick-link pins for missing/malformed storage and Reset.
- * Order is intentional (Home, Fleet, Security, Resources), not Classic strip order.
+ * Order is intentional (Home, Fleet, Resources, Security, Update, Schedules), not page order.
  */
 export const recommendedQuickLinkIds: readonly ActiveView[] = [
   'dashboard',
   'fleet',
-  'security',
   'resources',
+  'security',
+  'auto-updates',
+  'scheduled-ops',
 ] as const;
 
 const BY_VALUE = new Map(APP_NAV_REGISTRY.map((item) => [item.value, item]));
