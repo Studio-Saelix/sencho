@@ -24,7 +24,6 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import bcrypt from 'bcrypt';
-import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import {
   setupTestDb,
@@ -32,7 +31,7 @@ import {
   TEST_JWT_SECRET,
   TEST_USERNAME,
 } from './helpers/setupTestDb';
-import { generateApiToken } from '../utils/apiTokenFormat';
+import { createTestApiToken } from './helpers/apiTokenTestHelper';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -75,17 +74,15 @@ async function seedUser(username: string, role: 'viewer' | 'admin'): Promise<{ u
 
 /** Mint an API-token bearer header bound to the given user. */
 function apiTokenFor(userId: number): string {
-  const rawToken = generateApiToken();
-  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
-  DatabaseService.getInstance().addApiToken({
-    token_hash: tokenHash,
-    name: `pref-test-${Date.now()}`,
+  const db = DatabaseService as unknown as typeof DatabaseService & { getInstance(): unknown };
+  return createTestApiToken({
+    // The helper expects the module-namespace type; at runtime the value is
+    // the class itself, and getInstance() is all the helper touches.
+    db: db as never,
     scope: 'read-only',
-    user_id: userId,
-    created_at: Date.now(),
-    expires_at: null,
+    userId,
+    name: `pref-test-${Date.now()}`,
   });
-  return rawToken;
 }
 
 beforeAll(async () => {
@@ -172,15 +169,11 @@ describe('user-preferences auth chain', () => {
     // Writes: a read-only token is denied by the global scope middleware
     // before the route guard runs; assert the route guard itself with a
     // full-admin token, which the global middleware waves through.
-    const adminRaw = generateApiToken();
-    const adminHash = crypto.createHash('sha256').update(adminRaw).digest('hex');
-    DatabaseService.getInstance().addApiToken({
-      token_hash: adminHash,
-      name: `pref-test-admin-${Date.now()}`,
+    const adminRaw = createTestApiToken({
+      db: DatabaseService as never,
       scope: 'full-admin',
-      user_id: admin.userId,
-      created_at: Date.now(),
-      expires_at: null,
+      userId: admin.userId,
+      name: `pref-test-admin-${Date.now()}`,
     });
     const adminAuthHeader = { Authorization: `Bearer ${adminRaw}` };
 
