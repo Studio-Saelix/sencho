@@ -11,6 +11,7 @@
     "predev": "node scripts/generate-version.js",
     "dev": "nodemon --watch src --ext ts,json --exec ts-node src/index.ts",
     "test:docker-integration": "vitest run --config vitest.docker-integration.config.ts",
+    "pretest": "node ../scripts/check-preference-parity.mjs",
     "test": "vitest run",
     "lint": "eslint src",
     "matrix:render": "node scripts/git-support-matrix/render.js",
