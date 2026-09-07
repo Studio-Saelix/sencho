@@ -32,7 +32,7 @@ export const SETTINGS_GROUPS: readonly SettingsGroupMeta[] = [
 ];
 
 export type TierGate = 'paid' | null;
-export type Scope = 'global' | 'node' | 'browser';
+export type Scope = 'global' | 'node' | 'browser' | 'account';
 
 export interface SettingsItemMeta {
     id: SectionId;
@@ -65,10 +65,10 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         id: 'appearance',
         group: 'personal',
         label: 'Appearance',
-        description: 'Visual style, readability, theme, accent, charts, display, and navigation preferences saved to this browser.',
-        keywords: ['theme', 'dim', 'oled', 'light', 'dark', 'accent', 'color', 'glow', 'border', 'contrast', 'density', 'comfortable', 'compact', 'spacing', 'display', 'calm', 'signature', 'readability', 'heading', 'chart', 'motion', 'effects', 'navigation', 'smart', 'launcher', 'quick links', 'topbar', 'top nav'],
+        description: 'Visual style, readability, theme, accent, charts, display, and navigation preferences saved to your account.',
+        keywords: ['theme', 'dim', 'oled', 'light', 'dark', 'accent', 'color', 'glow', 'border', 'contrast', 'density', 'comfortable', 'compact', 'spacing', 'display', 'calm', 'signature', 'readability', 'heading', 'chart', 'motion', 'effects', 'navigation', 'smart', 'launcher', 'quick links', 'topbar', 'top nav', 'sync', 'account'],
         tier: null,
-        scope: 'browser',
+        scope: 'account',
     },
     // Access
     {
@@ -351,15 +351,16 @@ export function isItemLocked(item: SettingsItemMeta, ctx: VisibilityContext): bo
 }
 
 /**
- * The masthead SCOPE value for a non-node section. Browser-local sections
- * (Appearance) persist to this browser's localStorage and read as
- * browser regardless of their group; the signed-in Account is operator-scoped;
+ * The masthead SCOPE value for a non-node section. Account-synced sections
+ * (Appearance) persist per signed-in account on the server and read as
+ * account regardless of their group; the signed-in Account is operator-scoped;
  * Access sections (license, users, sso, api-tokens) are instance-global, so
  * they read as global like every other non-node group. Node-scoped sections
  * render a NODE pill instead and never reach here.
  */
 export function scopeLabel(item: SettingsItemMeta): string {
     if (item.scope === 'browser') return 'browser';
+    if (item.scope === 'account') return 'account';
     if (item.group === 'personal') return 'operator';
     return 'global';
 }

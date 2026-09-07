@@ -161,7 +161,7 @@ describe('StacksSection', () => {
 
 describe('AppearanceSection no longer owns stack-workflow controls', () => {
     it('does not render Deploy progress, Progress style, or Diff preview before save', () => {
-        render(<AppearanceSection />);
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         expect(screen.queryByText('Deploy progress')).not.toBeInTheDocument();
         expect(screen.queryByText('Progress style')).not.toBeInTheDocument();
         expect(screen.queryByText('Diff preview before save')).not.toBeInTheDocument();
