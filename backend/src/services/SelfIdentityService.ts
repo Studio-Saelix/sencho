@@ -50,6 +50,7 @@ class SelfIdentityService {
   private volumeNames = new Set<string>();
   private initialized = false;
   private initializePromise: Promise<void> | null = null;
+  private enrichmentPromise: Promise<void> | null = null;
 
   public static getInstance(): SelfIdentityService {
     if (!SelfIdentityService.instance) {
@@ -81,8 +82,10 @@ class SelfIdentityService {
     // Bounded revision enrichment runs detached so it never blocks the callers
     // awaiting initialize() (Docker event monitoring, resources discovery). Core
     // identity above is already captured; enrichment only adds the registry
-    // digest / pinned dev-<sha> and is failure-isolated.
-    void this.enrichRevision(this.imageRef, this.imageIdHex);
+    // digest / pinned dev-<sha> and is failure-isolated. The promise is retained
+    // so a reader that needs the settled revision can await it (see
+    // whenRevisionResolved) instead of observing a transient null.
+    this.enrichmentPromise = this.enrichRevision(this.imageRef, this.imageIdHex);
 
     const nets = info.NetworkSettings?.Networks ?? {};
     for (const [name, net] of Object.entries(nets)) {
@@ -157,6 +160,17 @@ class SelfIdentityService {
       imageId: this.imageIdHex,
       revision: this.revision,
     };
+  }
+
+  /**
+   * Resolves once the detached revision enrichment has settled (success or
+   * failure), or immediately when none was started. Awaiting cannot hang or
+   * throw (enrichment is bounded and failure-isolated). A reader that needs
+   * the final `revision` awaits this before getBuildInfo() so a successful
+   * response never freezes a transient null.
+   */
+  async whenRevisionResolved(): Promise<void> {
+    if (this.enrichmentPromise) await this.enrichmentPromise;
   }
 
   /**
@@ -284,6 +298,7 @@ class SelfIdentityService {
     this.volumeNames.clear();
     this.initialized = false;
     this.initializePromise = null;
+    this.enrichmentPromise = null;
   }
 
   private static stripSha(s: string): string {

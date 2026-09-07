@@ -24,9 +24,14 @@ interface BuildInfoResponse {
 // registry/repository name, so the endpoint requires a human session and
 // redacts hardened-image references to non-admins via `restricted: true` (the
 // UI shows "Restricted", never "Unknown", when set).
-buildInfoRouter.get('/', (req: Request, res: Response): void => {
+buildInfoRouter.get('/', async (req: Request, res: Response): Promise<void> => {
   if (!requireUserSession(req, res)) return;
-  const identity = SelfIdentityService.getInstance().getBuildInfo();
+  const service = SelfIdentityService.getInstance();
+  // Await the detached revision enrichment so a transient null is never the
+  // settled value of a successful response. Bounded by the inspect timeout and
+  // never rejects, so this adds at most a short wait on the first read.
+  await service.whenRevisionResolved();
+  const identity = service.getBuildInfo();
   const isAdmin = req.user?.role === 'admin';
   const imageChannel = identity.imageRef ? classifyImageChannel(identity.imageRef) : 'unknown';
   const restricted = !isAdmin && imageChannel === 'hardened';

@@ -5,6 +5,7 @@ import { TierBadge } from '@/components/TierBadge';
 import { Badge } from '@/components/ui/badge';
 import { FlaskConical } from 'lucide-react';
 import { copyToClipboard } from '@/lib/clipboard';
+import { toast } from '@/components/ui/toast-store';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { useWhatsNewPreference } from '@/hooks/useWhatsNewPreference';
 import { whatsNewEntries } from '@/whats-new/entries';
@@ -77,9 +78,13 @@ export function AboutSection() {
 
     const copyImageId = async () => {
         if (!buildInfo?.imageId) return;
-        await copyToClipboard(`sha256:${buildInfo.imageId}`);
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1500);
+        try {
+            await copyToClipboard(`sha256:${buildInfo.imageId}`);
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1500);
+        } catch {
+            toast.error('Could not copy the image id.');
+        }
     };
 
     return (
@@ -98,13 +103,13 @@ export function AboutSection() {
                     label="Current image"
                     helper="The image this control plane was started with. A compose edit changes the configured target until the container is recreated."
                 >
-                    <span className={mono}>{imageRefLabel}</span>
+                    <span className={`${mono} break-all`}>{imageRefLabel}</span>
                 </SettingsField>
                 <SettingsField
                     label="Revision"
                     helper="The immutable digest or pinned dev commit this build resolves to."
                 >
-                    <span className={mono}>{revisionLabel}</span>
+                    <span className={`${mono} break-all`}>{revisionLabel}</span>
                 </SettingsField>
                 {imageIdLabel !== 'Unknown' && imageIdLabel !== '…' ? (
                     <SettingsField

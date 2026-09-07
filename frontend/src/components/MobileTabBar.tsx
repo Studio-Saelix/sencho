@@ -51,6 +51,7 @@ export function MobileTabBar({
   const has = (value: ActiveView) => navItems.some(i => i.value === value);
   const channel = buildInfo?.channel;
   const showPill = channel === 'dev' || channel === 'preview';
+  const pillLabel = channel === 'dev' ? 'DEV' : 'PREVIEW';
 
   const tabs: Tab[] = [
     { id: 'home', label: 'Home', icon: Home },
@@ -90,17 +91,6 @@ export function MobileTabBar({
         'pb-[max(8px,env(safe-area-inset-bottom))]',
       )}
     >
-      {showPill ? (
-        <span
-          className={
-            channel === 'dev'
-              ? 'absolute top-1.5 right-2 pointer-events-none font-mono text-[8px] leading-none uppercase tracking-[0.16em] px-1 py-0.5 rounded bg-warning/15 text-warning border border-warning/30'
-              : 'absolute top-1.5 right-2 pointer-events-none font-mono text-[8px] leading-none uppercase tracking-[0.16em] px-1 py-0.5 rounded bg-brand/15 text-brand border border-brand/30'
-          }
-        >
-          {channel === 'dev' ? 'DEV' : 'PREVIEW'}
-        </span>
-      ) : null}
       {tabs.map(tab => {
         const on = current === tab.id;
         const Icon = tab.icon;
@@ -124,6 +114,17 @@ export function MobileTabBar({
           </button>
         );
       })}
+      {showPill ? (
+        <span
+          className={
+            channel === 'dev'
+              ? 'shrink-0 self-center mr-2 pointer-events-none font-mono text-[8px] leading-none uppercase tracking-[0.16em] px-1 py-0.5 rounded bg-warning/15 text-warning border border-warning/30'
+              : 'shrink-0 self-center mr-2 pointer-events-none font-mono text-[8px] leading-none uppercase tracking-[0.16em] px-1 py-0.5 rounded bg-brand/15 text-brand border border-brand/30'
+          }
+        >
+          {pillLabel}
+        </span>
+      ) : null}
     </nav>
   );
 }

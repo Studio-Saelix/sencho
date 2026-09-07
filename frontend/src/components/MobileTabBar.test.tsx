@@ -133,4 +133,17 @@ describe('MobileTabBar build-identity pill', () => {
         expect(screen.getByRole('button', { name: 'Stacks' })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument();
     });
+
+    it('lays the pill in-flow as a non-overlapping sibling of the tabs', () => {
+        mockUseBuildInfo.mockReturnValue({ buildInfo: buildInfo('dev'), status: 'ready', retry: vi.fn() });
+        renderBar();
+        const pill = screen.getByText('DEV');
+        // In-flow (flex sibling), not absolutely positioned over the Settings tab.
+        expect(pill).not.toHaveClass('absolute');
+        expect(pill).toHaveClass('self-center', 'shrink-0');
+        // Sibling of the tab buttons inside the nav, so flexbox reserves its own
+        // region rather than letting it overlap the rightmost tab.
+        const settingsTab = screen.getByRole('button', { name: 'Settings' });
+        expect(pill.parentElement).toBe(settingsTab.parentElement);
+    });
 });

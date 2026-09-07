@@ -173,6 +173,33 @@ describe('GET /api/build-info as a non-admin', () => {
   });
 });
 
+describe('GET /api/build-info awaits revision enrichment', () => {
+  it('blocks the response until the enrichment settle promise resolves', async () => {
+    mockBuildInfo();
+    const svc = SelfIdentityService.getInstance();
+    let release!: () => void;
+    vi.spyOn(svc, 'whenRevisionResolved').mockImplementation(
+      () => new Promise<void>((res) => { release = res; }),
+    );
+
+    let settled = false;
+    const pending = request(app)
+      .get('/api/build-info')
+      .set('Authorization', adminAuth)
+      .then((res) => { settled = true; return res; });
+
+    // Give the route a tick to reach the await. It must not have responded yet,
+    // proving a transient null is never the settled value of a success.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(settled).toBe(false);
+
+    release();
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(res.body.revision).toBe('dev-abc1234');
+  });
+});
+
 describe('GET /api/meta buildChannel', () => {
   it('exposes the bounded build channel on the public endpoint', async () => {
     mockBuildInfo();

@@ -48,6 +48,15 @@ vi.mock('@/hooks/useBuildInfo', () => ({
 import { useBuildInfo } from '@/hooks/useBuildInfo';
 import type { BuildInfo } from '@/context/BuildInfoProvider';
 
+const { mockCopyToClipboard, mockToastError } = vi.hoisted(() => ({
+    mockCopyToClipboard: vi.fn(),
+    mockToastError: vi.fn(),
+}));
+vi.mock('@/lib/clipboard', () => ({ copyToClipboard: mockCopyToClipboard }));
+vi.mock('@/components/ui/toast-store', () => ({
+    toast: { error: mockToastError, success: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
+}));
+
 const mockUseBuildInfo = vi.mocked(useBuildInfo);
 
 function buildInfo(over: Partial<BuildInfo> = {}): BuildInfo {
@@ -139,5 +148,22 @@ describe('AboutSection Build identity', () => {
         mockUseBuildInfo.mockReturnValue({ buildInfo: null, status: 'error', retry: vi.fn() });
         render(<AboutSection />);
         expect(screen.getAllByText('Unknown').length).toBeGreaterThan(0);
+    });
+
+    it('wraps long image and revision tokens so they do not overflow', () => {
+        mockUseBuildInfo.mockReturnValue({ buildInfo: buildInfo(), status: 'ready', retry: vi.fn() });
+        render(<AboutSection />);
+        expect(screen.getByText('ghcr.io/studio-saelix/sencho-dev:dev')).toHaveClass('break-all');
+        expect(screen.getByText('dev-abc1234')).toHaveClass('break-all');
+    });
+
+    it('surfaces an error toast when copying the image id fails', async () => {
+        mockUseBuildInfo.mockReturnValue({ buildInfo: buildInfo(), status: 'ready', retry: vi.fn() });
+        mockCopyToClipboard.mockRejectedValue(new Error('clipboard blocked'));
+        render(<AboutSection />);
+
+        await userEvent.click(screen.getByRole('button', { name: /sha256:/ }));
+        expect(mockCopyToClipboard).toHaveBeenCalledWith(`sha256:${'a'.repeat(64)}`);
+        expect(mockToastError).toHaveBeenCalledWith('Could not copy the image id.');
     });
 });

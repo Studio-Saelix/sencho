@@ -165,4 +165,33 @@ describe('SelfIdentityService.getBuildInfo', () => {
     for (let i = 0; i < 5; i++) svc.getBuildInfo();
     expect(mockInspectImage).toHaveBeenCalledTimes(1);
   });
+
+  it('exposes revision only after enrichment settles, and whenRevisionResolved awaits that', async () => {
+    let resolveInspect!: (v: { RepoDigests: string[]; Os: string; Architecture: string }) => void;
+    mockInspectImage.mockReturnValue(new Promise((res) => { resolveInspect = res; }));
+
+    const svc = await initWith('ghcr.io/studio-saelix/sencho-dev:dev');
+    // initialize() returned without awaiting the detached enrichment, so the
+    // revision is still transiently null and the settle promise is pending.
+    expect(svc.getBuildInfo().revision).toBeNull();
+
+    // A reader that awaits the settle promise (the build-info route) blocks
+    // until enrichment lands, then observes the resolved digest, so a single
+    // successful read never freezes a transient null.
+    const settled = svc.whenRevisionResolved();
+    resolveInspect({
+      RepoDigests: [`ghcr.io/studio-saelix/sencho-dev@sha256:${DIGEST}`],
+      Os: 'linux',
+      Architecture: 'amd64',
+    });
+    await settled;
+    expect(svc.getBuildInfo().revision).toBe(`sha256:${DIGEST}`);
+  });
+
+  it('resolves whenRevisionResolved immediately when no enrichment ever started', async () => {
+    process.env.HOSTNAME = undefined;
+    const svc = SelfIdentityService.getInstance();
+    await svc.whenRevisionResolved();
+    expect(svc.getBuildInfo().revision).toBeNull();
+  });
 });
