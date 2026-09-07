@@ -43,6 +43,10 @@ vi.mock('@/hooks/useWhatsNewPreference', () => ({
     useWhatsNewPreference: () => ({ enabled: true, setEnabled: vi.fn(), hasUnseen: false, markSeen: vi.fn() }),
 }));
 
+vi.mock('@/hooks/useBuildInfo', () => ({
+    useBuildInfo: () => ({ buildInfo: null, status: 'ready', retry: vi.fn() }),
+}));
+
 describe("AboutSection with no What's New entries authored", () => {
     it('hides the Preferences section entirely, so no toggle describes an absent icon', () => {
         render(<AboutSection />);
