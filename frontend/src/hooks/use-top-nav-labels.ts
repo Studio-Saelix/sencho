@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
+import { notifyPreferenceWrite } from '@/lib/preferences/preferenceEvents';
 
 export const TOP_NAV_LABELS_KEY = 'sencho.appearance.topNavLabels';
 
@@ -13,6 +14,22 @@ function readStored(): boolean {
     } catch {
         return true;
     }
+}
+
+/** Read the current labels flag without subscribing (sync layer use). */
+export function currentTopNavLabels(): boolean {
+    return readStored();
+}
+
+/** Apply a labels value through the same path a user commit uses. Hydration
+ *  writes do not notify the sync bus. */
+export function applyTopNavLabels(next: boolean): void {
+    try {
+        window.localStorage.setItem(TOP_NAV_LABELS_KEY, next ? 'true' : 'false');
+    } catch {
+        // ignore; localStorage may be unavailable (private mode, quota)
+    }
+    window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
 }
 
 export function useTopNavLabels(): [boolean, (next: boolean) => void] {
@@ -38,13 +55,9 @@ export function useTopNavLabels(): [boolean, (next: boolean) => void] {
     }, []);
 
     const setShowLabels = useCallback((next: boolean) => {
-        try {
-            window.localStorage.setItem(TOP_NAV_LABELS_KEY, next ? 'true' : 'false');
-        } catch {
-            // ignore; localStorage may be unavailable (private mode, quota)
-        }
+        applyTopNavLabels(next);
         setShowLabelsState(next);
-        window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
+        notifyPreferenceWrite('navigation', ['labels']);
     }, []);
 
     return [showLabels, setShowLabels];
