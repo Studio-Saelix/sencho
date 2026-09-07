@@ -1,33 +1,123 @@
 /**
  * Desktop navigation styles: Compact default, Smart alternate, labeled pins,
  * launcher animation, Navigate panel scrolling, and persistence.
+ *
+ * Environment isolation: the suite logs in as a dedicated admin account and
+ * seeds its navigation row through the preference API, so tests neither read
+ * another suite's rows nor depend on raw-localStorage setup. Raw localStorage
+ * is used only where the migration path itself is the test target. Admin is
+ * required because the Smart bar's More group depends on overflow-classified
+ * views surviving the role filter. The notifications subsystem is mocked for
+ * every test: this suite asserts navigation chrome, not notifications, and
+ * the local notification WebSocket reconnect churn accumulates renderer
+ * resources across page loads.
  */
-import { test, expect } from '@playwright/test';
-import { loginAs, waitForStacksLoaded } from './helpers';
+import { test, expect, type Page } from '@playwright/test';
+import { loginAs, waitForStacksLoaded, waitForShellReady, TEST_USERNAME, TEST_PASSWORD } from './helpers';
+import {
+  NAVIGATION_DOC, ensureE2EUser, currentUserId, putDomain,
+} from './preferences-helpers';
 
-async function setTopNavMode(page: import('@playwright/test').Page, mode: 'smart' | 'compact' | null) {
-  await page.evaluate((next) => {
-    if (next === null) {
-      window.localStorage.removeItem('sencho.appearance.topNavMode');
-      window.localStorage.removeItem('sencho.appearance.topNavQuickLinks');
-      return;
-    }
-    window.localStorage.setItem('sencho.appearance.topNavMode', next);
-  }, mode);
-  await page.reload();
-  await loginAs(page);
-  await waitForStacksLoaded(page);
+const SUITE_USER = 'nav-styles-e2e';
+const SUITE_PASSWORD = 'nav-styles-password-123';
+// Admin, not viewer: the Smart bar's More group only exists when an
+// overflow-classified view survives the role filter, and every overflow view
+// (Logs, Update, Schedules, Console, Audit) is hidden for a viewer. A viewer
+// account therefore never renders More navigation at any viewport width.
+const SUITE_ROLE = 'admin' as const;
+
+let suiteUserId = 0;
+let api: import('@playwright/test').APIRequestContext;
+let adminApiContext: import('@playwright/test').APIRequestContext;
+
+/** A suite-owned request context (beforeAll fixtures cannot span tests). */
+async function suiteApi(): Promise<import('@playwright/test').APIRequestContext> {
+  if (!api) {
+    api = await import('@playwright/test').then(({ request: pwRequest }) =>
+      pwRequest.newContext({ baseURL: 'http://localhost:5173' }));
+  }
+  return api;
+}
+
+/** An admin request context, used only for suite-account lifecycle. */
+async function adminApi(): Promise<import('@playwright/test').APIRequestContext> {
+  if (!adminApiContext) {
+    adminApiContext = await import('@playwright/test').then(({ request: pwRequest }) =>
+      pwRequest.newContext({ baseURL: 'http://localhost:5173' }));
+    const login = await adminApiContext.post('/api/auth/login', {
+      data: { username: TEST_USERNAME, password: TEST_PASSWORD },
+    });
+    if (!login.ok()) throw new Error(`admin login failed with ${login.status()}`);
+  }
+  return adminApiContext;
+}
+
+/**
+ * Seed the suite account's navigation row through the API, then give the
+ * browser a matching cached state so the next load hydrates from the server
+ * (which rewrites the cache) and paints exactly what was seeded.
+ */
+type NavPatch = Partial<Omit<typeof NAVIGATION_DOC, 'status'>> & Record<string, unknown>;
+async function seedNavigation(doc: NavPatch) {
+  return putDomain(await suiteApi(), suiteUserId, 'navigation', { ...NAVIGATION_DOC, ...doc });
+}
+
+/**
+ * Fresh page in the same context: the auth cookie persists, so the new page
+ * loads straight into the dashboard. Used instead of page.reload() where the
+ * reload itself is not the behavior under test.
+ */
+async function freshDashboard(context: import('@playwright/test').BrowserContext, viewerSafe = false) {
+  const page = await context.newPage();
+  await page.goto('/');
+  if (viewerSafe) await waitForShellReady(page);
+  else await waitForStacksLoaded(page);
+  return page;
 }
 
 test.describe('Desktop navigation styles', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/');
-    await page.evaluate(() => {
-      window.localStorage.removeItem('sencho.appearance.topNavMode');
-      window.localStorage.removeItem('sencho.appearance.topNavQuickLinks');
+  test.describe.configure({ mode: 'serial' });
+
+  test.beforeAll(async () => {
+    // Seeding runs as the suite account itself: the identity guard rejects a
+    // request whose x-sencho-pref-user does not match the session, so the
+    // suite context logs in as SUITE_USER before writing its row.
+    const request = await suiteApi();
+    await ensureE2EUser(await adminApi(), SUITE_USER, SUITE_PASSWORD, SUITE_ROLE);
+    const login = await request.post('/api/auth/login', {
+      data: { username: SUITE_USER, password: SUITE_PASSWORD },
     });
-    await loginAs(page);
-    await waitForStacksLoaded(page);
+    if (!login.ok()) throw new Error(`suite login failed with ${login.status()}`);
+    suiteUserId = await currentUserId(request);
+    // Baseline: Compact launcher, labeled, left-aligned, defaults pins.
+    await putDomain(request, suiteUserId, 'navigation', NAVIGATION_DOC);
+  });
+
+  test.afterAll(async () => {
+    if (adminApiContext) {
+      const users = await adminApiContext.get('/api/users');
+      if (users.ok()) {
+        const list = (await users.json()) as Array<{ id: number; username: string }>;
+        const found = list.find((u) => u.id === suiteUserId);
+        if (found) await adminApiContext.delete(`/api/users/${suiteUserId}`);
+      }
+      await adminApiContext.dispose();
+      adminApiContext = undefined as unknown as typeof adminApiContext;
+    }
+    if (api) {
+      await api.dispose();
+      api = undefined as unknown as typeof api;
+    }
+  });
+
+  test.beforeEach(async ({ page }) => {
+    // The suite does not test notifications; quieting the local notification
+    // WebSocket and its polling keeps repeated page loads within renderer
+    // resource limits on constrained hosts.
+    await page.route('**/api/notifications**', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
+    await page.route('**/ws/notifications**', (route) => route.abort());
+    await loginAs(page, SUITE_USER, SUITE_PASSWORD, { viewerSafe: true });
   });
 
   test('defaults to Compact launcher with an Open navigation launcher control', async ({ page }) => {
@@ -36,24 +126,33 @@ test.describe('Desktop navigation styles', () => {
     await expect(page.getByRole('button', { name: 'Open navigation launcher' })).toBeVisible();
   });
 
-  test('a legacy classic preference migrates to compact on load', async ({ page }) => {
+  test('a legacy classic preference migrates to compact on load', async ({ page, context }) => {
+    // Raw localStorage seed: the legacy-value migration path is the test
+    // target. Navigation hydration normalizes classic to Compact before any
+    // server write, so the migrated value is what the server ends up with.
     await page.evaluate(() => {
       window.localStorage.setItem('sencho.appearance.topNavMode', 'classic');
     });
-    await page.reload();
-    await loginAs(page);
-    await waitForStacksLoaded(page);
-    await expect(page.locator('[data-sn-chrome="topbar"]')).toHaveAttribute('data-sn-nav-mode', 'compact');
+    const second = await freshDashboard(context, true);
+    await expect(second.locator('[data-sn-chrome="topbar"]')).toHaveAttribute('data-sn-nav-mode', 'compact');
+    await second.close();
   });
 
-  test('persists mode across reload and navigates via Smart More', async ({ page }) => {
-    await setTopNavMode(page, 'smart');
-    await expect(page.locator('[data-sn-chrome="topbar"]')).toHaveAttribute('data-sn-nav-mode', 'smart');
-    await page.getByRole('button', { name: 'More navigation' }).click();
-    await expect(page.getByRole('menuitem', { name: /Logs/i })).toBeVisible();
-    await expect(page.locator('.font-heading').filter({ hasText: 'More' })).toHaveCount(0);
-    await page.getByRole('menuitem', { name: /Logs/i }).click();
-    await expect(page.locator('body')).toContainText(/Logs|Central|Observability/i);
+  test('persists mode across reload and navigates via Smart More', async ({ page, context }) => {
+    await seedNavigation({ mode: 'smart' });
+    const second = await context.newPage();
+    await second.goto('/');
+    await waitForShellReady(second);
+    const topbar = second.locator('[data-sn-chrome="topbar"]');
+    await expect(topbar).toHaveAttribute('data-sn-nav-mode', 'smart');
+    await second.getByRole('button', { name: 'More navigation' }).click();
+    await expect(second.getByRole('menuitem', { name: /Logs/i })).toBeVisible();
+    await expect(second.locator('.font-heading').filter({ hasText: 'More' })).toHaveCount(0);
+    await second.getByRole('menuitem', { name: /Logs/i }).click();
+    await expect(second.locator('body')).toContainText(/Logs|Central|Observability/i);
+    await second.close();
+    // Restore the compact baseline for the remaining tests.
+    await seedNavigation({ mode: 'compact' });
   });
 
   test('Compact launcher opens Settings', async ({ page }) => {
@@ -63,32 +162,36 @@ test.describe('Desktop navigation styles', () => {
     await expect(page.getByText('Appearance', { exact: true }).first()).toBeVisible({ timeout: 10_000 });
   });
 
-  test('Compact trailing + adds a labeled pin that survives reload', async ({ page }) => {
-    await page.setViewportSize({ width: 1100, height: 800 });
-    await page.evaluate(() => {
-      window.localStorage.setItem('sencho.appearance.topNavQuickLinks', '[]');
-    });
-    await setTopNavMode(page, 'compact');
-
-    const topbar = page.locator('[data-sn-chrome="topbar"]');
+  test('Compact trailing + adds a labeled pin that survives reload', async ({ page, context }) => {
+    await seedNavigation({ quickLinks: [] });
+    const second = await freshDashboard(context, true);
+    await second.setViewportSize({ width: 1100, height: 800 });
+    const topbar = second.locator('[data-sn-chrome="topbar"]');
     await expect(topbar).toHaveAttribute('data-sn-nav-mode', 'compact');
 
-    await page.getByRole('button', { name: 'Add quick link' }).click();
-    await page.getByRole('menuitem', { name: /Networking/i }).click();
+    await second.getByRole('button', { name: 'Add quick link' }).click();
+    await second.getByRole('menuitem', { name: /Networking/i }).click();
 
     const pin = topbar.getByRole('button', { name: 'Networking', exact: true });
     await expect(pin).toBeVisible();
     await expect(pin.locator('span.inline')).toBeVisible();
 
-    const stored = await page.evaluate(() => window.localStorage.getItem('sencho.appearance.topNavQuickLinks'));
-    expect(stored).toContain('networking');
+    // The seed pinned an empty list, so the debounced sync write has landed
+    // exactly when the server row starts including the new pin.
+    await expect.poll(async () => {
+      const after = await import('./preferences-helpers').then((h) =>
+        h.getPreferences(second.request, suiteUserId));
+      return (after.preferences.navigation?.data?.quickLinks as string[] | undefined)?.includes('networking');
+    }, { timeout: 10_000 }).toBe(true);
 
-    await page.reload();
-    await loginAs(page);
-    await waitForStacksLoaded(page);
-
-    await expect(page.locator('[data-sn-chrome="topbar"]').getByRole('button', { name: 'Networking', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Add quick link' })).toBeVisible();
+    // Persistence across a real reload on the same page (load 2 of 3 here).
+    await second.reload();
+    await waitForShellReady(second);
+    await expect(topbar.getByRole('button', { name: 'Networking', exact: true })).toBeVisible();
+    await expect(second.getByRole('button', { name: 'Add quick link' })).toBeVisible();
+    await second.close();
+    // Restore the baseline pin set for the remaining tests.
+    await seedNavigation({ quickLinks: NAVIGATION_DOC.quickLinks });
   });
 
   test('the launcher hamburger morphs open/closed and does not animate under Reduced motion', async ({ page }) => {
@@ -123,7 +226,18 @@ test.describe('Desktop navigation styles', () => {
     // The top bar stays mounted on the Settings view, so the bar can be measured
     // from there without navigating back.
     await trigger.click();
-    await page.getByRole('menuitem', { name: /^Settings$/i }).click();
+    await page.getByRole('menuitem', { name: /^Settings$/i }).click({ force: false, timeout: 10_000 }).catch(async (e) => {
+      // Under a long-running idle animation the menu item can report
+      // "not stable" to Playwright's actionability check, then get replaced by
+      // a re-render before the retry lands. Escape closes the launcher and a
+      // second open presents a fresh, settled panel, so recover that way
+      // instead of letting the actionability loop eat the 30s test timeout.
+      void e;
+      await page.keyboard.press('Escape');
+      await expect(trigger).toHaveAttribute('data-state', 'closed');
+      await trigger.click();
+      await page.getByRole('menuitem', { name: /^Settings$/i }).click();
+    });
     await page.getByText('Appearance', { exact: true }).first().waitFor();
     const reducedMotion = page.getByRole('switch', { name: 'Reduced motion' });
     const durationMs = () => bar.evaluate((el) => parseFloat(getComputedStyle(el).transitionDuration) * 1000);

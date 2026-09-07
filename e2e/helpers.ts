@@ -44,6 +44,17 @@ export async function isDashboard(page: Page): Promise<boolean> {
 }
 
 /**
+ * Role-independent dashboard probe. DASHBOARD_INDICATOR can false-negative for
+ * a viewer account: the logo img may not have resolved yet and a viewer never
+ * renders Create Stack, so isDashboard() then reports "not on the dashboard"
+ * for a page that is actually ready. The topbar chrome is present for every
+ * authenticated role, which makes it a safe identity signal.
+ */
+async function hasTopbarChrome(page: Page): Promise<boolean> {
+  return page.locator('[data-sn-chrome="topbar"]').isVisible().catch(() => false);
+}
+
+/**
  * Wait for the stacks sidebar to finish loading. Waits for the Create Stack
  * button and the data-stacks-loaded sentinel set by the CommandList after its
  * async refreshStacks() call resolves.
@@ -54,10 +65,38 @@ export async function waitForStacksLoaded(page: Page): Promise<void> {
 }
 
 /**
+ * Role-independent shell readiness. waitForStacksLoaded requires the Create
+ * Stack button, which needs stack:create, so viewer-role accounts can never
+ * satisfy it. The topbar chrome renders for every authenticated role and the
+ * stacks sentinel settles once the (read-only) list resolves, so both are
+ * safe readiness signals for any role.
+ */
+export async function waitForShellReady(page: Page): Promise<void> {
+  await expect(page.locator('[data-sn-chrome="topbar"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-stacks-loaded="true"]')).toBeAttached({ timeout: 15_000 });
+}
+
+/** Options for loginAs. */
+export interface LoginAsOptions {
+  /**
+   * Wait for role-independent shell readiness instead of the admin-only
+   * Create Stack button. Required for viewer-role accounts, which never
+   * render that button.
+   */
+  viewerSafe?: boolean;
+}
+
+/**
  * Navigate to the app root, complete first-run setup if needed, then log in.
  * After this call the dashboard is guaranteed to be visible.
  */
-export async function loginAs(page: Page, username = TEST_USERNAME, password = TEST_PASSWORD) {
+export async function loginAs(
+  page: Page,
+  username = TEST_USERNAME,
+  password = TEST_PASSWORD,
+  options?: LoginAsOptions,
+) {
+  const ready = options?.viewerSafe ? waitForShellReady : waitForStacksLoaded;
   await page.goto('/');
 
   // Wait for the app to finish its auth check (loading spinner disappears)
@@ -75,7 +114,7 @@ export async function loginAs(page: Page, username = TEST_USERNAME, password = T
     const enterButton = page.getByRole('button', { name: /enter sencho/i });
     await expect(enterButton).toBeVisible({ timeout: 10_000 });
     await enterButton.click();
-    await waitForStacksLoaded(page);
+    await ready(page);
     return;
   }
 
@@ -94,7 +133,7 @@ export async function loginAs(page: Page, username = TEST_USERNAME, password = T
       await usernameField.fill(username);
       await page.locator('#password').fill(password);
       await page.locator('button:has-text("Login"), button:has-text("Sign in")').first().click();
-      await waitForStacksLoaded(page);
+      await ready(page);
       return;
     }
     // Fall through to the dashboard check below.
@@ -104,10 +143,16 @@ export async function loginAs(page: Page, username = TEST_USERNAME, password = T
   if (await isDashboard(page)) {
     return;
   }
+  // Same dashboard state, seen through the role-independent chrome probe:
+  // covers a viewer account whose logo img has not painted yet.
+  if (await hasTopbarChrome(page)) {
+    await ready(page);
+    return;
+  }
 
   // Cookie session may still be restoring after a hard reload.
   try {
-    await waitForStacksLoaded(page);
+    await ready(page);
     return;
   } catch {
     // fall through
