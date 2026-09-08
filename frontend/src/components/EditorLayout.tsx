@@ -465,7 +465,6 @@ export default function EditorLayout() {
   // `activeView`, so 'dashboard' still maps to HomeDashboard everywhere.
   const isMobile = useIsMobile();
   const { sidebarMode, sidebarWidth, setSidebarWidth } = useSidebarLayout();
-  const commitSidebarWidth = useCallback((width: number) => setSidebarWidth(width), [setSidebarWidth]);
   const [mobileView, setMobileView] = useState<MobileView>('list');
   const [mobileSettingsSection, setMobileSettingsSection] = useState<SectionId | null>(null);
   // Optimistically flip to the detail surface the instant a row is tapped,
@@ -1052,7 +1051,7 @@ export default function EditorLayout() {
       const sidebarSlotEl = !isMobile && sidebarMode === 'resizable' ? (
         <SidebarResizePane
           sidebarWidth={sidebarWidth}
-          onCommitWidth={commitSidebarWidth}
+          onCommitWidth={setSidebarWidth}
         >
           {sidebarEl}
         </SidebarResizePane>
@@ -1400,7 +1399,7 @@ export default function EditorLayout() {
           {/* Left Sidebar (Stacks) */}
           {sidebarSlotEl}
           {/* Main Content Area */}
-          <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+          <div className={`${sidebarMode === 'resizable' ? 'min-w-0 ' : ''}flex-1 flex flex-col overflow-hidden`}>
             {topBarEl}
             {/* Main Workspace */}
             {workspaceEl}

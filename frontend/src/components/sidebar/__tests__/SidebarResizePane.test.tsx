@@ -247,14 +247,14 @@ describe('SidebarResizePane', () => {
     setup((w) => commits.push(w));
     separator().focus();
     await user.keyboard('{ArrowRight}');
-    expect(commits).toEqual([316]);
-    expect(separator()).toHaveAttribute('aria-valuenow', '316');
+    expect(commits).toEqual([308]);
+    expect(separator()).toHaveAttribute('aria-valuenow', '308');
     await user.keyboard('{Home}');
     expect(pane().style.width).toBe(`${SIDEBAR_WIDTH.min}px`);
     await user.keyboard('{End}');
     expect(pane().style.width).toBe(`${SIDEBAR_WIDTH.max}px`);
     expect(separator()).toHaveAttribute('aria-valuemax', String(SIDEBAR_WIDTH.max));
-    expect(commits).toEqual([316, SIDEBAR_WIDTH.min, SIDEBAR_WIDTH.max]);
+    expect(commits).toEqual([308, SIDEBAR_WIDTH.min, SIDEBAR_WIDTH.max]);
   });
 
   it('keyboard End clamps to the viewport-limited max in a narrow shell', async () => {

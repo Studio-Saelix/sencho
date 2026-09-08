@@ -18,7 +18,7 @@ const MIN_WORKSPACE = 560;
 /** Separator hit area in px between sidebar and workspace. */
 const HANDLE_FOOTPRINT = 12;
 /** Keyboard step per arrow press, in px. */
-const KEY_STEP = 16;
+const KEY_STEP = 8;
 
 interface SidebarResizePaneProps {
   sidebarWidth: number;
@@ -36,7 +36,6 @@ export function SidebarResizePane({ sidebarWidth, onCommitWidth, children }: Sid
     startX: number;
     startWidth: number;
     lastWidth: number;
-    committed: boolean;
   } | null>(null);
 
   // The pane's flex row (its parent: sidebar pane + separator + workspace)
@@ -104,7 +103,6 @@ export function SidebarResizePane({ sidebarWidth, onCommitWidth, children }: Sid
       startX: event.clientX,
       startWidth: effectiveWidth,
       lastWidth: effectiveWidth,
-      committed: false,
     };
     setDragging(true);
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -124,9 +122,8 @@ export function SidebarResizePane({ sidebarWidth, onCommitWidth, children }: Sid
   const onSeparatorPointerUp = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (drag === null || drag.pointerId !== event.pointerId) return;
-    // Snapshot and mark committed BEFORE releasing capture so the trailing
-    // lostpointercapture finds no drag and cleans up without a second commit.
-    drag.committed = true;
+    // The trailing lostpointercapture is a no-op: endDrag clears dragRef
+    // before capture releases, so nothing can commit a second time.
     try {
       onCommitWidth(Math.round(drag.lastWidth));
     } finally {
