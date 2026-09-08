@@ -96,7 +96,15 @@ export async function deleteE2EUser(request: APIRequestContext, userId: number):
 export async function getPreferences(request: APIRequestContext, userId: number): Promise<{
   preferences: Record<string, PreferenceEnvelope | null>;
 }> {
-  const res = await request.get('/api/user-preferences', { headers: prefHeaders(userId) });
+  // The suite user's GET shares the global per-minute API limiter with every
+  // other request from the same account; a burst of test traffic in the same
+  // window can 429, so retry briefly before failing the suite.
+  let res = await request.get('/api/user-preferences', { headers: prefHeaders(userId) });
+  for (let attempt = 0; !res.ok() && attempt < 4; attempt += 1) {
+    if (res.status() !== 429) throw new Error(`GET preferences failed with ${res.status()}`);
+    await new Promise((r) => setTimeout(r, 5_000));
+    res = await request.get('/api/user-preferences', { headers: prefHeaders(userId) });
+  }
   if (!res.ok()) throw new Error(`GET preferences failed with ${res.status()}`);
   return (await res.json()) as { preferences: Record<string, PreferenceEnvelope | null> };
 }
