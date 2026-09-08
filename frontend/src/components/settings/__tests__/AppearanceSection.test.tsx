@@ -2,6 +2,10 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent, act, renderHook } from '@testing-library/react';
 import { AppearanceSection } from '../AppearanceSection';
 import { useTheme } from '@/hooks/use-theme';
+import { SETTINGS_ITEMS } from '../registry';
+import { SIDEBAR_WIDTH, SIDEBAR_MODE_KEY, SIDEBAR_WIDTH_KEY } from '@/hooks/use-sidebar-layout';
+import { subscribeToPreferenceWrites } from '@/lib/preferences/preferenceEvents';
+import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
 
 // AppearanceSection drives the shared theme store. Reset it to a known Signature
 // baseline (readability off, effects full) before each test so the disabled-state
@@ -18,7 +22,10 @@ function resetTheme() {
 }
 
 describe('AppearanceSection', () => {
-    beforeEach(() => resetTheme());
+    beforeEach(() => {
+        localStorage.clear();
+        resetTheme();
+    });
 
     it('renders the four refresh sections above Theme', () => {
         render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
@@ -93,8 +100,12 @@ describe('AppearanceSection', () => {
 
     it('readability locks the header + chart controls and disables the glow slider', () => {
         const { container } = render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
-        // Baseline: nothing reduced, so no slider is disabled.
-        expect(container.querySelectorAll('[data-disabled]').length).toBe(0);
+        // Baseline: only the sidebar width slider is disabled (Fixed mode leaves
+        // it unapplied); the readability-gated controls are all active.
+        const glowLocked = () => !!container.querySelector('[aria-label="Ambient glow"][data-disabled]');
+        const sidebarLocked = () => !!container.querySelector('[aria-label="Sidebar width"][data-disabled]');
+        expect(glowLocked()).toBe(false);
+        expect(sidebarLocked()).toBe(true);
         expect(screen.getByRole('radiogroup', { name: 'Header style' }).getAttribute('aria-disabled')).toBeNull();
 
         fireEvent.click(screen.getByRole('switch', { name: 'Readability mode' }));
@@ -104,7 +115,7 @@ describe('AppearanceSection', () => {
         expect((screen.getByRole('switch', { name: 'Reduced effects' }) as HTMLButtonElement).disabled).toBe(true);
         // Effective reduced (readability || reducedEffects) disables the glow slider
         // even though reducedEffects itself is still off.
-        expect(container.querySelectorAll('[data-disabled]').length).toBeGreaterThan(0);
+        expect(glowLocked()).toBe(true);
     });
 
     it('reduced motion is independent of readability and toggles data-motion on <html>', () => {
@@ -229,5 +240,148 @@ describe('AppearanceSection', () => {
         expect(screen.getAllByText(/for your account on every device/i).length).toBe(2);
         // The retired browser-local wording must not resurface.
         expect(screen.queryByText(/this browser/i)).toBeNull();
+    });
+});
+
+describe('AppearanceSection sidebar layout', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        resetTheme();
+    });
+
+    // Radix puts the passed aria-label on the slider ROOT span (the element
+    // that also carries data-disabled and the keyboard handler); the visible
+    // thumb is a descendant with role="slider" and the value attributes.
+    const sliderRoot = (container: HTMLElement) =>
+        container.querySelector<HTMLElement>('[aria-label="Sidebar width"]');
+    const sliderThumb = (container: HTMLElement) =>
+        sliderRoot(container)?.querySelector<HTMLElement>('[role="slider"]');
+
+    it('renders the sidebar layout rows with Fixed as the default and the width slider locked', () => {
+        const { container } = render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
+        expect(screen.getByText('Sidebar layout')).toBeTruthy();
+        expect(screen.getByRole('radio', { name: 'Fixed' }).getAttribute('aria-checked')).toBe('true');
+        expect(screen.getByRole('radio', { name: 'Resizable' }).getAttribute('aria-checked')).toBe('false');
+        // Fixed mode leaves the width preference unapplied, so the slider locks.
+        expect(sliderRoot(container)?.getAttribute('data-disabled')).not.toBeNull();
+        expect(sliderThumb(container)?.getAttribute('aria-valuenow')).toBe('256');
+    });
+
+    it('switching to Resizable unlocks the width slider without writing the width field', () => {
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, '340');
+        const { container } = render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
+        const notify = vi.fn();
+        const unsub = subscribeToPreferenceWrites(notify);
+
+        fireEvent.click(screen.getByRole('radio', { name: 'Resizable' }));
+        expect(sliderRoot(container)?.getAttribute('data-disabled')).toBeNull();
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(notify).toHaveBeenCalledWith('appearance', ['sidebarMode']);
+        // The mode write never changes the width field: the stored 340 survives
+        // and the slider keeps showing it.
+        expect(localStorage.getItem(SIDEBAR_WIDTH_KEY)).toBe('340');
+        expect(sliderThumb(container)?.getAttribute('aria-valuenow')).toBe('340');
+        unsub();
+    });
+
+    it('the width slider drafts locally and writes once on commit', () => {
+        localStorage.setItem(SIDEBAR_MODE_KEY, 'resizable');
+        const { container } = render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
+        const notify = vi.fn();
+        const unsub = subscribeToPreferenceWrites(notify);
+        expect(sliderRoot(container)?.getAttribute('data-disabled')).toBeNull();
+
+        // Radix commits keyboard steps immediately (drag commits on release);
+        // onValueCommit is the single write path for both.
+        fireEvent.keyDown(sliderRoot(container)!, { key: 'End' });
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(notify).toHaveBeenCalledWith('appearance', ['sidebarWidth']);
+        expect(Number(sliderThumb(container)?.getAttribute('aria-valuenow'))).toBe(SIDEBAR_WIDTH.max);
+        expect(localStorage.getItem(SIDEBAR_WIDTH_KEY)).toBe(String(SIDEBAR_WIDTH.max));
+        unsub();
+    });
+
+    it('a targeted sidebar reset restores Fixed and the default width, leaving other fields untouched', () => {
+        localStorage.setItem(SIDEBAR_MODE_KEY, 'resizable');
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, '400');
+        localStorage.setItem('sencho.appearance.density', 'compact');
+        const { container } = render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Reset sidebar layout' }));
+        expect(localStorage.getItem(SIDEBAR_MODE_KEY)).toBe('fixed');
+        expect(localStorage.getItem(SIDEBAR_WIDTH_KEY)).toBe(String(SIDEBAR_WIDTH.default));
+        // Unrelated appearance fields survive the targeted reset.
+        expect(localStorage.getItem('sencho.appearance.density')).toBe('compact');
+        // The slider re-locks and the thumb lands on the default width.
+        expect(sliderRoot(container)?.getAttribute('data-disabled')).not.toBeNull();
+        expect(sliderThumb(container)?.getAttribute('aria-valuenow')).toBe(String(SIDEBAR_WIDTH.default));
+    });
+
+    it('the width draft re-syncs from the shared preference without issuing a write', () => {
+        localStorage.setItem(SIDEBAR_MODE_KEY, 'resizable');
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, '300');
+        const { container } = render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
+        const notify = vi.fn();
+        const unsub = subscribeToPreferenceWrites(notify);
+        expect(sliderThumb(container)?.getAttribute('aria-valuenow')).toBe('300');
+
+        // An apply-path change (targeted reset, hydration, another tab) lands
+        // via the settings-changed event; the slider follows it with no write.
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, '352');
+        act(() => {
+            window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
+        });
+        expect(sliderThumb(container)?.getAttribute('aria-valuenow')).toBe('352');
+        expect(notify).not.toHaveBeenCalled();
+        unsub();
+    });
+
+    it('registers the sidebar search keywords on the appearance entry', () => {
+        const appearance = SETTINGS_ITEMS.find((item) => item.id === 'appearance');
+        expect(appearance).toBeTruthy();
+        for (const term of ['sidebar', 'resize', 'resizable', 'pane', 'width', 'layout']) {
+            expect(appearance?.keywords, `keyword ${term}`).toContain(term);
+        }
+    });
+
+    it('dragging the slider drafts locally and writes only on pointer release', () => {
+        localStorage.setItem(SIDEBAR_MODE_KEY, 'resizable');
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, '300');
+        const { container } = render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
+        const notify = vi.fn();
+        const unsub = subscribeToPreferenceWrites(notify);
+        const root = sliderRoot(container)!;
+        expect(root.getAttribute('data-disabled')).toBeNull();
+
+        // Radix's pointer handlers consult the captured pointer position
+        // against the slider rect; pin both so the drag math is deterministic.
+        const rect: DOMRect = { width: 216, height: 20, top: 0, left: 0, bottom: 20, right: 216, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+        vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+            if (root.contains(this)) return rect;
+            return { width: 0, height: 0, top: 0, left: 0, bottom: 0, right: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+        });
+        vi.spyOn(HTMLElement.prototype, 'hasPointerCapture').mockReturnValue(true);
+        vi.spyOn(HTMLElement.prototype, 'setPointerCapture').mockImplementation(() => {});
+        vi.spyOn(HTMLElement.prototype, 'releasePointerCapture').mockImplementation(() => {});
+        // Radix maps pointer x onto [min, max] over the track rect, then snaps
+        // to the 4px step. Compute the expected value the same way.
+        const valueAt = (x: number) => Math.min(SIDEBAR_WIDTH.max, Math.max(SIDEBAR_WIDTH.min,
+            Math.round((SIDEBAR_WIDTH.min + (x / 216) * (SIDEBAR_WIDTH.max - SIDEBAR_WIDTH.min)) / 4) * 4));
+
+        fireEvent.pointerDown(root, { pointerId: 1, clientX: 108, button: 0 });
+        const mid = valueAt(140);
+        fireEvent.pointerMove(root, { pointerId: 1, clientX: 140 });
+        // Mid-drag: the draft follows the pointer but nothing is queued.
+        expect(Number(sliderThumb(container)?.getAttribute('aria-valuenow'))).toBe(mid);
+        expect(notify).not.toHaveBeenCalled();
+        expect(localStorage.getItem(SIDEBAR_WIDTH_KEY)).toBe('300');
+
+        fireEvent.pointerUp(root, { pointerId: 1, clientX: 140 });
+        // Release commits exactly once: one bus notify and one localStorage write.
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(notify).toHaveBeenCalledWith('appearance', ['sidebarWidth']);
+        expect(localStorage.getItem(SIDEBAR_WIDTH_KEY)).toBe(String(mid));
+        unsub();
+        vi.restoreAllMocks();
     });
 });

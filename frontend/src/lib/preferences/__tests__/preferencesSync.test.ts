@@ -50,6 +50,7 @@ import {
   hydrateAppearanceDocument,
   hydrateNavigationDocument,
 } from '../preferencesDocuments';
+import { resetSidebarLayout } from '../resetPreferences';
 
 interface MockResponse {
   ok: boolean;
@@ -474,5 +475,57 @@ describe('preference sync layer', () => {
     await flushPendingWrites();
     expect(recordedCalls().filter((c) => c.method === 'PUT')).toHaveLength(0);
     expect(inspectQueue('appearance').kind).toBeNull();
+  });
+
+  it('the targeted sidebar reset writes defaults locally and enqueues one write with both fields', async () => {
+    // No prior row is known, so the PUT resolves its baseline first, finds the
+    // row absent, and converts to a create-if-absent migrate carrying the
+    // reset values (document rebuilt at send time).
+    apiFetch.mockImplementation(async (_path: string, opts?: RequestInit) => {
+      if (opts?.method === 'POST') {
+        return jsonResponse(201, { domain: 'appearance', revision: 1, row: { domain: 'appearance', schemaVersion: 1, revision: 1, updatedAt: 1 } });
+      }
+      return jsonResponse(200, { preferences: {} });
+    });
+    localStorage.setItem('sencho.appearance.sidebarMode', 'resizable');
+    localStorage.setItem('sencho.appearance.sidebarWidth', '400');
+    localStorage.setItem('sencho.appearance.theme', 'dim');
+
+    resetSidebarLayout();
+
+    // Local defaults land immediately, unrelated appearance fields untouched.
+    expect(localStorage.getItem('sencho.appearance.sidebarMode')).toBe('fixed');
+    expect(localStorage.getItem('sencho.appearance.sidebarWidth')).toBe('256');
+    expect(localStorage.getItem('sencho.appearance.theme')).toBe('dim');
+    await flushPendingWrites();
+    await vi.waitFor(() => expect(recordedCalls().some((c) => c.method === 'POST')).toBe(true));
+    const mutations = recordedCalls().filter((c) => c.method === 'PUT' || c.method === 'POST' || c.method === 'DELETE');
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0].path).toBe('/user-preferences/appearance/migrate');
+    expect(mutations[0].body).toMatchObject({ sidebarMode: 'fixed', sidebarWidth: 256 });
+    expect(inspectQueue('appearance').settling).toBe(false);
+  });
+
+  it('the targeted sidebar reset after a known revision PUTs the defaults conditionally', async () => {
+    apiFetch.mockImplementation(async (_path: string, opts?: RequestInit) => {
+      if (opts?.method === 'PUT') {
+        return jsonResponse(200, { domain: 'appearance', revision: 5, updatedAt: 1 });
+      }
+      return jsonResponse(200, { preferences: {} });
+    });
+    adoptKnownRevision('appearance', 4);
+    localStorage.setItem('sencho.appearance.sidebarMode', 'resizable');
+    localStorage.setItem('sencho.appearance.sidebarWidth', '400');
+
+    resetSidebarLayout();
+
+    await flushPendingWrites();
+    await vi.waitFor(() => expect(recordedCalls().some((c) => c.method === 'PUT')).toBe(true));
+    const puts = recordedCalls().filter((c) => c.method === 'PUT');
+    expect(puts).toHaveLength(1);
+    expect(puts[0].path).toBe('/user-preferences/appearance');
+    expect(puts[0].body).toMatchObject({ expectedRevision: 4, sidebarMode: 'fixed', sidebarWidth: 256 });
+    expect(recordedCalls().filter((c) => c.method === 'DELETE')).toHaveLength(0);
+    expect(inspectQueue('appearance').settling).toBe(false);
   });
 });

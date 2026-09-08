@@ -73,14 +73,17 @@ export function currentSidebarWidth(): number {
 
 /** Guarded localStorage write shared by every path in this module: skips the
  *  identical-value write and tolerates an unavailable store (private mode,
- *  quota). */
-function writeStoredValue(key: string, value: string): void {
+ *  quota). Reports whether a new value actually landed. */
+function writeStoredValue(key: string, value: string): boolean {
   try {
     if (window.localStorage.getItem(key) !== value) {
       window.localStorage.setItem(key, value);
+      return true;
     }
+    return false;
   } catch {
     // ignore; localStorage may be unavailable (private mode, quota)
+    return false;
   }
 }
 
@@ -88,14 +91,14 @@ function writeStoredValue(key: string, value: string): void {
  *  instances arrives via the settings-changed event; localStorage is written
  *  here). Hydration-side writes do not notify the sync bus. */
 export function applySidebarModeValue(next: SidebarMode): void {
-  writeStoredValue(SIDEBAR_MODE_KEY, next);
-  window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
+  const changed = writeStoredValue(SIDEBAR_MODE_KEY, next);
+  if (changed) window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
 }
 
 /** Apply a preferred width (already sanitized) without notifying the bus. */
 export function applySidebarWidthValue(next: number): void {
-  writeStoredValue(SIDEBAR_WIDTH_KEY, String(next));
-  window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
+  const changed = writeStoredValue(SIDEBAR_WIDTH_KEY, String(next));
+  if (changed) window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
 }
 
 interface SidebarLayoutState {
@@ -112,13 +115,20 @@ export function useSidebarLayout(): SidebarLayoutState {
   // Persist-on-change, matching the use-density contract: the hook's own state
   // is the write source, so a setter state change lands in localStorage even
   // when no apply* path was involved. Guarded, so a re-read (same value) is a
-  // no-op write.
+  // no-op write. A setter write that actually changes storage also broadcasts
+  // the settings-changed event so other mounted instances (e.g. the Settings
+  // page while the shell separator commits) re-read; this is the setter-side
+  // counterpart of the apply* broadcasts above.
   useEffect(() => {
-    writeStoredValue(SIDEBAR_MODE_KEY, sidebarMode);
+    if (writeStoredValue(SIDEBAR_MODE_KEY, sidebarMode)) {
+      window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
+    }
   }, [sidebarMode]);
 
   useEffect(() => {
-    writeStoredValue(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+    if (writeStoredValue(SIDEBAR_WIDTH_KEY, String(sidebarWidth))) {
+      window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
+    }
   }, [sidebarWidth]);
 
   useEffect(() => {

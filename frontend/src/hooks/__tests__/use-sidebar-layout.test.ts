@@ -94,12 +94,27 @@ describe('apply* write path', () => {
         unsub();
     });
 
-    it('skips the identical-value localStorage write but still broadcasts', () => {
+    it('skips the identical-value localStorage write and its broadcast', () => {
         applySidebarModeValue('fixed');
         let changed = 0;
         const listener = () => { changed += 1; };
         window.addEventListener(SENCHO_SETTINGS_CHANGED, listener);
         applySidebarModeValue('fixed');
+        expect(changed).toBe(0);
+        window.removeEventListener(SENCHO_SETTINGS_CHANGED, listener);
+    });
+
+    it('broadcasts once when the setter path changes storage (shell separator commit)', () => {
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, '300');
+        const { result } = renderHook(() => useSidebarLayout());
+        let changed = 0;
+        const listener = () => { changed += 1; };
+        window.addEventListener(SENCHO_SETTINGS_CHANGED, listener);
+
+        act(() => result.current.setSidebarWidth(352));
+        // The writing instance keeps its own state; other mounted instances
+        // re-read storage on this event and converge on the new width.
+        expect(result.current.sidebarWidth).toBe(352);
         expect(changed).toBe(1);
         window.removeEventListener(SENCHO_SETTINGS_CHANGED, listener);
     });
