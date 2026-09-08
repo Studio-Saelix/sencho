@@ -2445,7 +2445,7 @@ export class GitSourceService {
      */
     private readonly inFlightFetches: InFlightMap<PullResult> = new Map();
     private readonly inFlightApplies: InFlightMap<GitApplyResult> = new Map();
-    private readonly inFlightWebhookDeliveries = new Map<string, Promise<WebhookPullResult>>();
+    private readonly inFlightWebhookDeliveries = new Map<string, { promise: Promise<WebhookPullResult> }>();
 
     /**
      * The controller-facing entry point: one normalized submission in,
@@ -2574,12 +2574,13 @@ export class GitSourceService {
                 execution,
                 settled: this.settleAttempt(request.applicationId, envelope, execution.result),
             }));
-        map.set(key, { operationId: envelope.operationId, promise });
+        const entry = { operationId: envelope.operationId, promise };
+        map.set(key, entry);
         try {
             const completion = await promise;
             return { kind: 'executed', execution: completion.execution };
         } finally {
-            if (map.get(key)?.promise === promise) map.delete(key);
+            if (map.get(key) === entry) map.delete(key);
         }
     }
 
@@ -2600,7 +2601,9 @@ export class GitSourceService {
             return { ...outcome, result: normalize(outcome) };
         } catch (e) {
             console.error(
-                `[GitSource] Failed to derive a settlement result for attempt ${sanitizeForLog(envelope.operationId)} on application ${sanitizeForLog(request.applicationId)}:`,
+                '[GitSource] Failed to derive a settlement result for attempt %s on application %s:',
+                sanitizeForLog(envelope.operationId),
+                sanitizeForLog(request.applicationId),
                 e instanceof Error ? e.message : String(e),
             );
             return {
@@ -2710,7 +2713,9 @@ export class GitSourceService {
             return settled || !!GitOpsStore.getInstance().getSettledAttempt(applicationId, envelope.operationId);
         } catch (e) {
             console.error(
-                `[GitSource] Failed to settle reconcile attempt ${sanitizeForLog(envelope.operationId)} for application ${sanitizeForLog(applicationId)}:`,
+                '[GitSource] Failed to settle reconcile attempt %s for application %s:',
+                sanitizeForLog(envelope.operationId),
+                sanitizeForLog(applicationId),
                 e instanceof Error ? e.message : String(e),
             );
             return false;
@@ -2737,7 +2742,9 @@ export class GitSourceService {
             return this.settleFromDurableState(applicationId, operationId, actor, trigger);
         } catch (e) {
             console.error(
-                `[GitSource] Failed to resolve already-reserved attempt ${sanitizeForLog(operationId)} for application ${sanitizeForLog(applicationId)}:`,
+                '[GitSource] Failed to resolve already-reserved attempt %s for application %s:',
+                sanitizeForLog(operationId),
+                sanitizeForLog(applicationId),
                 e instanceof Error ? e.message : String(e),
             );
             return { outcome: 'unknown', reason: 'This attempt could not be resolved from durable state.', nextAction: 'none' };
@@ -4668,14 +4675,15 @@ export class GitSourceService {
         if (!deliveryId) return this.handleWebhookPullOnce(stackName, undefined, deployAuthorized);
         const key = `${stackName}:${deliveryId}`;
         const leader = this.inFlightWebhookDeliveries.get(key);
-        if (leader) return leader;
+        if (leader) return leader.promise;
 
         const promise = this.handleWebhookPullOnce(stackName, deliveryId, deployAuthorized);
-        this.inFlightWebhookDeliveries.set(key, promise);
+        const entry = { promise };
+        this.inFlightWebhookDeliveries.set(key, entry);
         try {
             return await promise;
         } finally {
-            if (this.inFlightWebhookDeliveries.get(key) === promise) {
+            if (this.inFlightWebhookDeliveries.get(key) === entry) {
                 this.inFlightWebhookDeliveries.delete(key);
             }
         }
@@ -4729,7 +4737,9 @@ export class GitSourceService {
                 deliveryIntent = GitSourceService.deliveryIntentFromStartedAttempt(startedDelivery);
             } catch (e) {
                 console.error(
-                    `[GitSource] Could not recover webhook delivery intent for ${sanitizeForLog(stackName)}${deliverySuffix}:`,
+                    '[GitSource] Could not recover webhook delivery intent for %s%s:',
+                    sanitizeForLog(stackName),
+                    deliverySuffix,
                     e instanceof Error ? e.message : String(e),
                 );
                 return { status: 'error', message: 'Could not recover the original webhook delivery intent.' };
