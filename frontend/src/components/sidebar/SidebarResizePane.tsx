@@ -72,13 +72,9 @@ export function SidebarResizePane({ sidebarWidth, onCommitWidth, children }: Sid
   // Centralized, idempotent teardown for every termination path. A trailing
   // lostpointercapture after a committed pointerup is a no-op because the
   // committed pointerup cleared dragRef first.
-  const endDrag = useCallback((commit: boolean): void => {
+  const endDrag = useCallback((): void => {
     const drag = dragRef.current;
     dragRef.current = null;
-    if (drag !== null && commit && !drag.committed) {
-      drag.committed = true;
-      onCommitWidth(Math.round(drag.lastWidth));
-    }
     try {
       if (drag !== null) paneRef.current?.releasePointerCapture(drag.pointerId);
     } catch {
@@ -87,10 +83,10 @@ export function SidebarResizePane({ sidebarWidth, onCommitWidth, children }: Sid
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
     setDragging(false);
-  }, [onCommitWidth]);
+  }, []);
 
   // Unmount mid-drag still cleans the body styles.
-  useEffect(() => () => endDrag(false), [endDrag]);
+  useEffect(() => () => endDrag(), [endDrag]);
 
   // The pane is declaratively owned except mid-drag, when pointermove writes
   // the style directly (no React state, so only the boundary moves).
@@ -99,7 +95,9 @@ export function SidebarResizePane({ sidebarWidth, onCommitWidth, children }: Sid
   }, [effectiveWidth, dragging]);
 
   const onSeparatorPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
+    // Ignore additional pointers while a drag is in progress (multi-touch,
+    // stray second mouse button) so they cannot steal or corrupt the drag.
+    if (event.button !== 0 || dragRef.current !== null) return;
     event.preventDefault();
     dragRef.current = {
       pointerId: event.pointerId,
@@ -129,8 +127,11 @@ export function SidebarResizePane({ sidebarWidth, onCommitWidth, children }: Sid
     // Snapshot and mark committed BEFORE releasing capture so the trailing
     // lostpointercapture finds no drag and cleans up without a second commit.
     drag.committed = true;
-    onCommitWidth(Math.round(drag.lastWidth));
-    endDrag(false);
+    try {
+      onCommitWidth(Math.round(drag.lastWidth));
+    } finally {
+      endDrag();
+    }
   }, [endDrag, onCommitWidth]);
 
   const onSeparatorKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -175,8 +176,8 @@ export function SidebarResizePane({ sidebarWidth, onCommitWidth, children }: Sid
         onPointerDown={onSeparatorPointerDown}
         onPointerMove={onSeparatorPointerMove}
         onPointerUp={onSeparatorPointerUp}
-        onPointerCancel={() => endDrag(false)}
-        onLostPointerCapture={() => endDrag(false)}
+        onPointerCancel={() => endDrag()}
+        onLostPointerCapture={() => endDrag()}
         onKeyDown={onSeparatorKeyDown}
       >
         <span className="absolute inset-y-0 left-0 -right-1.5 z-10" aria-hidden />

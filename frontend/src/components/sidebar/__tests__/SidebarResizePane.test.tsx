@@ -256,4 +256,39 @@ describe('SidebarResizePane', () => {
     expect(separator()).toHaveAttribute('aria-valuemax', String(SIDEBAR_WIDTH.max));
     expect(commits).toEqual([316, SIDEBAR_WIDTH.min, SIDEBAR_WIDTH.max]);
   });
+
+  it('keyboard End clamps to the viewport-limited max in a narrow shell', async () => {
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, '300');
+    shellRowWidth = 900; // effectiveMax = 900 - 560 - 12 = 328
+    const user = userEvent.setup();
+    const commits: number[] = [];
+    setup((w) => commits.push(w));
+    await waitFor(() => expect(separator()).toHaveAttribute('aria-valuemax', '328'));
+    separator().focus();
+    await user.keyboard('{End}');
+    expect(commits).toEqual([328]);
+    expect(separator()).toHaveAttribute('aria-valuenow', '328');
+  });
+
+  it('dragging below the min clamps to the min without a sub-minimum commit', async () => {
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, '280');
+    const commits: number[] = [];
+    setup((w) => commits.push(w));
+    dragSeparator(300, 0); // raw pointer delta lands far below the min
+    expect(commits).toEqual([SIDEBAR_WIDTH.min]);
+    expect(pane().style.width).toBe(`${SIDEBAR_WIDTH.min}px`);
+    expect(separator()).toHaveAttribute('aria-valuenow', String(SIDEBAR_WIDTH.min));
+  });
+
+  it('a second pointerdown while a drag is in progress is ignored', async () => {
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, '280');
+    const commits: number[] = [];
+    setup((w) => commits.push(w));
+    const sep = separator();
+    fireEvent.pointerDown(sep, { pointerId: 1, clientX: 300 });
+    fireEvent.pointerMove(sep, { pointerId: 1, clientX: 340 });
+    fireEvent.pointerDown(sep, { pointerId: 2, clientX: 500 });
+    fireEvent.pointerUp(sep, { pointerId: 1, clientX: 340 });
+    expect(commits).toEqual([320]);
+  });
 });
