@@ -251,6 +251,55 @@ describe('POST /api/webhooks/:id/trigger: authenticated happy path', () => {
         expect(res.body).toMatchObject({ action: 'start' });
     });
 
+    it('extracts a recognized provider delivery header and passes it through to execute', async () => {
+        const { id, secret } = createWebhook({ action: 'stop' });
+        const body = '{}';
+        const executeSpy = vi.spyOn(WebhookService.getInstance(), 'execute').mockResolvedValue({ success: true, duration_ms: 0 });
+
+        try {
+            await request(app)
+                .post(`/api/webhooks/${id}/trigger`)
+                .set('Content-Type', 'application/json')
+                .set('X-Webhook-Signature', sign(body, secret))
+                .set('X-GitHub-Delivery', 'gh-delivery-123')
+                .send(body);
+
+            expect(executeSpy).toHaveBeenCalledWith(
+                expect.objectContaining({ id }),
+                'stop',
+                expect.anything(),
+                true,
+                'gh-delivery-123',
+            );
+        } finally {
+            executeSpy.mockRestore();
+        }
+    });
+
+    it('passes no delivery id through when the caller sends no recognized header', async () => {
+        const { id, secret } = createWebhook({ action: 'stop' });
+        const body = '{}';
+        const executeSpy = vi.spyOn(WebhookService.getInstance(), 'execute').mockResolvedValue({ success: true, duration_ms: 0 });
+
+        try {
+            await request(app)
+                .post(`/api/webhooks/${id}/trigger`)
+                .set('Content-Type', 'application/json')
+                .set('X-Webhook-Signature', sign(body, secret))
+                .send(body);
+
+            expect(executeSpy).toHaveBeenCalledWith(
+                expect.objectContaining({ id }),
+                'stop',
+                expect.anything(),
+                true,
+                undefined,
+            );
+        } finally {
+            executeSpy.mockRestore();
+        }
+    });
+
     it('rejects an unknown action override with 400 after the signature passes (L2)', async () => {
         const { id, secret } = createWebhook();
         const body = '{"action":"nuke-the-cluster"}';

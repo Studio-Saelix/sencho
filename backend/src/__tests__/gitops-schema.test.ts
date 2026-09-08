@@ -239,6 +239,61 @@ describe('gitops schema', () => {
     expect(row?.configured_ref).toBe('v1');
   });
 
+  it('round-trips the portable generation contract fields, defaulting to null for legacy rows', async () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(directApp('app-portable', 'portable-web'));
+    store.insertGeneration({
+      ...generation('gen-portable-legacy', 'app-portable'),
+    });
+    const legacy = store.getGeneration('gen-portable-legacy');
+    expect(legacy?.portable_manifest_json).toBeNull();
+    expect(legacy?.compose_inputs_json).toBeNull();
+    expect(legacy?.source_policy_evidence_json).toBeNull();
+    expect(legacy?.security_policy_evidence_json).toBeNull();
+    expect(legacy?.support_requirements_json).toBeNull();
+    expect(legacy?.compatibility_requirements_json).toBeNull();
+
+    store.insertGeneration({
+      ...generation('gen-portable-new', 'app-portable'),
+      portable_manifest_json: '{"files":[]}',
+      compose_inputs_json: '{"composeFileOrder":["compose.yaml"]}',
+      source_policy_evidence_json: '{"policy":"manual"}',
+      security_policy_evidence_json: '{"status":"allowed"}',
+      support_requirements_json: '{}',
+      compatibility_requirements_json: '{}',
+    });
+    const populated = store.getGeneration('gen-portable-new');
+    expect(populated?.portable_manifest_json).toBe('{"files":[]}');
+    expect(populated?.compose_inputs_json).toBe('{"composeFileOrder":["compose.yaml"]}');
+    expect(populated?.source_policy_evidence_json).toBe('{"policy":"manual"}');
+  });
+
+  it('defaults controller-owned columns to manual, off, and zero on a fresh application', async () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(directApp('app-ctrl', 'ctrl-web'));
+    const app = store.getApplication('app-ctrl');
+    expect(app?.source_policy).toBe('manual');
+    expect(app?.poll_interval_secs).toBeNull();
+    expect(app?.next_poll_at).toBeNull();
+    expect(app?.attempt_seq).toBe(0);
+  });
+
+  it('round-trips a configured poll interval and policy', async () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication({
+      ...directApp('app-ctrl2', 'ctrl2-web'),
+      source_policy: 'automatic',
+      poll_interval_secs: 120,
+      next_poll_at: 5000,
+      attempt_seq: 3,
+    });
+    const app = store.getApplication('app-ctrl2');
+    expect(app?.source_policy).toBe('automatic');
+    expect(app?.poll_interval_secs).toBe(120);
+    expect(app?.next_poll_at).toBe(5000);
+    expect(app?.attempt_seq).toBe(3);
+  });
+
   it('round-trips fetched_resolved_ref_kind on application fetch transitions', async () => {
     const store = GitOpsStore.getInstance();
     store.insertApplication(directApp('app-fetch-kind', 'fetch-web'));
@@ -294,6 +349,10 @@ function directApp(id: string, stackName: string): GitOpsApplicationRow {
     pause_at: null,
     pause_reason: null,
     source_suspended_reason: null,
+    source_policy: 'manual',
+    poll_interval_secs: null,
+    next_poll_at: null,
+    attempt_seq: 0,
     partial_json: null,
     failure_stage: null,
     failure_class: null,
@@ -362,6 +421,12 @@ function generation(id: string, applicationId: string): GitOpsGenerationRow {
     actor: 'tester',
     previous_generation_id: null,
     redacted_limitations_json: '[]',
+    portable_manifest_json: null,
+    compose_inputs_json: null,
+    source_policy_evidence_json: null,
+    security_policy_evidence_json: null,
+    support_requirements_json: null,
+    compatibility_requirements_json: null,
     created_at: 1,
   };
 }

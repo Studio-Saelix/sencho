@@ -13,6 +13,38 @@ const mockMarkReconciling = vi.fn().mockReturnValue(true);
 const mockMarkImmediateVerified = vi.fn().mockReturnValue(true);
 const mockGet = vi.fn();
 const mockCompensate = vi.fn();
+const mockGitOpsApplication = {
+  id: 'gitops-app',
+  lifecycle_status: 'active',
+  stack_name: 'app',
+  candidate_generation_id: null,
+};
+const mockGitOpsStore = {
+  getLiveDirectApplication: vi.fn().mockReturnValue(mockGitOpsApplication),
+  getApplication: vi.fn().mockReturnValue(mockGitOpsApplication),
+  getGeneration: vi.fn().mockReturnValue(undefined),
+  getSettledAttempt: vi.fn().mockReturnValue(undefined),
+};
+const mockGitOpsTransitions = {
+  allocateReconcileAttempt: vi.fn().mockReturnValue({ operationId: 'gitops-app:attempt:1', reserved: true }),
+  settleReconcileAttempt: vi.fn().mockReturnValue({ settled: true }),
+};
+
+vi.mock('../services/gitops/store', () => ({
+  GitOpsStore: {
+    getInstance: () => mockGitOpsStore,
+  },
+}));
+
+vi.mock('../services/gitops/transitions', async () => {
+  const actual = await vi.importActual<typeof import('../services/gitops/transitions')>('../services/gitops/transitions');
+  return {
+    ...actual,
+    GitOpsTransitions: {
+      getInstance: () => mockGitOpsTransitions,
+    },
+  };
+});
 
 vi.mock('../services/StackUpdateRecoveryService', () => ({
   StackUpdateRecoveryService: {
@@ -129,10 +161,6 @@ vi.mock('../services/DatabaseService', () => ({
       setGitSourceLastPlan: mockSetGitSourceLastPlan,
       addNotificationHistory: mockAddNotificationHistory,
       getStackProjectEnvFiles: vi.fn().mockReturnValue([]),
-      // The apply path now asks whether this stack has a GitOps application.
-      // These fixtures predate the revision-state model, so the lookup finds
-      // nothing and every GitOps producer stays a no-op, which is exactly the
-      // behavior an install with pre-existing Git stacks gets.
       getDb: () => ({
         prepare: () => ({ get: () => undefined, all: () => [], run: () => ({ changes: 0 }) }),
         transaction: (fn: () => unknown) => () => fn(),
@@ -197,7 +225,7 @@ describe('git-source apply recovery (R1)', () => {
         v: 4,
         files: { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' },
         contextDir: null,
-        candidateRelPath: 'generations/cand',
+        candidateRelPath: 'generations/candidate-abc1234deadbeef',
         inventory: {
           inputs: [],
           refusals: [],
@@ -246,7 +274,7 @@ describe('git-source apply recovery (R1)', () => {
       version: 4,
       files: [{ path: 'compose.yaml', content: 'services:\n  web:\n    image: nginx\n' }],
       contextDir: null,
-      candidateRelPath: 'generations/cand',
+      candidateRelPath: 'generations/candidate-abc1234deadbeef',
       inventory: { inputs: [], refusals: [], buildContexts: [] },
       planFingerprint: 'fp-test',
       planSchemaVersion: GIT_CHANGE_PLAN_SCHEMA_VERSION,
