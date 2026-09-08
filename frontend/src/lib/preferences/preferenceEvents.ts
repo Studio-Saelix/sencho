@@ -30,12 +30,13 @@ export type PreferenceField =
   | 'theme' | 'accent' | 'uiFont' | 'monoFont' | 'visualStyle' | 'headingStyle'
   | 'chartStyle' | 'density' | 'logChipColorMode' | 'borderBoost' | 'glow'
   | 'contrast' | 'typeScale' | 'reducedEffects' | 'reducedMotion' | 'readability'
+  | 'sidebarMode' | 'sidebarWidth'
   | 'mode' | 'quickLinks' | 'labels' | 'align';
 
 export const DOMAIN_FIELDS: Record<PreferenceDomain, readonly PreferenceField[]> = {
   appearance: ['theme', 'accent', 'uiFont', 'monoFont', 'visualStyle', 'headingStyle',
     'chartStyle', 'density', 'logChipColorMode', 'borderBoost', 'glow', 'contrast',
-    'typeScale', 'reducedEffects', 'reducedMotion', 'readability'],
+    'typeScale', 'reducedEffects', 'reducedMotion', 'readability', 'sidebarMode', 'sidebarWidth'],
   navigation: ['mode', 'quickLinks', 'labels', 'align'],
 };
 

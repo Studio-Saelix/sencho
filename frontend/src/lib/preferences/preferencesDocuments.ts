@@ -26,6 +26,13 @@ import {
 import { TOP_NAV_LABELS_KEY, currentTopNavLabels, applyTopNavLabels } from '@/hooks/use-top-nav-labels';
 import { TOP_NAV_ALIGN_KEY, currentTopNavAlign, applyTopNavAlign, isTopNavAlignExport, type TopNavAlign } from '@/hooks/use-top-nav-align';
 import { currentLogChipColorMode, applyLogChipColorMode, isLogChipColorModeExport, type LogChipColorMode } from '@/hooks/use-log-chip-color-mode';
+import {
+  SIDEBAR_MODE_KEY, SIDEBAR_WIDTH_KEY, SIDEBAR_WIDTH_DEFAULT,
+  currentSidebarMode, currentSidebarWidth,
+  applySidebarModeValue, applySidebarWidthValue,
+  isSidebarMode, sanitizeSidebarWidth,
+  type SidebarMode,
+} from '@/hooks/use-sidebar-layout';
 import { recommendedQuickLinkIds } from '@/lib/navigation/appNavRegistry';
 
 export interface AppearanceDocument {
@@ -45,11 +52,14 @@ export interface AppearanceDocument {
   reducedEffects: boolean;
   reducedMotion: boolean;
   readability: boolean;
+  sidebarMode: SidebarMode;
+  sidebarWidth: number;
 }
 
-/** What the raw theme cache key holds: everything except the two fields
- *  (`density`, `logChipColorMode`) stored under their own keys. */
-export type ThemeCacheDocument = Omit<AppearanceDocument, 'density' | 'logChipColorMode'>;
+/** What the raw theme cache key holds: everything except the fields
+ *  (`density`, `logChipColorMode`, `sidebarMode`, `sidebarWidth`) stored under
+ *  their own keys. */
+export type ThemeCacheDocument = Omit<AppearanceDocument, 'density' | 'logChipColorMode' | 'sidebarMode' | 'sidebarWidth'>;
 
 /** Navigation document with unset provenance for the pin list. `unset` means
  *  the hook has never persisted a list (never-seeded or eligibility still
@@ -90,6 +100,8 @@ export function buildAppearanceDocument(): AppearanceDocument {
     reducedEffects: t.reducedEffects,
     reducedMotion: t.reducedMotion,
     readability: t.readability,
+    sidebarMode: currentSidebarMode(),
+    sidebarWidth: currentSidebarWidth(),
   };
 }
 
@@ -146,6 +158,10 @@ export function hydrateAppearanceDocument(raw: unknown): void {
   });
   applyDensityValue(isDensity(p.density) ? p.density : 'comfortable');
   applyLogChipColorMode(isLogChipColorModeExport(p.logChipColorMode) ? p.logChipColorMode : 'unified');
+  // A document missing the sidebar fields (older writer) degrades to the
+  // defaults instead of leaving stale browser-local values behind.
+  applySidebarModeValue(isSidebarMode(p.sidebarMode) ? p.sidebarMode : 'fixed');
+  applySidebarWidthValue(sanitizeSidebarWidth(p.sidebarWidth));
 }
 
 /** The documented calm-default appearance document, used for tombstone
@@ -170,6 +186,8 @@ export function defaultAppearanceDocument(): AppearanceDocument {
     reducedEffects: d.reducedEffects,
     reducedMotion: d.reducedMotion,
     readability: d.readability,
+    sidebarMode: 'fixed',
+    sidebarWidth: SIDEBAR_WIDTH_DEFAULT,
   };
 }
 
@@ -219,6 +237,8 @@ export const PREFERENCE_CACHE_KEYS = [
   'sencho-theme', // legacy theme key
   'sencho.appearance.density',
   'sencho.log-chip-color-mode',
+  SIDEBAR_MODE_KEY,
+  SIDEBAR_WIDTH_KEY,
   TOP_NAV_MODE_KEY,
   TOP_NAV_QUICK_LINKS_KEY,
   TOP_NAV_LABELS_KEY,
@@ -249,6 +269,8 @@ export function writePreferenceCacheFromDocuments(): void {
       ...appearance,
       density: undefined,
       logChipColorMode: undefined,
+      sidebarMode: undefined,
+      sidebarWidth: undefined,
     }));
   } catch {
     // ignore; private mode / quota

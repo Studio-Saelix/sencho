@@ -11,13 +11,14 @@ import type { APIRequestContext } from '@playwright/test';
 import { request as pwRequest } from '@playwright/test';
 import { TEST_USERNAME, TEST_PASSWORD } from './helpers';
 
-/** The full 16-field appearance document the server schema validates. */
+/** The full 18-field appearance document the server schema validates. */
 export const APPEARANCE_DOC = {
   theme: 'oled', accent: 'violet', uiFont: 'Geist', monoFont: 'Geist Mono',
   visualStyle: 'calm', headingStyle: 'clean', chartStyle: 'muted',
   density: 'compact', logChipColorMode: 'unified',
   borderBoost: 0, glow: 0.16, contrast: 0, typeScale: 1,
   reducedEffects: true, reducedMotion: true, readability: false,
+  sidebarMode: 'fixed', sidebarWidth: 256,
 };
 
 /** The four-field navigation document. */

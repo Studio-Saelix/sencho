@@ -43,6 +43,18 @@ const APPEARANCE_DOC = {
   density: 'comfortable', logChipColorMode: 'unified',
   borderBoost: 0, glow: 0.16, contrast: 0, typeScale: 1,
   reducedEffects: true, reducedMotion: true, readability: false,
+  sidebarMode: 'resizable', sidebarWidth: 320,
+};
+
+// The document shape an older frontend writer sends (before the sidebar
+// fields existed). The backend must accept it and store it normalized with
+// the defaults rather than 400ing on the strict schema.
+const LEGACY_APPEARANCE_DOC = {
+  theme: 'dim', accent: 'cyan', uiFont: 'Geist', monoFont: 'Geist Mono',
+  visualStyle: 'calm', headingStyle: 'clean', chartStyle: 'muted',
+  density: 'comfortable', logChipColorMode: 'unified',
+  borderBoost: 0, glow: 0.16, contrast: 0, typeScale: 1,
+  reducedEffects: true, reducedMotion: true, readability: false,
 };
 
 const NAVIGATION_DOC = {
@@ -642,6 +654,87 @@ describe('user-preferences validation', () => {
     expect((await put({ ...APPEARANCE_DOC, theme: 'midnight' })).status).toBe(400);
     expect((await put({ ...APPEARANCE_DOC, density: 'cozy' })).status).toBe(400);
     expect((await put({ ...APPEARANCE_DOC, extra: true })).status).toBe(400);
+  });
+
+  it('accepts the new sidebar fields', async () => {
+    const put = (doc: Record<string, unknown>) => request(app).put('/api/user-preferences/appearance')
+      .set('Cookie', viewer.cookie).set(HEADER, String(viewer.userId))
+      .send({ absent: true, ...doc });
+
+    expect((await put(APPEARANCE_DOC)).status).toBe(200);
+    const all = await request(app).get('/api/user-preferences')
+      .set('Cookie', viewer.cookie).set(HEADER, String(viewer.userId));
+    expect(all.status).toBe(200);
+    const appearance = (all.body.preferences.appearance?.data ?? {}) as Record<string, unknown>;
+    expect(appearance.sidebarMode).toBe('resizable');
+    expect(appearance.sidebarWidth).toBe(320);
+  });
+
+  it('rejects invalid sidebar field values', async () => {
+    const put = (doc: Record<string, unknown>) => request(app).put('/api/user-preferences/appearance')
+      .set('Cookie', viewer.cookie).set(HEADER, String(viewer.userId))
+      .send({ absent: true, ...doc });
+
+    expect((await put({ ...APPEARANCE_DOC, sidebarMode: 'float' })).status).toBe(400);
+    expect((await put({ ...APPEARANCE_DOC, sidebarWidth: 223 })).status).toBe(400);
+    expect((await put({ ...APPEARANCE_DOC, sidebarWidth: 441 })).status).toBe(400);
+    expect((await put({ ...APPEARANCE_DOC, sidebarWidth: 320.5 })).status).toBe(400);
+    expect((await put({ ...APPEARANCE_DOC, sidebarWidth: '320' })).status).toBe(400);
+  });
+
+  /** Remove the viewer's appearance row outright. A route-level DELETE only
+   *  tombstones the row (it still exists), and a tombstone fails an
+   *  absent-precondition PUT, so the tests that need a truly absent row go to
+   *  the DB directly. */
+  function clearAppearanceRow(): void {
+    DatabaseService.getInstance()
+      .getDb()
+      .prepare("DELETE FROM user_preferences WHERE user_id = ? AND domain = 'appearance'")
+      .run(viewer.userId);
+  }
+
+  it('normalizes a legacy 16-field document with the sidebar defaults on PUT', async () => {
+    await clearAppearanceRow();
+
+    const put = await request(app).put('/api/user-preferences/appearance')
+      .set('Cookie', viewer.cookie).set(HEADER, String(viewer.userId))
+      .send({ absent: true, ...LEGACY_APPEARANCE_DOC });
+    expect(put.status).toBe(200);
+    expect(put.body.data.sidebarMode).toBe('fixed');
+    expect(put.body.data.sidebarWidth).toBe(256);
+  });
+
+  it('normalizes a legacy document on migrate and a repair PUT keeps the defaults', async () => {
+    // Seed a genuinely absent row, then backdate it in the DB: the stored
+    // document predates the sidebar fields, exactly what an older writer
+    // would have left behind. Migration is create-if-absent, so the seeded
+    // legacy row wins and the incoming document is dropped unchanged.
+    clearAppearanceRow();
+    DatabaseService.getInstance()
+      .getDb()
+      .prepare(
+        "INSERT INTO user_preferences (user_id, domain, schema_version, revision, data, created_at, updated_at) VALUES (?, 'appearance', 1, 1, ?, ?, ?)",
+      )
+      .run(viewer.userId, JSON.stringify(LEGACY_APPEARANCE_DOC), Date.now(), Date.now());
+
+    const mig = await request(app).post('/api/user-preferences/appearance/migrate')
+      .set('Cookie', viewer.cookie).set(HEADER, String(viewer.userId))
+      .send(LEGACY_APPEARANCE_DOC);
+    expect(mig.status).toBe(200);
+    expect(mig.body.migrated).toBe(false);
+    // The loser of create-if-absent hydrates the winner's (backdated, legacy)
+    // row unchanged: reads serve the stored document as-is, with no
+    // server-side rewrite, so the legacy row keeps missing the new fields.
+    expect(mig.body.row.data).toEqual(LEGACY_APPEARANCE_DOC);
+
+    // The conditional repair PUT (the documented corrupt/legacy recovery
+    // path) stores the legacy document normalized with the defaults.
+    const repair = await request(app).put('/api/user-preferences/appearance')
+      .set('Cookie', viewer.cookie).set(HEADER, String(viewer.userId))
+      .send({ expectedRevision: mig.body.row.revision, ...LEGACY_APPEARANCE_DOC });
+    expect(repair.status).toBe(200);
+    expect(repair.body.data.sidebarMode).toBe('fixed');
+    expect(repair.body.data.sidebarWidth).toBe(256);
   });
 
   it('404s an unknown domain', async () => {
