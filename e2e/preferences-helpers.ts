@@ -98,7 +98,8 @@ export async function getPreferences(request: APIRequestContext, userId: number)
 }> {
   // The suite user's GET shares the global per-minute API limiter with every
   // other request from the same account; a burst of test traffic in the same
-  // window can 429, so retry briefly before failing the suite.
+  // window can 429, so retry (up to ~20s worst case) before failing the
+  // suite. Non-429 failures surface immediately.
   let res = await request.get('/api/user-preferences', { headers: prefHeaders(userId) });
   for (let attempt = 0; !res.ok() && attempt < 4; attempt += 1) {
     if (res.status() !== 429) throw new Error(`GET preferences failed with ${res.status()}`);

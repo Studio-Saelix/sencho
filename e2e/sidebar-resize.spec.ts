@@ -9,9 +9,11 @@
  *
  * Seeding uses the shared preference helpers; drag writes are asserted on the
  * network (PUT /api/user-preferences/appearance) because the 400ms debounce
- * makes DOM-only timing flaky.
+ * makes DOM-only timing flaky. The tests run serially and hand state to each
+ * other deliberately: the keyboard test starts from the 320px the drag test
+ * committed, and later tests re-seed a known document before asserting.
  */
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { loginAs, waitForShellReady, TEST_PASSWORD } from './helpers';
 import {
   APPEARANCE_DOC, adminApiContext, currentUserId, disposePrefUser, getPreferences, putDomain,
@@ -19,12 +21,12 @@ import {
 } from './preferences-helpers';
 
 const SUITE_USER = 'sidebar-resize-e2e';
-const DEBOUNCE_MS = 700;
 
-/** The sidebar pane (Resizable mode only) and its separator handle. */
+/** The sidebar pane; rendered only on desktop in Resizable mode. */
 function pane(page: Page) {
   return page.getByTestId('sidebar-resize-pane');
 }
+/** The draggable separator handle; rendered only on desktop in Resizable mode. */
 function separator(page: Page) {
   return page.getByTestId('sidebar-resize-separator');
 }
@@ -37,9 +39,20 @@ async function openAppearanceSettings(page: Page): Promise<void> {
   await expect(page.getByRole('heading', { name: 'Sidebar layout' })).toBeVisible();
 }
 
-/** Wait for the preference sync bus to flush its queued appearance write. */
-async function flushPreferenceWrite(page: Page): Promise<void> {
-  await page.waitForTimeout(DEBOUNCE_MS);
+/**
+ * Poll the server-side appearance document until it matches, so the sync
+ * bus's debounce and any request ordering cannot produce a fixed-sleep race.
+ * Retries cover 429s from the shared per-minute limiter.
+ */
+async function expectStoredAppearance(
+  request: APIRequestContext,
+  userId: number,
+  expected: Record<string, unknown>,
+): Promise<void> {
+  await expect.poll(async () => {
+    const rows = await getPreferences(request, userId);
+    return rows.preferences.appearance?.data ?? null;
+  }, { timeout: 15_000 }).toMatchObject(expected);
 }
 
 /**
@@ -68,9 +81,10 @@ test.describe('Resizable stacks sidebar', () => {
 
   test.beforeAll(async () => {
     prefUser = await seedPrefUser(SUITE_USER, TEST_PASSWORD, 'viewer');
-    // A retried or reseeded suite account may carry a stale Resizable row
-    // (the tests run serially); reset the domain so the Fixed-default test
-    // always starts from the true default.
+    admin = await adminApiContext();
+    // The tests run serially and share one account, so a retried run can
+    // leave a stale Resizable row from a previous pass; reset the domain so
+    // the Fixed-default test always starts from the suite baseline.
     await putDomain(prefUser.request, prefUser.userId, 'appearance', APPEARANCE_DOC);
   });
 
@@ -104,12 +118,19 @@ test.describe('Resizable stacks sidebar', () => {
     await openAppearanceSettings(page);
     await page.getByRole('radio', { name: 'Resizable' }).click();
     await expect(separator(page)).toBeVisible();
-    await flushPreferenceWrite(page);
 
+    // Poll the captured requests rather than trusting the flush window: the
+    // debounce only guarantees the PUT is late, never that it arrived early.
+    await expect.poll(() => puts.filter((p) => p.body.sidebarMode === 'resizable').length).toBe(1);
     const writes = puts.filter((p) => p.body.sidebarMode === 'resizable');
-    expect(writes).toHaveLength(1);
     expect(writes[0].body.sidebarMode).toBe('resizable');
     expect(writes[0].body.sidebarWidth).toBe(256);
+
+    // The serial tests hand state to each other, so prove the write actually
+    // reached the server before this context closes: a captured request is
+    // not a persisted one, and the next test hydrates from the server.
+    await expectStoredAppearance(page.request, prefUser!.userId,
+      { sidebarMode: 'resizable', sidebarWidth: 256 });
 
     await context.close();
   });
@@ -141,8 +162,7 @@ test.describe('Resizable stacks sidebar', () => {
     await page.mouse.move(startX + 64, startY, { steps: 4 });
     expect(putCount).toBe(0);
     await page.mouse.up();
-    await flushPreferenceWrite(page);
-    expect(putCount).toBe(1);
+    await expect.poll(() => putCount).toBe(1);
 
     const widthDuringDrag = 256 + 64;
     await expect
@@ -167,27 +187,30 @@ test.describe('Resizable stacks sidebar', () => {
     await separator(page).focus();
     const before = Number(await pane(page).evaluate((el: HTMLElement) => parseInt(el.style.width, 10)));
     await page.keyboard.press('ArrowRight');
-    await flushPreferenceWrite(page);
     await expect(pane(page)).toHaveAttribute('style', /width: 328px/);
     expect(before).toBe(320);
     await separator(page).focus();
     await page.keyboard.press('Home');
-    await flushPreferenceWrite(page);
     await expect(pane(page)).toHaveAttribute('style', /width: 224px/);
 
-    // Leave a comfortable width for the later retention tests.
+    // Leave a comfortable width for the clamp and retention tests.
     await separator(page).focus();
     await page.keyboard.press('End');
-    await flushPreferenceWrite(page);
     await expect(separator(page)).toHaveAttribute('aria-valuemax', '440');
     await expect(pane(page)).toHaveAttribute('style', /width: 440px/);
+
+    // Same boundary proof as above: the clamp test below starts a fresh
+    // context and hydrates from the server, so the keyboard commits must
+    // have landed there first.
+    await expectStoredAppearance(page.request, prefUser!.userId, { sidebarWidth: 440 });
 
     await context.close();
   });
 
   test('dragging past the viewport bound clamps live without persisting the clamp', async ({ browser }) => {
-    const context = await browser.newContext({ viewport: { width: 900, height: 800 } });
+    const context = await browser.newContext();
     const page = await context.newPage();
+    await page.setViewportSize({ width: 900, height: 800 });
     await loginAs(page, SUITE_USER, TEST_PASSWORD, { viewerSafe: true });
     await waitForShellReady(page);
 
@@ -196,8 +219,7 @@ test.describe('Resizable stacks sidebar', () => {
     await expect(pane(page)).toHaveAttribute('style', /width: 328px/);
     await expect(separator(page)).toHaveAttribute('aria-valuemax', '328');
 
-    const rows = await getPreferences(page.request, prefUser!.userId);
-    expect(rows.preferences.appearance?.data).toMatchObject({ sidebarWidth: 440 });
+    await expectStoredAppearance(page.request, prefUser!.userId, { sidebarWidth: 440 });
 
     // Dragging into the bound stops there and still persists the clamped value
     // the user actually landed on.
@@ -209,11 +231,9 @@ test.describe('Resizable stacks sidebar', () => {
     await page.mouse.down();
     await page.mouse.move(startX + 120, startY, { steps: 4 });
     await page.mouse.up();
-    await flushPreferenceWrite(page);
 
     await expect(pane(page)).toHaveAttribute('style', /width: 328px/);
-    const afterRows = await getPreferences(page.request, prefUser!.userId);
-    expect(afterRows.preferences.appearance?.data).toMatchObject({ sidebarWidth: 328 });
+    await expectStoredAppearance(page.request, prefUser!.userId, { sidebarWidth: 328 });
 
     await context.close();
   });
@@ -230,24 +250,30 @@ test.describe('Resizable stacks sidebar', () => {
       { ...APPEARANCE_DOC, sidebarMode: 'resizable', sidebarWidth: 440 });
     await page.reload();
     await waitForShellReady(page);
+    // Confirm the seeded value actually hydrated before touching the mode
+    // radio: clicking Fixed while the shell still holds a stale local width
+    // would persist that stale value instead of the seeded one.
+    await expect(pane(page)).toHaveAttribute('style', /width: 440px/);
 
     await openAppearanceSettings(page);
     await page.getByRole('radio', { name: 'Fixed' }).click();
     await expect(separator(page)).toHaveCount(0);
     await expect(pane(page)).toHaveCount(0);
-    await flushPreferenceWrite(page);
 
     // Fixed keeps the preferred width in the stored document.
-    const rows = await getPreferences(page.request, prefUser!.userId);
-    expect(rows.preferences.appearance?.data).toMatchObject({ sidebarMode: 'fixed', sidebarWidth: 440 });
+    await expectStoredAppearance(page.request, prefUser!.userId,
+      { sidebarMode: 'fixed', sidebarWidth: 440 });
 
     // Back to Resizable: the retained width applies again (the default
     // viewport allows it, so no clamp rewrites it).
     await page.getByRole('radio', { name: 'Resizable' }).click();
     await expect(pane(page)).toBeVisible();
-    await flushPreferenceWrite(page);
-    const restored = parseInt(await pane(page).evaluate((el: HTMLElement) => el.style.width), 10);
-    expect(restored).toBe(440);
+    await expect(pane(page)).toHaveAttribute('style', /width: 440px/);
+
+    // The next test hydrates from the server, so prove the mode switch (and
+    // the width it kept) reached storage before this context closes.
+    await expectStoredAppearance(page.request, prefUser!.userId,
+      { sidebarMode: 'resizable', sidebarWidth: 440 });
 
     await context.close();
   });
@@ -258,25 +284,25 @@ test.describe('Resizable stacks sidebar', () => {
     await loginAs(page, SUITE_USER, TEST_PASSWORD, { viewerSafe: true });
     await waitForShellReady(page);
 
-    // Give the suite account a non-default theme and density so the reset's
-    // "other appearance preferences are untouched" promise is observable.
+    // Seed appearance values that differ from the defaults on every axis the
+    // reset must not touch (theme, density) plus the sidebar fields it must.
+    // A default-valued seed would make "untouched" vacuous.
     const userId = await currentUserId(page.request);
-    await putDomain(page.request, userId, 'appearance', { ...APPEARANCE_DOC, theme: 'dim', sidebarMode: 'resizable', sidebarWidth: 400 });
+    await putDomain(page.request, userId, 'appearance',
+      { ...APPEARANCE_DOC, theme: 'oled', density: 'compact', sidebarMode: 'resizable', sidebarWidth: 400 });
     await page.reload();
     await waitForShellReady(page);
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dim');
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'oled');
 
     await openAppearanceSettings(page);
     await page.getByRole('button', { name: 'Reset sidebar layout' }).click();
-    await flushPreferenceWrite(page);
 
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dim');
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'oled');
     await expect(separator(page)).toHaveCount(0);
     await expect(pane(page)).toHaveCount(0);
 
-    const rows = await getPreferences(page.request, prefUser!.userId);
-    expect(rows.preferences.appearance?.data).toMatchObject({
-      sidebarMode: 'fixed', sidebarWidth: 256, theme: 'dim',
+    await expectStoredAppearance(page.request, prefUser!.userId, {
+      sidebarMode: 'fixed', sidebarWidth: 256, theme: 'oled', density: 'compact',
     });
 
     await context.close();
@@ -288,10 +314,20 @@ test.describe('Resizable stacks sidebar', () => {
     await loginAs(page, SUITE_USER, TEST_PASSWORD, { viewerSafe: true });
     await waitForShellReady(page);
 
-    // A fresh account has no row at all: its shell is Fixed/256 even though
-    // the suite account has a persisted Resizable layout on this install.
+    // Contrast the two storage states: a fresh account has no appearance row
+    // (defaults apply), and the suite account's row is re-seeded below with a
+    // non-default Resizable layout so the contrast is observable. Neither
+    // account's values reach the other's shell.
     const second = await seedPrefUser('sidebar-resize-e2e-2', TEST_PASSWORD, 'viewer');
     try {
+      // Give the suite account a non-default layout so the fresh account's
+      // defaults are provably its own, not leakage that happens to match.
+      await putDomain(page.request, prefUser!.userId, 'appearance',
+        { ...APPEARANCE_DOC, sidebarMode: 'resizable', sidebarWidth: 440 });
+      await page.reload();
+      await waitForShellReady(page);
+      await expect(pane(page)).toHaveAttribute('style', /width: 440px/);
+
       const contextB = await browser.newContext();
       const pageB = await contextB.newPage();
       await loginAs(pageB, 'sidebar-resize-e2e-2', TEST_PASSWORD, { viewerSafe: true });
@@ -300,9 +336,9 @@ test.describe('Resizable stacks sidebar', () => {
       await expect(pane(pageB)).toHaveCount(0);
       await contextB.close();
 
-      // And the suite account's row still carries its own values.
-      const rows = await getPreferences(page.request, prefUser!.userId);
-      expect(rows.preferences.appearance?.data).toMatchObject({ sidebarMode: 'fixed', sidebarWidth: 256 });
+      // The suite account's row still carries its own values afterwards.
+      await expectStoredAppearance(page.request, prefUser!.userId,
+        { sidebarMode: 'resizable', sidebarWidth: 440 });
     } finally {
       const adminCtx = await adminApiContext();
       await disposePrefUser(second, adminCtx);
@@ -311,8 +347,12 @@ test.describe('Resizable stacks sidebar', () => {
   });
 
   test('mobile viewport shows no handle and unchanged layout', async ({ browser }) => {
-    const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const context = await browser.newContext();
     const page = await context.newPage();
+    // setViewportSize (not a context-level viewport) matches the mobile-check
+    // suite's approach; on this host a context-level small viewport combined
+    // with a long serial run has been observed to crash the renderer.
+    await page.setViewportSize({ width: 390, height: 844 });
     await mobileLogin(page);
     await expect(separator(page)).toHaveCount(0);
     await expect(pane(page)).toHaveCount(0);
