@@ -5,7 +5,7 @@ import { GitProjectManifestService } from '../services/GitProjectManifestService
 import { FileSystemService } from '../services/FileSystemService';
 import { DatabaseService } from '../services/DatabaseService';
 import { CryptoService } from '../services/CryptoService';
-import { requirePermission } from '../middleware/permissions';
+import { checkPermission, requirePermission } from '../middleware/permissions';
 import { classifySourceRow, satisfiesGitOpsRead } from '../services/gitops/readAuth';
 import { NOT_APPLICABLE_REVISION, projectStackRevision, stackResourceSet } from '../helpers/gitopsResponse';
 import { respondWithHistory } from '../helpers/gitopsHistoryPage';
@@ -28,6 +28,7 @@ const MAX_BRANCH_LENGTH = REF_MAX_LEN;
 const MAX_ENV_PATH_LENGTH = 1024;
 const MAX_TOKEN_LENGTH = 8192;
 const MAX_SUSPEND_REASON_LENGTH = 512;
+const MAX_WEBHOOK_DELIVERY_ID_LENGTH = 512;
 
 /**
  * Shared handler for the "browse repository" compose-file picker: validate the
@@ -585,14 +586,28 @@ stackGitSourceRouter.post('/:stackName/git-source/webhook-pull', async (req: Req
     return;
   }
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const deliveryId = req.body?.deliveryId;
+  if (
+    deliveryId !== undefined
+    && (typeof deliveryId !== 'string' || !deliveryId.trim() || deliveryId.length > MAX_WEBHOOK_DELIVERY_ID_LENGTH)
+  ) {
+    res.status(400).json({ error: 'deliveryId must be a non-empty string of at most 512 characters' });
+    return;
+  }
   try {
-    const source = GitSourceService.getInstance().get(stackName);
+    const service = GitSourceService.getInstance();
+    const source = service.get(stackName);
     if (!source) {
       res.status(404).json({ error: 'No Git source configured for this stack', status: 'error' });
       return;
     }
-    if (source.auto_apply_on_webhook && source.auto_deploy_on_apply && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
-    const result = await GitSourceService.getInstance().handleWebhookPull(stackName);
+    const normalizedDeliveryId = deliveryId?.trim();
+    const deployAuthorized = checkPermission(req, 'stack:deploy', 'stack', stackName);
+    if (service.webhookDeliveryRequiresDeploy(stackName, normalizedDeliveryId) && !deployAuthorized) {
+      requirePermission(req, res, 'stack:deploy', 'stack', stackName);
+      return;
+    }
+    const result = await service.handleWebhookPull(stackName, deployAuthorized, normalizedDeliveryId);
     // Map the outcome to a real HTTP status so a Git provider sees a 4xx on
     // failure instead of a 200 with an error body (which it would read as
     // "delivered fine, stop retrying").

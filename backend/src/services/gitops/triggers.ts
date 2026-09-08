@@ -2,11 +2,9 @@
  * Normalized reconciliation triggers for the GitOps source controller.
  *
  * A trigger only authorizes evaluation; it is not proof anything changed.
- * `manual`, `api`, `webhook`, `poll`, `retry`, `config_change`, `startup`,
- * and `resume` have real producers. `provider_event`, `schedule`, and
- * `binding_change` are typed here ahead of the producers that will emit
- * them, so a later change extends this union instead of inventing a
- * parallel one.
+ * `manual`, `webhook`, `poll`, and `retry` have current execution producers.
+ * The remaining values are typed ahead of later deliveries so those callers
+ * extend this union instead of inventing a parallel one.
  */
 export type ReconcileTrigger =
   | 'manual'

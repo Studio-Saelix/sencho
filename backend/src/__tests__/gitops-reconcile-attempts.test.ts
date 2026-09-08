@@ -166,6 +166,31 @@ describe('reconcile attempt reservation and settlement', () => {
     expect(after.attempt_seq).toBe(before.attempt_seq + 2);
   });
 
+  it('rolls back the allocated sequence when reservation insertion fails', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-alloc-rollback', 'alloc-rollback-web'), nodeId: 1, envelope: env('op-act-alloc-rollback') });
+    const db = DatabaseService.getInstance().getDb();
+    const before = store.getApplication('app-alloc-rollback')!;
+    db.exec(`
+      CREATE TRIGGER fail_reconcile_reservation
+      BEFORE INSERT ON gitops_history
+      WHEN NEW.stage = 'source_reconcile_started'
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated reservation insert failure');
+      END
+    `);
+
+    try {
+      expect(() => tx.allocateReconcileAttempt('app-alloc-rollback', 'tester', 'manual', Date.now()))
+        .toThrow('simulated reservation insert failure');
+      expect(store.getApplication('app-alloc-rollback')!.attempt_seq).toBe(before.attempt_seq);
+      expect(store.listUnsettledReconcileAttempts().some((row) => row.application_id === 'app-alloc-rollback')).toBe(false);
+    } finally {
+      db.exec('DROP TRIGGER fail_reconcile_reservation');
+    }
+  });
+
   it('records a follower link on a reservation made on behalf of a coalesced request', () => {
     const tx = GitOpsTransitions.getInstance();
     tx.activateDirect({ application: app('app-follower', 'follower-web'), nodeId: 1, envelope: env('op-act-follower') });
@@ -178,6 +203,23 @@ describe('reconcile attempt reservation and settlement', () => {
       .prepare("SELECT after_json FROM gitops_history WHERE application_id = ? AND operation_id = ? AND stage = 'source_reconcile_started'")
       .get('app-follower', follower.operationId) as { after_json: string };
     expect(JSON.parse(started.after_json)).toEqual({ followerOf: leader.operationId });
+  });
+
+  it('records the original webhook delivery intent on its stable reservation', () => {
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-delivery-intent', 'delivery-intent-web'), nodeId: 1, envelope: env('op-act-delivery-intent') });
+
+    tx.reserveReconcileAttempt(
+      'app-delivery-intent',
+      env('webhook:fetch:delivery-intent'),
+      undefined,
+      { autoApply: true, deploy: false },
+    );
+
+    const started = GitOpsStore.getInstance().getStartedAttempt('app-delivery-intent', 'webhook:fetch:delivery-intent')!;
+    expect(JSON.parse(started.after_json)).toEqual({
+      deliveryIntent: { autoApply: true, deploy: false },
+    });
   });
 
   it('reports the most recently settled attempt even when both share the same millisecond timestamp', () => {

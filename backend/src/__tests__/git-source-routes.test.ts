@@ -26,11 +26,13 @@ import { ComposeService } from '../services/ComposeService';
 import { GitSourceService, GitSourceError } from '../services/GitSourceService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
+import { deliveryKey } from '../services/gitops/triggers';
 import { insertHistory } from '../services/gitops/history';
 import type { GitOpsApplicationRow } from '../services/gitops/types';
 import { PROXY_DEPLOY_ACTOR_HEADER, PROXY_DEPLOY_SOURCE_HEADER } from '../services/license-headers';
 import { withLoopbackTargetProtection } from './helpers/allowLoopbackTargets';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
+import { ROLE_PERMISSIONS } from '../middleware/permissions';
 
 // ── Hoisted mocks (must come before importing the app) ─────────────────
 
@@ -79,8 +81,13 @@ function viewerToken(): string {
     return jwt.sign({ username: 'viewer', role: 'viewer' }, TEST_JWT_SECRET, { expiresIn: '1m' });
 }
 
+function nodeAdminToken(): string {
+    return jwt.sign({ username: 'node-admin', role: 'node-admin' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+}
+
 beforeAll(async () => {
     tmpDir = await setupTestDb();
+    DatabaseService.getInstance().addUser({ username: 'node-admin', password_hash: 'test', role: 'node-admin' });
     ({ app } = await import('../index'));
 
     // Seed a real stack directory so the PUT handler's existence guard is satisfied
@@ -649,6 +656,101 @@ describe('POST /api/stacks/:stackName/git-source/webhook-pull status codes', () 
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(res.status).toBe(200);
         pullSpy.mockRestore();
+    });
+
+    it('passes a remote webhook delivery id into the durable pull path', async () => {
+        seedGitSource('webhook-delivery-id');
+        const pullSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+            .mockResolvedValue({ status: 'success', message: 'Pending update ready at abc1234.' });
+        const res = await request(app)
+            .post('/api/stacks/webhook-delivery-id/git-source/webhook-pull')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ deliveryId: 'webhook:42:provider-delivery-1' });
+
+        expect(res.status).toBe(200);
+        expect(pullSpy).toHaveBeenCalledWith('webhook-delivery-id', true, 'webhook:42:provider-delivery-1');
+        pullSpy.mockRestore();
+    });
+
+    it('requires stack:deploy when a redelivery carries a persisted deploy intent', async () => {
+        const stackName = 'webhook-delivery-deploy-auth';
+        const applicationId = 'webhook-delivery-deploy-auth-app';
+        const deliveryId = 'webhook:control:42:provider-delivery-deploy';
+        seedGitSource(stackName);
+        GitOpsStore.getInstance().insertApplication(directApplicationFixture(applicationId, stackName));
+        GitOpsTransitions.getInstance().reserveReconcileAttempt(
+            applicationId,
+            {
+                operationId: deliveryKey('webhook', 'fetch', deliveryId),
+                actor: 'system:webhook',
+                trigger: 'webhook',
+                at: Date.now(),
+            },
+            undefined,
+            { autoApply: true, deploy: true },
+        );
+        const pullSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull');
+        const originalPermissions = ROLE_PERMISSIONS['node-admin'];
+        ROLE_PERMISSIONS['node-admin'] = originalPermissions.filter((permission) => permission !== 'stack:deploy');
+
+        try {
+            const res = await request(app)
+                .post(`/api/stacks/${stackName}/git-source/webhook-pull`)
+                .set('Authorization', `Bearer ${nodeAdminToken()}`)
+                .send({ deliveryId });
+
+            expect(res.status).toBe(403);
+            expect(res.body.code).toBe('PERMISSION_DENIED');
+            expect(pullSpy).not.toHaveBeenCalled();
+        } finally {
+            ROLE_PERMISSIONS['node-admin'] = originalPermissions;
+            pullSpy.mockRestore();
+        }
+    });
+
+    it('requires stack:deploy when a first delivery is configured to auto-apply and deploy', async () => {
+        const stackName = 'webhook-first-delivery-deploy-auth';
+        seedGitSource(stackName);
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE stack_git_sources SET auto_apply_on_webhook = 1, auto_deploy_on_apply = 1 WHERE stack_name = ?')
+            .run(stackName);
+        const pullSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull');
+        const originalPermissions = ROLE_PERMISSIONS['node-admin'];
+        ROLE_PERMISSIONS['node-admin'] = originalPermissions.filter((permission) => permission !== 'stack:deploy');
+
+        try {
+            const res = await request(app)
+                .post(`/api/stacks/${stackName}/git-source/webhook-pull`)
+                .set('Authorization', `Bearer ${nodeAdminToken()}`);
+
+            expect(res.status).toBe(403);
+            expect(res.body.code).toBe('PERMISSION_DENIED');
+            expect(pullSpy).not.toHaveBeenCalled();
+        } finally {
+            ROLE_PERMISSIONS['node-admin'] = originalPermissions;
+            pullSpy.mockRestore();
+        }
+    });
+
+    it.each([
+        ['an object', { nested: true }],
+        ['a blank string', '   '],
+        ['a string over 512 characters', 'x'.repeat(513)],
+    ])('rejects %s as a remote webhook delivery id', async (_caseName, deliveryId) => {
+        seedGitSource('webhook-delivery-id-invalid');
+        const pullSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull');
+
+        try {
+            const res = await request(app)
+                .post('/api/stacks/webhook-delivery-id-invalid/git-source/webhook-pull')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ deliveryId });
+
+            expect(res.status).toBe(400);
+            expect(pullSpy).not.toHaveBeenCalled();
+        } finally {
+            pullSpy.mockRestore();
+        }
     });
 });
 

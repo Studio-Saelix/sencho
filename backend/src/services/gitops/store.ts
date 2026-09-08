@@ -169,6 +169,25 @@ export class GitOpsStore {
     return this.db().prepare('SELECT * FROM gitops_generations WHERE id = ?').get(id) as GitOpsGenerationRow | undefined;
   }
 
+  /** Generations whose creating reconcile attempt has not durably settled. */
+  listGenerationsClaimedByUnsettledAttempts(applicationId: string): GitOpsGenerationRow[] {
+    return this.db().prepare(
+      `SELECT DISTINCT generation.*
+       FROM gitops_generations generation
+       JOIN gitops_history started
+         ON started.application_id = generation.application_id
+        AND started.operation_id = generation.operation_id
+        AND started.stage = 'source_reconcile_started'
+       WHERE generation.application_id = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM gitops_history settled
+           WHERE settled.application_id = started.application_id
+             AND settled.operation_id = started.operation_id
+             AND settled.stage = 'source_reconcile_settled'
+         )`,
+    ).all(applicationId) as GitOpsGenerationRow[];
+  }
+
   getArtifactSet(id: string): GitOpsArtifactSetRow | undefined {
     return this.db().prepare('SELECT * FROM gitops_artifact_sets WHERE id = ?').get(id) as GitOpsArtifactSetRow | undefined;
   }

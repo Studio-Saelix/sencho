@@ -16,8 +16,9 @@ function isWebhookAction(value: unknown): value is WebhookAction {
 // endpoint is a generic HMAC-signed trigger, not a provider-specific
 // receiver, so a well-known provider header is the only delivery identity
 // available, and only when the caller happens to send one. The value is a
-// plain traceability breadcrumb on git-pull's failure log lines (see
-// GitSourceService.handleWebhookPull); nothing consumes it structurally.
+// stable delivery identity available. WebhookService namespaces the value by
+// control instance and configured webhook before it reaches GitSourceService,
+// so two producers cannot collide on the same provider-assigned id.
 //
 // Each header is still the provider's actual per-delivery identity rather
 // than a webhook- or connection-level id that stays constant across every
@@ -27,8 +28,7 @@ function isWebhookAction(value: unknown): value is WebhookAction {
 // X-Gitlab-Event-UUID, which tracks recursive-trigger chains and can
 // repeat across genuinely distinct events; Bitbucket's is X-Request-UUID,
 // not X-Hook-UUID, which identifies the webhook configuration itself.
-// Picking the wrong one yields a breadcrumb that looks meaningful in logs
-// but is the same value on every push.
+// Picking the wrong one would deduplicate genuinely distinct pushes.
 const DELIVERY_ID_HEADERS = ['x-github-delivery', 'webhook-id', 'idempotency-key', 'x-request-uuid', 'x-webhook-delivery-id'] as const;
 
 function deliveryIdFromHeaders(headers: Request['headers']): string | undefined {

@@ -644,7 +644,7 @@ describe('Direct Git producers drive the revision state', () => {
     expect(recovered.active_operation_stage).toBeNull();
   });
 
-  it('leaves a stack with no GitOps application untouched', async () => {
+  it('refuses to fetch when a configured stack has no GitOps application', async () => {
     const svc = GitSourceService.getInstance();
     const store = GitOpsStore.getInstance();
     const stackName = 'producers-legacy';
@@ -681,9 +681,12 @@ describe('Direct Git producers drive the revision state', () => {
     expect(store.getLiveDirectApplication(stackName)).toBeUndefined();
 
     stageRepo(COMPOSE_V2, 'fffffff6');
-    await svc.pull(stackName, { actor: 'tester' });
+    await expect(svc.pull(stackName, { actor: 'tester' })).rejects.toMatchObject({
+      code: 'GIT_ERROR',
+      message: expect.stringContaining('GitOps tracking is unavailable'),
+    });
 
-    // The pull succeeded operationally and wrote no GitOps rows.
+    // No untracked fetch or GitOps history was written.
     expect(store.getLiveDirectApplication(stackName)).toBeUndefined();
     const historyRows = (await import('../services/DatabaseService')).DatabaseService
       .getInstance().getDb()

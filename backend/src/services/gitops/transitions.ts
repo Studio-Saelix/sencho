@@ -28,6 +28,10 @@ export type EventEnvelope = {
   at: number;
 };
 
+export type ReconcileDeliveryIntent =
+  | { autoApply: false; deploy: false }
+  | { autoApply: true; deploy: boolean };
+
 export type AppliedArgs = {
   applicationId: string;
   generationId: string;
@@ -900,14 +904,19 @@ export class GitOpsTransitions {
    * means this exact (application, operation) already reserved -- the
    * caller reconstructs from durable state rather than repeating work.
    *
-   * `followerOf` records that this reservation was made on behalf of a
-   * request that joined another, still-running attempt's execution rather
-   * than running its own: it is audit-trail linkage only, never read to
-   * change how this reservation itself behaves.
+   * `followerOf` records that this reservation joined another running
+   * attempt. Recovery uses the link to settle the follower from its leader's
+   * result. `deliveryIntent` preserves the original webhook apply and deploy
+   * decision so redelivery cannot change behavior with later settings.
    */
-  reserveReconcileAttempt(applicationId: string, envelope: EventEnvelope, followerOf?: string): { reserved: boolean } {
+  reserveReconcileAttempt(
+    applicationId: string,
+    envelope: EventEnvelope,
+    followerOf?: string,
+    deliveryIntent?: ReconcileDeliveryIntent,
+  ): { reserved: boolean } {
     return this.raw().transaction(() => ({
-      reserved: this.insertReconcileReservation(this.requireApp(applicationId), envelope, followerOf),
+      reserved: this.insertReconcileReservation(this.requireApp(applicationId), envelope, followerOf, deliveryIntent),
     }))();
   }
 
@@ -948,12 +957,16 @@ export class GitOpsTransitions {
     app: GitOpsApplicationRow,
     envelope: EventEnvelope,
     followerOf: string | undefined,
+    deliveryIntent?: ReconcileDeliveryIntent,
   ): boolean {
     return this.history(app, envelope, {
       stage: 'source_reconcile_started',
       outcome: 'committed',
       before: {},
-      after: followerOf ? { followerOf } : {},
+      after: {
+        ...(followerOf ? { followerOf } : {}),
+        ...(deliveryIntent ? { deliveryIntent } : {}),
+      },
     }) !== null;
   }
 

@@ -20,6 +20,7 @@ type ExecutionResult = { success: boolean; error?: string; duration_ms: number }
 type ExecutionStatus = 'success' | 'failure';
 
 const REMOTE_WEBHOOK_REQUEST_TIMEOUT_MS = 30_000;
+const MAX_PROVIDER_DELIVERY_ID_LENGTH = 256;
 
 // Maps a webhook lifecycle action to the per-stack lock action. 'pull' updates,
 // so it locks as 'update'; 'git-pull' is excluded (it locks inside GitSourceService).
@@ -111,15 +112,34 @@ export class WebhookService {
             return { success: false, error, duration_ms: 0 };
         }
 
+        const scopedDeliveryId = action === 'git-pull'
+            ? WebhookService.scopedDeliveryId(
+                DatabaseService.getInstance().getGlobalSettings().delivery_source_id,
+                webhookId,
+                deliveryId,
+            )
+            : undefined;
+
         if (node.type === 'remote') {
-            // Not forwarded to the remote node today: carrying a delivery id
-            // would mean extending the remote-proxy contract itself, a wider
-            // change than a log breadcrumb warrants. A remote git-pull
-            // behaves exactly as before, just without the breadcrumb.
-            return this.executeRemote(webhookId, nodeId, webhook.stack_name, action, triggerSource, atomic);
+            return this.executeRemote(webhookId, nodeId, webhook.stack_name, action, triggerSource, atomic, scopedDeliveryId);
         }
 
-        return this.executeLocal(webhookId, nodeId, webhook.stack_name, action, triggerSource, atomic, deliveryId);
+        return this.executeLocal(webhookId, nodeId, webhook.stack_name, action, triggerSource, atomic, scopedDeliveryId);
+    }
+
+    /** Stable external identity, isolated to one configured webhook producer. */
+    private static scopedDeliveryId(
+        deliverySourceId: string | undefined,
+        webhookId: number,
+        deliveryId: string | undefined,
+    ): string | undefined {
+        const normalized = deliveryId?.trim();
+        if (!normalized) return undefined;
+        if (!deliverySourceId) throw new Error('Webhook delivery source identity is not configured');
+        const bounded = normalized.length <= MAX_PROVIDER_DELIVERY_ID_LENGTH
+            ? normalized
+            : `sha256:${crypto.createHash('sha256').update(normalized).digest('hex')}`;
+        return `webhook:${deliverySourceId}:${webhookId}:${bounded}`;
     }
 
     public maskSecret(secret: string): string {
@@ -233,7 +253,7 @@ export class WebhookService {
         startTime: number,
         deliveryId?: string,
     ): Promise<ExecutionResult> {
-        const result = await GitSourceService.getInstance().handleWebhookPull(stackName, deliveryId);
+        const result = await GitSourceService.getInstance().handleWebhookPull(stackName, true, deliveryId);
         const durationMs = Date.now() - startTime;
         if (result.status === 'error') {
             this.recordExecution(webhookId, action, 'failure', triggerSource, durationMs, result.message);
@@ -262,6 +282,7 @@ export class WebhookService {
         action: string,
         triggerSource: string | null,
         atomic?: boolean,
+        deliveryId?: string,
     ): Promise<ExecutionResult> {
         const startTime = Date.now();
         try {
@@ -270,7 +291,9 @@ export class WebhookService {
                 : action === 'pull'
                     ? 'update'
                     : action;
-            const body = atomic === undefined ? undefined : { atomic };
+            const body = action === 'git-pull'
+                ? { ...(atomic === undefined ? {} : { atomic }), ...(deliveryId ? { deliveryId } : {}) }
+                : atomic === undefined ? undefined : { atomic };
             const response = await this.remoteStackRequest(nodeId, stackName, endpoint, 'POST', body);
             const durationMs = Date.now() - startTime;
             const payload = await response.json().catch(() => ({})) as { error?: string; message?: string; status?: string };
