@@ -2412,6 +2412,80 @@ describe('git-source policy compatibility', () => {
         }
     });
 
+    it('PUT on an existing source with explicit source_policy persists the resolved policy', async () => {
+        const stackName = 'policy-put-existing-review';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'automatic');
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: false, source_policy: 'review' }));
+            expect(res.status).toBe(200);
+            // The stored row carries the new policy, not just the response.
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('review');
+            // The projection flips with it: review never auto-applies.
+            expect(res.body.auto_apply_on_webhook).toBe(false);
+            const after = await request(app)
+                .get(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(after.body.auto_apply_on_webhook).toBe(false);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('PUT on an existing source with auto_apply_on_webhook true upgrades review to automatic', async () => {
+        const stackName = 'policy-put-existing-automatic';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'review');
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: true }));
+            expect(res.status).toBe(200);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('automatic');
+            expect(res.body.auto_apply_on_webhook).toBe(true);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it.each([
+        ['false', false],
+        ['omitted', undefined],
+    ])('PUT on an existing automatic source with %s auto_apply_on_webhook stays automatic', async (_name, flag) => {
+        const stackName = `policy-put-existing-keeps-auto-${_name}`;
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'automatic');
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: flag }));
+            expect(res.status).toBe(200);
+            // Boolean 0 or absent must not silently convert an existing
+            // automatic policy; the operator has to ask explicitly.
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('automatic');
+            expect(res.body.auto_apply_on_webhook).toBe(true);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
     it('explicit source_policy wins over the boolean', async () => {
         const stackName = 'policy-explicit-wins';
         seedStackDir(stackName);

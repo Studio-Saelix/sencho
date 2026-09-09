@@ -20,6 +20,7 @@ import type {
   GitOpsIntentRevisionRow,
   GitOpsRolloutCandidateRow,
   GitOpsTargetCurrentRow,
+  SourcePolicy,
 } from './types';
 
 export type EventEnvelope = {
@@ -891,6 +892,23 @@ export class GitOpsTransitions {
         throw new GitOpsTransitionError('cannot schedule a poll while an operation is in flight');
       }
       app.next_poll_at = nextPollAt;
+    });
+  }
+
+  /**
+   * Persist a resolved source policy onto a live application. The create path
+   * stamps the policy through activateDirect; this is the existing-app path,
+   * so an operator who changes the policy on an already-linked source gets a
+   * durable row change (and an audit line) instead of a silently discarded
+   * PUT field.
+   */
+  sourcePolicyChanged(applicationId: string, sourcePolicy: SourcePolicy, envelope: EventEnvelope): TransitionResult {
+    return this.mutateApp(applicationId, envelope, 'source_policy_changed', 'committed', (app) => {
+      if (app.suspended_at) throw new GitOpsTransitionError('source is suspended');
+      if (app.active_operation_stage) {
+        throw new GitOpsTransitionError('cannot change the source policy while an operation is in flight');
+      }
+      app.source_policy = sourcePolicy;
     });
   }
 
