@@ -2,7 +2,7 @@ import Docker from 'dockerode';
 import axios from 'axios';
 import { EventEmitter } from 'events';
 import { DatabaseService, Node } from './DatabaseService';
-import { fetchRemoteMeta, OFFLINE_META, RemoteMeta } from './CapabilityRegistry';
+import { fetchRemoteMeta, OFFLINE_META, probeRemoteMeta as probeRemoteMetaRaw, type RemoteMeta, type RemoteMetaProbe } from './CapabilityRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
 import { assertSafeOutboundUrl, safeAxiosTransport } from '../utils/outboundTarget';
 
@@ -125,14 +125,25 @@ export class NodeRegistry extends EventEmitter {
     }
 
     /**
+     * Probe /api/meta from a remote node and return the RAW typed outcome,
+     * including whether a proxy target even exists (`no_target`). Callers that
+     * need only a flattened RemoteMeta or a fail-closed boolean should prefer
+     * fetchMetaForNode / remoteAdvertisesCapability.
+     */
+    public async probeRemoteMeta(nodeId: number, abortSignal?: AbortSignal): Promise<RemoteMetaProbe> {
+        const target = this.getProxyTarget(nodeId);
+        if (!target) return { kind: 'no_target' };
+        return probeRemoteMetaRaw(target.apiUrl, target.apiToken, target.trustedLoopback, abortSignal);
+    }
+
+    /**
      * Fetch /api/meta from a remote node, dispatching through the proxy
      * target. Returns OFFLINE_META when no target is reachable (proxy-mode
      * missing api_url/api_token, or pilot-agent tunnel disconnected).
      */
     public async fetchMetaForNode(nodeId: number): Promise<RemoteMeta> {
-        const target = this.getProxyTarget(nodeId);
-        if (!target) return { ...OFFLINE_META };
-        return fetchRemoteMeta(target.apiUrl, target.apiToken, target.trustedLoopback);
+        const probe = await this.probeRemoteMeta(nodeId);
+        return probe.kind === 'ok' ? probe.meta : { ...OFFLINE_META };
     }
 
     /**

@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { ensureTrustedRoot, validateTrustedRoot } from '../helpers/privateRootValidator';
+import type { RegistryDeliveryCapturedBasis } from '../helpers/registryDeliverySelection';
 
 export const PREPARED_SOURCE_MARKER_FILE = '.sencho-prepared-source';
 export const PREPARED_SOURCE_PARENT_PREFIX = 'sencho-registry-prepared-';
@@ -18,6 +19,8 @@ export interface PreparedSourceEntry {
   state: PreparedSourceState;
   createdAt: number;
   expiresAt: number;
+  /** Recovery-restore selection basis captured at preparation time. */
+  capturedBasis?: RegistryDeliveryCapturedBasis;
 }
 
 function deliverySourceHash(deliverySourceId: string): string {

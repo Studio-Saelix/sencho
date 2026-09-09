@@ -16,7 +16,7 @@ describe('registryDeliveryComposeEnv', () => {
     delete process.env[envKey];
   });
 
-  it('resolves registry host from project .env variables', () => {
+  it('resolves registry host from project .env variables', async () => {
     const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-compose-env-${Date.now()}`);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
@@ -26,11 +26,11 @@ describe('registryDeliveryComposeEnv', () => {
     fs.writeFileSync(path.join(dir, '.env'), 'REGISTRY=ghcr.io\n');
 
     const env = resolveComposeEnvForDiscovery(dir);
-    const result = discoverRegistryReferences(dir, env);
+    const result = await discoverRegistryReferences(dir, env);
     expect(result.referencedHosts).toEqual(['ghcr.io']);
   });
 
-  it('lets process environment override .env for compose variables', () => {
+  it('lets process environment override .env for compose variables', async () => {
     const dir = path.join(process.env.TMPDIR || '/tmp', `sencho-compose-env-override-${Date.now()}`);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
@@ -41,7 +41,7 @@ describe('registryDeliveryComposeEnv', () => {
 
     process.env[envKey] = 'quay.io';
     const env = resolveComposeEnvForDiscovery(dir);
-    const result = discoverRegistryReferences(dir, env);
+    const result = await discoverRegistryReferences(dir, env);
     expect(result.referencedHosts).toEqual(['quay.io']);
   });
 

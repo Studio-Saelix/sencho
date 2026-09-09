@@ -1,7 +1,8 @@
 /**
  * Production proxy orchestration for registry credential delivery: abort must
  * stop forwarding, compressed bodies pass through when delivery is unavailable,
- * and return 415 only when delivery would run.
+ * return 415 only when delivery would run, and a delivery refusal surfaces its
+ * status, code, and message to the client without forwarding.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import http from 'http';
@@ -9,7 +10,20 @@ import zlib from 'zlib';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
-import { REMOTE_REGISTRY_CREDENTIALS_CAPABILITY } from '../services/CapabilityRegistry';
+import { REMOTE_REGISTRY_EXACT_REF_PROOF_V1_CAPABILITY } from '../services/CapabilityRegistry';
+
+// Pass-through spy: lets a test queue a one-time refusal without
+// changing any other behavior.
+vi.mock('../helpers/registryDeliveryOutbound', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../helpers/registryDeliveryOutbound')>();
+  return {
+    ...actual,
+    augmentJsonBodyForRegistryDelivery: vi.fn(
+      (...args: Parameters<typeof actual.augmentJsonBodyForRegistryDelivery>) =>
+        actual.augmentJsonBodyForRegistryDelivery(...args),
+    ),
+  };
+});
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -35,6 +49,24 @@ function createRemoteServer(capabilities: string[]): http.Server {
       return;
     }
     capturedHops.push({ method: req.method ?? '', url: req.url ?? '' });
+    if (req.url?.startsWith('/api/registry-delivery/discover')) {
+      // Shape-valid scripted discover: the exact ref list points at a
+      // link-local host, which the real safe-probe boundary always refuses
+      // before any connection, so the probe path is deterministic on every
+      // runner and the hub lands on passthrough and forwards the deploy.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        contractVersion: 1,
+        referencedHosts: ['169.254.169.254'],
+        referencedPullRefs: ['169.254.169.254/acme/app:1.0.0'],
+        coveredHosts: [],
+        sourceHash: 'abc',
+        actionSetHash: 'def',
+        deliverySourceId: 'src',
+        attestation: 'att',
+      }));
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
   });
@@ -58,7 +90,7 @@ beforeAll(async () => {
   const { RegistryDeliveryService } = await import('../services/RegistryDeliveryService');
   vi.spyOn(RegistryDeliveryService.getInstance(), 'isProxyTransportConfidential').mockReturnValue(true);
 
-  capableServer = createRemoteServer([REMOTE_REGISTRY_CREDENTIALS_CAPABILITY]);
+  capableServer = createRemoteServer([REMOTE_REGISTRY_EXACT_REF_PROOF_V1_CAPABILITY]);
   incapableServer = createRemoteServer([]);
   capablePort = await listen(capableServer);
   incapablePort = await listen(incapableServer);
@@ -167,6 +199,42 @@ describe('remoteNodeProxy registry delivery gate', () => {
 
     await new Promise<void>((resolve) => server.close(() => resolve()));
     expect(outcome.aborted).toBe(true);
+    expect(capturedHops.some((h) => h.url.includes('/deploy'))).toBe(false);
+  });
+
+  it('runs discover end to end and forwards the deploy when every probed host is unsafe', async () => {
+    const res = await request(app)
+      .post(deployPath)
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteWithCapabilityId))
+      .set('Content-Type', 'application/json')
+      .send('{}');
+
+    expect(res.status).toBe(200);
+    expect(capturedHops.some((h) => h.url === '/api/registry-delivery/discover')).toBe(true);
+    expect(capturedHops.some((h) => h.url.includes('/deploy'))).toBe(true);
+  });
+  it('surfaces the delivery refusal code and message when augment refuses', async () => {
+    const { augmentJsonBodyForRegistryDelivery } = await import('../helpers/registryDeliveryOutbound');
+    vi.mocked(augmentJsonBodyForRegistryDelivery).mockResolvedValueOnce({
+      ok: false as const,
+      status: 409,
+      code: 'REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE',
+      error: 'Registry credentials unavailable for challenged image hosts',
+    });
+
+    const res = await request(app)
+      .post(deployPath)
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteWithCapabilityId))
+      .set('Content-Type', 'application/json')
+      .send('{}');
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      error: 'Registry credentials unavailable for challenged image hosts',
+      code: 'REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE',
+    });
     expect(capturedHops.some((h) => h.url.includes('/deploy'))).toBe(false);
   });
 });
