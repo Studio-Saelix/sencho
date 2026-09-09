@@ -911,8 +911,11 @@ export class GitSourceService {
         // The source row, the pending clear, and the GitOps transition commit
         // together. Clearing pending without invalidating the candidate would
         // leave the model offering an apply for files the operator can no
-        // longer produce.
-        db.getDb().transaction(() => {
+        // longer produce. A refused transition (an operation went in flight)
+        // aborts the whole save; it is mapped below so the operator sees the
+        // specific refusal, not a generic 500.
+        try {
+            db.getDb().transaction(() => {
             db.upsertGitSource({
                 stack_name: input.stackName,
                 repo_url: input.repoUrl,
@@ -990,6 +993,12 @@ export class GitSourceService {
                 GitOpsTransitions.getInstance().sourcePolicyChanged(app.id, effectivePolicy, envelope);
             }
         })();
+        } catch (error) {
+            if (error instanceof GitOpsTransitionError) {
+                throw new GitSourceError('OPERATION_IN_FLIGHT', `Cannot save the Git source for ${input.stackName}: ${error.message}`);
+            }
+            throw error;
+        }
 
         if (
             input.authType === 'deploy_key'

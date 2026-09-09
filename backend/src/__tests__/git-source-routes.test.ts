@@ -2550,6 +2550,36 @@ describe('git-source policy compatibility', () => {
         expect(res.body.error).toMatch(/source_policy/i);
     });
 
+    it('PUT racing an in-flight operation maps the refusal to 409', async () => {
+        const stackName = 'policy-put-in-flight';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'automatic');
+        // Open a fetch on the application so the policy transition refuses.
+        // The PUT transaction must roll back whole, and the specific refusal
+        // must reach the operator as 409, not as a generic 500.
+        GitOpsTransitions.getInstance().fetchStarted(
+            `policy-app-${stackName}`,
+            { operationId: 'fetch-policy-put', actor: 'test', trigger: 'poll', at: Date.now() },
+        );
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: false, source_policy: 'review' }));
+            expect(res.status).toBe(409);
+            expect(res.body.error).toMatch(/in flight/);
+            // The whole save rolled back: the policy did not change under the
+            // refused PUT.
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('automatic');
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
     it('read projects auto_apply_on_webhook true only for automatic', async () => {
         const stackName = 'policy-read-projection';
         seedStackDir(stackName);
