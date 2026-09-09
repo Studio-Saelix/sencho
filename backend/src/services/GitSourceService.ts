@@ -983,12 +983,9 @@ export class GitSourceService {
                     envelope,
                 });
             }
-            // A policy change on an existing application persists durably: the
-            // create path stamps the policy through activateDirect, and this is
-            // the existing-app counterpart, so explicit PUT policy edits (and
-            // boolean-true upgrades) survive the save. A boolean 0 or absent
-            // resolves to the existing policy here and never silently converts
-            // it.
+            // A boolean 0 or absent resolves to the existing policy and never
+            // silently converts it; only an actual change writes the
+            // transition.
             if (app && app.source_policy !== effectivePolicy) {
                 GitOpsTransitions.getInstance().sourcePolicyChanged(app.id, effectivePolicy, envelope);
             }

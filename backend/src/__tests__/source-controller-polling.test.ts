@@ -294,7 +294,7 @@ describe('SourceController poll scheduling', () => {
         );
         const pollCursorAt = getApp('app-backoff').next_poll_at;
         const retryCursorAt = getApp('app-backoff').retry_at;
-        // Simulate the real due queries (the SQL now filters this row out of
+        // Simulate the real due queries (the SQL filters this row out of
         // the poll scan; the retry scan does not see it until retry_at).
         const store = GitOpsStore.getInstance();
         vi.spyOn(store, 'listSourcesDueForPoll').mockImplementation(
@@ -313,8 +313,7 @@ describe('SourceController poll scheduling', () => {
         await advanceOneTick();
 
         // The retry cursor is the next wake: no fetch, no poll re-arm, no
-        // backoff overwrite. A cadence change arriving mid-backoff must not
-        // turn into an immediate refetch.
+        // backoff overwrite while the window lasts.
         expect(reconcile).not.toHaveBeenCalled();
         expect(getApp('app-backoff').next_poll_at).toBe(pollCursorAt);
         expect(getApp('app-backoff').retry_at).toBe(retryCursorAt);

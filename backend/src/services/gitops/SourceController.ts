@@ -128,8 +128,11 @@ export class SourceController {
         for (const app of store.listActiveDirectApplications()) {
             if (app.source_policy === 'manual') continue;
             // A source inside a retry backoff window keeps the retry cursor
-            // as its next wake: arming a poll cursor here would refetch the
-            // remote before the backoff expires.
+            // as its next wake: the poll scan already defers to any retry
+            // cursor, so a poll cursor armed here would sit inert until the
+            // retry's fetch discards it, while misreporting the next wake in
+            // the polling projection and minting a spurious poll-scheduled
+            // audit line.
             if (app.retry_at !== null && app.retry_at > now) continue;
             const secs = this.effectiveIntervalSecs(app);
             if (secs <= 0) continue;

@@ -327,9 +327,10 @@ describe('poll and retry eligibility queries', () => {
 
   it('lists an application once its retry cursor fires even while a stale poll cursor remains', () => {
     const store = GitOpsStore.getInstance();
-    // A backoff row the operator later fixed by editing the interval keeps a
-    // due next_poll_at alongside the firing retry cursor; the retry scan
-    // must still pick it up (the poll scan defers to the retry cursor).
+    // Only the poll scan defers to the retry cursor; the retry query must
+    // not filter on the poll cursor at all. The fixture hand-builds a row
+    // holding both cursors because the transition graph clears next_poll_at
+    // when the backoff begins, but the SQL property should hold regardless.
     store.insertApplication({ ...app('app-retry-fires', 'retry-fires-web'), next_poll_at: 1_000, retry_at: 1_000 });
     const due = store.listApplicationsDueForRetry(1_000);
     expect(due.map((a) => a.id)).toContain('app-retry-fires');

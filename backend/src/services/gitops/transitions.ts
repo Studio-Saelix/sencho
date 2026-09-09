@@ -896,14 +896,14 @@ export class GitOpsTransitions {
   }
 
   /**
-   * Persist a resolved source policy onto a live application. The create path
-   * stamps the policy through activateDirect; this is the existing-app path,
-   * so an operator who changes the policy on an already-linked source gets a
-   * durable row change (and an audit line) instead of a silently discarded
-   * PUT field. Configuration, not work: a suspended source keeps taking
-   * policy edits (suspension gates fetching and applying, not configuration),
-   * but the policy cannot flip under an operation that is mid-flight, since
-   * the settle path reads the policy when deciding acceptance.
+   * Persist a resolved source policy onto an application. Callers resolve
+   * the live row (the upsert path reads it through gitopsApplicationFor, so
+   * detached rows never reach this transition); suspension and detachment
+   * are not checked here. Configuration, not work: a suspended source keeps
+   * taking policy edits (suspension gates fetching and applying, not
+   * configuration), but the policy cannot flip under an operation that is
+   * mid-flight, since the settle path reads the policy when deciding
+   * acceptance.
    */
   sourcePolicyChanged(applicationId: string, sourcePolicy: SourcePolicy, envelope: EventEnvelope): TransitionResult {
     return this.mutateApp(applicationId, envelope, 'source_policy_changed', 'committed', (app) => {

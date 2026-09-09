@@ -361,7 +361,8 @@ export class GitOpsStore {
 
   /**
    * Direct sources whose poll time has arrived: active, not suspended, no
-   * operation in flight. Blueprint-mode applications are never polled here
+   * operation in flight, and no retry cursor (the retry scan owns a row in
+   * backoff). Blueprint-mode applications are never polled here
    * -- source evaluation for them is blocked at the evaluation boundary
    * until an application-keyed source engine exists for that mode.
    */
