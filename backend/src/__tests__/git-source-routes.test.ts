@@ -2526,3 +2526,162 @@ describe('git-source policy compatibility', () => {
         }
     });
 });
+
+describe('git-source polling settings', () => {
+    // A real viewer row, not just a signed token: the auth middleware resolves
+    // users against the database, so a token for a username with no row is
+    // rejected 401 before the node:manage gate ever runs.
+    let pollingViewerToken: string;
+    beforeAll(async () => {
+        DatabaseService.getInstance().addUser({
+            username: 'polling-viewer',
+            password_hash: 'test',
+            role: 'viewer',
+        });
+        pollingViewerToken = jwt.sign(
+            { username: 'polling-viewer', role: 'viewer' },
+            TEST_JWT_SECRET,
+            { expiresIn: '1m' },
+        );
+    });
+
+    function seedPollApp(stackName: string, policy: 'manual' | 'review' | 'automatic'): void {
+        const row = directApplicationFixture(`poll-app-${stackName}`, stackName);
+        row.source_policy = policy;
+        GitOpsStore.getInstance().insertApplication(row);
+    }
+
+    function deletePollRows(stackName: string): void {
+        DatabaseService.getInstance().getDb()
+            .prepare('DELETE FROM gitops_applications WHERE id = ?')
+            .run(`poll-app-${stackName}`);
+    }
+
+    it('GET requires node:manage', async () => {
+        const res = await request(app)
+            .get('/api/git-sources/polling')
+            .set('Authorization', `Bearer ${pollingViewerToken}`);
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('PERMISSION_DENIED');
+    });
+
+    it('GET returns the global interval and per-source rows', async () => {
+        const stackName = 'polling-get-row';
+        seedPollApp(stackName, 'review');
+        DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '7');
+        try {
+            const res = await request(app)
+                .get('/api/git-sources/polling')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            expect(res.body.poll_interval_mins).toBe(7);
+            const row = res.body.per_source.find((r: { stack_name: string }) => r.stack_name === stackName);
+            expect(row).toBeDefined();
+            expect(row.source_policy).toBe('review');
+            expect(row.poll_interval_secs).toBeNull();
+            expect(row.next_poll_at).toBeNull();
+        } finally {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            deletePollRows(stackName);
+        }
+    });
+
+    it('PATCH rejects non-integer, negative, and oversized values with 400', async () => {
+        for (const value of [-1, 0.5, 10081, 'five', true, null]) {
+            const res = await request(app)
+                .patch('/api/git-sources/polling')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ poll_interval_mins: value });
+            expect(res.status).toBe(400);
+            expect(res.body.error).toMatch(/poll_interval_mins/i);
+        }
+    });
+
+    it('PATCH requires node:manage', async () => {
+        const res = await request(app)
+            .patch('/api/git-sources/polling')
+            .set('Authorization', `Bearer ${pollingViewerToken}`)
+            .send({ poll_interval_mins: 5 });
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('PERMISSION_DENIED');
+    });
+
+    it('PATCH stores the value and recomputes next_poll_at', async () => {
+        const stackName = 'polling-patch-auto';
+        seedPollApp(stackName, 'automatic');
+        const before = Date.now();
+        try {
+            const res = await request(app)
+                .patch('/api/git-sources/polling')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ poll_interval_mins: 5 });
+            expect(res.status).toBe(200);
+            expect(res.body.poll_interval_mins).toBe(5);
+            const row = res.body.per_source.find((r: { stack_name: string }) => r.stack_name === stackName);
+            // Automatic sources get a cursor at now + 300s; review sources
+            // are re-armed on the same cadence, and only manual is left off
+            // the unattended schedule.
+            expect(row.next_poll_at).toBeGreaterThanOrEqual(before + 300_000);
+            expect(row.next_poll_at).toBeLessThanOrEqual(Date.now() + 300_000);
+
+            const stored = GitOpsStore.getInstance().getApplication(`poll-app-${stackName}`);
+            expect(stored?.next_poll_at).toBe(row.next_poll_at);
+        } finally {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            deletePollRows(stackName);
+        }
+    });
+
+    it('PATCH re-arms review sources on the new cadence and skips manual', async () => {
+        const reviewStack = 'polling-patch-review';
+        const manualStack = 'polling-patch-manual';
+        seedPollApp(reviewStack, 'review');
+        seedPollApp(manualStack, 'manual');
+        const staleCursor = 123456;
+        for (const stackName of [reviewStack, manualStack]) {
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE gitops_applications SET next_poll_at = ? WHERE id = ?')
+                .run(staleCursor, `poll-app-${stackName}`);
+        }
+        try {
+            const res = await request(app)
+                .patch('/api/git-sources/polling')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ poll_interval_mins: 5 });
+            expect(res.status).toBe(200);
+            const reviewRow = res.body.per_source.find((r: { stack_name: string }) => r.stack_name === reviewStack);
+            const manualRow = res.body.per_source.find((r: { stack_name: string }) => r.stack_name === manualStack);
+            // Review rides the unattended cadence like automatic; manual keeps
+            // its stale cursor because rescheduleAll never arms it.
+            expect(reviewRow.next_poll_at).toBeGreaterThan(staleCursor);
+            expect(manualRow.next_poll_at).toBe(staleCursor);
+        } finally {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            deletePollRows(reviewStack);
+            deletePollRows(manualStack);
+        }
+    });
+
+    it('PATCH 0 leaves existing next_poll_at values alone (off means off)', async () => {
+        const stackName = 'polling-patch-off';
+        seedPollApp(stackName, 'automatic');
+        const existing = GitOpsStore.getInstance().getApplication(`poll-app-${stackName}`)!;
+        existing.next_poll_at = 123456;
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE gitops_applications SET next_poll_at = ? WHERE id = ?')
+            .run(123456, existing.id);
+        try {
+            const res = await request(app)
+                .patch('/api/git-sources/polling')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ poll_interval_mins: 0 });
+            expect(res.status).toBe(200);
+            expect(res.body.poll_interval_mins).toBe(0);
+            const row = res.body.per_source.find((r: { stack_name: string }) => r.stack_name === stackName);
+            expect(row.next_poll_at).toBe(123456);
+        } finally {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            deletePollRows(stackName);
+        }
+    });
+});

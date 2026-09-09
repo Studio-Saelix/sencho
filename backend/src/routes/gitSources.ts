@@ -1,5 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { GitSourceService, type PublicGitSource, type SourcePolicy } from '../services/GitSourceService';
+import { GitOpsStore } from '../services/gitops/store';
+import { SourceController } from '../services/gitops/SourceController';
 import type { GitOpsRevisionProjection } from '../services/gitops/types';
 import { GitProjectManifestService } from '../services/GitProjectManifestService';
 import { FileSystemService } from '../services/FileSystemService';
@@ -242,6 +244,86 @@ gitSourcesRouter.get('/history', async (req: Request, res: Response): Promise<vo
 gitSourcesRouter.post('/browse', async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'stack:create')) return;
   await handleBrowse(req, res, null, null, null, null);
+});
+
+/**
+ * Strict parser for the global poll interval (minutes, 0..10080). Accepts
+ * integer numbers or digit strings only; rejects null, booleans, decimals,
+ * whitespace, and out-of-range values without coercion, so a malformed value
+ * cannot silently disable polling the operator meant to arm.
+ */
+export function parsePollIntervalMins(raw: unknown): number | null {
+  if (typeof raw === 'number') {
+    if (!Number.isInteger(raw) || raw < 0 || raw > 10080) return null;
+    return raw;
+  }
+  if (typeof raw === 'string') {
+    if (!/^\d{1,5}$/.test(raw)) return null;
+    const value = Number(raw);
+    return value <= 10080 ? value : null;
+  }
+  return null;
+}
+
+function requireNodeManage(req: Request, res: Response): boolean {
+  if (typeof req.nodeId === 'number') {
+    return requirePermission(req, res, 'node:manage', 'node', String(req.nodeId));
+  }
+  return requirePermission(req, res, 'node:manage');
+}
+
+function pollingSettingsPayload(): {
+  poll_interval_mins: number;
+  per_source: Array<{
+    stack_name: string;
+    poll_interval_secs: number | null;
+    next_poll_at: number | null;
+    source_policy: string;
+  }>;
+} {
+  return {
+    poll_interval_mins: DatabaseService.getInstance().getGitOpsPollIntervalMins(),
+    per_source: GitOpsStore.getInstance().listActiveDirectApplications().map((app) => ({
+      stack_name: app.stack_name ?? '',
+      poll_interval_secs: app.poll_interval_secs,
+      next_poll_at: app.next_poll_at,
+      source_policy: app.source_policy,
+    })),
+  };
+}
+
+/**
+ * Node-scoped polling configuration. The GET projects the global interval and
+ * each live source's own cadence; the PATCH stores the interval and
+ * reschedules every non-manual source, both gated by node:manage because the
+ * cadence governs unattended fetches against the node.
+ */
+gitSourcesRouter.get('/polling', async (req: Request, res: Response): Promise<void> => {
+  if (!requireNodeManage(req, res)) return;
+  try {
+    res.json(pollingSettingsPayload());
+  } catch (error) {
+    console.error('[GitSources] polling settings read failed:', error instanceof Error ? error.message : String(error));
+    res.status(500).json({ error: 'Could not read polling settings.' });
+  }
+});
+
+gitSourcesRouter.patch('/polling', async (req: Request, res: Response): Promise<void> => {
+  if (!requireNodeManage(req, res)) return;
+  const value = parsePollIntervalMins((req.body ?? {}).poll_interval_mins);
+  if (value === null) {
+    res.status(400).json({ error: 'poll_interval_mins must be an integer between 0 and 10080' });
+    return;
+  }
+  try {
+    DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', String(value));
+    SourceController.getInstance().rescheduleAll('system:git-source');
+    SourceController.getInstance().restartPolling();
+    res.json(pollingSettingsPayload());
+  } catch (error) {
+    console.error('[GitSources] polling settings write failed:', error instanceof Error ? error.message : String(error));
+    res.status(500).json({ error: 'Could not save polling settings.' });
+  }
 });
 
 /**

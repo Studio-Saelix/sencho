@@ -341,3 +341,51 @@ describe('remote proxy scoped node-admin settings writes', () => {
     db.deleteRoleAssignmentsByUser(viewerId);
   });
 });
+
+describe('remote proxy scoped node-admin git-source polling writes', () => {
+  it('forwards polling PATCH from scoped node-admin on granted node with elevated role header', async () => {
+    const db = (await import('../services/DatabaseService')).DatabaseService.getInstance();
+    db.addRoleAssignment({
+      user_id: viewerId,
+      role: 'node-admin',
+      resource_type: 'node',
+      resource_id: String(grantedNodeId),
+    });
+
+    const res = await request(app)
+      .patch('/api/git-sources/polling')
+      .set('Authorization', `Bearer ${viewerBearer}`)
+      .set('x-node-id', String(grantedNodeId))
+      .send({ poll_interval_mins: 15 });
+
+    expect(res.status).toBe(200);
+    const hop = grantedHops.find((h) => h.url?.includes('/git-sources/polling'));
+    expect(hop).toBeDefined();
+    expect(hop!.method).toBe('PATCH');
+    expect(hop!.roleHeader).toBe('node-admin');
+
+    db.deleteRoleAssignmentsByUser(viewerId);
+  });
+
+  it('denies polling PATCH from scoped node-admin on ungranted remote node', async () => {
+    const db = (await import('../services/DatabaseService')).DatabaseService.getInstance();
+    db.addRoleAssignment({
+      user_id: viewerId,
+      role: 'node-admin',
+      resource_type: 'node',
+      resource_id: String(grantedNodeId),
+    });
+
+    const res = await request(app)
+      .patch('/api/git-sources/polling')
+      .set('Authorization', `Bearer ${viewerBearer}`)
+      .set('x-node-id', String(ungrantedNodeId))
+      .send({ poll_interval_mins: 15 });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
+    expect(ungrantedHops).toHaveLength(0);
+
+    db.deleteRoleAssignmentsByUser(viewerId);
+  });
+});
