@@ -387,6 +387,33 @@ describe('reconcileConfirmedPlan fingerprint gate', () => {
             status: 'ok',
         }]);
     });
+
+    it('keeps the registry delivery refusal code on a failed deploy outcome', async () => {
+        const node = seedNode();
+        const bp = createBp({ nodeIds: [node.id] });
+        approvePlace(bp.id, [node.id]);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({
+            status: 'failed',
+            error: 'Remote deploy failed',
+            code: 'REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE',
+        });
+
+        const result = await BlueprintReconciler.getInstance().reconcileConfirmedPlan(bp.id, [
+            { nodeId: node.id, action: 'create' },
+        ]);
+
+        expect(deploySpy).toHaveBeenCalledTimes(1);
+        expect(result.refused).toBeFalsy();
+        expect(result.outcomes).toEqual([{
+            nodeId: node.id,
+            nodeName: node.name,
+            action: 'create',
+            status: 'failed',
+            error: 'Remote deploy failed',
+            code: 'REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE',
+        }]);
+    });
 });
 
 describe('Accept/Evict STALE_GUARD', () => {

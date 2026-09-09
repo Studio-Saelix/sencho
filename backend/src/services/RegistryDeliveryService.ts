@@ -9,13 +9,17 @@ import {
 } from './RegistryService';
 import { discoverRegistryReferences } from './registryReferenceDiscovery';
 import { remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
-import { REMOTE_REGISTRY_CREDENTIALS_CAPABILITY } from './CapabilityRegistry';
+import {
+  REMOTE_REGISTRY_CREDENTIALS_CAPABILITY,
+  REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION,
+} from './CapabilityRegistry';
+import { normalizePullRefList } from '../helpers/registryPullReference';
 import { isTrustedProxyPeer } from '../helpers/trustedProxyCidrs';
 import type { RegistryDeliveryEnvelope, RegistryDeliveryAuthEntry } from '../helpers/registryDeliveryContext';
-import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
-import { prepareSourceForDiscover, resolveBlueprintPostApplyDiscovery } from '../helpers/registryDeliveryPrepare';
+import { classifyRegistryDeliveryOp, type RegistryDeliveryStage } from '../helpers/registryOpClassifier';
+import { prepareSourceForDiscover, resolveBlueprintPostApplyDiscovery, type RegistryDeliverySourceKind } from '../helpers/registryDeliveryPrepare';
 import { PreparedSourceStore } from './preparedSourceStore';
-import { hashProjectSource } from '../helpers/registryDeliveryHashes';
+import { hashProjectSource, hashPullRefList } from '../helpers/registryDeliveryHashes';
 import { isValidStackName } from '../utils/validation';
 import {
   resolveComposeEnvForDiscovery,
@@ -26,9 +30,9 @@ const ATTESTATION_TTL_SECONDS = 900;
 
 export interface RegistryDeliveryDiscoverRequest {
   stack?: string;
-  op: string;
+  op: RegistryDeliveryStage;
   service?: string;
-  sourceKind: string;
+  sourceKind: RegistryDeliverySourceKind;
   sourceHash?: string;
   actionSetHash: string;
   prepId?: string;
@@ -39,11 +43,14 @@ export interface RegistryDeliveryDiscoverRequest {
   gitApply?: boolean;
   restoreVariant?: string;
   composeContent?: string;
+  contractVersion?: number;
 }
 
 export interface RegistryDeliveryDiscoverResponse {
   prepId?: string;
+  contractVersion: typeof REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION;
   referencedHosts: string[];
+  referencedPullRefs: string[];
   coveredHosts: string[];
   sourceHash: string;
   actionSetHash: string;
@@ -104,8 +111,10 @@ export class RegistryDeliveryService {
     service?: string;
     sourceHash: string;
     referencedHostsHash: string;
+    referencedPullRefsHash: string;
     coveredHostsHash: string;
     actionSetHash: string;
+    deliveryContractVersion: number;
     prepId?: string;
   }): string {
     const jti = crypto.randomBytes(16).toString('hex');
@@ -118,8 +127,10 @@ export class RegistryDeliveryService {
         service: payload.service,
         sourceHash: payload.sourceHash,
         referencedHostsHash: payload.referencedHostsHash,
+        referencedPullRefsHash: payload.referencedPullRefsHash,
         coveredHostsHash: payload.coveredHostsHash,
         actionSetHash: payload.actionSetHash,
+        deliveryContractVersion: payload.deliveryContractVersion,
         prepId: payload.prepId,
         jti_t: jti,
         target_session_id: this.targetSessionId,
@@ -173,6 +184,17 @@ export class RegistryDeliveryService {
   }
 
   async discoverOnTarget(request: RegistryDeliveryDiscoverRequest): Promise<RegistryDeliveryDiscoverResponse> {
+    // Contract tolerance: a request without a contract version comes from a
+    // hub that predates the exact-ref contract; only this version check is
+    // skipped, the response is otherwise identical. A request naming a
+    // different version speaks a contract this node does not implement, which
+    // is a client error, not a server failure.
+    if (
+      request.contractVersion !== undefined
+      && request.contractVersion !== REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION
+    ) {
+      throw Object.assign(new Error('Registry delivery contract version not supported'), { status: 400 });
+    }
     const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
     if (
       request.sourceKind === 'restore-candidate'
@@ -188,6 +210,7 @@ export class RegistryDeliveryService {
     }
 
     let referencedHosts: string[] = [];
+    let rawPullRefs: string[] = [];
     let sourceHash = request.sourceHash;
     let prepId = request.prepId;
 
@@ -199,8 +222,10 @@ export class RegistryDeliveryService {
       const discovery = discoverRegistryReferences(
         payloadPath,
         resolveComposeEnvForDiscovery(payloadPath, request.envVars),
+        request.service,
       );
       referencedHosts = discovery.referencedHosts;
+      rawPullRefs = discovery.referencedPullRefs;
     } else if (request.sourceKind === 'body-content' && typeof request.composeContent === 'string') {
       const MAX_COMPOSE_CONTENT_BYTES = 2 * 1024 * 1024;
       if (Buffer.byteLength(request.composeContent, 'utf8') > MAX_COMPOSE_CONTENT_BYTES) {
@@ -217,6 +242,7 @@ export class RegistryDeliveryService {
       );
       sourceHash = discovery.sourceHash;
       referencedHosts = discovery.referencedHosts;
+      rawPullRefs = discovery.referencedPullRefs;
     } else if (request.stack) {
       if (!isValidStackName(request.stack)) {
         throw new Error('Invalid stack name');
@@ -234,13 +260,17 @@ export class RegistryDeliveryService {
       const discovery = discoverRegistryReferences(
         projectDir,
         resolveComposeEnvForDiscovery(projectDir, request.envVars),
+        request.service,
       );
       referencedHosts = discovery.referencedHosts;
+      rawPullRefs = discovery.referencedPullRefs;
     }
 
     if (!sourceHash) {
       sourceHash = crypto.createHash('sha256').update('').digest('hex');
     }
+
+    const referencedPullRefs = normalizePullRefList(rawPullRefs);
 
     const registry = RegistryService.getInstance();
     const coveredHosts: string[] = [];
@@ -255,8 +285,10 @@ export class RegistryDeliveryService {
     }
 
     const referencedHostsHash = this.hashHostList(referencedHosts);
+    const referencedPullRefsHash = hashPullRefList(referencedPullRefs);
     const coveredHostsHash = this.hashHostList(coveredHosts);
     const deliverySourceId = this.getDeliverySourceId();
+    const contractVersion = REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION;
 
     const attestation = this.signAttestation({
       nodeIdClaim: nodeId,
@@ -265,14 +297,18 @@ export class RegistryDeliveryService {
       service: request.service,
       sourceHash,
       referencedHostsHash,
+      referencedPullRefsHash,
       coveredHostsHash,
       actionSetHash: request.actionSetHash,
+      deliveryContractVersion: contractVersion,
       prepId,
     });
 
     return {
       prepId,
+      contractVersion,
       referencedHosts,
+      referencedPullRefs,
       coveredHosts,
       sourceHash,
       actionSetHash: request.actionSetHash,
@@ -284,23 +320,33 @@ export class RegistryDeliveryService {
   async buildHubEnvelope(
     nodeId: number,
     discover: RegistryDeliveryDiscoverResponse,
+    challengedHosts: string[],
   ): Promise<RegistryDeliveryEnvelope | null> {
-    const deltaHosts = discover.referencedHosts.filter(host => {
-      return !discover.coveredHosts.includes(host);
-    });
-
+    // Envelope coverage is all-or-nothing. Only hosts holding at least one
+    // challenged exact ref may enter the envelope, and every challenged host
+    // must be covered: a partially covered envelope would let the target
+    // mutate the services it can pull and then fail mid-operation on the ones
+    // it cannot. The caller answers 409 CREDENTIAL_UNAVAILABLE for the whole
+    // delivery as soon as one challenged host is uncoverable.
     const registry = RegistryService.getInstance();
     const auths: RegistryDeliveryAuthEntry[] = [];
+    let uncovered = false;
 
-    for (const host of deltaHosts) {
+    for (const host of challengedHosts) {
       const hubResolution: DockerConfigHostResolution = await registry.resolveDockerConfigForHostDetailed(host);
-      if (hubResolution.state === 'unavailable') {
-        throw new Error(`Hub registry credentials unavailable for ${host}`);
-      }
-      if (hubResolution.state === 'missing') {
+      // 'missing' means the hub has no configured credentials for this host;
+      // 'unavailable' means a row exists but resolution failed (for example a
+      // role assumption or decrypt error). Either state, like a resolved row
+      // without usable auth, makes the delivery uncoverable for that host.
+      // Each uncovered host is logged so an operator can fix every missing
+      // credential in one pass instead of discovering them one refusal at a
+      // time.
+      if (hubResolution.state !== 'available' || !hubResolution.auth) {
+        const state = hubResolution.state !== 'available' ? hubResolution.state : 'no-auth';
+        console.warn('[registryDelivery] REGISTRY_DELIVERY_HOST_NOT_COVERED', { nodeId, host, state });
+        uncovered = true;
         continue;
       }
-      if (!hubResolution.auth) continue;
       auths.push({
         host,
         username: hubResolution.auth.username,
@@ -309,9 +355,19 @@ export class RegistryDeliveryService {
       });
     }
 
+    if (uncovered) {
+      return null;
+    }
+
+    if (auths.length === 0) {
+      return null;
+    }
+
     const now = Date.now();
     const envelopeExp = now + ATTESTATION_TTL_SECONDS * 1000;
     const providerExpiries = auths.map(a => a.expiresAt).filter((v): v is number => typeof v === 'number');
+    // The envelope never outlives the attestation TTL or the earliest
+    // provider credential, whichever expires first.
     const notAfter = Math.min(envelopeExp, ...providerExpiries.length > 0 ? providerExpiries : [envelopeExp]);
 
     return {

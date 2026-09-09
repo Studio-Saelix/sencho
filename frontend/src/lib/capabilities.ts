@@ -43,6 +43,7 @@ export const CAPABILITIES = [
   'service-scoped-stack-alert',
   'scoped-stack-auth-evidence',
   'remote-registry-credentials',
+  'remote-registry-exact-ref-proof-v1',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

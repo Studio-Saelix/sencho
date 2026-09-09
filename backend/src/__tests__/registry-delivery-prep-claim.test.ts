@@ -8,7 +8,8 @@ import { NodeRegistry } from '../services/NodeRegistry';
 import { StackOpLockService } from '../services/StackOpLockService';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
 import { resolveRegistryAuthAtSeam } from '../helpers/registryDeliverySeam';
-import { hashActionSet, hashDeliverySourceDir } from '../helpers/registryDeliveryHashes';
+import { hashActionSet, hashDeliverySourceDir, hashPullRefList } from '../helpers/registryDeliveryHashes';
+import { normalizePullRefList } from '../helpers/registryPullReference';
 import { discoverRegistryReferences } from '../services/registryReferenceDiscovery';
 import { normalizeImageHost } from '../services/RegistryService';
 
@@ -51,7 +52,8 @@ describe('registryDeliverySeam prepared source claim', () => {
       stagingDir,
     );
     const payloadPath = PreparedSourceStore.getInstance().peekPayloadPath(entry.prepId);
-    const referencedHosts = discoverRegistryReferences(payloadPath).referencedHosts;
+    const discovery = discoverRegistryReferences(payloadPath);
+    const referencedHosts = discovery.referencedHosts;
     const delivery = RegistryDeliveryService.getInstance();
     const attestation = delivery.signAttestation({
       nodeIdClaim: nodeId,
@@ -59,8 +61,10 @@ describe('registryDeliverySeam prepared source claim', () => {
       op: 'template-deploy',
       sourceHash,
       referencedHostsHash: delivery.hashHostList(referencedHosts),
+      referencedPullRefsHash: hashPullRefList(normalizePullRefList(discovery.referencedPullRefs)),
       coveredHostsHash: delivery.hashHostList([]),
       actionSetHash: hashActionSet(['stack:create', 'stack:deploy']),
+      deliveryContractVersion: 1,
       prepId: entry.prepId,
     });
 
@@ -100,8 +104,10 @@ describe('registryDeliverySeam prepared source claim', () => {
       op: 'template-deploy',
       sourceHash: 'abc',
       referencedHostsHash: delivery.hashHostList([]),
+      referencedPullRefsHash: hashPullRefList([]),
       coveredHostsHash: delivery.hashHostList([]),
       actionSetHash: hashActionSet(['stack:create', 'stack:deploy']),
+      deliveryContractVersion: 1,
       prepId: 'deadbeefdeadbeefdeadbeefdeadbeef',
     });
 

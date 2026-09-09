@@ -11,6 +11,7 @@ import type { RemoteMeta } from '../services/CapabilityRegistry';
 
 let remoteSupportsCrossNodeRbac: typeof import('../helpers/remoteCapabilities').remoteSupportsCrossNodeRbac;
 let remoteAdvertisesCapability: typeof import('../helpers/remoteCapabilities').remoteAdvertisesCapability;
+let probeRemoteCapability: typeof import('../helpers/remoteCapabilities').probeRemoteCapability;
 let NodeRegistry: typeof import('../services/NodeRegistry').NodeRegistry;
 let tmpDir: string;
 
@@ -18,7 +19,7 @@ const NODE_ID = 4242;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
-  ({ remoteSupportsCrossNodeRbac, remoteAdvertisesCapability } = await import('../helpers/remoteCapabilities'));
+  ({ remoteSupportsCrossNodeRbac, remoteAdvertisesCapability, probeRemoteCapability } = await import('../helpers/remoteCapabilities'));
   ({ NodeRegistry } = await import('../services/NodeRegistry'));
 });
 
@@ -98,5 +99,62 @@ describe('remoteAdvertisesCapability', () => {
     expect(rbac).toBe(true);
     expect(volumes).toBe(true);
     expect(spy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('probeRemoteCapability', () => {
+  const CAP = 'remote-registry-exact-ref-proof-v1';
+
+  it('returns supported for a valid online metadata that advertises the capability', async () => {
+    vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode')
+      .mockResolvedValue({ version: '0.97.1', capabilities: ['fleet', CAP], ...ONLINE });
+    expect(await probeRemoteCapability(NODE_ID, CAP)).toBe('supported');
+  });
+
+  it('returns unsupported for a valid online metadata that does not advertise it', async () => {
+    vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode')
+      .mockResolvedValue({ version: '0.97.1', capabilities: ['fleet'], ...ONLINE });
+    expect(await probeRemoteCapability(NODE_ID, CAP)).toBe('unsupported');
+  });
+
+  it('returns unreachable, not unsupported, when the metadata is offline', async () => {
+    vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode')
+      .mockResolvedValue({ version: null, capabilities: [], startedAt: null, updateError: null, online: false, imagePinKind: null, updateBlocked: false, imageChannel: null });
+    expect(await probeRemoteCapability(NODE_ID, CAP)).toBe('unreachable');
+  });
+
+  it('returns unreachable, not unsupported, when the meta fetch throws', async () => {
+    vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockRejectedValue(new Error('unreachable'));
+    expect(await probeRemoteCapability(NODE_ID, CAP)).toBe('unreachable');
+  });
+
+  it('returns unreachable, not unsupported, when a 2xx response carries malformed metadata', async () => {
+    // Raw response path: a 2xx body that is not a JSON object with a genuine
+    // capability array must never read as an online remote that advertises
+    // nothing. The probe reports unreachable so an operator distinguishes an
+    // outage or intercepting proxy from an old-but-healthy remote.
+    const axios = (await import('axios')).default;
+    const db = (await import('../services/DatabaseService')).DatabaseService.getInstance();
+    const nodeId = db.addNode({
+      name: 'probe-malformed-meta',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/tmp',
+      is_default: false,
+      api_url: 'https://remote.example.com:1852',
+      api_token: 'token',
+    });
+    const reg = NodeRegistry.getInstance();
+    vi.spyOn(reg, 'getProxyTarget').mockReturnValue({
+      apiUrl: 'https://remote.example.com:1852',
+      apiToken: 'token',
+      trustedLoopback: false,
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    for (const data of ['not-an-object', { version: '0.97.1' }, { capabilities: 'yes' }]) {
+      vi.spyOn(axios, 'get').mockResolvedValue({ data });
+      expect(await probeRemoteCapability(nodeId, CAP)).toBe('unreachable');
+    }
+    db.deleteNode(nodeId);
   });
 });

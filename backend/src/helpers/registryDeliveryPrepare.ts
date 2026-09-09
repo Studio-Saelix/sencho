@@ -22,6 +22,7 @@ export interface PreparedSourceResult {
 export interface BlueprintPostApplyDiscovery {
   sourceHash: string;
   referencedHosts: string[];
+  referencedPullRefs: string[];
 }
 
 /**
@@ -44,7 +45,11 @@ export async function resolveBlueprintPostApplyDiscovery(
     composeContent,
     mergeComposeEnvVars(dotEnv),
   );
-  return { sourceHash, referencedHosts: discovery.referencedHosts };
+  return {
+    sourceHash,
+    referencedHosts: discovery.referencedHosts,
+    referencedPullRefs: discovery.referencedPullRefs,
+  };
 }
 
 export async function prepareRequestGeneratedSource(input: {
@@ -176,6 +181,17 @@ export async function prepareGitCandidateSource(
   const { GitSourceService } = await import('../services/GitSourceService');
   return GitSourceService.getInstance().prepareRegistryDeliveryFromGit(input);
 }
+
+/**
+ * Closed set of source kinds a discover request can carry. The switch in
+ * prepareSourceForDiscover throws on any value outside this set.
+ */
+export type RegistryDeliverySourceKind =
+  | 'request-generated'
+  | 'restore-candidate'
+  | 'git-candidate'
+  | 'live-project'
+  | 'body-content';
 
 export async function prepareSourceForDiscover(
   request: RegistryDeliveryDiscoverRequest,
