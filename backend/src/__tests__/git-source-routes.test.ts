@@ -2570,10 +2570,14 @@ describe('git-source policy compatibility', () => {
                 .send(putBody({ auto_apply_on_webhook: false, source_policy: 'review' }));
             expect(res.status).toBe(409);
             expect(res.body.error).toMatch(/in flight/);
-            // The whole save rolled back: the policy did not change under the
-            // refused PUT.
+            // The whole save rolled back: the policy did not change, and the
+            // source row keeps its prior configuration (the upsertGitSource
+            // write sits in the same transaction as the refused transition).
             const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
             expect(application?.source_policy).toBe('automatic');
+            const source = DatabaseService.getInstance().getGitSource(stackName);
+            expect(source?.branch).toBe(putBody().branch);
+            expect(source?.pending_commit_sha).toBeNull();
         } finally {
             fetchFromGit.mockRestore();
             deleteRows(stackName);
