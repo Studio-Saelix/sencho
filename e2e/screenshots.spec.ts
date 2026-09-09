@@ -12,6 +12,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { expect, test, type Page } from '@playwright/test';
 import { loginAs } from './helpers';
+import { currentUserId, getPreferences, prefHeaders, putDomain } from './preferences-helpers';
 
 const DOCS_IMAGES = path.resolve(__dirname, '../docs/images');
 
@@ -50,6 +51,83 @@ test('resources', async ({ page }) => {
   await page.getByRole('button', { name: /resources/i }).click();
   await page.waitForTimeout(800);
   await page.screenshot({ path: path.join(DOCS_IMAGES, 'resources.png'), fullPage: true });
+});
+
+test('stack detail Anatomy resize', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await loginAs(page);
+  const stackName = 'docs-pane-layout';
+  const userId = await currentUserId(page.request);
+  await expect.poll(async () => {
+    const preferences = await getPreferences(page.request, userId);
+    return preferences.preferences.appearance !== null;
+  }).toBe(true);
+  const originalAppearance = (await getPreferences(page.request, userId)).preferences.appearance;
+  if (!originalAppearance) throw new Error('appearance preferences did not initialize');
+  if (!originalAppearance.data && originalAppearance.schemaVersion !== 0) {
+    throw new Error('appearance preferences are corrupt');
+  }
+  const originalMode = originalAppearance.data?.anatomyMode === 'resizable' ? 'resizable' : 'fixed';
+  let preferenceMutationStarted = false;
+  let primaryError: unknown;
+  try {
+    await createStack(page, stackName);
+    await page.getByRole('button', { name: /profile/i }).click();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('button', { name: 'Appearance', exact: true }).click();
+    const anatomyMode = page.getByRole('radiogroup', { name: 'Anatomy panel mode' });
+    preferenceMutationStarted = true;
+    if (originalMode !== 'resizable') {
+      await anatomyMode.getByRole('radio', { name: 'Resizable' }).click();
+    }
+    const widthSlider = page.locator('[aria-label="Anatomy panel width"]');
+    const sliderBox = await widthSlider.boundingBox();
+    if (!sliderBox) throw new Error('Anatomy width slider has no bounding box');
+    await widthSlider.click({ position: { x: sliderBox.width / 2, y: sliderBox.height / 2 } });
+    await expect.poll(async () => {
+      const stored = await getPreferences(page.request, userId);
+      const appearance = stored.preferences.appearance?.data;
+      return { mode: appearance?.anatomyMode, width: appearance?.anatomyWidth };
+    }).toEqual({ mode: 'resizable', width: 640 });
+    await page.locator('[data-testid="stack-row"]').filter({ hasText: stackName }).click();
+    const separator = page.getByTestId('anatomy-resize-separator');
+    await expect(separator).toBeVisible();
+    await separator.focus();
+    await page.screenshot({ path: path.join(DOCS_IMAGES, 'settings', 'appearance-anatomy-layout.png') });
+  } catch (error) {
+    primaryError = error;
+  }
+
+  const cleanupErrors: unknown[] = [];
+  try {
+    const cleanup = await page.request.delete(`/api/stacks/${stackName}`);
+    if (!cleanup.ok() && cleanup.status() !== 404) {
+      throw new Error(`delete ${stackName} failed with ${cleanup.status()}`);
+    }
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  if (preferenceMutationStarted) {
+    try {
+      if (originalAppearance.data) {
+        await putDomain(page.request, userId, 'appearance', originalAppearance.data);
+      } else {
+        const current = (await getPreferences(page.request, userId)).preferences.appearance;
+        if (!current) throw new Error('appearance preferences disappeared during capture');
+        const reset = await page.request.delete('/api/user-preferences/appearance', {
+          headers: prefHeaders(userId),
+          data: { expectedRevision: current.revision },
+        });
+        if (!reset.ok()) throw new Error(`reset appearance preferences failed with ${reset.status()}`);
+      }
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+
+  const failures = primaryError === undefined ? cleanupErrors : [primaryError, ...cleanupErrors];
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, 'Screenshot capture and cleanup failed');
 });
 
 test('sso settings', async ({ page }) => {

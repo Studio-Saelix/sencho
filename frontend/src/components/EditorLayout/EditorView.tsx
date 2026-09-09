@@ -37,7 +37,9 @@ import ErrorBoundary from '../ErrorBoundary';
 import StackAnatomyPanel from '../StackAnatomyPanel';
 import { StackFileExplorer } from '@/components/files/StackFileExplorer';
 import { useIsMobile } from '@/hooks/use-is-mobile';
+import { useAnatomyLayout } from '@/hooks/use-anatomy-layout';
 import { ScrollArea } from '../ui/scroll-area';
+import { AnatomyResizePane } from '@/components/stack/AnatomyResizePane';
 import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './editor-view-blocks';
 import { MobileStackDetail } from './MobileStackDetail';
 import { RecoveryChip } from './RecoveryChip';
@@ -413,6 +415,7 @@ export function EditorView(props: EditorViewProps) {
     // Below md, render the segmented full-screen mobile detail instead of the
     // desktop two-pane grid. All hooks above run unconditionally before this
     // branch so hook order stays stable across breakpoints.
+    const { anatomyMode, anatomyWidth, setAnatomyWidth } = useAnatomyLayout();
     const isMobile = useIsMobile();
     if (isMobile) {
         return <MobileStackDetail {...props} />;
@@ -429,9 +432,29 @@ export function EditorView(props: EditorViewProps) {
         />
     );
 
+    const anatomyPanel = (
+        <StackAnatomyPanel
+            stackName={stackName}
+            content={content}
+            envContent={envContent}
+            selectedEnvFile={selectedEnvFile}
+            gitSourcePending={gitSourcePendingMap[stackName] ?? null}
+            onEditCompose={openComposeEditor}
+            onOpenFiles={canRead ? () => { setEditingCompose(true); setActiveTab('files'); } : undefined}
+            onOpenGitSource={() => setGitSourceOpen(true)}
+            onApplyUpdate={() => { void updateStack(); }}
+            applying={loadingAction === 'update'}
+            canEdit={can('stack:edit', 'stack', stackName, activeNode?.id)}
+            notifications={notifications}
+            requestedTab={props.requestedAnatomyTab}
+        />
+    );
+
+    const anatomyResizable = anatomyMode === 'resizable' && !editingCompose && !filesFullscreen;
+
     return (
         <ErrorBoundary>
-            <div className={`grid gap-6 ${filesFullscreen ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-2'} min-h-[600px] h-[calc(100vh-160px)] max-h-[1040px]`}>
+            <div className={`grid gap-6 ${filesFullscreen ? 'grid-cols-1' : anatomyResizable ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_24px_auto] lg:gap-0' : 'grid-cols-1 lg:grid-cols-2'} min-h-[600px] h-[calc(100vh-160px)] max-h-[1040px]`}>
                 {/* Left column: identity + health strip + logs, stacked. Hidden in
                     files fullscreen so the editor card fills the width. */}
                 {!filesFullscreen && (
@@ -728,23 +751,11 @@ export function EditorView(props: EditorViewProps) {
                             )}
                         </div>
                     </Card>
-                ) : (
-                    <StackAnatomyPanel
-                        stackName={stackName}
-                        content={content}
-                        envContent={envContent}
-                        selectedEnvFile={selectedEnvFile}
-                        gitSourcePending={gitSourcePendingMap[stackName] ?? null}
-                        onEditCompose={openComposeEditor}
-                        onOpenFiles={canRead ? () => { setEditingCompose(true); setActiveTab('files'); } : undefined}
-                        onOpenGitSource={() => setGitSourceOpen(true)}
-                        onApplyUpdate={() => { void updateStack(); }}
-                        applying={loadingAction === 'update'}
-                        canEdit={can('stack:edit', 'stack', stackName, activeNode?.id)}
-                        notifications={notifications}
-                        requestedTab={props.requestedAnatomyTab}
-                    />
-                )}
+                ) : anatomyResizable ? (
+                    <AnatomyResizePane anatomyWidth={anatomyWidth} onCommitWidth={setAnatomyWidth}>
+                        {anatomyPanel}
+                    </AnatomyResizePane>
+                ) : anatomyPanel}
             </div>
         </ErrorBoundary>
     );

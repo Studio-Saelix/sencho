@@ -25,11 +25,13 @@ const LOG_CHIP_COLOR_MODES = ['unified', 'per-service'] as const;
 const NAV_MODES = ['smart', 'compact'] as const;
 const NAV_ALIGNS = ['left', 'center'] as const;
 const SIDEBAR_MODES = ['fixed', 'resizable'] as const;
+const ANATOMY_MODES = ['fixed', 'resizable'] as const;
 
-// Desktop stacks-sidebar width bounds, in px. Defaults fill missing fields so
+// Desktop pane width bounds, in px. Defaults fill missing fields so
 // an older writer's 16-field document still parses (it is then stored
 // normalized with these values, never rejected).
-const SIDEBAR_WIDTH = { min: 224, max: 440 } as const;
+const SIDEBAR_WIDTH = { min: 248, max: 440 } as const;
+const ANATOMY_WIDTH = { min: 320, max: 960 } as const;
 
 // Quick-link ids must be members of the frontend's eligible-view registry
 // (frontend/src/lib/navigation/appNavRegistry.ts, items with
@@ -69,6 +71,8 @@ const appearanceSchema = z.object({
   readability: z.boolean(),
   sidebarMode: z.enum(SIDEBAR_MODES).default('fixed'),
   sidebarWidth: z.number().int().min(SIDEBAR_WIDTH.min).max(SIDEBAR_WIDTH.max).default(256),
+  anatomyMode: z.enum(ANATOMY_MODES).default('fixed'),
+  anatomyWidth: z.number().int().min(ANATOMY_WIDTH.min).max(ANATOMY_WIDTH.max).default(640),
 }).strict();
 
 const navigationSchema = z.object({

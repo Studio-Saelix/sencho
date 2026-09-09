@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, fireEvent, act, renderHook } from '@testing-library/react';
+import { render, screen, fireEvent, act, renderHook, within } from '@testing-library/react';
 import { AppearanceSection } from '../AppearanceSection';
 import { useTheme } from '@/hooks/use-theme';
 import { SETTINGS_ITEMS } from '../registry';
 import { SIDEBAR_WIDTH, SIDEBAR_MODE_KEY, SIDEBAR_WIDTH_KEY } from '@/hooks/use-sidebar-layout';
+import { ANATOMY_WIDTH, ANATOMY_MODE_KEY, ANATOMY_WIDTH_KEY } from '@/hooks/use-anatomy-layout';
 import { subscribeToPreferenceWrites } from '@/lib/preferences/preferenceEvents';
 import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
 
@@ -100,12 +101,14 @@ describe('AppearanceSection', () => {
 
     it('readability locks the header + chart controls and disables the glow slider', () => {
         const { container } = render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
-        // Baseline: only the sidebar width slider is disabled (Fixed mode leaves
-        // it unapplied); the readability-gated controls are all active.
+        // Fixed mode leaves the pane width sliders unapplied; the
+        // readability-gated controls are all active.
         const glowLocked = () => !!container.querySelector('[aria-label="Ambient glow"][data-disabled]');
         const sidebarLocked = () => !!container.querySelector('[aria-label="Sidebar width"][data-disabled]');
+        const anatomyLocked = () => !!container.querySelector('[aria-label="Anatomy panel width"][data-disabled]');
         expect(glowLocked()).toBe(false);
         expect(sidebarLocked()).toBe(true);
+        expect(anatomyLocked()).toBe(true);
         expect(screen.getByRole('radiogroup', { name: 'Header style' }).getAttribute('aria-disabled')).toBeNull();
 
         fireEvent.click(screen.getByRole('switch', { name: 'Readability mode' }));
@@ -260,8 +263,9 @@ describe('AppearanceSection sidebar layout', () => {
     it('renders the sidebar layout rows with Fixed as the default and the width slider locked', () => {
         const { container } = render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         expect(screen.getByText('Sidebar layout')).toBeTruthy();
-        expect(screen.getByRole('radio', { name: 'Fixed' }).getAttribute('aria-checked')).toBe('true');
-        expect(screen.getByRole('radio', { name: 'Resizable' }).getAttribute('aria-checked')).toBe('false');
+        const modeGroup = screen.getByRole('radiogroup', { name: 'Sidebar mode' });
+        expect(within(modeGroup).getByRole('radio', { name: 'Fixed' }).getAttribute('aria-checked')).toBe('true');
+        expect(within(modeGroup).getByRole('radio', { name: 'Resizable' }).getAttribute('aria-checked')).toBe('false');
         // Fixed mode leaves the width preference unapplied, so the slider locks.
         expect(sliderRoot(container)?.getAttribute('data-disabled')).not.toBeNull();
         expect(sliderThumb(container)?.getAttribute('aria-valuenow')).toBe('256');
@@ -273,7 +277,7 @@ describe('AppearanceSection sidebar layout', () => {
         const notify = vi.fn();
         const unsub = subscribeToPreferenceWrites(notify);
 
-        fireEvent.click(screen.getByRole('radio', { name: 'Resizable' }));
+        fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Sidebar mode' })).getByRole('radio', { name: 'Resizable' }));
         expect(sliderRoot(container)?.getAttribute('data-disabled')).toBeNull();
         expect(notify).toHaveBeenCalledTimes(1);
         expect(notify).toHaveBeenCalledWith('appearance', ['sidebarMode']);
@@ -383,5 +387,61 @@ describe('AppearanceSection sidebar layout', () => {
         expect(localStorage.getItem(SIDEBAR_WIDTH_KEY)).toBe(String(mid));
         unsub();
         vi.restoreAllMocks();
+    });
+});
+
+describe('AppearanceSection Anatomy layout', () => {
+    beforeEach(() => {
+        localStorage.clear();
+        resetTheme();
+    });
+
+    const sliderRoot = (container: HTMLElement) =>
+        container.querySelector<HTMLElement>('[aria-label="Anatomy panel width"]');
+    const sliderThumb = (container: HTMLElement) =>
+        sliderRoot(container)?.querySelector<HTMLElement>('[role="slider"]');
+
+    it('keeps the Anatomy width inactive in Fixed mode and unlocks it in Resizable mode', () => {
+        const { container } = render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
+        const modeGroup = screen.getByRole('radiogroup', { name: 'Anatomy panel mode' });
+        expect(within(modeGroup).getByRole('radio', { name: 'Fixed' }).getAttribute('aria-checked')).toBe('true');
+        expect(sliderRoot(container)?.getAttribute('data-disabled')).not.toBeNull();
+
+        fireEvent.click(within(modeGroup).getByRole('radio', { name: 'Resizable' }));
+
+        expect(sliderRoot(container)?.getAttribute('data-disabled')).toBeNull();
+        expect(localStorage.getItem(ANATOMY_MODE_KEY)).toBe('resizable');
+    });
+
+    it('commits the Anatomy width without changing the sidebar width', () => {
+        localStorage.setItem(ANATOMY_MODE_KEY, 'resizable');
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, '400');
+        const { container } = render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
+        const notify = vi.fn();
+        const unsub = subscribeToPreferenceWrites(notify);
+
+        fireEvent.keyDown(sliderRoot(container)!, { key: 'End' });
+
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(notify).toHaveBeenCalledWith('appearance', ['anatomyWidth']);
+        expect(sliderThumb(container)?.getAttribute('aria-valuenow')).toBe(String(ANATOMY_WIDTH.max));
+        expect(localStorage.getItem(ANATOMY_WIDTH_KEY)).toBe(String(ANATOMY_WIDTH.max));
+        expect(localStorage.getItem(SIDEBAR_WIDTH_KEY)).toBe('400');
+        unsub();
+    });
+
+    it('resets only the Anatomy layout preferences', () => {
+        localStorage.setItem(ANATOMY_MODE_KEY, 'resizable');
+        localStorage.setItem(ANATOMY_WIDTH_KEY, '800');
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, '400');
+        const { container } = render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Reset Anatomy panel layout' }));
+
+        expect(localStorage.getItem(ANATOMY_MODE_KEY)).toBe('fixed');
+        expect(localStorage.getItem(ANATOMY_WIDTH_KEY)).toBe(String(ANATOMY_WIDTH.default));
+        expect(localStorage.getItem(SIDEBAR_WIDTH_KEY)).toBe('400');
+        expect(sliderRoot(container)?.getAttribute('data-disabled')).not.toBeNull();
+        expect(sliderThumb(container)?.getAttribute('aria-valuenow')).toBe(String(ANATOMY_WIDTH.default));
     });
 });

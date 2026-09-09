@@ -50,7 +50,7 @@ import {
   hydrateAppearanceDocument,
   hydrateNavigationDocument,
 } from '../preferencesDocuments';
-import { resetSidebarLayout } from '../resetPreferences';
+import { resetAnatomyLayout, resetSidebarLayout } from '../resetPreferences';
 
 interface MockResponse {
   ok: boolean;
@@ -77,6 +77,8 @@ const APPEARANCE_DOC = {
   density: 'comfortable', logChipColorMode: 'unified',
   borderBoost: 0, glow: 0.16, contrast: 0, typeScale: 1,
   reducedEffects: true, reducedMotion: true, readability: false,
+  sidebarMode: 'fixed', sidebarWidth: 256,
+  anatomyMode: 'fixed', anatomyWidth: 640,
 };
 
 const NAVIGATION_DOC = {
@@ -527,5 +529,29 @@ describe('preference sync layer', () => {
     expect(puts[0].body).toMatchObject({ expectedRevision: 4, sidebarMode: 'fixed', sidebarWidth: 256 });
     expect(recordedCalls().filter((c) => c.method === 'DELETE')).toHaveLength(0);
     expect(inspectQueue('appearance').settling).toBe(false);
+  });
+
+  it('the targeted Anatomy reset writes only its layout defaults', async () => {
+    apiFetch.mockImplementation(async (_path: string, opts?: RequestInit) => {
+      if (opts?.method === 'PUT') {
+        return jsonResponse(200, { domain: 'appearance', revision: 5, updatedAt: 1 });
+      }
+      return jsonResponse(200, { preferences: {} });
+    });
+    adoptKnownRevision('appearance', 4);
+    localStorage.setItem('sencho.appearance.anatomyMode', 'resizable');
+    localStorage.setItem('sencho.appearance.anatomyWidth', '800');
+    localStorage.setItem('sencho.appearance.sidebarWidth', '400');
+
+    resetAnatomyLayout();
+
+    expect(localStorage.getItem('sencho.appearance.anatomyMode')).toBe('fixed');
+    expect(localStorage.getItem('sencho.appearance.anatomyWidth')).toBe('640');
+    expect(localStorage.getItem('sencho.appearance.sidebarWidth')).toBe('400');
+    await flushPendingWrites();
+    await vi.waitFor(() => expect(recordedCalls().some((c) => c.method === 'PUT')).toBe(true));
+    const puts = recordedCalls().filter((c) => c.method === 'PUT');
+    expect(puts).toHaveLength(1);
+    expect(puts[0].body).toMatchObject({ expectedRevision: 4, anatomyMode: 'fixed', anatomyWidth: 640 });
   });
 });

@@ -44,6 +44,7 @@ const APPEARANCE_DOC = {
   borderBoost: 0, glow: 0.16, contrast: 0, typeScale: 1,
   reducedEffects: true, reducedMotion: true, readability: false,
   sidebarMode: 'resizable', sidebarWidth: 320,
+  anatomyMode: 'resizable', anatomyWidth: 640,
 };
 
 // The document shape an older frontend writer sends (before the sidebar
@@ -656,7 +657,7 @@ describe('user-preferences validation', () => {
     expect((await put({ ...APPEARANCE_DOC, extra: true })).status).toBe(400);
   });
 
-  it('accepts the new sidebar fields', async () => {
+  it('accepts the pane layout fields', async () => {
     const put = (doc: Record<string, unknown>) => request(app).put('/api/user-preferences/appearance')
       .set('Cookie', viewer.cookie).set(HEADER, String(viewer.userId))
       .send({ absent: true, ...doc });
@@ -668,18 +669,25 @@ describe('user-preferences validation', () => {
     const appearance = (all.body.preferences.appearance?.data ?? {}) as Record<string, unknown>;
     expect(appearance.sidebarMode).toBe('resizable');
     expect(appearance.sidebarWidth).toBe(320);
+    expect(appearance.anatomyMode).toBe('resizable');
+    expect(appearance.anatomyWidth).toBe(640);
   });
 
-  it('rejects invalid sidebar field values', async () => {
+  it('rejects invalid pane layout field values', async () => {
     const put = (doc: Record<string, unknown>) => request(app).put('/api/user-preferences/appearance')
       .set('Cookie', viewer.cookie).set(HEADER, String(viewer.userId))
       .send({ absent: true, ...doc });
 
     expect((await put({ ...APPEARANCE_DOC, sidebarMode: 'float' })).status).toBe(400);
-    expect((await put({ ...APPEARANCE_DOC, sidebarWidth: 223 })).status).toBe(400);
+    expect((await put({ ...APPEARANCE_DOC, sidebarWidth: 247 })).status).toBe(400);
     expect((await put({ ...APPEARANCE_DOC, sidebarWidth: 441 })).status).toBe(400);
     expect((await put({ ...APPEARANCE_DOC, sidebarWidth: 320.5 })).status).toBe(400);
     expect((await put({ ...APPEARANCE_DOC, sidebarWidth: '320' })).status).toBe(400);
+    expect((await put({ ...APPEARANCE_DOC, anatomyMode: 'float' })).status).toBe(400);
+    expect((await put({ ...APPEARANCE_DOC, anatomyWidth: 319 })).status).toBe(400);
+    expect((await put({ ...APPEARANCE_DOC, anatomyWidth: 961 })).status).toBe(400);
+    expect((await put({ ...APPEARANCE_DOC, anatomyWidth: 640.5 })).status).toBe(400);
+    expect((await put({ ...APPEARANCE_DOC, anatomyWidth: '640' })).status).toBe(400);
   });
 
   /** Remove the viewer's appearance row outright. A route-level DELETE only
@@ -693,7 +701,7 @@ describe('user-preferences validation', () => {
       .run(viewer.userId);
   }
 
-  it('normalizes a legacy 16-field document with the sidebar defaults on PUT', async () => {
+  it('normalizes a legacy 16-field document with the pane defaults on PUT', async () => {
     await clearAppearanceRow();
 
     const put = await request(app).put('/api/user-preferences/appearance')
@@ -702,6 +710,8 @@ describe('user-preferences validation', () => {
     expect(put.status).toBe(200);
     expect(put.body.data.sidebarMode).toBe('fixed');
     expect(put.body.data.sidebarWidth).toBe(256);
+    expect(put.body.data.anatomyMode).toBe('fixed');
+    expect(put.body.data.anatomyWidth).toBe(640);
   });
 
   it('normalizes a legacy document on migrate and a repair PUT keeps the defaults', async () => {
@@ -735,6 +745,8 @@ describe('user-preferences validation', () => {
     expect(repair.status).toBe(200);
     expect(repair.body.data.sidebarMode).toBe('fixed');
     expect(repair.body.data.sidebarWidth).toBe(256);
+    expect(repair.body.data.anatomyMode).toBe('fixed');
+    expect(repair.body.data.anatomyWidth).toBe(640);
   });
 
   it('404s an unknown domain', async () => {

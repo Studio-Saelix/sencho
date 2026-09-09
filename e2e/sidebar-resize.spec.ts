@@ -39,6 +39,10 @@ async function openAppearanceSettings(page: Page): Promise<void> {
   await expect(page.getByRole('heading', { name: 'Sidebar layout' })).toBeVisible();
 }
 
+function sidebarModeOption(page: Page, name: 'Fixed' | 'Resizable') {
+  return page.getByRole('radiogroup', { name: 'Sidebar mode' }).getByRole('radio', { name });
+}
+
 /**
  * Poll the server-side appearance document until it matches, so the sync
  * bus's debounce and any request ordering cannot produce a fixed-sleep race.
@@ -53,24 +57,6 @@ async function expectStoredAppearance(
     const rows = await getPreferences(request, userId);
     return rows.preferences.appearance?.data ?? null;
   }, { timeout: 15_000 }).toMatchObject(expected);
-}
-
-/**
- * Log in on a phone viewport. loginAs cannot be used here: its readiness
- * probes target the desktop topbar, which bespoke mobile screens never
- * render (the phone shell rehomes notifications and the nav into the
- * masthead and the bottom navigation). Waits for the mobile sidebar chrome
- * on the stacks list surface instead.
- */
-async function mobileLogin(page: Page): Promise<void> {
-  await page.goto('/');
-  await page.locator('#username').fill(SUITE_USER);
-  await page.locator('#password').fill(TEST_PASSWORD);
-  await page.locator('button:has-text("Login"), button:has-text("Sign in")').first().click();
-  await expect(page.getByRole('navigation', { name: 'Primary mobile' })).toBeVisible({ timeout: 15_000 });
-  await page.goto('/nodes/local/stacks');
-  await expect(page.locator('[data-sn-chrome="sidebar"]')).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('[data-stacks-loaded="true"]')).toBeAttached({ timeout: 15_000 });
 }
 
 test.describe('Resizable stacks sidebar', () => {
@@ -116,8 +102,16 @@ test.describe('Resizable stacks sidebar', () => {
     });
 
     await openAppearanceSettings(page);
-    await page.getByRole('radio', { name: 'Resizable' }).click();
+    await sidebarModeOption(page, 'Resizable').click();
     await expect(separator(page)).toBeVisible();
+
+    const paneBox = await pane(page).boundingBox();
+    const tickerBox = await page.getByTestId('activity-ticker').boundingBox();
+    expect(paneBox).not.toBeNull();
+    expect(tickerBox).not.toBeNull();
+    expect(Math.abs(
+      paneBox!.y + paneBox!.height - tickerBox!.y - tickerBox!.height,
+    )).toBeLessThan(1);
 
     // Poll the captured requests rather than trusting the flush window: the
     // debounce only guarantees the PUT is late, never that it arrived early.
@@ -191,7 +185,7 @@ test.describe('Resizable stacks sidebar', () => {
     expect(before).toBe(320);
     await separator(page).focus();
     await page.keyboard.press('Home');
-    await expect(pane(page)).toHaveAttribute('style', /width: 224px/);
+    await expect(pane(page)).toHaveAttribute('style', /width: 248px/);
 
     // Leave a comfortable width for the clamp and retention tests.
     await separator(page).focus();
@@ -256,7 +250,7 @@ test.describe('Resizable stacks sidebar', () => {
     await expect(pane(page)).toHaveAttribute('style', /width: 440px/);
 
     await openAppearanceSettings(page);
-    await page.getByRole('radio', { name: 'Fixed' }).click();
+    await sidebarModeOption(page, 'Fixed').click();
     await expect(separator(page)).toHaveCount(0);
     await expect(pane(page)).toHaveCount(0);
 
@@ -266,7 +260,7 @@ test.describe('Resizable stacks sidebar', () => {
 
     // Back to Resizable: the retained width applies again (the default
     // viewport allows it, so no clamp rewrites it).
-    await page.getByRole('radio', { name: 'Resizable' }).click();
+    await sidebarModeOption(page, 'Resizable').click();
     await expect(pane(page)).toBeVisible();
     await expect(pane(page)).toHaveAttribute('style', /width: 440px/);
 
@@ -349,11 +343,11 @@ test.describe('Resizable stacks sidebar', () => {
   test('mobile viewport shows no handle and unchanged layout', async ({ browser }) => {
     const context = await browser.newContext();
     const page = await context.newPage();
-    // setViewportSize (not a context-level viewport) matches the mobile-check
-    // suite's approach; on this host a context-level small viewport combined
-    // with a long serial run has been observed to crash the renderer.
+    // Authenticate while the role-independent desktop readiness probe is
+    // available, then switch the same page to the phone viewport.
+    await loginAs(page, SUITE_USER, TEST_PASSWORD, { viewerSafe: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await mobileLogin(page);
+    await expect(page.getByRole('navigation', { name: 'Primary mobile' })).toBeVisible({ timeout: 15_000 });
     await expect(separator(page)).toHaveCount(0);
     await expect(pane(page)).toHaveCount(0);
     await expect(page.locator('[data-sn-chrome="sidebar"]')).toBeVisible();

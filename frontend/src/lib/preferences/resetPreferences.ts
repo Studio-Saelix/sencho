@@ -14,6 +14,7 @@ import {
   writePreferenceCacheFromDocuments,
 } from './preferencesDocuments';
 import { SIDEBAR_WIDTH_DEFAULT, applySidebarModeValue, applySidebarWidthValue } from '@/hooks/use-sidebar-layout';
+import { ANATOMY_WIDTH_DEFAULT, applyAnatomyModeValue, applyAnatomyWidthValue } from '@/hooks/use-anatomy-layout';
 
 export function resetPreferenceDomain(domain: PreferenceDomain): void {
   setHydratingDomains(new Set([domain]));
@@ -49,5 +50,12 @@ export function resetSidebarLayout(): void {
   applySidebarModeValue('fixed');
   applySidebarWidthValue(SIDEBAR_WIDTH_DEFAULT);
   const fields: readonly PreferenceField[] = ['sidebarMode', 'sidebarWidth'];
+  notifyPreferenceWrite('appearance', fields);
+}
+
+export function resetAnatomyLayout(): void {
+  applyAnatomyModeValue('fixed');
+  applyAnatomyWidthValue(ANATOMY_WIDTH_DEFAULT);
+  const fields: readonly PreferenceField[] = ['anatomyMode', 'anatomyWidth'];
   notifyPreferenceWrite('appearance', fields);
 }
