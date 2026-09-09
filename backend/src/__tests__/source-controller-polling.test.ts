@@ -6,7 +6,9 @@
  * for the harness rationale), but rows are seeded and cursor transitions run
  * for real against the GitOps schema: the tests primarily assert on the row
  * state the controller leaves behind (the manual-source test asserts the
- * absence of a reconcile call).
+ * absence of a reconcile call). One exception: the backoff-deferral test,
+ * where eligibility itself is the behavior under test, drives the real due
+ * queries instead of mockDue.
  *
  * Seeding rule learned the hard way: the controller re-reads the durable row
  * after reconcile, so a hand-edited copy passed to mockDue only decides what

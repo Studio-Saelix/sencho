@@ -185,6 +185,26 @@ describe('gitops transitions', () => {
     expect(store.getApplication('app-policy-manual')?.next_poll_at).toBeNull();
   });
 
+  it('sourcePolicyChanged to manual consumes an armed retry cursor', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-policy-manual-retry', 'policy-manual-retry-web'), nodeId: 1, envelope: envelope('op-act-policy-manual-retry') });
+    tx.sourceRetryScheduled(
+      'app-policy-manual-retry',
+      Date.now() + 10 * 60_000,
+      1,
+      envelope('op-retry-policy-manual'),
+    );
+    tx.sourcePolicyChanged('app-policy-manual-retry', 'manual', envelope('op-policy-manual-retry'));
+    // Same trap as the poll cursor: the retry scan has no policy filter, so
+    // a left-behind retry_at would put the manual row in the retry-due set
+    // every tick, declined by the controller's manual guard and never
+    // consumed.
+    expect(store.getApplication('app-policy-manual-retry')?.retry_at).toBeNull();
+    // The failure itself stays visible; only the schedule is withdrawn.
+    expect(store.getApplication('app-policy-manual-retry')?.failure_stage).toBeNull();
+  });
+
   it('sourcePolicyChanged to non-manual keeps the armed poll cursor', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
