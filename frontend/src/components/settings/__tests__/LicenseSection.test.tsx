@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import type { LicenseInfo } from '@/context/LicenseContext';
+import type { BuildInfoContextType } from '@/context/BuildInfoProvider';
 
 const useLicenseMock = vi.fn();
 
@@ -10,6 +11,12 @@ vi.mock('@/context/LicenseContext', () => ({
 
 vi.mock('../MastheadStatsContext', () => ({
     useMastheadStats: () => {},
+}));
+
+const useBuildInfoMock = vi.fn<() => BuildInfoContextType>(() => ({ buildInfo: null, status: 'ready', retry: vi.fn() }));
+
+vi.mock('@/hooks/useBuildInfo', () => ({
+    useBuildInfo: () => useBuildInfoMock(),
 }));
 
 vi.mock('@/components/TierBadge', () => ({
@@ -133,5 +140,74 @@ describe('LicenseSection pricing link', () => {
         );
         render(<LicenseSection />);
         expect(screen.getByText('See pricing')).toBeTruthy();
+    });
+});
+
+describe('LicenseSection build rows (running identity consistency)', () => {
+    beforeEach(() => {
+        useLicenseMock.mockReset();
+        useBuildInfoMock.mockReset();
+        useBuildInfoMock.mockReturnValue({ buildInfo: null, status: 'ready', retry: vi.fn() });
+        mockLicense(baseLicense());
+    });
+
+    it('renders the running Community channel and image ref, regardless of configured target', () => {
+        useBuildInfoMock.mockReturnValue({
+            buildInfo: {
+                version: '0.97.1',
+                channel: 'stable',
+                imageChannel: 'community',
+                imageRef: 'ghcr.io/studio-saelix/sencho:0.97.1',
+                imageId: 'a'.repeat(64),
+                revision: null,
+                restricted: false,
+            },
+            status: 'ready',
+            retry: vi.fn(),
+        });
+        render(<LicenseSection />);
+        // The configured/compose target is hardened, but the running build is
+        // Community: the row must show the running image, never the target.
+        expect(screen.getByText('ghcr.io/studio-saelix/sencho:0.97.1')).toBeTruthy();
+        expect(screen.queryByText('Hardened')).toBeNull();
+    });
+
+    it('renders a hardened running image as Hardened channel and Restricted image, not Unknown', () => {
+        useBuildInfoMock.mockReturnValue({
+            buildInfo: {
+                version: '0.97.1',
+                channel: 'stable',
+                imageChannel: 'hardened',
+                imageRef: null,
+                imageId: 'b'.repeat(64),
+                revision: null,
+                restricted: true,
+            },
+            status: 'ready',
+            retry: vi.fn(),
+        });
+        render(<LicenseSection />);
+        expect(screen.getByText('Hardened')).toBeTruthy();
+        expect(screen.getByText('Restricted')).toBeTruthy();
+        expect(screen.queryByText('Unknown')).toBeNull();
+    });
+
+    it('labels an unclassifiable running image Channel Unknown, never Custom', () => {
+        useBuildInfoMock.mockReturnValue({
+            buildInfo: {
+                version: '0.97.1',
+                channel: 'unknown',
+                imageChannel: 'unknown',
+                imageRef: null,
+                imageId: null,
+                revision: null,
+                restricted: false,
+            },
+            status: 'ready',
+            retry: vi.fn(),
+        });
+        render(<LicenseSection />);
+        expect(screen.getAllByText('Unknown').length).toBeGreaterThan(0);
+        expect(screen.queryByText('Custom')).toBeNull();
     });
 });

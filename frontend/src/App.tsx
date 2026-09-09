@@ -9,6 +9,7 @@ import { retryDomain } from './lib/preferences/syncBus';
 import { toast } from './components/ui/toast-store';
 import { NodeProvider } from './context/NodeContext';
 import { LicenseProvider } from './context/LicenseContext';
+import { BuildInfoProvider } from './context/BuildInfoProvider';
 import { Login } from './components/Login';
 import { Setup } from './components/Setup';
 import EditorLayout from './components/EditorLayout';
@@ -103,11 +104,13 @@ function AppContent() {
               </Button>
             </div>
           )}
-          <EditorLayout />
-          {/* Portal lives inside LicenseProvider so the editor surface and its
-              portalled overlays can read license state via useLicense().
-              Outer DeployFeedbackProvider is still an ancestor through App. */}
-          <DeployFeedbackPortal />
+          <BuildInfoProvider>
+            <EditorLayout />
+            {/* Portal lives inside LicenseProvider so the editor surface and its
+                portalled overlays can read license state via useLicense().
+                Outer DeployFeedbackProvider is still an ancestor through App. */}
+            <DeployFeedbackPortal />
+          </BuildInfoProvider>
         </LicenseProvider>
       </NodeProvider>
     </MotionProvider>

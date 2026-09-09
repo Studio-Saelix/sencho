@@ -22,6 +22,7 @@ import { useOverlayState } from './EditorLayout/hooks/useOverlayState';
 import { useStackActions, NODE_SWITCH_PENDING_TOKEN } from './EditorLayout/hooks/useStackActions';
 import { useSelectedStackLiveRefresh } from './EditorLayout/hooks/useSelectedStackLiveRefresh';
 import { useTheme } from '@/hooks/use-theme';
+import { useBuildInfo } from '@/hooks/useBuildInfo';
 import { ThemeQuickSwitch } from './theme/ThemeQuickSwitch';
 import { useNotifications } from './EditorLayout/hooks/useNotifications';
 import { useContainerStats } from './EditorLayout/hooks/useContainerStats';
@@ -453,6 +454,7 @@ export default function EditorLayout() {
   const stackMuteActions = useStackMuteActions(stackDisplayName, openMuteRulesWithPrefill);
 
   const { isDarkMode } = useTheme();
+  const { buildInfo } = useBuildInfo();
 
   // ---- Mobile shell (below md) ---------------------------------------------
   // Desktop renders the persistent sidebar + workspace untouched. On a phone we
@@ -974,6 +976,7 @@ export default function EditorLayout() {
       const sidebarEl = (
         <StackSidebar
           isDarkMode={isDarkMode}
+          buildInfo={buildInfo}
           nodeSwitcherSlot={
             <NodeSwitcher
               onManageNodes={() => openSettings('nodes')}
