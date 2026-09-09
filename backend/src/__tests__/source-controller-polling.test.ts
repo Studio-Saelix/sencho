@@ -294,19 +294,11 @@ describe('SourceController poll scheduling', () => {
         );
         const pollCursorAt = getApp('app-backoff').next_poll_at;
         const retryCursorAt = getApp('app-backoff').retry_at;
-        // Simulate the real due queries (the SQL filters this row out of
-        // the poll scan; the retry scan does not see it until retry_at).
-        const store = GitOpsStore.getInstance();
-        vi.spyOn(store, 'listSourcesDueForPoll').mockImplementation(
-            (now: number) => store.listActiveDirectApplications().filter(
-                (a) => a.next_poll_at !== null && a.next_poll_at <= now && a.retry_at === null,
-            ),
-        );
-        vi.spyOn(store, 'listApplicationsDueForRetry').mockImplementation(
-            (now: number) => store.listActiveDirectApplications().filter(
-                (a) => a.retry_at !== null && a.retry_at <= now,
-            ),
-        );
+        // Eligibility is the behavior under test here, so the real due
+        // queries run against the seeded row (every other test in this file
+        // mocks them; see the header). The store SQL must be the thing that
+        // defers to the retry cursor; a JS reimplementation of the predicate
+        // would pass even if the SQL regressed.
         const reconcile = spyOnReconcile().mockResolvedValue(okResult);
 
         controller.start();
