@@ -200,7 +200,7 @@ describe('SourceController poll scheduling', () => {
         seedApplication('app-failed', 'failed-web', 'automatic');
         armPastPoll('app-failed', 'arm-failed');
         mockDue([getApp('app-failed')]);
-        const reconcile = spyOnReconcile().mockImplementation(async () => {
+        spyOnReconcile().mockImplementation(async () => {
             // Drive the failure through the real transitions, exactly as
             // GitSourceService does when a pull fails: fetchStarted consumes
             // both cursors, fetchFailed records the classified evidence.
