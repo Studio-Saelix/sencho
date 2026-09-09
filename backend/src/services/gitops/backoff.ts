@@ -121,6 +121,18 @@ export function classifyFailure(evidence: FailureEvidence): FailureDisposition {
   }
 }
 
+/**
+ * Narrow a stored failure_class to a classifiable code. The column is a
+ * free-form string: the legacy unclassified fallback 'fetch' (still written
+ * when a fetch fails with something that is not a GitSourceError) is not a
+ * GitSourceErrorCode, and classifying it would return undefined instead of
+ * a disposition. Callers must treat an unclassifiable value as permanent:
+ * the failure stays operator-visible and nothing retries it blind.
+ */
+export function isGitSourceErrorCode(code: string): code is GitSourceErrorCode {
+  return Object.prototype.hasOwnProperty.call(CODE_DISPOSITION, code);
+}
+
 const BASE_DELAY_MS = 60_000;
 const MAX_DELAY_MS = 3_600_000;
 const JITTER_RATIO = 0.1;

@@ -165,6 +165,15 @@ export class GitOpsStore {
     ).all() as GitOpsApplicationRow[];
   }
 
+  /** Every live Direct application, for configuration-wide rescheduling. */
+  listActiveDirectApplications(): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE target_mode = 'direct' AND lifecycle_status = 'active'
+       ORDER BY stack_name ASC`,
+    ).all() as GitOpsApplicationRow[];
+  }
+
   getGeneration(id: string): GitOpsGenerationRow | undefined {
     return this.db().prepare('SELECT * FROM gitops_generations WHERE id = ?').get(id) as GitOpsGenerationRow | undefined;
   }

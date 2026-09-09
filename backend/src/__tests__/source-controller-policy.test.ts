@@ -1,0 +1,286 @@
+/**
+ * SourceController automatic acceptance: when a poll settles with a staged
+ * candidate and the source policy is 'automatic', the controller reads the
+ * candidate's compose files off disk as evidence, evaluates them against the
+ * security policy, and, when the verdict is allowed, accepts the candidate
+ * on the policy's behalf (authority: configured_policy) and drives the
+ * apply. Blocked or unprovable candidates hold for a human instead.
+ *
+ * evaluateCandidatePolicy is stubbed (the evaluator itself is covered by
+ * policy-enforcement.test.ts) so each test decides the verdict, but the
+ * compose file the controller reads as evidence is staged for real: a
+ * verdict is only reachable when the evidence read succeeded, so these
+ * tests cannot pass because of an unreadable candidate.
+ */
+import * as fs from 'fs';
+import * as path from 'path';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { directApplicationFixture } from './helpers/gitopsFixtures';
+import { GitOpsStore } from '../services/gitops/store';
+import { GitOpsTransitions } from '../services/gitops/transitions';
+import { stackManagedRoot } from '../services/gitops/directApplication';
+import { GitSourceService } from '../services/GitSourceService';
+import { SourceController } from '../services/gitops/SourceController';
+import type { GitOpsApplicationRow } from '../services/gitops/types';
+import type { ReconcileResult } from '../services/gitops/outcomes';
+
+const TICK_MS = 60_000;
+const okResult: ReconcileResult = { outcome: 'no_source_change', reason: 'ok', nextAction: 'none' };
+
+type EvaluateCandidatePolicy = typeof import('../services/PolicyEnforcement')['evaluateCandidatePolicy'];
+
+const evaluateCandidatePolicy = vi.hoisted(() =>
+    vi.fn<(...args: Parameters<EvaluateCandidatePolicy>) => ReturnType<EvaluateCandidatePolicy>>(),
+);
+vi.mock('../services/PolicyEnforcement', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('../services/PolicyEnforcement')>();
+    return {
+        ...actual,
+        evaluateCandidatePolicy: ((...args: Parameters<EvaluateCandidatePolicy>) =>
+            evaluateCandidatePolicy(...args)) as EvaluateCandidatePolicy,
+    };
+});
+
+let tmpDir: string;
+let controller: SourceController;
+
+function mockDue(duePoll: GitOpsApplicationRow[], dueRetry: GitOpsApplicationRow[] = []): void {
+    vi.spyOn(GitOpsStore.getInstance(), 'listSourcesDueForPoll').mockReturnValue(duePoll);
+    vi.spyOn(GitOpsStore.getInstance(), 'listApplicationsDueForRetry').mockReturnValue(dueRetry);
+}
+
+function spyOnReconcile() {
+    return vi.spyOn(GitSourceService.getInstance(), 'reconcile');
+}
+
+async function advanceOneTick(): Promise<void> {
+    await vi.advanceTimersByTimeAsync(TICK_MS);
+}
+
+function getApp(id: string): GitOpsApplicationRow {
+    const app = GitOpsStore.getInstance().getApplication(id);
+    if (!app) throw new Error(`application ${id} not found`);
+    return app;
+}
+
+/** Write the compose file the controller reads as candidate evidence. */
+function stageCandidateComposeFile(stackName: string, generationId: string): void {
+    const dir = path.join(stackManagedRoot(stackName), 'generations', `candidate-${generationId}`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: nginx:1.27\n');
+}
+
+/**
+ * Stage a live candidate through the real transitions, mirroring the fetch
+ * success sequence GitSourceService drives: fetch opens, generation is
+ * inserted, the commit lands, the candidate passes validation. reviewRequired
+ * follows the production rule (anything not automatic needs a human sign-off).
+ */
+function stageCandidate(
+    appId: string,
+    stackName: string,
+    generationId: string,
+    policy: 'manual' | 'review' | 'automatic' = 'automatic',
+): void {
+    const app = { ...directApplicationFixture(appId, stackName), source_policy: policy };
+    GitOpsTransitions.getInstance().activateDirect({
+        application: app,
+        nodeId: 1,
+        envelope: { operationId: `seed-${appId}`, actor: 'test', trigger: 'config_change', at: Date.now() },
+    });
+    GitOpsStore.getInstance().insertGeneration({
+        id: generationId,
+        application_id: appId,
+        commit_sha: 'c'.repeat(40),
+        repo_url: 'https://github.com/example/repo.git',
+        resolved_ref_kind: 'branch',
+        configured_ref: 'main',
+        repo_identity_json: '{"host":"github.com","pathname":"/example/repo.git"}',
+        manifest_version: 1,
+        candidate_dir: `generations/candidate-${generationId}`,
+        applied_dir: `generations/applied-${generationId}-0`,
+        expected_invocation_json: '{"composeFileOrder":[],"projectName":null,"projectDirectory":null,"envFileOrder":[]}',
+        materialization_fingerprint: app.materialization_fingerprint ?? 'a'.repeat(64),
+        validation_ok: 1,
+        plan_blocked: 0,
+        change_plan_fingerprint: 'f'.repeat(64),
+        operation_id: `gen-${generationId}`,
+        trigger: 'poll',
+        actor: 'system:source-controller',
+        previous_generation_id: null,
+        redacted_limitations_json: '[]',
+        portable_manifest_json: null,
+        compose_inputs_json: null,
+        source_policy_evidence_json: null,
+        security_policy_evidence_json: null,
+        support_requirements_json: null,
+        compatibility_requirements_json: null,
+        created_at: Date.now(),
+    });
+    const env = { operationId: `fetch-${appId}`, actor: 'test', trigger: 'poll', at: Date.now() };
+    GitOpsTransitions.getInstance().fetchStarted(appId, env);
+    GitOpsTransitions.getInstance().fetched(appId, 'c'.repeat(40), env);
+    GitOpsTransitions.getInstance().candidateReady(appId, generationId, policy !== 'automatic', env);
+    stageCandidateComposeFile(stackName, generationId);
+}
+
+/** Arm the poll cursor in the past through the real transition, making the row poll-due. */
+function armDuePoll(id: string): GitOpsApplicationRow {
+    GitOpsTransitions.getInstance().sourcePollScheduled(
+        id,
+        Date.now() - 1_000,
+        { operationId: `arm-${id}`, actor: 'test', trigger: 'poll', at: Date.now() },
+    );
+    return getApp(id);
+}
+
+beforeAll(async () => {
+    tmpDir = await setupTestDb();
+    GitOpsStore.resetForTests();
+    GitOpsTransitions.resetForTests();
+});
+
+afterAll(() => {
+    cleanupTestDb(tmpDir);
+});
+
+beforeEach(() => {
+    vi.useFakeTimers();
+    SourceController.resetForTests();
+    controller = SourceController.getInstance();
+    evaluateCandidatePolicy.mockReset();
+});
+
+afterEach(() => {
+    controller.stop();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+});
+
+describe('SourceController automatic acceptance', () => {
+    it('accepts a staged candidate on an automatic source and drives the apply', async () => {
+        stageCandidate('app-accept', 'accept-web', 'gen-accept');
+        mockDue([armDuePoll('app-accept')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        const reconcile = spyOnReconcile()
+            .mockResolvedValueOnce({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' })
+            .mockResolvedValueOnce(okResult);
+
+        controller.start();
+        await advanceOneTick();
+
+        const row = getApp('app-accept');
+        expect(row.accepted_generation_id).toBe('gen-accept');
+        expect(row.review_required).toBe(0);
+        expect(evaluateCandidatePolicy).toHaveBeenCalledWith(
+            'accept-web',
+            expect.any(Number),
+            expect.any(Array),
+            expect.objectContaining({ actor: 'system:source-controller', bypass: false }),
+        );
+        expect(reconcile).toHaveBeenLastCalledWith(expect.objectContaining({
+            intent: 'apply',
+            applicationId: 'app-accept',
+            stackName: 'accept-web',
+            trigger: 'poll',
+            actor: 'system:source-controller',
+            commitSha: 'c'.repeat(40),
+            planFingerprint: 'f'.repeat(64),
+            deploy: false,
+        }));
+    });
+
+    it('holds a blocked candidate for review without accepting it', async () => {
+        stageCandidate('app-blocked', 'blocked-web', 'gen-blocked');
+        mockDue([armDuePoll('app-blocked')]);
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'blocked',
+            violations: [],
+        });
+        const reconcile = spyOnReconcile()
+            .mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+
+        controller.start();
+        await advanceOneTick();
+
+        const row = getApp('app-blocked');
+        // The evaluator was reached (the evidence read succeeded) and its
+        // verdict, not a missing candidate file, is what holds the candidate.
+        expect(evaluateCandidatePolicy).toHaveBeenCalled();
+        expect(row.accepted_generation_id).toBeNull();
+        expect(row.candidate_generation_id).toBe('gen-blocked');
+        expect(reconcile).toHaveBeenCalledTimes(1);
+        expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ intent: 'fetch' }));
+    });
+
+    it('holds a candidate the evaluator could not prove either way', async () => {
+        stageCandidate('app-unproven', 'unproven-web', 'gen-unproven');
+        mockDue([armDuePoll('app-unproven')]);
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'unavailable',
+            reason: 'Vulnerability scanner is unavailable',
+        });
+        const reconcile = spyOnReconcile()
+            .mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(evaluateCandidatePolicy).toHaveBeenCalled();
+        expect(getApp('app-unproven').accepted_generation_id).toBeNull();
+        expect(reconcile).toHaveBeenCalledTimes(1);
+    });
+
+    it('never auto-accepts on a review-policy source', async () => {
+        stageCandidate('app-review', 'review-web', 'gen-review', 'review');
+        mockDue([armDuePoll('app-review')]);
+        const reconcile = spyOnReconcile()
+            .mockResolvedValue({ outcome: 'pending_review', reason: 'ok', nextAction: 'review' });
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('app-review').accepted_generation_id).toBeNull();
+        expect(evaluateCandidatePolicy).not.toHaveBeenCalled();
+        expect(reconcile).toHaveBeenCalledTimes(1);
+    });
+
+    it('never auto-accepts a source whose policy is manual', async () => {
+        stageCandidate('app-manual-cand', 'manual-cand-web', 'gen-manual', 'manual');
+        mockDue([armDuePoll('app-manual-cand')]);
+        const reconcile = spyOnReconcile()
+            .mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+
+        controller.start();
+        await advanceOneTick();
+
+        // The manual guard skips the row before any fetch or acceptance.
+        expect(reconcile).not.toHaveBeenCalled();
+        expect(evaluateCandidatePolicy).not.toHaveBeenCalled();
+        const row = getApp('app-manual-cand');
+        expect(row.accepted_generation_id).toBeNull();
+        expect(row.candidate_generation_id).toBe('gen-manual');
+    });
+
+    it('does not re-accept a generation that is already accepted', async () => {
+        stageCandidate('app-twice', 'twice-web', 'gen-twice');
+        GitOpsTransitions.getInstance().sourceAccepted({
+            applicationId: 'app-twice',
+            generationId: 'gen-twice',
+            artifactSetId: 'as-twice',
+            sourceAcceptanceId: 'sa-twice',
+            authority: 'operator',
+            envelope: { operationId: 'accept-first', actor: 'operator', trigger: 'manual', at: Date.now() },
+        });
+        mockDue([armDuePoll('app-twice')]);
+        const reconcile = spyOnReconcile()
+            .mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(evaluateCandidatePolicy).not.toHaveBeenCalled();
+        expect(reconcile).toHaveBeenCalledTimes(1);
+    });
+});
