@@ -50,6 +50,14 @@ describe('outcomeFromSourceFacet', () => {
     expect(outcomeFromSourceFacet(facet).outcome).toBe('superseded');
   });
 
+  it('reports no_source_change for a scheduled poll with the next poll time surfaced', () => {
+    const facet: SourceFacet = { ...identity, status: 'source_poll_scheduled', nextPollAt: 12345 };
+    const result = outcomeFromSourceFacet(facet);
+    expect(result.outcome).toBe('no_source_change');
+    expect(result.nextAction).toBe('none');
+    expect(result.nextPollAt).toBe(12345);
+  });
+
   it('reports retry_scheduled with the retry time surfaced', () => {
     const facet: SourceFacet = { ...identity, status: 'source_retry_scheduled', retryAt: 12345, retryCount: 2 };
     const result = outcomeFromSourceFacet(facet);

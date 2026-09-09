@@ -425,6 +425,7 @@ export type SourceFacet =
   | (SourceIdentityFields & { status: 'source_superseded'; supersededGenerationId: string })
   | (SourceIdentityFields & { status: 'applying'; activeOperationId: string; activeGenerationId: string })
   | (SourceIdentityFields & { status: 'source_retry_scheduled'; retryAt: number; retryCount: number })
+  | (SourceIdentityFields & { status: 'source_poll_scheduled'; nextPollAt: number })
   | (SourceIdentityFields & { status: 'source_suspended'; suspendedAt: number; suspendedReason: string | null })
   | (SourceIdentityFields & {
       status: 'source_failed';
@@ -623,6 +624,7 @@ export const FACET_EVIDENCE_SOURCE: FacetEvidenceSource = {
     application_generation_accepted: 'current',
     source_superseded: 'future',
     source_retry_scheduled: 'current',
+    source_poll_scheduled: 'current',
     source_suspended: 'current',
     source_failed: 'current',
     source_unknown: 'current',

@@ -134,6 +134,49 @@ describe('gitops transitions', () => {
     expect(store.getTarget('app-fail', 1)?.applied_generation_id).toBe('gen-fail');
   });
 
+  it('sourcePollScheduled sets next_poll_at and records history', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-poll-sched', 'poll-sched-web'), nodeId: 1, envelope: envelope('op-act-poll') });
+    const result = tx.sourcePollScheduled('app-poll-sched', 12345, envelope('op-poll-sched'));
+    expect(store.getApplication('app-poll-sched')?.next_poll_at).toBe(12345);
+    expect(result.historyIds.length).toBeGreaterThan(0);
+  });
+
+  it('sourcePollScheduled refuses a suspended source', () => {
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-poll-susp', 'poll-susp-web'), nodeId: 1, envelope: envelope('op-act-poll-susp') });
+    tx.sourceSuspended('app-poll-susp', 'operator hold', envelope('op-suspend-poll'));
+    expect(() => tx.sourcePollScheduled('app-poll-susp', 12345, envelope('op-poll-susp'))).toThrow(/suspended/);
+  });
+
+  it('sourcePollScheduled refuses to schedule while an operation is in flight', () => {
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-poll-op', 'poll-op-web'), nodeId: 1, envelope: envelope('op-act-poll-op') });
+    tx.fetchStarted('app-poll-op', envelope('op-f-poll-op'));
+    expect(() => tx.sourcePollScheduled('app-poll-op', 12345, envelope('op-poll-op'))).toThrow(/in flight/);
+  });
+
+  it('fetchFailed records the git source error code as failure_class', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-fetch-code', 'fetch-code-web'), nodeId: 1, envelope: envelope('op-act-fc') });
+    tx.fetchStarted('app-fetch-code', envelope('op-f-fc'));
+    tx.fetchFailed('app-fetch-code', envelope('op-f-fc'), 'NETWORK_TIMEOUT');
+    const application = store.getApplication('app-fetch-code')!;
+    expect(application.failure_class).toBe('NETWORK_TIMEOUT');
+    expect(application.failure_stage).toBe('fetch');
+  });
+
+  it('fetchFailed without evidence keeps the legacy failure_class', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-fetch-legacy', 'fetch-legacy-web'), nodeId: 1, envelope: envelope('op-act-fl') });
+    tx.fetchStarted('app-fetch-legacy', envelope('op-f-fl'));
+    tx.fetchFailed('app-fetch-legacy', envelope('op-f-fl'));
+    expect(store.getApplication('app-fetch-legacy')?.failure_class).toBe('fetch');
+  });
+
   it('rejects a candidate whose fingerprint no longer matches configuration', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();

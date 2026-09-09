@@ -37,6 +37,7 @@ export type ReconcileResult = {
   reason: string;
   nextAction: NextAction;
   retryAt?: number;
+  nextPollAt?: number;
   commitSha?: string;
 };
 
@@ -155,6 +156,15 @@ export function outcomeFromSourceFacet(facet: SourceFacet): ReconcileResult {
         reason: `A previous attempt failed transiently; retry ${facet.retryCount + 1} is scheduled.`,
         nextAction: 'none',
         retryAt: facet.retryAt,
+        commitSha: commitShaOf(facet),
+      };
+
+    case 'source_poll_scheduled':
+      return {
+        outcome: 'no_source_change',
+        reason: `The source settled; the next poll is scheduled for ${new Date(facet.nextPollAt).toISOString()}.`,
+        nextAction: 'none',
+        nextPollAt: facet.nextPollAt,
         commitSha: commitShaOf(facet),
       };
 

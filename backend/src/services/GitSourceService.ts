@@ -2104,11 +2104,15 @@ export class GitSourceService {
                 GitOpsTransitions.getInstance().fetchStarted(gitopsApp.id, gitopsEnv);
             });
         }
+        // The classified error code travels with the failure transition so the
+        // controller can later tell a transient network condition from a
+        // permanent one when it decides whether to schedule a retry.
+        let fetchFailureCode: GitSourceErrorCode | undefined;
         const closeFetch = (): void => {
             if (!gitopsApp || !fetchOpen) return;
             fetchOpen = false;
             this.recordGitOps(stackName, 'fetch failure', () => {
-                GitOpsTransitions.getInstance().fetchFailed(gitopsApp.id, gitopsEnv);
+                GitOpsTransitions.getInstance().fetchFailed(gitopsApp.id, gitopsEnv, fetchFailureCode);
             });
         };
 
@@ -2121,6 +2125,7 @@ export class GitSourceService {
                 abandon: closeFetch,
             });
         } catch (e) {
+            if (e instanceof GitSourceError) fetchFailureCode = e.code;
             closeFetch();
             throw e;
         }
@@ -2950,6 +2955,7 @@ export class GitSourceService {
             reason: decoded.reason,
             nextAction: decoded.nextAction,
             retryAt: typeof decoded.retryAt === 'number' ? decoded.retryAt : undefined,
+            nextPollAt: typeof decoded.nextPollAt === 'number' ? decoded.nextPollAt : undefined,
             commitSha: typeof decoded.commitSha === 'string' ? decoded.commitSha : undefined,
         };
     }

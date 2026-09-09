@@ -70,6 +70,7 @@ export type GitOpsHistoryStage =
   | 'rollout_unpaused'
   | 'source_accepted'
   | 'source_conflict_blocker'
+  | 'source_poll_scheduled'
   | 'source_reconcile_started'
   | 'source_reconcile_settled'
   | 'source_retry_scheduled'

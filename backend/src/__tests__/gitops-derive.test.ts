@@ -679,6 +679,41 @@ describe('gitops derivation', () => {
     expect(projection.availableActions).not.toContain('apply');
   });
 
+  it('reports a scheduled poll before the accepted and never-reconciled fallbacks', () => {
+    const store = GitOpsStore.getInstance();
+    // A poll cursor with no failure, no retry cursor, and no candidate means
+    // the controller is waiting for the next poll, not that the source is idle.
+    store.insertApplication(rawApp('app-poll-due', { stack_name: 'poll-due-web', next_poll_at: 12345 }));
+    const projection = projectApplication('app-poll-due', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    if (projection.facets.source.status !== 'source_poll_scheduled') throw new Error('expected poll facet');
+    expect(projection.facets.source.nextPollAt).toBe(12345);
+    // An accepted generation is still the stronger evidence, so the poll
+    // cursor must not mask it.
+    store.insertApplication(rawApp('app-poll-accepted', {
+      stack_name: 'poll-accepted-web',
+      next_poll_at: 12345,
+      desired_commit_sha: 'abc123',
+      accepted_generation_id: 'gen-poll-accepted',
+    }));
+    store.insertGeneration(gen('gen-poll-accepted', 'app-poll-accepted'));
+    const acceptedProjection = projectApplication('app-poll-accepted', false);
+    if (acceptedProjection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(acceptedProjection.facets.source.status).toBe('application_generation_accepted');
+    // A failure beats the cursor the same way the cursor beats the fallbacks:
+    // a poll schedule is never an excuse to hide a fetch failure.
+    store.insertApplication(rawApp('app-poll-failed', {
+      stack_name: 'poll-failed-web',
+      next_poll_at: 12345,
+      failure_stage: 'fetch',
+      failure_class: 'NETWORK_TIMEOUT',
+      failure_at: 1,
+    }));
+    const failedProjection = projectApplication('app-poll-failed', false);
+    if (failedProjection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(failedProjection.facets.source.status).toBe('source_failed');
+  });
+
   it('reports an accepted generation only when its evidence is present, owned, and current', () => {
     const store = GitOpsStore.getInstance();
     const acceptedApp = (id: string, overrides: Partial<GitOpsApplicationRow> = {}) =>

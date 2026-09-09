@@ -1,4 +1,5 @@
 import type { RefKind } from '../git/types';
+import type { GitSourceErrorCode } from '../GitSourceService';
 import { DatabaseService } from '../DatabaseService';
 import {
   decodeArtifactEvidenceJson,
@@ -177,16 +178,28 @@ export class GitOpsTransitions {
       app.active_operation_at = envelope.at;
       app.active_generation_id = null;
       app.retry_at = null;
+      // The poll cursor is a schedule for one fetch, not a standing cadence:
+      // consuming it here (rather than only re-arming on success) is what
+      // keeps a stale cursor from re-firing every tick after the fetch
+      // fails, is declined for manual/off policies, or crashes the
+      // evaluation. A success re-arms through sourcePollScheduled.
+      app.next_poll_at = null;
       this.clearInterruption(app, 'fetch_started');
     });
   }
 
-  fetchFailed(applicationId: string, envelope: EventEnvelope): TransitionResult {
+  /**
+   * Record a fetch failure, with the classified error code when the caller has
+   * one. The code is what lets the controller classify the failure as
+   * transient or permanent; the legacy `'fetch'` class stays the fallback so
+   * callers without a classification still produce a readable failure.
+   */
+  fetchFailed(applicationId: string, envelope: EventEnvelope, code?: GitSourceErrorCode): TransitionResult {
     return this.mutateApp(applicationId, envelope, 'fetch_failed', 'failed', (app) => {
       this.requireMatchingFetch(app, envelope);
       this.clearActive(app);
       app.failure_stage = 'fetch';
-      app.failure_class = 'fetch';
+      app.failure_class = code ?? 'fetch';
       app.failure_at = envelope.at;
       this.clearInterruption(app, 'fetch_started');
     });
@@ -860,6 +873,24 @@ export class GitOpsTransitions {
       }
       app.retry_at = retryAt;
       app.retry_count = retryCount;
+    });
+  }
+
+  /**
+   * Schedule the next poll for a source that settled without needing a retry.
+   *
+   * Like the retry cursor, the poll cursor is a plan, not a resolution: it
+   * never hides a failure (the failure branches win in the derivation) and
+   * never overwrites a staged candidate or an accepted generation, which the
+   * derivation reports ahead of the waiting state.
+   */
+  sourcePollScheduled(applicationId: string, nextPollAt: number, envelope: EventEnvelope): TransitionResult {
+    return this.mutateApp(applicationId, envelope, 'source_poll_scheduled', 'committed', (app) => {
+      if (app.suspended_at) throw new GitOpsTransitionError('source is suspended');
+      if (app.active_operation_stage) {
+        throw new GitOpsTransitionError('cannot schedule a poll while an operation is in flight');
+      }
+      app.next_poll_at = nextPollAt;
     });
   }
 
