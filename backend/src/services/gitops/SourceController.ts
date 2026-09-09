@@ -127,13 +127,12 @@ export class SourceController {
         const store = GitOpsStore.getInstance();
         for (const app of store.listActiveDirectApplications()) {
             if (app.source_policy === 'manual') continue;
-            // A source inside a retry backoff window keeps the retry cursor
-            // as its next wake: the poll scan already defers to any retry
-            // cursor, so a poll cursor armed here would sit inert until the
-            // retry's fetch discards it, while misreporting the next wake in
-            // the polling projection and minting a spurious poll-scheduled
-            // audit line.
-            if (app.retry_at !== null && app.retry_at > now) continue;
+            // A source with an unconsumed retry cursor keeps that cursor as
+            // its next wake: the poll scan defers to any retry cursor, so a
+            // poll cursor armed here would sit inert until the retry's fetch
+            // discards it, while misreporting the next wake in the polling
+            // projection and minting a spurious poll-scheduled audit line.
+            if (app.retry_at !== null) continue;
             const secs = this.effectiveIntervalSecs(app);
             if (secs <= 0) continue;
             const envelope = { operationId: randomUUID(), actor, trigger: 'config_change', at: now };
