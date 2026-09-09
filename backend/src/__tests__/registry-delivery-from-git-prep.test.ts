@@ -10,7 +10,7 @@ import { runWithRegistryDeliveryContext } from '../helpers/registryDeliveryConte
 import {
   writeGitCandidatePreparedMeta,
 } from '../helpers/registryDeliveryGitCandidate';
-import { hashDeliverySourceDir, hashActionSet } from '../helpers/registryDeliveryHashes';
+import { hashDeliverySourceDir, hashActionSet, hashPullRefList } from '../helpers/registryDeliveryHashes';
 import { candidateRelPathForSha } from '../services/gitops/createStagingMarker';
 import type { FetchResult, MaterializationResult } from '../services/GitSourceService';
 
@@ -104,8 +104,10 @@ describe('createStackFromGit prepared git candidate consumption', () => {
             op: 'from-git-deploy-now',
             sourceHash,
             referencedHostsHash: delivery.hashHostList([]),
+            referencedPullRefsHash: hashPullRefList([]),
             coveredHostsHash: delivery.hashHostList([]),
             actionSetHash: hashActionSet(['stack:create']),
+            deliveryContractVersion: 1,
             prepId: entry.prepId,
           }),
           prepId: entry.prepId,

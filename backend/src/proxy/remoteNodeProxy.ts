@@ -728,16 +728,17 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         req.proxyElevatedRole = 'node-admin';
       }
 
-      // Registry credential delivery: when capability and confidential
-      // transport are present, run hop-1 discover and attach the envelope to
-      // the forwarded JSON body. Otherwise forward unchanged (AUD-30).
+      // Registry credential delivery: when the remote supports the exact-ref
+      // contract, run hop-1 discover and either attach the envelope to the
+      // forwarded JSON body or refuse per the delivery matrix; a compressed
+      // body is refused with 415 before the hop runs. Unsupported and
+      // unreachable remotes forward unchanged.
       const deliveryApiPath = `/api${req.path}`;
       if (RegistryDeliveryService.getInstance().isDeliveryEligibleRoute(req.method, deliveryApiPath)) {
         const gate = await evaluateRegistryDeliveryProxyGate(
           req,
           res,
           req.nodeId,
-          node,
           req.method,
           deliveryApiPath,
         );
@@ -776,13 +777,15 @@ export function createRemoteProxyMiddleware(): RequestHandler {
               node,
               target,
               req.rawBody,
+              gate.probe,
             );
             if (!deliveryResult.forward) {
               if (req.registryDeliveryAbortController?.signal.aborted) {
                 return;
               }
-              res.status(deliveryResult.status ?? 500).json({
-                error: deliveryResult.error ?? 'Registry delivery failed',
+              res.status(deliveryResult.status).json({
+                error: deliveryResult.error,
+                code: deliveryResult.code,
               });
               return;
             }

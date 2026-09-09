@@ -4,6 +4,7 @@ import fs from 'fs';
 import semver from 'semver';
 import { SENCHO_VERSION } from '../generated/version';
 import { isDebugEnabled } from '../utils/debug';
+import { getErrorMessage } from '../utils/errors';
 import type { ImagePinKind } from '../helpers/selfUpdateCompose';
 import { assertSafeOutboundUrl, safeAxiosTransport } from '../utils/outboundTarget';
 
@@ -66,6 +67,7 @@ export const CAPABILITIES = [
   'service-scoped-stack-alert',
   'scoped-stack-auth-evidence',
   'remote-registry-credentials',
+  'remote-registry-exact-ref-proof-v1',
 ] as const;
 
 /**
@@ -125,6 +127,23 @@ export const SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY =
 export const REMOTE_REGISTRY_CREDENTIALS_CAPABILITY =
   'remote-registry-credentials' as const satisfies Capability;
 
+/**
+ * Remotes that participate in the exact-ref registry delivery contract
+ * (`contractVersion: 1`): the target reports the exact pull references the
+ * project uses and the hosts it already covers with its own credentials, the
+ * hub probes the uncovered hosts and delivers credentials only for the
+ * challenged ones it can cover, and the attestation carries a hash of the
+ * exact reference list. Hubs refuse to deliver credentials
+ * to a capable remote over a non-confidential transport (409), and refuse to
+ * deliver when no side covers a challenged host. Absent this flag, the hub never
+ * augments and never refuses (legacy silent passthrough).
+ */
+export const REMOTE_REGISTRY_EXACT_REF_PROOF_V1_CAPABILITY =
+  'remote-registry-exact-ref-proof-v1' as const satisfies Capability;
+
+/** Contract version the hub and target negotiate for exact-ref proof. */
+export const REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION = 1;
+
 /** Returns true when the string is a usable semver version. */
 export function isValidVersion(v: string | null | undefined): v is string {
   return !!v && v !== 'unknown' && v !== '0.0.0-dev' && !!semver.valid(v);
@@ -178,6 +197,27 @@ export interface RemoteMeta {
    */
   imageChannel: 'community' | 'hardened' | 'unknown' | null;
 }
+
+export type RemoteMetaTransportFailure =
+  | 'timeout'
+  | 'disconnect'
+  | 'refused'
+  | 'other';
+
+/**
+ * Raw outcome of a remote /api/meta probe, BEFORE normalization. Carries the
+ * reason a probe did not yield meta so capability checks can distinguish a
+ * reachable remote that does not advertise a flag from one that is simply
+ * unreachable. `no_target` is produced by the node-scoped probe when no proxy
+ * target exists; the transport-level fetch (which always has a base URL) never
+ * returns it.
+ */
+export type RemoteMetaProbe =
+  | { kind: 'ok'; meta: RemoteMeta }
+  | { kind: 'no_target' }
+  | { kind: 'transport_failure'; detail: RemoteMetaTransportFailure }
+  | { kind: 'http_failure'; status: number }
+  | { kind: 'malformed' };
 
 // Runtime capability overrides; services call disableCapability() during init.
 const disabledCapabilities = new Set<Capability>();
@@ -239,12 +279,54 @@ function redactUrlCredentials(url: string): string {
   return url.replace(/(\/\/)[^/@]*@/, '$1');
 }
 
-/** Fetch /api/meta from a remote Sencho instance. Returns empty data on failure. */
-export async function fetchRemoteMeta(
+/**
+ * Classify the raw shape of a 2xx /api/meta response body. Only a JSON object
+ * carrying a genuine capabilities array is a usable meta document; anything
+ * else (non-object JSON, a missing or non-array capabilities field) means the
+ * remote did not answer with Sencho metadata, so callers must treat the node
+ * as unreachable rather than as an online remote that advertises nothing.
+ */
+function classifyRemoteMetaBody(
+  data: unknown,
+): 'meta' | 'not-object' | 'capabilities-missing' | 'capabilities-not-array' | 'capabilities-not-strings' {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return 'not-object';
+  const capabilities = (data as Record<string, unknown>).capabilities;
+  if (capabilities === undefined) return 'capabilities-missing';
+  if (!Array.isArray(capabilities)) return 'capabilities-not-array';
+  if (!capabilities.every((entry): entry is string => typeof entry === 'string')) {
+    return 'capabilities-not-strings';
+  }
+  return 'meta';
+}
+
+/** Classify a failed /api/meta request into a raw probe kind, logging the reason. */
+function classifyMetaFetchError(err: unknown, safeUrl: string): RemoteMetaProbe {
+  const maybeResponse = (err as { response?: { status?: unknown } }).response;
+  if (maybeResponse && typeof maybeResponse.status === 'number') {
+    console.warn(`[CapabilityRegistry] Failed to fetch meta from ${safeUrl}: HTTP ${maybeResponse.status}`);
+    return { kind: 'http_failure', status: maybeResponse.status };
+  }
+  const code = (err as { code?: string }).code;
+  let detail: RemoteMetaTransportFailure = 'other';
+  if (code === 'ECONNABORTED') detail = 'timeout';
+  else if (code === 'ECONNRESET') detail = 'disconnect';
+  else if (code === 'ECONNREFUSED') detail = 'refused';
+  console.warn(`[CapabilityRegistry] Failed to fetch meta from ${safeUrl}:`, getErrorMessage(err, 'unknown'));
+  return { kind: 'transport_failure', detail };
+}
+
+/**
+ * Probe /api/meta from a remote Sencho instance and return a typed outcome:
+ * failure causes stay raw (malformed, transport/HTTP failure kinds), while a
+ * successful meta document is normalized into a RemoteMeta. Normalization
+ * consumers that only need a flattened RemoteMeta should call
+ * {@link fetchRemoteMeta}.
+ */
+export async function probeRemoteMeta(
   baseUrl: string,
   apiToken: string,
   trustedLoopback = false,
-): Promise<RemoteMeta> {
+): Promise<RemoteMetaProbe> {
   const safeUrl = redactUrlCredentials(baseUrl);
   try {
     if (!trustedLoopback) await assertSafeOutboundUrl(baseUrl);
@@ -253,10 +335,22 @@ export async function fetchRemoteMeta(
       headers: apiToken ? { Authorization: `Bearer ${apiToken}` } : {},
       timeout: 5000,
     });
+    // A 2xx body that is not a JSON object with a genuine capabilities array is
+    // not Sencho metadata (an intercepting proxy, an error page, a truncated
+    // body). Classify it as malformed so capability probes report unreachable
+    // instead of mistaking garbage for an online remote that advertises
+    // nothing.
+    const bodyClass = classifyRemoteMetaBody(res.data);
+    if (bodyClass !== 'meta') {
+      console.warn(
+        `[CapabilityRegistry] Remote meta from ${safeUrl} is malformed (${bodyClass}); reporting node as unreachable`,
+      );
+      return { kind: 'malformed' };
+    }
     const rawVersion: string | undefined = res.data.version;
     const meta: RemoteMeta = {
       version: isValidVersion(rawVersion) ? rawVersion : null,
-      capabilities: Array.isArray(res.data.capabilities) ? res.data.capabilities : [],
+      capabilities: res.data.capabilities as string[],
       startedAt: typeof res.data.startedAt === 'number' ? res.data.startedAt : null,
       updateError: typeof res.data.updateError === 'string' ? res.data.updateError : null,
       online: true,
@@ -272,9 +366,18 @@ export async function fetchRemoteMeta(
         `[CapabilityRegistry:diag] meta ok from ${safeUrl}: version=${meta.version ?? 'null'} capabilities=${meta.capabilities.length}`,
       );
     }
-    return meta;
+    return { kind: 'ok', meta };
   } catch (err) {
-    console.warn(`[CapabilityRegistry] Failed to fetch meta from ${safeUrl}:`, (err as Error).message);
-    return { ...OFFLINE_META };
+    return classifyMetaFetchError(err, safeUrl);
   }
+}
+
+/** Fetch /api/meta from a remote Sencho instance. Returns empty data on failure. */
+export async function fetchRemoteMeta(
+  baseUrl: string,
+  apiToken: string,
+  trustedLoopback = false,
+): Promise<RemoteMeta> {
+  const probe = await probeRemoteMeta(baseUrl, apiToken, trustedLoopback);
+  return probe.kind === 'ok' ? probe.meta : { ...OFFLINE_META };
 }
