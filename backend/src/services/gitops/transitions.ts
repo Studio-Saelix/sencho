@@ -904,6 +904,11 @@ export class GitOpsTransitions {
    * configuration), but the policy cannot flip under an operation that is
    * mid-flight, since the settle path reads the policy when deciding
    * acceptance.
+   *
+   * Moving to manual consumes any armed poll cursor: manual sources never
+   * join the unattended cadence, so a cursor left armed would be picked up
+   * every tick, declined by the controller's manual guard, and left in
+   * place, projecting a scheduled poll that can never run.
    */
   sourcePolicyChanged(applicationId: string, sourcePolicy: SourcePolicy, envelope: EventEnvelope): TransitionResult {
     return this.mutateApp(applicationId, envelope, 'source_policy_changed', 'committed', (app) => {
@@ -911,6 +916,9 @@ export class GitOpsTransitions {
         throw new GitOpsTransitionError('cannot change the source policy while an operation is in flight');
       }
       app.source_policy = sourcePolicy;
+      if (sourcePolicy === 'manual') {
+        app.next_poll_at = null;
+      }
     });
   }
 

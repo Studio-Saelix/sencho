@@ -173,6 +173,27 @@ describe('gitops transitions', () => {
     expect(() => tx.sourcePolicyChanged('app-policy-op', 'automatic', envelope('op-policy-op'))).toThrow(/in flight/);
   });
 
+  it('sourcePolicyChanged to manual consumes the armed poll cursor', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-policy-manual', 'policy-manual-web'), nodeId: 1, envelope: envelope('op-act-policy-manual') });
+    tx.sourcePollScheduled('app-policy-manual', 12345, envelope('op-poll-policy-manual'));
+    tx.sourcePolicyChanged('app-policy-manual', 'manual', envelope('op-policy-manual'));
+    // A manual source never joins the unattended cadence; leaving the cursor
+    // armed would project a scheduled poll that the controller declines
+    // every tick.
+    expect(store.getApplication('app-policy-manual')?.next_poll_at).toBeNull();
+  });
+
+  it('sourcePolicyChanged to non-manual keeps the armed poll cursor', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-policy-review', 'policy-review-web'), nodeId: 1, envelope: envelope('op-act-policy-review') });
+    tx.sourcePollScheduled('app-policy-review', 12345, envelope('op-poll-policy-review'));
+    tx.sourcePolicyChanged('app-policy-review', 'review', envelope('op-policy-review'));
+    expect(store.getApplication('app-policy-review')?.next_poll_at).toBe(12345);
+  });
+
   it('fetchFailed records the git source error code as failure_class', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
