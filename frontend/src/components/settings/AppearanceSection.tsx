@@ -1,4 +1,5 @@
 import { Check, Info, RotateCcw } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { Combobox } from '@/components/ui/combobox';
 import { Slider } from '@/components/ui/slider';
@@ -6,6 +7,8 @@ import { SegmentedControl } from '@/components/ui/segmented-control';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { useDensity } from '@/hooks/use-density';
 import type { Density } from '@/hooks/use-density';
+import { useSidebarLayout, SIDEBAR_WIDTH, type SidebarMode } from '@/hooks/use-sidebar-layout';
+import { useAnatomyLayout, ANATOMY_WIDTH, type AnatomyMode } from '@/hooks/use-anatomy-layout';
 import { useLogChipColorMode, type LogChipColorMode } from '@/hooks/use-log-chip-color-mode';
 import { useTopNavLabels } from '@/hooks/use-top-nav-labels';
 import { useTopNavAlign, type TopNavAlign } from '@/hooks/use-top-nav-align';
@@ -22,6 +25,7 @@ import { AccentPicker } from '@/components/theme/AccentPicker';
 import { ThemePreview } from '@/components/theme/ThemePreview';
 import { TypeChips } from '@/components/theme/TypeChips';
 import { UI_FONT_OPTIONS, MONO_FONT_OPTIONS } from '@/components/theme/typeOptions';
+import { resetAnatomyLayout, resetSidebarLayout } from '@/lib/preferences/resetPreferences';
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsSecondaryButton } from './SettingsActions';
@@ -62,6 +66,19 @@ const CHIP_COLOR_OPTIONS: { value: LogChipColorMode; label: string }[] = [
     { value: 'unified', label: 'Unified' },
     { value: 'per-service', label: 'Per service' },
 ];
+
+const SIDEBAR_MODE_OPTIONS: { value: SidebarMode; label: string }[] = [
+    { value: 'fixed', label: 'Fixed' },
+    { value: 'resizable', label: 'Resizable' },
+];
+
+const ANATOMY_MODE_OPTIONS: { value: AnatomyMode; label: string }[] = [
+    { value: 'fixed', label: 'Fixed' },
+    { value: 'resizable', label: 'Resizable' },
+];
+
+/** Slider granularity in px; every reachable width is a valid stored integer. */
+const PANE_WIDTH_STEP = 4;
 
 const fmtSigned = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(2)}`;
 
@@ -157,6 +174,22 @@ export function AppearanceSection({
 }) {
     const [density, setDensity] = useDensity();
     const [chipColorMode, setChipColorMode] = useLogChipColorMode();
+    const { sidebarMode, sidebarWidth, setSidebarMode, setSidebarWidth } = useSidebarLayout();
+    // The width slider holds a local draft only while the user drags. An effect
+    // re-syncs the draft from the shared preference whenever it changes through
+    // another surface (targeted reset, hydration, another tab), without issuing
+    // a write.
+    const [sidebarWidthDraft, setSidebarWidthDraft] = useState(sidebarWidth);
+    useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- re-sync the draft from the shared preference (reset, hydration, another tab)
+        setSidebarWidthDraft(sidebarWidth);
+    }, [sidebarWidth]);
+    const { anatomyMode, anatomyWidth, setAnatomyMode, setAnatomyWidth } = useAnatomyLayout();
+    const [anatomyWidthDraft, setAnatomyWidthDraft] = useState(anatomyWidth);
+    useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- re-sync the draft from the shared preference (reset, hydration, another tab)
+        setAnatomyWidthDraft(anatomyWidth);
+    }, [anatomyWidth]);
     const [topNavLabels, setTopNavLabels] = useTopNavLabels();
     const [topNavAlign, setTopNavAlign] = useTopNavAlign();
     const [topNavMode, setTopNavMode] = useTopNavMode();
@@ -461,6 +494,97 @@ export function AppearanceSection({
                         onChange={setChipColorMode}
                         ariaLabel="Log chip color mode"
                     />
+                </SettingsField>
+            </SettingsSection>
+
+            <SettingsSection title="Sidebar layout" kicker="your account">
+                <SettingsField
+                    label="Sidebar mode"
+                    helper="Fixed keeps the stacks sidebar at a set width. Resizable makes the divider between the sidebar and the workspace draggable, on desktop, between 248 and 440 px. Reset sidebar layout restores Fixed and the default width."
+                    align="start"
+                >
+                    <SegmentedControl
+                        value={sidebarMode}
+                        options={SIDEBAR_MODE_OPTIONS}
+                        onChange={setSidebarMode}
+                        ariaLabel="Sidebar mode"
+                    />
+                </SettingsField>
+
+                <SettingsField
+                    label="Sidebar width"
+                    helper="Preferred stacks-sidebar width while Resizable is active."
+                >
+                    <div className="flex items-center gap-3">
+                        <Slider
+                            value={[sidebarWidthDraft]}
+                            min={SIDEBAR_WIDTH.min}
+                            max={SIDEBAR_WIDTH.max}
+                            step={PANE_WIDTH_STEP}
+                            disabled={sidebarMode !== 'resizable'}
+                            onValueChange={([v]) => setSidebarWidthDraft(v)}
+                            onValueCommit={([v]) => setSidebarWidth(v)}
+                            aria-label="Sidebar width"
+                        />
+                        <span className="w-12 shrink-0 text-right font-mono text-xs tabular-nums text-stat-subtitle">
+                            {sidebarWidthDraft} px
+                        </span>
+                    </div>
+                </SettingsField>
+
+                <SettingsField
+                    label="Reset sidebar layout"
+                    helper="Restore the Fixed mode and default width; other appearance preferences are untouched."
+                    align="start"
+                >
+                    <SettingsSecondaryButton type="button" onClick={resetSidebarLayout} aria-label="Reset sidebar layout">
+                        <RotateCcw className="h-4 w-4" />
+                        Reset
+                    </SettingsSecondaryButton>
+                </SettingsField>
+            </SettingsSection>
+
+            <SettingsSection title="Stack detail layout" kicker="your account">
+                <SettingsField
+                    label="Anatomy panel mode"
+                    helper="Fixed keeps the Stack details panes evenly divided. On desktop, Resizable keeps both panes at least 320 px wide, with a 4096 px Anatomy preference ceiling."
+                    align="start"
+                >
+                    <SegmentedControl
+                        value={anatomyMode}
+                        options={ANATOMY_MODE_OPTIONS}
+                        onChange={setAnatomyMode}
+                        ariaLabel="Anatomy panel mode"
+                    />
+                </SettingsField>
+
+                <SettingsField label="Anatomy panel width" helper="Preferred Anatomy panel width while Resizable is active. Available Stack details space determines the live maximum.">
+                    <div className="flex items-center gap-3">
+                        <Slider
+                            value={[anatomyWidthDraft]}
+                            min={ANATOMY_WIDTH.min}
+                            max={ANATOMY_WIDTH.max}
+                            step={PANE_WIDTH_STEP}
+                            disabled={anatomyMode !== 'resizable'}
+                            onValueChange={([v]) => setAnatomyWidthDraft(v)}
+                            onValueCommit={([v]) => setAnatomyWidth(v)}
+                            aria-label="Anatomy panel width"
+                        />
+                        <span className="w-16 shrink-0 text-right font-mono text-xs tabular-nums text-stat-subtitle">
+                            {anatomyWidthDraft} px
+                        </span>
+                    </div>
+                </SettingsField>
+
+                <SettingsField
+                    label="Reset Anatomy panel layout"
+                    helper="Restore Fixed mode and the default width; other appearance preferences are untouched."
+                    align="start"
+                >
+                    <SettingsSecondaryButton type="button" onClick={resetAnatomyLayout} aria-label="Reset Anatomy panel layout">
+                        <RotateCcw className="h-4 w-4" />
+                        Reset
+                    </SettingsSecondaryButton>
                 </SettingsField>
             </SettingsSection>
 

@@ -41,6 +41,9 @@ export interface StackSidebarProps {
   filterStale?: boolean;
   /** False while status evidence is not authoritative; disables bulk buttons. */
   actionsReady?: boolean;
+  /** Fill the parent pane instead of the fixed desktop width (the resizable
+   *  shell pane owns the width); mobile classes are unaffected. */
+  fluid?: boolean;
 }
 
 export function StackSidebar(props: StackSidebarProps) {
@@ -52,6 +55,7 @@ export function StackSidebar(props: StackSidebarProps) {
     showUpdatesChip = true,
     filterStale = false,
     actionsReady = false,
+    fluid = false,
   } = props;
 
   const [filtersVisible, setFiltersVisible] = useState(() => {
@@ -72,7 +76,7 @@ export function StackSidebar(props: StackSidebarProps) {
   return (
     <div
       data-sn-chrome="sidebar"
-      className="w-64 max-md:w-full max-md:flex-1 max-md:min-h-0 max-md:border-r-0 border-r border-glass-border bg-sidebar backdrop-blur-md flex flex-col"
+      className={`${fluid ? 'h-full w-full max-md:h-auto' : 'w-64'} max-md:w-full max-md:flex-1 max-md:min-h-0 max-md:border-r-0 border-r border-glass-border bg-sidebar backdrop-blur-md flex flex-col`}
     >
       {/* On mobile the status masthead leads (it carries the node switcher as
           its kicker chip), so the in-sidebar brand and node rows are redundant

@@ -44,6 +44,8 @@ import { useAuth } from '@/context/AuthContext';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { StackSidebar } from '@/components/sidebar/StackSidebar';
+import { SidebarResizePane } from '@/components/sidebar/SidebarResizePane';
+import { useSidebarLayout } from '@/hooks/use-sidebar-layout';
 import type { StackRowStatus } from '@/components/sidebar/stack-status-utils';
 import { useSidebarActivitySummary } from '@/components/sidebar/useSidebarActivitySummary';
 import { useNextAutoUpdateRun } from '@/components/sidebar/useNextAutoUpdateRun';
@@ -462,6 +464,7 @@ export default function EditorLayout() {
   // full-screen stack detail. `mobileView` is explicit state, decoupled from
   // `activeView`, so 'dashboard' still maps to HomeDashboard everywhere.
   const isMobile = useIsMobile();
+  const { sidebarMode, sidebarWidth, setSidebarWidth } = useSidebarLayout();
   const [mobileView, setMobileView] = useState<MobileView>('list');
   const [mobileSettingsSection, setMobileSettingsSection] = useState<SectionId | null>(null);
   // Optimistically flip to the detail surface the instant a row is tapped,
@@ -1039,8 +1042,20 @@ export default function EditorLayout() {
           onClearSelection={clearSelection}
           onBulkAction={handleBulkAction}
           showUpdatesChip={sidebarIndicators}
+          fluid={sidebarMode === 'resizable'}
         />
       );
+
+      // Desktop resizable branch: the pane owns the width and adds the
+      // separator; Fixed keeps the original shell DOM untouched.
+      const sidebarSlotEl = !isMobile && sidebarMode === 'resizable' ? (
+        <SidebarResizePane
+          sidebarWidth={sidebarWidth}
+          onCommitWidth={setSidebarWidth}
+        >
+          {sidebarEl}
+        </SidebarResizePane>
+      ) : sidebarEl;
 
       const notificationsEl = (
         <NotificationPanel
@@ -1382,9 +1397,9 @@ export default function EditorLayout() {
         <div className="flex h-screen w-screen overflow-hidden app-canvas text-foreground">
           {commandPaletteEl}
           {/* Left Sidebar (Stacks) */}
-          {sidebarEl}
+          {sidebarSlotEl}
           {/* Main Content Area */}
-          <div className="flex-1 flex flex-col overflow-hidden">
+          <div className={`${sidebarMode === 'resizable' ? 'min-w-0 ' : ''}flex-1 flex flex-col overflow-hidden`}>
             {topBarEl}
             {/* Main Workspace */}
             {workspaceEl}
