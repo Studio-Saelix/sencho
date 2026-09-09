@@ -1192,6 +1192,7 @@ export class DatabaseService {
         this.migrateGitOpsCreateCheckpointSshDeployKey();
         this.migrateNodeUpdateSkips();
         this.migrateStackAlertServiceScope();
+        this.migrateGitOpsSourcePolicy();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -2156,6 +2157,8 @@ export class DatabaseService {
         // it off in Settings > Users.
         stmt.run('session_sliding_refresh', '1');
 stmt.run('gitops_schema_version', '1');
+        // Global GitOps polling starts off after an upgrade; operators opt in.
+        stmt.run('gitops_poll_interval_mins', '0');
         // SSO role sync defaults off: admin-set roles persist across SSO sign-ins;
         // operators who want IdP group membership to drive roles opt in via Settings > SSO.
         stmt.run('sso_role_sync', '0');
@@ -2762,6 +2765,37 @@ stmt.run('gitops_schema_version', '1');
     private migrateScanPolicyFleetColumns(): void {
         this.tryAddColumn('scan_policies', 'node_identity', "TEXT NOT NULL DEFAULT ''");
         this.tryAddColumn('scan_policies', 'replicated_from_control', 'INTEGER NOT NULL DEFAULT 0');
+    }
+
+    /**
+     * Legacy auto-apply boolean to source policy. Webhooks always fetched before
+     * consulting the boolean, so a `0` row was review-only, not manual: every
+     * row with a git source converts (0 to review, 1 to automatic). Interval
+     * columns stay NULL so an upgrade starts no unattended polling; global
+     * polling seeds off separately. Gated on gitops_schema_version and idempotent.
+     */
+    private migrateGitOpsSourcePolicy(): void {
+        if (this.getGlobalSettingFresh('gitops_schema_version') === '2') return;
+        try {
+            this.db.transaction(() => {
+                this.db.prepare(`
+                    UPDATE gitops_applications
+                    SET source_policy = (
+                        SELECT CASE WHEN s.auto_apply_on_webhook = 1 THEN 'automatic' ELSE 'review' END
+                        FROM stack_git_sources s
+                        WHERE s.stack_name = gitops_applications.stack_name
+                    )
+                    WHERE EXISTS (
+                        SELECT 1 FROM stack_git_sources s
+                        WHERE s.stack_name = gitops_applications.stack_name
+                    )
+                `).run();
+                this.updateGlobalSetting('gitops_schema_version', '2');
+            })();
+        } catch (e) {
+            console.error('[DatabaseService] gitops source policy migration failed:', (e as Error).message);
+            throw e;
+        }
     }
 
     /**
@@ -4500,6 +4534,27 @@ stmt.run('gitops_schema_version', '1');
         } catch (e) {
             console.warn('[DatabaseService] recovery_retention_days read failed; using default:', (e as Error).message);
             return DEFAULT_RECOVERY_RETENTION_DAYS;
+        }
+    }
+
+    /**
+     * Global unattended poll interval in minutes; 0 disables polling entirely
+     * (the safe default, since 0 also means off when set). Per-source
+     * poll_interval_secs overrides this when non-null. Invalid or missing
+     * values fall back to 0: automation defaults off on a read failure.
+     */
+    public getGitOpsPollIntervalMins(): number {
+        try {
+            const raw = this.getGlobalSettings()['gitops_poll_interval_mins'];
+            const parsed = parseInt(String(raw ?? '0'), 10);
+            if (!Number.isFinite(parsed) || parsed < 0) {
+                console.warn(`[DatabaseService] invalid gitops_poll_interval_mins "${String(raw)}"; treating as 0 (off)`);
+                return 0;
+            }
+            return parsed;
+        } catch (e) {
+            console.warn('[DatabaseService] gitops_poll_interval_mins read failed; treating as 0 (off):', (e as Error).message);
+            return 0;
         }
     }
 
