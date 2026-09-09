@@ -6,6 +6,14 @@ import { wsProxyServer } from '../proxy/websocketProxy';
 import { getErrorMessage } from '../utils/errors';
 import { rejectUpgrade as reject } from './reject';
 import { consoleSessionPathForPathname } from '../helpers/consoleSession';
+import type { ProxyTarget } from '../services/NodeRegistry';
+import {
+  assertSafeOutboundUrl,
+  safeHttpAgent,
+  safeHttpsAgent,
+  safeRemoteFetch,
+  UnsafeOutboundTargetError,
+} from '../utils/outboundTarget';
 
 /**
  * Forward a WebSocket upgrade to a remote Sencho instance. Handles the
@@ -26,7 +34,7 @@ export async function handleRemoteForwarder(
   head: Buffer,
   opts: {
     pathname: string;
-    target: { apiUrl: string; apiToken: string };
+    target: ProxyTarget;
     /** Hub browser operator; recorded as acting_as on the remote audit trail. */
     actingAs?: string;
   },
@@ -35,7 +43,16 @@ export async function handleRemoteForwarder(
   if (!target.apiUrl) return reject(socket, 503, 'Service Unavailable');
 
   const wsTarget = target.apiUrl.replace(/\/$/, '').replace(/^https?/, (m) => m === 'https' ? 'wss' : 'ws');
-  const isPilotLoopback = target.apiToken === '';
+  const isPilotLoopback = target.trustedLoopback;
+  if (!isPilotLoopback) {
+    try {
+      await assertSafeOutboundUrl(target.apiUrl);
+    } catch (error: unknown) {
+      const reason = error instanceof UnsafeOutboundTargetError ? error.reason : 'validation-error';
+      console.error(`[WS Proxy] Refused remote target (${reason}):`, getErrorMessage(error, 'unknown'));
+      return reject(socket, 502, 'Bad Gateway');
+    }
+  }
 
   // Interactive console paths (host console / container exec) are guarded on
   // the remote by an isProxyToken check that rejects the long-lived api_token.
@@ -49,7 +66,7 @@ export async function handleRemoteForwarder(
   if (sessionPath && !isPilotLoopback) {
     try {
       const consoleHeaders = LicenseService.getInstance().getProxyHeaders();
-      const tokenRes = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/system/console-token`, {
+      const tokenRes = await safeRemoteFetch(`${target.apiUrl.replace(/\/$/, '')}/api/system/console-token`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${target.apiToken}`,
@@ -98,5 +115,6 @@ export async function handleRemoteForwarder(
   const fwdUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   fwdUrl.searchParams.delete('nodeId');
   req.url = fwdUrl.pathname + (fwdUrl.searchParams.toString() ? `?${fwdUrl.searchParams.toString()}` : '');
-  wsProxyServer.ws(req, socket, head, { target: wsTarget });
+  const agent = target.apiUrl.startsWith('https:') ? safeHttpsAgent : safeHttpAgent;
+  wsProxyServer.ws(req, socket, head, isPilotLoopback ? { target: wsTarget } : { target: wsTarget, agent });
 }

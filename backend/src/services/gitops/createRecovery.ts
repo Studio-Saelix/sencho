@@ -267,6 +267,7 @@ async function resolveOne(checkpoint: GitOpsCreateCheckpointRow): Promise<Create
           encrypted_deploy_key: checkpoint.encrypted_deploy_key,
           ssh_known_hosts_entry: checkpoint.ssh_known_hosts_entry,
           ssh_host_key_fingerprint: checkpoint.ssh_host_key_fingerprint,
+          encrypted_ca_bundle: checkpoint.encrypted_ca_bundle,
           auto_apply_on_webhook: checkpoint.auto_apply_on_webhook === 1,
           auto_deploy_on_apply: checkpoint.auto_deploy_on_apply === 1,
           last_applied_commit_sha: checkpoint.commit_sha,

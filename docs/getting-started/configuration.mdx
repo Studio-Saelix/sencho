@@ -55,16 +55,13 @@ These tune optional subsystems. Most deployments never set them; the defaults ar
 | `GITSOURCE_MAX_PATH_DEPTH` | `64` | Maximum directory depth for a materialized repository path. Deeper paths are refused. |
 | `GITSOURCE_MAX_FILE_BYTES` | `10485760` | Maximum size of a single materialized file (10 MB). Oversized files are refused. |
 | `SENCHO_PUBLIC_URL` | *(request host)* | Set on the primary instance. Its externally reachable `http(s)://` URL, no trailing slash, baked into pilot enrollment so remote agents dial the public hostname rather than the address the admin used at setup. |
+| `SENCHO_TRUSTED_PROXY_CIDRS` | *(unset)* | Comma-separated CIDRs of reverse proxy peers trusted to supply forwarded client addresses and schemes. Use `/32` for one IPv4 proxy, `/128` for one IPv6 proxy, or the proxy network CIDR. Unset or invalid values make Sencho ignore forwarding headers. |
 | `SENCHO_COMPOSE_COMMAND_TIMEOUT_MS` | `1800000` | Hard timeout for a single Compose command (pull, up, down) during deploy and update, in milliseconds (30 minutes). Sencho kills the command and reports failure if it runs longer than this, regardless of whether it is still producing output. Raise it only for very large images or slow storage. |
 | `SENCHO_COMPOSE_STALL_TIMEOUT_MS` | `600000` | Idle-output backstop for deploy and update Compose steps (pull and recreate), separate from the hard timeout above. If a step produces no output for this long while still running, Sencho stops it so a hung image pull surfaces a clear failure and the in-app recovery actions instead of spinning. Raise it on slow links or for heavy local image builds. |
 | `SENCHO_ZFS_ARCSTATS_PATH` | *(auto)* | Path **inside the container** to the OpenZFS ARC kstat file, for [ZFS ARC-aware host memory](#zfs-arc-aware-host-memory). Sencho checks this path first, then `/host/proc/spl/kstat/zfs/arcstats`, then `/proc/spl/kstat/zfs/arcstats`. Set it only when your ARC stats live at a non-standard path. |
 | `SENCHO_PROC_MEMINFO_PATH` | *(auto)* | Path **inside the container** to `/proc/meminfo`, for [VM memory ballooning](#vm-memory-ballooning). Sencho checks this path first, then `/host/proc/meminfo`, then `/proc/meminfo`. Set it only when you need a custom meminfo path. |
 
 Running a remote host as a pilot agent uses four more variables (`SENCHO_MODE`, `SENCHO_PRIMARY_URL`, `SENCHO_ENROLL_TOKEN`, and `SENCHO_PILOT_CA_FILE`), set only on the remote agent container. Sencho bakes them into the enrollment Compose file it generates, so you rarely write them by hand. See [Pilot Agent](/features/pilot-agent) for the full enrollment walkthrough.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SENCHO_TRUSTED_PROXY_CIDRS` | *(unset)* | Comma-separated CIDRs of reverse proxies that may set `X-Forwarded-Proto` for Pilot Agent TLS termination. When unset or invalid, non-TLS Pilot upgrades are treated as non-confidential and hub registry credential delivery is skipped for that hop. Set this when a TLS-terminating proxy sits in front of the primary and pilots connect through it. |
 
 ## ZFS ARC-aware host memory
 
@@ -249,7 +246,7 @@ services:
 
 ## Reverse proxy setup
 
-Sencho works behind any reverse proxy. The only requirement is that WebSocket connections are forwarded correctly (used for live logs, container terminals, and the host console).
+Sencho works behind any reverse proxy. Forward WebSocket upgrades, the original client address, and the original request scheme. Set `SENCHO_TRUSTED_PROXY_CIDRS` to the direct proxy as a CIDR (for example, `192.168.1.50/32` for one IPv4 address or `fd12:3456:789a::50/128` for one IPv6 address), or to the proxy network CIDR, so Sencho accepts those forwarding headers only from that peer.
 
 ### Nginx
 
@@ -268,6 +265,8 @@ server {
 
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 3600s;
     }
 }

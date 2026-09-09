@@ -29,6 +29,7 @@ import { SettingsSectionContent } from './SettingsSectionContent';
 import { MastheadStatsProvider, useMastheadStatsValue } from './MastheadStatsContext';
 import { useSettingsVisibility } from './useSettingsVisibility';
 import type { NavDestination } from '@/lib/navigation/appNavRegistry';
+import type { ActiveView } from '@/lib/router/routeTypes';
 
 interface SettingsPageProps {
     currentSection: SectionId;
@@ -37,6 +38,7 @@ interface SettingsPageProps {
     onMutePrefillConsumed?: () => void;
     onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
     quickLinkCandidates?: NavDestination[];
+    defaultQuickLinkEligibility?: ActiveView[] | null;
 }
 
 export function SettingsPage(props: SettingsPageProps) {
@@ -54,6 +56,7 @@ function SettingsPageInner({
     onMutePrefillConsumed,
     onOpenMuteRulesWithPrefill,
     quickLinkCandidates,
+    defaultQuickLinkEligibility,
 }: SettingsPageProps) {
     const { activeNode } = useNodes();
     const visibility = useSettingsVisibility();
@@ -212,6 +215,7 @@ function SettingsPageInner({
                                 onMutePrefillConsumed={onMutePrefillConsumed}
                                 onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
                                 quickLinkCandidates={quickLinkCandidates}
+                                defaultQuickLinkEligibility={defaultQuickLinkEligibility}
                             />
                         </div>
                     </ScrollArea>

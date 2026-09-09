@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
@@ -39,11 +40,15 @@ export interface GitSourceFieldsState {
   authType: 'none' | 'token' | 'deploy_key';
   token: string;
   deployKey: string;
+  caBundle: string;
   sshKnownHostsEntry: string;
   sshHostKeyFingerprint: string;
   /** When editing an existing source, the server tells us whether a token is already stored. */
   hasStoredToken: boolean;
   hasStoredDeployKey: boolean;
+  hasStoredCaBundle: boolean;
+  /** Explicit revocation is armed: the next save sends `remove_ca_bundle: true`. */
+  removeCaBundle: boolean;
   storedHostKeyFingerprint: string | null;
   applyMode: ApplyMode;
 }
@@ -62,6 +67,9 @@ export interface GitSourceFieldsProps extends GitSourceFieldsState {
   onAuthTypeChange: (value: 'none' | 'token' | 'deploy_key') => void;
   onTokenChange: (value: string) => void;
   onDeployKeyChange: (value: string) => void;
+  onCaBundleChange: (value: string) => void;
+  /** Explicit revocation: the operator clicked "Remove stored CA". Sends `remove_ca_bundle: true` on the next save. */
+  onRemoveCaBundle: () => void;
   onSshKnownHostsEntryChange: (value: string) => void;
   onSshHostKeyFingerprintChange: (value: string) => void;
   onApplyModeChange: (value: ApplyMode) => void;
@@ -91,9 +99,12 @@ export function GitSourceFields({
   authType,
   token,
   deployKey,
+  caBundle,
   sshHostKeyFingerprint,
   hasStoredToken,
   hasStoredDeployKey,
+  hasStoredCaBundle,
+  removeCaBundle,
   storedHostKeyFingerprint,
   applyMode,
   disabled = false,
@@ -106,6 +117,8 @@ export function GitSourceFields({
   onAuthTypeChange,
   onTokenChange,
   onDeployKeyChange,
+  onCaBundleChange,
+  onRemoveCaBundle,
   onSshKnownHostsEntryChange,
   onSshHostKeyFingerprintChange,
   onApplyModeChange,
@@ -115,6 +128,7 @@ export function GitSourceFields({
   const copy = APPLY_MODE_COPY[variant];
   const primaryComposePath = composePaths[0] ?? '';
   const canBrowse = !!repoUrl?.trim() && !!branch?.trim();
+  const isHttpsRepo = /^https:\/\//i.test(repoUrl.trim());
   const [hostKeyRotation, setHostKeyRotation] = useState<HostKeyRotationWarning | null>(null);
 
   useEffect(() => {
@@ -361,6 +375,46 @@ export function GitSourceFields({
           </div>
         )}
       </div>
+
+      {isHttpsRepo && (
+        <div className="space-y-2">
+          <Label htmlFor="git-source-ca-bundle">Custom CA certificate (optional)</Label>
+          <textarea
+            id="git-source-ca-bundle"
+            placeholder={hasStoredCaBundle ? 'CA bundle stored (paste to replace)' : 'Paste PEM certificate(s) for a private CA'}
+            value={caBundle}
+            onChange={(e) => onCaBundleChange(e.target.value)}
+            disabled={disabled}
+            className="w-full min-h-[72px] rounded-md border border-glass-border bg-transparent px-3 py-2 font-mono text-xs"
+          />
+          <p className="text-[11px] text-stat-subtitle">
+            By default Sencho trusts the system certificate store. Add a custom CA when your git server uses a private certificate authority. The bundle is encrypted at rest and never returned from the API.
+          </p>
+          {hasStoredCaBundle && (
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={disabled}
+                onClick={onRemoveCaBundle}
+              >
+                Remove stored CA
+              </Button>
+              {removeCaBundle && (
+                <Badge variant="destructive" className="text-[10px] h-5" data-testid="git-source-ca-remove-armed">
+                  Removal armed
+                </Badge>
+              )}
+              <span className="text-[11px] text-stat-subtitle">
+                {removeCaBundle
+                  ? 'Will revoke trust for this CA on the next save. Paste a new PEM instead to replace it.'
+                  : 'Revokes trust for this CA on the next save. The textarea starts empty, so saving without changes will keep the stored CA.'}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="space-y-2">
         <Label>Apply behavior</Label>

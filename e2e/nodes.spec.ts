@@ -49,7 +49,7 @@ test.describe('Node management', () => {
     // Scope to the dialog so we target the submit button, not the trigger
     await page.getByRole('dialog').getByRole('button', { name: /add node/i }).click();
 
-    await expect(page.getByText(/loopback|localhost/i)).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText(/target is not allowed/i)).toBeVisible({ timeout: 5_000 });
   });
 
   test('adding a node with an invalid URL shows an error', async ({ page }) => {

@@ -90,8 +90,8 @@ afterEach(() => {
 
 function mockTargets(opts: { pilotReachable: boolean; proxyReachable: boolean } = { pilotReachable: true, proxyReachable: true }) {
   vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => {
-    if (id === pilotNodeId) return opts.pilotReachable ? { apiUrl: PILOT_LOOPBACK, apiToken: '' } : null;
-    if (id === proxyNodeId) return opts.proxyReachable ? { apiUrl: PROXY_URL, apiToken: PROXY_TOKEN } : null;
+    if (id === pilotNodeId) return opts.pilotReachable ? { apiUrl: PILOT_LOOPBACK, apiToken: '', trustedLoopback: true } : null;
+    if (id === proxyNodeId) return opts.proxyReachable ? { apiUrl: PROXY_URL, apiToken: PROXY_TOKEN, trustedLoopback: false } : null;
     return null;
   });
 }

@@ -89,6 +89,9 @@ const EXACT_SUFFIX_RULES: readonly SuffixRule[] = [
   { method: 'POST', suffix: '/git-source/webhook-pull', action: 'stack:edit' },
   { method: 'POST', suffix: '/git-source/dismiss-pending', action: 'stack:edit' },
   { method: 'POST', suffix: '/git-source/browse', action: 'stack:edit' },
+  { method: 'POST', suffix: '/git-source/suspend', action: 'stack:edit' },
+  { method: 'POST', suffix: '/git-source/resume', action: 'stack:edit' },
+  { method: 'POST', suffix: '/git-source/retry', action: 'stack:edit' },
 
   // Deploy
   { method: 'POST', suffix: '/deploy', action: 'stack:deploy' },

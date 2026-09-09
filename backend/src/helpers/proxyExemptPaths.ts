@@ -13,6 +13,7 @@ export const PROXY_EXEMPT_PREFIXES: readonly string[] = [
   '/api/fleet/',
   '/api/webhooks',
   '/api/meta',
+  '/api/build-info',
 ];
 
 /** Returns true when the path should bypass the remote proxy (handled locally). */
@@ -66,6 +67,7 @@ export const HUB_ONLY_PREFIXES: readonly string[] = [
   '/api/node-labels/',
   '/api/registry-delivery/',
   '/api/sso/',
+  '/api/api-tokens/',
 ];
 
 /** Returns true when the path is hub-only and must not be proxied to a remote node. */

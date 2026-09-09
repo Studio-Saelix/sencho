@@ -26,6 +26,7 @@ import type { MuteRuleDraft } from '@/lib/muteRules';
 import LazyBoundary from '../LazyBoundary';
 import { SectionGate } from './SectionGate';
 import type { NavDestination } from '@/lib/navigation/appNavRegistry';
+import type { ActiveView } from '@/lib/router/routeTypes';
 
 // Paid-tier sections are loaded on demand. SectionGate returns null for
 // Community / unentitled operators before reaching the JSX that would mount
@@ -74,17 +75,23 @@ function SectionSkeleton() {
     );
 }
 
-function renderSection(
-    sectionId: SectionId,
-    onDirtyChange: (section: SectionId, dirty: boolean) => void,
-    muteRulePrefill: MuteRuleDraft | null | undefined,
-    onMutePrefillConsumed: (() => void) | undefined,
-    onOpenMuteRulesWithPrefill: ((draft: MuteRuleDraft) => void) | undefined,
-    quickLinkCandidates: NavDestination[] | undefined,
-) {
+function renderSection({
+    sectionId,
+    onDirtyChange,
+    muteRulePrefill,
+    onMutePrefillConsumed,
+    onOpenMuteRulesWithPrefill,
+    quickLinkCandidates,
+    defaultQuickLinkEligibility,
+}: Omit<SettingsSectionContentProps, 'showDescription'>) {
     switch (sectionId) {
         case 'account': return <AccountSection />;
-        case 'appearance': return <AppearanceSection quickLinkCandidates={quickLinkCandidates} />;
+        case 'appearance': return (
+            <AppearanceSection
+                quickLinkCandidates={quickLinkCandidates}
+                defaultQuickLinkEligibility={defaultQuickLinkEligibility}
+            />
+        );
         case 'license': return <LicenseSection />;
         case 'users': return <UsersSection />;
         case 'sso': return <SSOSection />;
@@ -128,6 +135,7 @@ interface SettingsSectionContentProps {
     onMutePrefillConsumed?: () => void;
     onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
     quickLinkCandidates?: NavDestination[];
+    defaultQuickLinkEligibility?: ActiveView[] | null;
 }
 
 /**
@@ -144,18 +152,20 @@ export function SettingsSectionContent({
     onMutePrefillConsumed,
     onOpenMuteRulesWithPrefill,
     quickLinkCandidates,
+    defaultQuickLinkEligibility,
 }: SettingsSectionContentProps) {
     const item = getSettingsItem(sectionId);
     const element = useMemo(
-        () => renderSection(
+        () => renderSection({
             sectionId,
             onDirtyChange,
             muteRulePrefill,
             onMutePrefillConsumed,
             onOpenMuteRulesWithPrefill,
             quickLinkCandidates,
-        ),
-        [sectionId, onDirtyChange, muteRulePrefill, onMutePrefillConsumed, onOpenMuteRulesWithPrefill, quickLinkCandidates],
+            defaultQuickLinkEligibility,
+        }),
+        [sectionId, onDirtyChange, muteRulePrefill, onMutePrefillConsumed, onOpenMuteRulesWithPrefill, quickLinkCandidates, defaultQuickLinkEligibility],
     );
     return (
         <>

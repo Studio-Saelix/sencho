@@ -2,7 +2,7 @@ import type { Request } from 'express';
 
 /** True when the request arrived over HTTPS, either directly or via a trusted TLS-terminating proxy. */
 export const isSecureRequest = (req: Request): boolean => {
-  return req.secure || req.headers['x-forwarded-proto'] === 'https';
+  return req.secure;
 };
 
 /**

@@ -9,6 +9,7 @@ import { NotificationService } from './NotificationService';
 import { PROXY_TIER_HEADER } from './license-headers';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
+import { safeRemoteFetch } from '../utils/outboundTarget';
 
 // Dockerode listContainers shape (subset used here)
 type ContainerInfo = {
@@ -177,14 +178,14 @@ export class AutoHealService {
             }
             const baseUrl = target.apiUrl.replace(/\/$/, '');
             try {
-                const res = await fetch(`${baseUrl}/api/auto-heal/policies`, {
+                const res = await safeRemoteFetch(`${baseUrl}/api/auto-heal/policies`, {
                     method: 'GET',
                     headers: {
                         'Authorization': `Bearer ${target.apiToken}`,
                         [PROXY_TIER_HEADER]: proxyHeaders.tier,
                     },
                     signal: AbortSignal.timeout(LEASE_REFRESH_TIMEOUT_MS),
-                });
+                }, target.trustedLoopback);
                 if (res.ok) {
                     this.leaseRefreshFailures.delete(nodeId);
                 } else {

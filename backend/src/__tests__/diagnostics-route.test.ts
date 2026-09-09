@@ -7,6 +7,7 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { resetTrustedProxyBlockListCache } from '../helpers/trustedProxyCidrs';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -98,6 +99,37 @@ describe('GET /api/diagnostics/environment', () => {
                 adoptCandidateCount: expect.any(Number),
                 adoptCandidatesTruncated: expect.any(Boolean),
             });
+        }
+    });
+
+    it('ignores a forwarded HTTPS scheme from an untrusted peer', async () => {
+        const res = await request(app)
+            .get('/api/diagnostics/environment')
+            .set('Authorization', adminAuthHeader)
+            .set('Host', 'sencho.example.com')
+            .set('X-Forwarded-Proto', 'https');
+
+        expect(res.status).toBe(200);
+        const tls = (res.body.checks as Array<{ id: string; status: string }>).find(check => check.id === 'tls');
+        expect(tls?.status).toBe('warn');
+    });
+
+    it('honors a forwarded HTTPS scheme from an allowlisted proxy peer', async () => {
+        process.env.SENCHO_TRUSTED_PROXY_CIDRS = '127.0.0.0/8';
+        resetTrustedProxyBlockListCache();
+        try {
+            const res = await request(app)
+                .get('/api/diagnostics/environment')
+                .set('Authorization', adminAuthHeader)
+                .set('Host', 'sencho.example.com')
+                .set('X-Forwarded-Proto', 'https');
+
+            expect(res.status).toBe(200);
+            const tls = (res.body.checks as Array<{ id: string; status: string }>).find(check => check.id === 'tls');
+            expect(tls?.status).toBe('pass');
+        } finally {
+            delete process.env.SENCHO_TRUSTED_PROXY_CIDRS;
+            resetTrustedProxyBlockListCache();
         }
     });
 });

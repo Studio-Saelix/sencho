@@ -156,6 +156,11 @@ export function buildDirectApplicationRow(args: {
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    source_suspended_reason: null,
+    source_policy: 'manual',
+    poll_interval_secs: null,
+    next_poll_at: null,
+    attempt_seq: 0,
     partial_json: null,
     failure_stage: null,
     failure_class: null,
@@ -216,6 +221,12 @@ export function buildGenerationRow(args: {
     actor: args.actor,
     previous_generation_id: null,
     redacted_limitations_json: '[]',
+    portable_manifest_json: null,
+    compose_inputs_json: null,
+    source_policy_evidence_json: null,
+    security_policy_evidence_json: null,
+    support_requirements_json: null,
+    compatibility_requirements_json: null,
     created_at: args.at,
   };
 }
@@ -231,6 +242,7 @@ export function buildCreateCheckpointRow(args: {
   encryptedDeployKey?: string | null;
   sshKnownHostsEntry?: string | null;
   sshHostKeyFingerprint?: string | null;
+  encryptedCaBundle?: string | null;
   autoApplyOnWebhook: boolean;
   autoDeployOnApply: boolean;
   commitSha: string;
@@ -257,6 +269,7 @@ export function buildCreateCheckpointRow(args: {
     encrypted_deploy_key: args.encryptedDeployKey ?? null,
     ssh_known_hosts_entry: args.sshKnownHostsEntry ?? null,
     ssh_host_key_fingerprint: args.sshHostKeyFingerprint ?? null,
+    encrypted_ca_bundle: args.encryptedCaBundle ?? null,
     auto_apply_on_webhook: args.autoApplyOnWebhook ? 1 : 0,
     auto_deploy_on_apply: args.autoDeployOnApply ? 1 : 0,
     commit_sha: args.commitSha,

@@ -30,6 +30,8 @@ export interface ResolveRequest {
     ref: string;
     token?: string | null;
     sshAuth?: SshDeployKeyAuth | null;
+    /** Optional per-source custom CA PEM bundle (system anchors are still included). */
+    caBundlePem?: string | null;
     /**
      * Total fetch budget in milliseconds. Note: the resolution round trip
      * (ls-remote) is internally capped at 10s regardless of this value, so

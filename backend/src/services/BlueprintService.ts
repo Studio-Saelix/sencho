@@ -13,6 +13,7 @@ import { StackOpLockService, stackOpSkipMessage, type StackOpAction } from './St
 import { DeployedStackDeletionService } from './DeployedStackDeletionService';
 import { FileSystemService } from './FileSystemService';
 import { NodeRegistry } from './NodeRegistry';
+import { safeAxiosTransport } from '../utils/outboundTarget';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import { LicenseService } from './LicenseService';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions, describePolicyBlock, triggerPostDeployScan } from '../helpers/policyGate';
@@ -180,6 +181,7 @@ export class BlueprintService {
             if (!target) return null;
             const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(blueprintName)}/files/content?path=${encodeURIComponent(BLUEPRINT_MARKER_FILENAME)}`;
             const res = await axios.get(url, {
+                ...safeAxiosTransport(target.trustedLoopback),
                 headers: this.remoteHeaders(target.apiToken),
                 timeout: REMOTE_HTTP_TIMEOUT_MS,
                 validateStatus: () => true,
@@ -229,6 +231,7 @@ export class BlueprintService {
         let listRes;
         try {
             listRes = await axios.get(`${baseUrl}/api/stacks`, {
+                ...safeAxiosTransport(target.trustedLoopback),
                 headers: this.remoteHeaders(target.apiToken),
                 timeout: REMOTE_HTTP_TIMEOUT_MS,
                 validateStatus: () => true,
@@ -433,6 +436,7 @@ export class BlueprintService {
             if (!target) return { allRunning: false, detail: 'remote node not reachable (no proxy target)' };
             const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(blueprintName)}/containers`;
             const res = await axios.get(url, {
+                ...safeAxiosTransport(target.trustedLoopback),
                 headers: this.remoteHeaders(target.apiToken),
                 timeout: REMOTE_HTTP_TIMEOUT_MS,
                 validateStatus: () => true,
@@ -659,7 +663,12 @@ export class BlueprintService {
         const res = await axios.post(
             `${baseUrl}/api/blueprints/apply-local`,
             augmented.body,
-            { headers, timeout: REMOTE_HTTP_TIMEOUT_MS, validateStatus: () => true },
+            {
+                ...safeAxiosTransport(target.trustedLoopback),
+                headers,
+                timeout: REMOTE_HTTP_TIMEOUT_MS,
+                validateStatus: () => true,
+            },
         );
         if (res.status === 404) {
             throw new BlueprintRemoteUpgradeRequiredError(
@@ -691,7 +700,12 @@ export class BlueprintService {
             res = await axios.post(
                 `${baseUrl}/api/blueprints/withdraw-local`,
                 { stackName: blueprint.name, blueprintId: blueprint.id },
-                { headers, timeout: REMOTE_HTTP_TIMEOUT_MS, validateStatus: () => true },
+                {
+                    ...safeAxiosTransport(target.trustedLoopback),
+                    headers,
+                    timeout: REMOTE_HTTP_TIMEOUT_MS,
+                    validateStatus: () => true,
+                },
             );
         } catch (err) {
             const message = BlueprintService.formatError(err);

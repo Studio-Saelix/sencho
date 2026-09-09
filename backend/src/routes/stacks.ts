@@ -25,6 +25,7 @@ import {
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
+import { validateCaBundlePem } from '../services/git/caBundle';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
@@ -1096,6 +1097,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       deploy_key,
       ssh_known_hosts_entry,
       ssh_host_key_fingerprint,
+      ca_bundle,
       auto_apply_on_webhook,
       auto_deploy_on_apply,
       deploy_now,
@@ -1142,6 +1144,12 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
     if (typeof token === 'string' && token.length > 8192) {
       return res.status(400).json({ error: 'token is too long' });
     }
+    if (typeof ca_bundle === 'string' && ca_bundle.length > 65536) {
+      return res.status(400).json({ error: 'ca_bundle is too long' });
+    }
+    if (typeof ca_bundle === 'string' && ca_bundle.trim() && !validateCaBundlePem(ca_bundle)) {
+      return res.status(400).json({ error: 'ca_bundle must contain one or more PEM certificates' });
+    }
     if (typeof env_path === 'string' && env_path.trim() && !isValidGitSourcePath(env_path.trim())) {
       return res.status(400).json({ error: 'env_path must be a relative repository file path' });
     }
@@ -1183,6 +1191,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       sshHostKeyFingerprint: resolvedAuthType === 'deploy_key' && typeof ssh_host_key_fingerprint === 'string'
         ? ssh_host_key_fingerprint
         : null,
+      caBundle: typeof ca_bundle === 'string' ? ca_bundle : null,
       autoApplyOnWebhook,
       autoDeployOnApply,
       auditContext: {

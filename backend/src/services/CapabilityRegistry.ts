@@ -5,6 +5,7 @@ import semver from 'semver';
 import { SENCHO_VERSION } from '../generated/version';
 import { isDebugEnabled } from '../utils/debug';
 import type { ImagePinKind } from '../helpers/selfUpdateCompose';
+import { assertSafeOutboundUrl, safeAxiosTransport } from '../utils/outboundTarget';
 
 const IMAGE_PIN_KINDS: readonly ImagePinKind[] = ['floating', 'semver', 'digest', 'unknown'];
 
@@ -239,10 +240,16 @@ function redactUrlCredentials(url: string): string {
 }
 
 /** Fetch /api/meta from a remote Sencho instance. Returns empty data on failure. */
-export async function fetchRemoteMeta(baseUrl: string, apiToken: string): Promise<RemoteMeta> {
+export async function fetchRemoteMeta(
+  baseUrl: string,
+  apiToken: string,
+  trustedLoopback = false,
+): Promise<RemoteMeta> {
   const safeUrl = redactUrlCredentials(baseUrl);
   try {
+    if (!trustedLoopback) await assertSafeOutboundUrl(baseUrl);
     const res = await axios.get(`${baseUrl.replace(/\/$/, '')}/api/meta`, {
+      ...safeAxiosTransport(trustedLoopback),
       headers: apiToken ? { Authorization: `Bearer ${apiToken}` } : {},
       timeout: 5000,
     });

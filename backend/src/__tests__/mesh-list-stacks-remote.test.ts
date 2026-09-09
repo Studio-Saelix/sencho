@@ -73,6 +73,7 @@ describe('MeshService.listStacksOnNode dispatch (F8)', () => {
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
             apiUrl: 'https://remote.example.com:1852',
             apiToken: 'remote-tok',
+            trustedLoopback: false,
         });
 
         const fetchMock = vi
@@ -112,6 +113,7 @@ describe('MeshService.listStacksOnNode dispatch (F8)', () => {
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
             apiUrl: 'https://remote.example.com:1852',
             apiToken: 'remote-tok',
+            trustedLoopback: false,
         });
         vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('Internal Server Error', { status: 500 }));
 
@@ -160,6 +162,7 @@ describe('MeshService.listStacksOnNode dispatch (F8)', () => {
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
             apiUrl: 'https://remote.example.com:1852',
             apiToken: 'remote-tok',
+            trustedLoopback: false,
         });
         vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
             JSON.stringify({ stacks: ['ok-string', 42, null, { not: 'a string' }] }),
@@ -223,6 +226,7 @@ describe('MeshService.listStacksOnNode dispatch (F8)', () => {
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
             apiUrl: 'https://remote.example.com:1852',
             apiToken: 'remote-tok',
+            trustedLoopback: false,
         });
         vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
             throw new MeshError('push_failed', 'simulated transport failure');

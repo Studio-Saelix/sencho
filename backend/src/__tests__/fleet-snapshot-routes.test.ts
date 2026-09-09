@@ -627,7 +627,7 @@ describe('Snapshot restore: remote dossier notes (proxy PUT)', () => {
 
     it('writes notes to a remote node via the proxy dossier PUT when opted in', async () => {
         const { id, remoteId } = remoteDocSnapshot('rweb', 'documented');
-        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok' });
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
         const calls: Array<{ url: string; method?: string }> = [];
         vi.stubGlobal('fetch', vi.fn(async (url: string, opts?: { method?: string }) => {
             calls.push({ url, method: opts?.method });
@@ -647,7 +647,7 @@ describe('Snapshot restore: remote dossier notes (proxy PUT)', () => {
 
     it('reports a non-fatal notesError when the remote dossier PUT fails but files restored', async () => {
         const { id, remoteId } = remoteDocSnapshot('rweb2', 'documented');
-        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok' });
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
         vi.stubGlobal('fetch', vi.fn(async (url: string) => {
             if (/\/dossier$/.test(url)) return { ok: false, status: 500, text: async () => 'boom' } as unknown as Response;
             return { ok: true, status: 200, text: async () => '' } as unknown as Response;
@@ -668,7 +668,7 @@ describe('Snapshot restore: remote dossier notes (proxy PUT)', () => {
         // restore-all is driven by snapshot id; the target node is resolved from
         // the snapshot's stored files, so the returned remoteId is not needed here.
         const { id } = remoteDocSnapshot('rweb3', 'documented');
-        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok' });
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
         vi.stubGlobal('fetch', vi.fn(async (url: string) => {
             if (/\/dossier$/.test(url)) return { ok: false, status: 500, text: async () => 'boom' } as unknown as Response;
             return { ok: true, status: 200, text: async () => '' } as unknown as Response;
@@ -928,6 +928,7 @@ describe('Snapshot restore: recovery generation contract', () => {
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
             apiUrl: 'http://remote:1852',
             apiToken: 'tok',
+            trustedLoopback: false,
         });
     }
 

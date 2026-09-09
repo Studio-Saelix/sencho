@@ -461,6 +461,7 @@ export interface StackGitSource {
     encrypted_deploy_key: string | null;
     ssh_known_hosts_entry: string | null;
     ssh_host_key_fingerprint: string | null;
+    encrypted_ca_bundle: string | null;
     auto_apply_on_webhook: boolean;
     auto_deploy_on_apply: boolean;
     last_applied_commit_sha: string | null;
@@ -572,6 +573,14 @@ export interface NotificationHistory {
     container_name?: string;
     actor_username?: string | null;
     suppression_match?: string | null;
+    /** The GitOps operation this notification reports on, if any. */
+    gitops_operation_id?: string | null;
+    /**
+     * Unique across all notifications when set. Lets fanout repair re-run
+     * safely: inserting the same key again is a no-op that returns the
+     * existing row instead of creating a duplicate.
+     */
+    dedupe_key?: string | null;
 }
 
 export interface FleetSnapshot {
@@ -1163,6 +1172,7 @@ export class DatabaseService {
         this.migratePolicyEvaluationColumn();
         this.migrateNotificationCategory();
         this.migrateNotificationActor();
+        this.migrateNotificationGitOpsDedupe();
         this.migrateMeshTables();
         this.migrateNodeLabels();
         this.migrateBlueprints();
@@ -1175,6 +1185,7 @@ export class DatabaseService {
         this.migrateStackDossierHashes();
         this.migrateGitSourceMultiFile();
         this.migrateGitSourceSshDeployKey();
+        this.migrateGitSourcePrivateCa();
         this.migrateGitSourceManifest();
         this.migrateGitSourceChangePlan();
         this.migrateGitOpsRecoveryColumns();
@@ -1961,6 +1972,28 @@ export class DatabaseService {
         // from the CREATE TABLE; older DBs need the additive column here.
         maybeAddCol('gitops_generations', 'resolved_ref_kind', 'TEXT NULL');
         maybeAddCol('gitops_applications', 'fetched_resolved_ref_kind', 'TEXT NULL');
+        // Source suspension reason, distinct from the rollout pause_reason
+        // existing installs already have. New installs get it from the
+        // CREATE TABLE; older DBs need the additive column here.
+        maybeAddCol('gitops_applications', 'source_suspended_reason', 'TEXT NULL');
+        // Portable accepted-generation contract fields. Additive and
+        // nullable: existing generation rows decode these as an explicit
+        // limitation rather than invented evidence.
+        maybeAddCol('gitops_generations', 'portable_manifest_json', 'TEXT NULL');
+        maybeAddCol('gitops_generations', 'compose_inputs_json', 'TEXT NULL');
+        maybeAddCol('gitops_generations', 'source_policy_evidence_json', 'TEXT NULL');
+        maybeAddCol('gitops_generations', 'security_policy_evidence_json', 'TEXT NULL');
+        maybeAddCol('gitops_generations', 'support_requirements_json', 'TEXT NULL');
+        maybeAddCol('gitops_generations', 'compatibility_requirements_json', 'TEXT NULL');
+        // Controller-owned bookkeeping (source policy, poll cadence, attempt
+        // sequence). New installs get these from the CREATE TABLE; older DBs
+        // need the additive columns here. Existing installations must not
+        // start unattended polling, so poll_interval_secs and next_poll_at
+        // stay NULL until an operator (or the migration below) sets one.
+        maybeAddCol('gitops_applications', 'source_policy', "TEXT NOT NULL DEFAULT 'manual' CHECK (source_policy IN ('manual','review','automatic'))");
+        maybeAddCol('gitops_applications', 'poll_interval_secs', 'INTEGER NULL');
+        maybeAddCol('gitops_applications', 'next_poll_at', 'INTEGER NULL');
+        maybeAddCol('gitops_applications', 'attempt_seq', 'INTEGER NOT NULL DEFAULT 0');
 
         // Distributed API model columns
         maybeAddCol('nodes', 'api_url', "TEXT DEFAULT ''");
@@ -2643,6 +2676,11 @@ stmt.run('gitops_schema_version', '1');
         this.tryAddColumn('stack_git_sources', 'ssh_host_key_fingerprint', 'TEXT');
     }
 
+    private migrateGitSourcePrivateCa(): void {
+        this.tryAddColumn('stack_git_sources', 'encrypted_ca_bundle', 'TEXT');
+        this.tryAddColumn('gitops_create_checkpoints', 'encrypted_ca_bundle', 'TEXT');
+    }
+
     private migrateGitSourceManifest(): void {
         // Cache columns for the managed-project manifest (the manifest FILE in
         // <DATA_DIR>/git-managed/<nodeId>/<stackName>/ is the source of truth).
@@ -2789,6 +2827,29 @@ stmt.run('gitops_schema_version', '1');
             ).run();
         } catch {
             // index already present or partial-index syntax unsupported
+        }
+    }
+
+    /**
+     * A GitOps history/operation reference and a dedupe key, so notification
+     * fanout for a settled GitOps attempt can be repaired from durable state
+     * (retried at startup after a crash between commit and fanout) without
+     * ever inserting a duplicate notification for the same attempt.
+     */
+    private migrateNotificationGitOpsDedupe(): void {
+        this.tryAddColumn('notification_history', 'gitops_operation_id', 'TEXT');
+        this.tryAddColumn('notification_history', 'dedupe_key', 'TEXT');
+        try {
+            this.db.prepare(
+                'CREATE UNIQUE INDEX IF NOT EXISTS idx_notif_history_dedupe_key ON notification_history(dedupe_key) WHERE dedupe_key IS NOT NULL'
+            ).run();
+        } catch (err) {
+            // Unlike a pure performance index, this one is the ON CONFLICT
+            // target every addNotificationHistory() insert names. If it is
+            // missing, every notification write in the product fails, not
+            // just GitOps ones, so a silent catch here would turn into an
+            // unexplained total outage instead of a diagnosable startup log.
+            console.error('[DatabaseService] Failed to create notification dedupe index:', err);
         }
     }
 
@@ -4731,8 +4792,13 @@ stmt.run('gitops_schema_version', '1');
     }
 
     public addNotificationHistory(nodeId: number, notification: Omit<NotificationHistory, 'id' | 'is_read'>): NotificationHistory {
+        const dedupeKey = notification.dedupe_key ?? null;
         const stmt = this.db.prepare(
-            'INSERT INTO notification_history (node_id, level, message, timestamp, is_read, stack_name, container_name, category, actor_username) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)'
+            `INSERT INTO notification_history (
+                node_id, level, message, timestamp, is_read, stack_name, container_name,
+                category, actor_username, gitops_operation_id, dedupe_key
+            ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING`
         );
         const result = stmt.run(
             nodeId,
@@ -4743,7 +4809,19 @@ stmt.run('gitops_schema_version', '1');
             notification.container_name ?? null,
             notification.category ?? null,
             notification.actor_username ?? null,
+            notification.gitops_operation_id ?? null,
+            dedupeKey,
         );
+
+        // A repair replaying a settled GitOps attempt must not create a
+        // duplicate notification; the conflict is not an error, it is proof
+        // this exact attempt was already reported.
+        if (result.changes === 0 && dedupeKey !== null) {
+            const existing = this.db.prepare(
+                'SELECT * FROM notification_history WHERE dedupe_key = ?',
+            ).get(dedupeKey);
+            return this.mapNotificationRow(existing);
+        }
 
         return {
             id: result.lastInsertRowid as number,
@@ -4755,6 +4833,8 @@ stmt.run('gitops_schema_version', '1');
             stack_name: notification.stack_name,
             container_name: notification.container_name,
             actor_username: notification.actor_username,
+            gitops_operation_id: notification.gitops_operation_id,
+            dedupe_key: dedupeKey,
         };
     }
 
@@ -6496,6 +6576,7 @@ stmt.run('gitops_schema_version', '1');
             encrypted_deploy_key: (row.encrypted_deploy_key as string | null) ?? null,
             ssh_known_hosts_entry: (row.ssh_known_hosts_entry as string | null) ?? null,
             ssh_host_key_fingerprint: (row.ssh_host_key_fingerprint as string | null) ?? null,
+            encrypted_ca_bundle: (row.encrypted_ca_bundle as string | null) ?? null,
             auto_apply_on_webhook: Number(row.auto_apply_on_webhook) === 1,
             auto_deploy_on_apply: Number(row.auto_deploy_on_apply) === 1,
             last_applied_commit_sha: (row.last_applied_commit_sha as string | null) ?? null,
@@ -6538,6 +6619,7 @@ stmt.run('gitops_schema_version', '1');
                     sync_env = ?, env_path = ?,
                     auth_type = ?, encrypted_token = ?, encrypted_deploy_key = ?,
                     ssh_known_hosts_entry = ?, ssh_host_key_fingerprint = ?,
+                    encrypted_ca_bundle = ?,
                     auto_apply_on_webhook = ?, auto_deploy_on_apply = ?,
                     updated_at = ?
                  WHERE stack_name = ?`
@@ -6546,6 +6628,7 @@ stmt.run('gitops_schema_version', '1');
                 source.sync_env ? 1 : 0, source.env_path,
                 source.auth_type, source.encrypted_token, source.encrypted_deploy_key,
                 source.ssh_known_hosts_entry, source.ssh_host_key_fingerprint,
+                source.encrypted_ca_bundle,
                 source.auto_apply_on_webhook ? 1 : 0, source.auto_deploy_on_apply ? 1 : 0,
                 now, source.stack_name
             );
@@ -6555,14 +6638,16 @@ stmt.run('gitops_schema_version', '1');
             `INSERT INTO stack_git_sources
                 (stack_name, repo_url, branch, compose_path, compose_paths, context_dir, sync_env, env_path,
                  auth_type, encrypted_token, encrypted_deploy_key, ssh_known_hosts_entry, ssh_host_key_fingerprint,
+                 encrypted_ca_bundle,
                  auto_apply_on_webhook, auto_deploy_on_apply,
                  created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
             source.stack_name, source.repo_url, source.branch, source.compose_path, composePathsJson, source.context_dir,
             source.sync_env ? 1 : 0, source.env_path,
             source.auth_type, source.encrypted_token, source.encrypted_deploy_key,
             source.ssh_known_hosts_entry, source.ssh_host_key_fingerprint,
+            source.encrypted_ca_bundle,
             source.auto_apply_on_webhook ? 1 : 0, source.auto_deploy_on_apply ? 1 : 0,
             now, now
         );

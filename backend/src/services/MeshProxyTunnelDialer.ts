@@ -11,6 +11,7 @@ import { PilotMetrics } from './PilotMetrics';
 import type { MeshActivityType } from './MeshService';
 import { LicenseService } from './LicenseService';
 import { PROXY_TIER_HEADER } from './license-headers';
+import { assertSafeOutboundUrl, safeOutboundLookup } from '../utils/outboundTarget';
 
 /**
  * Central-side dialer for proxy-mode mesh tunnels.
@@ -247,7 +248,9 @@ export class MeshProxyTunnelDialer extends EventEmitter {
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
         let ws: WebSocket;
         try {
+            await assertSafeOutboundUrl(target.apiUrl);
             ws = new WebSocket(wsUrl, {
+                lookup: safeOutboundLookup,
                 headers: {
                     Authorization: `Bearer ${target.apiToken}`,
                     [PROXY_TIER_HEADER]: proxyHeaders.tier,

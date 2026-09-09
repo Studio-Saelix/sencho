@@ -195,6 +195,28 @@ describe('GitSourcePanel load', () => {
   });
 });
 
+describe('GitSourcePanel CA bundle removal', () => {
+  it('shows an armed indicator on Remove click and clears it when a new PEM is typed', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...LINKED_SOURCE, has_ca_bundle: true }));
+
+    render(panel());
+    await screen.findByRole('button', { name: /update/i });
+
+    expect(screen.queryByTestId('git-source-ca-remove-armed')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /remove stored ca/i }));
+
+    expect(screen.getByTestId('git-source-ca-remove-armed')).toBeInTheDocument();
+    expect(screen.getByText(/will revoke trust for this ca on the next save/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/custom ca certificate/i), {
+      target: { value: '-----BEGIN CERTIFICATE-----\nMII...\n-----END CERTIFICATE-----' },
+    });
+
+    expect(screen.queryByTestId('git-source-ca-remove-armed')).not.toBeInTheDocument();
+  });
+});
+
 describe('GitSourcePanel deploy-mode apply node binding', () => {
   beforeEach(() => {
     nodeCtl.activeNode = { id: 4, type: 'local' };

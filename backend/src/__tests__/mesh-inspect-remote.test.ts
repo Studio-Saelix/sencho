@@ -75,6 +75,7 @@ describe('MeshService.inspectStackServices dispatch (C-3 fix)', () => {
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
             apiUrl: 'https://remote.example.com:1852',
             apiToken: 'remote-tok',
+            trustedLoopback: false,
         });
 
         const fetchMock = vi
@@ -114,6 +115,7 @@ describe('MeshService.inspectStackServices dispatch (C-3 fix)', () => {
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
             apiUrl: 'https://remote.example.com:1852',
             apiToken: 'remote-tok',
+            trustedLoopback: false,
         });
         vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('Internal Server Error', { status: 500 }));
 

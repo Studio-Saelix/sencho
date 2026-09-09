@@ -9,6 +9,7 @@
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { withLoopbackTargetProtection } from './helpers/allowLoopbackTargets';
 
 let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
@@ -72,6 +73,28 @@ describe('MeshProxyTunnelDialer', () => {
         expect(dialer.hasBridge(nodeId)).toBe(false);
         await dialer.ensureBridge(nodeId);
         expect(dialer.hasBridge(nodeId)).toBe(false);
+    });
+
+    it('rejects an unsafe proxy target before opening a WebSocket', async () => {
+        const dialer = MeshProxyTunnelDialer.resetForTest(0);
+        const db = DatabaseService.getInstance();
+        const nodeId = db.addNode({
+            name: 'proxy-test-unsafe-target',
+            type: 'remote',
+            compose_dir: '',
+            is_default: false,
+            mode: 'proxy',
+            api_url: 'http://127.0.0.1:1852',
+            api_token: 'test-token',
+        });
+
+        const result = await withLoopbackTargetProtection(() => dialer.ensureBridge(nodeId));
+
+        expect(result).toBeNull();
+        expect(dialer.getRecentFailure(nodeId)).toMatchObject({
+            code: 'network_error',
+            message: 'The target address is not allowed.',
+        });
     });
 
     it('expires the recent-failure cache entry after the cache TTL window', async () => {

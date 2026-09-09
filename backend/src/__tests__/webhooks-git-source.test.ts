@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 
 let tmpDir: string;
@@ -25,6 +26,7 @@ function seedGitSource(stackName: string): void {
         env_path: null,
         auth_type: 'none',
         encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null, ssh_host_key_fingerprint: null,
+            encrypted_ca_bundle: null,
         auto_apply_on_webhook: false,
         auto_deploy_on_apply: false,
         last_applied_commit_sha: null,
@@ -235,5 +237,143 @@ describe('node-aware Git source webhooks', () => {
         const history = db.getWebhookExecutions(webhookId);
         expect(history[0].status).toBe('success');
         expect(history[0].error).toMatch(/debounced/i);
+    });
+
+    it('forwards a provider delivery id to a remote node under the webhook namespace', async () => {
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'remote-delivery-id-webhook',
+            type: 'remote',
+            compose_dir: '/tmp',
+            is_default: false,
+            api_url: 'http://remote-delivery.example',
+            api_token: 'remote-token',
+        });
+        const webhookId = db.addWebhook({
+            node_id: remoteNodeId,
+            name: 'delivery id remote git',
+            stack_name: 'remote-stack',
+            action: 'git-pull',
+            secret: WebhookService.getInstance().generateSecret(),
+            enabled: true,
+        });
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+            new Response(JSON.stringify({ status: 'success', message: 'Fetched.' }), { status: 200 }),
+        );
+
+        const webhook = db.getWebhook(webhookId)!;
+        const deliverySourceId = db.getGlobalSettings().delivery_source_id;
+        const result = await WebhookService.getInstance().execute(
+            webhook,
+            'git-pull',
+            'test',
+            undefined,
+            'provider-delivery-1',
+        );
+
+        expect(result.success).toBe(true);
+        expect(fetchSpy).toHaveBeenCalledWith(
+            'http://remote-delivery.example/api/stacks/remote-stack/git-source/webhook-pull',
+            expect.objectContaining({
+                method: 'POST',
+                body: expect.stringContaining(`"deliveryId":"webhook:${deliverySourceId}:${webhookId}:provider-delivery-1"`),
+            }),
+        );
+    });
+
+    it('passes the same producer-scoped delivery identity to a local Git source', async () => {
+        const db = DatabaseService.getInstance();
+        const nodeId = db.getDefaultNode()!.id;
+        const webhookId = db.addWebhook({
+            node_id: nodeId,
+            name: 'delivery id local git',
+            stack_name: 'local-delivery-stack',
+            action: 'git-pull',
+            secret: WebhookService.getInstance().generateSecret(),
+            enabled: true,
+        });
+        const webhook = db.getWebhook(webhookId)!;
+        const deliverySourceId = db.getGlobalSettings().delivery_source_id;
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const { GitSourceService } = await import('../services/GitSourceService');
+        const stacksSpy = vi.spyOn(FileSystemService.prototype, 'getStacks')
+            .mockResolvedValue(['local-delivery-stack']);
+        const pullSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+            .mockResolvedValue({ status: 'success', message: 'Fetched.' });
+
+        try {
+            const result = await WebhookService.getInstance().execute(
+                webhook,
+                'git-pull',
+                'test',
+                undefined,
+                'provider-delivery-2',
+            );
+
+            expect(result).toEqual({ success: true, duration_ms: expect.any(Number) });
+            expect(pullSpy).toHaveBeenCalledWith(
+                'local-delivery-stack',
+                true,
+                `webhook:${deliverySourceId}:${webhookId}:provider-delivery-2`,
+            );
+
+            const secondWebhookId = db.addWebhook({
+                node_id: nodeId,
+                name: 'second delivery id local git',
+                stack_name: 'local-delivery-stack',
+                action: 'git-pull',
+                secret: webhook.secret,
+                enabled: true,
+            });
+            pullSpy.mockClear();
+            await WebhookService.getInstance().execute(
+                db.getWebhook(secondWebhookId)!,
+                'git-pull',
+                'test',
+                undefined,
+                'provider-delivery-2',
+            );
+            expect(pullSpy).toHaveBeenCalledWith(
+                'local-delivery-stack',
+                true,
+                `webhook:${deliverySourceId}:${secondWebhookId}:provider-delivery-2`,
+            );
+
+            db.updateGlobalSetting('delivery_source_id', 'second-control-source');
+            pullSpy.mockClear();
+            await WebhookService.getInstance().execute(
+                webhook,
+                'git-pull',
+                'test',
+                undefined,
+                'provider-delivery-2',
+            );
+            expect(pullSpy).toHaveBeenCalledWith(
+                'local-delivery-stack',
+                true,
+                `webhook:second-control-source:${webhookId}:provider-delivery-2`,
+            );
+            db.updateGlobalSetting('delivery_source_id', deliverySourceId!);
+
+            const oversizedDeliveryId = 'x'.repeat(300);
+            const boundedId = crypto.createHash('sha256').update(oversizedDeliveryId).digest('hex');
+            pullSpy.mockClear();
+            await WebhookService.getInstance().execute(
+                webhook,
+                'git-pull',
+                'test',
+                undefined,
+                oversizedDeliveryId,
+            );
+            expect(pullSpy).toHaveBeenCalledWith(
+                'local-delivery-stack',
+                true,
+                `webhook:${deliverySourceId}:${webhookId}:sha256:${boundedId}`,
+            );
+        } finally {
+            if (deliverySourceId) db.updateGlobalSetting('delivery_source_id', deliverySourceId);
+            stacksSpy.mockRestore();
+            pullSpy.mockRestore();
+        }
     });
 });

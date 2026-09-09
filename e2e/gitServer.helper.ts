@@ -12,17 +12,18 @@
  * NODE_EXTRA_CA_CERTS (wired in CI and in the local validation lifecycle).
  * The key is a throwaway test certificate with no security value.
  *
- * Soft-skips when the system git binary is unavailable.
+ * Soft-skips when the system git binary is unavailable (locally; throws
+ * under CI, see externalDeps.ts).
  */
 import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import https from 'https';
 import os from 'os';
 import path from 'path';
+import { requireGitBinary } from './externalDeps';
 
 export function gitAvailable(): boolean {
-  const probe = spawnSync('git', ['--version'], { stdio: 'ignore' });
-  return probe.status === 0;
+  return requireGitBinary();
 }
 
 /** Build a git repository with the given files on `branch`, returns the repo dir. */
@@ -49,7 +50,17 @@ export function buildFixtureRepo(files: Record<string, string>, branch = 'main')
  * Serve the given repos (keyed by served name) over smart HTTPS. Returns the
  * base URL; repos are reachable at `<url>/<name>.git`.
  */
-export function serveRepos(repoDirs: Record<string, string>): Promise<{ url: string; close: () => void }> {
+export function serveRepos(
+  repoDirs: Record<string, string>,
+  /**
+   * Basename (without extension) of the certificate pair under e2e/fixtures to
+   * present. Defaults to the shared dev CA that the app also trusts globally.
+   * The per-source CA spec passes a pair signed by a CA that is deliberately
+   * absent from process-wide trust, so that only a stored per-source bundle
+   * can make its fetch succeed.
+   */
+  certBasename = 'git-server',
+): Promise<{ url: string; close: () => void }> {
   return new Promise((resolve, reject) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-e2e-git-'));
     for (const [name, dir] of Object.entries(repoDirs)) {
@@ -62,8 +73,8 @@ export function serveRepos(repoDirs: Record<string, string>): Promise<{ url: str
     const fixtures = path.join(process.cwd(), 'e2e', 'fixtures');
     const server = https.createServer(
       {
-        cert: fs.readFileSync(path.join(fixtures, 'git-server.pem')),
-        key: fs.readFileSync(path.join(fixtures, 'git-server.key')),
+        cert: fs.readFileSync(path.join(fixtures, `${certBasename}.pem`)),
+        key: fs.readFileSync(path.join(fixtures, `${certBasename}.key`)),
       },
       (req, res) => {
         const url = req.url ?? '/';

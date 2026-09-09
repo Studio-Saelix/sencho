@@ -104,8 +104,8 @@ afterEach(() => {
 
 function mockTargetForPilot() {
   vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => {
-    if (id === pilotNodeId) return { apiUrl: LOOPBACK, apiToken: '' };
-    if (id === proxyNodeId) return { apiUrl: 'http://192.168.1.99:1852', apiToken: 'proxy-token' };
+    if (id === pilotNodeId) return { apiUrl: LOOPBACK, apiToken: '', trustedLoopback: true };
+    if (id === proxyNodeId) return { apiUrl: 'http://192.168.1.99:1852', apiToken: 'proxy-token', trustedLoopback: false };
     return null;
   });
 }

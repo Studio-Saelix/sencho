@@ -5,19 +5,20 @@ import { GitProjectManifestService } from '../services/GitProjectManifestService
 import { FileSystemService } from '../services/FileSystemService';
 import { DatabaseService } from '../services/DatabaseService';
 import { CryptoService } from '../services/CryptoService';
-import { requirePermission } from '../middleware/permissions';
+import { checkPermission, requirePermission } from '../middleware/permissions';
 import { classifySourceRow, satisfiesGitOpsRead } from '../services/gitops/readAuth';
 import { NOT_APPLICABLE_REVISION, projectStackRevision, stackResourceSet } from '../helpers/gitopsResponse';
 import { respondWithHistory } from '../helpers/gitopsHistoryPage';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
-import { triggerPostDeployScan } from '../helpers/policyGate';
 import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
 import { isValidGitSourcePath, isValidStackName } from '../utils/validation';
 import { sendGitSourceError, webhookPullStatus } from '../utils/gitSourceHttp';
 import { sanitizeForLog } from '../utils/safeLog';
-import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
+import { parseStorableRepoUrl, repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
+import { validateCaBundlePem } from '../services/git/caBundle';
 import { auditActorUsername } from '../helpers/auditActor';
+import { assertSafeOutboundHostname, resolveSafeOutboundHostname, UnsafeOutboundTargetError } from '../utils/outboundTarget';
 
 // Reasonable upper bounds so a caller cannot flood the service with huge
 // payloads. Generous compared to anything a real Git provider emits.
@@ -26,6 +27,8 @@ import { auditActorUsername } from '../helpers/auditActor';
 const MAX_BRANCH_LENGTH = REF_MAX_LEN;
 const MAX_ENV_PATH_LENGTH = 1024;
 const MAX_TOKEN_LENGTH = 8192;
+const MAX_SUSPEND_REASON_LENGTH = 512;
+const MAX_WEBHOOK_DELIVERY_ID_LENGTH = 512;
 
 /**
  * Shared handler for the "browse repository" compose-file picker: validate the
@@ -34,6 +37,7 @@ const MAX_TOKEN_LENGTH = 8192;
  * re-entering a stored PAT.
  */
 const MAX_DEPLOY_KEY_LENGTH = 16384;
+const MAX_CA_BUNDLE_LENGTH = 65536;
 
 async function handleBrowse(
   req: Request,
@@ -41,8 +45,9 @@ async function handleBrowse(
   storedToken: string | null,
   storedDeployKey: string | null,
   storedKnownHosts: string | null,
+  storedCaBundle: string | null,
 ): Promise<void> {
-  const { repo_url, branch, auth_type, token, deploy_key, ssh_known_hosts_entry } = req.body ?? {};
+  const { repo_url, branch, auth_type, token, deploy_key, ssh_known_hosts_entry, ca_bundle } = req.body ?? {};
   if (typeof repo_url !== 'string' || !repo_url.trim()) {
     res.status(400).json({ error: 'repo_url is required' });
     return;
@@ -55,6 +60,25 @@ async function handleBrowse(
   if (repoUrlError) {
     res.status(400).json({ error: repoUrlError });
     return;
+  }
+  const parsedRepo = parseStorableRepoUrl(repo_url);
+  if (!parsedRepo.ok) {
+    res.status(400).json({ error: 'Repository URL is invalid' });
+    return;
+  }
+  const repoHostname = parsedRepo.kind === 'https' ? parsedRepo.url.hostname : parsedRepo.ssh.host;
+  try {
+    await assertSafeOutboundHostname(repoHostname);
+  } catch (error: unknown) {
+    if (error instanceof UnsafeOutboundTargetError) {
+      res.status(400).json({
+        error: error.reason === 'blocked'
+          ? 'Repository host is not allowed'
+          : 'Repository host could not be resolved',
+      });
+      return;
+    }
+    throw error;
   }
   if (branch.length > MAX_BRANCH_LENGTH) {
     res.status(400).json({ error: 'The branch, tag, or commit SHA is too long.' });
@@ -72,6 +96,10 @@ async function handleBrowse(
     res.status(400).json({ error: 'deploy_key is too long' });
     return;
   }
+  if (typeof ca_bundle === 'string' && ca_bundle.length > MAX_CA_BUNDLE_LENGTH) {
+    res.status(400).json({ error: 'ca_bundle is too long' });
+    return;
+  }
   const explicitToken = typeof token === 'string' && token.trim() ? token : null;
   const effectiveToken = auth_type === 'token' ? (explicitToken ?? storedToken) : null;
   const explicitDeployKey = typeof deploy_key === 'string' && deploy_key.trim() ? deploy_key : null;
@@ -81,11 +109,18 @@ async function handleBrowse(
       ? ssh_known_hosts_entry.trim()
       : storedKnownHosts)
     : null;
+  const explicitCaBundle = typeof ca_bundle === 'string' && ca_bundle.trim() ? ca_bundle.trim() : null;
+  const effectiveCaBundle = explicitCaBundle ?? storedCaBundle;
+  if (explicitCaBundle && !validateCaBundlePem(explicitCaBundle)) {
+    res.status(400).json({ error: 'ca_bundle must contain one or more PEM certificates' });
+    return;
+  }
   const listParams: {
     repoUrl: string;
     branch: string;
     token?: string | null;
     sshAuth?: { privateKey: string; knownHostsEntry: string };
+    caBundlePem?: string | null;
   } = {
     repoUrl: repo_url.trim(),
     branch: branch.trim(),
@@ -94,6 +129,9 @@ async function handleBrowse(
     listParams.token = effectiveToken;
   } else if (auth_type === 'deploy_key' && effectiveDeployKey && effectiveKnownHosts) {
     listParams.sshAuth = { privateKey: effectiveDeployKey, knownHostsEntry: effectiveKnownHosts };
+  }
+  if (effectiveCaBundle) {
+    listParams.caBundlePem = effectiveCaBundle;
   }
   try {
     const result = await GitSourceService.getInstance().listRepoTree(listParams);
@@ -133,13 +171,22 @@ gitSourcesRouter.post('/ssh-host-key', async (req: Request, res: Response): Prom
       res.status(400).json({ error: 'Host key probe requires an SSH repository URL' });
       return;
     }
-    const keys = await scanHostKeys(parsed.host, parsed.port);
+    const [{ address }] = await resolveSafeOutboundHostname(parsed.host);
+    const keys = await scanHostKeys(parsed.host, parsed.port, address);
     res.json({
       host: parsed.host,
       port: parsed.port,
       keys,
     });
   } catch (error) {
+    if (error instanceof UnsafeOutboundTargetError) {
+      res.status(400).json({
+        error: error.reason === 'blocked'
+          ? 'Repository host is not allowed'
+          : 'Repository host could not be resolved',
+      });
+      return;
+    }
     sendGitSourceError(res, error);
   }
 });
@@ -194,7 +241,7 @@ gitSourcesRouter.get('/history', async (req: Request, res: Response): Promise<vo
 // creating a stack from Git.
 gitSourcesRouter.post('/browse', async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'stack:create')) return;
-  await handleBrowse(req, res, null, null, null);
+  await handleBrowse(req, res, null, null, null, null);
 });
 
 /**
@@ -291,6 +338,8 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       deploy_key,
       ssh_known_hosts_entry,
       ssh_host_key_fingerprint,
+      ca_bundle,
+      remove_ca_bundle,
       auto_apply_on_webhook,
       auto_deploy_on_apply,
     } = req.body ?? {};
@@ -345,6 +394,18 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       res.status(400).json({ error: 'deploy_key is too long' });
       return;
     }
+    if (typeof ca_bundle === 'string' && ca_bundle.length > MAX_CA_BUNDLE_LENGTH) {
+      res.status(400).json({ error: 'ca_bundle is too long' });
+      return;
+    }
+    if (typeof ca_bundle === 'string' && ca_bundle.trim() && !validateCaBundlePem(ca_bundle)) {
+      res.status(400).json({ error: 'ca_bundle must contain one or more PEM certificates' });
+      return;
+    }
+    if (remove_ca_bundle !== undefined && typeof remove_ca_bundle !== 'boolean') {
+      res.status(400).json({ error: 'remove_ca_bundle must be a boolean' });
+      return;
+    }
     const autoApplyOnWebhook = auto_apply_on_webhook === true;
     const autoDeployOnApply = auto_deploy_on_apply === true;
     if (autoDeployOnApply && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
@@ -376,6 +437,8 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       deployKey: typeof deploy_key === 'string' ? deploy_key : undefined,
       sshKnownHostsEntry: typeof ssh_known_hosts_entry === 'string' ? ssh_known_hosts_entry : undefined,
       sshHostKeyFingerprint: typeof ssh_host_key_fingerprint === 'string' ? ssh_host_key_fingerprint : undefined,
+      caBundle: typeof ca_bundle === 'string' ? ca_bundle : undefined,
+      removeCaBundle: remove_ca_bundle === true,
       autoApplyOnWebhook,
       autoDeployOnApply,
       auditContext: {
@@ -501,7 +564,7 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
         requirePlanFingerprint: true,
       },
     );
-    invalidateNodeCaches(req.nodeId);
+    // Cache invalidation and the post-deploy scan now run inside GitSourceService.apply() itself.
     const shortSha = commitSha.trim().slice(0, 7);
     if (result.deployed) {
       console.log('[GitSource] Applied commit %s to %s (deployed)', sanitizeForLog(shortSha), sanitizeForLog(stackName));
@@ -511,11 +574,6 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
       console.log('[GitSource] Applied commit %s to %s', sanitizeForLog(shortSha), sanitizeForLog(stackName));
     }
     res.json(result);
-    if (result.deployed) {
-      triggerPostDeployScan(stackName, req.nodeId).catch(err =>
-        console.error(`[Security] Post-deploy scan failed for ${sanitizeForLog(stackName)}:`, err),
-      );
-    }
   } catch (error) {
     sendGitSourceError(res, error);
   }
@@ -528,14 +586,28 @@ stackGitSourceRouter.post('/:stackName/git-source/webhook-pull', async (req: Req
     return;
   }
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const deliveryId = req.body?.deliveryId;
+  if (
+    deliveryId !== undefined
+    && (typeof deliveryId !== 'string' || !deliveryId.trim() || deliveryId.length > MAX_WEBHOOK_DELIVERY_ID_LENGTH)
+  ) {
+    res.status(400).json({ error: 'deliveryId must be a non-empty string of at most 512 characters' });
+    return;
+  }
   try {
-    const source = GitSourceService.getInstance().get(stackName);
+    const service = GitSourceService.getInstance();
+    const source = service.get(stackName);
     if (!source) {
       res.status(404).json({ error: 'No Git source configured for this stack', status: 'error' });
       return;
     }
-    if (source.auto_apply_on_webhook && source.auto_deploy_on_apply && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
-    const result = await GitSourceService.getInstance().handleWebhookPull(stackName);
+    const normalizedDeliveryId = deliveryId?.trim();
+    const deployAuthorized = checkPermission(req, 'stack:deploy', 'stack', stackName);
+    if (service.webhookDeliveryRequiresDeploy(stackName, normalizedDeliveryId) && !deployAuthorized) {
+      requirePermission(req, res, 'stack:deploy', 'stack', stackName);
+      return;
+    }
+    const result = await service.handleWebhookPull(stackName, deployAuthorized, normalizedDeliveryId);
     // Map the outcome to a real HTTP status so a Git provider sees a 4xx on
     // failure instead of a 200 with an error body (which it would read as
     // "delivered fine, stop retrying").
@@ -560,6 +632,64 @@ stackGitSourceRouter.post('/:stackName/git-source/dismiss-pending', async (req: 
   }
 });
 
+stackGitSourceRouter.post('/:stackName/git-source/suspend', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const { reason: rawReason } = req.body ?? {};
+  const reason = typeof rawReason === 'string' ? rawReason : undefined;
+  if (reason !== undefined && reason.length > MAX_SUSPEND_REASON_LENGTH) {
+    res.status(400).json({ error: 'reason is too long' });
+    return;
+  }
+  try {
+    const result = await GitSourceService.getInstance().suspend(stackName, {
+      actor: req.user?.username ?? 'unknown',
+      reason,
+    });
+    res.json(result);
+  } catch (error) {
+    sendGitSourceError(res, error);
+  }
+});
+
+stackGitSourceRouter.post('/:stackName/git-source/resume', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  try {
+    const result = await GitSourceService.getInstance().resume(stackName, {
+      actor: req.user?.username ?? 'unknown',
+    });
+    res.json(result);
+  } catch (error) {
+    sendGitSourceError(res, error);
+  }
+});
+
+stackGitSourceRouter.post('/:stackName/git-source/retry', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  try {
+    const result = await GitSourceService.getInstance().retry(stackName, {
+      actor: req.user?.username ?? 'unknown',
+    });
+    res.json(result);
+  } catch (error) {
+    sendGitSourceError(res, error);
+  }
+});
+
 // Edit-mode repo browse for an existing stack: gated by stack:edit so a user who
 // can edit (but not create) stacks can re-pick files, and reuses the stored token
 // when the request omits one.
@@ -574,5 +704,6 @@ stackGitSourceRouter.post('/:stackName/git-source/browse', async (req: Request, 
   const storedToken = src?.encrypted_token ? CryptoService.getInstance().decrypt(src.encrypted_token) : null;
   const storedDeployKey = src?.encrypted_deploy_key ? CryptoService.getInstance().decrypt(src.encrypted_deploy_key) : null;
   const storedKnownHosts = src?.ssh_known_hosts_entry ?? null;
-  await handleBrowse(req, res, storedToken, storedDeployKey, storedKnownHosts);
+  const storedCaBundle = src?.encrypted_ca_bundle ? CryptoService.getInstance().decrypt(src.encrypted_ca_bundle) : null;
+  await handleBrowse(req, res, storedToken, storedDeployKey, storedKnownHosts, storedCaBundle);
 });

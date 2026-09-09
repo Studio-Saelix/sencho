@@ -493,7 +493,7 @@ describe('GET /api/fleet/container-labels', () => {
     ]);
     const db = DatabaseService.getInstance();
     const remoteId = db.addNode({ name: 'remote-lbl', type: 'remote', compose_dir: '/app/compose', is_default: false, api_url: 'http://remote.invalid', api_token: 't' });
-    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't' } : null);
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't', trustedLoopback: false } : null);
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('nope', { status: 502 }));
     try {
       const res = await request(app).get('/api/fleet/container-labels').set('Cookie', authCookie);
@@ -511,7 +511,7 @@ describe('GET /api/fleet/container-labels', () => {
     ]);
     const db = DatabaseService.getInstance();
     const remoteId = db.addNode({ name: 'remote-bad', type: 'remote', compose_dir: '/app/compose', is_default: false, api_url: 'http://remote.invalid', api_token: 't' });
-    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't' } : null);
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't', trustedLoopback: false } : null);
     // byLabel row missing valid key/value/source: must be rejected by the deep guard.
     const malformed = JSON.stringify({ nodeId: remoteId, containers: [], byLabel: [{ key: 123, containers: [] }], partial: false, generatedAt: 0 });
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(malformed, { status: 200, headers: { 'content-type': 'application/json' } }));
@@ -528,7 +528,7 @@ describe('GET /api/fleet/container-labels', () => {
     stubDockerList([]);
     const db = DatabaseService.getInstance();
     const remoteId = db.addNode({ name: 'remote-src', type: 'remote', compose_dir: '/app/compose', is_default: false, api_url: 'http://remote.invalid', api_token: 't' });
-    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't' } : null);
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't', trustedLoopback: false } : null);
     const badSource = JSON.stringify({ nodeId: remoteId, containers: [], partial: false, generatedAt: 0, byLabel: [{ key: 'k', value: 'v', source: 'not-a-source', containers: [{ id: 'c', name: 'n' }] }] });
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(badSource, { status: 200, headers: { 'content-type': 'application/json' } }));
     try {
@@ -544,7 +544,7 @@ describe('GET /api/fleet/container-labels', () => {
     stubDockerList([]);
     const db = DatabaseService.getInstance();
     const remoteId = db.addNode({ name: 'remote-cont', type: 'remote', compose_dir: '/app/compose', is_default: false, api_url: 'http://remote.invalid', api_token: 't' });
-    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't' } : null);
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't', trustedLoopback: false } : null);
     const badContainer = JSON.stringify({ nodeId: remoteId, byLabel: [], partial: false, generatedAt: 0, containers: [{}] });
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(badContainer, { status: 200, headers: { 'content-type': 'application/json' } }));
     try {
@@ -560,7 +560,7 @@ describe('GET /api/fleet/container-labels', () => {
     stubDockerList([]);
     const db = DatabaseService.getInstance();
     const remoteId = db.addNode({ name: 'remote-ref', type: 'remote', compose_dir: '/app/compose', is_default: false, api_url: 'http://remote.invalid', api_token: 't' });
-    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't' } : null);
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't', trustedLoopback: false } : null);
     const badRef = JSON.stringify({ nodeId: remoteId, containers: [], partial: false, generatedAt: 0, byLabel: [{ key: 'k', value: 'v', source: 'runtime', containers: [{ id: 5 }] }] });
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(badRef, { status: 200, headers: { 'content-type': 'application/json' } }));
     try {

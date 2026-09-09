@@ -1,5 +1,7 @@
 import path from 'path';
+import net from 'net';
 import { sanitizeForLog } from './safeLog';
+import { isBlockedOutboundAddress } from './outboundTarget';
 
 /**
  * Stack name must only contain URL-safe characters with no path separators.
@@ -33,12 +35,13 @@ export function isValidRemoteUrl(
   if (!['http:', 'https:'].includes(url.protocol)) {
     return { valid: false, reason: 'API URL must use http:// or https://' };
   }
-  // Node.js URL API preserves brackets for IPv6: new URL('http://[::1]').hostname === '[::1]'
-  const loopback = /^(localhost|127(\.\d+){3}|\[::1\]|0\.0\.0\.0)$/i;
-  if (loopback.test(url.hostname)) {
+  const hostname = url.hostname.startsWith('[') && url.hostname.endsWith(']')
+    ? url.hostname.slice(1, -1)
+    : url.hostname;
+  if (hostname.toLowerCase() === 'localhost' || (net.isIP(hostname) !== 0 && isBlockedOutboundAddress(hostname))) {
     return {
       valid: false,
-      reason: 'API URL cannot point to localhost or loopback - use the actual host address',
+      reason: 'API URL target is not allowed',
     };
   }
   return { valid: true, url };

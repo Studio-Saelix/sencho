@@ -9,6 +9,7 @@ import { FileSystemService } from '../services/FileSystemService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { formatNoTargetError } from './remoteTarget';
 import { isDebugEnabled } from './debug';
+import { safeRemoteFetch } from './outboundTarget';
 
 // Presence map over every operator-authored dossier field. Typing it as
 // Record<keyof StackDossierFields, true> makes the build fail if a field is
@@ -215,10 +216,10 @@ export async function captureRemoteNodeFiles(node: CaptureNode, captureDocs = fa
   const headers: Record<string, string> = {};
   if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
 
-  const stacksRes = await fetch(`${baseUrl}/api/stacks`, {
+  const stacksRes = await safeRemoteFetch(`${baseUrl}/api/stacks`, {
     headers,
     signal: AbortSignal.timeout(15000),
-  });
+  }, target.trustedLoopback);
   if (!stacksRes.ok) throw new Error('Failed to fetch stacks from remote node');
   const stackNames = await stacksRes.json() as string[];
 
@@ -231,10 +232,10 @@ export async function captureRemoteNodeFiles(node: CaptureNode, captureDocs = fa
 
     let composeContent: string;
     try {
-      const composeRes = await fetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}`, {
+      const composeRes = await safeRemoteFetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}`, {
         headers,
         signal: AbortSignal.timeout(15000),
-      });
+      }, target.trustedLoopback);
       if (!composeRes.ok) {
         const reason = `compose.yaml fetch failed (HTTP ${composeRes.status}); stack skipped`;
         console.warn(`[Fleet Snapshot] ${reason} ("${stackName}" on "${node.name}")`);
@@ -255,10 +256,10 @@ export async function captureRemoteNodeFiles(node: CaptureNode, captureDocs = fa
     files.push({ filename: 'compose.yaml', content: composeContent });
 
     try {
-      const envRes = await fetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/env`, {
+      const envRes = await safeRemoteFetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/env`, {
         headers,
         signal: AbortSignal.timeout(15000),
-      });
+      }, target.trustedLoopback);
       // The remote replies 200 with an empty body and X-Env-Exists: false when a
       // stack has no .env. Treat that as absent (matching the local ENOENT path)
       // so restore does not write a spurious empty .env. An older remote that
@@ -280,10 +281,10 @@ export async function captureRemoteNodeFiles(node: CaptureNode, captureDocs = fa
     let dossier: StackDossierFields | undefined;
     if (captureDocs) {
       try {
-        const dossierRes = await fetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/dossier`, {
+        const dossierRes = await safeRemoteFetch(`${baseUrl}/api/stacks/${encodeURIComponent(stackName)}/dossier`, {
           headers,
           signal: AbortSignal.timeout(15000),
-        });
+        }, target.trustedLoopback);
         if (dossierRes.ok) {
           const fields = pickDossierFields(await dossierRes.json() as Record<string, unknown>);
           if (dossierHasContent(fields)) dossier = fields;

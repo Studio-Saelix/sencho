@@ -59,7 +59,7 @@ describe('POST /api/nodes - api_url SSRF validation (C2 fix)', () => {
       .set('Authorization', authHeader)
       .send({ name: 'bad-node', type: 'remote', api_url: 'http://localhost:6379' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/loopback/i);
+    expect(res.body.error).toMatch(/not allowed/i);
   });
 
   it('rejects 127.0.0.1 api_url', async () => {

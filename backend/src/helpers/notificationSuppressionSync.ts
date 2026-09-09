@@ -8,6 +8,7 @@ import {
 } from '../services/CapabilityRegistry';
 import { remoteAdvertisesCapability } from './remoteCapabilities';
 import { getErrorMessage } from '../utils/errors';
+import { safeRemoteFetch } from '../utils/outboundTarget';
 
 const SYNC_TIMEOUT_MS = 15_000;
 
@@ -91,10 +92,14 @@ function clearPending(nodeId: number, ruleId: number): void {
   DatabaseService.getInstance().deleteNotificationSuppressionPendingRetraction(ruleId, nodeId);
 }
 
-function resolveRemoteApi(node: Node): { baseUrl: string; apiToken: string } | null {
+function resolveRemoteApi(node: Node): { baseUrl: string; apiToken: string; trustedLoopback: boolean } | null {
   const target = NodeRegistry.getInstance().getProxyTarget(node.id);
   if (!target?.apiUrl) return null;
-  return { baseUrl: target.apiUrl.replace(/\/$/, ''), apiToken: target.apiToken };
+  return {
+    baseUrl: target.apiUrl.replace(/\/$/, ''),
+    apiToken: target.apiToken,
+    trustedLoopback: target.trustedLoopback,
+  };
 }
 
 /** Non-2xx (including opaque 404) is always failure; never treat missing routes as applied. */
@@ -119,12 +124,12 @@ async function pushRuleToNode(node: Node, rule: NotificationSuppressionRule): Pr
     console.warn(`[SuppressionSync] Skipping node "${node.name}": no proxy target`);
     return;
   }
-  const res = await fetch(`${remote.baseUrl}/api/notification-suppression-rules/replica`, {
+  const res = await safeRemoteFetch(`${remote.baseUrl}/api/notification-suppression-rules/replica`, {
     method: 'POST',
     headers: buildRemoteHeaders(remote.apiToken),
     body: JSON.stringify({ rule: replicaPayload(rule) }),
     signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
-  });
+  }, remote.trustedLoopback);
   if (!res.ok) await throwHttpFailure(res);
   const outcome = await readOutcome(res);
   if (outcome !== 'applied') {
@@ -148,12 +153,12 @@ export async function deleteRuleOnNode(
     throw new Error(err);
   }
   try {
-    const res = await fetch(`${remote.baseUrl}/api/notification-suppression-rules/replica/${ruleId}`, {
+    const res = await safeRemoteFetch(`${remote.baseUrl}/api/notification-suppression-rules/replica/${ruleId}`, {
       method: 'DELETE',
       headers: buildRemoteHeaders(remote.apiToken),
       body: JSON.stringify(retraction),
       signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
-    });
+    }, remote.trustedLoopback);
     if (!res.ok) await throwHttpFailure(res);
     const outcome = await readOutcome(res);
     if (outcome !== 'applied') {

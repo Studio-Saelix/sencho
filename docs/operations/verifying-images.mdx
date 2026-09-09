@@ -154,3 +154,17 @@ Maintainers publish these from open PRs for external validation. They are unsign
 |---|---|---|
 | `pr-<N>` | `saelix/sencho:pr-1526` | Each re-run of the preview workflow for that PR |
 | `preview-<sha>` | `saelix/sencho:preview-abc1234` | Never (immutable per build) |
+
+## Reading your running build
+
+Sencho surfaces the build it is actually running in **Settings → About → Build** (and in the **Channel** and **Current image** rows of **Settings → Admiral Account**). These fields come from the running container's identity, not from the compose file, so a compose edit does not change them until the container is recreated.
+
+| Field | Meaning |
+|---|---|
+| **Version** | The packaged semantic version of the build. A dev build keeps the last stable version here, which is why the Channel row matters. |
+| **Channel** | The build track of the running image: `Dev`, `Preview`, `Stable`, or `Unknown`. A `dev` or `dev-<sha>` image reads `Dev`; a `pr-<N>` or `preview-<sha>` image reads `Preview`; a release image reads `Stable`. |
+| **Current image** | The image reference the container was started with, for example `ghcr.io/studio-saelix/sencho-dev:dev-a1b2c3d`. |
+| **Revision** | The immutable digest this build resolves to, or the pinned `dev-<sha>` tag when the running image is on the integration track. |
+| **Image ID** | The first twelve characters of the running image's sha256 identifier; click to copy the full id. |
+
+These fields describe the **control plane** instance you are logged in to, not remote nodes. When identity metadata cannot be determined, the reference fields read `Unknown` rather than guessing. A hardened image viewed by a non-administrator shows `Restricted` for the reference fields instead of `Unknown`.

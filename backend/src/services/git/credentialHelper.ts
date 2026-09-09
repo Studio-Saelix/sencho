@@ -31,6 +31,8 @@ import path from 'path';
 
 export const GIT_TOKEN_ENV_VAR = 'SENCHO_GIT_TOKEN';
 export const GIT_HELPER_PATH_ENV_VAR = 'SENCHO_GIT_HELPER';
+/** Lowercase host[:port] from the configured repository URL; credentials are refused elsewhere. */
+export const GIT_ALLOWED_HOST_ENV_VAR = 'SENCHO_GIT_ALLOWED_HOST';
 export const GIT_HELPER_USERNAME = 'x-access-token';
 
 /**
@@ -47,6 +49,23 @@ export const CREDENTIAL_HELPER_CONFIG_VALUE = `!"$${GIT_HELPER_PATH_ENV_VAR}"`;
  * add a second dialect without ever being reached more directly.
  */
 const HELPER_SCRIPT = '#!/bin/sh\n'
+    + 'allowed_host=""\n'
+    + `if [ -n "$${GIT_ALLOWED_HOST_ENV_VAR}" ]; then allowed_host="$${GIT_ALLOWED_HOST_ENV_VAR}"; fi\n`
+    + 'req_host=""\n'
+    + 'req_port=""\n'
+    + 'while IFS= read -r line; do\n'
+    + '  [ -z "$line" ] && break\n'
+    + '  case "$line" in\n'
+    + '    host=*) req_host="${line#host=}" ;;\n'
+    + '    port=*) req_port="${line#port=}" ;;\n'
+    + '  esac\n'
+    + 'done\n'
+    + 'if [ -n "$req_port" ] && [ "$req_port" != "443" ]; then\n'
+    + '  req_host="${req_host}:$req_port"\n'
+    + 'fi\n'
+    + 'if [ -n "$allowed_host" ] && [ "$req_host" != "$allowed_host" ]; then\n'
+    + '  exit 0\n'
+    + 'fi\n'
     + `printf 'username=${GIT_HELPER_USERNAME}\\n'\n`
     + `printf 'password=%s\\n' "$${GIT_TOKEN_ENV_VAR}"\n`;
 
