@@ -291,8 +291,9 @@ describe('gitops schema', () => {
       store = GitOpsStore.getInstance();
       migrate = (db as unknown as { migrateGitOpsSourcePolicy: () => void }).migrateGitOpsSourcePolicy.bind(db);
       // Two sources: one with the legacy boolean off, one with it on. Each gets
-      // a live direct application whose policy is forced to 'manual' so the
-      // test cannot depend on what buildDirectApplicationRow defaults to.
+      // a live direct application whose policy is forced to 'manual' before the
+      // migration runs, proving the migration only touches rows with a matching
+      // git source (rows without one must keep their policy).
       db.upsertGitSource({
         stack_name: 'mig-off',
         repo_url: 'https://github.com/example/repo.git',

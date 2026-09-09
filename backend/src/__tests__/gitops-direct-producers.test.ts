@@ -274,7 +274,10 @@ describe('Direct Git producers drive the revision state', () => {
     expect(candidate.application_id).toBe(app.id);
     expect(candidate.materialization_fingerprint).toBe(afterPull.materialization_fingerprint);
     expect(store.getTarget(app.id, 1)?.candidate_generation_id).toBe(candidateId);
-    expect(projectOf(app.id).availableActions).toContain('apply');
+    // Create derives the review policy from the legacy boolean of false, so
+    // the staged candidate requires review: dismissable but not auto-ready.
+    expect(projectOf(app.id).availableActions).toEqual(expect.arrayContaining(['dismiss']));
+    expect(projectOf(app.id).availableActions).not.toContain('apply');
 
     // ── apply ─────────────────────────────────────────────────────────────
     await svc.apply(stackName, 'bbbbbbb2', { requirePlanFingerprint: false, deploy: false, actor: 'tester' });

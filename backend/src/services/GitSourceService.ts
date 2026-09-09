@@ -55,7 +55,11 @@ import {
     newGitOpsId,
     stackManagedRoot,
 } from './gitops/directApplication';
-import type { GitOpsApplicationRow, GitOpsHistoryRow } from './gitops/types';
+import type { GitOpsApplicationRow, GitOpsHistoryRow, SourcePolicy } from './gitops/types';
+// Re-exported here because the route layer and legacy-boolean compatibility
+// matrix consume it through this module; the definition lives with the row
+// type in gitops/types.ts so the storage and service layers cannot drift.
+export type { SourcePolicy } from './gitops/types';
 import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readStagingMarker, validateCandidateRelPath, writeStagingMarker } from './gitops/createStagingMarker';
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops/createCleanup';
 import { managedAreaBase } from './gitops/managedPaths';
@@ -204,6 +208,7 @@ export interface UpsertInput {
     removeCaBundle?: boolean;  // explicit user-initiated revocation; overrides caBundle omission
     autoApplyOnWebhook: boolean;
     autoDeployOnApply: boolean;
+    sourcePolicy?: SourcePolicy;  // explicit tri-state policy; wins over the boolean
     auditContext?: {
         username: string;
         method: string;
@@ -228,6 +233,8 @@ export interface CreateStackFromGitInput {
     caBundle?: string | null;
     autoApplyOnWebhook: boolean;
     autoDeployOnApply: boolean;
+    /** Explicit tri-state policy; wins over the boolean (create defaults to review without one). */
+    sourcePolicy?: SourcePolicy;
     auditContext?: {
         username: string;
         method: string;
@@ -632,7 +639,11 @@ export class GitSourceService {
             has_deploy_key: !!src.encrypted_deploy_key,
             has_ca_bundle: !!src.encrypted_ca_bundle,
             ssh_host_key_fingerprint: src.ssh_host_key_fingerprint ?? null,
-            auto_apply_on_webhook: src.auto_apply_on_webhook,
+            // source_policy is authoritative; the legacy boolean is projected
+            // from it (automatic only) so old clients keep working. When no
+            // application row models the source yet, effectiveAutoApply falls
+            // back to the stored boolean.
+            auto_apply_on_webhook: this.effectiveAutoApply(src.stack_name, !!src.auto_apply_on_webhook),
             auto_deploy_on_apply: src.auto_deploy_on_apply,
             last_applied_commit_sha: src.last_applied_commit_sha,
             pending_commit_sha: src.pending_commit_sha,
@@ -814,9 +825,16 @@ export class GitSourceService {
             }
         }
 
-        // Apply-matrix sanity: auto_deploy requires auto_apply.
-        if (input.autoDeployOnApply && !input.autoApplyOnWebhook) {
-            throw new GitSourceError('GIT_ERROR', 'Auto-deploy requires auto-apply-on-webhook to be enabled.');
+        // Apply-matrix sanity: auto-deploy requires the effective policy to be
+        // automatic. Legacy clients express that through the boolean; existing
+        // manual rows are protected by the no-silent-conversion derivation.
+        const existingApp = this.gitopsApplicationFor(input.stackName);
+        const effectivePolicy = GitSourceService.resolveSourcePolicy(
+            existingApp?.source_policy ?? null,
+            input,
+        );
+        if (input.autoDeployOnApply && effectivePolicy !== 'automatic') {
+            throw new GitSourceError('GIT_ERROR', 'Auto-deploy requires the automatic source policy.');
         }
 
         // Repository identity changes on a managed stack deadlock: the manifest
@@ -910,7 +928,7 @@ export class GitSourceService {
                 ssh_known_hosts_entry: sshKnownHostsEntry,
                 ssh_host_key_fingerprint: sshHostKeyFingerprint,
                 encrypted_ca_bundle: encryptedCaBundle,
-                auto_apply_on_webhook: input.autoApplyOnWebhook,
+                auto_apply_on_webhook: effectivePolicy === 'automatic',
                 auto_deploy_on_apply: input.autoDeployOnApply,
                 last_applied_commit_sha: existing?.last_applied_commit_sha ?? null,
                 last_applied_content_hash: existing?.last_applied_content_hash ?? null,
@@ -939,7 +957,7 @@ export class GitSourceService {
                         identity: gitopsIdentity,
                         lifecycleStatus: 'active',
                         at: envelope.at,
-                    }),
+                    }, effectivePolicy),
                     nodeId: NodeRegistry.getInstance().getDefaultNodeId(),
                     envelope,
                 });
@@ -2209,11 +2227,13 @@ export class GitSourceService {
                 });
                 // A pull that resolves to exactly what the live candidate
                 // already proposes (same commit, source fingerprint, plan
-                // verdict) must not mint a lookalike generation and rewrite the
-                // candidate pointers. The staged generation stands; only the
-                // fetch above is new. A candidate for a different commit, or no
-                // candidate at all, mints anew: staging after an apply is a new
-                // dispatch cycle and needs its own generation to accept.
+                // verdict, review requirement) must not mint a lookalike
+                // generation and rewrite the candidate pointers. The staged
+                // generation stands; only the fetch above is new. A candidate
+                // for a different commit, or no candidate at all, mints anew:
+                // staging after an apply is a new dispatch cycle and needs its
+                // own generation to accept.
+                const reviewRequired = gitopsApp.source_policy !== 'automatic';
                 const staged = gitopsApp.candidate_generation_id
                     ? GitOpsStore.getInstance().getGeneration(gitopsApp.candidate_generation_id)
                     : undefined;
@@ -2221,7 +2241,8 @@ export class GitSourceService {
                     staged &&
                     staged.commit_sha === fetched.commitSha &&
                     staged.materialization_fingerprint === identity.fingerprint &&
-                    staged.plan_blocked === (plan?.blocked === true ? 1 : 0)
+                    staged.plan_blocked === (plan?.blocked === true ? 1 : 0) &&
+                    gitopsApp.review_required === (reviewRequired ? 1 : 0)
                 ) {
                     return;
                 }
@@ -2249,7 +2270,7 @@ export class GitSourceService {
                     planBlocked: plan?.blocked === true,
                 }));
                 if (plan?.blocked) tx.sourceConflictBlocker(gitopsApp.id, generationId, gitopsEnv);
-                else tx.candidateReady(gitopsApp.id, generationId, false, gitopsEnv);
+                else tx.candidateReady(gitopsApp.id, generationId, reviewRequired, gitopsEnv);
                 })();
                 gitops.markSettled();
             });
@@ -2864,6 +2885,32 @@ export class GitSourceService {
 
     private static deliveryIntent(autoApply: boolean, deploy: boolean): ReconcileDeliveryIntent {
         return autoApply ? { autoApply: true, deploy } : { autoApply: false, deploy: false };
+    }
+
+    /**
+     * Legacy-boolean to tri-state derivation. An explicit sourcePolicy wins;
+     * boolean true means automatic; boolean false leaves an existing policy
+     * alone and only defaults to review when the row has none (webhooks always
+     * fetched before consulting the boolean, so 0 was review, not manual).
+     */
+    public static resolveSourcePolicy(
+        existing: SourcePolicy | null,
+        input: { sourcePolicy?: SourcePolicy; autoApplyOnWebhook: boolean },
+    ): SourcePolicy {
+        if (input.sourcePolicy) return input.sourcePolicy;
+        if (input.autoApplyOnWebhook) return 'automatic';
+        return existing ?? 'review';
+    }
+
+    /**
+     * Effective auto-apply for the live application, falling back to the
+     * stored legacy boolean when no application row models the source. When a
+     * row exists its policy is authoritative, so a stale `1` boolean on a
+     * manual or review row never re-enables automation behind the projection.
+     */
+    private effectiveAutoApply(stackName: string, fallback: boolean): boolean {
+        const policy = this.gitopsApplicationFor(stackName)?.source_policy;
+        return policy !== undefined ? policy === 'automatic' : fallback;
     }
 
     /**
@@ -3839,8 +3886,12 @@ export class GitSourceService {
             const db = DatabaseService.getInstance();
             const diag = isDebugEnabled();
 
-            if (input.autoDeployOnApply && !input.autoApplyOnWebhook) {
-                throw new GitSourceError('GIT_ERROR', 'Auto-deploy requires auto-apply-on-webhook to be enabled.');
+            // Apply-matrix sanity for create: auto-deploy requires the effective
+            // policy to be automatic. Create defaults to review when no explicit
+            // policy arrives, so a legacy boolean of false stays review.
+            const effectivePolicy = GitSourceService.resolveSourcePolicy(null, input);
+            if (input.autoDeployOnApply && effectivePolicy !== 'automatic') {
+                throw new GitSourceError('GIT_ERROR', 'Auto-deploy requires the automatic source policy.');
             }
 
             const gitopsOperationId = crypto.randomUUID();
@@ -4097,7 +4148,7 @@ export class GitSourceService {
                             identity: gitopsIdentity,
                             lifecycleStatus: 'creating',
                             at: envelope.at,
-                        }),
+                        }, effectivePolicy),
                         nodeId: NodeRegistry.getInstance().getDefaultNodeId(),
                         commitSha: fetched.commitSha,
                         generation: buildGenerationRow({
@@ -4206,7 +4257,7 @@ export class GitSourceService {
                     ssh_known_hosts_entry: createDeployKeyTrust?.sshKnownHostsEntry ?? null,
                     ssh_host_key_fingerprint: createDeployKeyTrust?.sshHostKeyFingerprint ?? null,
                     encrypted_ca_bundle: encryptedCaBundle,
-                    auto_apply_on_webhook: input.autoApplyOnWebhook,
+                    auto_apply_on_webhook: effectivePolicy === 'automatic',
                     auto_deploy_on_apply: input.autoDeployOnApply,
                     last_applied_commit_sha: fetched.commitSha,
                     last_applied_content_hash: hash,
@@ -4657,7 +4708,7 @@ export class GitSourceService {
             )
             : undefined;
         if (started) return GitSourceService.deliveryIntentFromStartedAttempt(started).deploy;
-        return source.auto_apply_on_webhook && source.auto_deploy_on_apply;
+        return this.effectiveAutoApply(stackName, source.auto_apply_on_webhook) && source.auto_deploy_on_apply;
     }
 
     /**
@@ -4729,7 +4780,9 @@ export class GitSourceService {
         }
 
         let deliveryIntent = GitSourceService.deliveryIntent(
-            src.auto_apply_on_webhook,
+            // The live application's tri-state policy is authoritative; the
+            // stored boolean only matters when no application models the source.
+            this.effectiveAutoApply(stackName, src.auto_apply_on_webhook),
             src.auto_deploy_on_apply,
         );
         if (startedDelivery) {

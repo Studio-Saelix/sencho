@@ -149,7 +149,10 @@ function migrateOne(source: StackGitSource): MigrationResult {
     // would go on claiming the name.
     lifecycleStatus: 'active',
     at,
-  });
+    // Match the SQL migration's rule for existing rows: the stored boolean
+    // maps 1 to automatic and 0 to review, so a migrated application keeps
+    // the policy its source already expressed.
+  }, source.auto_apply_on_webhook ? 'automatic' : 'review');
 
   return DatabaseService.getInstance().getDb().transaction((): MigrationResult => {
     if (trust.kind === 'trusted' && stackPresent) {

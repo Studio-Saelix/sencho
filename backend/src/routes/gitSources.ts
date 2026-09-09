@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { GitSourceService, type PublicGitSource } from '../services/GitSourceService';
+import { GitSourceService, type PublicGitSource, type SourcePolicy } from '../services/GitSourceService';
 import type { GitOpsRevisionProjection } from '../services/gitops/types';
 import { GitProjectManifestService } from '../services/GitProjectManifestService';
 import { FileSystemService } from '../services/FileSystemService';
@@ -342,6 +342,7 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       remove_ca_bundle,
       auto_apply_on_webhook,
       auto_deploy_on_apply,
+      source_policy,
     } = req.body ?? {};
 
     if (typeof repo_url !== 'string' || !repo_url.trim()) {
@@ -363,6 +364,15 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
     }
     if (auto_apply_on_webhook !== undefined && typeof auto_apply_on_webhook !== 'boolean') {
       res.status(400).json({ error: 'auto_apply_on_webhook must be a boolean' });
+      return;
+    }
+    if (
+      source_policy !== undefined &&
+      source_policy !== 'manual' &&
+      source_policy !== 'review' &&
+      source_policy !== 'automatic'
+    ) {
+      res.status(400).json({ error: 'source_policy must be "manual", "review", or "automatic"' });
       return;
     }
     if (auto_deploy_on_apply !== undefined && typeof auto_deploy_on_apply !== 'boolean') {
@@ -408,6 +418,10 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
     }
     const autoApplyOnWebhook = auto_apply_on_webhook === true;
     const autoDeployOnApply = auto_deploy_on_apply === true;
+    // The permission gate is unconditional: arming auto-deploy always demands
+    // stack:deploy. Whether the policy matrix lets the arming through is a
+    // separate service-side decision (only an automatic policy qualifies), so
+    // no authorization decision depends on policy state read from the DB here.
     if (autoDeployOnApply && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
 
     // Confirm the stack actually exists on the active node. Without this guard
@@ -441,6 +455,9 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       removeCaBundle: remove_ca_bundle === true,
       autoApplyOnWebhook,
       autoDeployOnApply,
+      // Type-safe only because the validation above 400s on anything outside
+      // the three-value union before this point.
+      sourcePolicy: source_policy as SourcePolicy | undefined,
       auditContext: {
         username: auditActorUsername(req),
         method: req.method,

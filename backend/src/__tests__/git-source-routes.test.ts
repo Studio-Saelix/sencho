@@ -2287,3 +2287,242 @@ describe('SSH deploy-key route validation', () => {
         fetchFromGit.mockRestore();
     });
 });
+
+describe('git-source policy compatibility', () => {
+    function seedStackDir(stackName: string): void {
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, stackName), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, stackName, 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+    }
+
+    // Every save path runs a dry-run fetch against the configured files before
+    // persisting, so a stub over the real network call is shared by all tests
+    // here. A distinct commitSha per test is unnecessary: no assertion reads it.
+    function stubFetchFromGit(): ReturnType<typeof vi.spyOn> {
+        return vi.spyOn(GitSourceService.getInstance(), 'fetchFromGit').mockResolvedValue({
+            composeFiles: [{ path: 'compose.yaml', content: 'services:\n  x:\n    image: nginx\n' }],
+            envContent: null,
+            commitSha: 'f'.repeat(40),
+            resolvedRefKind: 'branch',
+            warnings: [],
+        });
+    }
+
+    function putBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+        return {
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            auth_type: 'none',
+            ...overrides,
+        };
+    }
+
+    function seedApp(stackName: string, policy: 'manual' | 'review' | 'automatic'): void {
+        const row = directApplicationFixture(`policy-app-${stackName}`, stackName);
+        row.source_policy = policy;
+        GitOpsStore.getInstance().insertApplication(row);
+    }
+
+    function deleteRows(stackName: string): void {
+        DatabaseService.getInstance().deleteGitSource(stackName);
+        DatabaseService.getInstance().getDb()
+            .prepare('DELETE FROM gitops_applications WHERE id = ?')
+            .run(`policy-app-${stackName}`);
+    }
+
+    it('create with auto_apply_on_webhook true derives automatic', async () => {
+        const stackName = 'policy-derive-automatic';
+        seedStackDir(stackName);
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: true }));
+            expect(res.status).toBe(200);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('automatic');
+            expect(res.body.auto_apply_on_webhook).toBe(true);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('create with auto_apply_on_webhook false derives review', async () => {
+        const stackName = 'policy-derive-review';
+        seedStackDir(stackName);
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: false }));
+            expect(res.status).toBe(200);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('review');
+            expect(res.body.auto_apply_on_webhook).toBe(false);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it.each([
+        ['false', false],
+        ['omitted', undefined],
+    ])('unrelated legacy edit with %s auto_apply_on_webhook keeps an existing manual policy', async (_name, flag) => {
+        const stackName = `policy-keep-manual-${_name}`;
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'manual');
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: flag }));
+            expect(res.status).toBe(200);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('manual');
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('unrelated legacy edit with false keeps an existing automatic policy', async () => {
+        const stackName = 'policy-keep-automatic';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'automatic');
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: false }));
+            expect(res.status).toBe(200);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('automatic');
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('explicit source_policy wins over the boolean', async () => {
+        const stackName = 'policy-explicit-wins';
+        seedStackDir(stackName);
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            // The boolean says automatic, but the explicit policy is manual.
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: true, source_policy: 'manual' }));
+            expect(res.status).toBe(200);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('manual');
+            // Reads project the boolean from the policy, so false wins out.
+            expect(res.body.auto_apply_on_webhook).toBe(false);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('rejects an unknown source_policy with 400', async () => {
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send(putBody({ source_policy: 'auto' }));
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/source_policy/i);
+    });
+
+    it('read projects auto_apply_on_webhook true only for automatic', async () => {
+        const stackName = 'policy-read-projection';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'review');
+        try {
+            const res = await request(app)
+                .get(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            // The application row models the source, so its review policy is
+            // authoritative and the projection reports false regardless of
+            // the stored boolean.
+            expect(res.body.auto_apply_on_webhook).toBe(false);
+        } finally {
+            deleteRows(stackName);
+        }
+    });
+
+    it('auto-deploy arming always requires stack:deploy even when the policy would refuse it', async () => {
+        const stackName = 'policy-deploy-no-permission';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'manual');
+        // A subject holding stack:edit but not stack:deploy (node-admin with
+        // deploy stripped) must be refused by the permission gate itself,
+        // regardless of what the policy matrix would later decide.
+        const originalPermissions = ROLE_PERMISSIONS['node-admin'];
+        ROLE_PERMISSIONS['node-admin'] = originalPermissions.filter((permission) => permission !== 'stack:deploy');
+        const upsertSpy = vi.spyOn(GitSourceService.getInstance(), 'upsert');
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${nodeAdminToken()}`)
+                .send(putBody({ auto_deploy_on_apply: true }));
+            expect(res.status).toBe(403);
+            expect(res.body.code).toBe('PERMISSION_DENIED');
+            expect(upsertSpy).not.toHaveBeenCalled();
+        } finally {
+            ROLE_PERMISSIONS['node-admin'] = originalPermissions;
+            upsertSpy.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('auto-deploy with a non-automatic policy is refused by the policy matrix, not the permission gate', async () => {
+        const stackName = 'policy-deploy-non-automatic-editor';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'manual');
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_deploy_on_apply: true }));
+            expect(res.status).toBe(400);
+            expect(res.body.error).toMatch(/automatic/i);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('auto-deploy with automatic requires stack:deploy and succeeds for admin', async () => {
+        const stackName = 'policy-deploy-automatic-admin';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'automatic');
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_deploy_on_apply: true }));
+            expect(res.status).toBe(200);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('automatic');
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+});

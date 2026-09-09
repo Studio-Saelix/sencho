@@ -5,6 +5,7 @@ import { MANAGED_ROOT_NAME } from './managedPaths';
 import { encodeGitOpsJson } from './json';
 import { materializationFingerprint } from './fingerprint';
 import { parseLegacyRepoUrl, parseStorableRepoUrl, secretFreeRepoUrl, secretFreeRepoUrlFromStorable, serializeRepoIdentity, serializeRepoIdentityFromStorable, type RepoIdentity } from './repoIdentity';
+import type { SourcePolicy } from './types';
 import type { RefKind } from '../git/types';
 import type {
   GitOpsApplicationRow,
@@ -116,7 +117,7 @@ export function buildDirectApplicationRow(args: {
   identity: DirectSourceIdentity;
   lifecycleStatus: 'creating' | 'active';
   at: number;
-}): GitOpsApplicationRow {
+}, policy: SourcePolicy): GitOpsApplicationRow {
   return {
     id: args.id,
     lifecycle_key: `direct:${args.stackName}`,
@@ -157,7 +158,7 @@ export function buildDirectApplicationRow(args: {
     pause_at: null,
     pause_reason: null,
     source_suspended_reason: null,
-    source_policy: 'manual',
+    source_policy: policy,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,
