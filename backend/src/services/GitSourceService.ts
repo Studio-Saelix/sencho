@@ -916,82 +916,82 @@ export class GitSourceService {
         // specific refusal, not a generic 500.
         try {
             db.getDb().transaction(() => {
-            db.upsertGitSource({
-                stack_name: input.stackName,
-                repo_url: input.repoUrl,
-                branch: input.branch,
-                compose_path: input.composePaths[0],
-                compose_paths: input.composePaths,
-                context_dir: input.contextDir,
-                sync_env: input.syncEnv,
-                env_path: resolvedEnvPath,
-                auth_type: input.authType,
-                encrypted_token: encryptedToken,
-                encrypted_deploy_key: encryptedDeployKey,
-                ssh_known_hosts_entry: sshKnownHostsEntry,
-                ssh_host_key_fingerprint: sshHostKeyFingerprint,
-                encrypted_ca_bundle: encryptedCaBundle,
-                auto_apply_on_webhook: effectivePolicy === 'automatic',
-                auto_deploy_on_apply: input.autoDeployOnApply,
-                last_applied_commit_sha: existing?.last_applied_commit_sha ?? null,
-                last_applied_content_hash: existing?.last_applied_content_hash ?? null,
-                pending_commit_sha: existing?.pending_commit_sha ?? null,
-                pending_compose_content: existing?.pending_compose_content ?? null,
-                pending_env_content: existing?.pending_env_content ?? null,
-                pending_fetched_at: existing?.pending_fetched_at ?? null,
-                last_debounce_at: existing?.last_debounce_at ?? null,
-            });
-
-            const app = this.gitopsApplicationFor(input.stackName);
-            if (configChanged || !app) {
-                db.clearGitSourcePending(input.stackName);
-            }
-
-            const envelope = this.gitopsEnvelope(crypto.randomUUID(), 'system:git-source', 'configure');
-            if (!app && !this.gitopsNameHeld(input.stackName)) {
-                // Linking a stack that already exists. Nothing is fetched or
-                // accepted yet, so the application starts live with no desired
-                // commit and the projection asks for a fetch.
-                GitOpsTransitions.getInstance().activateDirect({
-                    application: buildDirectApplicationRow({
-                        id: newGitOpsId(),
-                        stackName: input.stackName,
-                        config: gitopsConfig,
-                        identity: gitopsIdentity,
-                        lifecycleStatus: 'active',
-                        at: envelope.at,
-                    }, effectivePolicy),
-                    nodeId: NodeRegistry.getInstance().getDefaultNodeId(),
-                    envelope,
+                db.upsertGitSource({
+                    stack_name: input.stackName,
+                    repo_url: input.repoUrl,
+                    branch: input.branch,
+                    compose_path: input.composePaths[0],
+                    compose_paths: input.composePaths,
+                    context_dir: input.contextDir,
+                    sync_env: input.syncEnv,
+                    env_path: resolvedEnvPath,
+                    auth_type: input.authType,
+                    encrypted_token: encryptedToken,
+                    encrypted_deploy_key: encryptedDeployKey,
+                    ssh_known_hosts_entry: sshKnownHostsEntry,
+                    ssh_host_key_fingerprint: sshHostKeyFingerprint,
+                    encrypted_ca_bundle: encryptedCaBundle,
+                    auto_apply_on_webhook: effectivePolicy === 'automatic',
+                    auto_deploy_on_apply: input.autoDeployOnApply,
+                    last_applied_commit_sha: existing?.last_applied_commit_sha ?? null,
+                    last_applied_content_hash: existing?.last_applied_content_hash ?? null,
+                    pending_commit_sha: existing?.pending_commit_sha ?? null,
+                    pending_compose_content: existing?.pending_compose_content ?? null,
+                    pending_env_content: existing?.pending_env_content ?? null,
+                    pending_fetched_at: existing?.pending_fetched_at ?? null,
+                    last_debounce_at: existing?.last_debounce_at ?? null,
                 });
-                return;
-            }
-            // Credential-only and policy-only edits change nothing material, so
-            // they leave the candidate and every accepted pointer alone.
-            if (app && configChanged) {
-                GitOpsTransitions.getInstance().configChangedPendingCleared({
-                    applicationId: app.id,
-                    identity: {
-                        repoUrl: gitopsIdentity.repoUrl,
-                        repoIdentityJson: JSON.stringify(gitopsIdentity.identity),
-                        configuredRef: input.branch,
-                    },
-                    material: {
-                        composePathsJson: JSON.stringify([...input.composePaths]),
-                        contextDir: input.contextDir,
-                        syncEnv: input.syncEnv ? 1 : 0,
-                        envPath: resolvedEnvPath,
-                        fingerprint: gitopsIdentity.fingerprint,
-                    },
-                    envelope,
-                });
-            }
-            // A boolean 0 or absent resolves to the existing policy and never
-            // silently converts it; only an actual change writes the
-            // transition.
-            if (app && app.source_policy !== effectivePolicy) {
-                GitOpsTransitions.getInstance().sourcePolicyChanged(app.id, effectivePolicy, envelope);
-            }
+
+                const app = this.gitopsApplicationFor(input.stackName);
+                if (configChanged || !app) {
+                    db.clearGitSourcePending(input.stackName);
+                }
+
+                const envelope = this.gitopsEnvelope(crypto.randomUUID(), 'system:git-source', 'configure');
+                if (!app && !this.gitopsNameHeld(input.stackName)) {
+                    // Linking a stack that already exists. Nothing is fetched or
+                    // accepted yet, so the application starts live with no desired
+                    // commit and the projection asks for a fetch.
+                    GitOpsTransitions.getInstance().activateDirect({
+                        application: buildDirectApplicationRow({
+                            id: newGitOpsId(),
+                            stackName: input.stackName,
+                            config: gitopsConfig,
+                            identity: gitopsIdentity,
+                            lifecycleStatus: 'active',
+                            at: envelope.at,
+                        }, effectivePolicy),
+                        nodeId: NodeRegistry.getInstance().getDefaultNodeId(),
+                        envelope,
+                    });
+                    return;
+                }
+                // Credential-only and policy-only edits change nothing material, so
+                // they leave the candidate and every accepted pointer alone.
+                if (app && configChanged) {
+                    GitOpsTransitions.getInstance().configChangedPendingCleared({
+                        applicationId: app.id,
+                        identity: {
+                            repoUrl: gitopsIdentity.repoUrl,
+                            repoIdentityJson: JSON.stringify(gitopsIdentity.identity),
+                            configuredRef: input.branch,
+                        },
+                        material: {
+                            composePathsJson: JSON.stringify([...input.composePaths]),
+                            contextDir: input.contextDir,
+                            syncEnv: input.syncEnv ? 1 : 0,
+                            envPath: resolvedEnvPath,
+                            fingerprint: gitopsIdentity.fingerprint,
+                        },
+                        envelope,
+                    });
+                }
+                // A boolean 0 or absent resolves to the existing policy and never
+                // silently converts it; only an actual change writes the
+                // transition.
+                if (app && app.source_policy !== effectivePolicy) {
+                    GitOpsTransitions.getInstance().sourcePolicyChanged(app.id, effectivePolicy, envelope);
+                }
         })();
         } catch (error) {
             if (error instanceof GitOpsTransitionError) {
