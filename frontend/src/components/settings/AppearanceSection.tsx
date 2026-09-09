@@ -547,7 +547,7 @@ export function AppearanceSection({
             <SettingsSection title="Stack detail layout" kicker="your account">
                 <SettingsField
                     label="Anatomy panel mode"
-                    helper="Fixed keeps the Stack details panes evenly divided. Resizable makes the divider beside the Anatomy panel draggable, on desktop, between 320 and 960 px."
+                    helper="Fixed keeps the Stack details panes evenly divided. On desktop, Resizable keeps both panes at least 320 px wide, with a 4096 px Anatomy preference ceiling."
                     align="start"
                 >
                     <SegmentedControl
@@ -558,7 +558,7 @@ export function AppearanceSection({
                     />
                 </SettingsField>
 
-                <SettingsField label="Anatomy panel width" helper="Preferred Anatomy panel width while Resizable is active.">
+                <SettingsField label="Anatomy panel width" helper="Preferred Anatomy panel width while Resizable is active. Available Stack details space determines the live maximum.">
                     <div className="flex items-center gap-3">
                         <Slider
                             value={[anatomyWidthDraft]}
@@ -570,7 +570,7 @@ export function AppearanceSection({
                             onValueCommit={([v]) => setAnatomyWidth(v)}
                             aria-label="Anatomy panel width"
                         />
-                        <span className="w-12 shrink-0 text-right font-mono text-xs tabular-nums text-stat-subtitle">
+                        <span className="w-16 shrink-0 text-right font-mono text-xs tabular-nums text-stat-subtitle">
                             {anatomyWidthDraft} px
                         </span>
                     </div>

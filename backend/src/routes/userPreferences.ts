@@ -31,7 +31,7 @@ const ANATOMY_MODES = ['fixed', 'resizable'] as const;
 // an older writer's 16-field document still parses (it is then stored
 // normalized with these values, never rejected).
 const SIDEBAR_WIDTH = { min: 248, max: 440 } as const;
-const ANATOMY_WIDTH = { min: 320, max: 960 } as const;
+const ANATOMY_WIDTH = { min: 320, max: 4096 } as const;
 
 // Quick-link ids must be members of the frontend's eligible-view registry
 // (frontend/src/lib/navigation/appNavRegistry.ts, items with

@@ -137,6 +137,18 @@ test.describe('Resizable Anatomy panel', () => {
     await expect(pane(page)).toHaveAttribute('style', /width: 320px/);
     await expectStoredAppearance(page.request, prefUser!.userId, { anatomyWidth: 320 });
 
+    const gridBox = await separator(page).locator('..').boundingBox();
+    const separatorBox = await separator(page).boundingBox();
+    expect(gridBox).not.toBeNull();
+    expect(separatorBox).not.toBeNull();
+    const expectedMaximum = Math.floor(gridBox!.width - 320 - separatorBox!.width);
+    await page.keyboard.press('End');
+    await expect(pane(page)).toHaveAttribute('style', new RegExp(`width: ${expectedMaximum}px`));
+    await expectStoredAppearance(page.request, prefUser!.userId, { anatomyWidth: expectedMaximum });
+    const primaryPaneBox = await page.getByTestId('stack-detail-primary-pane').boundingBox();
+    expect(primaryPaneBox).not.toBeNull();
+    expect(Math.abs(primaryPaneBox!.width - 320)).toBeLessThanOrEqual(1);
+
     await putDomain(page.request, prefUser!.userId, 'appearance', {
       ...APPEARANCE_DOC,
       sidebarMode: 'resizable',

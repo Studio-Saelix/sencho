@@ -662,7 +662,7 @@ describe('user-preferences validation', () => {
       .set('Cookie', viewer.cookie).set(HEADER, String(viewer.userId))
       .send({ absent: true, ...doc });
 
-    expect((await put(APPEARANCE_DOC)).status).toBe(200);
+    expect((await put({ ...APPEARANCE_DOC, anatomyWidth: 4096 })).status).toBe(200);
     const all = await request(app).get('/api/user-preferences')
       .set('Cookie', viewer.cookie).set(HEADER, String(viewer.userId));
     expect(all.status).toBe(200);
@@ -670,7 +670,7 @@ describe('user-preferences validation', () => {
     expect(appearance.sidebarMode).toBe('resizable');
     expect(appearance.sidebarWidth).toBe(320);
     expect(appearance.anatomyMode).toBe('resizable');
-    expect(appearance.anatomyWidth).toBe(640);
+    expect(appearance.anatomyWidth).toBe(4096);
   });
 
   it('rejects invalid pane layout field values', async () => {
@@ -685,7 +685,7 @@ describe('user-preferences validation', () => {
     expect((await put({ ...APPEARANCE_DOC, sidebarWidth: '320' })).status).toBe(400);
     expect((await put({ ...APPEARANCE_DOC, anatomyMode: 'float' })).status).toBe(400);
     expect((await put({ ...APPEARANCE_DOC, anatomyWidth: 319 })).status).toBe(400);
-    expect((await put({ ...APPEARANCE_DOC, anatomyWidth: 961 })).status).toBe(400);
+    expect((await put({ ...APPEARANCE_DOC, anatomyWidth: 4097 })).status).toBe(400);
     expect((await put({ ...APPEARANCE_DOC, anatomyWidth: 640.5 })).status).toBe(400);
     expect((await put({ ...APPEARANCE_DOC, anatomyWidth: '640' })).status).toBe(400);
   });

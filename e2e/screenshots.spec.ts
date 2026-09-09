@@ -80,18 +80,18 @@ test('stack detail Anatomy resize', async ({ page }) => {
     if (originalMode !== 'resizable') {
       await anatomyMode.getByRole('radio', { name: 'Resizable' }).click();
     }
-    const widthSlider = page.locator('[aria-label="Anatomy panel width"]');
-    const sliderBox = await widthSlider.boundingBox();
-    if (!sliderBox) throw new Error('Anatomy width slider has no bounding box');
-    await widthSlider.click({ position: { x: sliderBox.width / 2, y: sliderBox.height / 2 } });
     await expect.poll(async () => {
       const stored = await getPreferences(page.request, userId);
-      const appearance = stored.preferences.appearance?.data;
-      return { mode: appearance?.anatomyMode, width: appearance?.anatomyWidth };
-    }).toEqual({ mode: 'resizable', width: 640 });
+      return stored.preferences.appearance?.data?.anatomyMode;
+    }).toBe('resizable');
+    const capturePreferences = (await getPreferences(page.request, userId)).preferences.appearance?.data;
+    if (!capturePreferences) throw new Error('appearance preferences did not persist');
+    await putDomain(page.request, userId, 'appearance', { ...capturePreferences, anatomyWidth: 640 });
+    await page.reload();
     await page.locator('[data-testid="stack-row"]').filter({ hasText: stackName }).click();
     const separator = page.getByTestId('anatomy-resize-separator');
     await expect(separator).toBeVisible();
+    await expect(page.getByTestId('anatomy-resize-pane')).toHaveAttribute('style', /width: 640px/);
     await separator.focus();
     await page.screenshot({ path: path.join(DOCS_IMAGES, 'settings', 'appearance-anatomy-layout.png') });
   } catch (error) {
@@ -193,15 +193,12 @@ function linkedSource(stackName: string) {
 }
 
 async function createStack(page: Page, stackName: string) {
-  await page.evaluate(async (name) => {
-    await fetch(`/api/stacks/${name}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
-    await fetch('/api/stacks', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ stackName: name }),
-    });
-  }, stackName);
+  const priorDelete = await page.request.delete(`/api/stacks/${stackName}`);
+  if (!priorDelete.ok() && priorDelete.status() !== 404) {
+    throw new Error(`delete existing ${stackName} failed with ${priorDelete.status()}`);
+  }
+  const create = await page.request.post('/api/stacks', { data: { stackName } });
+  if (!create.ok()) throw new Error(`create ${stackName} failed with ${create.status()}`);
 }
 
 async function stubGitSourceAndPull(page: Page, stackName: string, pullBody: unknown) {

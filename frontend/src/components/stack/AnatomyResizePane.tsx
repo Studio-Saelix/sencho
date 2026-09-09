@@ -5,7 +5,7 @@ import { ResizablePane, type ResizablePaneConfig } from '@/components/ui/resizab
 const ANATOMY_RESIZE_CONFIG: ResizablePaneConfig = {
   side: 'end',
   bounds: ANATOMY_WIDTH,
-  minComplementWidth: 360,
+  minComplementWidth: ANATOMY_WIDTH.min,
   separatorSize: 24,
   boundsFootprint: 24,
   keyboardStep: 8,

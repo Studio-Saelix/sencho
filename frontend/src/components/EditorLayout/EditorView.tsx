@@ -458,7 +458,7 @@ export function EditorView(props: EditorViewProps) {
                 {/* Left column: identity + health strip + logs, stacked. Hidden in
                     files fullscreen so the editor card fills the width. */}
                 {!filesFullscreen && (
-                <div className="flex flex-col gap-6 min-h-0">
+                <div className="flex flex-col gap-6 min-h-0" data-testid="stack-detail-primary-pane">
                     {/* Command Center Card (identity + health strip). Hidden when
                         the logs are expanded so the logs pane fills the column. */}
                     {!logsExpanded && (

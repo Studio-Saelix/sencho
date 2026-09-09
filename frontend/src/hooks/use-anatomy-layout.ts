@@ -5,7 +5,7 @@ export type AnatomyMode = 'fixed' | 'resizable';
 export const ANATOMY_MODE_KEY = 'sencho.appearance.anatomyMode';
 export const ANATOMY_WIDTH_KEY = 'sencho.appearance.anatomyWidth';
 export const ANATOMY_MODES = ['fixed', 'resizable'] as const;
-export const ANATOMY_WIDTH = { min: 320, max: 960, default: 640 } as const;
+export const ANATOMY_WIDTH = { min: 320, max: 4096, default: 640 } as const;
 export const ANATOMY_WIDTH_DEFAULT = ANATOMY_WIDTH.default;
 
 const anatomyPreference = createPaneLayoutPreference({

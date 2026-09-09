@@ -128,10 +128,23 @@ describe('AnatomyResizePane', () => {
   it('temporarily clamps to preserve the left pane without committing', async () => {
     const commit = vi.fn();
     containerWidth = 900;
-    setup(commit, 800);
+    setup(commit, 1800);
 
-    await waitFor(() => expect(screen.getByTestId('anatomy-resize-pane')).toHaveStyle({ width: '516px' }));
-    expect(screen.getByTestId('anatomy-resize-separator')).toHaveAttribute('aria-valuemax', '516');
+    await waitFor(() => expect(screen.getByTestId('anatomy-resize-pane')).toHaveStyle({ width: '556px' }));
+    expect(screen.getByTestId('anatomy-resize-separator')).toHaveAttribute('aria-valuemax', '556');
     expect(commit).not.toHaveBeenCalled();
+
+    containerWidth = 2200;
+    act(() => notifyResize());
+    await waitFor(() => expect(screen.getByTestId('anatomy-resize-pane')).toHaveStyle({ width: '1800px' }));
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it('allows Anatomy to exceed 960px when the left pane still has 320px', async () => {
+    containerWidth = 2200;
+    setup(vi.fn(), 1800);
+
+    await waitFor(() => expect(screen.getByTestId('anatomy-resize-pane')).toHaveStyle({ width: '1800px' }));
+    expect(screen.getByTestId('anatomy-resize-separator')).toHaveAttribute('aria-valuemax', '1856');
   });
 });
