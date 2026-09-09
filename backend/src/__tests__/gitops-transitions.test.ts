@@ -157,6 +157,22 @@ describe('gitops transitions', () => {
     expect(() => tx.sourcePollScheduled('app-poll-op', 12345, envelope('op-poll-op'))).toThrow(/in flight/);
   });
 
+  it('sourcePolicyChanged persists the policy and records history', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-policy-set', 'policy-set-web'), nodeId: 1, envelope: envelope('op-act-policy') });
+    const result = tx.sourcePolicyChanged('app-policy-set', 'review', envelope('op-policy-set'));
+    expect(store.getApplication('app-policy-set')?.source_policy).toBe('review');
+    expect(result.historyIds.length).toBeGreaterThan(0);
+  });
+
+  it('sourcePolicyChanged refuses to run while an operation is in flight', () => {
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-policy-op', 'policy-op-web'), nodeId: 1, envelope: envelope('op-act-policy-op') });
+    tx.fetchStarted('app-policy-op', envelope('op-f-policy-op'));
+    expect(() => tx.sourcePolicyChanged('app-policy-op', 'automatic', envelope('op-policy-op'))).toThrow(/in flight/);
+  });
+
   it('fetchFailed records the git source error code as failure_class', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
