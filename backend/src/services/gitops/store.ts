@@ -39,7 +39,10 @@ export type AssertNoLiveBlueprintResult =
  * SQL instead of a copy. Each is served by a partial index whose WHERE
  * clause mirrors the query's static terms (see idx_gitops_app_poll_due /
  * idx_gitops_app_retry_due in schema.ts); changing a term here must change
- * it there in the same commit.
+ * it there in the same commit. The poll scan excludes rows with any retry
+ * cursor (past or future): retry-due rows arrive via the retry scan, and a
+ * row still inside its backoff window must not be refetched by a due poll
+ * cursor, so the retry cursor stays the next wake.
  */
 export const SOURCES_DUE_FOR_POLL_SQL = `SELECT * FROM gitops_applications
        WHERE target_mode = 'direct'
@@ -48,6 +51,7 @@ export const SOURCES_DUE_FOR_POLL_SQL = `SELECT * FROM gitops_applications
          AND active_operation_stage IS NULL
          AND next_poll_at IS NOT NULL
          AND next_poll_at <= ?
+         AND retry_at IS NULL
        ORDER BY next_poll_at ASC
        LIMIT ?`;
 

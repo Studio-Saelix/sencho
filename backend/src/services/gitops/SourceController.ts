@@ -116,15 +116,21 @@ export class SourceController {
      * Recompute the poll cursor for every active direct application after a
      * configuration change (the global interval was edited). Automatic and
      * review sources get a fresh cursor; manual sources never join the
-     * unattended schedule, and turning polling off leaves existing cursors
-     * alone: they fire, the fetch consumes them, and the controller declines
-     * to re-arm, so the source drops out of the due set.
+     * unattended schedule, a source still inside a retry backoff window
+     * keeps its retry cursor as the next wake, and turning polling off
+     * leaves existing cursors alone: they fire, the fetch consumes them,
+     * and the controller declines to re-arm, so the source drops out of the
+     * due set.
      */
     rescheduleAll(actor: string): void {
         const now = Date.now();
         const store = GitOpsStore.getInstance();
         for (const app of store.listActiveDirectApplications()) {
             if (app.source_policy === 'manual') continue;
+            // A source inside a retry backoff window keeps the retry cursor
+            // as its next wake: arming a poll cursor here would refetch the
+            // remote before the backoff expires.
+            if (app.retry_at !== null && app.retry_at > now) continue;
             const secs = this.effectiveIntervalSecs(app);
             if (secs <= 0) continue;
             const envelope = { operationId: randomUUID(), actor, trigger: 'config_change', at: now };

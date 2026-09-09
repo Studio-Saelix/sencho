@@ -276,6 +276,68 @@ describe('SourceController poll scheduling', () => {
         expect(getApp('app-review-poll').next_poll_at).toBe(Date.now() + 5 * 60 * 1_000);
     });
 
+    it('does not fetch a source whose retry cursor is still in the future even though its poll cursor is due', async () => {
+        seedApplication('app-backoff', 'backoff-web', 'automatic', 60);
+        // The row is poll-due (next_poll_at armed in the past) but is also
+        // inside a network backoff window that has not fired yet.
+        recordFetchFailure('app-backoff', 'NETWORK_TIMEOUT', 'fetch-app-backoff');
+        GitOpsTransitions.getInstance().sourcePollScheduled(
+            'app-backoff',
+            Date.now() - 1_000,
+            { operationId: 'arm-backoff-poll', actor: 'test', trigger: 'poll', at: Date.now() },
+        );
+        GitOpsTransitions.getInstance().sourceRetryScheduled(
+            'app-backoff',
+            Date.now() + 10 * 60_000,
+            1,
+            { operationId: 'arm-backoff-retry', actor: 'test', trigger: 'retry', at: Date.now() },
+        );
+        const pollCursorAt = getApp('app-backoff').next_poll_at;
+        const retryCursorAt = getApp('app-backoff').retry_at;
+        // Simulate the real due queries (the SQL now filters this row out of
+        // the poll scan; the retry scan does not see it until retry_at).
+        const store = GitOpsStore.getInstance();
+        vi.spyOn(store, 'listSourcesDueForPoll').mockImplementation(
+            (now: number) => store.listActiveDirectApplications().filter(
+                (a) => a.next_poll_at !== null && a.next_poll_at <= now && a.retry_at === null,
+            ),
+        );
+        vi.spyOn(store, 'listApplicationsDueForRetry').mockImplementation(
+            (now: number) => store.listActiveDirectApplications().filter(
+                (a) => a.retry_at !== null && a.retry_at <= now,
+            ),
+        );
+        const reconcile = spyOnReconcile().mockResolvedValue(okResult);
+
+        controller.start();
+        await advanceOneTick();
+
+        // The retry cursor is the next wake: no fetch, no poll re-arm, no
+        // backoff overwrite. A cadence change arriving mid-backoff must not
+        // turn into an immediate refetch.
+        expect(reconcile).not.toHaveBeenCalled();
+        expect(getApp('app-backoff').next_poll_at).toBe(pollCursorAt);
+        expect(getApp('app-backoff').retry_at).toBe(retryCursorAt);
+    });
+
+    it('rescheduling after a config change does not arm a poll cursor over a future retry cursor', async () => {
+        seedApplication('app-resched', 'resched-web', 'automatic');
+        recordFetchFailure('app-resched', 'NETWORK_TIMEOUT', 'fetch-app-resched');
+        GitOpsTransitions.getInstance().sourceRetryScheduled(
+            'app-resched',
+            Date.now() + 5 * 60_000,
+            1,
+            { operationId: 'arm-resched-retry', actor: 'test', trigger: 'retry', at: Date.now() },
+        );
+
+        controller.rescheduleAll('test');
+
+        // The backoff window stays the next wake; rescheduleAll only manages
+        // sources that are not already waiting on a retry.
+        expect(getApp('app-resched').next_poll_at).toBeNull();
+        expect(getApp('app-resched').retry_at).toBe(Date.now() + 5 * 60_000);
+    });
+
     it('floors a per-source interval below 60s at 60s', async () => {
         seedApplication('app-floor', 'floor-web', 'automatic', 5);
         armPastPoll('app-floor', 'arm-floor');

@@ -217,7 +217,7 @@ describe('gitops schema', () => {
       sql.split('\n').map((line) => line.trim().replace(/^(WHERE|AND)\s+/i, '').trim()).filter((line) => line.length > 0);
 
     const pollTerms = staticTerms(SOURCES_DUE_FOR_POLL_SQL).filter((t) =>
-      t.startsWith("target_mode = 'direct'") || t.startsWith("lifecycle_status = 'active'") || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL') || t.startsWith('next_poll_at IS NOT NULL'));
+      t.startsWith("target_mode = 'direct'") || t.startsWith("lifecycle_status = 'active'") || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL') || t.startsWith('next_poll_at IS NOT NULL') || t.startsWith('retry_at IS NULL'));
     for (const term of pollTerms) {
       expect(sqlOf('idx_gitops_app_poll_due')).toContain(term);
     }
@@ -227,6 +227,7 @@ describe('gitops schema', () => {
       'suspended_at IS NULL',
       'active_operation_stage IS NULL',
       'next_poll_at IS NOT NULL',
+      'retry_at IS NULL',
     ]);
 
     const retryTerms = staticTerms(APPLICATIONS_DUE_FOR_RETRY_SQL).filter((t) =>

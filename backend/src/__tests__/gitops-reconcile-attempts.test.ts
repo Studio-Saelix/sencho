@@ -281,6 +281,15 @@ describe('poll and retry eligibility queries', () => {
     expect(due.map((a) => a.id)).not.toContain('app-poll-busy');
   });
 
+  it('excludes a source whose retry cursor is still in the future even when its poll time has arrived', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication({ ...app('app-poll-backoff', 'poll-backoff-web'), next_poll_at: 1_000, retry_at: 5_000 });
+    // The poll scan must not refetch during backoff: the retry cursor is
+    // the next wake, and the retry scan still owns the row once it fires.
+    expect(store.listSourcesDueForPoll(1_000).map((a) => a.id)).not.toContain('app-poll-backoff');
+    expect(store.listApplicationsDueForRetry(1_000).map((a) => a.id)).not.toContain('app-poll-backoff');
+  });
+
   it('excludes a Blueprint-mode application from polling', () => {
     const store = GitOpsStore.getInstance();
     store.insertApplication({
@@ -314,6 +323,16 @@ describe('poll and retry eligibility queries', () => {
     store.insertApplication({ ...app('app-retry-susp', 'retry-susp-web'), retry_at: 1_000, suspended_at: 500 });
     const due = store.listApplicationsDueForRetry(1_000);
     expect(due.map((a) => a.id)).not.toContain('app-retry-susp');
+  });
+
+  it('lists an application once its retry cursor fires even while a stale poll cursor remains', () => {
+    const store = GitOpsStore.getInstance();
+    // A backoff row the operator later fixed by editing the interval keeps a
+    // due next_poll_at alongside the firing retry cursor; the retry scan
+    // must still pick it up (the poll scan defers to the retry cursor).
+    store.insertApplication({ ...app('app-retry-fires', 'retry-fires-web'), next_poll_at: 1_000, retry_at: 1_000 });
+    const due = store.listApplicationsDueForRetry(1_000);
+    expect(due.map((a) => a.id)).toContain('app-retry-fires');
   });
 });
 
