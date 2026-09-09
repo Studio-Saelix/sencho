@@ -43,12 +43,12 @@ diagnosticsRouter.get('/', async (req: Request, res: Response): Promise<void> =>
 // compose directory and its host path mapping, TLS, disk headroom). Same admin
 // session gate as the recovery report. proto / host come from the request so
 // the TLS verdict reflects how this browser reached the dashboard; behind a
-// reverse proxy that terminates TLS, x-forwarded-proto carries the real scheme.
+// trusted reverse proxy that terminates TLS, req.protocol carries the real scheme.
 diagnosticsRouter.get('/environment', async (req: Request, res: Response): Promise<void> => {
     if (!requireUserSession(req, res)) return;
     if (!requireAdmin(req, res)) return;
     try {
-        const proto = (req.get('x-forwarded-proto')?.split(',')[0].trim()) || req.protocol;
+        const proto = req.protocol;
         const host = req.get('host') || '';
         const report = await collectEnvironmentReport(buildRealProbes({ proto, host }));
         try {

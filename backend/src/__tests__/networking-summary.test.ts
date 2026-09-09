@@ -196,7 +196,7 @@ describe('networking summary', () => {
   it('degrades a remote that errors to a node-error while keeping the hub', async () => {
     const db = DatabaseService.getInstance();
     const remoteId = db.addNode({ name: 'remote-degrade', type: 'remote', compose_dir: '/app/compose', is_default: false, api_url: 'http://remote.invalid', api_token: 't' });
-    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't' } : null);
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't', trustedLoopback: false } : null);
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('not found', { status: 404 }));
     try {
       const res = await request(app).get('/api/fleet/networking-summary').set('Authorization', authHeader);

@@ -69,6 +69,7 @@ import {
   _resetTrivyMissingNotificationStateForTests,
   enforcePolicyForImageRefs,
   enforcePolicyPreDeploy,
+  evaluateCandidatePolicy,
 } from '../services/PolicyEnforcement';
 
 function mkPolicy(overrides: Partial<ScanPolicy> = {}): ScanPolicy {
@@ -794,5 +795,131 @@ describe('enforcePolicyForImageRefs - risk-based inputs (KEV / fixable / optiona
     expect(result.violations).toEqual([]);
     expect(dbStub.insertAuditLog).toHaveBeenCalledTimes(1);
     expect(dbStub.insertAuditLog.mock.calls[0][0].summary).toContain('policy.suppression_pass');
+  });
+});
+
+// Candidate (pre-acceptance) evaluation must not fail open the way the
+// deploy-time gate deliberately does: an unresolvable scanner state must
+// surface as its own `unavailable` outcome so a caller can withhold automatic
+// acceptance, rather than silently reusing `ok: true`.
+describe('evaluateCandidatePolicy', () => {
+  beforeEach(() => {
+    trivyStub.isTrivyAvailable.mockReset();
+    trivyStub.scanImagePreflight.mockReset();
+    composeStub.listStackImages.mockReset();
+    dbStub.getMatchingPolicy.mockReset();
+    dbStub.insertAuditLog.mockReset();
+    dbStub.getGlobalSettings.mockReset().mockReturnValue({});
+    dbStub.getAllVulnerabilityDetails.mockReset().mockReturnValue([]);
+    dbStub.getCveSuppressions.mockReset().mockReturnValue([]);
+    dbStub.getCveIntel.mockReset().mockReturnValue(new Map());
+    notificationStub.dispatchAlert.mockReset();
+    _resetTrivyMissingNotificationStateForTests();
+  });
+
+  it('reports allowed when no matching policy exists', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(null);
+
+    const result = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'u' });
+
+    expect(result.status).toBe('allowed');
+  });
+
+  it('reports unavailable, not allowed, when the scanner cannot be evaluated', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(false);
+
+    const result = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'u' });
+
+    expect(result.status).toBe('unavailable');
+    if (result.status === 'unavailable') {
+      expect(result.reason).toBeTruthy();
+    }
+  });
+
+  it('reports blocked when a scanned image exceeds the policy severity', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 7, highest_severity: 'CRITICAL', critical_count: 1 }));
+
+    const result = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'u' });
+
+    expect(result.status).toBe('blocked');
+    if (result.status === 'blocked') {
+      expect(result.violations).toHaveLength(1);
+    }
+  });
+
+  it('reports allowed on an authorized bypass', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 8, highest_severity: 'CRITICAL', critical_count: 1 }));
+
+    const result = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: true, actor: 'admin' });
+
+    expect(result.status).toBe('allowed');
+  });
+
+  it('never reads compose from disk; the caller supplies candidate image refs', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 9, highest_severity: 'LOW' }));
+
+    await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'u' });
+
+    expect(composeStub.listStackImages).not.toHaveBeenCalled();
+  });
+
+  it('reports unavailable, not allowed, for an image reference that cannot be scanned', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+
+    const result = await evaluateCandidatePolicy('web', 1, ['not a valid ref!!'], { bypass: false, actor: 'u' });
+
+    expect(result.status).toBe('unavailable');
+    expect(trivyStub.scanImagePreflight).not.toHaveBeenCalled();
+  });
+
+  it('reports unavailable, not blocked, when the scanner throws for every image', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+    trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+
+    const result = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'u' });
+
+    expect(result.status).toBe('unavailable');
+  });
+
+  it('still reports blocked when at least one image has a genuine scanned violation', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+    trivyStub.scanImagePreflight
+      .mockRejectedValueOnce(new Error('scan process crashed'))
+      .mockResolvedValueOnce(mkScan({ id: 11, highest_severity: 'CRITICAL', critical_count: 1 }));
+
+    const result = await evaluateCandidatePolicy('web', 1, ['unreachable:1', 'nginx:1.27'], { bypass: false, actor: 'u' });
+
+    expect(result.status).toBe('blocked');
+  });
+
+  it('honors an explicit bypass even when the scanner is unavailable', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(false);
+
+    const result = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: true, actor: 'admin' });
+
+    expect(result.status).toBe('allowed');
+  });
+
+  it('does not attribute its audit trail to a deploy that never happened', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 10, highest_severity: 'CRITICAL', critical_count: 1 }));
+
+    await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: true, actor: 'admin' });
+
+    expect(dbStub.insertAuditLog).toHaveBeenCalledTimes(1);
+    const entry = dbStub.insertAuditLog.mock.calls[0][0];
+    expect(entry.path).not.toMatch(/\/deploy$/);
   });
 });

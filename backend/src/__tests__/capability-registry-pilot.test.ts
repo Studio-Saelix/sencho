@@ -33,8 +33,16 @@ describe('fetchRemoteMeta Authorization header', () => {
     await fetchRemoteMeta('https://remote.example.com:1852', 'real-token');
 
     expect(getSpy).toHaveBeenCalledTimes(1);
-    const init = getSpy.mock.calls[0][1] as { headers: Record<string, string> };
+    const init = getSpy.mock.calls[0][1] as {
+      headers: Record<string, string>;
+      proxy?: boolean;
+      httpAgent?: unknown;
+      httpsAgent?: unknown;
+    };
     expect(init.headers).toEqual({ Authorization: 'Bearer real-token' });
+    expect(init.proxy).toBe(false);
+    expect(init.httpAgent).toBeDefined();
+    expect(init.httpsAgent).toBeDefined();
   });
 
   it('omits Authorization entirely when token is empty (pilot-agent loopback)', async () => {
@@ -42,18 +50,21 @@ describe('fetchRemoteMeta Authorization header', () => {
       data: { version: '0.76.7', capabilities: ['stacks'], startedAt: 1, updateError: null },
     });
 
-    await fetchRemoteMeta('http://127.0.0.1:54321', '');
+    await fetchRemoteMeta('http://127.0.0.1:54321', '', true);
 
     expect(getSpy).toHaveBeenCalledTimes(1);
-    const init = getSpy.mock.calls[0][1] as { headers: Record<string, string> };
+    const init = getSpy.mock.calls[0][1] as { headers: Record<string, string>; proxy?: boolean };
     expect(init.headers).toEqual({});
     expect(init.headers).not.toHaveProperty('Authorization');
+    expect(init.proxy).toBe(false);
+    expect(init).not.toHaveProperty('httpAgent');
+    expect(init).not.toHaveProperty('httpsAgent');
   });
 
   it('returns OFFLINE_META shape on transport failure', async () => {
     vi.spyOn(axios, 'get').mockRejectedValue(new Error('connect ECONNREFUSED'));
 
-    const meta = await fetchRemoteMeta('http://127.0.0.1:54321', '');
+    const meta = await fetchRemoteMeta('http://127.0.0.1:54321', '', true);
 
     expect(meta).toEqual({
       version: null,

@@ -63,6 +63,7 @@ beforeEach(() => {
     vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
         apiUrl: 'https://remote.example.com:1852',
         apiToken: 'remote-tok',
+        trustedLoopback: false,
     });
     const db = DatabaseService.getInstance().getDb();
     db.prepare('DELETE FROM blueprint_deployments').run();

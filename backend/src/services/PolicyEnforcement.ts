@@ -74,6 +74,20 @@ export interface PolicyEnforcementResult {
     trivyMissing?: boolean;
 }
 
+/**
+ * Candidate (pre-acceptance) policy outcome. Unlike the deploy-time gate,
+ * which deliberately fails open when the scanner is unavailable so an
+ * operator is never blocked from deploying, an unresolvable scanner state
+ * here is its own outcome: automatic source acceptance must not read
+ * `unavailable` as `allowed`, or a GitOps source could accept a candidate
+ * nothing actually proved safe.
+ */
+export type CandidatePolicyEvaluation = { policy?: ScanPolicy } & (
+    | { status: 'allowed' }
+    | { status: 'blocked'; violations: PolicyViolation[] }
+    | { status: 'unavailable'; reason: string }
+);
+
 const TRIVY_MISSING_NOTIFY_COOLDOWN_MS = 60 * 60 * 1000;
 // Growth bounded by configured-policy fanout (only stacks with an enabled
 // block_on_deploy policy can land here), not by total stack churn. Cleared
@@ -471,4 +485,51 @@ export async function enforcePolicyForImageRefs(
         sanitizeForLog(stackName), violations.length, describePolicyInputs(policyInputs(policy)), sanitizeForLog(policy.name),
     );
     return { ok: false, bypassed: false, policy, violations };
+}
+
+/**
+ * Tri-state candidate evaluation for GitOps source acceptance, built on the
+ * same evaluator the deploy-time gate uses, with the candidate's own image
+ * refs supplied directly rather than read from disk. Has side effects:
+ * writes a policy.bypass/policy.suppression_pass audit row when applicable,
+ * and may dispatch the once-per-hour Trivy-missing operator notification.
+ */
+export async function evaluateCandidatePolicy(
+    stackName: string,
+    nodeId: number,
+    imageRefs: string[],
+    opts: PolicyEnforcementOptions,
+): Promise<CandidatePolicyEvaluation> {
+    const result = await enforcePolicyForImageRefs(stackName, nodeId, imageRefs, {
+        ...opts,
+        // Undefaulted, these attribute the audit row to a deploy path
+        // (enforcePolicyForImageRefs's own default), which never happened
+        // for a pre-acceptance candidate.
+        auditMethod: opts.auditMethod ?? 'POST',
+        auditPath: opts.auditPath ?? `/api/stacks/${stackName}/git-source/candidate`,
+        // The deploy gate silently skips an unscannable ref (fail-open,
+        // since it must never block an operator's deploy on its own
+        // inability to evaluate). Candidate evaluation is the opposite: an
+        // unscannable ref must surface as evidence, not vanish, so it can be
+        // told apart from a genuinely clean scan below.
+    }, undefined, true);
+    // Only trivyMissing forgoes bypass consideration below it because it is
+    // the one path that returns bypassed: false unconditionally; every other
+    // branch of the shared evaluator already honors opts.bypass itself.
+    if (result.trivyMissing) {
+        if (opts.bypass) return { status: 'allowed', policy: result.policy };
+        return { status: 'unavailable', policy: result.policy, reason: 'Vulnerability scanner is unavailable' };
+    }
+    if (!result.ok) {
+        // A violation with no `error` is a genuine scanned policy match; one
+        // with `error` set is an invalid ref, a scan failure, or an
+        // evaluation failure -- evidence Sencho could not prove either way,
+        // not a proven violation. All-unproven must not read as `blocked`.
+        const hasGenuineViolation = result.violations.some((v) => !v.error);
+        if (!hasGenuineViolation) {
+            return { status: 'unavailable', policy: result.policy, reason: 'Candidate could not be fully evaluated' };
+        }
+        return { status: 'blocked', policy: result.policy, violations: result.violations };
+    }
+    return { status: 'allowed', policy: result.policy };
 }

@@ -12,17 +12,18 @@
  * NODE_EXTRA_CA_CERTS (wired in CI and in the local validation lifecycle).
  * The key is a throwaway test certificate with no security value.
  *
- * Soft-skips when the system git binary is unavailable.
+ * Soft-skips when the system git binary is unavailable (locally; throws
+ * under CI, see externalDeps.ts).
  */
 import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import https from 'https';
 import os from 'os';
 import path from 'path';
+import { requireGitBinary } from './externalDeps';
 
 export function gitAvailable(): boolean {
-  const probe = spawnSync('git', ['--version'], { stdio: 'ignore' });
-  return probe.status === 0;
+  return requireGitBinary();
 }
 
 /** Build a git repository with the given files on `branch`, returns the repo dir. */

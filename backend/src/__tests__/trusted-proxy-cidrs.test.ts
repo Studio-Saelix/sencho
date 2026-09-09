@@ -23,6 +23,13 @@ describe('trustedProxyCidrs', () => {
     expect(isTrustedProxyPeer('192.168.1.1')).toBe(false);
   });
 
+  it('matches IPv4-mapped IPv6 peers against IPv4 CIDRs', () => {
+    process.env.SENCHO_TRUSTED_PROXY_CIDRS = '10.0.0.0/8';
+    resetTrustedProxyBlockListCache();
+    expect(isTrustedProxyPeer('::ffff:10.1.2.3')).toBe(true);
+    expect(isTrustedProxyPeer('::ffff:192.168.1.1')).toBe(false);
+  });
+
   it('fails closed on invalid entries', () => {
     process.env.SENCHO_TRUSTED_PROXY_CIDRS = 'not-a-cidr';
     resetTrustedProxyBlockListCache();

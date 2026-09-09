@@ -399,6 +399,7 @@ describe('AutoHealService.evaluate', () => {
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
             apiUrl: 'http://remote:1852',
             apiToken: 'tok',
+            trustedLoopback: false,
         });
         const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
 
@@ -434,6 +435,7 @@ describe('AutoHealService.evaluate', () => {
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
             apiUrl: 'http://remote2:1852',
             apiToken: 'tok2',
+            trustedLoopback: false,
         });
         const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
 

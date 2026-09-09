@@ -11,10 +11,12 @@ import { StackList, type StackListProps } from './StackList';
 import type { FilterChip } from './sidebar-types';
 import type { BulkAction } from '@/hooks/useBulkStackActions';
 import type { SidebarActivitySummary } from './useSidebarActivitySummary';
+import type { BuildInfo } from '@/context/BuildInfoProvider';
 import { isStacksListSettled } from './stacksLoadUi';
 
 export interface StackSidebarProps {
   isDarkMode: boolean;
+  buildInfo?: BuildInfo | null;
   nodeSwitcherSlot: ReactNode;
   createStackSlot: ReactNode | null;
   onScan: () => void;
@@ -43,7 +45,7 @@ export interface StackSidebarProps {
 
 export function StackSidebar(props: StackSidebarProps) {
   const {
-    isDarkMode, nodeSwitcherSlot, createStackSlot, onScan, isScanning, canCreate,
+    isDarkMode, buildInfo, nodeSwitcherSlot, createStackSlot, onScan, isScanning, canCreate,
     searchQuery, onSearchChange, filterChip, filterCounts, onFilterChipChange,
     list, activitySummary, onActivityAction,
     bulkMode, selectedFiles, onToggleBulkMode, onToggleSelect, onClearSelection, onBulkAction,
@@ -76,7 +78,7 @@ export function StackSidebar(props: StackSidebarProps) {
           its kicker chip), so the in-sidebar brand and node rows are redundant
           there and hidden to save vertical space. */}
       <div className="max-md:hidden">
-        <SidebarBrand isDarkMode={isDarkMode} />
+        <SidebarBrand isDarkMode={isDarkMode} buildInfo={buildInfo} />
       </div>
       <div className="max-md:hidden px-4 pt-2 pb-0">{nodeSwitcherSlot}</div>
       {canCreate && createStackSlot !== null && (

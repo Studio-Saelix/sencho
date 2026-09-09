@@ -36,7 +36,7 @@ The worked example is `jackett`, a small self-hosted indexer proxy pinned to `ls
     This is cosmetic confirmation, not the policy itself: the schedule you create next is what actually drives updates.
   </Step>
   <Step title="Create a schedule that targets the label">
-    Open **More → Schedules**, click **New Schedule**, and set **Action** to **Auto-update stacks by label** (in the **Updates** group). Fill in:
+    Open the navigation launcher and, under **Operations**, pick **Schedules** (Smart bar: **More → Schedules**). Click **New Schedule**, and set **Action** to **Auto-update stacks by label** (in the **Updates** group). Fill in:
 
     - **Name**: `Nightly patch check`
     - **Stack Label**: type `Auto-update` and pick the suggestion that appears (it shows the live match count: `1 stack · 1 node`)
@@ -76,7 +76,7 @@ Check from two places, since a status badge alone can't tell you *what* got upda
   <img src="/images/tutorials/configure-auto-update-policies/run-history.png" alt="Execution history sheet for Nightly patch check showing one run: Source Manual, Status Success, Duration 24.1s, and details naming the stack-label selector and 'Stack jackett: updated (lscr.io/linuxserver/jackett:latest)'." />
 </Frame>
 
-**The Update readiness board.** Open **More → Update**. Where jackett's card used to show `Rebuild available`, the board now reads `Everything is up to date`, and the sidebar's **Updates** filter chip is back to `0`.
+**The Update readiness board.** Open the navigation launcher and, under **Operations**, pick **Update** (Smart bar: **More → Update**). Where jackett's card used to show `Rebuild available`, the board now reads `Everything is up to date`, and the sidebar's **Updates** filter chip is back to `0`.
 
 <Frame caption="The Update readiness board after the schedule cleared the only pending rebuild.">
   <img src="/images/tutorials/configure-auto-update-policies/readiness-board-up-to-date.png" alt="Update readiness board showing the empty state: a shield icon, the headline 'All stacks on current builds', and the subtitle 'Sencho rechecks registries on the configured interval.' The sidebar's UPDATES chip reads 0." />

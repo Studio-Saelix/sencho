@@ -26,70 +26,13 @@ import { ComposeService } from '../services/ComposeService';
 import { GitSourceService, GitSourceError } from '../services/GitSourceService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
+import { deliveryKey } from '../services/gitops/triggers';
 import { insertHistory } from '../services/gitops/history';
 import type { GitOpsApplicationRow } from '../services/gitops/types';
 import { PROXY_DEPLOY_ACTOR_HEADER, PROXY_DEPLOY_SOURCE_HEADER } from '../services/license-headers';
-
-/** A minimal live Direct application row for GitOps read-path fixtures. */
-function directApplicationFixture(id: string, stackName: string): GitOpsApplicationRow {
-    return {
-        id,
-        lifecycle_key: `direct:${stackName}`,
-        lifecycle_status: 'active',
-        target_mode: 'direct',
-        stack_name: stackName,
-        blueprint_id: null,
-        configured_repo_url: 'https://github.com/example/repo.git',
-        repo_identity_json: '{"host":"github.com","pathname":"/example/repo.git"}',
-        configured_ref: 'main',
-        compose_paths_json: '["compose.yaml"]',
-        context_dir: null,
-        sync_env: 0,
-        env_path: null,
-        materialization_fingerprint: 'a'.repeat(64),
-        desired_commit_sha: null,
-        fetched_commit_sha: null,
-    fetched_resolved_ref_kind: null,
-        candidate_generation_id: null,
-        accepted_generation_id: null,
-        candidate_plan_blocked: 0,
-        review_required: 0,
-        artifact_set_id: null,
-        latest_artifact_set_id: null,
-        intent_revision_id: null,
-        rollout_candidate_id: null,
-        rollout_generation_id: null,
-        source_acceptance_ref: null,
-        placement_approval_ref: null,
-        rollout_authorization_ref: null,
-        legacy_combined_approval_ref: null,
-        preflight_fingerprint: null,
-        latest_operation_id: null,
-        active_operation_id: null,
-        active_operation_stage: null,
-        active_operation_at: null,
-        active_generation_id: null,
-        pause_at: null,
-        pause_reason: null,
-        partial_json: null,
-        failure_stage: null,
-        failure_class: null,
-        failure_at: null,
-        retry_at: null,
-        retry_count: 0,
-        suspended_at: null,
-        recovery_ref: null,
-        recovery_phase: null,
-        interruption_stage: null,
-        interruption_at: null,
-        interruption_operation_id: null,
-        interruption_generation_id: null,
-        evidence_fresh_at: null,
-        evidence_limitations_json: null,
-        created_at: 1,
-        updated_at: 1,
-    };
-}
+import { withLoopbackTargetProtection } from './helpers/allowLoopbackTargets';
+import { directApplicationFixture } from './helpers/gitopsFixtures';
+import { ROLE_PERMISSIONS } from '../middleware/permissions';
 
 // ── Hoisted mocks (must come before importing the app) ─────────────────
 
@@ -134,8 +77,17 @@ function adminToken(): string {
     return jwt.sign({ username: TEST_USERNAME, role: 'admin' }, TEST_JWT_SECRET, { expiresIn: '1m' });
 }
 
+function viewerToken(): string {
+    return jwt.sign({ username: 'viewer', role: 'viewer' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+}
+
+function nodeAdminToken(): string {
+    return jwt.sign({ username: 'node-admin', role: 'node-admin' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+}
+
 beforeAll(async () => {
     tmpDir = await setupTestDb();
+    DatabaseService.getInstance().addUser({ username: 'node-admin', password_hash: 'test', role: 'node-admin' });
     ({ app } = await import('../index'));
 
     // Seed a real stack directory so the PUT handler's existence guard is satisfied
@@ -218,6 +170,20 @@ describe('POST /api/git-sources/browse: URL validation', () => {
         }
         expect(listRepoTree).not.toHaveBeenCalled();
         listRepoTree.mockRestore();
+    });
+
+    it('rejects repository hosts that resolve to an unsafe address', async () => {
+        const res = await withLoopbackTargetProtection(() => request(app)
+          .post('/api/git-sources/browse')
+          .set('Authorization', `Bearer ${adminToken()}`)
+          .send({
+              repo_url: 'https://127.0.0.1:9999/repo.git',
+              branch: 'main',
+              auth_type: 'none',
+          }));
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/not allowed/i);
     });
 });
 
@@ -690,6 +656,253 @@ describe('POST /api/stacks/:stackName/git-source/webhook-pull status codes', () 
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(res.status).toBe(200);
         pullSpy.mockRestore();
+    });
+
+    it('passes a remote webhook delivery id into the durable pull path', async () => {
+        seedGitSource('webhook-delivery-id');
+        const pullSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+            .mockResolvedValue({ status: 'success', message: 'Pending update ready at abc1234.' });
+        const res = await request(app)
+            .post('/api/stacks/webhook-delivery-id/git-source/webhook-pull')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ deliveryId: 'webhook:42:provider-delivery-1' });
+
+        expect(res.status).toBe(200);
+        expect(pullSpy).toHaveBeenCalledWith('webhook-delivery-id', true, 'webhook:42:provider-delivery-1');
+        pullSpy.mockRestore();
+    });
+
+    it('requires stack:deploy when a redelivery carries a persisted deploy intent', async () => {
+        const stackName = 'webhook-delivery-deploy-auth';
+        const applicationId = 'webhook-delivery-deploy-auth-app';
+        const deliveryId = 'webhook:control:42:provider-delivery-deploy';
+        seedGitSource(stackName);
+        GitOpsStore.getInstance().insertApplication(directApplicationFixture(applicationId, stackName));
+        GitOpsTransitions.getInstance().reserveReconcileAttempt(
+            applicationId,
+            {
+                operationId: deliveryKey('webhook', 'fetch', deliveryId),
+                actor: 'system:webhook',
+                trigger: 'webhook',
+                at: Date.now(),
+            },
+            undefined,
+            { autoApply: true, deploy: true },
+        );
+        const pullSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull');
+        const originalPermissions = ROLE_PERMISSIONS['node-admin'];
+        ROLE_PERMISSIONS['node-admin'] = originalPermissions.filter((permission) => permission !== 'stack:deploy');
+
+        try {
+            const res = await request(app)
+                .post(`/api/stacks/${stackName}/git-source/webhook-pull`)
+                .set('Authorization', `Bearer ${nodeAdminToken()}`)
+                .send({ deliveryId });
+
+            expect(res.status).toBe(403);
+            expect(res.body.code).toBe('PERMISSION_DENIED');
+            expect(pullSpy).not.toHaveBeenCalled();
+        } finally {
+            ROLE_PERMISSIONS['node-admin'] = originalPermissions;
+            pullSpy.mockRestore();
+        }
+    });
+
+    it('requires stack:deploy when a first delivery is configured to auto-apply and deploy', async () => {
+        const stackName = 'webhook-first-delivery-deploy-auth';
+        seedGitSource(stackName);
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE stack_git_sources SET auto_apply_on_webhook = 1, auto_deploy_on_apply = 1 WHERE stack_name = ?')
+            .run(stackName);
+        const pullSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull');
+        const originalPermissions = ROLE_PERMISSIONS['node-admin'];
+        ROLE_PERMISSIONS['node-admin'] = originalPermissions.filter((permission) => permission !== 'stack:deploy');
+
+        try {
+            const res = await request(app)
+                .post(`/api/stacks/${stackName}/git-source/webhook-pull`)
+                .set('Authorization', `Bearer ${nodeAdminToken()}`);
+
+            expect(res.status).toBe(403);
+            expect(res.body.code).toBe('PERMISSION_DENIED');
+            expect(pullSpy).not.toHaveBeenCalled();
+        } finally {
+            ROLE_PERMISSIONS['node-admin'] = originalPermissions;
+            pullSpy.mockRestore();
+        }
+    });
+
+    it.each([
+        ['an object', { nested: true }],
+        ['a blank string', '   '],
+        ['a string over 512 characters', 'x'.repeat(513)],
+    ])('rejects %s as a remote webhook delivery id', async (_caseName, deliveryId) => {
+        seedGitSource('webhook-delivery-id-invalid');
+        const pullSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull');
+
+        try {
+            const res = await request(app)
+                .post('/api/stacks/webhook-delivery-id-invalid/git-source/webhook-pull')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ deliveryId });
+
+            expect(res.status).toBe(400);
+            expect(pullSpy).not.toHaveBeenCalled();
+        } finally {
+            pullSpy.mockRestore();
+        }
+    });
+});
+
+describe('POST /api/stacks/:stackName/git-source/suspend', () => {
+    it('returns 401 without auth', async () => {
+        const res = await request(app).post('/api/stacks/existing-stack/git-source/suspend');
+        expect(res.status).toBe(401);
+    });
+
+    it('returns 400 for an invalid stack name', async () => {
+        const res = await request(app)
+            .post('/api/stacks/..%2fescape/git-source/suspend')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect([400, 404]).toContain(res.status);
+    });
+
+    it('passes the reason through and returns the normalized result', async () => {
+        const suspendSpy = vi.spyOn(GitSourceService.getInstance(), 'suspend')
+            .mockResolvedValue({ outcome: 'suspended', reason: 'Reconciliation is suspended: maintenance', nextAction: 'resume' });
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/suspend')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ reason: 'maintenance' });
+        expect(res.status).toBe(200);
+        expect(res.body.outcome).toBe('suspended');
+        expect(suspendSpy).toHaveBeenCalledWith('existing-stack', expect.objectContaining({ reason: 'maintenance' }));
+        suspendSpy.mockRestore();
+    });
+
+    it('omits reason when none is given in the body', async () => {
+        const suspendSpy = vi.spyOn(GitSourceService.getInstance(), 'suspend')
+            .mockResolvedValue({ outcome: 'suspended', reason: 'Reconciliation is suspended.', nextAction: 'resume' });
+        await request(app)
+            .post('/api/stacks/existing-stack/git-source/suspend')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(suspendSpy).toHaveBeenCalledWith('existing-stack', expect.objectContaining({ reason: undefined }));
+        suspendSpy.mockRestore();
+    });
+
+    it('maps a refused suspend to 409', async () => {
+        const suspendSpy = vi.spyOn(GitSourceService.getInstance(), 'suspend')
+            .mockRejectedValue(new GitSourceError('OPERATION_IN_FLIGHT', 'Cannot suspend existing-stack: source is not live'));
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/suspend')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(res.status).toBe(409);
+        suspendSpy.mockRestore();
+    });
+
+    it('denies without the stack:edit permission', async () => {
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/suspend')
+            .set('Authorization', `Bearer ${viewerToken()}`)
+            .send({});
+        expect([401, 403]).toContain(res.status);
+    });
+
+    it('rejects an oversized reason with 400', async () => {
+        const suspendSpy = vi.spyOn(GitSourceService.getInstance(), 'suspend');
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/suspend')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ reason: 'x'.repeat(513) });
+        expect(res.status).toBe(400);
+        expect(suspendSpy).not.toHaveBeenCalled();
+        suspendSpy.mockRestore();
+    });
+});
+
+describe('POST /api/stacks/:stackName/git-source/resume', () => {
+    it('returns 401 without auth', async () => {
+        const res = await request(app).post('/api/stacks/existing-stack/git-source/resume');
+        expect(res.status).toBe(401);
+    });
+
+    it('returns 400 for an invalid stack name', async () => {
+        const res = await request(app)
+            .post('/api/stacks/..%2fescape/git-source/resume')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect([400, 404]).toContain(res.status);
+    });
+
+    it('returns the normalized result', async () => {
+        const resumeSpy = vi.spyOn(GitSourceService.getInstance(), 'resume')
+            .mockResolvedValue({ outcome: 'no_source_change', reason: 'ok', nextAction: 'none' });
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/resume')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(res.status).toBe(200);
+        expect(res.body.outcome).toBe('no_source_change');
+        expect(resumeSpy).toHaveBeenCalledWith('existing-stack', expect.objectContaining({ actor: expect.any(String) }));
+        resumeSpy.mockRestore();
+    });
+
+    it('denies without the stack:edit permission', async () => {
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/resume')
+            .set('Authorization', `Bearer ${viewerToken()}`)
+            .send({});
+        expect([401, 403]).toContain(res.status);
+    });
+});
+
+describe('POST /api/stacks/:stackName/git-source/retry', () => {
+    it('returns 401 without auth', async () => {
+        const res = await request(app).post('/api/stacks/existing-stack/git-source/retry');
+        expect(res.status).toBe(401);
+    });
+
+    it('returns 400 for an invalid stack name', async () => {
+        const res = await request(app)
+            .post('/api/stacks/..%2fescape/git-source/retry')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect([400, 404]).toContain(res.status);
+    });
+
+    it('returns the normalized result', async () => {
+        const retrySpy = vi.spyOn(GitSourceService.getInstance(), 'retry')
+            .mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/retry')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(res.status).toBe(200);
+        expect(res.body.outcome).toBe('candidate_already_fetched');
+        expect(retrySpy).toHaveBeenCalledWith('existing-stack', expect.objectContaining({ actor: expect.any(String) }));
+        retrySpy.mockRestore();
+    });
+
+    it('maps an unexpected failure to 500', async () => {
+        const retrySpy = vi.spyOn(GitSourceService.getInstance(), 'retry')
+            .mockRejectedValue(new Error('unexpected'));
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/retry')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(res.status).toBe(500);
+        retrySpy.mockRestore();
+    });
+
+    it('denies without the stack:edit permission', async () => {
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/retry')
+            .set('Authorization', `Bearer ${viewerToken()}`)
+            .send({});
+        expect([401, 403]).toContain(res.status);
     });
 });
 
@@ -1757,6 +1970,15 @@ describe('POST /api/git-sources/ssh-host-key', () => {
         expect(res.body.error).toMatch(/SSH repository URL/i);
     });
 
+    it('rejects host-key probes to an unsafe address', async () => {
+        const res = await withLoopbackTargetProtection(() => request(app)
+          .post('/api/git-sources/ssh-host-key')
+          .set('Authorization', `Bearer ${adminToken()}`)
+          .send({ repo_url: 'ssh://git@127.0.0.1:22/example/repo.git' }));
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/not allowed/i);
+    });
+
     it('returns scanned host keys for an SSH repository URL', async () => {
         const scanHostKeys = vi.spyOn(
             await import('../services/git/sshTrust'),
@@ -1771,12 +1993,13 @@ describe('POST /api/git-sources/ssh-host-key', () => {
         const res = await request(app)
             .post('/api/git-sources/ssh-host-key')
             .set('Authorization', `Bearer ${adminToken()}`)
-            .send({ repo_url: 'git@github.com:example/repo.git' });
+            .send({ repo_url: 'git@pinned.example:example/repo.git' });
         expect(res.status).toBe(200);
-        expect(res.body.host).toBe('github.com');
+        expect(res.body.host).toBe('pinned.example');
         expect(res.body.port).toBe(22);
         expect(res.body.keys).toHaveLength(1);
         expect(res.body.keys[0].fingerprint).toBe('SHA256:fixtureFingerprint');
+        expect(scanHostKeys).toHaveBeenCalledWith('pinned.example', 22, '93.184.216.34');
         scanHostKeys.mockRestore();
     });
 
@@ -1822,7 +2045,7 @@ describe('POST /api/git-sources/ssh-host-key', () => {
         const res = await request(app)
             .post('/api/git-sources/ssh-host-key')
             .set('Authorization', `Bearer ${adminToken()}`)
-            .send({ repo_url: 'ssh://git@git.example.com:2222/org/repo.git' });
+            .send({ repo_url: 'ssh://git@github.com:2222/org/repo.git' });
         expect(res.status).toBe(500);
         expect(res.body.error).toMatch(/Git source operation failed/i);
         scanHostKeys.mockRestore();

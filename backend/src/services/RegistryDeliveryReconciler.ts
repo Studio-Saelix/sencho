@@ -7,8 +7,9 @@ import type { RegistryDeliveryEvidencePage } from '../types/registryDeliveryEvid
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { DatabaseService } from './DatabaseService';
-import { NodeRegistry } from './NodeRegistry';
+import { NodeRegistry, type ProxyTarget } from './NodeRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
+import { safeAxiosTransport } from '../utils/outboundTarget';
 
 const RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
 const RECONCILE_INITIAL_DELAY_MS = 30_000;
@@ -140,7 +141,7 @@ export class RegistryDeliveryReconciler {
   }
 
   private async fetchEvidencePage(
-    target: { apiUrl: string; apiToken: string },
+    target: ProxyTarget,
     cursor: number,
     limit: number,
   ): Promise<RegistryDeliveryEvidencePage> {
@@ -151,6 +152,7 @@ export class RegistryDeliveryReconciler {
     }
 
     const res = await axios.get(`${base}/api/registry-delivery/evidence`, {
+      ...safeAxiosTransport(target.trustedLoopback),
       headers,
       params: { cursor, limit },
       timeout: 30_000,

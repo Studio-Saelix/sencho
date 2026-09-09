@@ -92,6 +92,7 @@ function makeClone(files: Record<string, string>): string {
 }
 
 const REPO = { repo_url: 'https://github.com/example/repo.git', branch: 'main' };
+const NO_CANDIDATE_CLAIMS = { complete: true as const, dirs: new Set<string>() };
 
 function seedGitSource(stackName: string): void {
     DatabaseService.getInstance().upsertGitSource({
@@ -731,6 +732,59 @@ describe('promoteGeneration', () => {
 });
 
 describe('sweepManagedArea (crash recovery)', () => {
+    it('does not delete a candidate when its completion marker cannot be inspected', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'sweep-candidate-marker-io';
+        const candidateAbs = path.join(tmpDir, 'git-managed', '1', stackName, 'generations', 'candidate-marker-io');
+        const markerPath = path.join(candidateAbs, CANDIDATE_COMPLETE_MARKER);
+        fs.mkdirSync(candidateAbs, { recursive: true });
+        fs.writeFileSync(markerPath, 'complete');
+        const originalAccess = fs.promises.access.bind(fs.promises);
+        const accessSpy = vi.spyOn(fs.promises, 'access').mockImplementation(async (...args: Parameters<typeof fs.promises.access>) => {
+            if (String(args[0]) === markerPath) {
+                throw Object.assign(new Error('candidate marker permission denied'), { code: 'EACCES' });
+            }
+            return originalAccess(...args);
+        });
+
+        try {
+            await expect(svc.sweepManagedArea(stackName, {
+                repoUrl: REPO.repo_url,
+                branch: REPO.branch,
+                stackExists: true,
+                candidateClaims: NO_CANDIDATE_CLAIMS,
+            })).rejects.toThrow(/candidate marker permission denied/);
+            expect(fs.existsSync(candidateAbs)).toBe(true);
+        } finally {
+            accessSpy.mockRestore();
+        }
+    });
+
+    it('surfaces a generations-directory read failure', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const stackName = 'sweep-generations-read-io';
+        const generationsDir = path.join(tmpDir, 'git-managed', '1', stackName, 'generations');
+        fs.mkdirSync(generationsDir, { recursive: true });
+        const originalReaddir = fs.promises.readdir.bind(fs.promises);
+        const readdirSpy = vi.spyOn(fs.promises, 'readdir').mockImplementation(async (...args: Parameters<typeof fs.promises.readdir>) => {
+            if (String(args[0]) === generationsDir) {
+                throw Object.assign(new Error('generations directory unavailable'), { code: 'EIO' });
+            }
+            return originalReaddir(...args);
+        });
+
+        try {
+            await expect(svc.sweepManagedArea(stackName, {
+                repoUrl: REPO.repo_url,
+                branch: REPO.branch,
+                stackExists: true,
+                candidateClaims: NO_CANDIDATE_CLAIMS,
+            })).rejects.toThrow(/generations directory unavailable/);
+        } finally {
+            readdirSpy.mockRestore();
+        }
+    });
+
     it('restores the previous applied generation when the marker matches the stack dir', async () => {
         const svc = GitProjectManifestService.getInstance();
         const stackName = 'sweep-restore';
@@ -763,7 +817,7 @@ describe('sweepManagedArea (crash recovery)', () => {
             affected: ['app.env', 'compose.yaml'],
         });
 
-        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true, candidateClaims: NO_CANDIDATE_CLAIMS });
 
         expect(readStackFile(stackName, 'compose.yaml')).toBe('PRIOR\n');
         expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
@@ -817,7 +871,7 @@ describe('sweepManagedArea (crash recovery)', () => {
             affected: ['compose.yaml'],
         });
 
-        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true, candidateClaims: NO_CANDIDATE_CLAIMS });
 
         expect(readStackFile(stackName, 'compose.yaml')).toBe('OPERATOR FIXED ME\n');
         expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
@@ -852,7 +906,7 @@ describe('sweepManagedArea (crash recovery)', () => {
             affected: ['compose.yaml'],
         });
 
-        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true, candidateClaims: NO_CANDIDATE_CLAIMS });
 
         expect(readStackFile(stackName, 'compose.yaml')).toBe('PRIOR\n');
         expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
@@ -887,7 +941,7 @@ describe('sweepManagedArea (crash recovery)', () => {
             affected: ['compose.yaml'],
         });
 
-        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true, candidateClaims: NO_CANDIDATE_CLAIMS });
 
         expect(readStackFile(stackName, 'compose.yaml')).toBe('NEW\n');
         expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
@@ -927,7 +981,7 @@ describe('sweepManagedArea (crash recovery)', () => {
             affected: ['compose.yaml'],
         });
 
-        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true, candidateClaims: NO_CANDIDATE_CLAIMS });
 
         expect(readStackFile(stackName, 'compose.yaml')).toBe('PRIOR\n');
         const row = DatabaseService.getInstance().getGitSource(stackName);
@@ -969,7 +1023,7 @@ describe('sweepManagedArea (crash recovery)', () => {
             affected: ['app.env', 'compose.yaml'],
         });
 
-        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true, candidateClaims: NO_CANDIDATE_CLAIMS });
 
         expect(readStackFile(stackName, 'compose.yaml')).toBe('NEW\n');
         expect(readStackFile(stackName, 'app.env')).toBe('OPERATOR\n');
@@ -981,7 +1035,7 @@ describe('sweepManagedArea (crash recovery)', () => {
         const svc = GitProjectManifestService.getInstance();
         const stackName = 'sweep-orphan';
         await svc.writeManifest(stackName, buildManifest(stackName, [managedEntry({ materializedPath: 'compose.yaml' })]));
-        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: false });
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: false, candidateClaims: NO_CANDIDATE_CLAIMS });
         expect(await svc.readManifest(stackName, REPO.repo_url, REPO.branch)).toBeNull();
     });
 });
@@ -1059,7 +1113,7 @@ describe('detach crash recovery', () => {
         writeStackFile(stackName, 'compose.yaml', 'services:\n  web:\n    image: nginx:new\n');
         expect(await svc.stageManagedAreaForDetach(stackName)).toBe(true);
 
-        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true, candidateClaims: NO_CANDIDATE_CLAIMS });
 
         expect(readStackFile(stackName, 'compose.yaml')).toBe(original.toString('utf8'));
         const restored = await svc.readManifest(stackName, REPO.repo_url, REPO.branch);
@@ -1303,7 +1357,7 @@ describe('promoteGeneration mid-write failure recovery', () => {
         });
         fs.mkdirSync(path.join(tmpDir, 'git-managed', '1', stackName), { recursive: true });
         fs.writeFileSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER), '{"v":3 torn', 'utf8');
-        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true });
+        await svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true, candidateClaims: NO_CANDIDATE_CLAIMS });
         expect(fs.existsSync(path.join(tmpDir, 'git-managed', '1', stackName, PROMOTION_MARKER))).toBe(false);
         expect(DatabaseService.getInstance().getGitSource(stackName)?.manifest_state).toBe('migration_required');
     });
@@ -1325,7 +1379,7 @@ describe('promoteGeneration mid-write failure recovery', () => {
         }), 'utf8');
         const stateSpy = vi.spyOn(DatabaseService.getInstance(), 'setGitSourceManifestState');
         try {
-            await expect(svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true })).resolves.toBeUndefined();
+            await expect(svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true, candidateClaims: NO_CANDIDATE_CLAIMS })).resolves.toBeUndefined();
             expect(stateSpy).toHaveBeenCalledWith(stackName, null, 'migration_required', null);
         } finally {
             stateSpy.mockRestore();
@@ -1343,7 +1397,7 @@ describe('promoteGeneration mid-write failure recovery', () => {
             throw new Error('database unavailable');
         });
         try {
-            await expect(svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true })).rejects.toThrow(/database unavailable/);
+            await expect(svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true, candidateClaims: NO_CANDIDATE_CLAIMS })).rejects.toThrow(/database unavailable/);
             expect(fs.existsSync(markerPath)).toBe(true);
         } finally {
             stateSpy.mockRestore();
@@ -1371,7 +1425,7 @@ describe('promoteGeneration mid-write failure recovery', () => {
             return originalAccess(...args);
         });
         try {
-            await expect(svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true })).rejects.toThrow(/permission denied/);
+            await expect(svc.sweepManagedArea(stackName, { repoUrl: REPO.repo_url, branch: REPO.branch, stackExists: true, candidateClaims: NO_CANDIDATE_CLAIMS })).rejects.toThrow(/permission denied/);
             expect(fs.existsSync(markerPath)).toBe(true);
         } finally {
             accessSpy.mockRestore();

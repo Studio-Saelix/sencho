@@ -341,7 +341,7 @@ export function commitBlueprintDelete(blueprintId: number, actor: string | null)
 }
 
 /** A Blueprint application before anything has been asked of it. */
-export function blankInlineApplication(id: string, blueprintId: number, at: number) {
+export function blankInlineApplication(id: string, blueprintId: number, at: number): GitOpsApplicationRow {
   return {
     id,
     lifecycle_key: `blueprint:${blueprintId}`,
@@ -381,6 +381,11 @@ export function blankInlineApplication(id: string, blueprintId: number, at: numb
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    source_suspended_reason: null,
+    source_policy: 'manual',
+    poll_interval_secs: null,
+    next_poll_at: null,
+    attempt_seq: 0,
     partial_json: null,
     failure_stage: null,
     failure_class: null,

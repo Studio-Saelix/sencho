@@ -234,7 +234,14 @@ function deriveSource(app: GitOpsApplicationRow, limitations: GitOpsLimitation[]
       interruptedGenerationId: app.interruption_generation_id,
     };
   }
-  if (app.suspended_at) return { ...identity, status: 'source_suspended', suspendedAt: app.suspended_at };
+  if (app.suspended_at) {
+    return {
+      ...identity,
+      status: 'source_suspended',
+      suspendedAt: app.suspended_at,
+      suspendedReason: app.source_suspended_reason,
+    };
+  }
   if (app.failure_stage === 'fetch' || app.failure_stage === 'validation' || app.failure_stage === 'apply' || app.failure_stage === 'create') {
     return {
       ...identity,

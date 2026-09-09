@@ -173,32 +173,39 @@ describe('AppearanceSection', () => {
         localStorage.clear();
         render(<AppearanceSection />);
         expect(screen.getByText('Navigation')).toBeTruthy();
-        expect(screen.getByRole('radiogroup', { name: 'Navigation style' })).toBeTruthy();
-        // Smart default shows label toggle, hides quick links.
+        const navigationStyle = screen.getByRole('radiogroup', { name: 'Navigation style' });
+        expect(navigationStyle).toBeTruthy();
+        // Compact is the default: shows quick links, hides label/alignment controls.
+        expect(screen.getByText('Quick links')).toBeTruthy();
+        expect(screen.queryByText('Top navigation labels')).toBeNull();
+
+        fireEvent.click(screen.getByRole('radio', { name: 'Smart bar' }));
         expect(screen.getByText('Top navigation labels')).toBeTruthy();
         expect(screen.queryByText('Quick links')).toBeNull();
 
         fireEvent.click(screen.getByRole('radio', { name: 'Compact launcher' }));
         expect(screen.getByText('Quick links')).toBeTruthy();
         expect(screen.queryByText('Top navigation labels')).toBeNull();
-
-        fireEvent.click(screen.getByRole('radio', { name: 'Classic bar' }));
-        expect(screen.getByText('Top navigation labels')).toBeTruthy();
-        expect(screen.queryByText('Quick links')).toBeNull();
     });
 
-    it('shows the Classic bar retiring callout only while Classic is selected', () => {
+    it('offers only Compact launcher and Smart bar, with Compact first', () => {
         localStorage.clear();
         render(<AppearanceSection />);
+        const options = screen.getAllByRole('radio', { name: /bar|launcher/i }).map((el) => el.textContent);
+        expect(options).toEqual(['Compact launcher', 'Smart bar']);
+        expect(screen.queryByRole('radio', { name: 'Classic bar' })).toBeNull();
         expect(screen.queryByText('Classic bar retiring')).toBeNull();
+    });
 
-        fireEvent.click(screen.getByRole('radio', { name: 'Classic bar' }));
-        expect(screen.getByText('Classic bar retiring')).toBeTruthy();
-        expect(
-            screen.getByText('Classic bar will be removed soon. Your preference is kept until then.'),
-        ).toBeTruthy();
+    it('disables Reset to defaults while default eligibility has not settled', () => {
+        localStorage.clear();
+        render(<AppearanceSection quickLinkCandidates={[]} defaultQuickLinkEligibility={null} />);
+        expect((screen.getByRole('button', { name: 'Reset to defaults' }) as HTMLButtonElement).disabled).toBe(true);
+    });
 
-        fireEvent.click(screen.getByRole('radio', { name: 'Compact launcher' }));
-        expect(screen.queryByText('Classic bar retiring')).toBeNull();
+    it('enables Reset to defaults once default eligibility has settled', () => {
+        localStorage.clear();
+        render(<AppearanceSection quickLinkCandidates={[]} defaultQuickLinkEligibility={['dashboard']} />);
+        expect((screen.getByRole('button', { name: 'Reset to defaults' }) as HTMLButtonElement).disabled).toBe(false);
     });
 });

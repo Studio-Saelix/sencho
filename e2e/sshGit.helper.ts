@@ -10,10 +10,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import net from 'net';
 import os from 'os';
 import path from 'path';
+import { requireGitBinary, requireSshd } from './externalDeps';
 
 export function sshGitFixtureAvailable(): boolean {
-  return spawnSync('git', ['--version'], { stdio: 'ignore' }).status === 0
-    && spawnSync('/usr/sbin/sshd', ['-V'], { stdio: 'ignore' }).status === 0;
+  return requireGitBinary() && requireSshd();
 }
 
 const COMPOSE_FIXTURE = `services:

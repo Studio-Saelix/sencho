@@ -71,6 +71,13 @@ export type GitOpsApplicationRow = {
   active_generation_id: string | null;
   pause_at: number | null;
   pause_reason: string | null;
+  /** sourceSuspended/sourceUnsuspended's own reason field; independent of pause_reason. */
+  source_suspended_reason: string | null;
+  /** Controller-owned. See gitops/SourceController.ts. */
+  source_policy: 'manual' | 'review' | 'automatic';
+  poll_interval_secs: number | null;
+  next_poll_at: number | null;
+  attempt_seq: number;
   partial_json: string | null;
   failure_stage: ApplicationFailureStage | null;
   failure_class: string | null;
@@ -159,6 +166,13 @@ export type GitOpsGenerationRow = {
   actor: string | null;
   previous_generation_id: string | null;
   redacted_limitations_json: string;
+  /** Portable accepted-generation contract fields. See gitops/handoff.ts. */
+  portable_manifest_json: string | null;
+  compose_inputs_json: string | null;
+  source_policy_evidence_json: string | null;
+  security_policy_evidence_json: string | null;
+  support_requirements_json: string | null;
+  compatibility_requirements_json: string | null;
   created_at: number;
 };
 
@@ -402,7 +416,7 @@ export type SourceFacet =
   | (SourceIdentityFields & { status: 'source_superseded'; supersededGenerationId: string })
   | (SourceIdentityFields & { status: 'applying'; activeOperationId: string; activeGenerationId: string })
   | (SourceIdentityFields & { status: 'source_retry_scheduled'; retryAt: number; retryCount: number })
-  | (SourceIdentityFields & { status: 'source_suspended'; suspendedAt: number })
+  | (SourceIdentityFields & { status: 'source_suspended'; suspendedAt: number; suspendedReason: string | null })
   | (SourceIdentityFields & {
       status: 'source_failed';
       failureStage: 'fetch' | 'validation' | 'apply' | 'create';

@@ -1,7 +1,7 @@
 /**
  * Proves per-source CA bundles work without the process-wide NODE_EXTRA_CA_CERTS bridge.
  */
-import { spawn, spawnSync } from 'child_process';
+import { spawn } from 'child_process';
 import { promises as fs, readFileSync } from 'fs';
 import https from 'https';
 import os from 'os';
@@ -9,10 +9,7 @@ import path from 'path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { nativeGitTransport } from '../services/git/nativeGitTransport';
 import { buildBareRepo } from './__helpers__/gitFixture';
-
-function gitAvailable(): boolean {
-    return spawnSync('git', ['--version'], { stdio: 'ignore' }).status === 0;
-}
+import { requireGitBinary } from './__helpers__/externalDeps';
 
 const FIXTURES_DIR = path.resolve(__dirname, '..', '..', '..', 'e2e', 'fixtures');
 const CA_PEM = readFileSync(path.join(FIXTURES_DIR, 'git-ca.pem'), 'utf8');
@@ -70,7 +67,7 @@ function serveRepo(bareDir: string): Promise<{ url: string; close: () => void }>
     });
 }
 
-describe.skipIf(!gitAvailable())('per-source private CA transport (real git)', () => {
+describe.skipIf(!requireGitBinary())('per-source private CA transport (real git)', () => {
     let repoUrl: string;
     let closeServer: () => void;
     let prevExtraCaCerts: string | undefined;

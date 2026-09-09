@@ -104,13 +104,50 @@ export function isSenchoDevFloatingTag(imageRef: string): boolean {
   // A digest pin disqualifies the reference (e.g., `@sha256:...`)
   if (ref.includes('@sha256:') || ref.startsWith('sha256:')) return false;
 
-  // Extract the tag using the same logic as classifyImagePin.
+  const tag = extractTagFromRef(ref);
+  return tag === 'dev';
+}
+
+/**
+ * Build channel of a running or declared image, derived from the image
+ * reference alone. This is the canonical build identity classifier used by
+ * `/api/build-info` and the shell/About surfaces: it answers "is this a dev,
+ * preview, or stable build" from the ref, independent of the packaged semver
+ * (a dev image carries the last released version, so version alone cannot
+ * identify it).
+ *
+ *   - dev repo (`ghcr.io/studio-saelix/sencho-dev`): always `'dev'`. An
+ *     arbitrary `:dev-<sha>` tag still reads `dev` (a deliberate operator
+ *     choice); the immutable revision is surfaced separately from the digest.
+ *   - stable repos (`ghcr.io/studio-saelix/sencho-hardened`, `saelix/sencho`,
+ *     `ghcr.io/studio-saelix/sencho`): `pr-<n>` and `preview-<sha>` tags are
+ *     `'preview'` (CI builds on the stable repo that are not releases);
+ *     everything else is `'stable'`.
+ *   - any other repository: `'unknown'`.
+ */
+export type BuildChannel = 'stable' | 'dev' | 'preview' | 'unknown';
+
+export function classifyBuildChannel(imageRef: string): BuildChannel {
+  const repository = normalizeImageRepository(imageRef);
+  if (repository === 'ghcr.io/studio-saelix/sencho-dev') return 'dev';
+  if (
+    repository === 'ghcr.io/studio-saelix/sencho-hardened' ||
+    repository === 'saelix/sencho' ||
+    repository === 'ghcr.io/studio-saelix/sencho'
+  ) {
+    const tag = extractTagFromRef(imageRef.trim());
+    if (tag && (/^pr-\d+$/.test(tag) || /^preview-[0-9a-f]{7,40}$/.test(tag))) return 'preview';
+    return 'stable';
+  }
+  return 'unknown';
+}
+
+/** Extract the tag portion of an image ref (`.../repo:tag`), or '' when absent. */
+function extractTagFromRef(ref: string): string {
   const lastSlash = ref.lastIndexOf('/');
   const lastColon = ref.lastIndexOf(':');
   // A colon after the last slash is a tag separator; before it is a registry port.
-  const tag = lastColon > lastSlash ? ref.slice(lastColon + 1) : '';
-
-  return tag === 'dev';
+  return lastColon > lastSlash ? ref.slice(lastColon + 1) : '';
 }
 
 /**

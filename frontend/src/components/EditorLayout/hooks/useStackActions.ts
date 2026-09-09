@@ -636,7 +636,9 @@ export function useStackActions(options: UseStackActionsOptions) {
     signal?: AbortSignal;
     attemptId?: string;
     expectedFile: string;
-    expectedNodeId: number | undefined;
+    // The node the fetch was pinned to (null = local). A mid-flight node change
+    // elsewhere cannot invalidate (or retarget) it.
+    expectedNodeId: number | null;
     generation: number;
   };
 
@@ -645,7 +647,11 @@ export function useStackActions(options: UseStackActionsOptions) {
   ): 'ok' | 'aborted' | 'stale' => {
     if (ownership.signal?.aborted) return 'aborted';
     if (selectedFileRef.current !== ownership.expectedFile) return 'stale';
-    if (activeNodeIdRef.current !== ownership.expectedNodeId) return 'stale';
+    // Both sides normalize against null: the ref is `number | undefined` (no
+    // active node yet) and the ownership field is `number | null` (pinned
+    // local target). `undefined !== null` is true in strict equality, so an
+    // un-normalized pair would report a false stale for a plain local load.
+    if ((activeNodeIdRef.current ?? null) !== ownership.expectedNodeId) return 'stale';
     if (containersFetchGenRef.current !== ownership.generation) return 'stale';
     if (
       ownership.attemptId !== undefined
@@ -766,7 +772,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     if (selectedFileRef.current !== stackFile) return 'skipped';
     const result = await fetchStackContainers(stackFile, 'soft', {
       expectedFile: stackFile,
-      expectedNodeId: activeNodeIdRef.current,
+      expectedNodeId: activeNodeIdRef.current ?? null,
     });
     if (result.ok) return 'ok';
     if (result.reason === 'stale' || result.reason === 'aborted') return 'skipped';
@@ -778,20 +784,23 @@ export function useStackActions(options: UseStackActionsOptions) {
     if (!stackFile) return;
     await fetchStackContainers(stackFile, 'foreground', {
       expectedFile: stackFile,
-      expectedNodeId: activeNodeIdRef.current,
+      expectedNodeId: activeNodeIdRef.current ?? null,
     });
   };
 
   const loadContainerState = (
     filename: string,
-    signal?: AbortSignal,
-    attemptId?: string,
+    signal: AbortSignal | undefined,
+    attemptId: string | undefined,
+    // Pin the fetch to this node (null = local). Only loadFileCore passes it;
+    // the other callers construct the expectation from the current ref.
+    expectedNodeId: number | null,
   ): Promise<ContainersFetchResult> =>
     fetchStackContainers(filename, 'foreground', {
       signal,
       attemptId,
       expectedFile: filename,
-      expectedNodeId: activeNodeIdRef.current,
+      expectedNodeId,
     });
 
   // Stack operations whose failure produces a recovery panel. A failed
@@ -884,7 +893,10 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
     setActiveNode(node);
     stackListState.setSearchQuery('');
-    await loadFileRef.current(filename, options);
+    // Pin the load to the target node explicitly: activeNode has not re-rendered
+    // yet, so an unpinned load would read the stale ref (or, once it does render,
+    // whatever node another tab made active in the shared localStorage).
+    await loadFileRef.current(filename, { ...options, nodeId: node.id });
   };
 
   const clearEnvState = () => {
@@ -896,9 +908,9 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setEnvEtag(null);
   };
 
-  const loadEnvState = async (filename: string, signal?: AbortSignal): Promise<string[]> => {
+  const loadEnvState = async (filename: string, signal?: AbortSignal, opNodeId?: number | null): Promise<string[]> => {
     try {
-      const envsRes = await apiFetch(`/stacks/${filename}/envs`, { signal });
+      const envsRes = await apiFetch(`/stacks/${filename}/envs`, { signal, nodeId: opNodeId });
       if (signal?.aborted) return [];
       if (!envsRes.ok) {
         clearEnvState();
@@ -913,7 +925,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         editorState.setEnvExists(true);
         const envContentRes = await apiFetch(
           `/stacks/${filename}/env?file=${encodeURIComponent(firstFile)}`,
-          { signal },
+          { signal, nodeId: opNodeId },
         );
         if (signal?.aborted) return envFiles;
         if (envContentRes.ok) {
@@ -937,9 +949,9 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const loadBackupState = async (filename: string, signal?: AbortSignal) => {
+  const loadBackupState = async (filename: string, signal?: AbortSignal, opNodeId?: number | null) => {
     try {
-      const backupRes = await apiFetch(`/stacks/${filename}/backup`, { signal });
+      const backupRes = await apiFetch(`/stacks/${filename}/backup`, { signal, nodeId: opNodeId });
       if (signal?.aborted) return;
       if (backupRes.ok) editorState.setBackupInfo(await backupRes.json());
       else editorState.setBackupInfo({ exists: false, timestamp: null });
@@ -953,14 +965,14 @@ export function useStackActions(options: UseStackActionsOptions) {
   // without the capability so an older remote node never sees the extra
   // request; a render failure or non-ok response also fails closed to an
   // empty list, which keeps the legacy single-service layout.
-  const loadEffectiveServicesState = async (filename: string, signal?: AbortSignal) => {
+  const loadEffectiveServicesState = async (filename: string, signal?: AbortSignal, opNodeId?: number | null) => {
     if (!hasServiceScopedUpdate) {
       editorState.setEffectiveServices([]);
       return;
     }
     const stackName = filename.replace(/\.(yml|yaml)$/, '');
     try {
-      const res = await apiFetch(`/stacks/${stackName}/effective-services`, { signal });
+      const res = await apiFetch(`/stacks/${stackName}/effective-services`, { signal, nodeId: opNodeId });
       if (signal?.aborted) return;
       if (!res.ok) {
         editorState.setEffectiveServices([]);
@@ -1022,9 +1034,13 @@ export function useStackActions(options: UseStackActionsOptions) {
     containersFetchGenRef.current += 1;
     let headersSpan: SpanHandle | null = null;
     let bodySpan: SpanHandle | null = null;
+    // Node pin for the whole load: an explicit option wins (loadFileOnNode),
+    // otherwise the node this tab captured. Captured once here so no request in
+    // the chain can follow a node another tab made active mid-load.
+    const opNodeId = options?.nodeId !== undefined ? options.nodeId : (activeNode?.id ?? null);
     try {
       headersSpan = beginSpan('fetch_headers', { attemptId });
-      const res = await apiFetch(`/stacks/${filename}`, { signal });
+      const res = await apiFetch(`/stacks/${filename}`, { signal, nodeId: opNodeId });
       const proxied = res.headers.get('x-sencho-proxy') === '1';
       endSpan(headersSpan, { proxied, detail: { status: res.status } });
       headersSpan = null;
@@ -1046,8 +1062,8 @@ export function useStackActions(options: UseStackActionsOptions) {
       endSpan(dispatchSpan);
       detailVisiblePendingRef.current = { attemptId, token: filename, proxied };
       setDetailVisibleEpoch((n) => n + 1);
-      const envFiles = await loadEnvState(filename, signal);
-      const containersResult = await loadContainerState(filename, signal, attemptId);
+      const envFiles = await loadEnvState(filename, signal, opNodeId);
+      const containersResult = await loadContainerState(filename, signal, attemptId, opNodeId);
       if (!signal.aborted) {
         if (containersResult.ok) {
           detailContainersPendingRef.current = {
@@ -1064,8 +1080,8 @@ export function useStackActions(options: UseStackActionsOptions) {
           });
         }
       }
-      await loadBackupState(filename, signal);
-      await loadEffectiveServicesState(filename, signal);
+      await loadBackupState(filename, signal, opNodeId);
+      await loadEffectiveServicesState(filename, signal, opNodeId);
       // Post-load auto-edit evaluates permission for the loaded target, not
       // the previously selected stack (selectedFile was just updated above).
       if (options?.startInComposeEdit && canEditStack(filename)) {
@@ -1130,9 +1146,13 @@ export function useStackActions(options: UseStackActionsOptions) {
   const changeEnvFile = async (file: string) => {
     editorState.setSelectedEnvFile(file);
     editorState.setIsFileLoading(true);
+    // Pin the fetch to the node this tab captured; another tab switching the
+    // shared active node mid-edit must not retarget this GET.
+    const opNodeId = activeNode?.id ?? null;
     try {
       const res = await apiFetch(
         `/stacks/${stackListState.selectedFile}/env?file=${encodeURIComponent(file)}`,
+        { nodeId: opNodeId },
       );
       if (!res.ok) {
         editorState.setEnvContent('');
@@ -1170,11 +1190,16 @@ export function useStackActions(options: UseStackActionsOptions) {
     const etag = isCompose ? editorState.composeEtag : editorState.envEtag;
     const headers: Record<string, string> = {};
     if (!force && etag) headers['If-Match'] = etag;
+    // Pin the PUT to the node this tab captured at the start of the operation.
+    // A forced retry re-enters this same closure and reads the same already
+    // captured `activeNode` binding, so both PUTs carry one target.
+    const opNodeId = activeNode?.id ?? null;
     try {
       const response = await apiFetch(endpoint, {
         method: 'PUT',
         headers,
         body: JSON.stringify({ content: currentContent }),
+        nodeId: opNodeId,
       });
       if (response.status === 412) {
         const payload = await response.json().catch(() => null);

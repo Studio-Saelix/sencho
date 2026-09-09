@@ -14,7 +14,7 @@ import { DatabaseService } from '../services/DatabaseService';
 //                         with a 300/min safety net to prevent resource exhaustion.
 //   Tier W   (Webhooks): CI/CD webhook triggers at 500/min (shared datacenter IPs).
 //   Tier 2   (Standard): All other endpoints at 200/min.
-//   Tier 3   (Auth):     Strict brute-force protection (5-10 attempts / 15min).
+//   Tier 3   (Auth):     Login protection at 5 attempts/IP per 15 minutes.
 //
 // Enterprise adaptations:
 //   - Internal node-to-node traffic (node_proxy JWTs) bypasses all rate limiters.

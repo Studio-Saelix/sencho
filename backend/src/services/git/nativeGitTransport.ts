@@ -22,6 +22,7 @@ import {
     type ParsedRepoUrl,
 } from './sshTrust';
 import { writeDeployKey, writeKnownHosts } from './sshCredentialFiles';
+import { resolveSafeOutboundHostname, UnsafeOutboundTargetError } from '../../utils/outboundTarget';
 
 /**
  * Native git transport: every Git operation is an `execFile`-style spawn of
@@ -32,8 +33,8 @@ import { writeDeployKey, writeKnownHosts } from './sshCredentialFiles';
  * - `GIT_CONFIG_NOSYSTEM=1` plus an isolated empty HOME/USERPROFILE so the
  *   operator's ~/.gitconfig (credential helpers, insteadOf rewrites, hooks)
  *   cannot influence fetches.
- * - `protocol.allow=never` with only https re-enabled: no file://, git://,
- *   ext::, or ssh:// this early in the program.
+ * - `protocol.allow=never` with only the validated target protocol (HTTPS or
+ *   SSH) re-enabled: file://, git://, and ext:: remain blocked.
  * - `core.hooksPath` pointed at an empty directory we own, so repository
  *   scripts can never run. (A literal /dev/null works on Linux but not
  *   Windows; an empty dir is portable.)
@@ -293,6 +294,12 @@ function buildEnv(
         // An inherited trace flag would widen the log surface with packet
         // dumps that can carry URL material.
         GIT_TRACE: '',
+        HTTP_PROXY: '',
+        HTTPS_PROXY: '',
+        ALL_PROXY: '',
+        http_proxy: '',
+        https_proxy: '',
+        all_proxy: '',
         HOME: homeDir,
     };
     if (process.platform === 'win32') {
@@ -449,6 +456,7 @@ async function commonArgs(
  */
 async function prepareInvocation(
     workspaceRoot: string,
+    target: ResolvedRepoTarget,
     repoUrl: string,
     token?: string | null,
     sshAuth?: ResolveRequest['sshAuth'],
@@ -456,10 +464,18 @@ async function prepareInvocation(
 ): Promise<{ layout: WorkspaceLayout; env: NodeJS.ProcessEnv; baseArgs: string[]; allowedHost: string | null; caPath: string | null }> {
     const layout = await prepareWorkspace(workspaceRoot);
     let sshCommand: string | null = null;
-    if (sshAuth) {
+    if (target.kind === 'ssh') {
+        if (!sshAuth) {
+            throw {
+                transportFailure: true,
+                reason: 'ssh-auth-required',
+                host: target.sshTarget.hostKeyAlias,
+                hasToken: Boolean(token),
+            } satisfies TransportFailure;
+        }
         const keyPath = await writeDeployKey(layout.metaDir, sshAuth.privateKey);
         const knownPath = await writeKnownHosts(layout.metaDir, sshAuth.knownHostsEntry);
-        sshCommand = buildSshCommand(keyPath, knownPath);
+        sshCommand = buildSshCommand(keyPath, knownPath, target.sshTarget);
     }
     const helperPath = token ? await writeCredentialHelper(layout.metaDir) : null;
     const parsed = parseRepoTransportUrl(repoUrl);
@@ -467,7 +483,8 @@ async function prepareInvocation(
         ? credentialScopeHost(parsed.host)
         : null;
     const env = buildEnv(layout.homeDir, token, helperPath, sshCommand, allowedHost);
-    const { args: baseArgs, caPath } = await commonArgs(layout, helperPath, Boolean(sshAuth), caBundlePem);
+    const { args: commonBaseArgs, caPath } = await commonArgs(layout, helperPath, target.kind === 'ssh', caBundlePem);
+    const baseArgs = [...commonBaseArgs, ...target.gitArgs];
     return { layout, env, baseArgs, allowedHost, caPath };
 }
 
@@ -765,6 +782,7 @@ export async function verifyFastForward(req: {
     const hasToken = Boolean(req.token) || Boolean(req.sshAuth);
     await ensureBinaryReady(hasToken);
     const repo = assertValidRepoUrl(req.repoUrl, hasToken);
+    const target = await resolveSafeRepoTarget(repo, hasToken);
     const host = repoHostLabel(repo);
     const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const deadline = Date.now() + timeoutMs;
@@ -775,7 +793,7 @@ export async function verifyFastForward(req: {
         }
     };
     const { env, baseArgs, caPath } = await prepareInvocation(
-        req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
+        req.workspaceRoot, target, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
     );
     // Resolved once if the host refuses a redirect, then reused by the deepen
     // rounds so they do not each re-walk the same chain.
@@ -988,6 +1006,46 @@ export async function verifyFastForward(req: {
     }
 }
 
+type ResolvedRepoTarget =
+    | { kind: 'https'; gitArgs: string[] }
+    | { kind: 'ssh'; gitArgs: []; sshTarget: { address: string; hostKeyAlias: string } };
+
+async function resolveSafeRepoTarget(repo: ParsedRepoUrl, hasToken: boolean): Promise<ResolvedRepoTarget> {
+    try {
+        if (repo.kind === 'https') {
+            const url = new URL(repo.href);
+            const [{ address, family }] = await resolveSafeOutboundHostname(url.hostname);
+            const port = url.port || '443';
+            const curlAddress = family === 6 ? `[${address}]` : address;
+            return {
+                kind: 'https',
+                gitArgs: [
+                    '-c', 'http.followRedirects=false',
+                    '-c', 'http.proxy=',
+                    '-c', `http.curloptResolve=${url.hostname}:${port}:${curlAddress}`,
+                ],
+            };
+        }
+        const [{ address }] = await resolveSafeOutboundHostname(repo.host);
+        const hostKeyAlias = repo.port && repo.port !== 22
+            ? `[${repo.host}]:${repo.port}`
+            : repo.host;
+        return {
+            kind: 'ssh',
+            gitArgs: [],
+            sshTarget: { address, hostKeyAlias },
+        };
+    } catch (error: unknown) {
+        if (!(error instanceof UnsafeOutboundTargetError)) throw error;
+        throw {
+            transportFailure: true,
+            reason: error.reason === 'blocked' ? 'unsafe-target' : 'target-unresolved',
+            host: repoHostLabel(repo),
+            hasToken,
+        } satisfies TransportFailure;
+    }
+}
+
 export const nativeGitTransport: GitTransport = {
     async resolveRef(req: ResolveRequest): Promise<ResolveResult> {
         const hasToken = Boolean(req.token) || Boolean(req.sshAuth);
@@ -1003,9 +1061,9 @@ export const nativeGitTransport: GitTransport = {
         }
 
         assertValidRef(req.ref, repoHostLabel(repo), hasToken);
-
+        const target = await resolveSafeRepoTarget(repo, hasToken);
         const { env, baseArgs, caPath } = await prepareInvocation(
-            req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
+            req.workspaceRoot, target, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
         );
         const found = await lsRemoteRefs(
             repo, req.ref, env, baseArgs,
@@ -1020,6 +1078,7 @@ export const nativeGitTransport: GitTransport = {
         const hasToken = Boolean(req.token) || Boolean(req.sshAuth);
         await ensureBinaryReady(hasToken);
         const repo = assertValidRepoUrl(req.repoUrl, hasToken);
+        const target = await resolveSafeRepoTarget(repo, hasToken);
         assertValidRef(req.ref, repoHostLabel(repo), hasToken);
 
         // The credential scope host is set inside prepareInvocation via
@@ -1027,7 +1086,7 @@ export const nativeGitTransport: GitTransport = {
         // credentials for any other host. A refused redirect is resolved and
         // approved by the preflight below before any retry.
         const { layout, env, baseArgs, caPath } = await prepareInvocation(
-            req.workspaceRoot, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
+            req.workspaceRoot, target, req.repoUrl, req.token, req.sshAuth, req.caBundlePem,
         );
         const checkout = path.join(req.workspaceRoot, 'repo');
         const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;

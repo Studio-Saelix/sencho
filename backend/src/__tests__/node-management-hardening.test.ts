@@ -19,6 +19,7 @@ import { WebSocket } from 'ws';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { MeshProxyTunnelDialer } from '../services/MeshProxyTunnelDialer';
+import { withLoopbackTargetProtection } from './helpers/allowLoopbackTargets';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -145,6 +146,45 @@ describe('node-management write routes require node:manage', () => {
       .set('Authorization', `Bearer ${tokenForRole('node-admin')}`);
     expect(res.status).toBe(200);
     expect(db.getNode(id)).toBeUndefined();
+  });
+
+  it('rejects proxy nodes whose API URL resolves to an unsafe address', async () => {
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Authorization', `Bearer ${tokenForRole('admin')}`)
+      .send({
+        name: `nm-unsafe-${Date.now()}`,
+        type: 'remote',
+        mode: 'proxy',
+        api_url: 'http://[::ffff:127.0.0.1]:1852',
+        api_token: 'test-token',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/not allowed/i);
+  });
+
+  it('rejects updating a proxy node to an unsafe API URL', async () => {
+    const db = DatabaseService.getInstance();
+    const id = db.addNode({
+      name: `nm-update-unsafe-${Date.now()}`,
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/tmp/x',
+      is_default: false,
+      api_url: 'https://remote.example.com:1852',
+      api_token: 'test-token',
+    });
+
+    const res = await withLoopbackTargetProtection(() => request(app)
+      .put(`/api/nodes/${id}`)
+      .set('Authorization', `Bearer ${tokenForRole('admin')}`)
+      .send({ api_url: 'http://127.0.0.1:1852' }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/not allowed/i);
+    expect(db.getNode(id)?.api_url).toBe('https://remote.example.com:1852');
+    db.deleteNode(id);
   });
 });
 

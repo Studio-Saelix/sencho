@@ -7,12 +7,17 @@
  * (service -> git/*) and the classifier is unit-testable in isolation. The
  * service wraps the returned pair in its own GitSourceError.
  *
- * Two behaviors are contractual and pinned by tests; do not change them:
+ * Three behaviors are contractual and pinned by tests; do not change them:
  *   1. Authentication failure WITH a supplied token reports AUTH_FAILED,
  *      which the HTTP layer maps to 400, never 401, because the frontend's
  *      global logout trips on any API-level 401.
  *   2. A 401/403-shaped refusal WITHOUT a token reports REPO_NOT_FOUND with
- *      a private-repo hint, mirroring GitHub's masking of private repos.
+ *      a private-repo hint, mirroring GitHub's masking of private repos,
+ *      unless rule 3 claims it first.
+ *   3. An unambiguous rate-limit signal (a 429 status, or a server sideband
+ *      line naming a throttle) reports RATE_LIMITED ahead of rules 1 and 2:
+ *      a throttle leaks nothing about repo existence, so the rule-2 masking
+ *      does not apply to it even when no token was supplied.
  */
 
 export type TransportFacingCode =
@@ -21,12 +26,16 @@ export type TransportFacingCode =
     | 'SSH_HOST_KEY_FAILED'
     | 'REF_NOT_FOUND'
     | 'UNSUPPORTED_REF'
+    | 'RATE_LIMITED'
     | 'NETWORK_TIMEOUT'
     | 'GIT_ERROR';
 
 /** Structured failure raised by the native transport; classified below. */
 export type TransportFailureReason =
     | 'invalid-url'
+    | 'unsafe-target'
+    | 'target-unresolved'
+    | 'ssh-auth-required'
     | 'invalid-ref'
     | 'git-missing'
     | 'git-old'
@@ -52,6 +61,9 @@ interface TransportFailureBase {
  */
 export type TransportFailure = TransportFailureBase & (
     | { reason: 'invalid-url' }
+    | { reason: 'unsafe-target' }
+    | { reason: 'target-unresolved' }
+    | { reason: 'ssh-auth-required' }
     | { reason: 'invalid-ref' }
     | { reason: 'git-missing'; stderr?: string }
     | { reason: 'git-old'; stderr?: string }
@@ -108,6 +120,12 @@ export function classifyGitFailure(
     switch (failure.reason) {
         case 'invalid-url':
             return { code: 'GIT_ERROR', message: 'Unsupported repository URL. Use https:// or SSH (git@host:org/repo.git or ssh://) without embedded credentials.' };
+        case 'unsafe-target':
+            return { code: 'GIT_ERROR', message: 'Repository host is not allowed.' };
+        case 'target-unresolved':
+            return { code: 'NETWORK_TIMEOUT', message: `Could not resolve${dest}. Check the repository URL and your network or DNS.` };
+        case 'ssh-auth-required':
+            return { code: 'GIT_ERROR', message: 'SSH repository URLs require a deploy key.' };
         case 'invalid-ref':
             return { code: 'GIT_ERROR', message: 'Unsupported ref name. Use a branch name, a tag name, or a full commit SHA as the remote reports it.' };
         case 'git-missing':
@@ -142,6 +160,26 @@ export function classifyGitFailure(
         return {
             code: 'GIT_ERROR',
             message: `The repository host redirected to a different host than configured. Credentials were not sent to the redirect target. Use the final repository URL directly, or contact the server operator.`,
+        };
+    }
+
+    // Rate limiting is checked ahead of the auth-shaped branches below,
+    // including the WITHOUT-a-token masking rule: a throttle is a throttle
+    // regardless of credentials. Without this branch a throttled fetch
+    // reaches the auth branch's /\b40[13]\b/ and tells the operator to rotate
+    // a credential that is not the problem.
+    //
+    // Both patterns stay narrow, because git's fatal line echoes the repo URL
+    // verbatim and sideband lines (always prefixed "remote:") carry arbitrary
+    // server text: a bare \b429\b would also match an upload-pack progress
+    // counter ("Counting objects: 100% (429/429)") or a number in the URL,
+    // and an unanchored word match would fire on a repo named "rate-limiter".
+    // Sideband wording is limited to throttle-specific phrases, since a
+    // generic "retry later" also describes a transient 5xx.
+    if (/returned error:\s*429\b/.test(raw) || /^remote:.*(too many requests|rate[ -]limit|abuse detection)/m.test(raw)) {
+        return {
+            code: 'RATE_LIMITED',
+            message: `Rate limited by${dest}. Too many requests were sent in a short window. Wait a few minutes and retry.`,
         };
     }
 

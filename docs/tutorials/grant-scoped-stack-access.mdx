@@ -83,7 +83,7 @@ Check from two places, since a single screen showing "it looks right" isn't proo
   <img src="/images/tutorials/grant-scoped-stack-access/scope-added.png" alt="The Edit User panel's Scoped Permissions box showing one row: deployer on stack support-portal at Local, with a trash icon to remove it." />
 </Frame>
 
-**The audit log.** Open **Audit** from the navigation's **More** menu. Two entries confirm the setup, both attributed to your account: a **created user** entry (`POST /api/users`) and an **assigned role** entry (`POST /api/users/:id/roles`). If the teammate restarted the stack in Step 3, a third entry and a `manual` count on the dashboard's **Stack Restarts (7d)** card confirm the permission was exercised, not just granted.
+**The audit log.** Open the navigation launcher and pick **Audit** (Smart bar: open **More** instead). Two entries confirm the setup, both attributed to your account: a **created user** entry (`POST /api/users`) and an **assigned role** entry (`POST /api/users/:id/roles`). If the teammate restarted the stack in Step 3, a third entry and a `manual` count on the dashboard's **Stack Restarts (7d)** card confirm the permission was exercised, not just granted.
 
 <Frame>
   <img src="/images/tutorials/grant-scoped-stack-access/audit-log.png" alt="Audit log showing entries for assigning a role (POST /api/users/3/roles) and creating a user (POST /api/users), both attributed to the admin account." />

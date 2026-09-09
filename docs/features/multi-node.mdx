@@ -271,6 +271,8 @@ http://100.64.0.2:1852     ← Tailscale IP, encrypted by the VPN tunnel
 
 All traffic between nodes is encrypted by the VPN. Sencho does not need to do anything additional.
 
+Remote node URLs may use private LAN, VPC, or VPN addresses. Sencho refuses targets that resolve to loopback, link-local, multicast, or selected special-use addresses.
+
 #### Reverse proxy (Caddy, Nginx, Traefik)
 
 If you prefer TLS termination at each node, place a reverse proxy in front of each Sencho instance. [Caddy](https://caddyserver.com/) is the simplest option; it auto-provisions HTTPS certificates from Let's Encrypt with zero configuration:

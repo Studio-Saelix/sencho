@@ -4,6 +4,7 @@ import { CronExpressionParser } from 'cron-parser';
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { safeRemoteFetch } from '../utils/outboundTarget';
 import { CacheService } from '../services/CacheService';
 import {
   createAutoUpdateDigestGateState,
@@ -274,16 +275,20 @@ imageUpdatesRouter.get('/fleet', authMiddleware, async (req: Request, res: Respo
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), REMOTE_NODE_FETCH_TIMEOUT_MS);
             try {
-              const resp = await fetch(`${baseUrl}/api/image-updates`, {
+              const resp = await safeRemoteFetch(`${baseUrl}/api/image-updates`, {
                 headers: proxyTarget.apiToken
                   ? { Authorization: `Bearer ${proxyTarget.apiToken}` }
                   : {},
                 signal: controller.signal,
-              });
+              }, proxyTarget.trustedLoopback);
               clearTimeout(timeout);
               if (resp.ok) return { nodeId: node.id, data: await resp.json() as Record<string, boolean> };
-            } catch {
+            } catch (error: unknown) {
               clearTimeout(timeout);
+              console.warn(
+                `[Image updates] Status fetch failed for node "${sanitizeForLog(node.name)}":`,
+                getErrorMessage(error, 'unknown'),
+              );
             }
             return null;
           }),
@@ -348,17 +353,21 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), REMOTE_NODE_FETCH_TIMEOUT_MS);
       try {
-        const resp = await fetch(`${baseUrl}/api/image-updates/refresh`, {
+        const resp = await safeRemoteFetch(`${baseUrl}/api/image-updates/refresh`, {
           method: 'POST',
           headers: proxyTarget.apiToken
             ? { Authorization: `Bearer ${proxyTarget.apiToken}` }
             : {},
           signal: controller.signal,
-        });
+        }, proxyTarget.trustedLoopback);
         clearTimeout(timeout);
         return { nodeId: node.id, status: resp.status };
       } catch (e) {
         clearTimeout(timeout);
+        console.warn(
+          `[Image updates] Refresh failed for node "${sanitizeForLog(node.name)}":`,
+          getErrorMessage(e, 'unknown'),
+        );
         return { nodeId: node.id, status: 0, error: e };
       }
     }),

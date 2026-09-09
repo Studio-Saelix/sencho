@@ -1,7 +1,8 @@
 import axios from 'axios';
 import type { Node } from '../services/DatabaseService';
 import { DatabaseService } from '../services/DatabaseService';
-import { NodeRegistry } from '../services/NodeRegistry';
+import { NodeRegistry, type ProxyTarget } from '../services/NodeRegistry';
+import { safeAxiosTransport } from '../utils/outboundTarget';
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 import type { RegistryDeliveryDiscoverResponse } from '../services/RegistryDeliveryService';
@@ -26,7 +27,7 @@ export interface AugmentRegistryDeliveryInput {
   apiPath: string;
   nodeId: number;
   node: Node;
-  target: { apiUrl: string; apiToken: string };
+  target: ProxyTarget;
   body: Record<string, unknown>;
   sourceKind?: string;
   prepId?: string;
@@ -61,7 +62,7 @@ export async function wouldAttemptRegistryDelivery(
 }
 
 async function callTargetDiscover(
-  target: { apiUrl: string; apiToken: string },
+  target: ProxyTarget,
   body: Record<string, unknown>,
   abortSignal?: AbortSignal,
 ): Promise<RegistryDeliveryDiscoverResponse> {
@@ -70,6 +71,7 @@ async function callTargetDiscover(
   }
   const base = target.apiUrl.replace(/\/$/, '');
   const res = await axios.post(`${base}/api/registry-delivery/discover`, body, {
+    ...safeAxiosTransport(target.trustedLoopback),
     headers: { Authorization: `Bearer ${target.apiToken}` },
     timeout: 30_000,
     maxBodyLength: REGISTRY_DELIVERY_FIELD_LIMIT_BYTES,

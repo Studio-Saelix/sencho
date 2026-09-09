@@ -26,10 +26,7 @@ import path from 'path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { classifyGitFailure, isTransportFailure } from '../services/git/errors';
 import { nativeGitTransport, verifyFastForward } from '../services/git/nativeGitTransport';
-
-function gitAvailable(): boolean {
-    return spawnSync('git', ['--version'], { stdio: 'ignore' }).status === 0;
-}
+import { requireGitBinary } from './__helpers__/externalDeps';
 
 const FIXTURES_DIR = path.resolve(__dirname, '..', '..', '..', 'e2e', 'fixtures');
 const VALID_TOKEN = 'sencho-integration-test-token-do-not-leak';
@@ -174,7 +171,7 @@ function serveAuthedRepo(bareDir: string): Promise<{ url: string; close: () => v
     });
 }
 
-describe.skipIf(!gitAvailable())('authenticated native git transport (real git, real TLS, real auth)', () => {
+describe.skipIf(!requireGitBinary())('authenticated native git transport (real git, real TLS, real auth)', () => {
     let repoUrl: string;
     let closeServer: () => void;
     let prevExtraCaCerts: string | undefined;

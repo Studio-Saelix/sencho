@@ -40,6 +40,7 @@ import {
 } from '../services/git/credentialHelper';
 import * as gitBinary from '../services/git/gitBinary';
 import { nativeGitTransport, REF_MAX_LEN, startSizeWatchdog, verifyFastForward } from '../services/git/nativeGitTransport';
+import { withLoopbackTargetProtection } from './helpers/allowLoopbackTargets';
 import { GIT_ALLOWED_HOST_ENV_VAR } from '../services/git/credentialHelper';
 
 const GIT_EXEC_PATH_STUB = 'C:/Program Files/Git/mingw64/libexec/git-core';
@@ -187,6 +188,7 @@ describe('classifyGitFailure (native git stderr corpus)', () => {
         ['size', { transportFailure: true as const, reason: 'size', maxBytes: 5 * 1024 * 1024, host: 'h', hasToken: false }, 'Repository exceeds the maximum clone size of 5 MB.'],
         ['tip-changed', { transportFailure: true as const, reason: 'tip-changed', host: 'h', hasToken: false }, 'Repository tip changed during fetch; retry the pull.'],
         ['ref-not-found', { transportFailure: true as const, reason: 'ref-not-found', host: 'h', hasToken: false }, 'The configured branch, tag, or commit was not found in the repository.'],
+        ['ssh-auth-required', { transportFailure: true as const, reason: 'ssh-auth-required', host: 'h', hasToken: false }, 'SSH repository URLs require a deploy key.'],
         ['unsupported-ref', { transportFailure: true as const, reason: 'unsupported-ref', host: 'h', hasToken: false }, 'The configured commit is not reachable on this repository host. Use a branch or tag, or a commit the host advertises.'],
         ['timeout', { transportFailure: true as const, reason: 'timeout', host: 'github.com', hasToken: false }, 'Timed out reaching github.com.'],
     ] as const)('maps structured reason %s verbatim', (_label, failure, message) => {
@@ -215,6 +217,122 @@ describe('classifyGitFailure (native git stderr corpus)', () => {
             hasToken: true,
         });
         expect(c.code).toBe('UNSUPPORTED_REF');
+    });
+
+    it.each([
+        // The HTTP shapes are verified against a real git binary talking to a
+        // fixture server (git-transport-ratelimit.integration.test.ts): git
+        // reports the status line only, never the response body.
+        ['bare 429 from the host', "fatal: unable to access 'https://h/x.git/': The requested URL returned error: 429"],
+        ['429 with trailing text', "fatal: unable to access 'https://h/x.git/': The requested URL returned error: 429 Too Many Requests"],
+        // Text a host sends through the pack stream does reach stderr as a
+        // remote: line, unlike an HTTP response body.
+        ['remote sideband rate-limit message', "remote: You have exceeded a secondary rate limit. Please wait a few minutes before you try again.\nfatal: the remote end hung up unexpectedly"],
+        ['remote sideband abuse-detection message', "remote: You have triggered an abuse detection mechanism.\nfatal: the remote end hung up unexpectedly"],
+    ])('classifies %s as RATE_LIMITED', (_label, stderr) => {
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr,
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: true,
+        });
+        expect(c.code).toBe('RATE_LIMITED');
+        expect(c.message).toMatch(/rate limited/i);
+    });
+
+    it('classifies an unambiguous rate limit as RATE_LIMITED even without a token', () => {
+        // Rule 3 (see the module header) takes precedence over rule 2's
+        // no-token private-repo masking: a throttle leaks nothing about repo
+        // existence, so it should not be reported as REPO_NOT_FOUND.
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr: "remote: You have exceeded a secondary rate limit.\nfatal: the remote end hung up unexpectedly",
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: false,
+        });
+        expect(c.code).toBe('RATE_LIMITED');
+    });
+
+    it('does not send a rate-limited operator to rotate a working credential', () => {
+        // A sideband throttle message can arrive alongside a 403 fatal line,
+        // which the auth branch below would otherwise claim. Both the code
+        // and the message are asserted: reporting RATE_LIMITED while still
+        // saying "check your token" would leave the operator with the same
+        // wrong action.
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr: "remote: You have exceeded a secondary rate limit.\nfatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 403",
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: true,
+        });
+        expect(c.code).toBe('RATE_LIMITED');
+        expect(c.message).not.toMatch(/check your token/i);
+    });
+
+    it('leaves a bare 403 with no rate-limit wording as an auth failure', () => {
+        // Guards the other direction, and pins a real constraint: git does
+        // not surface an HTTP response body, so a host that signals a
+        // throttle as a bare 403 is indistinguishable from a rejected
+        // credential. Widening the rate-limit branch to cover every 403
+        // would make a genuinely bad token read as a throttle to wait out.
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr: "fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 403",
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: true,
+        });
+        expect(c.code).toBe('AUTH_FAILED');
+    });
+
+    it('does not mistake a repository named "rate-limiter" for a rate-limit signal', () => {
+        // git's fatal line echoes the full repo URL verbatim, so an
+        // unscoped rate-limit word match would fire on the path itself. A
+        // genuinely bad token against a repo whose name happens to contain
+        // rate-limit wording must still classify as an auth failure.
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr: "fatal: unable to access 'https://github.com/acme/rate-limiter.git/': The requested URL returned error: 403",
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: true,
+        });
+        expect(c.code).toBe('AUTH_FAILED');
+    });
+
+    it('does not mistake an upload-pack progress counter for a 429 status', () => {
+        // Progress lines like "Counting objects: 100% (429/429)" reach
+        // stderr from the server sideband and can contain the literal digits
+        // 429 with no connection to an HTTP status at all.
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr: "remote: Counting objects: 100% (429/429), done.\nfatal: the remote end hung up unexpectedly",
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: false,
+        });
+        expect(c.code).toBe('NETWORK_TIMEOUT');
+    });
+
+    it('does not mistake an unrelated transient-error sideband for a rate limit', () => {
+        const c = classifyGitFailure({
+            transportFailure: true as const,
+            reason: 'exit',
+            stderr: "remote: Internal server error, please retry later\nfatal: the remote end hung up unexpectedly",
+            exitCode: 128,
+            host: 'github.com',
+            hasToken: false,
+        });
+        expect(c.code).toBe('NETWORK_TIMEOUT');
     });
 
     it('scrubs credentials from the generic fallback tail', () => {
@@ -560,6 +678,15 @@ describe('transport argv hardening', () => {
         expect(mockSpawn).not.toHaveBeenCalled();
     });
 
+    it('rejects SSH repository URLs without deploy-key authentication before spawning git', async () => {
+        await expect(nativeGitTransport.resolveRef({
+            repoUrl: 'ssh://git@ssh.example/org/repo.git',
+            ref: 'main',
+            workspaceRoot: os.tmpdir(),
+        })).rejects.toMatchObject({ transportFailure: true as const, reason: 'ssh-auth-required' });
+        expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
     it('rejects option-injecting ref names', async () => {
         await expect(nativeGitTransport.resolveRef({
             repoUrl: 'https://github.com/example/repo.git',
@@ -799,20 +926,53 @@ describe('resolve/fetch/verify flow', () => {
         }
     });
 
-    it('resolves an annotated tag through the peeled ^{} commit', async () => {
+    it('pins HTTPS to the validated address while resolving an annotated tag', async () => {
         scriptSpawn([{
             stdout: `${SHA_B}\trefs/tags/v1\n${SHA_A}\trefs/tags/v1^{}\n`,
         }]);
         const root = await makeWorkspace();
         try {
             await expect(nativeGitTransport.resolveRef({
-                repoUrl: 'https://github.com/example/repo.git',
+                repoUrl: 'https://pinned.example:8443/example/repo.git',
                 ref: 'v1',
                 timeoutMs: 5000,
                 workspaceRoot: root,
             })).resolves.toMatchObject({ commitSha: SHA_A, kind: 'tag' });
             const lsRemoteArgs = mockSpawn.mock.calls[0][1] as string[];
             expect(lsRemoteArgs).toContain('refs/tags/v1^{}');
+            expect(lsRemoteArgs).toContain('http.followRedirects=false');
+            expect(lsRemoteArgs).toContain('http.proxy=');
+            expect(lsRemoteArgs).toContain('http.curloptResolve=pinned.example:8443:93.184.216.34');
+            const env = spawnEnv(0);
+            expect(env.HTTP_PROXY).toBe('');
+            expect(env.HTTPS_PROXY).toBe('');
+            expect(env.ALL_PROXY).toBe('');
+            expect(env.http_proxy).toBe('');
+            expect(env.https_proxy).toBe('');
+            expect(env.all_proxy).toBe('');
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('pins SSH to the validated address while retaining host identity and port', async () => {
+        scriptSpawn([{ stdout: `${SHA_A}\trefs/heads/main\n` }]);
+        const root = await makeWorkspace();
+        try {
+            await expect(nativeGitTransport.resolveRef({
+                repoUrl: 'ssh://git@pinned.example:2222/example/repo.git',
+                ref: 'main',
+                sshAuth: {
+                    privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\nYWJj\n-----END OPENSSH PRIVATE KEY-----\n',
+                    knownHostsEntry: 'pinned.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGb3JzL3Rlc3Q=\n',
+                },
+                timeoutMs: 5000,
+                workspaceRoot: root,
+            })).resolves.toMatchObject({ commitSha: SHA_A, kind: 'branch' });
+
+            const sshCommand = spawnEnv(0).GIT_SSH_COMMAND;
+            expect(sshCommand).toContain('Hostname=93.184.216.34');
+            expect(sshCommand).toContain('HostKeyAlias=[pinned.example]:2222');
         } finally {
             await fs.rm(root, { recursive: true, force: true });
         }
@@ -836,12 +996,12 @@ describe('resolve/fetch/verify flow', () => {
     it('self-resolves a full SHA without a network round trip', async () => {
         const root = await makeWorkspace();
         try {
-            await expect(nativeGitTransport.resolveRef({
-                repoUrl: 'https://github.com/example/repo.git',
+            await expect(withLoopbackTargetProtection(() => nativeGitTransport.resolveRef({
+                repoUrl: 'https://127.0.0.1/example/repo.git',
                 ref: SHA_A.toUpperCase(),
                 timeoutMs: 5000,
                 workspaceRoot: root,
-            })).resolves.toMatchObject({ commitSha: SHA_A, kind: 'sha' });
+            }))).resolves.toMatchObject({ commitSha: SHA_A, kind: 'sha' });
             // The SHA needs no ls-remote: the identity IS the value.
             expect(mockSpawn).not.toHaveBeenCalled();
         } finally {
@@ -1056,6 +1216,26 @@ describe('clone failure classification and final size gate', () => {
                 reason: 'size',
                 maxBytes: 8,
             });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('rejects unsafe targets during fast-forward verification', async () => {
+        const root = await makeWorkspace();
+        try {
+            await expect(withLoopbackTargetProtection(() => verifyFastForward({
+                repoUrl: 'https://127.0.0.1/repo.git',
+                ancestorSha: SHA_B,
+                descendantSha: SHA_A,
+                timeoutMs: 5000,
+                workspaceRoot: root,
+                maxBytes: 100 * 1024 * 1024,
+            }))).rejects.toMatchObject({
+                transportFailure: true as const,
+                reason: 'unsafe-target',
+            });
+            expect(mockSpawn).not.toHaveBeenCalled();
         } finally {
             await fs.rm(root, { recursive: true, force: true });
         }
@@ -1411,8 +1591,7 @@ describe('clone failure classification and final size gate', () => {
             // simulated confirmation has not arrived yet: settling here
             // would let a caller start cleaning up the workspace while the
             // child tree is still alive.
-            await new Promise((r) => setTimeout(r, 55));
-            expect(killInvoked).toBe(true);
+            await vi.waitFor(() => expect(killInvoked).toBe(true), { timeout: 250 });
             expect(settled).toBe(false);
 
             await expect(promise).rejects.toMatchObject({ transportFailure: true as const, reason: 'timeout' });
