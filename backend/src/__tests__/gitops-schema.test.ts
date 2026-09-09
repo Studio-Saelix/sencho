@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { isHubOnlyPath } from '../helpers/proxyExemptPaths';
-import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
+import { APPLICATIONS_DUE_FOR_RETRY_SQL, GitOpsStore, emptyTargetRow, SOURCES_DUE_FOR_POLL_SQL } from '../services/gitops/store';
 import { encodeArtifactEvidenceJson } from '../services/gitops/json';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
 
@@ -195,6 +195,50 @@ describe('gitops schema', () => {
     ).run();
     store.insertApplication(directApp('dup-second', 'dup-web'));
     expect(store.getApplication('dup-second')?.stack_name).toBe('dup-web');
+  });
+
+  it('declares due-query SQL whose static terms all appear in the partial due indexes', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance().getDb();
+
+    // The planner only prefers a partial index once table statistics exist
+    // (without ANALYZE it picked the plain lifecycle_status index on a tiny
+    // table), so instead of asserting a plan, pin the contract: every static
+    // WHERE term of the exported due scans must also appear in the matching
+    // index WHERE. A term added to one side without the other would silently
+    // stop the index from serving the scan, which is exactly what this
+    // catches. The SQL constants are the real strings the store runs.
+    const indexes = db.prepare(
+      "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name IN ('idx_gitops_app_poll_due','idx_gitops_app_retry_due')",
+    ).all() as Array<{ name: string; sql: string }>;
+    const sqlOf = (name: string) => indexes.find((i) => i.name === name)?.sql ?? '';
+
+    const staticTerms = (sql: string): string[] =>
+      sql.split('\n').map((line) => line.trim().replace(/^(WHERE|AND)\s+/i, '').trim()).filter((line) => line.length > 0);
+
+    const pollTerms = staticTerms(SOURCES_DUE_FOR_POLL_SQL).filter((t) =>
+      t.startsWith("target_mode = 'direct'") || t.startsWith("lifecycle_status = 'active'") || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL') || t.startsWith('next_poll_at IS NOT NULL'));
+    for (const term of pollTerms) {
+      expect(sqlOf('idx_gitops_app_poll_due')).toContain(term);
+    }
+    expect(pollTerms).toEqual([
+      "target_mode = 'direct'",
+      "lifecycle_status = 'active'",
+      'suspended_at IS NULL',
+      'active_operation_stage IS NULL',
+      'next_poll_at IS NOT NULL',
+    ]);
+
+    const retryTerms = staticTerms(APPLICATIONS_DUE_FOR_RETRY_SQL).filter((t) =>
+      t.startsWith('retry_at IS NOT NULL') || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL'));
+    for (const term of retryTerms) {
+      expect(sqlOf('idx_gitops_app_retry_due')).toContain(term);
+    }
+    expect(retryTerms).toEqual([
+      'retry_at IS NOT NULL',
+      'suspended_at IS NULL',
+      'active_operation_stage IS NULL',
+    ]);
   });
 
   it('keeps blueprints and node-labels hub-only and git-sources proxyable', () => {

@@ -34,6 +34,31 @@ export type AssertNoLiveBlueprintResult =
   | { ok: true }
   | { ok: false; existing: LiveBlueprintApplication };
 
+/**
+ * The two controller due scans, exported so tests assert against the real
+ * SQL instead of a copy. Each is served by a partial index whose WHERE
+ * clause mirrors the query's static terms (see idx_gitops_app_poll_due /
+ * idx_gitops_app_retry_due in schema.ts); changing a term here must change
+ * it there in the same commit.
+ */
+export const SOURCES_DUE_FOR_POLL_SQL = `SELECT * FROM gitops_applications
+       WHERE target_mode = 'direct'
+         AND lifecycle_status = 'active'
+         AND suspended_at IS NULL
+         AND active_operation_stage IS NULL
+         AND next_poll_at IS NOT NULL
+         AND next_poll_at <= ?
+       ORDER BY next_poll_at ASC
+       LIMIT ?`;
+
+export const APPLICATIONS_DUE_FOR_RETRY_SQL = `SELECT * FROM gitops_applications
+       WHERE retry_at IS NOT NULL
+         AND retry_at <= ?
+         AND suspended_at IS NULL
+         AND active_operation_stage IS NULL
+       ORDER BY retry_at ASC
+       LIMIT ?`;
+
 export class GitOpsStore {
   private static instance: GitOpsStore | undefined;
 
@@ -337,17 +362,7 @@ export class GitOpsStore {
    * until an application-keyed source engine exists for that mode.
    */
   listSourcesDueForPoll(now: number, limit = 200): GitOpsApplicationRow[] {
-    return this.db().prepare(
-      `SELECT * FROM gitops_applications
-       WHERE target_mode = 'direct'
-         AND lifecycle_status = 'active'
-         AND suspended_at IS NULL
-         AND active_operation_stage IS NULL
-         AND next_poll_at IS NOT NULL
-         AND next_poll_at <= ?
-       ORDER BY next_poll_at ASC
-       LIMIT ?`,
-    ).all(now, limit) as GitOpsApplicationRow[];
+    return this.db().prepare(SOURCES_DUE_FOR_POLL_SQL).all(now, limit) as GitOpsApplicationRow[];
   }
 
   /**
@@ -357,15 +372,7 @@ export class GitOpsStore {
    * application whose poll cadence would not otherwise select it yet.
    */
   listApplicationsDueForRetry(now: number, limit = 200): GitOpsApplicationRow[] {
-    return this.db().prepare(
-      `SELECT * FROM gitops_applications
-       WHERE retry_at IS NOT NULL
-         AND retry_at <= ?
-         AND suspended_at IS NULL
-         AND active_operation_stage IS NULL
-       ORDER BY retry_at ASC
-       LIMIT ?`,
-    ).all(now, limit) as GitOpsApplicationRow[];
+    return this.db().prepare(APPLICATIONS_DUE_FOR_RETRY_SQL).all(now, limit) as GitOpsApplicationRow[];
   }
 
   /** Every live target on one node, across all applications. */
