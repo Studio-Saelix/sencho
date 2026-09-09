@@ -2433,6 +2433,40 @@ describe('git-source policy compatibility', () => {
                 .get(`/api/stacks/${stackName}/git-source`)
                 .set('Authorization', `Bearer ${adminToken()}`);
             expect(after.body.auto_apply_on_webhook).toBe(false);
+            // The transition writes an audit line: the history row is half
+            // the feature, so its absence must fail this test.
+            const history = DatabaseService.getInstance().getDb()
+                .prepare("SELECT COUNT(*) AS n FROM gitops_history WHERE application_id = ? AND stage = 'source_policy_changed'")
+                .get(`policy-app-${stackName}`) as { n: number };
+            expect(history.n).toBe(1);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('PUT persists a policy change on a suspended source', async () => {
+        const stackName = 'policy-put-suspended';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'review');
+        GitOpsTransitions.getInstance().sourceSuspended(
+            `policy-app-${stackName}`,
+            'test suspension',
+            { operationId: 'suspend-policy-put', actor: 'test', trigger: 'config_change', at: Date.now() },
+        );
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: true }));
+            expect(res.status).toBe(200);
+            // Suspension gates fetching and applying, not configuration: an
+            // operator must be able to re-policy a paused source before
+            // resuming it, so the guard is deliberately absent here.
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('automatic');
         } finally {
             fetchFromGit.mockRestore();
             deleteRows(stackName);
@@ -2733,6 +2767,31 @@ describe('git-source polling settings', () => {
             DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
             deletePollRows(reviewStack);
             deletePollRows(manualStack);
+        }
+    });
+
+    it('PATCH does not arm a poll cursor over a live retry backoff', async () => {
+        const stackName = 'polling-patch-backoff';
+        seedPollApp(stackName, 'automatic');
+        const retryAt = Date.now() + 10 * 60_000;
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE gitops_applications SET retry_at = ? WHERE id = ?')
+            .run(retryAt, `poll-app-${stackName}`);
+        try {
+            const res = await request(app)
+                .patch('/api/git-sources/polling')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ poll_interval_mins: 5 });
+            expect(res.status).toBe(200);
+            // The retry cursor stays the next wake: the row projects with no
+            // new poll cursor, and the stored backoff is untouched.
+            const row = res.body.per_source.find((r: { stack_name: string }) => r.stack_name === stackName);
+            expect(row.next_poll_at).toBeNull();
+            const stored = GitOpsStore.getInstance().getApplication(`poll-app-${stackName}`);
+            expect(stored?.retry_at).toBe(retryAt);
+        } finally {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            deletePollRows(stackName);
         }
     });
 
