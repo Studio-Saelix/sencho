@@ -900,11 +900,13 @@ export class GitOpsTransitions {
    * stamps the policy through activateDirect; this is the existing-app path,
    * so an operator who changes the policy on an already-linked source gets a
    * durable row change (and an audit line) instead of a silently discarded
-   * PUT field.
+   * PUT field. Configuration, not work: a suspended source keeps taking
+   * policy edits (suspension gates fetching and applying, not configuration),
+   * but the policy cannot flip under an operation that is mid-flight, since
+   * the settle path reads the policy when deciding acceptance.
    */
   sourcePolicyChanged(applicationId: string, sourcePolicy: SourcePolicy, envelope: EventEnvelope): TransitionResult {
     return this.mutateApp(applicationId, envelope, 'source_policy_changed', 'committed', (app) => {
-      if (app.suspended_at) throw new GitOpsTransitionError('source is suspended');
       if (app.active_operation_stage) {
         throw new GitOpsTransitionError('cannot change the source policy while an operation is in flight');
       }
