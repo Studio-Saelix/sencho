@@ -108,6 +108,23 @@ describe('POST /api/nodes - api_url SSRF validation (C2 fix)', () => {
       .send({ name: 'missing-url', type: 'remote' });
     expect(res.status).toBe(400);
   });
+
+  it('rejects a whitespace-only name with 400', async () => {
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Authorization', authHeader)
+      .send({
+        name: '   ',
+        type: 'remote',
+        mode: 'proxy',
+        api_url: 'http://192.168.1.77:1852',
+        api_token: 'tok',
+        compose_dir: '/app/compose',
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Node name is required');
+    expect(DatabaseService.getInstance().getNodes().some((n) => n.name === '   ')).toBe(false);
+  });
 });
 
 describe('GET /api/nodes/:id/meta - local meta honors runtime-disabled capabilities', () => {
@@ -302,14 +319,24 @@ describe('PUT /api/nodes/:id name collision', () => {
   });
 
   it('allows saving a whitespace-only name unchanged', async () => {
-    // POST accepts whitespace-only names (truthiness check), so a legacy node
-    // may carry one; the full-form echo on Save must not 400 it.
-    const id = await createRemoteWithName('   ');
+    // Seed a legacy row that predates POST blank/whitespace validation. POST
+    // no longer accepts this name; PUT still echoes it unchanged so Save on
+    // those rows does not 400.
+    const id = DatabaseService.getInstance().addNode({
+      name: '   ',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/app/compose',
+      is_default: false,
+      api_url: 'http://192.168.1.77:1852',
+      api_token: 'tok-legacy-whitespace',
+    });
     const save = await request(app)
       .put(`/api/nodes/${id}`)
       .set('Authorization', authHeader)
       .send({ name: '   ' });
     expect(save.status).toBe(200);
+    expect(DatabaseService.getInstance().getNode(id)?.name).toBe('   ');
   });
 
   it('still updates other fields when name is absent', async () => {
