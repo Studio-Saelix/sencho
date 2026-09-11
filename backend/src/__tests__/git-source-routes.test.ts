@@ -608,6 +608,49 @@ describe('POST /api/stacks/from-git', () => {
         expect(res.status).toBe(409);
         expect(res.body.error).toMatch(/already exists/i);
     });
+
+    it.each(['manual', 'review', 'automatic'] as const)(
+        'validates source_policy %s into the create call',
+        async (policy) => {
+            const spy = vi.spyOn(GitSourceService.getInstance(), 'createStackFromGit')
+                .mockResolvedValue({
+                    commitSha: 'f'.repeat(40),
+                    envWritten: false,
+                    warnings: [],
+                    source: {
+                        id: 1, stack_name: validBody.stack_name, repo_url: validBody.repo_url,
+                        branch: validBody.branch, compose_path: validBody.compose_path,
+                        compose_paths: [validBody.compose_path], context_dir: null, sync_env: false,
+                        env_path: null, auth_type: 'none', has_token: false, has_deploy_key: false,
+                        has_ca_bundle: false, ssh_host_key_fingerprint: null,
+                        source_policy: policy, auto_apply_on_webhook: policy === 'automatic',
+                        auto_deploy_on_apply: false, last_applied_commit_sha: 'f'.repeat(40),
+                        pending_commit_sha: null, pending_fetched_at: null, created_at: Date.now(),
+                        updated_at: Date.now(), manifest_state: 'absent', pending_plan: null,
+                        last_plan_fingerprint: null, last_plan_outcome: null,
+                    },
+                });
+            try {
+                const res = await request(app)
+                    .post('/api/stacks/from-git')
+                    .set('Authorization', `Bearer ${adminToken()}`)
+                    .send({ ...validBody, source_policy: policy });
+                expect(res.status).toBe(200);
+                expect(spy).toHaveBeenCalledWith(expect.objectContaining({ sourcePolicy: policy }));
+            } finally {
+                spy.mockRestore();
+            }
+        },
+    );
+
+    it('rejects an unknown source_policy with 400', async () => {
+        const res = await request(app)
+            .post('/api/stacks/from-git')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ ...validBody, source_policy: 'sometimes' });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/source_policy/);
+    });
 });
 
 describe('POST /api/stacks/:stackName/git-source/webhook-pull status codes', () => {
@@ -2346,6 +2389,9 @@ describe('git-source policy compatibility', () => {
             const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
             expect(application?.source_policy).toBe('automatic');
             expect(res.body.auto_apply_on_webhook).toBe(true);
+            // The tri-state policy is part of the public projection, so a
+            // client can read back what the source actually runs under.
+            expect(res.body.source_policy).toBe('automatic');
         } finally {
             fetchFromGit.mockRestore();
             deleteRows(stackName);
@@ -2365,6 +2411,65 @@ describe('git-source policy compatibility', () => {
             const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
             expect(application?.source_policy).toBe('review');
             expect(res.body.auto_apply_on_webhook).toBe(false);
+            expect(res.body.source_policy).toBe('review');
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it.each([
+        ['manual', true],
+        ['review', false],
+        ['automatic', true],
+    ])('the projected source_policy round-trips through PUT (%s)', async (policy, legacyBoolean) => {
+        const stackName = `policy-roundtrip-${policy}`;
+        seedStackDir(stackName);
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: legacyBoolean, source_policy: policy }));
+            expect(res.status).toBe(200);
+            expect(res.body.source_policy).toBe(policy);
+            // Reading the source back reports the same policy: PUTting it
+            // again must be a no-op, not a conversion.
+            const after = await request(app)
+                .get(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(after.status).toBe(200);
+            expect(after.body.source_policy).toBe(policy);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe(policy);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('a source with no application row projects its policy from the legacy boolean', async () => {
+        const stackName = 'policy-projection-legacy';
+        seedStackDir(stackName);
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: true }));
+            expect(res.status).toBe(200);
+            // Detach the application row: the source models a pre-GitOps
+            // world where only the boolean exists. True mapped the old
+            // two-state world to automatic, false to review.
+            DatabaseService.getInstance().getDb()
+                .prepare('DELETE FROM gitops_applications WHERE stack_name = ?')
+                .run(stackName);
+            const after = await request(app)
+                .get(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(after.status).toBe(200);
+            expect(after.body.source_policy).toBe('automatic');
+            expect(after.body.auto_apply_on_webhook).toBe(true);
         } finally {
             fetchFromGit.mockRestore();
             deleteRows(stackName);
