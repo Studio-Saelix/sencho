@@ -16,6 +16,15 @@ import type { ReconcileResult } from '../services/gitops/outcomes';
 const TICK_MS = 60_000;
 const okResult: ReconcileResult = { outcome: 'no_source_change', reason: 'ok', nextAction: 'none' };
 
+/**
+ * The controller only drives non-manual sources through the unattended
+ * cadence, so the rows these timer tests feed it are automatic; the manual
+ * guard's own behavior is covered by source-controller-polling.test.ts.
+ */
+function autoFixture(id: string, stackName: string): GitOpsApplicationRow {
+    return { ...directApplicationFixture(id, stackName), source_policy: 'automatic' };
+}
+
 let tmpDir: string;
 let controller: SourceController;
 
@@ -57,7 +66,7 @@ afterEach(() => {
 
 describe('SourceController', () => {
     it('evaluates a source whose poll interval is due', async () => {
-        mockDue([directApplicationFixture('app-poll', 'poll-web')]);
+        mockDue([autoFixture('app-poll', 'poll-web')]);
         const reconcile = spyOnReconcile().mockResolvedValue(okResult);
 
         controller.start();
@@ -72,7 +81,7 @@ describe('SourceController', () => {
     });
 
     it('evaluates an application whose retry_at has arrived, tagged as a retry trigger', async () => {
-        const app = { ...directApplicationFixture('app-retry', 'retry-web'), retry_at: Date.now() - 1_000 };
+        const app = { ...autoFixture('app-retry', 'retry-web'), retry_at: Date.now() - 1_000 };
         mockDue([], [app]);
         const reconcile = spyOnReconcile().mockResolvedValue(okResult);
 
@@ -86,7 +95,7 @@ describe('SourceController', () => {
     });
 
     it('evaluates an application due for both poll and retry exactly once', async () => {
-        const app = { ...directApplicationFixture('app-both', 'both-web'), retry_at: Date.now() - 1_000 };
+        const app = { ...autoFixture('app-both', 'both-web'), retry_at: Date.now() - 1_000 };
         mockDue([app], [app]);
         const reconcile = spyOnReconcile().mockResolvedValue(okResult);
 
@@ -97,7 +106,7 @@ describe('SourceController', () => {
     });
 
     it('does not re-evaluate an application still in flight from a previous tick', async () => {
-        mockDue([directApplicationFixture('app-slow', 'slow-web')]);
+        mockDue([autoFixture('app-slow', 'slow-web')]);
         let settleFirstCall!: (result: ReconcileResult) => void;
         const firstCall = new Promise<ReconcileResult>((resolve) => { settleFirstCall = resolve; });
         const reconcile = spyOnReconcile().mockReturnValue(firstCall);
@@ -120,7 +129,7 @@ describe('SourceController', () => {
     });
 
     it('recovers on the next tick after a store query throws, rather than dying permanently', async () => {
-        mockDue([directApplicationFixture('app-recovers', 'recovers-web')]);
+        mockDue([autoFixture('app-recovers', 'recovers-web')]);
         vi.spyOn(GitOpsStore.getInstance(), 'listSourcesDueForPoll').mockImplementationOnce(() => {
             throw new Error('database is locked');
         });
@@ -136,7 +145,7 @@ describe('SourceController', () => {
     });
 
     it('releases the in-flight slot for an application whose reconcile rejects', async () => {
-        mockDue([directApplicationFixture('app-rejects', 'rejects-web')]);
+        mockDue([autoFixture('app-rejects', 'rejects-web')]);
         const reconcile = spyOnReconcile().mockRejectedValue(new Error('boom'));
 
         controller.start();
@@ -147,7 +156,7 @@ describe('SourceController', () => {
     });
 
     it('does not evaluate anything after stop', async () => {
-        mockDue([directApplicationFixture('app-stopped', 'stopped-web')]);
+        mockDue([autoFixture('app-stopped', 'stopped-web')]);
         const reconcile = spyOnReconcile().mockResolvedValue(okResult);
 
         controller.start();
@@ -159,7 +168,7 @@ describe('SourceController', () => {
     });
 
     it('does not double-arm when start() is called reentrantly from within an in-flight evaluation', async () => {
-        mockDue([directApplicationFixture('app-reentrant-start', 'reentrant-start-web')]);
+        mockDue([autoFixture('app-reentrant-start', 'reentrant-start-web')]);
         // tick() nulls `timer` before scanning, so a start() call landing
         // synchronously during that scan must not see a false "not running"
         // reading and arm a second timer.
@@ -195,7 +204,7 @@ describe('SourceController', () => {
     });
 
     it('start is a no-op when already running', async () => {
-        mockDue([directApplicationFixture('app-double-start', 'double-start-web')]);
+        mockDue([autoFixture('app-double-start', 'double-start-web')]);
         const reconcile = spyOnReconcile().mockResolvedValue(okResult);
 
         controller.start();

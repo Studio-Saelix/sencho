@@ -13,7 +13,7 @@
  * Service-layer logic (encryption, error mapping, mutex, pending lifecycle)
  * is covered in git-source-service.test.ts.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import fs, { readFileSync } from 'fs';
@@ -607,6 +607,49 @@ describe('POST /api/stacks/from-git', () => {
             .send({ ...validBody, stack_name: 'existing-stack' });
         expect(res.status).toBe(409);
         expect(res.body.error).toMatch(/already exists/i);
+    });
+
+    it.each(['manual', 'review', 'automatic'] as const)(
+        'validates source_policy %s into the create call',
+        async (policy) => {
+            const spy = vi.spyOn(GitSourceService.getInstance(), 'createStackFromGit')
+                .mockResolvedValue({
+                    commitSha: 'f'.repeat(40),
+                    envWritten: false,
+                    warnings: [],
+                    source: {
+                        id: 1, stack_name: validBody.stack_name, repo_url: validBody.repo_url,
+                        branch: validBody.branch, compose_path: validBody.compose_path,
+                        compose_paths: [validBody.compose_path], context_dir: null, sync_env: false,
+                        env_path: null, auth_type: 'none', has_token: false, has_deploy_key: false,
+                        has_ca_bundle: false, ssh_host_key_fingerprint: null,
+                        source_policy: policy, auto_apply_on_webhook: policy === 'automatic',
+                        auto_deploy_on_apply: false, last_applied_commit_sha: 'f'.repeat(40),
+                        pending_commit_sha: null, pending_fetched_at: null, created_at: Date.now(),
+                        updated_at: Date.now(), manifest_state: 'absent', pending_plan: null,
+                        last_plan_fingerprint: null, last_plan_outcome: null,
+                    },
+                });
+            try {
+                const res = await request(app)
+                    .post('/api/stacks/from-git')
+                    .set('Authorization', `Bearer ${adminToken()}`)
+                    .send({ ...validBody, source_policy: policy });
+                expect(res.status).toBe(200);
+                expect(spy).toHaveBeenCalledWith(expect.objectContaining({ sourcePolicy: policy }));
+            } finally {
+                spy.mockRestore();
+            }
+        },
+    );
+
+    it('rejects an unknown source_policy with 400', async () => {
+        const res = await request(app)
+            .post('/api/stacks/from-git')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ ...validBody, source_policy: 'sometimes' });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/source_policy/);
     });
 });
 
@@ -2285,5 +2328,777 @@ describe('SSH deploy-key route validation', () => {
         expect(getRes.status).toBe(200);
         expect(getRes.body.has_ca_bundle).toBe(false);
         fetchFromGit.mockRestore();
+    });
+});
+
+describe('git-source policy compatibility', () => {
+    function seedStackDir(stackName: string): void {
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, stackName), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, stackName, 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+    }
+
+    // Every save path runs a dry-run fetch against the configured files before
+    // persisting, so a stub over the real network call is shared by all tests
+    // here. A distinct commitSha per test is unnecessary: no assertion reads it.
+    function stubFetchFromGit(): ReturnType<typeof vi.spyOn> {
+        return vi.spyOn(GitSourceService.getInstance(), 'fetchFromGit').mockResolvedValue({
+            composeFiles: [{ path: 'compose.yaml', content: 'services:\n  x:\n    image: nginx\n' }],
+            envContent: null,
+            commitSha: 'f'.repeat(40),
+            resolvedRefKind: 'branch',
+            warnings: [],
+        });
+    }
+
+    function putBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+        return {
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_path: 'compose.yaml',
+            auth_type: 'none',
+            ...overrides,
+        };
+    }
+
+    function seedApp(stackName: string, policy: 'manual' | 'review' | 'automatic'): void {
+        const row = directApplicationFixture(`policy-app-${stackName}`, stackName);
+        row.source_policy = policy;
+        GitOpsStore.getInstance().insertApplication(row);
+    }
+
+    // The upsert new-link path mints its own application id, so cleanup
+    // deletes by stack name.
+    function deleteRows(stackName: string): void {
+        DatabaseService.getInstance().deleteGitSource(stackName);
+        DatabaseService.getInstance().getDb()
+            .prepare('DELETE FROM gitops_applications WHERE stack_name = ?')
+            .run(stackName);
+    }
+
+    it('create with auto_apply_on_webhook true derives automatic', async () => {
+        const stackName = 'policy-derive-automatic';
+        seedStackDir(stackName);
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: true }));
+            expect(res.status).toBe(200);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('automatic');
+            expect(res.body.auto_apply_on_webhook).toBe(true);
+            // The tri-state policy is part of the public projection, so a
+            // client can read back what the source actually runs under.
+            expect(res.body.source_policy).toBe('automatic');
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('create with auto_apply_on_webhook false derives review', async () => {
+        const stackName = 'policy-derive-review';
+        seedStackDir(stackName);
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: false }));
+            expect(res.status).toBe(200);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('review');
+            expect(res.body.auto_apply_on_webhook).toBe(false);
+            expect(res.body.source_policy).toBe('review');
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it.each([
+        ['manual', true],
+        ['review', false],
+        ['automatic', true],
+    ])('the projected source_policy round-trips through PUT (%s)', async (policy, legacyBoolean) => {
+        const stackName = `policy-roundtrip-${policy}`;
+        seedStackDir(stackName);
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: legacyBoolean, source_policy: policy }));
+            expect(res.status).toBe(200);
+            expect(res.body.source_policy).toBe(policy);
+            // Reading the source back reports the same policy: PUTting it
+            // again must be a no-op, not a conversion.
+            const after = await request(app)
+                .get(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(after.status).toBe(200);
+            expect(after.body.source_policy).toBe(policy);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe(policy);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('a source with no application row projects its policy from the legacy boolean', async () => {
+        const stackName = 'policy-projection-legacy';
+        seedStackDir(stackName);
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: true }));
+            expect(res.status).toBe(200);
+            // Detach the application row: the source models a pre-GitOps
+            // world where only the boolean exists. True mapped the old
+            // two-state world to automatic, false to review.
+            DatabaseService.getInstance().getDb()
+                .prepare('DELETE FROM gitops_applications WHERE stack_name = ?')
+                .run(stackName);
+            const after = await request(app)
+                .get(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(after.status).toBe(200);
+            expect(after.body.source_policy).toBe('automatic');
+            expect(after.body.auto_apply_on_webhook).toBe(true);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it.each([
+        ['false', false],
+        ['omitted', undefined],
+    ])('unrelated legacy edit with %s auto_apply_on_webhook keeps an existing manual policy', async (_name, flag) => {
+        const stackName = `policy-keep-manual-${_name}`;
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'manual');
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: flag }));
+            expect(res.status).toBe(200);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('manual');
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('unrelated legacy edit with false keeps an existing automatic policy', async () => {
+        const stackName = 'policy-keep-automatic';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'automatic');
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: false }));
+            expect(res.status).toBe(200);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('automatic');
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('PUT on an existing source with explicit source_policy persists the resolved policy', async () => {
+        const stackName = 'policy-put-existing-review';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'automatic');
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: false, source_policy: 'review' }));
+            expect(res.status).toBe(200);
+            // The stored row carries the new policy, not just the response.
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('review');
+            // The projection flips with it: review never auto-applies.
+            expect(res.body.auto_apply_on_webhook).toBe(false);
+            const after = await request(app)
+                .get(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(after.body.auto_apply_on_webhook).toBe(false);
+            // The transition writes an audit line: the history row is half
+            // the feature, so its absence must fail this test.
+            const history = DatabaseService.getInstance().getDb()
+                .prepare("SELECT COUNT(*) AS n FROM gitops_history WHERE application_id = ? AND stage = 'source_policy_changed'")
+                .get(`policy-app-${stackName}`) as { n: number };
+            expect(history.n).toBe(1);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('PUT persists a policy change on a suspended source', async () => {
+        const stackName = 'policy-put-suspended';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'review');
+        GitOpsTransitions.getInstance().sourceSuspended(
+            `policy-app-${stackName}`,
+            'test suspension',
+            { operationId: 'suspend-policy-put', actor: 'test', trigger: 'config_change', at: Date.now() },
+        );
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: true }));
+            expect(res.status).toBe(200);
+            // Suspension gates fetching and applying, not configuration: an
+            // operator must be able to re-policy a paused source before
+            // resuming it, so the guard is deliberately absent here.
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('automatic');
+            // The flip into automatic must not arm a cadence either: the
+            // arming pre-check skips suspended rows, so the cursor stays
+            // absent here. Resuming arms the cursor itself.
+            expect(application?.next_poll_at).toBeNull();
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('PUT on an existing source with auto_apply_on_webhook true upgrades review to automatic', async () => {
+        const stackName = 'policy-put-existing-automatic';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'review');
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: true }));
+            expect(res.status).toBe(200);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('automatic');
+            expect(res.body.auto_apply_on_webhook).toBe(true);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it.each([
+        ['false', false],
+        ['omitted', undefined],
+    ])('PUT on an existing automatic source with %s auto_apply_on_webhook stays automatic', async (_name, flag) => {
+        const stackName = `policy-put-existing-keeps-auto-${_name}`;
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'automatic');
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: flag }));
+            expect(res.status).toBe(200);
+            // Boolean 0 or absent must not silently convert an existing
+            // automatic policy; the operator has to ask explicitly.
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('automatic');
+            expect(res.body.auto_apply_on_webhook).toBe(true);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('explicit source_policy wins over the boolean', async () => {
+        const stackName = 'policy-explicit-wins';
+        seedStackDir(stackName);
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            // The boolean says automatic, but the explicit policy is manual.
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: true, source_policy: 'manual' }));
+            expect(res.status).toBe(200);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('manual');
+            // Reads project the boolean from the policy, so false wins out.
+            expect(res.body.auto_apply_on_webhook).toBe(false);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('rejects an unknown source_policy with 400', async () => {
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send(putBody({ source_policy: 'auto' }));
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/source_policy/i);
+    });
+
+    it('PUT racing an in-flight operation maps the refusal to 409', async () => {
+        const stackName = 'policy-put-in-flight';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'automatic');
+        // Open a fetch on the application so the policy transition refuses.
+        // The PUT transaction must roll back whole, and the specific refusal
+        // must reach the operator as 409, not as a generic 500.
+        GitOpsTransitions.getInstance().fetchStarted(
+            `policy-app-${stackName}`,
+            { operationId: 'fetch-policy-put', actor: 'test', trigger: 'poll', at: Date.now() },
+        );
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_apply_on_webhook: false, source_policy: 'review' }));
+            expect(res.status).toBe(409);
+            expect(res.body.error).toMatch(/in flight/);
+            // The whole save rolled back: the policy did not change, and the
+            // source row keeps its prior configuration (the upsertGitSource
+            // write sits in the same transaction as the refused transition).
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('automatic');
+            const source = DatabaseService.getInstance().getGitSource(stackName);
+            expect(source?.branch).toBe(putBody().branch);
+            expect(source?.pending_commit_sha).toBeNull();
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('read projects auto_apply_on_webhook true only for automatic', async () => {
+        const stackName = 'policy-read-projection';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'review');
+        try {
+            const res = await request(app)
+                .get(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            // The application row models the source, so its review policy is
+            // authoritative and the projection reports false regardless of
+            // the stored boolean.
+            expect(res.body.auto_apply_on_webhook).toBe(false);
+        } finally {
+            deleteRows(stackName);
+        }
+    });
+
+    it('auto-deploy arming always requires stack:deploy even when the policy would refuse it', async () => {
+        const stackName = 'policy-deploy-no-permission';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'manual');
+        // A subject holding stack:edit but not stack:deploy (node-admin with
+        // deploy stripped) must be refused by the permission gate itself,
+        // regardless of what the policy matrix would later decide.
+        const originalPermissions = ROLE_PERMISSIONS['node-admin'];
+        ROLE_PERMISSIONS['node-admin'] = originalPermissions.filter((permission) => permission !== 'stack:deploy');
+        const upsertSpy = vi.spyOn(GitSourceService.getInstance(), 'upsert');
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${nodeAdminToken()}`)
+                .send(putBody({ auto_deploy_on_apply: true }));
+            expect(res.status).toBe(403);
+            expect(res.body.code).toBe('PERMISSION_DENIED');
+            expect(upsertSpy).not.toHaveBeenCalled();
+        } finally {
+            ROLE_PERMISSIONS['node-admin'] = originalPermissions;
+            upsertSpy.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('auto-deploy with a non-automatic policy is refused by the policy matrix, not the permission gate', async () => {
+        const stackName = 'policy-deploy-non-automatic-editor';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'manual');
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_deploy_on_apply: true }));
+            expect(res.status).toBe(400);
+            expect(res.body.error).toMatch(/automatic/i);
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    it('auto-deploy with automatic requires stack:deploy and succeeds for admin', async () => {
+        const stackName = 'policy-deploy-automatic-admin';
+        seedStackDir(stackName);
+        seedGitSource(stackName);
+        seedApp(stackName, 'automatic');
+        const fetchFromGit = stubFetchFromGit();
+        try {
+            const res = await request(app)
+                .put(`/api/stacks/${stackName}/git-source`)
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(putBody({ auto_deploy_on_apply: true }));
+            expect(res.status).toBe(200);
+            const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            expect(application?.source_policy).toBe('automatic');
+        } finally {
+            fetchFromGit.mockRestore();
+            deleteRows(stackName);
+        }
+    });
+
+    describe('initial poll cursor arming', () => {
+        let originalInterval: string;
+
+        beforeEach(() => {
+            originalInterval = DatabaseService.getInstance().getGlobalSettings()['gitops_poll_interval_mins'] ?? '0';
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '5');
+        });
+
+        afterEach(() => {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', originalInterval);
+        });
+
+        it('a newly linked eligible source receives a durable cursor without another settings PATCH', async () => {
+            const stackName = 'cursor-new-link';
+            seedStackDir(stackName);
+            const fetchFromGit = stubFetchFromGit();
+            try {
+                const res = await request(app)
+                    .put(`/api/stacks/${stackName}/git-source`)
+                    .set('Authorization', `Bearer ${adminToken()}`)
+                    .send(putBody({ source_policy: 'review' }));
+                expect(res.status).toBe(200);
+                const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+                expect(application?.source_policy).toBe('review');
+                expect(application?.next_poll_at).not.toBeNull();
+                expect(application!.next_poll_at!).toBeGreaterThan(Date.now());
+                // 5 minutes, expressed through the same rule the controller re-arms with.
+                expect(application!.next_poll_at!).toBeLessThanOrEqual(Date.now() + 5 * 60 * 1000);
+                // The cursor arming is an audited transition, not a bare column
+                // write. The upsert new-link path mints the application id
+                // itself, so resolve the row rather than assuming a fixture id.
+                const history = DatabaseService.getInstance().getDb()
+                    .prepare("SELECT COUNT(*) AS n FROM gitops_history WHERE stack_name = ? AND stage = 'source_poll_scheduled'")
+                    .get(stackName) as { n: number };
+                expect(history.n).toBe(1);
+            } finally {
+                fetchFromGit.mockRestore();
+                // stack_name cleanup catches the minted new-link id.
+                deleteRows(stackName);
+            }
+        });
+
+        it.each(['review', 'automatic'] as const)('a policy flip from manual into %s arms the cursor', async (policy) => {
+            const stackName = `cursor-flip-to-${policy}`;
+            seedStackDir(stackName);
+            seedGitSource(stackName);
+            seedApp(stackName, 'manual');
+            const fetchFromGit = stubFetchFromGit();
+            try {
+                const res = await request(app)
+                    .put(`/api/stacks/${stackName}/git-source`)
+                    .set('Authorization', `Bearer ${adminToken()}`)
+                    .send(putBody({ source_policy: policy }));
+                expect(res.status).toBe(200);
+                const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+                expect(application?.source_policy).toBe(policy);
+                expect(application?.next_poll_at).not.toBeNull();
+                expect(application!.next_poll_at!).toBeGreaterThan(Date.now());
+            } finally {
+                fetchFromGit.mockRestore();
+                deleteRows(stackName);
+            }
+        });
+
+        it('a review-to-automatic flip keeps an existing cursor rather than double-arming it', async () => {
+            const stackName = 'cursor-review-to-automatic';
+            seedStackDir(stackName);
+            seedGitSource(stackName);
+            const appRow = directApplicationFixture(`policy-app-${stackName}`, stackName);
+            appRow.source_policy = 'review';
+            appRow.next_poll_at = Date.now() + 3 * 60 * 1000;
+            GitOpsStore.getInstance().insertApplication(appRow);
+            const fetchFromGit = stubFetchFromGit();
+            try {
+                const res = await request(app)
+                    .put(`/api/stacks/${stackName}/git-source`)
+                    .set('Authorization', `Bearer ${adminToken()}`)
+                    .send(putBody({ source_policy: 'automatic' }));
+                expect(res.status).toBe(200);
+                const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+                expect(application?.source_policy).toBe('automatic');
+                // Manual is the only policy that consumes the cursor, so the
+                // armed wake survives the flip untouched.
+                expect(application?.next_poll_at).toBe(appRow.next_poll_at);
+            } finally {
+                fetchFromGit.mockRestore();
+                deleteRows(stackName);
+            }
+        });
+
+        it('a policy flip does not arm a poll cursor under a live retry cursor', async () => {
+            const stackName = 'cursor-flip-retry-live';
+            seedStackDir(stackName);
+            seedGitSource(stackName);
+            seedApp(stackName, 'manual');
+            const retryAt = Date.now() + 10 * 60_000;
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE gitops_applications SET retry_at = ? WHERE id = ?')
+                .run(retryAt, `policy-app-${stackName}`);
+            const fetchFromGit = stubFetchFromGit();
+            try {
+                const res = await request(app)
+                    .put(`/api/stacks/${stackName}/git-source`)
+                    .set('Authorization', `Bearer ${adminToken()}`)
+                    .send(putBody({ source_policy: 'automatic' }));
+                expect(res.status).toBe(200);
+                // The retry cursor stays the next wake: arming a poll cursor
+                // underneath it would mint an inert cursor the due-poll query
+                // refuses to select until the retry discards it.
+                const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+                expect(application?.source_policy).toBe('automatic');
+                expect(application?.next_poll_at).toBeNull();
+                expect(application?.retry_at).toBe(retryAt);
+            } finally {
+                fetchFromGit.mockRestore();
+                deleteRows(stackName);
+            }
+        });
+
+        it('a newly linked manual source stays out of the cadence', async () => {
+            const stackName = 'cursor-new-link-manual';
+            seedStackDir(stackName);
+            const fetchFromGit = stubFetchFromGit();
+            try {
+                const res = await request(app)
+                    .put(`/api/stacks/${stackName}/git-source`)
+                    .set('Authorization', `Bearer ${adminToken()}`)
+                    .send(putBody({ source_policy: 'manual' }));
+                expect(res.status).toBe(200);
+                const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+                expect(application?.source_policy).toBe('manual');
+                expect(application?.next_poll_at).toBeNull();
+            } finally {
+                fetchFromGit.mockRestore();
+                deleteRows(stackName);
+            }
+        });
+    });
+});
+
+describe('git-source polling settings', () => {
+    // A real viewer row, not just a signed token: the auth middleware resolves
+    // users against the database, so a token for a username with no row is
+    // rejected 401 before the node:manage gate ever runs.
+    let pollingViewerToken: string;
+    beforeAll(async () => {
+        DatabaseService.getInstance().addUser({
+            username: 'polling-viewer',
+            password_hash: 'test',
+            role: 'viewer',
+        });
+        pollingViewerToken = jwt.sign(
+            { username: 'polling-viewer', role: 'viewer' },
+            TEST_JWT_SECRET,
+            { expiresIn: '1m' },
+        );
+    });
+
+    function seedPollApp(stackName: string, policy: 'manual' | 'review' | 'automatic'): void {
+        const row = directApplicationFixture(`poll-app-${stackName}`, stackName);
+        row.source_policy = policy;
+        GitOpsStore.getInstance().insertApplication(row);
+    }
+
+    function deletePollRows(stackName: string): void {
+        DatabaseService.getInstance().getDb()
+            .prepare('DELETE FROM gitops_applications WHERE id = ?')
+            .run(`poll-app-${stackName}`);
+    }
+
+    it('GET requires node:manage', async () => {
+        const res = await request(app)
+            .get('/api/git-sources/polling')
+            .set('Authorization', `Bearer ${pollingViewerToken}`);
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('PERMISSION_DENIED');
+    });
+
+    it('GET returns the global interval and per-source rows', async () => {
+        const stackName = 'polling-get-row';
+        seedPollApp(stackName, 'review');
+        DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '7');
+        try {
+            const res = await request(app)
+                .get('/api/git-sources/polling')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(res.status).toBe(200);
+            expect(res.body.poll_interval_mins).toBe(7);
+            const row = res.body.per_source.find((r: { stack_name: string }) => r.stack_name === stackName);
+            expect(row).toBeDefined();
+            expect(row.source_policy).toBe('review');
+            expect(row.poll_interval_secs).toBeNull();
+            expect(row.next_poll_at).toBeNull();
+        } finally {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            deletePollRows(stackName);
+        }
+    });
+
+    it('PATCH rejects non-integer, negative, and oversized values with 400', async () => {
+        for (const value of [-1, 0.5, 10081, 'five', true, null]) {
+            const res = await request(app)
+                .patch('/api/git-sources/polling')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ poll_interval_mins: value });
+            expect(res.status).toBe(400);
+            expect(res.body.error).toMatch(/poll_interval_mins/i);
+        }
+    });
+
+    it('PATCH requires node:manage', async () => {
+        const res = await request(app)
+            .patch('/api/git-sources/polling')
+            .set('Authorization', `Bearer ${pollingViewerToken}`)
+            .send({ poll_interval_mins: 5 });
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('PERMISSION_DENIED');
+    });
+
+    it('PATCH stores the value and recomputes next_poll_at', async () => {
+        const stackName = 'polling-patch-auto';
+        seedPollApp(stackName, 'automatic');
+        const before = Date.now();
+        try {
+            const res = await request(app)
+                .patch('/api/git-sources/polling')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ poll_interval_mins: 5 });
+            expect(res.status).toBe(200);
+            expect(res.body.poll_interval_mins).toBe(5);
+            const row = res.body.per_source.find((r: { stack_name: string }) => r.stack_name === stackName);
+            // Automatic sources get a cursor at now + 300s; review sources
+            // are re-armed on the same cadence, and only manual is left off
+            // the unattended schedule.
+            expect(row.next_poll_at).toBeGreaterThanOrEqual(before + 300_000);
+            expect(row.next_poll_at).toBeLessThanOrEqual(Date.now() + 300_000);
+
+            const stored = GitOpsStore.getInstance().getApplication(`poll-app-${stackName}`);
+            expect(stored?.next_poll_at).toBe(row.next_poll_at);
+        } finally {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            deletePollRows(stackName);
+        }
+    });
+
+    it('PATCH re-arms review sources on the new cadence and skips manual', async () => {
+        const reviewStack = 'polling-patch-review';
+        const manualStack = 'polling-patch-manual';
+        seedPollApp(reviewStack, 'review');
+        seedPollApp(manualStack, 'manual');
+        const staleCursor = 123456;
+        for (const stackName of [reviewStack, manualStack]) {
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE gitops_applications SET next_poll_at = ? WHERE id = ?')
+                .run(staleCursor, `poll-app-${stackName}`);
+        }
+        try {
+            const res = await request(app)
+                .patch('/api/git-sources/polling')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ poll_interval_mins: 5 });
+            expect(res.status).toBe(200);
+            const reviewRow = res.body.per_source.find((r: { stack_name: string }) => r.stack_name === reviewStack);
+            const manualRow = res.body.per_source.find((r: { stack_name: string }) => r.stack_name === manualStack);
+            // Review rides the unattended cadence like automatic; manual keeps
+            // its stale cursor because rescheduleAll never arms it.
+            expect(reviewRow.next_poll_at).toBeGreaterThan(staleCursor);
+            expect(manualRow.next_poll_at).toBe(staleCursor);
+        } finally {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            deletePollRows(reviewStack);
+            deletePollRows(manualStack);
+        }
+    });
+
+    it('PATCH does not arm a poll cursor over a live retry backoff', async () => {
+        const stackName = 'polling-patch-backoff';
+        seedPollApp(stackName, 'automatic');
+        const retryAt = Date.now() + 10 * 60_000;
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE gitops_applications SET retry_at = ? WHERE id = ?')
+            .run(retryAt, `poll-app-${stackName}`);
+        try {
+            const res = await request(app)
+                .patch('/api/git-sources/polling')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ poll_interval_mins: 5 });
+            expect(res.status).toBe(200);
+            // The retry cursor stays the next wake: the row projects with no
+            // new poll cursor, and the stored backoff is untouched.
+            const row = res.body.per_source.find((r: { stack_name: string }) => r.stack_name === stackName);
+            expect(row.next_poll_at).toBeNull();
+            const stored = GitOpsStore.getInstance().getApplication(`poll-app-${stackName}`);
+            expect(stored?.retry_at).toBe(retryAt);
+        } finally {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            deletePollRows(stackName);
+        }
+    });
+
+    it('PATCH 0 leaves existing next_poll_at values alone (off means off)', async () => {
+        const stackName = 'polling-patch-off';
+        seedPollApp(stackName, 'automatic');
+        const existing = GitOpsStore.getInstance().getApplication(`poll-app-${stackName}`)!;
+        existing.next_poll_at = 123456;
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE gitops_applications SET next_poll_at = ? WHERE id = ?')
+            .run(123456, existing.id);
+        try {
+            const res = await request(app)
+                .patch('/api/git-sources/polling')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({ poll_interval_mins: 0 });
+            expect(res.status).toBe(200);
+            expect(res.body.poll_interval_mins).toBe(0);
+            const row = res.body.per_source.find((r: { stack_name: string }) => r.stack_name === stackName);
+            expect(row.next_poll_at).toBe(123456);
+        } finally {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            deletePollRows(stackName);
+        }
     });
 });

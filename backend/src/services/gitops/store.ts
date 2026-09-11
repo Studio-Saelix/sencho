@@ -34,6 +34,42 @@ export type AssertNoLiveBlueprintResult =
   | { ok: true }
   | { ok: false; existing: LiveBlueprintApplication };
 
+/**
+ * The two controller due scans, exported so tests assert against the real
+ * SQL instead of a copy. Each is served by a partial index whose WHERE
+ * clause mirrors the query's static terms (see idx_gitops_app_poll_due /
+ * idx_gitops_app_retry_due in schema.ts); changing a term here must change
+ * it there in the same commit. Both scans are Direct-only and Active-only,
+ * and these terms are load-bearing: a detached row must not be fetched at
+ * all, and a Blueprint-mode row would reach the controller's evaluate()
+ * with no stack name, which returns early, so selecting it would only
+ * re-wake it every tick with a misleading warning. The poll scan
+ * additionally excludes rows with any retry cursor (past or future):
+ * retry-due rows arrive via the retry scan, and a row still inside its
+ * backoff window must not be refetched by a due poll cursor, so the
+ * retry cursor stays the next wake.
+ */
+export const SOURCES_DUE_FOR_POLL_SQL = `SELECT * FROM gitops_applications
+       WHERE target_mode = 'direct'
+         AND lifecycle_status = 'active'
+         AND suspended_at IS NULL
+         AND active_operation_stage IS NULL
+         AND next_poll_at IS NOT NULL
+         AND next_poll_at <= ?
+         AND retry_at IS NULL
+       ORDER BY next_poll_at ASC
+       LIMIT ?`;
+
+export const APPLICATIONS_DUE_FOR_RETRY_SQL = `SELECT * FROM gitops_applications
+       WHERE retry_at IS NOT NULL
+         AND retry_at <= ?
+         AND target_mode = 'direct'
+         AND lifecycle_status = 'active'
+         AND suspended_at IS NULL
+         AND active_operation_stage IS NULL
+       ORDER BY retry_at ASC
+       LIMIT ?`;
+
 export class GitOpsStore {
   private static instance: GitOpsStore | undefined;
 
@@ -162,6 +198,15 @@ export class GitOpsStore {
       `SELECT * FROM gitops_applications
        WHERE target_mode = 'direct' AND lifecycle_status = 'creating'
        ORDER BY created_at ASC`,
+    ).all() as GitOpsApplicationRow[];
+  }
+
+  /** Every live Direct application, for configuration-wide rescheduling. */
+  listActiveDirectApplications(): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE target_mode = 'direct' AND lifecycle_status = 'active'
+       ORDER BY stack_name ASC`,
     ).all() as GitOpsApplicationRow[];
   }
 
@@ -323,40 +368,24 @@ export class GitOpsStore {
 
   /**
    * Direct sources whose poll time has arrived: active, not suspended, no
-   * operation in flight. Blueprint-mode applications are never polled here
+   * operation in flight, and no retry cursor (the retry scan owns a row in
+   * backoff). Blueprint-mode applications are never polled here
    * -- source evaluation for them is blocked at the evaluation boundary
    * until an application-keyed source engine exists for that mode.
    */
   listSourcesDueForPoll(now: number, limit = 200): GitOpsApplicationRow[] {
-    return this.db().prepare(
-      `SELECT * FROM gitops_applications
-       WHERE target_mode = 'direct'
-         AND lifecycle_status = 'active'
-         AND suspended_at IS NULL
-         AND active_operation_stage IS NULL
-         AND next_poll_at IS NOT NULL
-         AND next_poll_at <= ?
-       ORDER BY next_poll_at ASC
-       LIMIT ?`,
-    ).all(now, limit) as GitOpsApplicationRow[];
+    return this.db().prepare(SOURCES_DUE_FOR_POLL_SQL).all(now, limit) as GitOpsApplicationRow[];
   }
 
   /**
-   * Applications with a scheduled retry that has come due: not suspended,
-   * no operation in flight. Poll eligibility and retry eligibility are
-   * deliberately separate queries, since a retry can be due on an
-   * application whose poll cadence would not otherwise select it yet.
+   * Active Direct applications with a scheduled retry that has come due:
+   * not suspended, no operation in flight. Poll eligibility and retry
+   * eligibility are deliberately separate queries, since a retry can be
+   * due on an application whose poll cadence would not otherwise select
+   * it yet.
    */
   listApplicationsDueForRetry(now: number, limit = 200): GitOpsApplicationRow[] {
-    return this.db().prepare(
-      `SELECT * FROM gitops_applications
-       WHERE retry_at IS NOT NULL
-         AND retry_at <= ?
-         AND suspended_at IS NULL
-         AND active_operation_stage IS NULL
-       ORDER BY retry_at ASC
-       LIMIT ?`,
-    ).all(now, limit) as GitOpsApplicationRow[];
+    return this.db().prepare(APPLICATIONS_DUE_FOR_RETRY_SQL).all(now, limit) as GitOpsApplicationRow[];
   }
 
   /** Every live target on one node, across all applications. */

@@ -864,6 +864,147 @@ describe('GitSourceService.upsert (encryption + reachability)', () => {
         expect(mockGitClone).not.toHaveBeenCalled();
     });
 
+    it('rejects auto-deploy when the effective policy is not automatic', async () => {
+        // An existing application already carries an explicit 'manual' policy;
+        // a legacy boolean-only write must not let auto-deploy ride along.
+        GitOpsStore.getInstance().insertApplication(
+            buildDirectApplicationRow({
+                id: newGitOpsId(),
+                stackName: 'manual-deploy-matrix',
+                config: {
+                    repoUrl: 'https://github.com/example/repo.git',
+                    branch: 'main',
+                    composePaths: ['compose.yaml'],
+                    contextDir: null,
+                    syncEnv: false,
+                    envPath: null,
+                },
+                identity: directSourceIdentity({
+                    repoUrl: 'https://github.com/example/repo.git',
+                    branch: 'main',
+                    composePaths: ['compose.yaml'],
+                    contextDir: null,
+                    syncEnv: false,
+                    envPath: null,
+                }),
+                lifecycleStatus: 'active',
+                at: Date.now(),
+            }, 'manual'),
+        );
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        await expect(svc.upsert({
+            stackName: 'manual-deploy-matrix',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: true,
+        })).rejects.toMatchObject({ code: 'GIT_ERROR' });
+    });
+
+    it('allows auto-deploy when the effective policy is automatic via sourcePolicy', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        await svc.upsert({
+            stackName: 'auto-deploy-matrix',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: true,
+            sourcePolicy: 'automatic',
+        });
+        const source = svc.get('auto-deploy-matrix')!;
+        expect(source.auto_apply_on_webhook).toBe(true);
+        expect(source.auto_deploy_on_apply).toBe(true);
+        const app = GitOpsStore.getInstance().getLiveDirectApplication('auto-deploy-matrix');
+        expect(app?.source_policy).toBe('automatic');
+    });
+
+    it('an explicit sourcePolicy wins over the legacy boolean', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        await svc.upsert({
+            stackName: 'policy-wins',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: true,
+            autoDeployOnApply: false,
+            sourcePolicy: 'manual',
+        });
+        expect(GitOpsStore.getInstance().getLiveDirectApplication('policy-wins')?.source_policy).toBe('manual');
+        // Reads project the boolean from source_policy (automatic only), so a
+        // manual policy reports false. A legacy client that read-modify-writes
+        // a manual source therefore sends false and never re-enables automatic.
+        expect(svc.get('policy-wins')!.auto_apply_on_webhook).toBe(false);
+    });
+
+    it('a legacy false edit keeps an existing manual policy (no silent conversion)', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        await svc.upsert({
+            stackName: 'manual-keeps',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: true,
+            autoDeployOnApply: false,
+            sourcePolicy: 'manual',
+        });
+        expect(GitOpsStore.getInstance().getLiveDirectApplication('manual-keeps')?.source_policy).toBe('manual');
+        // Unrelated legacy edit: boolean false, no sourcePolicy. The manual
+        // policy must survive rather than being converted to review.
+        await svc.upsert({
+            stackName: 'manual-keeps',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        expect(GitOpsStore.getInstance().getLiveDirectApplication('manual-keeps')?.source_policy).toBe('manual');
+    });
+
+    it('create without sourcePolicy derives review from a false boolean', async () => {
+        mockSuccessfulClone();
+        const svc = GitSourceService.getInstance();
+        await svc.upsert({
+            stackName: 'derive-review',
+            repoUrl: 'https://github.com/example/repo.git',
+            branch: 'main',
+            composePaths: ['compose.yaml'],
+            contextDir: null,
+            syncEnv: false,
+            envPath: null,
+            authType: 'none',
+            autoApplyOnWebhook: false,
+            autoDeployOnApply: false,
+        });
+        expect(GitOpsStore.getInstance().getLiveDirectApplication('derive-review')?.source_policy).toBe('review');
+    });
+
     it('does not persist when dry-run fetch fails', async () => {
         mockFetchAtCommit.mockRejectedValueOnce(gitFailure(
             "fatal: repository 'https://github.com/example/nope.git/' not found",
@@ -2807,6 +2948,79 @@ describe('GitSourceService.createStackFromGit', () => {
         await cleanupStackDir('create-nested');
     });
 
+    it('a newly created eligible source receives an initial poll cursor', async () => {
+        const sha = 'curs00000000000000000000000000000000001';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '5');
+        const svc = GitSourceService.getInstance();
+        try {
+            await svc.createStackFromGit({
+                stackName: 'create-cursor',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                token: null,
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+
+            // Create defaults to review, which is unattended-eligible, so the
+            // application row leaves the create with a durable wake already
+            // armed: no global settings PATCH is needed to start polling.
+            const application = GitOpsStore.getInstance().getLiveDirectApplication('create-cursor');
+            expect(application?.source_policy).toBe('review');
+            expect(application?.next_poll_at).not.toBeNull();
+            expect(application!.next_poll_at!).toBeGreaterThan(Date.now());
+            expect(application!.next_poll_at!).toBeLessThanOrEqual(Date.now() + 5 * 60 * 1000);
+            const history = DatabaseService.getInstance().getDb()
+                .prepare("SELECT COUNT(*) AS n FROM gitops_history WHERE stack_name = ? AND stage = 'source_poll_scheduled'")
+                .get('create-cursor') as { n: number };
+            expect(history.n).toBe(1);
+        } finally {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            DatabaseService.getInstance().getDb()
+                .prepare('DELETE FROM gitops_applications WHERE stack_name = ?')
+                .run('create-cursor');
+            await cleanupStackDir('create-cursor');
+        }
+    });
+
+    it('a newly created manual source stays out of the cadence', async () => {
+        const sha = 'curs00000000000000000000000000000000002';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '5');
+        const svc = GitSourceService.getInstance();
+        try {
+            await svc.createStackFromGit({
+                stackName: 'create-cursor-manual',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                token: null,
+                autoApplyOnWebhook: true,
+                autoDeployOnApply: false,
+                sourcePolicy: 'manual',
+            });
+            const application = GitOpsStore.getInstance().getLiveDirectApplication('create-cursor-manual');
+            expect(application?.source_policy).toBe('manual');
+            expect(application?.next_poll_at).toBeNull();
+        } finally {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            DatabaseService.getInstance().getDb()
+                .prepare('DELETE FROM gitops_applications WHERE stack_name = ?')
+                .run('create-cursor-manual');
+            await cleanupStackDir('create-cursor-manual');
+        }
+    });
+
     it('writes the env file when sync_env is enabled', async () => {
         const sha = '0101010101010101010101010101010101010101';
         mockSuccessfulClone({
@@ -3127,7 +3341,10 @@ describe('GitSourceService.apply', () => {
     });
 
     describe('reconcile', () => {
-        it('reports candidate_already_fetched after a fetch-intent reconcile stages a new candidate', async () => {
+        // A legacy boolean of false derives the review policy, so a staged
+        // candidate requires review: facet source_review_pending projects the
+        // pending_review outcome instead of the old always-ready staging.
+        it('reports pending_review after a fetch-intent reconcile stages a new candidate', async () => {
             const sha = 'e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1';
             mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha });
             const svc = GitSourceService.getInstance();
@@ -3154,7 +3371,7 @@ describe('GitSourceService.apply', () => {
                     trigger: 'manual',
                     actor: 'tester',
                 });
-                expect(result.outcome).toBe('candidate_already_fetched');
+                expect(result.outcome).toBe('pending_review');
             } finally {
                 validateSpy.mockRestore();
             }
@@ -3342,7 +3559,7 @@ describe('GitSourceService.apply', () => {
                 identity: directSourceIdentity(config),
                 lifecycleStatus: 'active',
                 at: Date.now(),
-            }));
+            }, 'automatic'));
             const newLiveId = liveApp('reconcile-apply-superseded-id')!.id;
             expect(newLiveId).not.toBe(staleApplicationId);
 
@@ -3413,7 +3630,7 @@ describe('GitSourceService.apply', () => {
                 identity: directSourceIdentity(config),
                 lifecycleStatus: 'active',
                 at: Date.now(),
-            }));
+            }, 'automatic'));
 
             releaseLock();
             await lockHolder;
@@ -3449,11 +3666,11 @@ describe('GitSourceService.apply', () => {
 
             const [fetchResult, suspendResult] = await Promise.all([fetch, suspend]);
 
-            expect(fetchResult.outcome).toBe('candidate_already_fetched');
+            expect(fetchResult.outcome).toBe('pending_review');
             expect(suspendResult.outcome).toBe('suspended');
             const settled = settledAttempts(applicationId);
             expect(settled).toHaveLength(1);
-            expect(JSON.parse(settled[0].after_json).outcome).toBe('candidate_already_fetched');
+            expect(JSON.parse(settled[0].after_json).outcome).toBe('pending_review');
         });
 
         it('reports unknown for a stack with no GitOps application', async () => {
@@ -3732,7 +3949,7 @@ describe('GitSourceService.apply', () => {
                 expect(mockGitClone).toHaveBeenCalledTimes(1);
                 expect(pullResult.commitSha).toBe(newSha);
                 expect(pullResult.candidateReady).toBe(true);
-                expect(reconcileResult.outcome).toBe('candidate_already_fetched');
+                expect(reconcileResult.outcome).toBe('pending_review');
                 const generationCountAfter = (DatabaseService.getInstance().getDb()
                     .prepare('SELECT COUNT(*) AS count FROM gitops_generations WHERE application_id = ?')
                     .get(applicationId) as { count: number }).count;
@@ -4079,7 +4296,7 @@ describe('GitSourceService.apply', () => {
                 // outcome, not a snapshot of the row from before the fetch
                 // ran (which would still show no candidate staged).
                 expect(redeliveryResult).toEqual(firstResult);
-                expect(firstResult.outcome).toBe('candidate_already_fetched');
+                expect(firstResult.outcome).toBe('pending_review');
             } finally {
                 validateSpy.mockRestore();
             }
@@ -4509,7 +4726,7 @@ describe('GitSourceService.apply', () => {
                 identity: directSourceIdentity(config),
                 lifecycleStatus: 'creating',
                 at: Date.now(),
-            }));
+            }, 'automatic'));
 
             await expect(GitSourceService.getInstance().suspend('suspend-creating-app', { actor: 'tester' }))
                 .rejects.toMatchObject({ code: 'OPERATION_IN_FLIGHT' });
@@ -4570,12 +4787,66 @@ describe('GitSourceService.apply', () => {
             expect(app?.source_suspended_reason).toBeNull();
         });
 
+        it('resuming a source re-policed into automatic while suspended arms its poll cursor', async () => {
+            const sha = 'curs00000000000000000000000000000000002';
+            const svc = await seedPending('resume-cursor', 'services:\n  x:\n    image: alpine\n', sha);
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '5');
+            try {
+                await svc.suspend('resume-cursor', { actor: 'tester', reason: 'pausing' });
+                await svc.upsert({
+                    stackName: 'resume-cursor',
+                    repoUrl: 'https://github.com/example/repo.git',
+                    branch: 'main',
+                    composePaths: ['compose.yaml'],
+                    contextDir: null,
+                    syncEnv: false,
+                    envPath: null,
+                    authType: 'none',
+                    autoApplyOnWebhook: true,
+                    autoDeployOnApply: false,
+                });
+                // The flip while suspended arms nothing: the pre-check skips
+                // paused rows.
+                expect(liveApp('resume-cursor')?.next_poll_at).toBeNull();
+
+                await svc.resume('resume-cursor', { actor: 'tester' });
+
+                const app = liveApp('resume-cursor');
+                expect(app?.suspended_at).toBeNull();
+                expect(app?.source_policy).toBe('automatic');
+                expect(app?.next_poll_at).not.toBeNull();
+                const history = DatabaseService.getInstance().getDb()
+                    .prepare("SELECT COUNT(*) AS n FROM gitops_history WHERE stack_name = ? AND stage = 'source_poll_scheduled'")
+                    .get('resume-cursor') as { n: number };
+                expect(history.n).toBe(1);
+            } finally {
+                DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            }
+        });
+
+        it('resuming a source that was never eligible for the cadence arms nothing', async () => {
+            const sha = 'curs00000000000000000000000000000000003';
+            const svc = await seedPending('resume-manual', 'services:\n  x:\n    image: alpine\n', sha);
+            try {
+                await svc.suspend('resume-manual', { actor: 'tester', reason: 'pausing' });
+                await svc.resume('resume-manual', { actor: 'tester' });
+
+                // The policy stays review and the global interval is off, so
+                // no wake is due from either guard.
+                const app = liveApp('resume-manual');
+                expect(app?.source_policy).toBe('review');
+                expect(app?.next_poll_at).toBeNull();
+            } finally {
+                DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            }
+        });
+
         it('resuming a source that is not suspended is a harmless no-op, not an error', async () => {
             const svc = await seedPending('resume-noop', 'services:\n  x:\n    image: alpine\n', 's8s8s8s8s8s8s8s8s8s8s8s8s8s8s8s8s8s8s8s8');
 
             const result = await svc.resume('resume-noop', { actor: 'tester' });
 
-            expect(result.outcome).toBe('candidate_already_fetched');
+            expect(result.outcome).toBe('pending_review');
         });
 
         it('pulling and applying again succeeds once a suspended source is resumed', async () => {
@@ -4609,7 +4880,7 @@ describe('GitSourceService.apply', () => {
 
             try {
                 const result = await svc.retry('retry-basic', { actor: 'tester' });
-                expect(result.outcome).toBe('candidate_already_fetched');
+                expect(result.outcome).toBe('pending_review');
                 expect(reconcileSpy).toHaveBeenCalledWith(expect.objectContaining({ trigger: 'retry', intent: 'fetch' }));
             } finally {
                 validateSpy.mockRestore();

@@ -7,6 +7,7 @@ import { sanitizeForLog } from '../../utils/safeLog';
 import { removeOperationOwnedPaths } from './createCleanup';
 import { deleteStagingMarker } from './createStagingMarker';
 import { newGitOpsId, stackManagedRoot } from './directApplication';
+import { effectivePollIntervalSecs } from './backoff';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions } from './transitions';
 import type { GitOpsCreateCheckpointRow } from './types';
@@ -307,6 +308,33 @@ async function resolveOne(checkpoint: GitOpsCreateCheckpointRow): Promise<Create
         activateCreating: true,
       });
       store.updateCreateCheckpoint(checkpoint.application_id, { phase: 'pointers_committed' }, Date.now());
+      // Mirror the live create path: a recovered source that is eligible for
+      // the unattended cadence arms its initial cursor now, not after the
+      // next global settings PATCH happens to re-scan it. The guards mirror
+      // sourcePollScheduled's own refusals and the due-scan eligibility
+      // rules, and arming over a live retry cursor would mint an inert
+      // cursor, so a retry cursor stays the next wake.
+      const recovered = store.getApplication(checkpoint.application_id);
+      if (recovered && recovered.source_policy !== 'manual'
+          && recovered.suspended_at === null && recovered.next_poll_at === null
+          && recovered.retry_at === null) {
+        const secs = effectivePollIntervalSecs(
+          recovered.poll_interval_secs,
+          DatabaseService.getInstance().getGitOpsPollIntervalMins(),
+        );
+        if (secs > 0) {
+          GitOpsTransitions.getInstance().sourcePollScheduled(
+            checkpoint.application_id,
+            Date.now() + secs * 1000,
+            {
+              operationId: crypto.randomUUID(),
+              actor: 'system:git-source',
+              trigger: 'create',
+              at: Date.now(),
+            },
+          );
+        }
+      }
     })();
     // Marker before checkpoint, for the reason given on the branch above. The
     // create is live either way by this point: the transaction above committed.

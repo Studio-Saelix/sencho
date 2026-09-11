@@ -281,6 +281,15 @@ describe('poll and retry eligibility queries', () => {
     expect(due.map((a) => a.id)).not.toContain('app-poll-busy');
   });
 
+  it('excludes a source whose retry cursor is still in the future even when its poll time has arrived', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication({ ...app('app-poll-backoff', 'poll-backoff-web'), next_poll_at: 1_000, retry_at: 5_000 });
+    // The poll scan must not refetch during backoff: the retry cursor is
+    // the next wake, and the retry scan still owns the row once it fires.
+    expect(store.listSourcesDueForPoll(1_000).map((a) => a.id)).not.toContain('app-poll-backoff');
+    expect(store.listApplicationsDueForRetry(1_000).map((a) => a.id)).not.toContain('app-poll-backoff');
+  });
+
   it('excludes a Blueprint-mode application from polling', () => {
     const store = GitOpsStore.getInstance();
     store.insertApplication({
@@ -314,6 +323,51 @@ describe('poll and retry eligibility queries', () => {
     store.insertApplication({ ...app('app-retry-susp', 'retry-susp-web'), retry_at: 1_000, suspended_at: 500 });
     const due = store.listApplicationsDueForRetry(1_000);
     expect(due.map((a) => a.id)).not.toContain('app-retry-susp');
+  });
+
+  it('lists an application once its retry cursor fires even while a stale poll cursor remains', () => {
+    const store = GitOpsStore.getInstance();
+    // Only the poll scan defers to the retry cursor; the retry query must
+    // not filter on the poll cursor at all. The fixture hand-builds a row
+    // holding both cursors because the transition graph clears next_poll_at
+    // when the backoff begins, but the SQL property should hold regardless.
+    store.insertApplication({ ...app('app-retry-fires', 'retry-fires-web'), next_poll_at: 1_000, retry_at: 1_000 });
+    const due = store.listApplicationsDueForRetry(1_000);
+    expect(due.map((a) => a.id)).toContain('app-retry-fires');
+  });
+
+  it('excludes a detached application even when its retry time has arrived', () => {
+    const store = GitOpsStore.getInstance();
+    // Detachment does not clear cursors (applicationTombstoned leaves
+    // retry_at alone), so a detached row can still carry a due retry
+    // cursor. The scan must exclude it on its own terms rather than
+    // assume the transition graph cleaned up first.
+    store.insertApplication({
+      ...app('app-retry-detached', 'retry-detached-web'),
+      lifecycle_status: 'detached',
+      retry_at: 1_000,
+    });
+    const due = store.listApplicationsDueForRetry(1_000);
+    expect(due.map((a) => a.id)).not.toContain('app-retry-detached');
+  });
+
+  it('excludes a Blueprint-mode application even when its retry time has arrived', () => {
+    const store = GitOpsStore.getInstance();
+    // Retry scheduling currently serves the Direct controller only. A
+    // Blueprint-mode wake would reach evaluate() with no stack name, which
+    // returns early, so selecting the row would only re-wake it every tick
+    // with a misleading warning. Until Blueprint fetch gains a retry path,
+    // the scan must not select it.
+    store.insertApplication({
+      ...app('app-retry-bp', 'unused-bp-retry'),
+      stack_name: null,
+      blueprint_id: 43,
+      target_mode: 'blueprint',
+      configured_repo_url: 'https://github.com/org/repo.git',
+      retry_at: 1_000,
+    });
+    const due = store.listApplicationsDueForRetry(1_000);
+    expect(due.map((a) => a.id)).not.toContain('app-retry-bp');
   });
 });
 

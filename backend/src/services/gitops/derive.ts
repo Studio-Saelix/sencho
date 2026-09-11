@@ -303,6 +303,13 @@ function deriveSource(app: GitOpsApplicationRow, limitations: GitOpsLimitation[]
     }
     return { ...identity, status: 'application_generation_accepted' };
   }
+  // A scheduled poll means the source settled without any stronger evidence
+  // to report (no candidate, no accepted generation): the controller is
+  // waiting for the next poll. The failure and retry branches above win over
+  // this cursor, so a poll schedule is never an excuse to hide a failure.
+  if (app.next_poll_at) {
+    return { ...identity, status: 'source_poll_scheduled', nextPollAt: app.next_poll_at };
+  }
   return { ...identity, status: 'never_reconciled' };
 }
 

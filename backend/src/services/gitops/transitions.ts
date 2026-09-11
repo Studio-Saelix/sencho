@@ -1,4 +1,5 @@
 import type { RefKind } from '../git/types';
+import type { GitSourceErrorCode } from '../GitSourceService';
 import { DatabaseService } from '../DatabaseService';
 import {
   decodeArtifactEvidenceJson,
@@ -19,6 +20,7 @@ import type {
   GitOpsIntentRevisionRow,
   GitOpsRolloutCandidateRow,
   GitOpsTargetCurrentRow,
+  SourcePolicy,
 } from './types';
 
 export type EventEnvelope = {
@@ -177,16 +179,28 @@ export class GitOpsTransitions {
       app.active_operation_at = envelope.at;
       app.active_generation_id = null;
       app.retry_at = null;
+      // The poll cursor is a schedule for one fetch, not a standing cadence:
+      // consuming it here (rather than only re-arming on success) is what
+      // keeps a stale cursor from re-firing every tick after the fetch
+      // fails, is declined for manual/off policies, or crashes the
+      // evaluation. A success re-arms through sourcePollScheduled.
+      app.next_poll_at = null;
       this.clearInterruption(app, 'fetch_started');
     });
   }
 
-  fetchFailed(applicationId: string, envelope: EventEnvelope): TransitionResult {
+  /**
+   * Record a fetch failure, with the classified error code when the caller has
+   * one. The code is what lets the controller classify the failure as
+   * transient or permanent; the legacy `'fetch'` class stays the fallback so
+   * callers without a classification still produce a readable failure.
+   */
+  fetchFailed(applicationId: string, envelope: EventEnvelope, code?: GitSourceErrorCode): TransitionResult {
     return this.mutateApp(applicationId, envelope, 'fetch_failed', 'failed', (app) => {
       this.requireMatchingFetch(app, envelope);
       this.clearActive(app);
       app.failure_stage = 'fetch';
-      app.failure_class = 'fetch';
+      app.failure_class = code ?? 'fetch';
       app.failure_at = envelope.at;
       this.clearInterruption(app, 'fetch_started');
     });
@@ -860,6 +874,53 @@ export class GitOpsTransitions {
       }
       app.retry_at = retryAt;
       app.retry_count = retryCount;
+    });
+  }
+
+  /**
+   * Schedule the next poll for a source that settled without needing a retry.
+   *
+   * Like the retry cursor, the poll cursor is a plan, not a resolution: it
+   * never hides a failure (the failure branches win in the derivation) and
+   * never overwrites a staged candidate or an accepted generation, which the
+   * derivation reports ahead of the waiting state.
+   */
+  sourcePollScheduled(applicationId: string, nextPollAt: number, envelope: EventEnvelope): TransitionResult {
+    return this.mutateApp(applicationId, envelope, 'source_poll_scheduled', 'committed', (app) => {
+      if (app.suspended_at) throw new GitOpsTransitionError('source is suspended');
+      if (app.active_operation_stage) {
+        throw new GitOpsTransitionError('cannot schedule a poll while an operation is in flight');
+      }
+      app.next_poll_at = nextPollAt;
+    });
+  }
+
+  /**
+   * Persist a resolved source policy onto an application. Callers resolve
+   * the live row (the upsert path reads it through gitopsApplicationFor, so
+   * detached rows never reach this transition); suspension and detachment
+   * are not checked here. Configuration, not work: a suspended source keeps
+   * taking policy edits (suspension gates fetching and applying, not
+   * configuration), but the policy cannot flip under an operation that is
+   * mid-flight, since the settle path reads the policy when deciding
+   * acceptance.
+   *
+   * Moving to manual consumes any armed cursor, poll or retry: manual
+   * sources never join the unattended cadence, so a cursor left armed would
+   * be picked up every tick, declined by the controller's manual guard, and
+   * left in place, projecting a scheduled wake that can never run. The
+   * failure evidence stays untouched, so the last failure remains visible.
+   */
+  sourcePolicyChanged(applicationId: string, sourcePolicy: SourcePolicy, envelope: EventEnvelope): TransitionResult {
+    return this.mutateApp(applicationId, envelope, 'source_policy_changed', 'committed', (app) => {
+      if (app.active_operation_stage) {
+        throw new GitOpsTransitionError('cannot change the source policy while an operation is in flight');
+      }
+      app.source_policy = sourcePolicy;
+      if (sourcePolicy === 'manual') {
+        app.next_poll_at = null;
+        app.retry_at = null;
+      }
     });
   }
 
@@ -2036,6 +2097,22 @@ export class GitOpsTransitions {
   private requireAcceptableCandidate(app: GitOpsApplicationRow, args: AppliedArgs): void {
     if (app.candidate_generation_id !== args.generationId) {
       throw new GitOpsTransitionError('applied generation is not the current candidate');
+    }
+    // A conflict-blocked candidate can never be accepted, whatever the
+    // caller claims. This runs on the row re-read inside the mutation
+    // transaction, so it acts on durable state, not on the caller's
+    // snapshot, and it backs applyStarted's own blocked refusal.
+    if (app.candidate_plan_blocked === 1) {
+      throw new GitOpsTransitionError('candidate is blocked');
+    }
+    // Configured-policy acceptance acts on the source policy's behalf, so it
+    // is only valid while the durable policy still says automatic. The
+    // caller's snapshot can predate a policy change that completed while the
+    // acceptance (or the evaluation feeding it) was in flight; the
+    // transaction-fresh row above is what decides. Operator authority is not
+    // constrained here: an operator accepts whatever is on the row.
+    if (args.authority === 'configured_policy' && app.source_policy !== 'automatic') {
+      throw new GitOpsTransitionError('source policy is no longer automatic');
     }
     // The seed artifact row is always evidence_version 1, so re-accepting a
     // generation that is already accepted would collide on the version

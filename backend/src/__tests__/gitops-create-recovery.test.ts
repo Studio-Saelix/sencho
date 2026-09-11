@@ -124,6 +124,54 @@ describe('gitops interrupted create recovery', () => {
     expect(store.getCreateCheckpoint('app-finish')).toBeUndefined();
   });
 
+  it('a recovered create arms its initial poll cursor when the policy is unattended and polling is on', async () => {
+    const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
+    seedCreate('app-finish-cursor', 'finish-cursor-web', 'manifest_committed');
+    db.getDb().prepare(
+      "UPDATE gitops_applications SET source_policy = 'automatic' WHERE id = 'app-finish-cursor'",
+    ).run();
+    db.updateGlobalSetting('gitops_poll_interval_mins', '5');
+    fs.mkdirSync(path.join(process.env.COMPOSE_DIR!, 'finish-cursor-web'), { recursive: true });
+
+    try {
+      const settled = await resolveInterruptedCreates();
+
+      expect(settled[0].outcome).toBe('completed');
+      const app = store.getApplication('app-finish-cursor')!;
+      expect(app.lifecycle_status).toBe('active');
+      expect(app.next_poll_at).not.toBeNull();
+      expect(app.next_poll_at!).toBeGreaterThan(Date.now());
+      expect(app.next_poll_at!).toBeLessThanOrEqual(Date.now() + 5 * 60 * 1000);
+      const history = db.getDb()
+        .prepare("SELECT COUNT(*) AS n FROM gitops_history WHERE application_id = ? AND stage = 'source_poll_scheduled'")
+        .get('app-finish-cursor') as { n: number };
+      expect(history.n).toBe(1);
+    } finally {
+      db.updateGlobalSetting('gitops_poll_interval_mins', '0');
+    }
+  });
+
+  it('a recovered manual create arms no poll cursor', async () => {
+    const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
+    seedCreate('app-finish-manual', 'finish-manual-web', 'manifest_committed');
+    db.updateGlobalSetting('gitops_poll_interval_mins', '5');
+    fs.mkdirSync(path.join(process.env.COMPOSE_DIR!, 'finish-manual-web'), { recursive: true });
+
+    try {
+      const settled = await resolveInterruptedCreates();
+
+      expect(settled[0].outcome).toBe('completed');
+      const app = store.getApplication('app-finish-manual')!;
+      expect(app.lifecycle_status).toBe('active');
+      expect(app.source_policy).toBe('manual');
+      expect(app.next_poll_at).toBeNull();
+    } finally {
+      db.updateGlobalSetting('gitops_poll_interval_mins', '0');
+    }
+  });
+
   it('restores deploy-key credentials when finishing a manifest_committed create', async () => {
     const store = GitOpsStore.getInstance();
     const db = DatabaseService.getInstance();

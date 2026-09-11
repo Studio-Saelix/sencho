@@ -163,6 +163,33 @@ CREATE INDEX IF NOT EXISTS idx_gitops_app_status
 CREATE INDEX IF NOT EXISTS idx_gitops_app_detached_direct
   ON gitops_applications(stack_name, updated_at DESC)
   WHERE lifecycle_status = 'detached' AND target_mode = 'direct';
+-- The due scans run every controller tick, so their predicates are indexed
+-- directly: each partial index mirrors exactly the WHERE terms of the query
+-- it serves (listSourcesDueForPoll / listApplicationsDueForRetry), keeping
+-- the index to the handful of rows actually waiting on a cursor. The poll
+-- index also excludes rows holding a retry cursor: retry-due rows arrive
+-- via the retry scan, and a backoff row must not be refetched early. Both
+-- DROPs precede their CREATEs because CREATE INDEX IF NOT EXISTS never
+-- updates an index that already exists under the same name: a database
+-- created before a WHERE term was added would otherwise keep serving the
+-- old definition on every upgraded install.
+DROP INDEX IF EXISTS idx_gitops_app_poll_due;
+CREATE INDEX IF NOT EXISTS idx_gitops_app_poll_due
+  ON gitops_applications(next_poll_at)
+  WHERE target_mode = 'direct'
+    AND lifecycle_status = 'active'
+    AND suspended_at IS NULL
+    AND active_operation_stage IS NULL
+    AND next_poll_at IS NOT NULL
+    AND retry_at IS NULL;
+DROP INDEX IF EXISTS idx_gitops_app_retry_due;
+CREATE INDEX IF NOT EXISTS idx_gitops_app_retry_due
+  ON gitops_applications(retry_at)
+  WHERE target_mode = 'direct'
+    AND lifecycle_status = 'active'
+    AND suspended_at IS NULL
+    AND active_operation_stage IS NULL
+    AND retry_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS gitops_generations (
   id TEXT PRIMARY KEY,

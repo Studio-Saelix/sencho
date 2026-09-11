@@ -134,6 +134,106 @@ describe('gitops transitions', () => {
     expect(store.getTarget('app-fail', 1)?.applied_generation_id).toBe('gen-fail');
   });
 
+  it('sourcePollScheduled sets next_poll_at and records history', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-poll-sched', 'poll-sched-web'), nodeId: 1, envelope: envelope('op-act-poll') });
+    const result = tx.sourcePollScheduled('app-poll-sched', 12345, envelope('op-poll-sched'));
+    expect(store.getApplication('app-poll-sched')?.next_poll_at).toBe(12345);
+    expect(result.historyIds.length).toBeGreaterThan(0);
+  });
+
+  it('sourcePollScheduled refuses a suspended source', () => {
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-poll-susp', 'poll-susp-web'), nodeId: 1, envelope: envelope('op-act-poll-susp') });
+    tx.sourceSuspended('app-poll-susp', 'operator hold', envelope('op-suspend-poll'));
+    expect(() => tx.sourcePollScheduled('app-poll-susp', 12345, envelope('op-poll-susp'))).toThrow(/suspended/);
+  });
+
+  it('sourcePollScheduled refuses to schedule while an operation is in flight', () => {
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-poll-op', 'poll-op-web'), nodeId: 1, envelope: envelope('op-act-poll-op') });
+    tx.fetchStarted('app-poll-op', envelope('op-f-poll-op'));
+    expect(() => tx.sourcePollScheduled('app-poll-op', 12345, envelope('op-poll-op'))).toThrow(/in flight/);
+  });
+
+  it('sourcePolicyChanged persists the policy and records history', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-policy-set', 'policy-set-web'), nodeId: 1, envelope: envelope('op-act-policy') });
+    const result = tx.sourcePolicyChanged('app-policy-set', 'review', envelope('op-policy-set'));
+    expect(store.getApplication('app-policy-set')?.source_policy).toBe('review');
+    expect(result.historyIds.length).toBeGreaterThan(0);
+  });
+
+  it('sourcePolicyChanged refuses to run while an operation is in flight', () => {
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-policy-op', 'policy-op-web'), nodeId: 1, envelope: envelope('op-act-policy-op') });
+    tx.fetchStarted('app-policy-op', envelope('op-f-policy-op'));
+    expect(() => tx.sourcePolicyChanged('app-policy-op', 'automatic', envelope('op-policy-op'))).toThrow(/in flight/);
+  });
+
+  it('sourcePolicyChanged to manual consumes the armed poll cursor', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-policy-manual', 'policy-manual-web'), nodeId: 1, envelope: envelope('op-act-policy-manual') });
+    tx.sourcePollScheduled('app-policy-manual', 12345, envelope('op-poll-policy-manual'));
+    tx.sourcePolicyChanged('app-policy-manual', 'manual', envelope('op-policy-manual'));
+    // A manual source never joins the unattended cadence; leaving the cursor
+    // armed would project a scheduled poll that the controller declines
+    // every tick.
+    expect(store.getApplication('app-policy-manual')?.next_poll_at).toBeNull();
+  });
+
+  it('sourcePolicyChanged to manual consumes an armed retry cursor', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-policy-manual-retry', 'policy-manual-retry-web'), nodeId: 1, envelope: envelope('op-act-policy-manual-retry') });
+    tx.sourceRetryScheduled(
+      'app-policy-manual-retry',
+      Date.now() + 10 * 60_000,
+      1,
+      envelope('op-retry-policy-manual'),
+    );
+    tx.sourcePolicyChanged('app-policy-manual-retry', 'manual', envelope('op-policy-manual-retry'));
+    // Same trap as the poll cursor: the retry scan has no policy filter, so
+    // a left-behind retry_at would put the manual row in the retry-due set
+    // every tick, declined by the controller's manual guard and never
+    // consumed.
+    expect(store.getApplication('app-policy-manual-retry')?.retry_at).toBeNull();
+    // The failure itself stays visible; only the schedule is withdrawn.
+    expect(store.getApplication('app-policy-manual-retry')?.failure_stage).toBeNull();
+  });
+
+  it('sourcePolicyChanged to non-manual keeps the armed poll cursor', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-policy-review', 'policy-review-web'), nodeId: 1, envelope: envelope('op-act-policy-review') });
+    tx.sourcePollScheduled('app-policy-review', 12345, envelope('op-poll-policy-review'));
+    tx.sourcePolicyChanged('app-policy-review', 'review', envelope('op-policy-review'));
+    expect(store.getApplication('app-policy-review')?.next_poll_at).toBe(12345);
+  });
+
+  it('fetchFailed records the git source error code as failure_class', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-fetch-code', 'fetch-code-web'), nodeId: 1, envelope: envelope('op-act-fc') });
+    tx.fetchStarted('app-fetch-code', envelope('op-f-fc'));
+    tx.fetchFailed('app-fetch-code', envelope('op-f-fc'), 'NETWORK_TIMEOUT');
+    const application = store.getApplication('app-fetch-code')!;
+    expect(application.failure_class).toBe('NETWORK_TIMEOUT');
+    expect(application.failure_stage).toBe('fetch');
+  });
+
+  it('fetchFailed without evidence keeps the legacy failure_class', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-fetch-legacy', 'fetch-legacy-web'), nodeId: 1, envelope: envelope('op-act-fl') });
+    tx.fetchStarted('app-fetch-legacy', envelope('op-f-fl'));
+    tx.fetchFailed('app-fetch-legacy', envelope('op-f-fl'));
+    expect(store.getApplication('app-fetch-legacy')?.failure_class).toBe('fetch');
+  });
+
   it('rejects a candidate whose fingerprint no longer matches configuration', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
@@ -234,6 +334,61 @@ describe('gitops transitions', () => {
     expect(projection.facets.source.status).toBe('source_conflict_blocker');
     expect(projection.availableActions).not.toContain('apply');
     expect(() => tx.applyStarted('app-blk', 'gen-blk', envelope('op-a-blk'))).toThrow(/blocked/);
+  });
+
+  it('refuses to accept a blocked candidate through either acceptance entry point', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-blk-acc', 'blk-acc-web'), nodeId: 1, envelope: envelope('op-act-blk-acc') });
+    store.insertGeneration({ ...gen('gen-blk-acc', 'app-blk-acc'), plan_blocked: 1 });
+    tx.fetchStarted('app-blk-acc', envelope('op-f-blk-acc'));
+    tx.fetched('app-blk-acc', 'abc123', envelope('op-f-blk-acc'));
+    tx.sourceConflictBlocker('app-blk-acc', 'gen-blk-acc', envelope('op-b-blk-acc'));
+
+    const acceptance = {
+      applicationId: 'app-blk-acc',
+      generationId: 'gen-blk-acc',
+      artifactSetId: 'art-blk-acc',
+      sourceAcceptanceId: 'acc-blk-acc',
+      envelope: envelope('op-acc-blk'),
+    };
+    expect(() => tx.sourceAccepted({ ...acceptance, authority: 'operator' })).toThrow(/blocked/);
+    expect(() => tx.applied({ ...acceptance, authority: 'operator' })).toThrow(/blocked/);
+
+    const application = store.getApplication('app-blk-acc')!;
+    expect(application.accepted_generation_id).toBeNull();
+    expect(application.candidate_generation_id).toBe('gen-blk-acc');
+    expect(application.candidate_plan_blocked).toBe(1);
+  });
+
+  it('refuses configured-policy acceptance once the source has left automatic', () => {
+    // The transaction-fresh row read inside the guard is what decides.
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({
+      application: { ...app('app-policy-race', 'policy-race-web'), source_policy: 'automatic' },
+      nodeId: 1,
+      envelope: envelope('op-act-policy-race'),
+    });
+    store.insertGeneration(gen('gen-policy-race', 'app-policy-race'));
+    tx.fetchStarted('app-policy-race', envelope('op-f-policy-race'));
+    tx.fetched('app-policy-race', 'abc123', envelope('op-f-policy-race'));
+    tx.candidateReady('app-policy-race', 'gen-policy-race', false, envelope('op-c-policy-race'));
+    tx.sourcePolicyChanged('app-policy-race', 'review', envelope('op-policy-flip'));
+
+    expect(() => tx.sourceAccepted({
+      applicationId: 'app-policy-race',
+      generationId: 'gen-policy-race',
+      artifactSetId: 'art-policy-race',
+      sourceAcceptanceId: 'acc-policy-race',
+      authority: 'configured_policy',
+      envelope: envelope('op-acc-policy-race'),
+    })).toThrow(/no longer automatic/);
+
+    const application = store.getApplication('app-policy-race')!;
+    expect(application.source_policy).toBe('review');
+    expect(application.accepted_generation_id).toBeNull();
+    expect(application.candidate_generation_id).toBe('gen-policy-race');
   });
 
   it('dismisses a candidate without touching what is already applied', () => {

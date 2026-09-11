@@ -28,6 +28,15 @@ export type TargetActiveStage =
   | 'recovery_started';
 export type RecoveryPhase = 'capturing' | 'restoring' | 'compensating' | 'complete' | 'failed';
 export type ApplicationFailureStage = 'fetch' | 'validation' | 'apply' | 'create' | 'recovery';
+
+/**
+ * How a source advances, in one tri-state: `manual` fetches only on operator
+ * action, `review` fetches but stages candidates for acceptance, `automatic`
+ * accepts candidates without an operator in the loop. Defined here once
+ * because the application row, the service-layer policy matrix, and the
+ * migration all must agree on the same three values.
+ */
+export type SourcePolicy = 'manual' | 'review' | 'automatic';
 export type TargetFailureStage = 'deploy' | 'recovery' | 'blueprint_deploy' | 'blueprint_withdraw';
 export type Connectivity = 'unknown' | 'reachable' | 'unreachable' | 'stale';
 export type LkgUnavailableReason = 'generation_missing' | 'recovery_unretainable';
@@ -74,7 +83,7 @@ export type GitOpsApplicationRow = {
   /** sourceSuspended/sourceUnsuspended's own reason field; independent of pause_reason. */
   source_suspended_reason: string | null;
   /** Controller-owned. See gitops/SourceController.ts. */
-  source_policy: 'manual' | 'review' | 'automatic';
+  source_policy: SourcePolicy;
   poll_interval_secs: number | null;
   next_poll_at: number | null;
   attempt_seq: number;
@@ -416,6 +425,7 @@ export type SourceFacet =
   | (SourceIdentityFields & { status: 'source_superseded'; supersededGenerationId: string })
   | (SourceIdentityFields & { status: 'applying'; activeOperationId: string; activeGenerationId: string })
   | (SourceIdentityFields & { status: 'source_retry_scheduled'; retryAt: number; retryCount: number })
+  | (SourceIdentityFields & { status: 'source_poll_scheduled'; nextPollAt: number })
   | (SourceIdentityFields & { status: 'source_suspended'; suspendedAt: number; suspendedReason: string | null })
   | (SourceIdentityFields & {
       status: 'source_failed';
@@ -614,6 +624,7 @@ export const FACET_EVIDENCE_SOURCE: FacetEvidenceSource = {
     application_generation_accepted: 'current',
     source_superseded: 'future',
     source_retry_scheduled: 'current',
+    source_poll_scheduled: 'current',
     source_suspended: 'current',
     source_failed: 'current',
     source_unknown: 'current',

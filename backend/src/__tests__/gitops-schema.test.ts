@@ -1,7 +1,7 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { isHubOnlyPath } from '../helpers/proxyExemptPaths';
-import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
+import { APPLICATIONS_DUE_FOR_RETRY_SQL, GitOpsStore, emptyTargetRow, SOURCES_DUE_FOR_POLL_SQL } from '../services/gitops/store';
 import { encodeArtifactEvidenceJson } from '../services/gitops/json';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
 
@@ -38,7 +38,7 @@ describe('gitops schema', () => {
     const version = db.prepare(
       "SELECT value FROM global_settings WHERE key = 'gitops_schema_version'",
     ).get() as { value: string };
-    expect(version.value).toBe('1');
+    expect(version.value).toBe('2');
     const recoveryCols = new Set(
       (db.pragma('table_info(stack_update_recovery_generations)') as Array<{ name: string }>).map((c) => c.name),
     );
@@ -197,6 +197,53 @@ describe('gitops schema', () => {
     expect(store.getApplication('dup-second')?.stack_name).toBe('dup-web');
   });
 
+  it('declares due-query SQL whose static terms all appear in the partial due indexes', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance().getDb();
+
+    // The planner only prefers a partial index once table statistics exist
+    // (without ANALYZE it picked the plain lifecycle_status index on a tiny
+    // table), so instead of asserting a plan, pin the contract: every static
+    // WHERE term of the exported due scans must also appear in the matching
+    // index WHERE. A term added to one side without the other would silently
+    // stop the index from serving the scan, which is exactly what this
+    // catches. The SQL constants are the real strings the store runs.
+    const indexes = db.prepare(
+      "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name IN ('idx_gitops_app_poll_due','idx_gitops_app_retry_due')",
+    ).all() as Array<{ name: string; sql: string }>;
+    const sqlOf = (name: string) => indexes.find((i) => i.name === name)?.sql ?? '';
+
+    const staticTerms = (sql: string): string[] =>
+      sql.split('\n').map((line) => line.trim().replace(/^(WHERE|AND)\s+/i, '').trim()).filter((line) => line.length > 0);
+
+    const pollTerms = staticTerms(SOURCES_DUE_FOR_POLL_SQL).filter((t) =>
+      t.startsWith("target_mode = 'direct'") || t.startsWith("lifecycle_status = 'active'") || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL') || t.startsWith('next_poll_at IS NOT NULL') || t.startsWith('retry_at IS NULL'));
+    for (const term of pollTerms) {
+      expect(sqlOf('idx_gitops_app_poll_due')).toContain(term);
+    }
+    expect(pollTerms).toEqual([
+      "target_mode = 'direct'",
+      "lifecycle_status = 'active'",
+      'suspended_at IS NULL',
+      'active_operation_stage IS NULL',
+      'next_poll_at IS NOT NULL',
+      'retry_at IS NULL',
+    ]);
+
+    const retryTerms = staticTerms(APPLICATIONS_DUE_FOR_RETRY_SQL).filter((t) =>
+      t.startsWith('retry_at IS NOT NULL') || t.startsWith("target_mode = 'direct'") || t.startsWith("lifecycle_status = 'active'") || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL'));
+    for (const term of retryTerms) {
+      expect(sqlOf('idx_gitops_app_retry_due')).toContain(term);
+    }
+    expect(retryTerms).toEqual([
+      'retry_at IS NOT NULL',
+      "target_mode = 'direct'",
+      "lifecycle_status = 'active'",
+      'suspended_at IS NULL',
+      'active_operation_stage IS NULL',
+    ]);
+  });
+
   it('keeps blueprints and node-labels hub-only and git-sources proxyable', () => {
     expect(isHubOnlyPath('/api/blueprints')).toBe(true);
     expect(isHubOnlyPath('/api/blueprints/1')).toBe(true);
@@ -266,6 +313,129 @@ describe('gitops schema', () => {
     expect(populated?.portable_manifest_json).toBe('{"files":[]}');
     expect(populated?.compose_inputs_json).toBe('{"composeFileOrder":["compose.yaml"]}');
     expect(populated?.source_policy_evidence_json).toBe('{"policy":"manual"}');
+  });
+
+  describe('migrateGitOpsSourcePolicy', () => {
+    // The migration is private like its siblings; tests reach it through the
+    // same cast the git-source migrations use.
+    let db: import('../services/DatabaseService').DatabaseService;
+    let store: import('../services/gitops/store').GitOpsStore;
+    let migrate: () => void;
+
+    beforeAll(async () => {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      db = DatabaseService.getInstance();
+    });
+
+    const forcePolicy = (id: string, policy: string): void => {
+      db.getDb().prepare(
+        "UPDATE gitops_applications SET source_policy = ? WHERE id = ?",
+      ).run(policy, id);
+    };
+
+    beforeAll(async () => {
+      const { GitOpsStore } = await import('../services/gitops/store');
+      store = GitOpsStore.getInstance();
+      migrate = (db as unknown as { migrateGitOpsSourcePolicy: () => void }).migrateGitOpsSourcePolicy.bind(db);
+      // Two sources: one with the legacy boolean off, one with it on. Each gets
+      // a live direct application whose policy is forced to 'manual' before the
+      // migration runs, proving the migration only touches rows with a matching
+      // git source (rows without one must keep their policy).
+      db.upsertGitSource({
+        stack_name: 'mig-off',
+        repo_url: 'https://github.com/example/repo.git',
+        branch: 'main',
+        compose_path: 'compose.yaml',
+        compose_paths: ['compose.yaml'],
+        context_dir: null,
+        sync_env: false,
+        env_path: null,
+        auth_type: 'none',
+        encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null,
+        ssh_host_key_fingerprint: null, encrypted_ca_bundle: null,
+        auto_apply_on_webhook: false,
+        auto_deploy_on_apply: false,
+        last_applied_commit_sha: null,
+        last_applied_content_hash: null,
+        pending_commit_sha: null,
+        pending_compose_content: null,
+        pending_env_content: null,
+        pending_fetched_at: null,
+        last_debounce_at: null,
+      });
+      db.upsertGitSource({
+        stack_name: 'mig-on',
+        repo_url: 'https://github.com/example/repo.git',
+        branch: 'main',
+        compose_path: 'compose.yaml',
+        compose_paths: ['compose.yaml'],
+        context_dir: null,
+        sync_env: false,
+        env_path: null,
+        auth_type: 'none',
+        encrypted_token: null, encrypted_deploy_key: null, ssh_known_hosts_entry: null,
+        ssh_host_key_fingerprint: null, encrypted_ca_bundle: null,
+        auto_apply_on_webhook: true,
+        auto_deploy_on_apply: false,
+        last_applied_commit_sha: null,
+        last_applied_content_hash: null,
+        pending_commit_sha: null,
+        pending_compose_content: null,
+        pending_env_content: null,
+        pending_fetched_at: null,
+        last_debounce_at: null,
+      });
+      store.insertApplication(directApp('app-mig-off', 'mig-off'));
+      store.insertApplication(directApp('app-mig-on', 'mig-on'));
+      store.insertApplication(directApp('app-mig-orphan', 'mig-orphan'));
+      forcePolicy('app-mig-off', 'manual');
+      forcePolicy('app-mig-on', 'manual');
+      forcePolicy('app-mig-orphan', 'manual');
+      // The constructor migration ran while the test DB was provisioned, so
+      // reset to the pre-migration state this describe block simulates.
+      db.updateGlobalSetting('gitops_schema_version', '1');
+    });
+
+    it('converts auto_apply_on_webhook 0 to review and 1 to automatic', () => {
+      migrate();
+      expect(store.getApplication('app-mig-off')?.source_policy).toBe('review');
+      expect(store.getApplication('app-mig-on')?.source_policy).toBe('automatic');
+    });
+
+    it('leaves rows without a matching git source untouched', () => {
+      migrate();
+      expect(store.getApplication('app-mig-orphan')?.source_policy).toBe('manual');
+    });
+
+    it('is idempotent', () => {
+      migrate();
+      migrate();
+      expect(store.getApplication('app-mig-off')?.source_policy).toBe('review');
+      expect(store.getApplication('app-mig-on')?.source_policy).toBe('automatic');
+    });
+
+    it('does not run when gitops_schema_version is already 2', () => {
+      db.updateGlobalSetting('gitops_schema_version', '2');
+      forcePolicy('app-mig-on', 'manual');
+      migrate();
+      expect(store.getApplication('app-mig-on')?.source_policy).toBe('manual');
+    });
+
+    it('seeds gitops_poll_interval_mins to 0', () => {
+      expect(db.getGitOpsPollIntervalMins()).toBe(0);
+    });
+
+    it('falls back to 0 and warns on an invalid stored value', () => {
+      db.updateGlobalSetting('gitops_poll_interval_mins', 'not-a-number');
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        expect(db.getGitOpsPollIntervalMins()).toBe(0);
+        expect(console.warn).toHaveBeenCalled();
+      } finally {
+        vi.restoreAllMocks();
+        db.updateGlobalSetting('gitops_poll_interval_mins', '0');
+      }
+    });
   });
 
   it('defaults controller-owned columns to manual, off, and zero on a fresh application', async () => {
