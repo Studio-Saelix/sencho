@@ -502,6 +502,46 @@ describe('SSO Role Sync on Re-Login', () => {
     });
     expect(user.role).toBe('viewer'); // demoted
   });
+
+  it.each([
+    ['deployer', 'viewer', 'admin'],
+    ['node-admin', 'admin', 'viewer'],
+    ['auditor', 'viewer', 'admin'],
+  ])('preserves granular %s role when sso_role_sync is enabled (%s -> %s IdP)', async (granularRole, firstIdp, secondIdp) => {
+    const { SSOService } = await import('../services/SSOService');
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const sso = SSOService.getInstance();
+    const db = DatabaseService.getInstance();
+    db.updateGlobalSetting('sso_role_sync', '1');
+    const providerId = `okta-granular-${granularRole}`;
+
+    // First provisioning applies the IdP-derived first role
+    const first = sso.provisionUser({
+      authProvider: 'oidc_okta',
+      providerId,
+      preferredUsername: `granular_${granularRole}`,
+      email: `granular_${granularRole}@example.com`,
+      role: firstIdp as 'admin' | 'viewer',
+    });
+    expect(first.role).toBe(firstIdp);
+
+    // Admin assigns a granular role
+    db.updateUser(first.id, { role: granularRole });
+    const afterSeed = db.getUser(first.id);
+    expect(afterSeed!.role).toBe(granularRole);
+
+    // Re-login with opposite coarse IdP role; granular must survive
+    const second = sso.provisionUser({
+      authProvider: 'oidc_okta',
+      providerId,
+      preferredUsername: `granular_${granularRole}`,
+      email: `granular_${granularRole}_new@example.com`,
+      role: secondIdp as 'admin' | 'viewer',
+    });
+    expect(second.id).toBe(first.id);
+    expect(second.role).toBe(granularRole); // preserved, not overwritten
+    expect(second.email).toBe(`granular_${granularRole}_new@example.com`); // email syncs independently
+  });
 });
 
 describe('LDAP Filter Escaping', () => {

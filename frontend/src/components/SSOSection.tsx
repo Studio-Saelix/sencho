@@ -484,7 +484,7 @@ function RoleSyncToggle() {
                     IdP role synchronization
                 </Label>
                 <p className="text-xs text-muted-foreground">
-                    When enabled, SSO sign-in syncs the provider&apos;s role group mapping over any role an admin assigns in Settings → Users. Disable to keep manual role edits persistent across logins.
+                    When enabled, SSO sign-in syncs the provider&apos;s role group mapping over any role an admin assigns in Settings → Users. The IdP can only express Admin or Viewer, so synchronization only applies while the stored role is one of those two; granular roles (deployer, node-admin, auditor) remain manually authoritative. Disable to keep manual role edits persistent across logins.
                 </p>
             </div>
             {enabled === null ? (

@@ -601,13 +601,16 @@ export class SSOService {
                 updates.email = params.email;
             }
 
-            // Preserve the stored role by default; IdP role changes are opt-in
-            // (sso_role_sync). By default the role assigned at first provisioning is
-            // preserved so an admin's manual edit in Settings → Users survives
-            // subsequent sign-ins (issue #1851). When sso_role_sync is '1', the
-            // provider-derived role is applied on each login. Email, in contrast, is
-            // synced whenever it changed, regardless of sso_role_sync.
-            if (db.getGlobalSettings()['sso_role_sync'] === '1' && params.role !== existing.role) {
+            // Role sync: the IdP can only express admin or viewer. When
+            // sso_role_sync is '1', sync only moves a user between those
+            // two roles. Granular roles (deployer, node-admin, auditor)
+            // are never overwritten because the IdP cannot express them;
+            // they remain manually authoritative. Email syncs independently.
+            if (
+                db.getGlobalSettings()['sso_role_sync'] === '1' &&
+                params.role !== existing.role &&
+                (existing.role === 'admin' || existing.role === 'viewer')
+            ) {
                 updates.role = params.role;
             }
 
