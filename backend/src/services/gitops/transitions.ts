@@ -2098,6 +2098,22 @@ export class GitOpsTransitions {
     if (app.candidate_generation_id !== args.generationId) {
       throw new GitOpsTransitionError('applied generation is not the current candidate');
     }
+    // A conflict-blocked candidate can never be accepted, whatever the
+    // caller claims. This runs on the row re-read inside the mutation
+    // transaction, so it acts on durable state, not on the caller's
+    // snapshot, and it backs applyStarted's own blocked refusal.
+    if (app.candidate_plan_blocked === 1) {
+      throw new GitOpsTransitionError('candidate is blocked');
+    }
+    // Configured-policy acceptance acts on the source policy's behalf, so it
+    // is only valid while the durable policy still says automatic. The
+    // caller's snapshot can predate a policy change that completed while the
+    // acceptance (or the evaluation feeding it) was in flight; the
+    // transaction-fresh row above is what decides. Operator authority is not
+    // constrained here: an operator accepts whatever is on the row.
+    if (args.authority === 'configured_policy' && app.source_policy !== 'automatic') {
+      throw new GitOpsTransitionError('source policy is no longer automatic');
+    }
     // The seed artifact row is always evidence_version 1, so re-accepting a
     // generation that is already accepted would collide on the version
     // uniqueness constraint. Reject it here as a domain error instead of

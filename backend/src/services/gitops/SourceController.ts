@@ -263,8 +263,14 @@ export class SourceController {
             this.maybeScheduleRetry(fresh);
         } else if (SUCCESS_SHAPED_OUTCOMES.has(result.outcome)) {
             this.maybeScheduleNextPoll(fresh);
+            // Automatic acceptance only runs for a success-shaped outcome. A
+            // conflict-blocked candidate settles into 'blocked', so it never
+            // reaches acceptance from here; the boundary itself additionally
+            // refuses a durable blocked candidate below
+            // (requireAcceptableCandidate guards against an outcome that
+            // misreports the row's state).
+            await this.maybeAcceptAutomaticCandidate(fresh, stackName, isRetry ? 'retry' : 'poll');
         }
-        await this.maybeAcceptAutomaticCandidate(fresh, stackName, isRetry ? 'retry' : 'poll');
     }
 
     /**

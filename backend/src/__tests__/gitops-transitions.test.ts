@@ -336,6 +336,61 @@ describe('gitops transitions', () => {
     expect(() => tx.applyStarted('app-blk', 'gen-blk', envelope('op-a-blk'))).toThrow(/blocked/);
   });
 
+  it('refuses to accept a blocked candidate through either acceptance entry point', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-blk-acc', 'blk-acc-web'), nodeId: 1, envelope: envelope('op-act-blk-acc') });
+    store.insertGeneration({ ...gen('gen-blk-acc', 'app-blk-acc'), plan_blocked: 1 });
+    tx.fetchStarted('app-blk-acc', envelope('op-f-blk-acc'));
+    tx.fetched('app-blk-acc', 'abc123', envelope('op-f-blk-acc'));
+    tx.sourceConflictBlocker('app-blk-acc', 'gen-blk-acc', envelope('op-b-blk-acc'));
+
+    const acceptance = {
+      applicationId: 'app-blk-acc',
+      generationId: 'gen-blk-acc',
+      artifactSetId: 'art-blk-acc',
+      sourceAcceptanceId: 'acc-blk-acc',
+      envelope: envelope('op-acc-blk'),
+    };
+    expect(() => tx.sourceAccepted({ ...acceptance, authority: 'operator' })).toThrow(/blocked/);
+    expect(() => tx.applied({ ...acceptance, authority: 'operator' })).toThrow(/blocked/);
+
+    const application = store.getApplication('app-blk-acc')!;
+    expect(application.accepted_generation_id).toBeNull();
+    expect(application.candidate_generation_id).toBe('gen-blk-acc');
+    expect(application.candidate_plan_blocked).toBe(1);
+  });
+
+  it('refuses configured-policy acceptance once the source has left automatic', () => {
+    // The transaction-fresh row read inside the guard is what decides.
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({
+      application: { ...app('app-policy-race', 'policy-race-web'), source_policy: 'automatic' },
+      nodeId: 1,
+      envelope: envelope('op-act-policy-race'),
+    });
+    store.insertGeneration(gen('gen-policy-race', 'app-policy-race'));
+    tx.fetchStarted('app-policy-race', envelope('op-f-policy-race'));
+    tx.fetched('app-policy-race', 'abc123', envelope('op-f-policy-race'));
+    tx.candidateReady('app-policy-race', 'gen-policy-race', false, envelope('op-c-policy-race'));
+    tx.sourcePolicyChanged('app-policy-race', 'review', envelope('op-policy-flip'));
+
+    expect(() => tx.sourceAccepted({
+      applicationId: 'app-policy-race',
+      generationId: 'gen-policy-race',
+      artifactSetId: 'art-policy-race',
+      sourceAcceptanceId: 'acc-policy-race',
+      authority: 'configured_policy',
+      envelope: envelope('op-acc-policy-race'),
+    })).toThrow(/no longer automatic/);
+
+    const application = store.getApplication('app-policy-race')!;
+    expect(application.source_policy).toBe('review');
+    expect(application.accepted_generation_id).toBeNull();
+    expect(application.candidate_generation_id).toBe('gen-policy-race');
+  });
+
   it('dismisses a candidate without touching what is already applied', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();

@@ -76,12 +76,18 @@ function stageCandidateComposeFile(stackName: string, generationId: string): voi
  * success sequence GitSourceService drives: fetch opens, generation is
  * inserted, the commit lands, the candidate passes validation. reviewRequired
  * follows the production rule (anything not automatic needs a human sign-off).
+ *
+ * With opts.blocked the generation carries plan_blocked: 1 and the sequence
+ * ends in sourceConflictBlocker instead: the durable state of a real
+ * conflict-blocked candidate, which the acceptance boundary must refuse no
+ * matter what the policy evaluator says.
  */
 function stageCandidate(
     appId: string,
     stackName: string,
     generationId: string,
     policy: 'manual' | 'review' | 'automatic' = 'automatic',
+    opts: { blocked?: boolean } = {},
 ): void {
     const app = { ...directApplicationFixture(appId, stackName), source_policy: policy };
     GitOpsTransitions.getInstance().activateDirect({
@@ -103,7 +109,7 @@ function stageCandidate(
         expected_invocation_json: '{"composeFileOrder":[],"projectName":null,"projectDirectory":null,"envFileOrder":[]}',
         materialization_fingerprint: app.materialization_fingerprint ?? 'a'.repeat(64),
         validation_ok: 1,
-        plan_blocked: 0,
+        plan_blocked: opts.blocked ? 1 : 0,
         change_plan_fingerprint: 'f'.repeat(64),
         operation_id: `gen-${generationId}`,
         trigger: 'poll',
@@ -121,7 +127,11 @@ function stageCandidate(
     const env = { operationId: `fetch-${appId}`, actor: 'test', trigger: 'poll', at: Date.now() };
     GitOpsTransitions.getInstance().fetchStarted(appId, env);
     GitOpsTransitions.getInstance().fetched(appId, 'c'.repeat(40), env);
-    GitOpsTransitions.getInstance().candidateReady(appId, generationId, policy !== 'automatic', env);
+    if (opts.blocked) {
+        GitOpsTransitions.getInstance().sourceConflictBlocker(appId, generationId, env);
+    } else {
+        GitOpsTransitions.getInstance().candidateReady(appId, generationId, policy !== 'automatic', env);
+    }
     stageCandidateComposeFile(stackName, generationId);
 }
 
@@ -282,5 +292,83 @@ describe('SourceController automatic acceptance', () => {
 
         expect(evaluateCandidatePolicy).not.toHaveBeenCalled();
         expect(reconcile).toHaveBeenCalledTimes(1);
+    });
+
+    it('never accepts a durably conflict-blocked candidate, even through an allowed verdict', async () => {
+        // A real sourceConflictBlocker candidate (durable
+        // candidate_plan_blocked = 1) driven through an allowed security
+        // verdict must not be accepted or applied. In production a blocked
+        // candidate settles into the 'blocked' outcome, so automatic
+        // acceptance must not run at all on that tick, and the boundary
+        // refusal below backstops a success-shaped outcome on a blocked row.
+        stageCandidate('app-real-blk', 'real-blk-web', 'gen-real-blk', 'automatic', { blocked: true });
+        mockDue([armDuePoll('app-real-blk')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        const reconcile = spyOnReconcile()
+            .mockResolvedValue({ outcome: 'blocked', reason: 'conflict', nextAction: 'resolve_conflict' });
+
+        controller.start();
+        await advanceOneTick();
+
+        const row = getApp('app-real-blk');
+        expect(row.accepted_generation_id).toBeNull();
+        expect(row.candidate_generation_id).toBe('gen-real-blk');
+        expect(row.candidate_plan_blocked).toBe(1);
+        expect(evaluateCandidatePolicy).not.toHaveBeenCalled();
+        expect(reconcile).toHaveBeenCalledTimes(1);
+        expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ intent: 'fetch' }));
+        expect(reconcile).not.toHaveBeenCalledWith(expect.objectContaining({ intent: 'apply' }));
+    });
+
+    it('refuses acceptance at the durable boundary when the row is blocked even under a success-shaped outcome', async () => {
+        // Defense in depth: the reconcile mock reports a success-shaped
+        // outcome while the durable row says the candidate is blocked, so the
+        // outcome gate alone would run acceptance. The boundary re-reads the
+        // row inside its own transaction and must refuse on the live state.
+        stageCandidate('app-blk-durable', 'blk-durable-web', 'gen-blk-durable', 'automatic', { blocked: true });
+        mockDue([armDuePoll('app-blk-durable')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        const reconcile = spyOnReconcile()
+            .mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('app-blk-durable').accepted_generation_id).toBeNull();
+        expect(getApp('app-blk-durable').candidate_generation_id).toBe('gen-blk-durable');
+        expect(reconcile).toHaveBeenCalledTimes(1);
+        expect(reconcile).not.toHaveBeenCalledWith(expect.objectContaining({ intent: 'apply' }));
+    });
+
+    it('refuses acceptance when the policy changed during evaluation', async () => {
+        // The race: a completed manual/review policy change must not be
+        // bypassed by a policy evaluation that was already running when the
+        // change landed. The evaluation returns 'allowed', but by then the
+        // durable row has left 'automatic' through the real transition, so
+        // the acceptance boundary re-reading the row inside its transaction
+        // must refuse and the candidate must stay staged.
+        stageCandidate('app-raced', 'raced-web', 'gen-raced');
+        mockDue([armDuePoll('app-raced')]);
+        evaluateCandidatePolicy.mockImplementation(async () => {
+            GitOpsTransitions.getInstance().sourcePolicyChanged(
+                'app-raced',
+                'review',
+                { operationId: 'policy-flip-mid-eval', actor: 'test', trigger: 'config_change', at: Date.now() },
+            );
+            return { status: 'allowed' };
+        });
+        const reconcile = spyOnReconcile()
+            .mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(evaluateCandidatePolicy).toHaveBeenCalled();
+        const row = getApp('app-raced');
+        expect(row.source_policy).toBe('review');
+        expect(row.accepted_generation_id).toBeNull();
+        expect(row.candidate_generation_id).toBe('gen-raced');
+        expect(reconcile).toHaveBeenCalledTimes(1);
+        expect(reconcile).not.toHaveBeenCalledWith(expect.objectContaining({ intent: 'apply' }));
     });
 });
