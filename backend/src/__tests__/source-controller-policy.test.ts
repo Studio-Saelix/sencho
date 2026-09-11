@@ -145,7 +145,7 @@ function armDuePoll(id: string): GitOpsApplicationRow {
     return getApp(id);
 }
 
-/** A stored policy row projected the way the evaluator hands it back. */
+/** A stored policy row shaped the way the evaluator hands it back. */
 function policyRow() {
     return {
         id: 7,

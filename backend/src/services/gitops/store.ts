@@ -39,13 +39,15 @@ export type AssertNoLiveBlueprintResult =
  * SQL instead of a copy. Each is served by a partial index whose WHERE
  * clause mirrors the query's static terms (see idx_gitops_app_poll_due /
  * idx_gitops_app_retry_due in schema.ts); changing a term here must change
- * it there in the same commit. Both scans are Direct-only and Active-only:
- * the retry scan would otherwise run the Direct fetch path against a
- * detached row or a Blueprint-mode row with no stack name. The poll scan
+ * it there in the same commit. Both scans are Direct-only and Active-only,
+ * and these terms are load-bearing: a detached row must not be fetched at
+ * all, and a Blueprint-mode row would reach the controller's evaluate()
+ * with no stack name, which returns early, so selecting it would only
+ * re-wake it every tick with a misleading warning. The poll scan
  * additionally excludes rows with any retry cursor (past or future):
  * retry-due rows arrive via the retry scan, and a row still inside its
- * backoff window must not be refetched by a due poll cursor, so the retry
- * cursor stays the next wake.
+ * backoff window must not be refetched by a due poll cursor, so the
+ * retry cursor stays the next wake.
  */
 export const SOURCES_DUE_FOR_POLL_SQL = `SELECT * FROM gitops_applications
        WHERE target_mode = 'direct'
@@ -392,10 +394,11 @@ export class GitOpsStore {
   }
 
   /**
-   * Applications with a scheduled retry that has come due: not suspended,
-   * no operation in flight. Poll eligibility and retry eligibility are
-   * deliberately separate queries, since a retry can be due on an
-   * application whose poll cadence would not otherwise select it yet.
+   * Active Direct applications with a scheduled retry that has come due:
+   * not suspended, no operation in flight. Poll eligibility and retry
+   * eligibility are deliberately separate queries, since a retry can be
+   * due on an application whose poll cadence would not otherwise select
+   * it yet.
    */
   listApplicationsDueForRetry(now: number, limit = 200): GitOpsApplicationRow[] {
     return this.db().prepare(APPLICATIONS_DUE_FOR_RETRY_SQL).all(now, limit) as GitOpsApplicationRow[];
