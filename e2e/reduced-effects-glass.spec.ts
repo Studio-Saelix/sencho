@@ -5,9 +5,25 @@
  * chrome/floating fills, and that full-effects still keeps glass. Fresh Calm
  * installs already set reduced via theme-init; Signature keeps blur until the
  * operator opts into Reduced effects.
+ *
+ * Environment isolation: the suite runs under a dedicated account whose
+ * appearance row is seeded through the preference API, so hydration mirrors
+ * the intended visualStyle/reducedEffects state and server convergence cannot
+ * overwrite a seed mid-test. Admin is required: the dialog-glass test opens
+ * the Create Stack dialog, which needs stack:create. The notifications
+ * subsystem is mocked for every test (this suite asserts glass, not
+ * notifications) to keep repeated page loads within renderer resource limits
+ * on constrained hosts. The cold-load test keeps its raw localStorage seed on
+ * purpose: it targets the pre-paint path, where the server cannot have run yet.
  */
 import { test, expect, type Page, type Locator } from '@playwright/test';
 import { loginAs, waitForStacksLoaded } from './helpers';
+import {
+  adminApiContext, disposePrefUser, seedPrefUser, putDomain, type PrefUserContext,
+} from './preferences-helpers';
+
+const SUITE_USER = 'glass-styles-e2e';
+const SUITE_PASSWORD = 'glass-styles-password-123';
 
 const CALM_STATE = {
   theme: 'dim',
@@ -24,6 +40,8 @@ const CALM_STATE = {
   reducedEffects: true,
   readability: false,
   reducedMotion: false,
+  density: 'comfortable',
+  logChipColorMode: 'unified',
 } as const;
 
 const SIGNATURE_STATE = {
@@ -34,7 +52,20 @@ const SIGNATURE_STATE = {
   reducedEffects: false,
 } as const;
 
-async function seedAppearance(page: Page, state: Record<string, unknown>) {
+let prefUser: PrefUserContext | undefined;
+let adminCtx: import('@playwright/test').APIRequestContext | undefined;
+
+/** Seed the suite account's appearance row as the given state. */
+async function seedAppearance(state: Record<string, unknown>) {
+  return putDomain(prefUser!.request, prefUser!.userId, 'appearance', state);
+}
+
+/**
+ * Raw-localStorage seed for the pre-paint path only: theme-init.js reads the
+ * cache before any server round-trip, so the cold-load DCL assertion must be
+ * driven from localStorage.
+ */
+async function seedAppearanceCache(page: Page, state: Record<string, unknown>) {
   await page.addInitScript((payload) => {
     localStorage.setItem('sencho.appearance.theme', JSON.stringify(payload));
   }, state);
@@ -128,8 +159,36 @@ async function openCreateStackDialog(page: Page) {
 }
 
 test.describe('Reduced-effects glass', () => {
+  test.describe.configure({ mode: 'serial' });
+
+  test.beforeAll(async () => {
+    // Admin: the dialog-glass test opens the Create Stack dialog, which needs
+    // stack:create, so a viewer account would never render that button.
+    prefUser = await seedPrefUser(SUITE_USER, SUITE_PASSWORD, 'admin');
+    // Kept for afterAll: the account delete needs an admin session, so the
+    // suite starts each run from a clean row instead of reusing stale state.
+    adminCtx = await adminApiContext();
+  });
+
+  test.afterAll(async () => {
+    await disposePrefUser(prefUser, adminCtx);
+    prefUser = undefined;
+    adminCtx = undefined;
+  });
+
+  test.beforeEach(async ({ page }) => {
+    await page.route('**/api/notifications**', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
+    await page.route('**/ws/notifications**', (route) => route.abort());
+  });
+
   test('cold load with Calm applies data-effects by DOMContentLoaded and clears chrome blur', async ({ page }) => {
-    await seedAppearance(page, CALM_STATE);
+    // Server baseline first, so the post-login assertions read the server row
+    // rather than depending on the account being brand-new (an orphaned
+    // account from an aborted run would otherwise win over the cache seed).
+    // The localStorage seed below drives only the pre-paint DCL assertion.
+    await seedAppearance(CALM_STATE);
+    await seedAppearanceCache(page, CALM_STATE);
 
     await page.addInitScript(() => {
       document.addEventListener(
@@ -148,7 +207,7 @@ test.describe('Reduced-effects glass', () => {
     );
     expect(effectsAtDomContent).toBe('reduced');
 
-    await loginAs(page);
+    await loginAs(page, SUITE_USER, SUITE_PASSWORD);
     await waitForStacksLoaded(page);
 
     await expect(page.locator('html')).toHaveAttribute('data-effects', 'reduced');
@@ -159,8 +218,8 @@ test.describe('Reduced-effects glass', () => {
   });
 
   test('Signature chrome is translucent with blur; Reduced effects reverses both without reload', async ({ page }) => {
-    await seedAppearance(page, SIGNATURE_STATE);
-    await loginAs(page);
+    await seedAppearance(SIGNATURE_STATE);
+    await loginAs(page, SUITE_USER, SUITE_PASSWORD);
     await waitForStacksLoaded(page);
 
     const topbar = page.locator('[data-sn-chrome="topbar"]');
@@ -204,8 +263,8 @@ test.describe('Reduced-effects glass', () => {
   });
 
   test('dialog toast and overlay glass flip with Reduced effects both ways', async ({ page }) => {
-    await seedAppearance(page, SIGNATURE_STATE);
-    await loginAs(page);
+    await seedAppearance(SIGNATURE_STATE);
+    await loginAs(page, SUITE_USER, SUITE_PASSWORD);
     await waitForStacksLoaded(page);
 
     // Dialog (Create Stack uses Modal -> DialogContent)
@@ -265,8 +324,8 @@ test.describe('Reduced-effects glass', () => {
   });
 
   test('Dim OLED Light and Auto media prefs keep reduced chrome opaque', async ({ page }) => {
-    await seedAppearance(page, CALM_STATE);
-    await loginAs(page);
+    await seedAppearance(CALM_STATE);
+    await loginAs(page, SUITE_USER, SUITE_PASSWORD);
     await waitForStacksLoaded(page);
 
     for (const mode of [
@@ -295,8 +354,8 @@ test.describe('Reduced-effects glass', () => {
 
   test('mobile tab bar clears blur and solidifies under reduced effects', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
-    await seedAppearance(page, CALM_STATE);
-    await loginAs(page);
+    await seedAppearance(CALM_STATE);
+    await loginAs(page, SUITE_USER, SUITE_PASSWORD);
     await waitForStacksLoaded(page);
 
     const tabBar = page.locator('[data-sn-glass="mobile-tabbar"]');
@@ -306,8 +365,8 @@ test.describe('Reduced-effects glass', () => {
   });
 
   test('Reduced motion hides the constrained-graphics callout', async ({ page }) => {
-    await seedAppearance(page, SIGNATURE_STATE);
-    await loginAs(page);
+    await seedAppearance(SIGNATURE_STATE);
+    await loginAs(page, SUITE_USER, SUITE_PASSWORD);
     await waitForStacksLoaded(page);
     await openAppearance(page);
 

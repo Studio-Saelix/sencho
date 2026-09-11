@@ -27,6 +27,7 @@ import LazyBoundary from '../LazyBoundary';
 import { SectionGate } from './SectionGate';
 import type { NavDestination } from '@/lib/navigation/appNavRegistry';
 import type { ActiveView } from '@/lib/router/routeTypes';
+import { resetPreferenceDomain } from '@/lib/preferences/resetPreferences';
 
 // Paid-tier sections are loaded on demand. SectionGate returns null for
 // Community / unentitled operators before reaching the JSX that would mount
@@ -90,6 +91,8 @@ function renderSection({
             <AppearanceSection
                 quickLinkCandidates={quickLinkCandidates}
                 defaultQuickLinkEligibility={defaultQuickLinkEligibility}
+                onResetAppearance={() => resetPreferenceDomain('appearance')}
+                onResetNavigation={() => resetPreferenceDomain('navigation')}
             />
         );
         case 'license': return <LicenseSection />;

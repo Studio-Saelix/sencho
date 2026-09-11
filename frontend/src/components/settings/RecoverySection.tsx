@@ -11,6 +11,9 @@ import { SettingsActions, SettingsPrimaryButton, SettingsSecondaryButton } from 
 import { EnvironmentChecks } from './EnvironmentChecks';
 import { DEPLOY_FEEDBACK_KEY } from '@/hooks/use-deploy-feedback-enabled';
 import { COMPOSE_DIFF_PREVIEW_KEY } from '@/hooks/use-compose-diff-preview-enabled';
+import { resetPreferenceDomain } from '@/lib/preferences/resetPreferences';
+import { getUnsavedEpisode, subscribeToUnsaved } from '@/lib/preferences/preferenceEvents';
+import { inspectQueue } from '@/lib/preferences/syncBus';
 
 // Mirrors the backend DiagnosticsReport (services/DiagnosticsService.ts). Kept
 // local because the frontend cannot import backend types.
@@ -30,10 +33,9 @@ interface DiagnosticsReport {
 
 type Health = 'ok' | 'warn' | 'error';
 
-// Browser-local display preferences cleared by "Reset interface preferences".
-// The density key is internal to use-density; the other two are exported.
-const DENSITY_KEY = 'sencho.appearance.density';
-const INTERFACE_PREF_KEYS = [DENSITY_KEY, DEPLOY_FEEDBACK_KEY, COMPOSE_DIFF_PREVIEW_KEY];
+// Browser-local workflow toggles cleared by "Reset interface preferences".
+// Density used to be listed here; it now lives in the account-synced
+// appearance document and is reset through that path instead.
 
 const CLI_COMMANDS: Array<{ cmd: string; purpose: string }> = [
     { cmd: 'node dist/cli/resetMfa.js <username>', purpose: "Clear a user's two-factor enrolment" },
@@ -158,11 +160,67 @@ export function RecoverySection() {
         }
     };
 
+    const finishReset = () => {
+        toast.success('Interface preferences reset to defaults. Reloading...');
+        window.setTimeout(() => window.location.reload(), 600);
+    };
+
     const resetInterface = () => {
         try {
-            INTERFACE_PREF_KEYS.forEach(key => window.localStorage.removeItem(key));
-            toast.success('Interface preferences reset to defaults. Reloading...');
-            setTimeout(() => window.location.reload(), 600);
+            // Deploy-feedback and diff-preview are browser-local workflow
+            // toggles outside the preference domains; clear them as before.
+            window.localStorage.removeItem(DEPLOY_FEEDBACK_KEY);
+            window.localStorage.removeItem(COMPOSE_DIFF_PREVIEW_KEY);
+            // Appearance + navigation are account documents: reset both
+            // domains (optimistic defaults now, tombstone DELETEs through the
+            // sync bus). The reload happens only when no unsaved episode
+            // remains, so a partial reset never claims full success.
+            resetPreferenceDomain('appearance');
+            resetPreferenceDomain('navigation');
+            // Three settle signals race (unsaved transition, poller, hard
+            // stop); exactly one of them may finish the reset.
+            let settled = false;
+            const finishOnce = () => {
+                if (settled) return;
+                settled = true;
+                finishReset();
+            };
+            const stop = subscribeToUnsaved((episode) => {
+                if (episode !== null) return; // a failure already surfaced its own toast
+                stop();
+                finishOnce();
+            });
+            // Pure successes emit no unsaved transition, so polling is the
+            // settle signal: each tick checks both the episode and the sync
+            // bus queue state. A tick counts as clean only when no DELETE is
+            // queued or in flight, so the reload can never cancel one.
+            let cleanTicks = 0;
+            const settleTimer = window.setInterval(() => {
+                if (getUnsavedEpisode() !== null) {
+                    window.clearInterval(settleTimer);
+                    stop();
+                    return; // a failure path owns the error surface
+                }
+                const busy = inspectQueue('appearance').settling || inspectQueue('navigation').settling;
+                cleanTicks = busy ? 0 : cleanTicks + 1;
+                if (cleanTicks >= 2) {
+                    window.clearInterval(settleTimer);
+                    stop();
+                    finishOnce();
+                }
+            }, 300);
+            // Hard stop: never poll longer than the grace period; a still
+            // in-flight reset must not claim success, so say so instead of
+            // finishing silently.
+            window.setTimeout(() => {
+                window.clearInterval(settleTimer);
+                stop();
+                const busy = inspectQueue('appearance').settling || inspectQueue('navigation').settling;
+                if (getUnsavedEpisode() === null && !busy) finishOnce();
+                else if (!settled) {
+                    toast.error('The reset is taking longer than expected and has not finished. Your preferences will keep retrying in the background.');
+                }
+            }, 4000);
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Could not reset interface preferences.');
         }
@@ -238,10 +296,10 @@ export function RecoverySection() {
             >
                 <SettingsField
                     label="Reset interface preferences"
-                    helper="Restore density and editor display options on this browser to their defaults, then reload. Useful if a display setting wedges the layout."
+                    helper="Restore every appearance and navigation preference to its default for your account, and the browser-local editor toggles for this browser, then reload. Useful if a display setting wedges the layout."
                     align="start"
                 >
-                    <SettingsSecondaryButton onClick={resetInterface}>
+                    <SettingsSecondaryButton onClick={resetInterface} aria-label="Reset interface preferences">
                         <RotateCcw className="h-4 w-4" />
                         Reset
                     </SettingsSecondaryButton>

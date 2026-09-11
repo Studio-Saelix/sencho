@@ -1636,6 +1636,17 @@ export class DatabaseService {
 
       CREATE INDEX IF NOT EXISTS idx_mfa_used_tokens_used_at ON mfa_used_tokens(used_at);
 
+      CREATE TABLE IF NOT EXISTS user_preferences (
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        domain TEXT NOT NULL,
+        schema_version INTEGER NOT NULL DEFAULT 1,
+        revision INTEGER NOT NULL DEFAULT 1,
+        data TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, domain)
+      );
+
       CREATE TABLE IF NOT EXISTS stack_git_sources (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         stack_name TEXT NOT NULL UNIQUE,
@@ -5736,7 +5747,13 @@ stmt.run('gitops_schema_version', '1');
     }
 
     public deleteUser(id: number): void {
-        this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
+        // FK enforcement is off (declarative-only), so user-owned rows are
+        // cleaned here. Preference rows are removed entirely at account
+        // deletion; tombstones are a per-domain, browser-facing semantic only.
+        this.transaction(() => {
+            this.deleteUserPreferenceDomains(id);
+            this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
+        });
     }
 
     /**
@@ -5934,6 +5951,161 @@ stmt.run('gitops_schema_version', '1');
             return true;
         });
         return consume();
+    }
+
+    // --- User Interface Preferences (per-user, per-domain versioned docs) ---
+
+    /** Transport shape of one preference-domain row: the parsed document
+     *  (`data`), server metadata, or a `corrupt` marker with the revision
+     *  intact. Null means the row does not exist. */
+    public static readonly PREFERENCE_DOMAIN_ENVELOPE = null as unknown as {
+        data?: Record<string, unknown>;
+        schemaVersion: number;
+        revision: number;
+        updatedAt: number;
+        corrupt?: boolean;
+    } | null;
+
+    /**
+     * Read one preference-domain row as a transport envelope. `data` is the
+     * parsed document object (sanitized client-side); a row whose payload no
+     * longer parses (schema drift, partial write) is reported as
+     * `corrupt: true` with its revision intact so clients can repair it with a
+     * conditional write instead of fabricating a winner. Parse failures are
+     * logged server-side with the user, domain, and revision for diagnosis.
+     */
+    public getUserPreferenceDomain(userId: number, domain: string): NonNullable<typeof DatabaseService.PREFERENCE_DOMAIN_ENVELOPE> | null {
+        const row = this.db
+            .prepare('SELECT data, schema_version, revision, updated_at FROM user_preferences WHERE user_id = ? AND domain = ?')
+            .get(userId, domain) as { data: string; schema_version: number; revision: number; updated_at: number } | undefined;
+        if (!row) return null;
+        if (row.schema_version === 0) {
+            // Tombstone: the domain was deliberately reset. No data is served.
+            return { schemaVersion: 0, revision: row.revision, updatedAt: row.updated_at };
+        }
+        if (row.schema_version === 1) {
+            try {
+                return { data: JSON.parse(row.data) as Record<string, unknown>, schemaVersion: 1, revision: row.revision, updatedAt: row.updated_at };
+            } catch (err) {
+                console.error(`[UserPreferences] corrupt row (user ${userId}, domain ${domain}, revision ${row.revision}):`, err);
+                return { schemaVersion: 1, revision: row.revision, updatedAt: row.updated_at, corrupt: true };
+            }
+        }
+        return { schemaVersion: row.schema_version, revision: row.revision, updatedAt: row.updated_at, corrupt: true };
+    }
+
+    /**
+     * Atomically apply one preference mutation under a precondition. The
+     * precondition check and the write run in a single transaction, so two
+     * competing writers with the same `expectedRevision` cannot both succeed:
+     * the integer revision is the guard, never `updated_at`.
+     *
+     * Precondition semantics:
+     * - `expectedRevision` present: the row's current revision must equal it.
+     * - `absentOnly`: the row must not exist (create-if-absent migration).
+     * - neither: precondition failure (clients must always guard; there is no
+     *   unguarded write path).
+     *
+     * Mutations set `schema_version = 1` and replace `data`, bumping the
+     * revision by one (this un-tombstones and repairs corrupt rows in one
+     * step). `mutation` receives the previous live document (`null` when the
+     * row is absent, a tombstone, or corrupt) and returns the next stored
+     * JSON. Returns `{ ok, row }` on success and `{ ok: false, current }`
+     * (fresh envelope, nothing written; `current` is null when the row does
+     * not exist, i.e. a conflict against a nonexistent baseline) on
+     * precondition failure.
+     */
+    public mutateUserPreferenceDomain(
+        userId: number,
+        domain: string,
+        expectedRevision: number | null,
+        absentOnly: boolean,
+        mutation: (previous: { data: string } | null) => string,
+    ): { ok: true; row: { data: string; schemaVersion: number; revision: number; updatedAt: number } } | { ok: false; current: ReturnType<DatabaseService['getUserPreferenceDomain']> } {
+        const write = this.db.transaction((): { ok: boolean; row?: { data: string; schemaVersion: number; revision: number; updatedAt: number }; current?: ReturnType<DatabaseService['getUserPreferenceDomain']> } => {
+            const raw = this.db
+                .prepare('SELECT data, schema_version, revision, updated_at FROM user_preferences WHERE user_id = ? AND domain = ?')
+                .get(userId, domain) as { data: string; schema_version: number; revision: number; updated_at: number } | undefined;
+
+            if (absentOnly && raw) return { ok: false, current: this.getUserPreferenceDomain(userId, domain) };
+            if (expectedRevision !== null) {
+                if (!raw || raw.revision !== expectedRevision) {
+                    return { ok: false, current: this.getUserPreferenceDomain(userId, domain) };
+                }
+            }
+            if (expectedRevision === null && !absentOnly) return { ok: false, current: this.getUserPreferenceDomain(userId, domain) };
+
+            const nextData = mutation(raw && raw.schema_version === 1 ? { data: raw.data } : null);
+            const now = Date.now();
+            const nextRevision = (raw?.revision ?? 0) + 1;
+            if (raw) {
+                this.db.prepare(
+                    'UPDATE user_preferences SET data = ?, schema_version = 1, revision = ?, updated_at = ? WHERE user_id = ? AND domain = ?'
+                ).run(nextData, nextRevision, now, userId, domain);
+            } else {
+                this.db.prepare(
+                    'INSERT INTO user_preferences (user_id, domain, schema_version, revision, data, created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?, ?)'
+                ).run(userId, domain, nextRevision, nextData, now, now);
+            }
+            return {
+                ok: true,
+                row: { data: nextData, schemaVersion: 1, revision: nextRevision, updatedAt: now },
+            };
+        });
+        const result = write();
+        if (result.ok && result.row) return { ok: true, row: result.row };
+        return { ok: false, current: result.current ?? null };
+    }
+
+    /**
+     * Reset one domain: the row survives as a tombstone (schema_version 0)
+     * under the same precondition contract as mutations. Tombstones carry
+     * revisions like live documents, so a post-reset edit can conditionally
+     * PUT against the tombstone's revision while a stale pre-reset edit
+     * conflicts cleanly. Reset never re-enables migration (row existence is
+     * the migration marker). Failure returns `{ ok: false, current }` where
+     * `current` is null when the row does not exist.
+     */
+    public resetUserPreferenceDomain(
+        userId: number,
+        domain: string,
+        expectedRevision: number | null,
+        absentOnly: boolean,
+    ): { ok: true; row: { schemaVersion: number; revision: number; updatedAt: number } } | { ok: false; current: ReturnType<DatabaseService['getUserPreferenceDomain']> } {
+        const write = this.db.transaction((): { ok: boolean; row?: { schemaVersion: number; revision: number; updatedAt: number }; current?: ReturnType<DatabaseService['getUserPreferenceDomain']> } => {
+            const raw = this.db
+                .prepare('SELECT schema_version, revision, updated_at FROM user_preferences WHERE user_id = ? AND domain = ?')
+                .get(userId, domain) as { schema_version: number; revision: number; updated_at: number } | undefined;
+
+            if (absentOnly && raw) return { ok: false, current: this.getUserPreferenceDomain(userId, domain) };
+            if (expectedRevision !== null) {
+                if (!raw || raw.revision !== expectedRevision) {
+                    return { ok: false, current: this.getUserPreferenceDomain(userId, domain) };
+                }
+            }
+            if (expectedRevision === null && !absentOnly) return { ok: false, current: this.getUserPreferenceDomain(userId, domain) };
+
+            const now = Date.now();
+            const nextRevision = (raw?.revision ?? 0) + 1;
+            if (raw) {
+                this.db.prepare(
+                    'UPDATE user_preferences SET data = ?, schema_version = 0, revision = ?, updated_at = ? WHERE user_id = ? AND domain = ?'
+                ).run('{}', nextRevision, now, userId, domain);
+            } else {
+                this.db.prepare(
+                    'INSERT INTO user_preferences (user_id, domain, schema_version, revision, data, created_at, updated_at) VALUES (?, ?, 0, ?, ?, ?, ?)'
+                ).run(userId, domain, nextRevision, '{}', now, now);
+            }
+            return { ok: true, row: { schemaVersion: 0, revision: nextRevision, updatedAt: now } };
+        });
+        const result = write();
+        if (result.ok && result.row) return { ok: true, row: result.row };
+        return { ok: false, current: result.current ?? null };
+    }
+
+    /** Remove every preference row for a user (account deletion cleanup). */
+    public deleteUserPreferenceDomains(userId: number): void {
+        this.db.prepare('DELETE FROM user_preferences WHERE user_id = ?').run(userId);
     }
 
     // --- Role Assignments ---

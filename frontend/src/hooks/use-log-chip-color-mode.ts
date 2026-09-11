@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
+import { notifyPreferenceWrite } from '@/lib/preferences/preferenceEvents';
 
 export const LOG_CHIP_COLOR_KEY = 'sencho.log-chip-color-mode';
 export type LogChipColorMode = 'unified' | 'per-service';
@@ -11,6 +12,26 @@ function readStored(): LogChipColorMode {
     } catch {
         return 'unified';
     }
+}
+
+export function isLogChipColorModeExport(v: unknown): v is LogChipColorMode {
+    return v === 'unified' || v === 'per-service';
+}
+
+/** Read the current mode without subscribing (sync layer use). */
+export function currentLogChipColorMode(): LogChipColorMode {
+    return readStored();
+}
+
+/** Apply a value through the same path a user commit uses. Hydration writes
+ *  do not notify the sync bus. */
+export function applyLogChipColorMode(next: LogChipColorMode): void {
+    try {
+        window.localStorage.setItem(LOG_CHIP_COLOR_KEY, next);
+    } catch {
+        // ignore; localStorage may be unavailable (private mode, quota)
+    }
+    window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
 }
 
 export function useLogChipColorMode(): [LogChipColorMode, (next: LogChipColorMode) => void] {
@@ -34,13 +55,9 @@ export function useLogChipColorMode(): [LogChipColorMode, (next: LogChipColorMod
     }, []);
 
     const setMode = useCallback((next: LogChipColorMode) => {
-        try {
-            window.localStorage.setItem(LOG_CHIP_COLOR_KEY, next);
-        } catch {
-            // ignore; localStorage may be unavailable (private mode, quota)
-        }
+        applyLogChipColorMode(next);
         setModeState(next);
-        window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
+        notifyPreferenceWrite('appearance', ['logChipColorMode']);
     }, []);
 
     return [mode, setMode];
