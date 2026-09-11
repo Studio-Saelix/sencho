@@ -145,6 +145,26 @@ function armDuePoll(id: string): GitOpsApplicationRow {
     return getApp(id);
 }
 
+/** A stored policy row projected the way the evaluator hands it back. */
+function policyRow() {
+    return {
+        id: 7,
+        name: 'prod-gate',
+        node_id: null,
+        node_identity: 'control',
+        stack_pattern: null,
+        max_severity: 'HIGH' as const,
+        block_on_deploy: 1,
+        enabled: 1,
+        replicated_from_control: 0,
+        block_on_severity: 1,
+        block_on_kev: 0,
+        block_on_fixable: 1,
+        created_at: 0,
+        updated_at: 0,
+    };
+}
+
 beforeAll(async () => {
     tmpDir = await setupTestDb();
     GitOpsStore.resetForTests();
@@ -370,5 +390,52 @@ describe('SourceController automatic acceptance', () => {
         expect(row.candidate_generation_id).toBe('gen-raced');
         expect(reconcile).toHaveBeenCalledTimes(1);
         expect(reconcile).not.toHaveBeenCalledWith(expect.objectContaining({ intent: 'apply' }));
+    });
+
+    it('records durable security-policy evidence on the accepted generation', async () => {
+        stageCandidate('app-evidence', 'evidence-web', 'gen-evidence');
+        mockDue([armDuePoll('app-evidence')]);
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'allowed',
+            policy: policyRow(),
+        });
+        spyOnReconcile().mockResolvedValue(okResult);
+
+        controller.start();
+        await advanceOneTick();
+
+        // Acceptance happened, and the generation now carries what allowed
+        // it: the deciding policy, its decision inputs, when, and on which
+        // image refs. This is what survives the restart that outlives the
+        // in-memory evaluation.
+        expect(getApp('app-evidence').accepted_generation_id).toBe('gen-evidence');
+        const raw = GitOpsStore.getInstance().getGeneration('gen-evidence')?.security_policy_evidence_json;
+        expect(JSON.parse(raw ?? 'null')).toEqual({
+            policy: {
+                id: 7,
+                name: 'prod-gate',
+                inputs: { blockOnSeverity: true, blockOnKev: false, blockOnFixable: true, maxSeverity: 'HIGH' },
+            },
+            evaluatedAt: expect.any(Number),
+            imageRefs: ['nginx:1.27'],
+        });
+    });
+
+    it('leaves no security-policy evidence behind when the candidate is held', async () => {
+        stageCandidate('app-ev-held', 'ev-held-web', 'gen-ev-held');
+        mockDue([armDuePoll('app-ev-held')]);
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'blocked',
+            violations: [],
+        });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+
+        controller.start();
+        await advanceOneTick();
+
+        // No acceptance, no evidence: a generation row must never imply a
+        // policy verdict it does not have.
+        expect(getApp('app-ev-held').accepted_generation_id).toBeNull();
+        expect(GitOpsStore.getInstance().getGeneration('gen-ev-held')?.security_policy_evidence_json).toBeNull();
     });
 });

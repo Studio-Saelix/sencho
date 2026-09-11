@@ -216,7 +216,7 @@ export class GitOpsStore {
    * The one write path for generation evidence that arrives after the row is
    * inserted: security-policy evidence is produced at acceptance time, while
    * the row is born at fetch time. Callers run this inside their own
-   * transaction so the evidence and the pointer moves it proves commit
+   * transaction so the evidence and the acceptance that cites it commit
    * together.
    */
   setGenerationSecurityPolicyEvidence(id: string, evidenceJson: string): void {
