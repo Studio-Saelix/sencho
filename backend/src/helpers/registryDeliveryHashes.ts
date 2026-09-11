@@ -118,3 +118,15 @@ export function hashActionSet(actions: readonly string[]): string {
     .update(actions.slice().sort().join('\n'))
     .digest('hex');
 }
+
+/**
+ * Stable hash of the canonical, sorted exact pull reference list. The input is
+ * expected to already be canonicalized and sorted (see normalizePullRefList);
+ * this sorts a defensive copy so the hash is independent of caller ordering.
+ */
+export function hashPullRefList(refs: readonly string[]): string {
+  return crypto
+    .createHash('sha256')
+    .update(refs.slice().sort().join('\n'))
+    .digest('hex');
+}

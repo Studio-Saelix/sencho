@@ -66,6 +66,7 @@ export const CAPABILITIES = [
   'service-scoped-stack-alert',
   'scoped-stack-auth-evidence',
   'remote-registry-credentials',
+  'remote-registry-exact-ref-proof-v1',
 ] as const;
 
 /**
@@ -124,6 +125,23 @@ export const SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY =
 /** Remotes that accept hub-delivered registry credentials for Compose operations. */
 export const REMOTE_REGISTRY_CREDENTIALS_CAPABILITY =
   'remote-registry-credentials' as const satisfies Capability;
+
+/**
+ * Remotes that participate in the exact-ref registry delivery contract
+ * (`contractVersion: 1`): the target reports the exact pull references the
+ * project uses and the hosts it already covers with its own credentials, the
+ * hub probes the uncovered hosts and delivers credentials only for the
+ * challenged ones it can cover, and the attestation carries a hash of the
+ * exact reference list. Hubs refuse to deliver credentials
+ * to a capable remote over a non-confidential transport (409), and refuse to
+ * deliver when no side covers a challenged host. Absent this flag, the hub never
+ * augments and never refuses (legacy silent passthrough).
+ */
+export const REMOTE_REGISTRY_EXACT_REF_PROOF_V1_CAPABILITY =
+  'remote-registry-exact-ref-proof-v1' as const satisfies Capability;
+
+/** Contract version the hub and target negotiate for exact-ref proof. */
+export const REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION = 1;
 
 /** Returns true when the string is a usable semver version. */
 export function isValidVersion(v: string | null | undefined): v is string {
@@ -239,6 +257,26 @@ function redactUrlCredentials(url: string): string {
   return url.replace(/(\/\/)[^/@]*@/, '$1');
 }
 
+/**
+ * Classify the raw shape of a 2xx /api/meta response body. Only a JSON object
+ * carrying a genuine capabilities array is a usable meta document; anything
+ * else (non-object JSON, a missing or non-array capabilities field) means the
+ * remote did not answer with Sencho metadata, so callers must treat the node
+ * as unreachable rather than as an online remote that advertises nothing.
+ */
+function classifyRemoteMetaBody(
+  data: unknown,
+): 'meta' | 'not-object' | 'capabilities-missing' | 'capabilities-not-array' | 'capabilities-not-strings' {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return 'not-object';
+  const capabilities = (data as Record<string, unknown>).capabilities;
+  if (capabilities === undefined) return 'capabilities-missing';
+  if (!Array.isArray(capabilities)) return 'capabilities-not-array';
+  if (!capabilities.every((entry): entry is string => typeof entry === 'string')) {
+    return 'capabilities-not-strings';
+  }
+  return 'meta';
+}
+
 /** Fetch /api/meta from a remote Sencho instance. Returns empty data on failure. */
 export async function fetchRemoteMeta(
   baseUrl: string,
@@ -253,10 +291,22 @@ export async function fetchRemoteMeta(
       headers: apiToken ? { Authorization: `Bearer ${apiToken}` } : {},
       timeout: 5000,
     });
+    // A 2xx body that is not a JSON object with a genuine capabilities array is
+    // not Sencho metadata (an intercepting proxy, an error page, a truncated
+    // body). Classify it as offline so capability probes report unreachable
+    // instead of mistaking garbage for an online remote that advertises
+    // nothing.
+    const bodyClass = classifyRemoteMetaBody(res.data);
+    if (bodyClass !== 'meta') {
+      console.warn(
+        `[CapabilityRegistry] Remote meta from ${safeUrl} is malformed (${bodyClass}); treating node as offline`,
+      );
+      return { ...OFFLINE_META };
+    }
     const rawVersion: string | undefined = res.data.version;
     const meta: RemoteMeta = {
       version: isValidVersion(rawVersion) ? rawVersion : null,
-      capabilities: Array.isArray(res.data.capabilities) ? res.data.capabilities : [],
+      capabilities: res.data.capabilities as string[],
       startedAt: typeof res.data.startedAt === 'number' ? res.data.startedAt : null,
       updateError: typeof res.data.updateError === 'string' ? res.data.updateError : null,
       online: true,

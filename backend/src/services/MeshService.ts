@@ -25,7 +25,10 @@ import { isPathWithinBase, isValidStackName, isValidRelativeStackPath } from '..
 import { getErrorMessage } from '../utils/errors';
 import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
-import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
+import {
+    appendRegistryDeliveryCode,
+    prepareOutboundRegistryDeliveryBody,
+} from '../helpers/registryDeliveryOutbound';
 
 const ACTIVITY_BUFFER_SIZE = 1000;
 const ALIAS_REFRESH_INTERVAL_MS = 60_000;
@@ -2513,7 +2516,16 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                     body: bodyRecord,
                 });
                 if (!augmented.ok) {
-                    throw new MeshError('push_failed', augmented.error);
+                    // push_failed stays the mesh-level classification; the
+                    // machine-readable refusal code rides in the message,
+                    // which is the only form triggerRedeploy's activity and
+                    // audit trail persist.
+                    const err = new MeshError(
+                        'push_failed',
+                        appendRegistryDeliveryCode(augmented.error, augmented.code),
+                    );
+                    (err as { status?: number }).status = augmented.status;
+                    throw err;
                 }
                 bodyToSend = augmented.body;
             }

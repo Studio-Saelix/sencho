@@ -209,3 +209,17 @@ export async function assertSafeOutboundUrl(
   await assertSafeOutboundHostname(lookupHostname(url));
   return url;
 }
+
+/**
+ * Safe-outbound plus HTTPS enforcement. Any URL that will receive an
+ * Authorization, Basic, or other credential-bearing header must pass this check
+ * before a request is sent. `assertSafeOutboundUrl` above keeps its original
+ * hostname-resolution scope; this adds the protocol requirement on top.
+ */
+export async function assertSafeHttpsUrl(raw: string): Promise<URL> {
+  const url = await assertSafeOutboundUrl(raw);
+  if (url.protocol !== 'https:') {
+    throw new Error('HTTPS is required for this outbound request');
+  }
+  return url;
+}

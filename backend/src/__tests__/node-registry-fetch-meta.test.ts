@@ -29,6 +29,27 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// The fetch-meta classification tests all probe the same proxy-mode node
+// shape; only the node name differs (each test registers its own row).
+function seedProxyMetaNode(name: string): number {
+  const db = DatabaseService.getInstance();
+  const nodeId = db.addNode({
+    name,
+    type: 'remote',
+    mode: 'proxy',
+    compose_dir: '/tmp',
+    is_default: false,
+    api_url: 'https://remote.example.com:1852',
+    api_token: 'token',
+  });
+  vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
+    apiUrl: 'https://remote.example.com:1852',
+    apiToken: 'token',
+    trustedLoopback: false,
+  });
+  return nodeId;
+}
+
 describe('NodeRegistry.fetchMetaForNode', () => {
   it('returns OFFLINE_META when getProxyTarget is null', async () => {
     const reg = NodeRegistry.getInstance();
@@ -134,6 +155,116 @@ describe('NodeRegistry.fetchMetaForNode', () => {
     expect(init.httpAgent).toBeDefined();
     expect(init.httpsAgent).toBeDefined();
 
+    db.deleteNode(nodeId);
+  });
+
+  it('classifies a 2xx non-object JSON body as offline, not as an empty capability set', async () => {
+    const reg = NodeRegistry.getInstance();
+    const db = DatabaseService.getInstance();
+    const nodeId = seedProxyMetaNode('meta-garbage-string');
+    const metaWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(axios, 'get').mockResolvedValue({ data: 'not-a-meta-object' });
+
+    const meta = await reg.fetchMetaForNode(nodeId);
+    expect(meta.online).toBe(false);
+    expect(meta.capabilities).toEqual([]);
+    expect(metaWarn).toHaveBeenCalledWith(
+      expect.stringContaining('malformed (not-object)'),
+    );
+    db.deleteNode(nodeId);
+  });
+
+  it('classifies a 2xx array body as offline', async () => {
+    const reg = NodeRegistry.getInstance();
+    const db = DatabaseService.getInstance();
+    const nodeId = seedProxyMetaNode('meta-garbage-array');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(axios, 'get').mockResolvedValue({ data: [] });
+
+    const meta = await reg.fetchMetaForNode(nodeId);
+    expect(meta.online).toBe(false);
+    db.deleteNode(nodeId);
+  });
+
+  it('classifies a 2xx object without a capabilities field as offline', async () => {
+    const reg = NodeRegistry.getInstance();
+    const db = DatabaseService.getInstance();
+    const nodeId = seedProxyMetaNode('meta-no-capabilities');
+    const metaWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(axios, 'get').mockResolvedValue({ data: { version: '0.97.1' } });
+
+    const meta = await reg.fetchMetaForNode(nodeId);
+    expect(meta.online).toBe(false);
+    expect(metaWarn).toHaveBeenCalledWith(
+      expect.stringContaining('malformed (capabilities-missing)'),
+    );
+    db.deleteNode(nodeId);
+  });
+
+  it('classifies a 2xx object with a non-array capabilities field as offline', async () => {
+    const reg = NodeRegistry.getInstance();
+    const db = DatabaseService.getInstance();
+    const nodeId = seedProxyMetaNode('meta-capabilities-string');
+    const metaWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(axios, 'get').mockResolvedValue({ data: { version: '0.97.1', capabilities: 'yes' } });
+
+    const meta = await reg.fetchMetaForNode(nodeId);
+    expect(meta.online).toBe(false);
+    expect(metaWarn).toHaveBeenCalledWith(
+      expect.stringContaining('malformed (capabilities-not-array)'),
+    );
+    db.deleteNode(nodeId);
+  });
+
+  it('classifies a capabilities array with non-string entries as offline', async () => {
+    const reg = NodeRegistry.getInstance();
+    const db = DatabaseService.getInstance();
+    const nodeId = seedProxyMetaNode('meta-capabilities-numbers');
+    const metaWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(axios, 'get').mockResolvedValue({ data: { version: '0.97.1', capabilities: [1, 2] } });
+
+    const meta = await reg.fetchMetaForNode(nodeId);
+    expect(meta.online).toBe(false);
+    expect(metaWarn).toHaveBeenCalledWith(
+      expect.stringContaining('malformed (capabilities-not-strings)'),
+    );
+    db.deleteNode(nodeId);
+  });
+
+  it('stays offline for a request failure covering timeout, disconnect, non-2xx, and invalid JSON responses', async () => {
+    const reg = NodeRegistry.getInstance();
+    const db = DatabaseService.getInstance();
+    const nodeId = seedProxyMetaNode('meta-request-failures');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // Axios throws on timeout/disconnect (network error), non-2xx status
+    // (validateStatus default), and invalid JSON (parse failure), so all four
+    // failure modes enter the same catch and return offline meta.
+    for (const rejection of [
+      new Error('timeout of 5000ms exceeded'),
+      new Error('socket hang up'),
+      Object.assign(new Error('Request failed with status code 502'), { response: { status: 502 } }),
+      Object.assign(new Error('Unexpected token < in JSON'), { response: { status: 200, data: '<html>' } }),
+    ]) {
+      vi.spyOn(axios, 'get').mockReset().mockRejectedValue(rejection);
+      const meta = await reg.fetchMetaForNode(nodeId);
+      expect(meta.online).toBe(false);
+      expect(meta.capabilities).toEqual([]);
+    }
+    db.deleteNode(nodeId);
+  });
+
+  it('keeps a valid 2xx object without the flag online and unsupported, never unreachable', async () => {
+    const reg = NodeRegistry.getInstance();
+    const db = DatabaseService.getInstance();
+    const nodeId = seedProxyMetaNode('meta-valid-no-flag');
+    vi.spyOn(axios, 'get').mockResolvedValue({
+      data: { version: '0.97.1', capabilities: ['fleet'], startedAt: 1, updateError: null },
+    });
+
+    const meta = await reg.fetchMetaForNode(nodeId);
+    expect(meta.online).toBe(true);
+    expect(meta.capabilities).toEqual(['fleet']);
     db.deleteNode(nodeId);
   });
 });

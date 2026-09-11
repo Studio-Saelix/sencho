@@ -1,5 +1,7 @@
 import { hashActionSet } from './registryDeliveryHashes';
 import { classifyRegistryDeliveryOp, type RegistryDeliveryStage } from './registryOpClassifier';
+import { REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION } from '../services/CapabilityRegistry';
+import type { RegistryDeliverySourceKind } from './registryDeliveryPrepare';
 
 function resolveStackName(body: Record<string, unknown>, classificationStack?: string): string | undefined {
   if (classificationStack) return classificationStack;
@@ -7,7 +9,7 @@ function resolveStackName(body: Record<string, unknown>, classificationStack?: s
   return typeof stackName === 'string' && stackName.length > 0 ? stackName : undefined;
 }
 
-function sourceKindForStage(stage: RegistryDeliveryStage): string {
+function sourceKindForStage(stage: RegistryDeliveryStage): RegistryDeliverySourceKind {
   switch (stage) {
     case 'template-deploy':
       return 'request-generated';
@@ -54,6 +56,7 @@ export function buildRegistryDiscoverPayload(options: {
     actionSetHash: hashActionSet(
       isRollback ? ['stack:deploy'] : requiredActionsForStage(stage),
     ),
+    contractVersion: REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION,
   };
 
   if (stage === 'template-deploy') {
@@ -89,7 +92,7 @@ export function buildRegistryDiscoverPayload(options: {
   }
 
   if (stage === 'blueprint-apply') {
-    payload.sourceKind = 'body-content';
+    payload.sourceKind = 'body-content' satisfies RegistryDeliverySourceKind;
     payload.composeContent = options.body.composeContent;
     payload.stackName = options.body.stackName;
   }

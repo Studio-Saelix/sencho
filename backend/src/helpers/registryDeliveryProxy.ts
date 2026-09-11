@@ -1,19 +1,29 @@
 import type { Request, Response } from 'express';
 import type { Node } from '../services/DatabaseService';
 import type { ProxyTarget } from '../services/NodeRegistry';
-import { augmentJsonBodyForRegistryDelivery, wouldAttemptRegistryDelivery } from './registryDeliveryOutbound';
-
-export interface RegistryDeliveryProxyResult {
-  /** When false, respond to the client with status/error instead of forwarding. */
-  forward: boolean;
-  status?: number;
-  error?: string;
-}
+import type { RemoteCapabilityProbe } from './remoteCapabilities';
+import {
+  augmentJsonBodyForRegistryDelivery,
+  REGISTRY_DELIVERY_ABORTED,
+  wouldAttemptRegistryDelivery,
+} from './registryDeliveryOutbound';
 
 /**
- * When delivery can be negotiated, run hop-1 discover, assemble the envelope,
- * and buffer an augmented JSON body on req.rawBody. When capability or
- * confidentiality is absent, leaves the request unchanged (AUD-30).
+ * Either forward the request unchanged, or respond to the client with the
+ * status/error/code instead of forwarding.
+ */
+export type RegistryDeliveryProxyResult =
+  | { forward: true }
+  | { forward: false; status: number; error: string; code: string };
+
+/**
+ * Run hop-1 discover, then either attach the assembled envelope to the
+ * forwarded JSON body or refuse instead of forwarding: 409 for missing
+ * credentials or a non-confidential transport, 413 for an oversized envelope
+ * or merged body, 499 on client disconnect, 400 for a body that is not valid
+ * JSON, 500 on a failed or invalid discover response. Remotes that cannot
+ * take delivery (unsupported or unreachable) pass the request through
+ * unchanged.
  */
 export async function augmentRemoteProxyWithRegistryDelivery(
   req: Request,
@@ -21,6 +31,7 @@ export async function augmentRemoteProxyWithRegistryDelivery(
   node: Node,
   target: ProxyTarget,
   rawBody: Buffer,
+  capabilityProbe: RemoteCapabilityProbe,
 ): Promise<RegistryDeliveryProxyResult> {
   const apiPath = `/api${req.path}`;
 
@@ -29,7 +40,7 @@ export async function augmentRemoteProxyWithRegistryDelivery(
     try {
       parsed = JSON.parse(rawBody.toString('utf-8')) as Record<string, unknown>;
     } catch {
-      return { forward: false, status: 400, error: 'Request body is not valid JSON' };
+      return { forward: false, status: 400, error: 'Request body is not valid JSON', code: 'REGISTRY_DELIVERY_INVALID_BODY' };
     }
   }
 
@@ -40,15 +51,16 @@ export async function augmentRemoteProxyWithRegistryDelivery(
     node,
     target,
     body: parsed,
+    capabilityProbe,
     abortSignal: req.registryDeliveryAbortController?.signal,
   });
 
   if (!result.ok) {
-    return { forward: false, status: result.status, error: result.error };
+    return { forward: false, status: result.status, error: result.error, code: result.code };
   }
 
   if (req.registryDeliveryAbortController?.signal.aborted) {
-    return { forward: false, status: 499, error: 'Request aborted' };
+    return { forward: false, status: 499, error: 'Request aborted', code: REGISTRY_DELIVERY_ABORTED };
   }
 
   if (result.augmented || rawBody.length === 0) {
@@ -89,14 +101,14 @@ export function ensureRegistryDeliveryHopAbortController(req: Request, res: Resp
 }
 
 export type RegistryDeliveryProxyHopDecision =
-  | { action: 'attempt' }
+  | { action: 'attempt'; probe: 'supported' }
   | { action: 'skip' }
   | { action: 'aborted' };
 
 export type RegistryDeliveryProxyGateResult =
   | { outcome: 'continue' }
   | { outcome: 'stop' }
-  | { outcome: 'run-delivery' };
+  | { outcome: 'run-delivery'; probe: 'supported' };
 
 /**
  * Register abort listeners, then decide whether hop-1 registry delivery runs.
@@ -108,7 +120,6 @@ export async function decideRegistryDeliveryProxyHop(
   req: Request,
   res: Response,
   nodeId: number,
-  node: Node,
   method: string,
   deliveryApiPath: string,
 ): Promise<RegistryDeliveryProxyHopDecision> {
@@ -119,7 +130,7 @@ export async function decideRegistryDeliveryProxyHop(
   if (req.registryDeliveryAbortController?.signal.aborted) {
     return { action: 'aborted' };
   }
-  const wouldAttempt = await wouldAttemptRegistryDelivery(nodeId, node, method, deliveryApiPath);
+  const probe = await wouldAttemptRegistryDelivery(nodeId, method, deliveryApiPath);
   if (
     req.destroyed
     || req.aborted
@@ -127,7 +138,7 @@ export async function decideRegistryDeliveryProxyHop(
   ) {
     return { action: 'aborted' };
   }
-  return wouldAttempt ? { action: 'attempt' } : { action: 'skip' };
+  return probe === 'supported' ? { action: 'attempt', probe } : { action: 'skip' };
 }
 
 /**
@@ -137,7 +148,6 @@ export async function evaluateRegistryDeliveryProxyGate(
   req: Request,
   res: Response,
   nodeId: number,
-  node: Node,
   method: string,
   deliveryApiPath: string,
 ): Promise<RegistryDeliveryProxyGateResult> {
@@ -145,7 +155,6 @@ export async function evaluateRegistryDeliveryProxyGate(
     req,
     res,
     nodeId,
-    node,
     method,
     deliveryApiPath,
   );
@@ -153,7 +162,7 @@ export async function evaluateRegistryDeliveryProxyGate(
     return { outcome: 'stop' };
   }
   if (decision.action === 'attempt') {
-    return { outcome: 'run-delivery' };
+    return { outcome: 'run-delivery', probe: decision.probe };
   }
   return { outcome: 'continue' };
 }
