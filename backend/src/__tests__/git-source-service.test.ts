@@ -5186,6 +5186,105 @@ describe('GitSourceService.apply', () => {
             scanSpy.mockRestore();
         }
     });
+
+    describe('shared completion pipeline parity', () => {
+        beforeEach(() => {
+            mockInvalidateNodeCaches.mockClear();
+            mockTriggerPostDeployScan.mockClear();
+            mockRecoveryAbandon.mockClear();
+        });
+
+        it('records a rolled_back last-plan outcome and abandons recovery when promotion restores', async () => {
+            const sha = 'a5'.repeat(20);
+            const stackName = 'promote-fail-restored';
+            const svc = await seedPending(stackName, 'services:\n  x:\n    image: alpine\n', sha);
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { GitProjectManifestService, PromoteGenerationError } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration')
+                .mockRejectedValue(new PromoteGenerationError('restored', new Error('simulated promotion failure')));
+            const activitySpy = vi.spyOn(DatabaseService.getInstance(), 'addNotificationHistory');
+
+            try {
+                await expect(svc.apply(stackName, sha, SKIP_PLAN_FINGERPRINT)).rejects.toMatchObject({ code: 'GIT_ERROR' });
+
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+                expect(mockRecoveryAbandon).toHaveBeenCalled();
+                // Promotion failed: no cache invalidation, no applied mark.
+                expect(mockInvalidateNodeCaches).not.toHaveBeenCalled();
+                const row = DatabaseService.getInstance().getGitSource(stackName);
+                expect(row?.last_plan_outcome).toBe('rolled_back');
+                expect(row?.last_applied_commit_sha).toBeNull();
+                expect(activitySpy).toHaveBeenCalledWith(expect.any(Number), expect.objectContaining({
+                    category: 'git_apply_rolled_back',
+                    stack_name: stackName,
+                }));
+            } finally {
+                validateSpy.mockRestore();
+                promoteSpy.mockRestore();
+                activitySpy.mockRestore();
+            }
+        });
+
+        it('records a failed last-plan outcome when promotion refuses before any mutation', async () => {
+            const sha = 'a6'.repeat(20);
+            const stackName = 'promote-fail-premutation';
+            const svc = await seedPending(stackName, 'services:\n  x:\n    image: alpine\n', sha);
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { GitProjectManifestService, PromoteGenerationError } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration')
+                .mockRejectedValue(new PromoteGenerationError('pre_mutation', new Error('simulated promotion refusal')));
+            const activitySpy = vi.spyOn(DatabaseService.getInstance(), 'addNotificationHistory');
+
+            try {
+                await expect(svc.apply(stackName, sha, SKIP_PLAN_FINGERPRINT)).rejects.toMatchObject({ code: 'GIT_ERROR' });
+
+                expect(mockRecoveryAbandon).toHaveBeenCalled();
+                expect(mockInvalidateNodeCaches).not.toHaveBeenCalled();
+                const row = DatabaseService.getInstance().getGitSource(stackName);
+                expect(row?.last_plan_outcome).toBe('failed');
+                expect(row?.last_applied_commit_sha).toBeNull();
+                expect(activitySpy).toHaveBeenCalledWith(expect.any(Number), expect.objectContaining({
+                    category: 'git_apply_failed',
+                    stack_name: stackName,
+                }));
+            } finally {
+                validateSpy.mockRestore();
+                promoteSpy.mockRestore();
+                activitySpy.mockRestore();
+            }
+        });
+
+        it('binds the health gate to the generation the deploy reports', async () => {
+            const sha = 'a7'.repeat(20);
+            const stackName = 'apply-health-binding';
+            const svc = await seedPending(stackName, 'services:\n  x:\n    image: alpine\n', sha);
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const { HealthGateService } = await import('../services/HealthGateService');
+            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack')
+                .mockResolvedValue({ recoveryId: null, deployedGenerationId: 'gen-deployed-9' });
+            const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-binding');
+
+            try {
+                const result = await svc.apply(stackName, sha, { deploy: true, ...skipFingerprint });
+                expect(result.deployed).toBe(true);
+                expect(beginSpy).toHaveBeenCalledWith(
+                    expect.any(Number),
+                    stackName,
+                    'deploy',
+                    'system:git-source',
+                    { deployedGenerationId: 'gen-deployed-9' },
+                );
+            } finally {
+                validateSpy.mockRestore();
+                saveSpy.mockRestore();
+                deploySpy.mockRestore();
+                beginSpy.mockRestore();
+            }
+        });
+    });
 });
 
 describe('GitSourceService.recoverUnsettledReconcileAttempts', () => {
