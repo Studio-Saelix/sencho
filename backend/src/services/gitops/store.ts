@@ -214,22 +214,6 @@ export class GitOpsStore {
     return this.db().prepare('SELECT * FROM gitops_generations WHERE id = ?').get(id) as GitOpsGenerationRow | undefined;
   }
 
-  /**
-   * The one write path for generation evidence that arrives after the row is
-   * inserted: security-policy evidence is produced at acceptance time, while
-   * the row is born at fetch time. Callers run this inside their own
-   * transaction so the evidence and the acceptance that cites it commit
-   * together.
-   */
-  setGenerationSecurityPolicyEvidence(id: string, evidenceJson: string): void {
-    const updated = this.db().prepare(
-      'UPDATE gitops_generations SET security_policy_evidence_json = ? WHERE id = ?',
-    ).run(evidenceJson, id);
-    if (updated.changes === 0) {
-      throw new Error(`generation not found: ${id}`);
-    }
-  }
-
   /** Generations whose creating reconcile attempt has not durably settled. */
   listGenerationsClaimedByUnsettledAttempts(applicationId: string): GitOpsGenerationRow[] {
     return this.db().prepare(

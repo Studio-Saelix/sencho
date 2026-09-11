@@ -392,7 +392,7 @@ describe('SourceController automatic acceptance', () => {
         expect(reconcile).not.toHaveBeenCalledWith(expect.objectContaining({ intent: 'apply' }));
     });
 
-    it('records durable security-policy evidence on the accepted generation', async () => {
+    it('leaves the accepted generation row byte-for-byte unchanged', async () => {
         stageCandidate('app-evidence', 'evidence-web', 'gen-evidence');
         mockDue([armDuePoll('app-evidence')]);
         evaluateCandidatePolicy.mockResolvedValue({
@@ -400,25 +400,18 @@ describe('SourceController automatic acceptance', () => {
             policy: policyRow(),
         });
         spyOnReconcile().mockResolvedValue(okResult);
+        const before = { ...GitOpsStore.getInstance().getGeneration('gen-evidence')! };
 
         controller.start();
         await advanceOneTick();
 
-        // Acceptance happened, and the generation now carries what allowed
-        // it: the deciding policy, its decision inputs, when, and on which
-        // image refs. This is what survives the restart that outlives the
-        // in-memory evaluation.
+        // Acceptance moves the application pointer only. The generation row
+        // is immutable candidate-time evidence: rewriting it to record the
+        // acceptance verdict would break that contract, so the verdict lives
+        // in the audit history instead and the row is left exactly as
+        // inserted.
         expect(getApp('app-evidence').accepted_generation_id).toBe('gen-evidence');
-        const raw = GitOpsStore.getInstance().getGeneration('gen-evidence')?.security_policy_evidence_json;
-        expect(JSON.parse(raw ?? 'null')).toEqual({
-            policy: {
-                id: 7,
-                name: 'prod-gate',
-                inputs: { blockOnSeverity: true, blockOnKev: false, blockOnFixable: true, maxSeverity: 'HIGH' },
-            },
-            evaluatedAt: expect.any(Number),
-            imageRefs: ['nginx:1.27'],
-        });
+        expect(GitOpsStore.getInstance().getGeneration('gen-evidence')).toEqual(before);
     });
 
     it('leaves no security-policy evidence behind when the candidate is held', async () => {

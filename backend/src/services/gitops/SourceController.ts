@@ -9,8 +9,6 @@ import type { GitOpsApplicationRow, GitOpsGenerationRow } from './types';
 import { classifyFailure, nextRetryAt, isGitSourceErrorCode, effectivePollIntervalSecs } from './backoff';
 import { evaluateCandidatePolicy } from '../PolicyEnforcement';
 import { buildSystemPolicyGateOptions } from '../../helpers/policyGate';
-import { policyInputs } from '../../utils/policy-risk';
-import { encodeGitOpsJson } from './json';
 import { stackManagedRoot, newGitOpsId } from './directApplication';
 import { NodeRegistry } from '../NodeRegistry';
 import { gitSourceLocalComposeFiles } from '../../utils/gitComposeFiles';
@@ -372,20 +370,6 @@ export class SourceController {
                 sourceAcceptanceId: newGitOpsId(),
                 authority: 'configured_policy',
                 envelope: { operationId: randomUUID(), actor: 'system:source-controller', trigger, at: Date.now() },
-                // Redacted, content-only evidence of what allowed this
-                // candidate: the deciding policy with its decision inputs,
-                // when, and on which image refs. Counts, violations, and
-                // scan rows stay out: this is a record of the verdict the
-                // policy produced, not of the vulnerability data behind it.
-                securityPolicyEvidenceJson: encodeGitOpsJson({
-                    policy: {
-                        id: evaluation.policy?.id ?? null,
-                        name: evaluation.policy?.name ?? null,
-                        inputs: evaluation.policy ? policyInputs(evaluation.policy) : null,
-                    },
-                    evaluatedAt: Date.now(),
-                    imageRefs,
-                }),
             });
         } catch (e) {
             this.warnSkipped(app.id, 'automatic acceptance failed', e);

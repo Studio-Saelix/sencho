@@ -42,14 +42,6 @@ export type AppliedArgs = {
   authority: Exclude<GitOpsApprovalAuthority, 'legacy_combined'>;
   envelope: EventEnvelope;
   activateCreating?: boolean;
-  /**
-   * Encoded security-policy evidence the caller evaluated for this
-   * generation, written onto the generation row in the acceptance
-   * transaction. Only set by configured-policy acceptance: an operator
-   * accepts on their own authority and the policy verdict, if any, was
-   * theirs to make, not the controller's to record.
-   */
-  securityPolicyEvidenceJson?: string;
 };
 
 export type TransitionResult = {
@@ -2155,13 +2147,6 @@ export class GitOpsTransitions {
 
   /** The mode-neutral application-row mutation `applied` and `sourceAccepted` share. */
   private applySourceAcceptanceMutation(app: GitOpsApplicationRow, args: AppliedArgs): void {
-    // Evidence and the acceptance it authorizes commit in the same
-    // transaction: a generation must never be accepted while its policy
-    // evidence write is still pending, or a crash in between leaves an
-    // accepted generation with no durable proof of what allowed it.
-    if (args.securityPolicyEvidenceJson !== undefined) {
-      this.store().setGenerationSecurityPolicyEvidence(args.generationId, args.securityPolicyEvidenceJson);
-    }
     this.insertAcceptanceRecords(app, args);
     app.accepted_generation_id = args.generationId;
     app.artifact_set_id = args.artifactSetId;
