@@ -150,3 +150,25 @@ export function nextRetryAt(now: number, retryCount: number, providerFloorMs?: n
   const delay = providerFloorMs !== undefined ? Math.max(jittered, providerFloorMs) : jittered;
   return now + delay;
 }
+
+/** The minimum effective poll interval in seconds: a mistyped 5-second interval must not become a tight loop against the remote. */
+const MIN_POLL_INTERVAL_SECS = 60;
+
+/**
+ * The poll cadence one application runs on, in seconds: the per-source
+ * override when set, else the global minutes. 0 means off; positive values
+ * are floored at MIN_POLL_INTERVAL_SECS. Shared by SourceController (cursor
+ * re-arm, reschedule), the Git source create/upsert arming paths, and create
+ * recovery, so every side of a configuration change or a crash-recovered
+ * create reads the interval the same way.
+ */
+export function effectivePollIntervalSecs(
+  perSourceSecs: number | null,
+  globalIntervalMins: number,
+): number {
+  if (perSourceSecs !== null) {
+    return perSourceSecs > 0 ? Math.max(perSourceSecs, MIN_POLL_INTERVAL_SECS) : 0;
+  }
+  const global = globalIntervalMins * 60;
+  return global > 0 ? Math.max(global, MIN_POLL_INTERVAL_SECS) : 0;
+}

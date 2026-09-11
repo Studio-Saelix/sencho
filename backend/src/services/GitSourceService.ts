@@ -38,7 +38,7 @@ import type { GitOpsHistoryCursor } from './gitops/history';
 import { projectApplication } from './gitops/derive';
 import { outcomeFromSourceFacet, isNextAction, isReconcileOutcome, type ReconcileOutcome, type ReconcileResult } from './gitops/outcomes';
 import { coalesceKey, deliveryKey, type ReconcileRequest, type ReconcileTrigger } from './gitops/triggers';
-import { classifyFailure } from './gitops/backoff';
+import { classifyFailure, effectivePollIntervalSecs } from './gitops/backoff';
 import { BlueprintTargetAdapter, type AcceptedGeneration, type DispatchContext, type DispatchResult } from './gitops/handoff';
 import {
     GitOpsTransitions,
@@ -287,6 +287,8 @@ export interface PublicGitSource {
     has_deploy_key: boolean;
     has_ca_bundle: boolean;
     ssh_host_key_fingerprint: string | null;
+    /** The tri-state automation policy a source runs under. */
+    source_policy: SourcePolicy;
     auto_apply_on_webhook: boolean;
     auto_deploy_on_apply: boolean;
     last_applied_commit_sha: string | null;
@@ -639,11 +641,13 @@ export class GitSourceService {
             has_deploy_key: !!src.encrypted_deploy_key,
             has_ca_bundle: !!src.encrypted_ca_bundle,
             ssh_host_key_fingerprint: src.ssh_host_key_fingerprint ?? null,
-            // source_policy is authoritative; the legacy boolean is projected
-            // from it (automatic only) so old clients keep working. When no
-            // application row models the source yet, effectiveAutoApply falls
-            // back to the stored boolean.
-            auto_apply_on_webhook: this.effectiveAutoApply(src.stack_name, !!src.auto_apply_on_webhook),
+            // The tri-state policy and the legacy boolean are both projected:
+            // the policy is authoritative when an application row models the
+            // source; with no row yet, the stored boolean maps the old
+            // two-state world onto the new one (true is automatic, false is
+            // review, the historical webhook behavior).
+            source_policy: this.effectiveSourcePolicy(src.stack_name, !!src.auto_apply_on_webhook),
+            auto_apply_on_webhook: this.effectiveSourcePolicy(src.stack_name, !!src.auto_apply_on_webhook) === 'automatic',
             auto_deploy_on_apply: src.auto_deploy_on_apply,
             last_applied_commit_sha: src.last_applied_commit_sha,
             pending_commit_sha: src.pending_commit_sha,
@@ -952,9 +956,10 @@ export class GitSourceService {
                     // Linking a stack that already exists. Nothing is fetched or
                     // accepted yet, so the application starts live with no desired
                     // commit and the projection asks for a fetch.
+                    const applicationId = newGitOpsId();
                     GitOpsTransitions.getInstance().activateDirect({
                         application: buildDirectApplicationRow({
-                            id: newGitOpsId(),
+                            id: applicationId,
                             stackName: input.stackName,
                             config: gitopsConfig,
                             identity: gitopsIdentity,
@@ -964,6 +969,24 @@ export class GitSourceService {
                         nodeId: NodeRegistry.getInstance().getDefaultNodeId(),
                         envelope,
                     });
+                    // An eligible source joins the unattended cadence the moment
+                    // it is configured, not after the next global settings
+                    // PATCH happens to re-scan it. The interval rule is the one
+                    // the controller re-arms with, so both sides of a config
+                    // change compute the same wake.
+                    const secs = effectivePollIntervalSecs(
+                        null,
+                        DatabaseService.getInstance().getGitOpsPollIntervalMins(),
+                    );
+                    if (effectivePolicy !== 'manual' && secs > 0) {
+                        GitOpsTransitions.getInstance().sourcePollScheduled(
+                            applicationId,
+                            Date.now() + secs * 1000,
+                            // The schedule is its own auditable event, distinct
+                            // from the activation that made the source eligible.
+                            this.gitopsEnvelope(crypto.randomUUID(), 'system:git-source', 'configure'),
+                        );
+                    }
                     return;
                 }
                 // Credential-only and policy-only edits change nothing material, so
@@ -991,6 +1014,15 @@ export class GitSourceService {
                 // transition.
                 if (app && app.source_policy !== effectivePolicy) {
                     GitOpsTransitions.getInstance().sourcePolicyChanged(app.id, effectivePolicy, envelope);
+                    // A manual source holds no cursor (the transition consumed
+                    // it), so a flip into an unattended mode must arm the
+                    // initial one; review keeps its cursor on the way to
+                    // automatic, so only a missing cursor is armed here. The
+                    // arming pre-check mirrors every refusal sourcePollScheduled
+                    // itself makes, so the nested transition cannot fire on the
+                    // same row state: sourcePolicyChanged just refused the
+                    // in-flight condition.
+                    this.armInitialPollCursor(input.stackName, 'configure');
                 }
         })();
         } catch (error) {
@@ -2923,14 +2955,17 @@ export class GitSourceService {
     }
 
     /**
-     * Effective auto-apply for the live application, falling back to the
-     * stored legacy boolean when no application row models the source. When a
-     * row exists its policy is authoritative, so a stale `1` boolean on a
-     * manual or review row never re-enables automation behind the projection.
+     * The projection half of the policy resolution: the application row's
+     * policy when one models the source, otherwise the stored legacy boolean
+     * mapped onto the tri-state (false defaults to review here, where no
+     * stored policy exists to preserve). A source the projection reports
+     * round-trips: PUTting the reported policy back is a no-op, not a silent
+     * conversion.
      */
-    private effectiveAutoApply(stackName: string, fallback: boolean): boolean {
+    private effectiveSourcePolicy(stackName: string, legacyAutoApply: boolean): SourcePolicy {
         const policy = this.gitopsApplicationFor(stackName)?.source_policy;
-        return policy !== undefined ? policy === 'automatic' : fallback;
+        if (policy !== undefined) return policy;
+        return legacyAutoApply ? 'automatic' : 'review';
     }
 
     /**
@@ -3228,8 +3263,40 @@ export class GitSourceService {
             this.recordGitOps(stackName, 'source resume', () => {
                 GitOpsTransitions.getInstance().sourceUnsuspended(app.id, envelope);
             });
+            this.armInitialPollCursor(stackName, 'resume');
             return this.deriveReconcileResult(stackName);
         });
+    }
+
+    /**
+     * Arm the initial poll cursor for an eligible source that holds no wake.
+     * The flip path needs this because a manual source holds no cursor (the
+     * policy transition consumed it), and resume needs it because suspension
+     * preserves whatever cursors the row carried. The guards mirror the
+     * refusals sourcePollScheduled itself makes (suspended, in-flight) plus
+     * the eligibility rules the due scans apply (policy, interval, and never
+     * a poll cursor under a live retry cursor, which would stay inert until
+     * the retry discards it).
+     */
+    private armInitialPollCursor(stackName: string, trigger: 'resume' | 'configure'): void {
+        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        if (!app
+            || app.source_policy === 'manual'
+            || app.suspended_at !== null
+            || app.next_poll_at !== null
+            || app.retry_at !== null) return;
+        const secs = effectivePollIntervalSecs(
+            app.poll_interval_secs,
+            DatabaseService.getInstance().getGitOpsPollIntervalMins(),
+        );
+        if (secs <= 0) return;
+        GitOpsTransitions.getInstance().sourcePollScheduled(
+            app.id,
+            Date.now() + secs * 1000,
+            // The schedule is its own auditable event, distinct from the
+            // transition that made the source eligible again.
+            this.gitopsEnvelope(crypto.randomUUID(), 'system:git-source', trigger),
+        );
     }
 
     /**
@@ -4322,6 +4389,22 @@ export class GitSourceService {
                     GitOpsStore.getInstance().updateCreateCheckpoint(
                         gitopsApplicationId, { phase: 'pointers_committed' }, Date.now(),
                     );
+                    // An eligible source joins the unattended cadence the moment
+                    // it is created, not after the next global settings PATCH
+                    // happens to re-scan it. The interval rule is the one the
+                    // controller re-arms with, so both sides of a config change
+                    // compute the same wake.
+                    const secs = effectivePollIntervalSecs(
+                        null,
+                        DatabaseService.getInstance().getGitOpsPollIntervalMins(),
+                    );
+                    if (effectivePolicy !== 'manual' && secs > 0) {
+                        GitOpsTransitions.getInstance().sourcePollScheduled(
+                            gitopsApplicationId,
+                            Date.now() + secs * 1000,
+                            this.gitopsEnvelope(crypto.randomUUID(), 'system:git-source', 'create'),
+                        );
+                    }
                 }
                 });
                 commitCreate();
@@ -4729,7 +4812,7 @@ export class GitSourceService {
             )
             : undefined;
         if (started) return GitSourceService.deliveryIntentFromStartedAttempt(started).deploy;
-        return this.effectiveAutoApply(stackName, source.auto_apply_on_webhook) && source.auto_deploy_on_apply;
+        return this.effectiveSourcePolicy(stackName, source.auto_apply_on_webhook) === 'automatic' && source.auto_deploy_on_apply;
     }
 
     /**
@@ -4803,7 +4886,7 @@ export class GitSourceService {
         let deliveryIntent = GitSourceService.deliveryIntent(
             // The live application's tri-state policy is authoritative; the
             // stored boolean only matters when no application models the source.
-            this.effectiveAutoApply(stackName, src.auto_apply_on_webhook),
+            this.effectiveSourcePolicy(stackName, src.auto_apply_on_webhook) === 'automatic',
             src.auto_deploy_on_apply,
         );
         if (startedDelivery) {

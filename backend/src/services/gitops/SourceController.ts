@@ -6,7 +6,7 @@ import { GitOpsTransitions } from './transitions';
 import { GitSourceService } from '../GitSourceService';
 import { DatabaseService } from '../DatabaseService';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from './types';
-import { classifyFailure, nextRetryAt, isGitSourceErrorCode } from './backoff';
+import { classifyFailure, nextRetryAt, isGitSourceErrorCode, effectivePollIntervalSecs } from './backoff';
 import { evaluateCandidatePolicy } from '../PolicyEnforcement';
 import { buildSystemPolicyGateOptions } from '../../helpers/policyGate';
 import { stackManagedRoot, newGitOpsId } from './directApplication';
@@ -151,15 +151,12 @@ export class SourceController {
      * The poll cadence this application runs on, in seconds: the per-source
      * override when set, else the global minutes. 0 means off; positive
      * values are floored at 60 so a mistyped 5-second interval cannot turn
-     * into a tight loop against the remote.
+     * into a tight loop against the remote. The rule lives in backoff.ts so
+     * the Git source upsert path reads it identically when arming an initial
+     * cursor.
      */
     private effectiveIntervalSecs(app: GitOpsApplicationRow): number {
-        const perSource = app.poll_interval_secs;
-        if (perSource !== null && perSource !== undefined) {
-            return perSource > 0 ? Math.max(perSource, 60) : 0;
-        }
-        const global = DatabaseService.getInstance().getGitOpsPollIntervalMins() * 60;
-        return global > 0 ? Math.max(global, 60) : 0;
+        return effectivePollIntervalSecs(app.poll_interval_secs, DatabaseService.getInstance().getGitOpsPollIntervalMins());
     }
 
     /** Clear any armed timer and invalidate the tick it would have run. */

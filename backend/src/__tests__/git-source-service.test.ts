@@ -2948,6 +2948,79 @@ describe('GitSourceService.createStackFromGit', () => {
         await cleanupStackDir('create-nested');
     });
 
+    it('a newly created eligible source receives an initial poll cursor', async () => {
+        const sha = 'curs00000000000000000000000000000000001';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '5');
+        const svc = GitSourceService.getInstance();
+        try {
+            await svc.createStackFromGit({
+                stackName: 'create-cursor',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                token: null,
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+
+            // Create defaults to review, which is unattended-eligible, so the
+            // application row leaves the create with a durable wake already
+            // armed: no global settings PATCH is needed to start polling.
+            const application = GitOpsStore.getInstance().getLiveDirectApplication('create-cursor');
+            expect(application?.source_policy).toBe('review');
+            expect(application?.next_poll_at).not.toBeNull();
+            expect(application!.next_poll_at!).toBeGreaterThan(Date.now());
+            expect(application!.next_poll_at!).toBeLessThanOrEqual(Date.now() + 5 * 60 * 1000);
+            const history = DatabaseService.getInstance().getDb()
+                .prepare("SELECT COUNT(*) AS n FROM gitops_history WHERE stack_name = ? AND stage = 'source_poll_scheduled'")
+                .get('create-cursor') as { n: number };
+            expect(history.n).toBe(1);
+        } finally {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            DatabaseService.getInstance().getDb()
+                .prepare('DELETE FROM gitops_applications WHERE stack_name = ?')
+                .run('create-cursor');
+            await cleanupStackDir('create-cursor');
+        }
+    });
+
+    it('a newly created manual source stays out of the cadence', async () => {
+        const sha = 'curs00000000000000000000000000000000002';
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha });
+        DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '5');
+        const svc = GitSourceService.getInstance();
+        try {
+            await svc.createStackFromGit({
+                stackName: 'create-cursor-manual',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                token: null,
+                autoApplyOnWebhook: true,
+                autoDeployOnApply: false,
+                sourcePolicy: 'manual',
+            });
+            const application = GitOpsStore.getInstance().getLiveDirectApplication('create-cursor-manual');
+            expect(application?.source_policy).toBe('manual');
+            expect(application?.next_poll_at).toBeNull();
+        } finally {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            DatabaseService.getInstance().getDb()
+                .prepare('DELETE FROM gitops_applications WHERE stack_name = ?')
+                .run('create-cursor-manual');
+            await cleanupStackDir('create-cursor-manual');
+        }
+    });
+
     it('writes the env file when sync_env is enabled', async () => {
         const sha = '0101010101010101010101010101010101010101';
         mockSuccessfulClone({
@@ -4712,6 +4785,60 @@ describe('GitSourceService.apply', () => {
             const app = liveApp('resume-basic');
             expect(app?.suspended_at).toBeNull();
             expect(app?.source_suspended_reason).toBeNull();
+        });
+
+        it('resuming a source re-policed into automatic while suspended arms its poll cursor', async () => {
+            const sha = 'curs00000000000000000000000000000000002';
+            const svc = await seedPending('resume-cursor', 'services:\n  x:\n    image: alpine\n', sha);
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '5');
+            try {
+                await svc.suspend('resume-cursor', { actor: 'tester', reason: 'pausing' });
+                await svc.upsert({
+                    stackName: 'resume-cursor',
+                    repoUrl: 'https://github.com/example/repo.git',
+                    branch: 'main',
+                    composePaths: ['compose.yaml'],
+                    contextDir: null,
+                    syncEnv: false,
+                    envPath: null,
+                    authType: 'none',
+                    autoApplyOnWebhook: true,
+                    autoDeployOnApply: false,
+                });
+                // The flip while suspended arms nothing: the pre-check skips
+                // paused rows.
+                expect(liveApp('resume-cursor')?.next_poll_at).toBeNull();
+
+                await svc.resume('resume-cursor', { actor: 'tester' });
+
+                const app = liveApp('resume-cursor');
+                expect(app?.suspended_at).toBeNull();
+                expect(app?.source_policy).toBe('automatic');
+                expect(app?.next_poll_at).not.toBeNull();
+                const history = DatabaseService.getInstance().getDb()
+                    .prepare("SELECT COUNT(*) AS n FROM gitops_history WHERE stack_name = ? AND stage = 'source_poll_scheduled'")
+                    .get('resume-cursor') as { n: number };
+                expect(history.n).toBe(1);
+            } finally {
+                DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            }
+        });
+
+        it('resuming a source that was never eligible for the cadence arms nothing', async () => {
+            const sha = 'curs00000000000000000000000000000000003';
+            const svc = await seedPending('resume-manual', 'services:\n  x:\n    image: alpine\n', sha);
+            try {
+                await svc.suspend('resume-manual', { actor: 'tester', reason: 'pausing' });
+                await svc.resume('resume-manual', { actor: 'tester' });
+
+                // The policy stays review and the global interval is off, so
+                // no wake is due from either guard.
+                const app = liveApp('resume-manual');
+                expect(app?.source_policy).toBe('review');
+                expect(app?.next_poll_at).toBeNull();
+            } finally {
+                DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '0');
+            }
         });
 
         it('resuming a source that is not suspended is a harmless no-op, not an error', async () => {

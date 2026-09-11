@@ -13,7 +13,7 @@
  * Service-layer logic (encryption, error mapping, mutex, pending lifecycle)
  * is covered in git-source-service.test.ts.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import fs, { readFileSync } from 'fs';
@@ -2324,11 +2324,13 @@ describe('git-source policy compatibility', () => {
         GitOpsStore.getInstance().insertApplication(row);
     }
 
+    // The upsert new-link path mints its own application id, so cleanup
+    // deletes by stack name.
     function deleteRows(stackName: string): void {
         DatabaseService.getInstance().deleteGitSource(stackName);
         DatabaseService.getInstance().getDb()
-            .prepare('DELETE FROM gitops_applications WHERE id = ?')
-            .run(`policy-app-${stackName}`);
+            .prepare('DELETE FROM gitops_applications WHERE stack_name = ?')
+            .run(stackName);
     }
 
     it('create with auto_apply_on_webhook true derives automatic', async () => {
@@ -2467,6 +2469,10 @@ describe('git-source policy compatibility', () => {
             // resuming it, so the guard is deliberately absent here.
             const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
             expect(application?.source_policy).toBe('automatic');
+            // The flip into automatic must not arm a cadence either: the
+            // arming pre-check skips suspended rows, so the cursor stays
+            // absent here. Resuming arms the cursor itself.
+            expect(application?.next_poll_at).toBeNull();
         } finally {
             fetchFromGit.mockRestore();
             deleteRows(stackName);
@@ -2666,6 +2672,145 @@ describe('git-source policy compatibility', () => {
             fetchFromGit.mockRestore();
             deleteRows(stackName);
         }
+    });
+
+    describe('initial poll cursor arming', () => {
+        let originalInterval: string;
+
+        beforeEach(() => {
+            originalInterval = DatabaseService.getInstance().getGlobalSettings()['gitops_poll_interval_mins'] ?? '0';
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', '5');
+        });
+
+        afterEach(() => {
+            DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', originalInterval);
+        });
+
+        it('a newly linked eligible source receives a durable cursor without another settings PATCH', async () => {
+            const stackName = 'cursor-new-link';
+            seedStackDir(stackName);
+            const fetchFromGit = stubFetchFromGit();
+            try {
+                const res = await request(app)
+                    .put(`/api/stacks/${stackName}/git-source`)
+                    .set('Authorization', `Bearer ${adminToken()}`)
+                    .send(putBody({ source_policy: 'review' }));
+                expect(res.status).toBe(200);
+                const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+                expect(application?.source_policy).toBe('review');
+                expect(application?.next_poll_at).not.toBeNull();
+                expect(application!.next_poll_at!).toBeGreaterThan(Date.now());
+                // 5 minutes, expressed through the same rule the controller re-arms with.
+                expect(application!.next_poll_at!).toBeLessThanOrEqual(Date.now() + 5 * 60 * 1000);
+                // The cursor arming is an audited transition, not a bare column
+                // write. The upsert new-link path mints the application id
+                // itself, so resolve the row rather than assuming a fixture id.
+                const history = DatabaseService.getInstance().getDb()
+                    .prepare("SELECT COUNT(*) AS n FROM gitops_history WHERE stack_name = ? AND stage = 'source_poll_scheduled'")
+                    .get(stackName) as { n: number };
+                expect(history.n).toBe(1);
+            } finally {
+                fetchFromGit.mockRestore();
+                // stack_name cleanup catches the minted new-link id.
+                deleteRows(stackName);
+            }
+        });
+
+        it.each(['review', 'automatic'] as const)('a policy flip from manual into %s arms the cursor', async (policy) => {
+            const stackName = `cursor-flip-to-${policy}`;
+            seedStackDir(stackName);
+            seedGitSource(stackName);
+            seedApp(stackName, 'manual');
+            const fetchFromGit = stubFetchFromGit();
+            try {
+                const res = await request(app)
+                    .put(`/api/stacks/${stackName}/git-source`)
+                    .set('Authorization', `Bearer ${adminToken()}`)
+                    .send(putBody({ source_policy: policy }));
+                expect(res.status).toBe(200);
+                const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+                expect(application?.source_policy).toBe(policy);
+                expect(application?.next_poll_at).not.toBeNull();
+                expect(application!.next_poll_at!).toBeGreaterThan(Date.now());
+            } finally {
+                fetchFromGit.mockRestore();
+                deleteRows(stackName);
+            }
+        });
+
+        it('a review-to-automatic flip keeps an existing cursor rather than double-arming it', async () => {
+            const stackName = 'cursor-review-to-automatic';
+            seedStackDir(stackName);
+            seedGitSource(stackName);
+            const appRow = directApplicationFixture(`policy-app-${stackName}`, stackName);
+            appRow.source_policy = 'review';
+            appRow.next_poll_at = Date.now() + 3 * 60 * 1000;
+            GitOpsStore.getInstance().insertApplication(appRow);
+            const fetchFromGit = stubFetchFromGit();
+            try {
+                const res = await request(app)
+                    .put(`/api/stacks/${stackName}/git-source`)
+                    .set('Authorization', `Bearer ${adminToken()}`)
+                    .send(putBody({ source_policy: 'automatic' }));
+                expect(res.status).toBe(200);
+                const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+                expect(application?.source_policy).toBe('automatic');
+                // Manual is the only policy that consumes the cursor, so the
+                // armed wake survives the flip untouched.
+                expect(application?.next_poll_at).toBe(appRow.next_poll_at);
+            } finally {
+                fetchFromGit.mockRestore();
+                deleteRows(stackName);
+            }
+        });
+
+        it('a policy flip does not arm a poll cursor under a live retry cursor', async () => {
+            const stackName = 'cursor-flip-retry-live';
+            seedStackDir(stackName);
+            seedGitSource(stackName);
+            seedApp(stackName, 'manual');
+            const retryAt = Date.now() + 10 * 60_000;
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE gitops_applications SET retry_at = ? WHERE id = ?')
+                .run(retryAt, `policy-app-${stackName}`);
+            const fetchFromGit = stubFetchFromGit();
+            try {
+                const res = await request(app)
+                    .put(`/api/stacks/${stackName}/git-source`)
+                    .set('Authorization', `Bearer ${adminToken()}`)
+                    .send(putBody({ source_policy: 'automatic' }));
+                expect(res.status).toBe(200);
+                // The retry cursor stays the next wake: arming a poll cursor
+                // underneath it would mint an inert cursor the due-poll query
+                // refuses to select until the retry discards it.
+                const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+                expect(application?.source_policy).toBe('automatic');
+                expect(application?.next_poll_at).toBeNull();
+                expect(application?.retry_at).toBe(retryAt);
+            } finally {
+                fetchFromGit.mockRestore();
+                deleteRows(stackName);
+            }
+        });
+
+        it('a newly linked manual source stays out of the cadence', async () => {
+            const stackName = 'cursor-new-link-manual';
+            seedStackDir(stackName);
+            const fetchFromGit = stubFetchFromGit();
+            try {
+                const res = await request(app)
+                    .put(`/api/stacks/${stackName}/git-source`)
+                    .set('Authorization', `Bearer ${adminToken()}`)
+                    .send(putBody({ source_policy: 'manual' }));
+                expect(res.status).toBe(200);
+                const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+                expect(application?.source_policy).toBe('manual');
+                expect(application?.next_poll_at).toBeNull();
+            } finally {
+                fetchFromGit.mockRestore();
+                deleteRows(stackName);
+            }
+        });
     });
 });
 
