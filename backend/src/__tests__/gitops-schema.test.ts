@@ -231,12 +231,14 @@ describe('gitops schema', () => {
     ]);
 
     const retryTerms = staticTerms(APPLICATIONS_DUE_FOR_RETRY_SQL).filter((t) =>
-      t.startsWith('retry_at IS NOT NULL') || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL'));
+      t.startsWith('retry_at IS NOT NULL') || t.startsWith("target_mode = 'direct'") || t.startsWith("lifecycle_status = 'active'") || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL'));
     for (const term of retryTerms) {
       expect(sqlOf('idx_gitops_app_retry_due')).toContain(term);
     }
     expect(retryTerms).toEqual([
       'retry_at IS NOT NULL',
+      "target_mode = 'direct'",
+      "lifecycle_status = 'active'",
       'suspended_at IS NULL',
       'active_operation_stage IS NULL',
     ]);

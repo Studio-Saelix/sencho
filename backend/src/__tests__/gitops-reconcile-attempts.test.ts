@@ -335,6 +335,38 @@ describe('poll and retry eligibility queries', () => {
     const due = store.listApplicationsDueForRetry(1_000);
     expect(due.map((a) => a.id)).toContain('app-retry-fires');
   });
+
+  it('excludes a detached application even when its retry time has arrived', () => {
+    const store = GitOpsStore.getInstance();
+    // Detachment clears cursors through the transition graph, but the scan's
+    // eligibility terms must not depend on that invariant holding: a detached
+    // row with a leftover due retry cursor is invisible to the controller.
+    store.insertApplication({
+      ...app('app-retry-detached', 'retry-detached-web'),
+      lifecycle_status: 'detached',
+      retry_at: 1_000,
+    });
+    const due = store.listApplicationsDueForRetry(1_000);
+    expect(due.map((a) => a.id)).not.toContain('app-retry-detached');
+  });
+
+  it('excludes a Blueprint-mode application even when its retry time has arrived', () => {
+    const store = GitOpsStore.getInstance();
+    // Retry scheduling currently serves the Direct controller only; a
+    // Blueprint-mode retry wake would run the Direct fetch path against a
+    // row with no stack name. Until Blueprint fetch gains a retry path, the
+    // scan must not select it.
+    store.insertApplication({
+      ...app('app-retry-bp', 'unused-bp-retry'),
+      stack_name: null,
+      blueprint_id: 43,
+      target_mode: 'blueprint',
+      configured_repo_url: 'https://github.com/org/repo.git',
+      retry_at: 1_000,
+    });
+    const due = store.listApplicationsDueForRetry(1_000);
+    expect(due.map((a) => a.id)).not.toContain('app-retry-bp');
+  });
 });
 
 function env(operationId: string): EventEnvelope {

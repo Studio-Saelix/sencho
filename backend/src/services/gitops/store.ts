@@ -39,10 +39,13 @@ export type AssertNoLiveBlueprintResult =
  * SQL instead of a copy. Each is served by a partial index whose WHERE
  * clause mirrors the query's static terms (see idx_gitops_app_poll_due /
  * idx_gitops_app_retry_due in schema.ts); changing a term here must change
- * it there in the same commit. The poll scan excludes rows with any retry
- * cursor (past or future): retry-due rows arrive via the retry scan, and a
- * row still inside its backoff window must not be refetched by a due poll
- * cursor, so the retry cursor stays the next wake.
+ * it there in the same commit. Both scans are Direct-only and Active-only:
+ * the retry scan would otherwise run the Direct fetch path against a
+ * detached row or a Blueprint-mode row with no stack name. The poll scan
+ * additionally excludes rows with any retry cursor (past or future):
+ * retry-due rows arrive via the retry scan, and a row still inside its
+ * backoff window must not be refetched by a due poll cursor, so the retry
+ * cursor stays the next wake.
  */
 export const SOURCES_DUE_FOR_POLL_SQL = `SELECT * FROM gitops_applications
        WHERE target_mode = 'direct'
@@ -58,6 +61,8 @@ export const SOURCES_DUE_FOR_POLL_SQL = `SELECT * FROM gitops_applications
 export const APPLICATIONS_DUE_FOR_RETRY_SQL = `SELECT * FROM gitops_applications
        WHERE retry_at IS NOT NULL
          AND retry_at <= ?
+         AND target_mode = 'direct'
+         AND lifecycle_status = 'active'
          AND suspended_at IS NULL
          AND active_operation_stage IS NULL
        ORDER BY retry_at ASC
@@ -205,6 +210,22 @@ export class GitOpsStore {
 
   getGeneration(id: string): GitOpsGenerationRow | undefined {
     return this.db().prepare('SELECT * FROM gitops_generations WHERE id = ?').get(id) as GitOpsGenerationRow | undefined;
+  }
+
+  /**
+   * The one write path for generation evidence that arrives after the row is
+   * inserted: security-policy evidence is produced at acceptance time, while
+   * the row is born at fetch time. Callers run this inside their own
+   * transaction so the evidence and the pointer moves it proves commit
+   * together.
+   */
+  setGenerationSecurityPolicyEvidence(id: string, evidenceJson: string): void {
+    const updated = this.db().prepare(
+      'UPDATE gitops_generations SET security_policy_evidence_json = ? WHERE id = ?',
+    ).run(evidenceJson, id);
+    if (updated.changes === 0) {
+      throw new Error(`generation not found: ${id}`);
+    }
   }
 
   /** Generations whose creating reconcile attempt has not durably settled. */
