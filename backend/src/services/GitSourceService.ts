@@ -55,7 +55,7 @@ import {
     newGitOpsId,
     stackManagedRoot,
 } from './gitops/directApplication';
-import type { GitOpsApplicationRow, GitOpsHistoryRow, SourcePolicy } from './gitops/types';
+import type { GitOpsApplicationRow, GitOpsGenerationRow, GitOpsHistoryRow, SourcePolicy } from './gitops/types';
 // Re-exported here because the route layer and legacy-boolean compatibility
 // matrix consume it through this module; the definition lives with the row
 // type in gitops/types.ts so the storage and service layers cannot drift.
@@ -3324,14 +3324,18 @@ export class GitSourceService {
     /**
      * Route an accepted generation to its target. Blueprint mode always
      * blocks (BlueprintTargetAdapter; rollout orchestration does not exist
-     * yet). Direct mode has no separate generation-based promotion pipeline
-     * today, so it dispatches by driving the same reconcile()/apply path a
-     * manual or webhook apply already uses, translating the normalized
-     * ReconcileResult into the narrower dispatched/blocked shape a target
-     * adapter reports.
-     * TODO(dispatch-boundary): rewrite the Direct branch to revalidate the
-     * live target under the stack lock and run completeGitApply against the
-     * accepted generation's own candidate instead of re-entering reconcile().
+     * yet). Direct mode promotes the generation's own staged candidate
+     * through the shared completion pipeline: it never re-enters
+     * reconcile()/apply(), because the pending-pull validation those paths
+     * perform is about a pull, not about an already-accepted generation.
+     * Instead the target is revalidated under the shared stack lock
+     * immediately before promotion: the acceptance, the live application
+     * row, the target candidate pointer, and a change plan recomputed from
+     * the candidate's staged content must all still agree. A disagreement
+     * leaves source acceptance intact and settles a blocked dispatch with
+     * no promotion and no Compose execution. Every refusal settles as
+     * blocked rather than throwing: dispatch reports an outcome, it does
+     * not raise one at its callers.
      */
     public async dispatchAcceptedGeneration(
         generation: AcceptedGeneration,
@@ -3345,26 +3349,367 @@ export class GitSourceService {
         if (!app?.stack_name) {
             return { status: 'blocked', reason: 'No Direct stack is bound to this application.' };
         }
-        const source = DatabaseService.getInstance().getGitSource(app.stack_name);
-        const result = await this.reconcile({
-            intent: 'apply',
-            applicationId: generation.applicationId,
-            stackName: app.stack_name,
-            trigger: opts.trigger,
-            actor: opts.actor,
-            commitSha: generation.commitSha,
-            planFingerprint: generation.changePlanFingerprint ?? '',
-            deploy: source?.auto_deploy_on_apply ?? false,
-        });
-        // 'converged' is not produced by reconcile() today (it requires
-        // target + health evidence this source-only path does not have),
-        // but it is a declared success member of ReconcileOutcome; treating
-        // only 'no_source_change' as success would silently misreport it as
-        // blocked the day a broader derivation starts emitting it.
-        if (result.outcome === 'no_source_change' || result.outcome === 'converged') {
-            return { status: 'dispatched' };
+        const stackName = app.stack_name;
+        if (!DatabaseService.getInstance().getGitSource(stackName)) {
+            return { status: 'blocked', reason: `No Git source is configured for ${stackName}.` };
         }
-        return { status: 'blocked', reason: result.reason };
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        // The durable attempt is reserved inside the lock, not here: a
+        // dispatch refused at the lock never started any work, so it must
+        // not leave a reservation for startup recovery to chase.
+        const lock = await StackOpLockService.getInstance().runExclusive(
+            nodeId,
+            stackName,
+            'git_apply',
+            opts.actor,
+            () => this.dispatchDirectLocked(generation, stackName, nodeId, opts),
+            getRegistryDeliveryLockContext(),
+        );
+        if (!lock.ran) {
+            return {
+                status: 'blocked',
+                reason: `Another operation (${lock.existing.action}) is already in progress for ${stackName}.`,
+            };
+        }
+        return lock.result;
+    }
+
+    /**
+     * Direct dispatch, running while the shared stack lock is held. Reserves
+     * its durable attempt, revalidates the live target against the accepted
+     * generation, runs the shared completion pipeline over the candidate's
+     * own staged content, and binds the target with targetApplied() only
+     * after promotion commits. Every path that reserved settles its attempt
+     * before returning.
+     */
+    private async dispatchDirectLocked(
+        generation: AcceptedGeneration,
+        stackName: string,
+        nodeId: number,
+        opts: { trigger: ReconcileTrigger; actor: string },
+    ): Promise<DispatchResult> {
+        const store = GitOpsStore.getInstance();
+        const src = DatabaseService.getInstance().getGitSource(stackName);
+        if (!src) {
+            return { status: 'blocked', reason: `No Git source is configured for ${stackName}.` };
+        }
+
+        let envelope: ReturnType<GitSourceService['gitopsEnvelope']>;
+        try {
+            const allocated = GitOpsTransitions.getInstance().allocateReconcileAttempt(
+                generation.applicationId,
+                opts.actor,
+                opts.trigger,
+                Date.now(),
+            );
+            envelope = this.gitopsEnvelope(allocated.operationId, opts.actor, opts.trigger);
+        } catch (e) {
+            console.error(
+                `[GitSource] Failed to reserve a durable attempt for dispatch of ${sanitizeForLog(stackName)}:`,
+                e instanceof Error ? e.stack ?? e.message : String(e),
+            );
+            return {
+                status: 'blocked',
+                reason: "This stack's GitOps tracking is unavailable; reconfigure the source before dispatching again.",
+            };
+        }
+        const settleBlocked = (reason: string): DispatchResult => {
+            this.settleAttempt(generation.applicationId, envelope, { outcome: 'blocked', reason, nextAction: 'resolve_conflict' });
+            return { status: 'blocked', reason };
+        };
+
+        // Re-read everything the acceptance was decided under. A newer pull,
+        // a pause, or a mode change between acceptance and dispatch must
+        // refuse promotion here, not race it.
+        const app = store.getApplication(generation.applicationId);
+        if (!app || app.stack_name !== stackName) {
+            return settleBlocked('No Direct stack is bound to this application.');
+        }
+        if (app.suspended_at) {
+            return settleBlocked(`Reconciliation is suspended for ${stackName}.`);
+        }
+        if (app.target_mode !== 'direct') {
+            return settleBlocked('The application is no longer in Direct mode.');
+        }
+        if (app.accepted_generation_id !== generation.generationId) {
+            return settleBlocked('The accepted generation changed before dispatch could promote it.');
+        }
+        const genRow = store.getGeneration(generation.generationId);
+        if (!genRow || genRow.commit_sha !== generation.commitSha) {
+            return settleBlocked('The dispatch contract disagrees with the accepted generation.');
+        }
+        const target = store.getTarget(app.id, nodeId);
+        if (!target) {
+            return settleBlocked('No Direct target is bound to this application.');
+        }
+        if (target.target_status !== 'active') {
+            return settleBlocked('The Direct target is tombstoned.');
+        }
+        if (target.candidate_generation_id !== generation.generationId) {
+            return settleBlocked('The target candidate no longer matches the accepted generation.');
+        }
+        // targetApplied() only accepts the exact artifact set and acceptance
+        // reference the source layer recorded; capture them while narrowed.
+        if (!app.artifact_set_id || !app.source_acceptance_ref) {
+            return settleBlocked('The accepted generation has no recorded acceptance evidence to bind.');
+        }
+        const artifactSetId = app.artifact_set_id;
+        const sourceAcceptanceId = app.source_acceptance_ref;
+
+        let result: { applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string };
+        // Both the revalidation and the pipeline run inside one try: discovery,
+        // candidate validation, or the change-plan recompute can themselves
+        // throw, and a throw here would escape runExclusive with the attempt
+        // still reserved, violating the no-throw dispatch contract.
+        let revalidation: Awaited<ReturnType<GitSourceService['revalidateAcceptedTarget']>>;
+        try {
+            revalidation = await this.revalidateAcceptedTarget(generation, genRow, src, stackName);
+            if (!revalidation.ok) {
+                return settleBlocked(revalidation.reason);
+            }
+            result = await this.completeGitApply({
+                stackName,
+                commitSha: generation.commitSha,
+                src,
+                nodeId,
+                // Raw opts.actor: the pipeline keeps its two distinct
+                // fallbacks, same as manual apply passes raw opts.actor.
+                actor: opts.actor,
+                applyOperationId: envelope.operationId,
+                gitopsEnv: envelope,
+                // Acceptance already happened at the source layer, so the
+                // pipeline records no new acceptance and there is no apply
+                // operation for an applyFailed wrapper to close.
+                gitopsApp: null,
+                gitopsGenerationId: null,
+                manifest: revalidation.manifest,
+                prior: revalidation.prior,
+                plan: revalidation.plan,
+                pending: revalidation.pending,
+                legacyOwnedPaths: revalidation.legacyOwnedPaths,
+                deploy: src.auto_deploy_on_apply,
+                bypassPolicy: false,
+                started: { app: null, env: null, settled: true },
+            });
+        } catch (e) {
+            return settleBlocked(e instanceof Error ? e.message : String(e));
+        }
+        if (!result.applied) {
+            return settleBlocked('The completion pipeline did not apply the accepted generation.');
+        }
+
+        // Promotion committed; the target binds to the already-accepted
+        // generation now, never before.
+        const bound = this.recordGitOps(stackName, 'target binding', () => {
+            GitOpsTransitions.getInstance().targetApplied(nodeId, {
+                applicationId: app.id,
+                generationId: generation.generationId,
+                artifactSetId,
+                sourceAcceptanceId,
+                authority: 'operator',
+                envelope,
+            });
+        });
+        if (!bound) {
+            return settleBlocked('The promotion committed, but the Direct target could not be bound to the accepted generation.');
+        }
+        if (result.deployError) {
+            const reason = `The source applied, but the deploy failed: ${result.deployError}`;
+            this.settleAttempt(app.id, envelope, {
+                outcome: 'recovery_required',
+                reason,
+                nextAction: 'view_target_results',
+            });
+            return { status: 'blocked', reason };
+        }
+        this.settleAttempt(app.id, envelope, this.finalizeReconcileOutcome(stackName, undefined));
+        return { status: 'dispatched' };
+    }
+
+    /**
+     * §3B target revalidation for dispatch: prove the accepted generation's
+     * staged candidate still describes the only change it was accepted for.
+     * The candidate directory, the compose validation, and a change plan
+     * recomputed from the candidate's own staged content must all agree with
+     * the evidence recorded at pull. Reviewed-live hashes are deliberately
+     * not passed (a generation row records none; the pull computed its plan
+     * without them), so a live file that moved since acceptance changes a
+     * per-operation live hash and breaks fingerprint equality. On success
+     * this also assembles everything the shared completion pipeline needs,
+     * read from the candidate rather than from any pending pull.
+     */
+    private async revalidateAcceptedTarget(
+        generation: AcceptedGeneration,
+        genRow: GitOpsGenerationRow,
+        src: StackGitSource,
+        stackName: string,
+    ): Promise<
+        | {
+              ok: true;
+              prior: GitProjectManifest | null;
+              plan: GitChangePlan;
+              manifest: GitProjectManifest;
+              legacyOwnedPaths: string[] | undefined;
+              pending: { candidateRelPath: string; files: ComposeFile[]; envContent: string | null };
+          }
+        | { ok: false; reason: string }
+    > {
+        const manifestSvc = GitProjectManifestService.getInstance();
+        const priorRead = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
+        if (priorRead !== null && 'corrupt' in priorRead) {
+            const identityMismatch = priorRead.corrupt.includes('identity');
+            return {
+                ok: false,
+                reason: identityMismatch
+                    ? `The managed-project manifest for ${stackName} is stamped for a different repository or branch. Detach the Git source, then re-link it to the current repository and branch.`
+                    : `The managed-project manifest for ${stackName} cannot be trusted (${priorRead.corrupt}). Detach the Git source and re-link it to rebuild the managed project.`,
+            };
+        }
+        const prior = priorRead;
+
+        const managedRoot = path.resolve(stackManagedRoot(stackName));
+        const candidateRelPath = genRow.candidate_dir;
+        const pathReason = validateCandidateRelPath(candidateRelPath, managedRoot);
+        if (pathReason) return { ok: false, reason: pathReason };
+        // Inline barrier at the access sink (CodeQL path-injection).
+        const candidateAbs = path.resolve(managedRoot, candidateRelPath);
+        if (!candidateAbs.startsWith(managedRoot + path.sep)) {
+            return { ok: false, reason: 'candidateRelPath escapes the managed root' };
+        }
+        try {
+            await fsPromises.access(candidateAbs);
+        } catch (accessErr: unknown) {
+            const code = (accessErr as NodeJS.ErrnoException).code;
+            if (code !== 'ENOENT') {
+                console.error(
+                    `[GitSource] dispatch candidate access failed for ${sanitizeForLog(stackName)}:`,
+                    accessErr instanceof Error ? accessErr.message : String(accessErr),
+                );
+                return { ok: false, reason: 'Cannot read the accepted candidate; try again.' };
+            }
+            return { ok: false, reason: 'The accepted candidate is no longer staged; pull the source again.' };
+        }
+
+        const candValidation = await this.validateCandidate(
+            stackName,
+            candidateRelPath,
+            src.compose_paths,
+            src.context_dir,
+            src.sync_env,
+        );
+        if (!candValidation.ok) {
+            return { ok: false, reason: `Candidate validation failed: ${candValidation.error}` };
+        }
+
+        // The synced env was staged into the candidate at pull; read it back
+        // from there rather than from any pending row the pull wrote.
+        let envContent: string | null = null;
+        if (src.sync_env) {
+            try {
+                envContent = await fsPromises.readFile(path.join(candidateAbs, '.env'), 'utf8');
+            } catch (envErr: unknown) {
+                if ((envErr as NodeJS.ErrnoException).code !== 'ENOENT') {
+                    console.error(
+                        `[GitSource] dispatch could not read the staged sync env for ${sanitizeForLog(stackName)}:`,
+                        envErr instanceof Error ? envErr.message : String(envErr),
+                    );
+                    return { ok: false, reason: 'Cannot read the accepted candidate; try again.' };
+                }
+            }
+        }
+
+        const bounds = manifestSvc.boundsConfig();
+        const inventory = await ComposeInputDiscoveryService.getInstance().discoverFromClone({
+            cloneDir: candidateAbs,
+            composePaths: src.compose_paths,
+            contextDir: src.context_dir,
+            syncEnv: src.sync_env,
+            bounds,
+        });
+        const plan = await this.computeChangePlan({
+            stackName,
+            commitSha: generation.commitSha,
+            mode: 'update',
+            src,
+            inventory,
+            envContent,
+            prior: prior ?? null,
+        });
+        if (plan.blocked) {
+            return {
+                ok: false,
+                reason: 'The change plan for the accepted generation is blocked by local conflicts. Resolve them before applying.',
+            };
+        }
+        if (plan.invocationBlocked) {
+            return {
+                ok: false,
+                reason: 'The live Compose invocation no longer matches the last applied generation. Review the change plan before dispatching again.',
+            };
+        }
+        if (genRow.change_plan_fingerprint !== null && plan.fingerprint !== genRow.change_plan_fingerprint) {
+            return {
+                ok: false,
+                reason: 'The live target no longer matches the accepted generation; review the change plan before dispatching again.',
+            };
+        }
+
+        const syncEnvEntry = src.sync_env ? this.syncEnvEntryFor(envContent) : null;
+        const manifest = manifestSvc.buildManifest({
+            stackName,
+            repoUrl: src.repo_url,
+            branch: src.branch,
+            commitSha: generation.commitSha,
+            projectRoot: src.context_dir,
+            composeFiles: src.compose_paths,
+            projectName: stackName,
+            invocation: plan.candidateInvocation,
+            inputs: mergeSyncEnvEntry(inventory.inputs, syncEnvEntry),
+            refusals: inventory.refusals,
+            buildContexts: inventory.buildContexts,
+            bounds,
+            priorManifest: prior ?? null,
+            state: inventory.refusals.length > 0 ? 'partial' : 'active',
+        });
+        // An existing pre-manifest stack adopts ONLY the paths the legacy
+        // format owned, identical to the manual apply pipeline.
+        const legacyOwnedPaths = prior
+            ? undefined
+            : [
+                ...(src.applied_deploy_spec?.files ?? [PRIMARY_COMPOSE_FILENAME]),
+                ...(src.sync_env ? ['.env'] : []),
+            ];
+        const files: ComposeFile[] = [];
+        for (const local of gitSourceLocalComposeFiles(src.compose_paths)) {
+            files.push({ path: local, content: await fsPromises.readFile(path.resolve(candidateAbs, local), 'utf8') });
+        }
+        return {
+            ok: true,
+            prior: prior ?? null,
+            plan,
+            manifest,
+            legacyOwnedPaths,
+            pending: { candidateRelPath, files, envContent },
+        };
+    }
+
+    /** The sync-env manifest entry for staged env content, or null when there is none. */
+    private syncEnvEntryFor(envContent: string | null): ComposeInputEntry | null {
+        if (envContent === null) return null;
+        return {
+            sourcePath: null,
+            materializedPath: '.env',
+            role: 'env',
+            dependencyKind: 'sync-env',
+            ownership: 'managed',
+            provenance: 'fetch',
+            sensitivity: 'high',
+            contentSha256: crypto.createHash('sha256').update(envContent).digest('hex'),
+            sizeBytes: Buffer.byteLength(envContent, 'utf8'),
+            state: 'present',
+            deletionAuthority: 'sencho',
+            note: null,
+        };
     }
 
     /**
@@ -3437,11 +3782,16 @@ export class GitSourceService {
     /**
      * The shared completion pipeline, run by manual apply and (after the
      * dispatch rewrite) accepted-generation dispatch alike: recovery
-     * capture, promotion, all four last-plan outcomes, the applied mark,
-     * the acceptance transition, managed-path conflict resolution, cache
-     * invalidation, the Compose deploy, recovery handoff, and the health
-     * gate, in one deliberate order. Callers arrive with the change plan
-     * already validated against live state; everything here is what must
+     * capture, promotion, the applied last-plan outcome (blocked is set by
+     * applyLockedBody during plan validation; rolled_back/failed here on a
+     * promote failure), the applied mark, the acceptance transition,
+     * managed-path conflict resolution, cache invalidation, the Compose
+     * deploy, recovery handoff, and the health gate, in one deliberate
+     * order: last-plan 'applied', conflict resolution, apply activity, and
+     * cache invalidation precede the applied mark; the acceptance follows
+     * it; the deploy branch hands recovery off before Compose and links the
+     * health gate after. Callers arrive with the change plan already
+     * validated against live state; everything here is what must
      * happen identically no matter who drove the plan.
      *
      * Cache invalidation and the post-deploy scan live here, not in any
@@ -3989,7 +4339,11 @@ export class GitSourceService {
                 commitSha,
                 src,
                 nodeId,
-                actor,
+                // Raw opts.actor: completeGitApply keeps main's two distinct
+                // fallbacks ('git-source' for capture, 'system:git-source'
+                // for gate/Compose). Passing the resolved value here would
+                // make the capture fallback unreachable.
+                actor: opts.actor,
                 applyOperationId,
                 gitopsEnv,
                 gitopsApp,

@@ -4555,34 +4555,92 @@ describe('GitSourceService.apply', () => {
         const directContext = { targetMode: 'direct', nodeId: null, bindingRevision: null } as const;
         const manualDispatch = { trigger: 'manual', actor: 'tester' } as const;
 
-        async function acceptedGenerationFor(stackName: string) {
-            const { buildAcceptedGeneration } = await import('../services/gitops/handoff');
+        /**
+         * Accept the staged candidate at the source layer (what a controller
+         * auto-acceptance or an operator review does) and return the accepted
+         * generation id. Acceptance clears the application row's candidate
+         * pointer, so the dispatch contract must be captured from here on.
+         */
+        function acceptCandidate(stackName: string): string {
             const app = liveApp(stackName)!;
-            const row = GitOpsStore.getInstance().getGeneration(app.candidate_generation_id!)!;
-            return buildAcceptedGeneration(row);
+            const generationId = app.candidate_generation_id!;
+            GitOpsTransitions.getInstance().sourceAccepted({
+                applicationId: app.id,
+                generationId,
+                artifactSetId: newGitOpsId(),
+                sourceAcceptanceId: newGitOpsId(),
+                authority: 'operator',
+                envelope: testEnvelope(),
+            });
+            return generationId;
         }
 
-        it('dispatches a direct-mode generation by driving the existing apply path', async () => {
+        async function acceptedGenerationById(generationId: string) {
+            const { buildAcceptedGeneration } = await import('../services/gitops/handoff');
+            return buildAcceptedGeneration(GitOpsStore.getInstance().getGeneration(generationId)!);
+        }
+
+        async function defaultNodeId(): Promise<number> {
+            const { NodeRegistry } = await import('../services/NodeRegistry');
+            return NodeRegistry.getInstance().getDefaultNodeId();
+        }
+
+        it('promotes the accepted generation through the shared pipeline without re-entering reconcile()', async () => {
             const sha = 'd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1';
             const svc = await seedPending('dispatch-direct', 'services:\n  x:\n    image: alpine\n', sha);
-            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
-            const { FileSystemService } = await import('../services/FileSystemService');
-            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+            const generationId = acceptCandidate('dispatch-direct');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-direct')!.id;
+            const startedBefore = historyOperationIds(applicationId, 'source_reconcile_started').length;
+            const settledBefore = settledAttemptsForApplication(applicationId).length;
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const order: string[] = [];
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration')
+                .mockImplementation(async () => { order.push('promote'); });
+            const originalTargetApplied = GitOpsTransitions.prototype.targetApplied;
+            const targetSpy = vi.spyOn(GitOpsTransitions.prototype, 'targetApplied')
+                .mockImplementation(function (this: GitOpsTransitions, ...args: Parameters<typeof originalTargetApplied>) {
+                    order.push('target');
+                    return originalTargetApplied.apply(this, args);
+                });
 
             try {
-                const generation = await acceptedGenerationFor('dispatch-direct');
                 const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+
                 expect(result).toEqual({ status: 'dispatched' });
+                expect(reconcileSpy).not.toHaveBeenCalled();
+                const generationRow = GitOpsStore.getInstance().getGeneration(generationId)!;
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+                // The pipeline promotes the generation's own staged candidate.
+                expect(promoteSpy.mock.calls[0]![1]).toMatchObject({ candidateRelPath: generationRow.candidate_dir, sha });
+                // targetApplied binds the target only after promotion commits, exactly once.
+                expect(order).toEqual(['promote', 'target']);
+                expect(targetSpy).toHaveBeenCalledTimes(1);
+
+                const app = GitOpsStore.getInstance().getApplication(applicationId)!;
+                expect(app.accepted_generation_id).toBe(generationId);
+                const target = GitOpsStore.getInstance().getTarget(applicationId, await defaultNodeId())!;
+                expect(target.applied_generation_id).toBe(generationId);
+                expect(target.candidate_generation_id).toBeNull();
+                const src = DatabaseService.getInstance().getGitSource('dispatch-direct')!;
+                expect(src.last_applied_commit_sha).toBe(sha);
+                expect(src.pending_commit_sha).toBeNull();
+                // This dispatch reserved exactly one durable attempt and settled it.
+                expect(historyOperationIds(applicationId, 'source_reconcile_started')).toHaveLength(startedBefore + 1);
+                expect(settledAttemptsForApplication(applicationId)).toHaveLength(settledBefore + 1);
             } finally {
-                validateSpy.mockRestore();
-                saveSpy.mockRestore();
+                reconcileSpy.mockRestore();
+                promoteSpy.mockRestore();
+                targetSpy.mockRestore();
             }
         });
 
         it('blocks a blueprint-mode generation by delegating to BlueprintTargetAdapter', async () => {
             const sha = 'd2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2';
             const svc = await seedPending('dispatch-blueprint', 'services:\n  x:\n    image: alpine\n', sha);
-            const generation = await acceptedGenerationFor('dispatch-blueprint');
+            const generationId = acceptCandidate('dispatch-blueprint');
+            const generation = await acceptedGenerationById(generationId);
 
             const result = await svc.dispatchAcceptedGeneration(
                 generation,
@@ -4594,67 +4652,171 @@ describe('GitSourceService.apply', () => {
                 status: 'blocked',
                 reason: 'Blueprint rollout orchestration is not yet implemented.',
             });
+            // Routing decided from the context alone; the acceptance stands untouched.
+            expect(liveApp('dispatch-blueprint')!.accepted_generation_id).toBe(generationId);
         });
 
-        it('blocks and forwards the reason when the underlying apply fails', async () => {
+        it('blocks when the dispatch contract disagrees with the stored accepted generation', async () => {
             const sha = 'd3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3';
-            const svc = await seedPending('dispatch-apply-fails', 'services:\n  x:\n    image: alpine\n', sha);
-            const generation = await acceptedGenerationFor('dispatch-apply-fails');
+            const svc = await seedPending('dispatch-contract-drift', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-contract-drift');
+            const generation = await acceptedGenerationById(generationId);
             const staleGeneration = { ...generation, commitSha: 'ffffffffffffffffffffffffffffffffffffffff' };
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration');
 
-            const result = await svc.dispatchAcceptedGeneration(staleGeneration, directContext, manualDispatch);
+            try {
+                const result = await svc.dispatchAcceptedGeneration(staleGeneration, directContext, manualDispatch);
 
-            expect(result).toEqual({
-                status: 'blocked',
-                reason: expect.stringMatching(/pending commit has changed/i),
-            });
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(/disagrees with the accepted generation/i),
+                });
+                expect(promoteSpy).not.toHaveBeenCalled();
+                expect(liveApp('dispatch-contract-drift')!.accepted_generation_id).toBe(generationId);
+            } finally {
+                promoteSpy.mockRestore();
+            }
         });
 
-        it('blocks a direct-mode dispatch when the generation names an application that no longer exists', async () => {
+        it('refuses promotion when the live target changed after acceptance, leaving acceptance intact', async () => {
             const sha = 'd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4';
-            const svc = await seedPending('dispatch-no-stack', 'services:\n  x:\n    image: alpine\n', sha);
-            const generation = await acceptedGenerationFor('dispatch-no-stack');
-            const orphanGeneration = { ...generation, applicationId: 'no-such-application' };
-
-            const result = await svc.dispatchAcceptedGeneration(orphanGeneration, directContext, manualDispatch);
-
-            expect(result).toEqual({
-                status: 'blocked',
-                reason: expect.stringMatching(/no direct stack is bound/i),
+            mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha });
+            const svc = GitSourceService.getInstance();
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const fsSvc = FileSystemService.getInstance();
+            await fsSvc.createStack('dispatch-changed-live');
+            await svc.upsert({
+                stackName: 'dispatch-changed-live',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
             });
+            await svc.pull('dispatch-changed-live');
+            const generationId = acceptCandidate('dispatch-changed-live');
+            const generation = await acceptedGenerationById(generationId);
+            // A local edit lands after the acceptance: the target the accepted
+            // generation was reviewed against no longer exists.
+            await fsSvc.saveStackContent('dispatch-changed-live', 'services:\n  x:\n    image: alpine:local\n');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration');
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack');
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(/no longer matches the accepted generation/i),
+                });
+                expect(promoteSpy).not.toHaveBeenCalled();
+                expect(deploySpy).not.toHaveBeenCalled();
+                const app = liveApp('dispatch-changed-live')!;
+                expect(app.accepted_generation_id).toBe(generationId);
+                expect(GitOpsStore.getInstance().getTarget(app.id, await defaultNodeId())?.applied_generation_id).toBeNull();
+            } finally {
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+                await cleanupStackDir('dispatch-changed-live');
+            }
         });
 
-        it('honors an auto_deploy_on_apply source setting by requesting a deploy on dispatch', async () => {
+        it('blocks when the accepted candidate directory was removed, promoting nothing', async () => {
             const sha = 'd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5';
+            const svc = await seedPending('dispatch-candidate-gone', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-candidate-gone');
+            const generation = await acceptedGenerationById(generationId);
+            const generationRow = GitOpsStore.getInstance().getGeneration(generationId)!;
+            fs.rmSync(path.join(stackManagedRoot('dispatch-candidate-gone'), generationRow.candidate_dir), { recursive: true, force: true });
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration');
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(/no longer staged/i),
+                });
+                expect(promoteSpy).not.toHaveBeenCalled();
+                expect(liveApp('dispatch-candidate-gone')!.accepted_generation_id).toBe(generationId);
+            } finally {
+                promoteSpy.mockRestore();
+            }
+        });
+
+        it('blocks with an in-progress reason instead of throwing when the stack lock is held', async () => {
+            const sha = 'd6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6';
+            const svc = await seedPending('dispatch-contention', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-contention');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-contention')!.id;
+            const startedBefore = historyOperationIds(applicationId, 'source_reconcile_started').length;
+            const settledBefore = settledAttemptsForApplication(applicationId).length;
+            const nodeId = await defaultNodeId();
+            expect(StackOpLockService.getInstance().tryAcquire(nodeId, 'dispatch-contention', 'deploy', 'tester').acquired).toBe(true);
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: 'Another operation (deploy) is already in progress for dispatch-contention.',
+                });
+                // The refused dispatch reserved nothing, so it leaves no
+                // unsettled attempt for startup recovery to chase.
+                expect(historyOperationIds(applicationId, 'source_reconcile_started')).toHaveLength(startedBefore);
+                expect(settledAttemptsForApplication(applicationId)).toHaveLength(settledBefore);
+            } finally {
+                StackOpLockService.getInstance().release(nodeId, 'dispatch-contention');
+            }
+        });
+
+        it('honors an auto_deploy_on_apply source setting by deploying after promotion', async () => {
+            const sha = 'd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7';
             const svc = await seedPending('dispatch-auto-deploy', 'services:\n  x:\n    image: alpine\n', sha);
-            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
-            const { FileSystemService } = await import('../services/FileSystemService');
+            const generationId = acceptCandidate('dispatch-auto-deploy');
+            const generation = await acceptedGenerationById(generationId);
             const { ComposeService } = await import('../services/ComposeService');
-            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
             const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
             DatabaseService.getInstance().getDb()
                 .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
                 .run('dispatch-auto-deploy');
 
             try {
-                const generation = await acceptedGenerationFor('dispatch-auto-deploy');
                 const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+
                 expect(result).toEqual({ status: 'dispatched' });
-                expect(deploySpy).toHaveBeenCalled();
+                expect(deploySpy).toHaveBeenCalledWith(
+                    'dispatch-auto-deploy',
+                    undefined,
+                    undefined,
+                    { source: 'git_apply', actor: 'tester' },
+                );
             } finally {
-                validateSpy.mockRestore();
-                saveSpy.mockRestore();
+                promoteSpy.mockRestore();
                 deploySpy.mockRestore();
             }
         });
 
-        it('blocks, rather than reporting dispatched, when an auto_deploy_on_apply dispatch applies but the deploy fails', async () => {
-            const sha = 'd6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6';
+        it('blocks with recovery evidence when an auto-deploy applies but the deploy fails', async () => {
+            const sha = 'd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8';
             const svc = await seedPending('dispatch-auto-deploy-fails', 'services:\n  x:\n    image: alpine\n', sha);
-            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
-            const { FileSystemService } = await import('../services/FileSystemService');
+            const generationId = acceptCandidate('dispatch-auto-deploy-fails');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-auto-deploy-fails')!.id;
             const { ComposeService } = await import('../services/ComposeService');
-            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
             const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(
                 new Error('compose up failed: docker unavailable'),
             );
@@ -4663,14 +4825,37 @@ describe('GitSourceService.apply', () => {
                 .run('dispatch-auto-deploy-fails');
 
             try {
-                const generation = await acceptedGenerationFor('dispatch-auto-deploy-fails');
                 const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
-                expect(result).toEqual({ status: 'blocked', reason: expect.stringMatching(/deploy/i) });
+
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(/deploy failed/i),
+                });
+                // The promotion committed, so the target binding happened even
+                // though the deploy did not.
+                expect(GitOpsStore.getInstance().getTarget(applicationId, await defaultNodeId())?.applied_generation_id).toBe(generationId);
+                const settled = settledAttemptsForApplication(applicationId);
+                const last = settled[settled.length - 1]!;
+                expect(JSON.parse(last.after_json!)).toMatchObject({ outcome: 'recovery_required', nextAction: 'view_target_results' });
             } finally {
-                validateSpy.mockRestore();
-                saveSpy.mockRestore();
+                promoteSpy.mockRestore();
                 deploySpy.mockRestore();
             }
+        });
+
+        it('blocks a direct-mode dispatch when the generation names an application that no longer exists', async () => {
+            const sha = 'd9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9';
+            const svc = await seedPending('dispatch-no-stack', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-no-stack');
+            const generation = await acceptedGenerationById(generationId);
+            const orphanGeneration = { ...generation, applicationId: 'no-such-application' };
+
+            const result = await svc.dispatchAcceptedGeneration(orphanGeneration, directContext, manualDispatch);
+
+            expect(result).toEqual({
+                status: 'blocked',
+                reason: expect.stringMatching(/no direct stack is bound/i),
+            });
         });
     });
 
