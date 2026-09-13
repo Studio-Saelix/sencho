@@ -775,7 +775,7 @@ describe('ComposeService - deployStack', () => {
     const promise = ComposeService.getInstance(1).deployStack('my-stack');
     await vi.advanceTimersByTimeAsync(3100);
 
-    await expect(promise).resolves.toEqual({ recoveryId: null, deployedGenerationId: null });
+    await expect(promise).resolves.toEqual({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
     expect(mockGetLegacyOrphanContainersByStack).toHaveBeenCalledWith('my-stack');
   });
 
@@ -879,7 +879,7 @@ describe('ComposeService - deployStack', () => {
     await vi.advanceTimersByTimeAsync(3100);
     const result = await promise;
 
-    expect(result).toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null });
+    expect(result).toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null, gitopsOperationId: null });
     expect(mockCaptureCandidate).toHaveBeenCalledWith(expect.objectContaining({
       stackName: 'my-stack',
       operationKind: 'deployment',
@@ -1256,7 +1256,7 @@ describe('ComposeService - updateStack prune-on-update', () => {
 
     // The update already succeeded before the prune ran, so a prune failure
     // must neither reject nor trigger the atomic restore.
-    await expect(promise).resolves.toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null });
+    await expect(promise).resolves.toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null, gitopsOperationId: null });
     expect(mockRestoreStackFiles).not.toHaveBeenCalled();
   });
 
@@ -1270,7 +1270,7 @@ describe('ComposeService - updateStack prune-on-update', () => {
     const promise = svc.updateStack('my-stack');
     await vi.advanceTimersByTimeAsync(3100);
 
-    await expect(promise).resolves.toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null });
+    await expect(promise).resolves.toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null, gitopsOperationId: null });
   });
 });
 

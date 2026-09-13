@@ -387,6 +387,22 @@ describe('Direct Git producers drive the revision state', () => {
     expect(bound.failure_stage).toBeNull();
     expect(bound.failure_class).toBeNull();
     expect(projectOf(app.id).targets[0]?.runtime.status).not.toBe('failed_after_mutation');
+
+    // The minted deploy operation id round-trips on the result, and the
+    // adapter's own transition writes carry it, so the caller of a completed
+    // deploy can name the exact operation the deploy recorded rather than
+    // re-deriving it from the stack. One id minted at the opening write,
+    // shared by the binding: the failed deploy earlier in this test opened a
+    // different operation, so filtering by this id proves the pairing, not
+    // just the stage names.
+    expect(result.gitopsOperationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const deployHistory = DatabaseService.getInstance().getDb()
+      .prepare(`SELECT stage FROM gitops_history
+                WHERE stack_name = ? AND operation_id = ?
+                  AND stage IN ('deploy_started', 'deploy_bound')`)
+      .all(stackName, result.gitopsOperationId) as Array<{ stage: string }>;
+    expect(deployHistory.map((row) => row.stage).sort()).toEqual(['deploy_bound', 'deploy_started']);
   });
 
   it('reports the deployed generation from an update so health can bind to it', async () => {
@@ -426,6 +442,15 @@ describe('Direct Git producers drive the revision state', () => {
     expect(target.active_operation_stage).toBeNull();
     expect(target.applied_generation_id).toBe(applied);
     expect(projectOf(app.id).targets[0]?.runtime.status).toBe('applied_not_deployed');
+    // No deploy operation was opened, so there is no operation id to report
+    // and no history row either: `gitopsOperationId` stays null on every
+    // update that never reached the recreate step.
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const openDeploys = DatabaseService.getInstance().getDb()
+      .prepare(`SELECT COUNT(*) AS n FROM gitops_history
+                WHERE stack_name = ? AND stage IN ('deploy_started', 'deploy_failed')`)
+      .get(stackName) as { n: number };
+    expect(openDeploys.n).toBe(0);
 
     // The same holds through the orchestrator, which is what the update callers
     // actually use and which carries the binding on to beginStack.

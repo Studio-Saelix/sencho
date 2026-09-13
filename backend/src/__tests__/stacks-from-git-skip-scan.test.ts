@@ -123,7 +123,7 @@ beforeEach(() => {
     envWritten: false,
     warnings: [],
   });
-  mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+  mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
   mockIsTrivyAvailable.mockReturnValue(true);
   mockListContainers.mockResolvedValue([{ Image: 'nginx:latest' }]);
   mockGetImageDigest.mockResolvedValue(null);

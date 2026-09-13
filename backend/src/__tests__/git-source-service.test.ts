@@ -3359,7 +3359,7 @@ describe('GitSourceService.apply', () => {
         const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockImplementation(async () => { await gate; });
         const { ComposeService } = await import('../services/ComposeService');
         const { HealthGateService } = await import('../services/HealthGateService');
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
         const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-git');
 
         try {
@@ -4834,7 +4834,8 @@ describe('GitSourceService.apply', () => {
             const { ComposeService } = await import('../services/ComposeService');
             const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
             const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
-            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: 'a1b2c3d4-e5f6-7788-99aa-bbacddddeeff' });
+            const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
             DatabaseService.getInstance().getDb()
                 .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
                 .run('dispatch-auto-deploy');
@@ -4849,9 +4850,15 @@ describe('GitSourceService.apply', () => {
                     undefined,
                     { source: 'git_apply', actor: 'tester' },
                 );
+                // The deploy's canonical GitOps operation id surfaces in the
+                // apply evidence line, so an operator reading the log can match
+                // the apply against the deploy's own transitions by the same id.
+                expect(logSpy.mock.calls.some((args) => String(args[0]).includes('[GitSource] Applied and deployed dispatch-auto-deploy')
+                    && String(args[0]).includes('(deploy op a1b2c3d4)'))).toBe(true);
             } finally {
                 promoteSpy.mockRestore();
                 deploySpy.mockRestore();
+                logSpy.mockRestore();
             }
         });
 
@@ -5462,7 +5469,7 @@ describe('GitSourceService.apply', () => {
         const { ComposeService } = await import('../services/ComposeService');
         const { HealthGateService } = await import('../services/HealthGateService');
         const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
         const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-git');
         const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
 
@@ -5568,7 +5575,7 @@ describe('GitSourceService.apply', () => {
             const { ComposeService } = await import('../services/ComposeService');
             const { HealthGateService } = await import('../services/HealthGateService');
             const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
-            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
             const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-scan');
 
             try {
@@ -5664,7 +5671,7 @@ describe('GitSourceService.apply', () => {
         const TrivyService = (await import('../services/TrivyService')).default;
         const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
         const listImagesSpy = vi.spyOn(ComposeService.prototype, 'listStackImages').mockResolvedValue(['nginx:bad']);
-        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
         const trivy = TrivyService.getInstance();
         const trivyAvailableSpy = vi.spyOn(trivy, 'isTrivyAvailable').mockReturnValue(true);
         const scanSpy = vi.spyOn(trivy, 'scanImagePreflight').mockResolvedValue({
@@ -5800,12 +5807,16 @@ describe('GitSourceService.apply', () => {
             const { HealthGateService } = await import('../services/HealthGateService');
             const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
             const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack')
-                .mockResolvedValue({ recoveryId: null, deployedGenerationId: 'gen-deployed-9' });
+                .mockResolvedValue({ recoveryId: null, deployedGenerationId: 'gen-deployed-9', gitopsOperationId: 'a1b2c3d4-e5f6-7788-99aa-bbacddddeeff' });
             const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-binding');
 
             try {
                 const result = await svc.apply(stackName, sha, { deploy: true, ...skipFingerprint });
                 expect(result.deployed).toBe(true);
+                // The deploy's canonical GitOps operation id rides back on the
+                // apply result, so the caller's evidence names the same
+                // operation the Compose adapter recorded.
+                expect(result.gitopsOperationId).toBe('a1b2c3d4-e5f6-7788-99aa-bbacddddeeff');
                 expect(beginSpy).toHaveBeenCalledWith(
                     expect.any(Number),
                     stackName,

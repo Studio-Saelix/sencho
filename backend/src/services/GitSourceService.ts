@@ -322,6 +322,17 @@ type GitApplyResult = {
     deployed: boolean;
     deployError?: string;
     recoveryId?: string;
+    /**
+     * Canonical GitOps deploy operation id (ComposeService's beginGitOpsDeploy
+     * identity), not this method's own apply/dispatch operation id. A string
+     * means a tracked deploy succeeded; null means the deploy succeeded but
+     * was untracked (no GitOps identity, or the tracking write failed); absent
+     * means this result did not come from a completed deploy. On the
+     * deploy-failed path the deploy's operation id exists in gitops_history
+     * but no result object carried it back, so absence does not mean no deploy
+     * was attempted.
+     */
+    gitopsOperationId?: string | null;
 };
 
 type WorkOutcome<T> =
@@ -3803,7 +3814,7 @@ export class GitSourceService {
         commitSha: string,
         opts: GitApplyOpts,
         operationId?: string,
-    ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
+    ): Promise<GitApplyResult> {
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const lock = await StackOpLockService.getInstance().runExclusive(
             nodeId,
@@ -3835,7 +3846,7 @@ export class GitSourceService {
         commitSha: string,
         opts: GitApplyOpts,
         operationId?: string,
-    ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
+    ): Promise<GitApplyResult> {
         const started: { app: GitOpsApplicationRow | null; env: ReturnType<GitSourceService['gitopsEnvelope']> | null; settled: boolean } = {
             app: null,
             env: null,
@@ -3910,7 +3921,7 @@ export class GitSourceService {
          * its own error handling (the applyFailed wrapper) does not consult it.
          */
         progress: { filesUntrusted: boolean };
-    }): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
+    }): Promise<GitApplyResult> {
         const { stackName, commitSha, src, nodeId, applyOperationId, gitopsEnv, gitopsApp, gitopsGenerationId } = args;
         // Byte-parity with main: recovery capture fell back to 'git-source'
         // while the policy gate and Compose fell back to 'system:git-source'.
@@ -4111,14 +4122,20 @@ export class GitSourceService {
                 if (recoveryId) {
                     recoverySvc.linkGateOrRetain(recoveryId, healthGateId);
                 }
-                console.log(`[GitSource] Applied and deployed ${stackName} at ${commitSha.slice(0, 7)}`);
+                // The deploy's canonical GitOps identity is the operation id
+                // ComposeService minted for it, logged here so an operator can
+                // match the apply against the deploy's own transitions by the
+                // same id.
+                console.log(
+                    `[GitSource] Applied and deployed ${stackName} at ${commitSha.slice(0, 7)}${autoDeploy.gitopsOperationId ? ` (deploy op ${GitSourceService.shortOperationId(autoDeploy.gitopsOperationId)})` : ''}`,
+                );
                 // Fire-and-forget, matching the manual apply route's prior
                 // placement: the scan runs only after a successful deploy and
                 // must never delay or fail the apply response.
                 triggerPostDeployScan(stackName, nodeId).catch((err) =>
                     console.error(`[Security] Post-deploy scan failed for ${sanitizeForLog(stackName)}:`, err),
                 );
-                return { applied: true, deployed: true, recoveryId };
+                return { applied: true, deployed: true, recoveryId, gitopsOperationId: autoDeploy.gitopsOperationId };
             } catch (e) {
                 // R1: do not auto-compensate. Keep applied files and leave the
                 // pre-promote generation is_current for manual rollback.
@@ -4168,7 +4185,7 @@ export class GitSourceService {
         opts: GitApplyOpts,
         started: { app: GitOpsApplicationRow | null; env: ReturnType<GitSourceService['gitopsEnvelope']> | null; settled: boolean },
         operationId?: string,
-    ): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
+    ): Promise<GitApplyResult> {
         const diag = isDebugEnabled();
         const db = DatabaseService.getInstance();
         const src = db.getGitSource(stackName);

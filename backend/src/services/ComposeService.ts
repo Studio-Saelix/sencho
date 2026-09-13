@@ -775,6 +775,13 @@ export class ComposeService {
    */
   private beginGitOpsDeploy(stackName: string): {
     generationId: string;
+    /**
+     * The canonical operation id of the GitOps deploy this call opened. Every
+     * write of this operation (start, binding, failure) shares it, and callers
+     * that surface their own evidence of the deploy (the apply log line, the
+     * GitApplyResult) carry it so the two records can be matched by id.
+     */
+    gitopsOperationId: string;
     bound: () => void;
     failed: (failureClass: 'pre_mutation' | 'post_mutation') => void;
   } | null {
@@ -808,6 +815,7 @@ export class ComposeService {
       }
       return {
         generationId,
+        gitopsOperationId: envelope.operationId,
         bound: () => record('binding', () => tx.deployBound(app.id, this.nodeId, generationId, envelope)),
         failed: (failureClass) => record('failure', () => tx.deployFailed(app.id, this.nodeId, failureClass, envelope)),
       };
@@ -826,7 +834,7 @@ export class ComposeService {
     ws?: WebSocket,
     atomic?: boolean,
     ctx?: DeployInvocationContext,
-  ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null }> {
+  ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     await this.ensureExternalNetworksForDeploy(stackName, ctx);
@@ -967,7 +975,11 @@ export class ComposeService {
       console.warn('[ComposeService] Exposure refresh failed after deploy for %s:',
         sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
     }
-    return { recoveryId, deployedGenerationId: gitopsDeploy?.generationId ?? null };
+    return {
+      recoveryId,
+      deployedGenerationId: gitopsDeploy?.generationId ?? null,
+      gitopsOperationId: gitopsDeploy?.gitopsOperationId ?? null,
+    };
   }
 
   streamLogs(stackName: string, ws: WebSocket) {
@@ -1296,7 +1308,7 @@ export class ComposeService {
     stackName: string,
     ws?: WebSocket,
     atomic?: boolean,
-  ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null }> {
+  ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
@@ -1500,7 +1512,11 @@ export class ComposeService {
         sanitizeForLog(getErrorMessage(err, 'unknown')),
       );
     }
-    return { recoveryId, deployedGenerationId: gitopsDeploy?.generationId ?? null };
+    return {
+      recoveryId,
+      deployedGenerationId: gitopsDeploy?.generationId ?? null,
+      gitopsOperationId: gitopsDeploy?.gitopsOperationId ?? null,
+    };
   }
 
   /**
