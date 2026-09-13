@@ -4888,6 +4888,12 @@ describe('GitSourceService.apply', () => {
                     .find((text) => text.includes('[GitSource] Applied and deployed dispatch-deploy-untracked'));
                 expect(appliedLine).toBeDefined();
                 expect(appliedLine).not.toContain('(deploy op');
+                // The settled row keeps the same promise the log line makes:
+                // no correlation id exists for an untracked deploy, so the
+                // field is absent rather than null or empty.
+                const settled = settledAttemptsForApplication(liveApp('dispatch-deploy-untracked')!.id);
+                const settledResult = JSON.parse(settled[settled.length - 1]!.after_json!) as Record<string, unknown>;
+                expect('deployGitopsOperationId' in settledResult).toBe(false);
             } finally {
                 promoteSpy.mockRestore();
                 deploySpy.mockRestore();
@@ -5017,6 +5023,129 @@ describe('GitSourceService.apply', () => {
             }
         });
 
+        it('names the tracked deploy operation on the settled row when an auto-deploy succeeds', async () => {
+            const sha = 'b4'.repeat(20);
+            const svc = await seedPending('dispatch-deploy-correlation-ok', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-deploy-correlation-ok');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-deploy-correlation-ok')!.id;
+            const { ComposeService } = await import('../services/ComposeService');
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            // Compose returns the canonical operation id of the deploy it
+            // ran; the dispatch settlement must carry the exact same id so
+            // an operator reading the attempt's evidence lands on the
+            // deploy's own history rows, not a timestamp guess.
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue(
+                { recoveryId: null, deployedGenerationId: null, gitopsOperationId: 'deploy-op-success-correlation' },
+            );
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run('dispatch-deploy-correlation-ok');
+            const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(result).toEqual({ status: 'dispatched' });
+                const settled = settledAttemptsForApplication(applicationId);
+                expect(JSON.parse(settled[settled.length - 1]!.after_json!)).toMatchObject({
+                    deployGitopsOperationId: 'deploy-op-success-correlation',
+                });
+                // Producer half of the recovery contract: the dispatch's own
+                // reservation must carry the marker naming this generation, or
+                // startup recovery cannot tell this attempt from a plain
+                // reconcile and falls back to the projection that lies about
+                // interrupted promotions.
+                const dispatchOperationId = settled[settled.length - 1]!.operation_id;
+                const startedRow = DatabaseService.getInstance().getDb()
+                    .prepare("SELECT after_json FROM gitops_history WHERE application_id = ? AND operation_id = ? AND stage = 'source_reconcile_started'")
+                    .get(applicationId, dispatchOperationId) as { after_json: string };
+                expect(JSON.parse(startedRow.after_json)).toMatchObject({ dispatchGenerationId: generationId });
+            } finally {
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+                logSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
+        });
+
+        it('names the failed deploy operation on the settled row when Compose tracked the deploy', async () => {
+            const sha = 'b5'.repeat(20);
+            const svc = await seedPending('dispatch-deploy-correlation-fail', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-deploy-correlation-fail');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-deploy-correlation-fail')!.id;
+            const { ComposeService } = await import('../services/ComposeService');
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            // The failure arm's correlation rides on the error itself:
+            // ComposeService stamps a tracked deploy's operation id before
+            // rethrowing, and the dispatch caller reads it type-guarded.
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(
+                Object.assign(new Error('compose up failed: exited 1'), {
+                    gitopsDeployOperationId: 'deploy-op-failure-correlation',
+                }),
+            );
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run('dispatch-deploy-correlation-fail');
+            const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(result.status).toBe('blocked');
+                const settled = settledAttemptsForApplication(applicationId);
+                expect(JSON.parse(settled[settled.length - 1]!.after_json!)).toMatchObject({
+                    outcome: 'recovery_required',
+                    nextAction: 'view_target_results',
+                    deployGitopsOperationId: 'deploy-op-failure-correlation',
+                });
+            } finally {
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+                logSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
+        });
+
+        it('omits the deploy correlation from the settled row when the failed deploy was untracked', async () => {
+            const sha = 'ab'.repeat(20);
+            const svc = await seedPending('dispatch-deploy-correlation-untracked', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-deploy-correlation-untracked');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-deploy-correlation-untracked')!.id;
+            const { ComposeService } = await import('../services/ComposeService');
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            // A deploy that opened no GitOps operation (a stack with no live
+            // application identity at deploy time, or a failed tracking
+            // write) leaves the error unstamped; the settlement must then
+            // carry no id at all rather than a fabricated or stale one.
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack')
+                .mockRejectedValue(new Error('compose up failed: no tracked deploy'));
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run('dispatch-deploy-correlation-untracked');
+            const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(result.status).toBe('blocked');
+                const settled = settledAttemptsForApplication(applicationId);
+                const settledResult = JSON.parse(settled[settled.length - 1]!.after_json!) as Record<string, unknown>;
+                expect(settledResult.outcome).toBe('recovery_required');
+                expect('deployGitopsOperationId' in settledResult).toBe(false);
+            } finally {
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+                logSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
+        });
+
         /**
          * A guard refusal must settle the reserved attempt as blocked with
          * resolve_conflict (the files are untouched), reserve exactly one
@@ -5141,8 +5270,98 @@ describe('GitSourceService.apply', () => {
                 const row = JSON.parse(settled[settled.length - 1]!.after_json!);
                 expect(row.reason).not.toContain('sup3rs3cr3t');
                 expect(row.reason).toContain('***');
+                // The generic dispatch catch logs the error before anything
+                // downstream sees it, and it logs the stack, not just the
+                // message: the head line of this throw's stack repeats the
+                // credential-bearing message, so a log site that scrubbed the
+                // message alone would still leak through the stack.
+                const logged = errorSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
+                expect(logged).toContain('[GitSource] Dispatch of dispatch-scrub threw');
+                expect(logged).not.toContain('sup3rs3cr3t');
+                expect(logged).toContain('***');
             } finally {
                 readSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
+        });
+
+        it('scrubs credential-shaped text from the reservation-catch log before it reaches the server log', async () => {
+            const sha = 'a9'.repeat(20);
+            const svc = await seedPending('dispatch-reserve-log-scrub', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-reserve-log-scrub');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-reserve-log-scrub')!.id;
+            const startedBefore = historyOperationIds(applicationId, 'source_reconcile_started').length;
+            // Reservation failures are store or transport errors whose text
+            // can embed credential-bearing URLs the same way Git transport
+            // output does; this catch logs the stack directly, so it is
+            // another dispatch-path surface that must scrub before the
+            // server log (the generic dispatch catch has its own test
+            // above). Provider auth material also rides in header-shaped
+            // text: a Bearer PAT, a Basic blob, and a JWT triple must all
+            // come out redacted, not just URL userinfo.
+            const reserveSpy = vi.spyOn(GitOpsTransitions.prototype, 'allocateReconcileAttempt')
+                .mockImplementationOnce(() => {
+                    throw new Error(
+                        'GitOps store write failed via https://svc:sup3rs3cr3t@example.com/store '
+                        + 'with Authorization: Bearer ghp_realtokenvalue1 and Basic c3VwZXI6c2VjcmV0 '
+                        + 'and jwt headerpart1x.bodypart2y.sigpart3z',
+                    );
+                });
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringContaining('GitOps tracking is unavailable'),
+                });
+                expect(historyOperationIds(applicationId, 'source_reconcile_started')).toHaveLength(startedBefore);
+                const logged = errorSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
+                expect(logged).toContain('Failed to reserve a durable attempt');
+                expect(logged).not.toContain('sup3rs3cr3t');
+                expect(logged).not.toContain('ghp_realtokenvalue1');
+                expect(logged).not.toContain('c3VwZXI6c2VjcmV0');
+                expect(logged).not.toContain('bodypart2y');
+                expect(logged).toContain('***');
+            } finally {
+                reserveSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
+        });
+
+        it('scrubs credential-shaped text from the promotion-failure log before it reaches the server log', async () => {
+            const sha = 'aa'.repeat(20);
+            const svc = await seedPending('dispatch-promote-log-scrub', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-promote-log-scrub');
+            const generation = await acceptedGenerationById(generationId);
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            // A raw promote failure logs at the pipeline's own catch before
+            // the dispatch catch ever sees the rewrapped error, so it is a
+            // separate log surface from the generic dispatch catch: both the
+            // pipeline-site log and the generic dispatch-catch log must come
+            // out clean.
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration')
+                .mockRejectedValueOnce(new Error(
+                    "fatal: push rejected for 'https://x-access:sup3rs3cr3t@example.com/repo.git'",
+                ));
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(/push rejected/s),
+                });
+                const logged = errorSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
+                expect(logged).toContain('promotion failed for dispatch-promote-log-scrub');
+                expect(logged).toContain('Dispatch of dispatch-promote-log-scrub threw');
+                expect(logged).not.toContain('sup3rs3cr3t');
+                expect(logged).toContain('***');
+            } finally {
+                promoteSpy.mockRestore();
                 errorSpy.mockRestore();
             }
         });
@@ -5379,13 +5598,15 @@ describe('GitSourceService.apply', () => {
             }
         });
 
-        it('settles recovery_required when the promotion committed but the target binding write fails', async () => {
+        it('settles recovery_required and stops the deploy branch when the promotion committed but the target binding write fails', async () => {
             const sha = 'e8'.repeat(20);
             const svc = await seedPending('dispatch-bind-fails', 'services:\n  x:\n    image: alpine\n', sha);
             const generationId = acceptCandidate('dispatch-bind-fails');
             const generation = await acceptedGenerationById(generationId);
             const applicationId = liveApp('dispatch-bind-fails')!.id;
             const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const { HealthGateService } = await import('../services/HealthGateService');
             const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
             // recordGitOps turns a throwing transition into a false return,
             // so a rejected binding never reaches the catch below the
@@ -5394,6 +5615,19 @@ describe('GitSourceService.apply', () => {
             // the live files are rewritten either way.
             const targetSpy = vi.spyOn(GitOpsTransitions.prototype, 'targetApplied')
                 .mockImplementation(() => { throw new Error('simulated binding rejection'); });
+            // Auto-deploy is on: the bind rejection must halt the pipeline at
+            // the post-commit boundary, before the policy gate and Compose.
+            // A deploy of files the target pointer does not describe is the
+            // half-applied state this classification exists to prevent, so
+            // the "did not run" evidence matters more than the outcome row.
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack')
+                .mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+            const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack');
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run('dispatch-bind-fails');
+            mockInvalidateNodeCaches.mockClear();
+            mockTriggerPostDeployScan.mockClear();
             const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
             try {
@@ -5408,9 +5642,19 @@ describe('GitSourceService.apply', () => {
                     outcome: 'recovery_required',
                     nextAction: 'view_target_results',
                 });
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+                expect(targetSpy).toHaveBeenCalledTimes(1);
+                // Nothing past the bind ran: no deploy, no deploy GitOps
+                // history under this attempt, no health gate, no scan.
+                expect(deploySpy).not.toHaveBeenCalled();
+                expect(beginSpy).not.toHaveBeenCalled();
+                expect(mockTriggerPostDeployScan).not.toHaveBeenCalled();
+                expect(historyOperationIds(applicationId, 'deploy_started')).toHaveLength(0);
             } finally {
                 promoteSpy.mockRestore();
                 targetSpy.mockRestore();
+                deploySpy.mockRestore();
+                beginSpy.mockRestore();
                 errorSpy.mockRestore();
             }
         });
@@ -5447,11 +5691,12 @@ describe('GitSourceService.apply', () => {
             }
         });
 
-        it('promotes when the generation records no plan fingerprint to compare', async () => {
+        it('refuses promotion when the accepted generation records no plan fingerprint to compare', async () => {
             const sha = 'e4'.repeat(20);
             const svc = await seedPending('dispatch-null-fingerprint', 'services:\n  x:\n    image: alpine\n', sha);
             const generationId = acceptCandidate('dispatch-null-fingerprint');
             const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-null-fingerprint')!.id;
             // The recorded plan evidence must exist before it is erased, or
             // the test would prove nothing about the null branch.
             expect(GitOpsStore.getInstance().getGeneration(generationId)?.change_plan_fingerprint).not.toBeNull();
@@ -5459,18 +5704,37 @@ describe('GitSourceService.apply', () => {
                 .prepare('UPDATE gitops_generations SET change_plan_fingerprint = NULL WHERE id = ?')
                 .run(generationId);
             const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const { ComposeService } = await import('../services/ComposeService');
             const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack');
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run('dispatch-null-fingerprint');
 
             try {
                 const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
 
-                // A null stored fingerprint means "cannot compare", not
-                // "drifted": the candidate and plan checks still ran, so a
-                // generation that recorded no plan evidence still promotes.
-                expect(result).toEqual({ status: 'dispatched' });
-                expect(promoteSpy).toHaveBeenCalledTimes(1);
+                // A null stored fingerprint means "no evidence to compare",
+                // not "no drift": the fingerprint equality check is the only
+                // proof that the accepted change still describes the live
+                // target, so its absence fails closed. The source acceptance
+                // itself is not in doubt, so the refusal only asks the
+                // operator to fetch and accept again.
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(/records no change-plan evidence/i),
+                });
+                expect(promoteSpy).not.toHaveBeenCalled();
+                expect(deploySpy).not.toHaveBeenCalled();
+                const settled = settledAttemptsForApplication(applicationId);
+                expect(JSON.parse(settled[settled.length - 1]!.after_json!)).toMatchObject({
+                    outcome: 'blocked',
+                    nextAction: 'resolve_conflict',
+                });
+                expect(liveApp('dispatch-null-fingerprint')!.accepted_generation_id).toBe(generationId);
             } finally {
                 promoteSpy.mockRestore();
+                deploySpy.mockRestore();
             }
         });
 
@@ -5540,6 +5804,199 @@ describe('GitSourceService.apply', () => {
                 expect(promoteSpy).toHaveBeenCalledTimes(1);
             } finally {
                 promoteSpy.mockRestore();
+                settleSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
+        });
+
+        it('recovery settles a dispatch interrupted before the promotion as unknown with a retry, never re-promoting', async () => {
+            const sha = 'b1'.repeat(20);
+            const svc = await seedPending('dispatch-recover-pre-promote', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-recover-pre-promote');
+            const applicationId = liveApp('dispatch-recover-pre-promote')!.id;
+            // The crash point is a state, not a code path: the process died
+            // between the marked reservation and the promotion, leaving the
+            // marker as the only durable trace of the intended dispatch.
+            // Reserving directly reproduces that state without letting any
+            // promotion run first.
+            const { reserved } = GitOpsTransitions.getInstance()
+                .allocateReconcileAttempt(applicationId, 'tester', 'manual', Date.now(), undefined, generationId);
+            expect(reserved).toBe(true);
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration');
+
+            try {
+                await svc.recoverUnsettledReconcileAttempts();
+
+                const started = historyOperationIds(applicationId, 'source_reconcile_started');
+                const dispatchOp = started[started.length - 1]!;
+                const settled = settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp);
+                expect(settled).toHaveLength(1);
+                // Promotion is unproven and the generation is still the
+                // accepted one, so the truthful close is "did not complete,
+                // dispatch it again", not the derive projection's quiet
+                // no_source_change.
+                expect(JSON.parse(settled[0]!.after_json!)).toMatchObject({
+                    outcome: 'unknown',
+                    reason: expect.stringMatching(/Nothing was applied/i),
+                    nextAction: 'retry',
+                    commitSha: sha,
+                });
+                // Recovery closes attempts, it never resurrects work.
+                expect(promoteSpy).not.toHaveBeenCalled();
+                expect(liveApp('dispatch-recover-pre-promote')!.accepted_generation_id).toBe(generationId);
+                expect(GitOpsStore.getInstance()
+                    .getTarget(applicationId, await defaultNodeId())?.applied_generation_id).not.toBe(generationId);
+            } finally {
+                promoteSpy.mockRestore();
+            }
+        });
+
+        it('recovery settles a dispatch interrupted after the promotion but before its bind settlement as recovery_required', async () => {
+            const sha = 'b2'.repeat(20);
+            const svc = await seedPending('dispatch-recover-post-promote', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-recover-post-promote');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-recover-post-promote')!.id;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            // The bind rejection stops the pipeline at the post-commit
+            // boundary, and the settle its bindRejected arm attempts is the
+            // step the simulated crash takes away: the marked attempt stays
+            // open with the promotion's bookkeeping fully landed, which is
+            // exactly what startup recovery must read as recovery_required.
+            const targetSpy = vi.spyOn(GitOpsTransitions.prototype, 'targetApplied')
+                .mockImplementation(() => { throw new Error('simulated bind crash'); });
+            const settleSpy = vi.spyOn(GitOpsTransitions.prototype, 'settleReconcileAttempt')
+                .mockImplementationOnce(() => { throw new Error('simulated crash before settle'); });
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+            // The failed settle write must leave a trace outside the attempt
+            // row: recovery's bind-evidence arm re-derives the source facet,
+            // which cannot reconstruct this classification, so the result is
+            // mirrored into the activity feed as it is dropped.
+            const activitySpy = vi.spyOn(DatabaseService.getInstance(), 'addNotificationHistory');
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(/could not be bound/i),
+                });
+                expect(activitySpy.mock.calls.map((args) => args[1])).toContainEqual(
+                    expect.objectContaining({
+                        category: 'git_apply_failed',
+                        message: expect.stringContaining('could not be bound'),
+                    }),
+                );
+                const started = historyOperationIds(applicationId, 'source_reconcile_started');
+                const dispatchOp = started[started.length - 1]!;
+                expect(settledAttemptsForApplication(applicationId)
+                    .some((row) => row.operation_id === dispatchOp)).toBe(false);
+
+                await svc.recoverUnsettledReconcileAttempts();
+
+                const settled = settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp);
+                expect(settled).toHaveLength(1);
+                expect(JSON.parse(settled[0]!.after_json!)).toMatchObject({
+                    outcome: 'recovery_required',
+                    reason: expect.stringMatching(/could not be bound/i),
+                    nextAction: 'view_target_results',
+                    commitSha: sha,
+                });
+                // One promotion across the whole interrupted-then-recovered
+                // lifecycle: recovery settles from evidence, never re-applies.
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+
+                await svc.recoverUnsettledReconcileAttempts();
+                expect(settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp)).toHaveLength(1);
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+            } finally {
+                promoteSpy.mockRestore();
+                targetSpy.mockRestore();
+                settleSpy.mockRestore();
+                errorSpy.mockRestore();
+                activitySpy.mockRestore();
+            }
+        });
+
+        it('derives from the plain source projection for an unmarked reservation, applying dispatch-stage logic only to marked attempts', async () => {
+            const sha = 'b3'.repeat(20);
+            const svc = await seedPending('recover-legacy-unmarked', 'services:\n  x:\n    image: alpine\n', sha);
+            acceptCandidate('recover-legacy-unmarked');
+            const applicationId = liveApp('recover-legacy-unmarked')!.id;
+            // The suspended source makes the derive answer unambiguous: a
+            // marked dispatch attempt interrupted on this same state would
+            // instead settle unknown/"Nothing was applied", so which shape
+            // the settled row takes proves which path ran. An older build's
+            // reservation carries no marker, and recovery must not guess a
+            // pipeline stage it cannot evidence.
+            await svc.suspend('recover-legacy-unmarked', { actor: 'tester', reason: 'recovery pass' });
+            const { reserved } = GitOpsTransitions.getInstance()
+                .allocateReconcileAttempt(applicationId, 'tester', 'manual', Date.now());
+            expect(reserved).toBe(true);
+
+            await svc.recoverUnsettledReconcileAttempts();
+
+            const started = historyOperationIds(applicationId, 'source_reconcile_started');
+            const legacyOp = started[started.length - 1]!;
+            const settled = settledAttemptsForApplication(applicationId)
+                .filter((row) => row.operation_id === legacyOp);
+            expect(settled).toHaveLength(1);
+            const result = JSON.parse(settled[0]!.after_json!);
+            expect(result).toMatchObject({ outcome: 'suspended' });
+            expect(result.reason).not.toMatch(/Nothing was applied|could not be bound/i);
+        });
+
+        it('recovery still proves the promotion from the plan record when the applied commit mark is gone', async () => {
+            const sha = 'b8'.repeat(20);
+            const svc = await seedPending('dispatch-recover-plan-disjunct', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-recover-plan-disjunct');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-recover-plan-disjunct')!.id;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            const targetSpy = vi.spyOn(GitOpsTransitions.prototype, 'targetApplied')
+                .mockImplementation(() => { throw new Error('simulated bind crash'); });
+            const settleSpy = vi.spyOn(GitOpsTransitions.prototype, 'settleReconcileAttempt')
+                .mockImplementationOnce(() => { throw new Error('simulated crash before settle'); });
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(result.status).toBe('blocked');
+
+                // The post-commit recovery_required classification has two
+                // independent proofs: the applied commit mark, or the last
+                // plan record for this exact fingerprint. The main
+                // post-promote recovery test exercises the mark; wiping it
+                // (a state later lifecycle paths do reach, e.g. a source
+                // reconfigure nulls it while the plan record stands) pins
+                // the second disjunct on its own.
+                DatabaseService.getInstance().getDb()
+                    .prepare('UPDATE stack_git_sources SET last_applied_commit_sha = NULL WHERE stack_name = ?')
+                    .run('dispatch-recover-plan-disjunct');
+                const fingerprint = GitOpsStore.getInstance().getGeneration(generationId)!.change_plan_fingerprint;
+                expect(DatabaseService.getInstance().getGitSource('dispatch-recover-plan-disjunct')!.last_plan_fingerprint)
+                    .toBe(fingerprint);
+
+                await svc.recoverUnsettledReconcileAttempts();
+
+                const started = historyOperationIds(applicationId, 'source_reconcile_started');
+                const dispatchOp = started[started.length - 1]!;
+                const settled = settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp);
+                expect(settled).toHaveLength(1);
+                expect(JSON.parse(settled[0]!.after_json!)).toMatchObject({
+                    outcome: 'recovery_required',
+                    reason: expect.stringMatching(/could not be bound/i),
+                    nextAction: 'view_target_results',
+                });
+            } finally {
+                promoteSpy.mockRestore();
+                targetSpy.mockRestore();
                 settleSpy.mockRestore();
                 errorSpy.mockRestore();
             }

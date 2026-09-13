@@ -255,16 +255,22 @@ describe('SourceController automatic acceptance', () => {
             && String(args[0]).includes('no longer matches'))).toBe(true);
     });
 
-    it('logs the manual remedy when the dispatch fails before reserving an attempt', async () => {
+    it('logs the manual remedy, without the credential, when the dispatch fails before reserving an attempt', async () => {
         stageCandidate('app-dispatch-throw', 'dispatch-throw-web', 'gen-dispatch-throw');
         mockDue([armDuePoll('app-dispatch-throw')]);
         evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
         spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
         // A throw means nothing was reserved, so no row exists and the next
         // tick will not retry: the log is the only evidence, and it must say
-        // what stands (the acceptance) and what the operator must do.
+        // what stands (the acceptance) and what the operator must do. The
+        // error text emulates a transport failure embedding a credential,
+        // which the handler must redact before the stack reaches the server
+        // log: this line is the only record that will ever exist.
         const dispatch = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
-            .mockRejectedValue(new Error('simulated pre-reservation store failure'));
+            .mockRejectedValue(Object.assign(
+                new Error("fatal: cannot reach 'https://user:sup3rs3cr3t@example.com/repo.git/'"),
+                { stack: "Error: fatal: cannot reach 'https://user:sup3rs3cr3t@example.com/repo.git/'\n    at dispatchAcceptedGeneration (test)" },
+            ));
         const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
         controller.start();
@@ -272,8 +278,14 @@ describe('SourceController automatic acceptance', () => {
 
         expect(dispatch).toHaveBeenCalledTimes(1);
         expect(getApp('app-dispatch-throw').accepted_generation_id).toBe('gen-dispatch-throw');
-        expect(errorSpy.mock.calls.some((args) => String(args[0]).includes('[SourceController] automatic dispatch failed for app-dispatch-throw before reserving an attempt')
-            && String(args[0]).includes('dispatch it manually'))).toBe(true);
+        const calls = errorSpy.mock.calls.filter((args) => String(args[0]).includes('[SourceController] automatic dispatch failed for app-dispatch-throw before reserving an attempt'));
+        expect(calls.some((args) => String(args[0]).includes('dispatch it manually'))).toBe(true);
+        // The scrubbed error is the second argument, and neither the message
+        // nor the stack may carry the credential through to the server log.
+        expect(calls).toHaveLength(1);
+        const loggedError = String(calls[0]![1]);
+        expect(loggedError).not.toContain('sup3rs3cr3t');
+        expect(loggedError).toContain('[redacted]');
     });
 
     it('holds a blocked candidate for review without accepting it', async () => {

@@ -5,7 +5,7 @@
  * into the same result.
  */
 import { describe, it, expect } from 'vitest';
-import { outcomeFromSourceFacet } from '../services/gitops/outcomes';
+import { outcomeFromSourceFacet, parseReconcileResultPayload } from '../services/gitops/outcomes';
 import type { SourceFacet } from '../services/gitops/types';
 
 const identity = {
@@ -156,5 +156,27 @@ describe('outcomeFromSourceFacet', () => {
   it('reports unknown while an operation is in flight (applying)', () => {
     const facet: SourceFacet = { ...identity, status: 'applying', activeOperationId: 'op-1', activeGenerationId: 'gen-1' };
     expect(outcomeFromSourceFacet(facet).outcome).toBe('unknown');
+  });
+});
+
+describe('parseReconcileResultPayload', () => {
+  it('round-trips the deploy correlation and drops it when stored as a non-string', () => {
+    const base = { outcome: 'recovery_required', reason: 'deploy failed', nextAction: 'view_target_results' };
+    expect(parseReconcileResultPayload({ ...base, deployGitopsOperationId: 'deploy-op-1' }))
+      .toMatchObject({ deployGitopsOperationId: 'deploy-op-1' });
+    // A corrupt or hand-edited history row must not smuggle a non-string
+    // correlation into the recovery read path.
+    const corrupt = parseReconcileResultPayload({ ...base, deployGitopsOperationId: 42 });
+    expect(corrupt?.outcome).toBe('recovery_required');
+    expect('deployGitopsOperationId' in (corrupt ?? {})).toBe(false);
+  });
+
+  it('returns null unless the three required fields hold, and drops unknown keys', () => {
+    expect(parseReconcileResultPayload({ outcome: 'converged', reason: 'x' })).toBeNull();
+    expect(parseReconcileResultPayload('not a record')).toBeNull();
+    const parsed = parseReconcileResultPayload({
+      outcome: 'converged', reason: 'x', nextAction: 'none', unrelated: 'drop me',
+    });
+    expect(parsed).toEqual({ outcome: 'converged', reason: 'x', nextAction: 'none' });
   });
 });
