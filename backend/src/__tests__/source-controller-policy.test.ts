@@ -54,6 +54,14 @@ function spyOnReconcile() {
     return vi.spyOn(GitSourceService.getInstance(), 'reconcile');
 }
 
+/** Stub the shared dispatch boundary so an accepted candidate never runs a
+ *  real promotion against these fixtures; acceptance tests assert the handoff,
+ *  and dispatch's own behavior is covered in git-source-service.test.ts. */
+function spyOnDispatch() {
+    return vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
+        .mockResolvedValue({ status: 'dispatched' });
+}
+
 async function advanceOneTick(): Promise<void> {
     await vi.advanceTimersByTimeAsync(TICK_MS);
 }
@@ -194,8 +202,8 @@ describe('SourceController automatic acceptance', () => {
         mockDue([armDuePoll('app-accept')]);
         evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
         const reconcile = spyOnReconcile()
-            .mockResolvedValueOnce({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' })
-            .mockResolvedValueOnce(okResult);
+            .mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        const dispatch = spyOnDispatch();
 
         controller.start();
         await advanceOneTick();
@@ -209,16 +217,21 @@ describe('SourceController automatic acceptance', () => {
             expect.any(Array),
             expect.objectContaining({ actor: 'system:source-controller', bypass: false }),
         );
-        expect(reconcile).toHaveBeenLastCalledWith(expect.objectContaining({
-            intent: 'apply',
-            applicationId: 'app-accept',
-            stackName: 'accept-web',
-            trigger: 'poll',
-            actor: 'system:source-controller',
-            commitSha: 'c'.repeat(40),
-            planFingerprint: 'f'.repeat(64),
-            deploy: false,
-        }));
+        // The apply is no longer a fused reconcile: the accepted generation
+        // travels through the shared dispatch boundary with the generation's
+        // own contract, a direct-mode context, and the poll trigger.
+        expect(reconcile).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledWith(
+            expect.objectContaining({
+                generationId: 'gen-accept',
+                applicationId: 'app-accept',
+                commitSha: 'c'.repeat(40),
+                changePlanFingerprint: 'f'.repeat(64),
+            }),
+            expect.objectContaining({ targetMode: 'direct', bindingRevision: null }),
+            { trigger: 'poll', actor: 'system:source-controller' },
+        );
     });
 
     it('holds a blocked candidate for review without accepting it', async () => {
@@ -400,6 +413,10 @@ describe('SourceController automatic acceptance', () => {
             policy: policyRow(),
         });
         spyOnReconcile().mockResolvedValue(okResult);
+        // The apply leg is this test's only side effect on the generation row
+        // path; stubbing it keeps the assertion about acceptance evidence,
+        // not dispatch.
+        spyOnDispatch();
         const before = { ...GitOpsStore.getInstance().getGeneration('gen-evidence')! };
 
         controller.start();
