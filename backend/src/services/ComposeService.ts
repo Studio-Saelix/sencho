@@ -82,6 +82,13 @@ export class ComposeRollbackError extends Error {
   public readonly rollbackAttempted: boolean;
   public readonly rolledBack: boolean;
   public readonly originalError: unknown;
+  /**
+   * Canonical GitOps deploy operation id of the failed deploy, stamped by
+   * ComposeService's deploy catch before this error is rethrown. Mutable
+   * because the id is only known at the failure site, after construction.
+   * Absent when the deploy was untracked (no GitOps operation opened).
+   */
+  public gitopsDeployOperationId?: string;
 
   constructor(originalError: unknown, rollbackAttempted: boolean, rolledBack: boolean) {
     super(getErrorMessage(originalError, 'Compose operation failed'));
@@ -156,6 +163,26 @@ function getComposeStallTimeoutMs(): number {
  * claim a workload nobody launched.
  */
 export type ComposeMutationResult = { mutatedByCompose: true };
+
+/**
+ * The GitOps deploy tracking handle beginGitOpsDeploy opens: the generation
+ * the deploy records against, the canonical operation id every write of that
+ * operation shares (and that a failed deploy stamps on its error), and the
+ * two terminal closures. Exported as a type only, so the mutation methods
+ * and the stamping tests share one shape instead of mirroring it.
+ */
+export type GitOpsDeployHandle = {
+  generationId: string;
+  /**
+   * The canonical operation id of the GitOps deploy this call opened. Every
+   * write of this operation (start, binding, failure) shares it, and callers
+   * that surface their own evidence of the deploy (the apply log line, the
+   * GitApplyResult) carry it so the two records can be matched by id.
+   */
+  gitopsOperationId: string;
+  bound: () => void;
+  failed: (failureClass: 'pre_mutation' | 'post_mutation') => void;
+};
 
 export class ComposeService {
   private baseDir: string;
@@ -773,18 +800,7 @@ export class ComposeService {
    * thing is a no-op. Recording never fails the deploy: the store describes
    * what happened, it does not make it happen.
    */
-  private beginGitOpsDeploy(stackName: string): {
-    generationId: string;
-    /**
-     * The canonical operation id of the GitOps deploy this call opened. Every
-     * write of this operation (start, binding, failure) shares it, and callers
-     * that surface their own evidence of the deploy (the apply log line, the
-     * GitApplyResult) carry it so the two records can be matched by id.
-     */
-    gitopsOperationId: string;
-    bound: () => void;
-    failed: (failureClass: 'pre_mutation' | 'post_mutation') => void;
-  } | null {
+  private beginGitOpsDeploy(stackName: string): GitOpsDeployHandle | null {
     try {
       const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
       if (!app || app.lifecycle_status !== 'active') return null;
@@ -826,6 +842,22 @@ export class ComposeService {
         error instanceof Error ? error.message : String(error),
       );
       return null;
+    }
+  }
+
+  /**
+   * Name the GitOps deploy operation a failed deploy belongs to on the
+   * error that leaves the mutation method, so a caller settling its own
+   * durable evidence (Git dispatch's reconcile attempt) can correlate the
+   * failure to the exact deploy record instead of guessing by timestamp.
+   * Guarded because `catch` holds `unknown`: a thrown primitive would
+   * make the property assignment itself throw, replacing the original
+   * deploy failure inside its own catch block. An untracked deploy (no
+   * handle) never calls this, which the caller reads as "no id exists".
+   */
+  private stampGitOpsDeployId(err: unknown, gitopsOperationId: string): void {
+    if (typeof err === 'object' && err !== null) {
+      (err as { gitopsDeployOperationId?: string }).gitopsDeployOperationId = gitopsOperationId;
     }
   }
 
@@ -934,6 +966,12 @@ export class ComposeService {
       // Classified by whether Compose was handed the mutation. Only a failure
       // before that leaves the previous workload provably intact.
       gitopsDeploy?.failed(composeHandedOff ? 'post_mutation' : 'pre_mutation');
+      // Name the GitOps deploy operation this failure belongs to on the
+      // error that leaves this method; both rethrow arms carry it (see
+      // stampGitOpsDeployId).
+      if (gitopsDeploy) {
+        this.stampGitOpsDeployId(deployError, gitopsDeploy.gitopsOperationId);
+      }
       if (atomic && recoverySvc && handedOff && recoveryId) {
         sendOutput('\n=== Deployment failed - restoring previous runtime from recovery generation ===\n');
         const generationId = recoveryId;
@@ -948,7 +986,11 @@ export class ComposeService {
             ),
           ),
         );
-        throw new ComposeRollbackError(deployError, true, rolledBack);
+        const wrapped = new ComposeRollbackError(deployError, true, rolledBack);
+        if (gitopsDeploy) {
+          wrapped.gitopsDeployOperationId = gitopsDeploy.gitopsOperationId;
+        }
+        throw wrapped;
       }
       if (atomic && recoverySvc && recoveryId && !handedOff) {
         await recoverySvc.abandon(recoveryId);
@@ -1477,6 +1519,12 @@ export class ComposeService {
       gitopsDeploy?.bound();
     } catch (updateError) {
       gitopsDeploy?.failed(composeHandedOff ? 'post_mutation' : 'pre_mutation');
+      // Mirrors the deployStack stamp so any caller correlating a failed
+      // deploy to its GitOps record reads the id off the thrown error,
+      // whichever mutation seam it came through.
+      if (gitopsDeploy) {
+        this.stampGitOpsDeployId(updateError, gitopsDeploy.gitopsOperationId);
+      }
       if (!handedOff && recoveryId) {
         await recoverySvc.abandon(recoveryId);
         recoveryId = null;
@@ -1495,7 +1543,11 @@ export class ComposeService {
             ),
           ),
         );
-        throw new ComposeRollbackError(updateError, true, rolledBack);
+        const wrapped = new ComposeRollbackError(updateError, true, rolledBack);
+        if (gitopsDeploy) {
+          wrapped.gitopsDeployOperationId = gitopsDeploy.gitopsOperationId;
+        }
+        throw wrapped;
       }
       // Pre-handoff failure: abandon already handled on acquire/classify; runtime untouched.
       throw updateError;

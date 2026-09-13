@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import { DatabaseService } from '../DatabaseService';
-import type { GitOpsHistoryCursor } from './history';
+import type { GitOpsHistoryCursor, GitOpsHistoryStage } from './history';
 import {
   decodeArtifactEvidenceJson,
   decodeGitOpsApprovedTargetEffectJson,
@@ -309,6 +309,20 @@ export class GitOpsStore {
        WHERE application_id = ? AND operation_id = ? AND stage = 'source_reconcile_started'
        LIMIT 1`,
     ).get(applicationId, operationId) as GitOpsHistoryRow | undefined;
+  }
+
+  /**
+   * Whether one stage row exists under an exact operation id. Startup
+   * recovery of an interrupted dispatch reads the bind this attempt
+   * recorded (or failed to record) under its own id, so a bind from some
+   * earlier operation can never be mistaken for this one's.
+   */
+  hasStageRowForAttempt(applicationId: string, operationId: string, stage: GitOpsHistoryStage): boolean {
+    return this.db().prepare(
+      `SELECT 1 FROM gitops_history
+       WHERE application_id = ? AND operation_id = ? AND stage = ?
+       LIMIT 1`,
+    ).get(applicationId, operationId, stage) !== undefined;
   }
 
   /**

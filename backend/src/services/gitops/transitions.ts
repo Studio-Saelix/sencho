@@ -1,5 +1,6 @@
 import type { RefKind } from '../git/types';
 import type { GitSourceErrorCode } from '../GitSourceService';
+import type { ReconcileResult } from './outcomes';
 import { DatabaseService } from '../DatabaseService';
 import {
   decodeArtifactEvidenceJson,
@@ -990,6 +991,12 @@ export class GitOpsTransitions {
    * thing here that is not a bare history insert, since a fresh id has to
    * come from somewhere durable. Only the allocated id's uniqueness is
    * load-bearing; its embedded sequence number is for traceability.
+   *
+   * `dispatchGenerationId` marks the reservation as an accepted-generation
+   * dispatch and names the generation it promotes. Recovery reads the
+   * marker to settle an interrupted dispatch against pipeline-stage
+   * evidence instead of the plain source-facet projection, which cannot
+   * tell "never promoted" from "promoted but never settled".
    */
   allocateReconcileAttempt(
     applicationId: string,
@@ -997,6 +1004,7 @@ export class GitOpsTransitions {
     trigger: string,
     at: number,
     followerOf?: string,
+    dispatchGenerationId?: string,
   ): { operationId: string; reserved: boolean } {
     return this.raw().transaction(() => {
       const app = this.requireApp(applicationId);
@@ -1004,7 +1012,10 @@ export class GitOpsTransitions {
       this.raw().prepare('UPDATE gitops_applications SET attempt_seq = ? WHERE id = ?').run(seq, applicationId);
       const operationId = `${applicationId}:attempt:${seq}`;
       const envelope: EventEnvelope = { operationId, actor, trigger, at };
-      return { operationId, reserved: this.insertReconcileReservation(app, envelope, followerOf) };
+      return {
+        operationId,
+        reserved: this.insertReconcileReservation(app, envelope, followerOf, undefined, dispatchGenerationId),
+      };
     })();
   }
 
@@ -1019,6 +1030,7 @@ export class GitOpsTransitions {
     envelope: EventEnvelope,
     followerOf: string | undefined,
     deliveryIntent?: ReconcileDeliveryIntent,
+    dispatchGenerationId?: string,
   ): boolean {
     return this.history(app, envelope, {
       stage: 'source_reconcile_started',
@@ -1027,6 +1039,7 @@ export class GitOpsTransitions {
       after: {
         ...(followerOf ? { followerOf } : {}),
         ...(deliveryIntent ? { deliveryIntent } : {}),
+        ...(dispatchGenerationId ? { dispatchGenerationId } : {}),
       },
     }) !== null;
   }
@@ -1040,7 +1053,7 @@ export class GitOpsTransitions {
   settleReconcileAttempt(
     applicationId: string,
     envelope: EventEnvelope,
-    result: { outcome: string; reason: string; nextAction: string; retryAt?: number; commitSha?: string },
+    result: ReconcileResult,
   ): { settled: boolean } {
     return this.raw().transaction(() => {
       const app = this.requireApp(applicationId);

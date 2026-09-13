@@ -15,7 +15,7 @@ import { NodeRegistry } from '../NodeRegistry';
 import { gitSourceLocalComposeFiles } from '../../utils/gitComposeFiles';
 import { extractImagesFromCompose, loadDotEnv } from '../ImageUpdateService';
 import type { ReconcileOutcome } from './outcomes';
-import { sanitizeForLog } from '../../utils/safeLog';
+import { redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
 
 /** Outcomes that mean the tick accomplished its work and the source may sleep again. */
 const SUCCESS_SHAPED_OUTCOMES: ReadonlySet<ReconcileOutcome> = new Set<ReconcileOutcome>([
@@ -401,10 +401,12 @@ export class SourceController {
             // Reaching here means nothing was reserved, so no durable row
             // exists and the next tick will not retry (the acceptance cleared
             // the candidate pointer). The log is the only evidence: say what
-            // stands and what the operator must do.
+            // stands and what the operator must do. Scrub the whole stack:
+            // dispatch throws can carry credential-shaped transport text, and
+            // nothing downstream redacts what lands in the server log.
             console.error(
                 `[SourceController] automatic dispatch failed for ${sanitizeForLog(app.id)} before reserving an attempt. The generation remains accepted and will not auto-apply; dispatch it manually:`,
-                e instanceof Error ? e.stack ?? e.message : String(e),
+                redactSensitiveText(e instanceof Error ? e.stack ?? e.message : String(e)),
             );
         }
     }

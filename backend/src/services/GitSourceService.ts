@@ -36,7 +36,7 @@ import { validateCaBundlePem } from './git/caBundle';
 import { GitOpsStore } from './gitops/store';
 import type { GitOpsHistoryCursor } from './gitops/history';
 import { projectApplication } from './gitops/derive';
-import { outcomeFromSourceFacet, isNextAction, isReconcileOutcome, type ReconcileOutcome, type ReconcileResult } from './gitops/outcomes';
+import { outcomeFromSourceFacet, parseReconcileResultPayload, type ReconcileOutcome, type ReconcileResult } from './gitops/outcomes';
 import { coalesceKey, deliveryKey, type ReconcileRequest, type ReconcileTrigger } from './gitops/triggers';
 import { classifyFailure, effectivePollIntervalSecs } from './gitops/backoff';
 import { BlueprintTargetAdapter, type AcceptedGeneration, type DispatchContext, type DispatchResult } from './gitops/handoff';
@@ -323,16 +323,31 @@ type GitApplyResult = {
     deployError?: string;
     recoveryId?: string;
     /**
+     * Set when the caller's post-promotion hook rejected and stopped the
+     * pipeline before the deploy branch opened. Exclusive with the
+     * deploy-arm fields (`deployError`, `gitopsOperationId`,
+     * `deployGitopsOperationId`): nothing past the hook ran. `recoveryId`
+     * still rides along; the promotion's rollback capture is independent of
+     * the bind rejection.
+     */
+    bindRejected?: true;
+    /**
      * Canonical GitOps deploy operation id (ComposeService's beginGitOpsDeploy
      * identity), not this method's own apply/dispatch operation id. A string
      * means a tracked deploy succeeded; null means the deploy succeeded but
      * was untracked (no GitOps identity, or the tracking write failed); absent
      * means this result did not come from a completed deploy. On the
-     * deploy-failed path the deploy's operation id exists in gitops_history
-     * but no result object carried it back, so absence does not mean no deploy
-     * was attempted.
+     * deploy-failed path the id is carried on `deployGitopsOperationId`
+     * instead, since a thrown deploy never builds a success result.
      */
     gitopsOperationId?: string | null;
+    /**
+     * The failed deploy's canonical GitOps operation id when the deploy
+     * branch ran and Compose threw after opening its GitOps operation.
+     * Absent on every other arm, and on a failed deploy whose operation
+     * was never opened (an untracked deploy).
+     */
+    deployGitopsOperationId?: string;
 };
 
 type WorkOutcome<T> =
@@ -397,16 +412,32 @@ function formatBytes(bytes: number): string {
 
 /**
  * Remove any inline credentials and Authorization headers from an error
- * message before it lands in a log or an API response. Git errors tend to
- * include the fetch URL; if a PAT ever leaks into a URL (we never send one,
- * but be defensive), strip it here.
+ * message before it lands in a log or an API response. Covers URL userinfo
+ * (we never send a PAT in a URL, but be defensive), `Bearer`/`Basic` header
+ * values, and JWT-shaped triples, because provider transport failures embed
+ * all three. The `***` marker is what the dispatch tests assert on.
  */
 function scrubCredentials(message: string): string {
     return message
         .replace(/https?:\/\/[^/\s:@]+:[^/\s@]+@/gi, 'https://***:***@')
+        .replace(/bearer\s+[a-z0-9\-._~+/=]+/gi, 'Bearer ***')
+        .replace(/basic\s+[a-z0-9+/=]+/gi, 'Basic ***')
+        .replace(/[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}/gi, '***')
         .replace(/(authorization[:=]\s*)[^\s,;]+/gi, '$1***')
         .replace(/(token[:=]\s*)[^\s,;]+/gi, '$1***')
         .replace(/(password[:=]\s*)[^\s,;]+/gi, '$1***');
+}
+
+/**
+ * The log-safe form of a thrown value: stack kept for debugging, inline
+ * credentials removed. Git errors embed the fetch URL and provider
+ * headers can appear in transport failure text, and a stack is written to
+ * the server log before any settlement-time scrub reaches it. The main
+ * dispatch-path throw sites log through here; sites that log a bare
+ * message instead scrub it with scrubCredentials directly.
+ */
+function errorForLog(e: unknown): string {
+    return scrubCredentials(e instanceof Error ? e.stack ?? e.message : String(e));
 }
 
 /**
@@ -2115,7 +2146,7 @@ export class GitSourceService {
         } catch (error) {
             console.error(
                 `[GitOps] Could not record ${what} for ${sanitizeForLog(stackName)}:`,
-                error instanceof Error ? error.stack ?? error.message : String(error),
+                errorForLog(error),
             );
             return false;
         }
@@ -2794,7 +2825,14 @@ export class GitSourceService {
      * result (up to and including a real fetch or apply that already
      * touched the filesystem) into a thrown error for the caller. The
      * attempt is left unsettled on this path, which is exactly the signal
-     * startup recovery looks for, so nothing here is lost, only deferred.
+     * startup recovery looks for. The deferral is lossless for refusals
+     * (pre-bind, guard, revalidation): recovery re-derives the same
+     * classification from source state. It is not lossless past the bind,
+     * where the deploy outcome lives only in this result: recovery's
+     * bind-evidence arm projects the source facet (which reads converged
+     * after a completed promotion), so the caller must mirror any failed
+     * post-bind settle into the activity feed rather than rely on the
+     * attempt row alone.
      */
     private settleAttempt(applicationId: string, envelope: EventEnvelope, result: ReconcileResult): boolean {
         try {
@@ -2809,6 +2847,33 @@ export class GitSourceService {
             );
             return false;
         }
+    }
+
+    /**
+     * Settle a post-commit dispatch result (bind rejection, failed deploy,
+     * or a throw past the promotion boundary). If the durable write fails,
+     * startup recovery's bind-evidence arm re-derives the source facet,
+     * which does not reconstruct a recovery_required classification, so the
+     * result must not rest on the attempt row alone: mirror it into the
+     * activity feed, which the operator timeline already renders.
+     */
+    private settlePostCommitAttempt(
+        stackName: string,
+        actor: string,
+        applicationId: string,
+        envelope: EventEnvelope,
+        result: ReconcileResult,
+    ): void {
+        if (this.settleAttempt(applicationId, envelope, result)) {
+            return;
+        }
+        this.recordGitActivity(
+            stackName,
+            'git_apply_failed',
+            `Dispatch settlement failed for ${stackName}: ${result.reason}`,
+            actor,
+            'error',
+        );
     }
 
     /**
@@ -2928,6 +2993,80 @@ export class GitSourceService {
         return this.deriveReconcileResult(app.stack_name);
     }
 
+    /**
+     * Startup settlement for a dispatch attempt that reserved but never
+     * settled: which pipeline stages left durable evidence decides what is
+     * truthful. The plain source projection cannot tell "accepted but never
+     * promoted" from "promoted, files on disk, bind never ran"; both project
+     * as no_source_change, and the second one is a lie about the target.
+     *
+     * Three evidence states, in order of how far the attempt got:
+     *  - this operation's own `target_applied` row (or a target row already
+     *    naming this generation from an earlier operation): the bind
+     *    happened, only the settle is missing. The source projection is
+     *    then truthful; the deploy stage has its own operation envelope and
+     *    its own startup interruption settlement, so it is never inferred
+     *    from this attempt's history.
+     *  - no bind, but the promotion's post-commit bookkeeping landed (the
+     *    applied mark, or the last-plan 'applied' record for this exact
+     *    plan fingerprint): recovery_required with view-target-results, the
+     *    same classification the live bind-rejection path applies. The
+     *    promotion's completion bookkeeping ran, so the live files hold the
+     *    accepted generation while the target pointer still names the
+     *    previous one; the bind is the missing step, not the write.
+     *  - neither: promotion is unproven, so nothing is claimed about the
+     *    files. While this generation is still the accepted one the honest
+     *    settlement is that the dispatch did not complete and can be
+     *    retried; if acceptance has moved on since, the source projection
+     *    describes the new state truthfully.
+     */
+    private dispatchStageResult(applicationId: string, operationId: string, generationId: string): ReconcileResult {
+        const store = GitOpsStore.getInstance();
+        const app = store.getApplication(applicationId);
+        if (!app?.stack_name) return GitSourceService.noApplicationResult();
+        if (store.getLiveDirectApplication(app.stack_name)?.id !== applicationId) {
+            return GitSourceService.staleApplicationResult();
+        }
+        const genRow = store.getGeneration(generationId);
+        if (!genRow) {
+            return {
+                outcome: 'unknown',
+                reason: 'The generation this dispatch was interrupted on can no longer be read.',
+                nextAction: 'none',
+            };
+        }
+        const target = store.getTarget(applicationId, NodeRegistry.getInstance().getDefaultNodeId());
+        const bindRecorded = store.hasStageRowForAttempt(applicationId, operationId, 'target_applied')
+            || target?.applied_generation_id === generationId;
+        if (bindRecorded) {
+            return this.deriveReconcileResult(app.stack_name);
+        }
+        const src = DatabaseService.getInstance().getGitSource(app.stack_name);
+        const promotionCommitted = !!src && (
+            src.last_applied_commit_sha === genRow.commit_sha
+            || (genRow.change_plan_fingerprint !== null
+                && src.last_plan_outcome === 'applied'
+                && src.last_plan_fingerprint === genRow.change_plan_fingerprint)
+        );
+        if (promotionCommitted) {
+            return {
+                outcome: 'recovery_required',
+                reason: 'The promotion committed, but the Direct target could not be bound to the accepted generation.',
+                nextAction: 'view_target_results',
+                commitSha: genRow.commit_sha,
+            };
+        }
+        if (app.accepted_generation_id === generationId) {
+            return {
+                outcome: 'unknown',
+                reason: 'The dispatch was interrupted before the accepted generation was promoted. Nothing was applied; dispatch it again.',
+                nextAction: 'retry',
+                commitSha: genRow.commit_sha,
+            };
+        }
+        return this.deriveReconcileResult(app.stack_name);
+    }
+
     /** The follower-link operation id recorded on a reservation, if any. */
     private static followerOfFromRow(row: GitOpsHistoryRow): string | undefined {
         const decoded = decodeGitOpsJson(row.after_json);
@@ -2937,6 +3076,24 @@ export class GitSourceService {
             throw new GitOpsJsonError('reserved attempt followerOf must be a string');
         }
         return decoded.followerOf;
+    }
+
+    /**
+     * The generation id recorded on a dispatch reservation, if this
+     * reservation is one. Dispatch is currently the only producer that
+     * writes this field, so its presence marks the attempt as an
+     * accepted-generation dispatch whose interrupted settlement needs
+     * pipeline-stage evidence (see dispatchStageResult) rather than the
+     * plain source projection.
+     */
+    private static dispatchGenerationIdFromStartedAttempt(row: GitOpsHistoryRow): string | undefined {
+        const decoded = decodeGitOpsJson(row.after_json);
+        if (!isRecord(decoded)) throw new GitOpsJsonError('reserved attempt metadata must be an object');
+        if (!('dispatchGenerationId' in decoded)) return undefined;
+        if (typeof decoded.dispatchGenerationId !== 'string') {
+            throw new GitOpsJsonError('reserved attempt dispatchGenerationId must be a string');
+        }
+        return decoded.dispatchGenerationId;
     }
 
     private static deliveryIntentFromStartedAttempt(row: GitOpsHistoryRow): ReconcileDeliveryIntent {
@@ -3007,23 +3164,12 @@ export class GitSourceService {
             console.error(`[GitSource] settled attempt ${sanitizeForLog(row.operation_id)} is not decodable JSON: ${e.message}`);
             return unreadable;
         }
-        if (
-            !isRecord(decoded)
-            || !isReconcileOutcome(decoded.outcome)
-            || typeof decoded.reason !== 'string'
-            || !isNextAction(decoded.nextAction)
-        ) {
+        const result = parseReconcileResultPayload(decoded);
+        if (!result) {
             console.error(`[GitSource] settled attempt ${sanitizeForLog(row.operation_id)} decoded to an unexpected shape`);
             return unreadable;
         }
-        return {
-            outcome: decoded.outcome,
-            reason: decoded.reason,
-            nextAction: decoded.nextAction,
-            retryAt: typeof decoded.retryAt === 'number' ? decoded.retryAt : undefined,
-            nextPollAt: typeof decoded.nextPollAt === 'number' ? decoded.nextPollAt : undefined,
-            commitSha: typeof decoded.commitSha === 'string' ? decoded.commitSha : undefined,
-        };
+        return result;
     }
 
     /**
@@ -3037,15 +3183,17 @@ export class GitSourceService {
      * this run cannot recover never blocks the rest of the backlog; see
      * listUnsettledReconcileAttempts for why that matters.
      *
-     * Two passes. Pass 1 settles every independent (non-follower) attempt
-     * by deriving the application's current truthful state, and defers
-     * every follower rather than settling it yet, so its leader (which
-     * can only be earlier in this same backlog, since a follower's own
-     * reservation records that its leader was already in flight) gets a
-     * chance to settle first. Pass 2 then settles each deferred follower
-     * from its leader's now-settled result, so a leader and its followers
-     * always agree; a follower whose leader is still unresolved is left
-     * for a later recovery run, per resolveFollowerOutcome.
+     * Two passes. Pass 1 settles every independent (non-follower) attempt:
+     * dispatch reservations by their pipeline-stage evidence (see
+     * dispatchStageResult), every other attempt by deriving the
+     * application's current truthful state. Followers are deferred rather
+     * than settled yet, so their leader (which can only be earlier in this
+     * same backlog, since a follower's own reservation records that its
+     * leader was already in flight) gets a chance to settle first. Pass 2
+     * then settles each deferred follower from its leader's now-settled
+     * result, so a leader and its followers always agree; a follower whose
+     * leader is still unresolved is left for a later recovery run, per
+     * resolveFollowerOutcome.
      *
      * One row failing to recover (a transient DB error, an application
      * deleted between listing and processing) is isolated: logged and
@@ -3092,7 +3240,10 @@ export class GitSourceService {
                         deferredFollowers.push({ row, followerOf });
                         continue;
                     }
-                    settle(row, this.deriveResultForApplication(row.application_id));
+                    const dispatchGenerationId = GitSourceService.dispatchGenerationIdFromStartedAttempt(row);
+                    settle(row, dispatchGenerationId
+                        ? this.dispatchStageResult(row.application_id, row.operation_id, dispatchGenerationId)
+                        : this.deriveResultForApplication(row.application_id));
                 } catch (e) {
                     noteFailure(row, e);
                 }
@@ -3420,6 +3571,11 @@ export class GitSourceService {
                 opts.actor,
                 opts.trigger,
                 Date.now(),
+                undefined,
+                // The marker names this reservation as a dispatch of this
+                // exact generation, so startup recovery can settle an
+                // interrupted attempt against pipeline-stage evidence.
+                generation.generationId,
             );
             if (!allocated.reserved) {
                 // A freshly allocated id collided with an existing reservation
@@ -3438,7 +3594,7 @@ export class GitSourceService {
         } catch (e) {
             console.error(
                 `[GitSource] Failed to reserve a durable attempt for dispatch of ${sanitizeForLog(stackName)}:`,
-                e instanceof Error ? e.stack ?? e.message : String(e),
+                errorForLog(e),
             );
             return {
                 status: 'blocked',
@@ -3523,10 +3679,10 @@ export class GitSourceService {
             // once the promotion has committed, at manual apply's applied()
             // position: the deploy branch opens its GitOps operation against
             // the target's applied generation, so the pointer must already
-            // name this generation when Compose runs. bindRejected (below)
-            // classifies a rejected bind with the recovery_required
-            // vocabulary the rewritten files warrant.
-            let bindRejected = false;
+            // name this generation when Compose runs. A false return from the
+            // hook stops the pipeline there: the bindRejected arm (below)
+            // classifies the rejection with the recovery_required vocabulary
+            // the rewritten files warrant, and no deploy ever ran.
             const result = await this.completeGitApply({
                 stackName,
                 commitSha: generation.commitSha,
@@ -3551,19 +3707,34 @@ export class GitSourceService {
                 bypassPolicy: false,
                 started: { app: null, env: null, settled: true },
                 progress,
-                postPromote: () => {
-                    bindRejected = !this.recordGitOps(stackName, 'target binding', () => {
-                        GitOpsTransitions.getInstance().targetApplied(nodeId, {
-                            applicationId: app.id,
-                            generationId: generation.generationId,
-                            artifactSetId,
-                            sourceAcceptanceId,
-                            authority: 'operator',
-                            envelope,
-                        });
+                postPromote: () => this.recordGitOps(stackName, 'target binding', () => {
+                    GitOpsTransitions.getInstance().targetApplied(nodeId, {
+                        applicationId: app.id,
+                        generationId: generation.generationId,
+                        artifactSetId,
+                        sourceAcceptanceId,
+                        authority: 'operator',
+                        envelope,
                     });
-                },
+                }),
             });
+            if (result.bindRejected) {
+                // The bind ran after promotion committed, inside the
+                // pipeline, and its false return stopped the pipeline before
+                // the deploy branch opened. Its rejection is the post-commit
+                // boundary, so it classifies recovery_required like the throw
+                // paths there; nothing past the bind ran. commitSha rides
+                // along so this row has the same evidence shape recovery
+                // writes for the identical classification.
+                const reason = 'The promotion committed, but the Direct target could not be bound to the accepted generation.';
+                this.settlePostCommitAttempt(stackName, opts.actor, app.id, envelope, {
+                    outcome: 'recovery_required',
+                    reason,
+                    nextAction: 'view_target_results',
+                    commitSha: generation.commitSha,
+                });
+                return { status: 'blocked', reason };
+            }
             if (!result.applied) {
                 // Defensive parity with the promotion boundary: a pipeline
                 // that reports not-applied over files the flag says are
@@ -3576,30 +3747,32 @@ export class GitSourceService {
                         'The promotion did not complete cleanly. The stack\'s Compose files may already be updated.')
                     : settleBlocked('The completion pipeline did not apply the accepted generation.');
             }
-            if (bindRejected) {
-                // The bind ran after promotion committed, inside the
-                // pipeline. Its rejection is the post-commit boundary, so it
-                // classifies recovery_required like the throw paths there,
-                // whether or not the deploy branch then ran (matching manual
-                // apply's rejected acceptance transition).
-                const reason = 'The promotion committed, but the Direct target could not be bound to the accepted generation.';
-                this.settleAttempt(app.id, envelope, {
-                    outcome: 'recovery_required',
-                    reason,
-                    nextAction: 'view_target_results',
-                });
-                return { status: 'blocked', reason };
-            }
             if (result.deployError) {
                 const reason = `The source applied, but the deploy failed: ${result.deployError}`;
-                this.settleAttempt(app.id, envelope, {
+                this.settlePostCommitAttempt(stackName, opts.actor, app.id, envelope, {
                     outcome: 'recovery_required',
                     reason,
                     nextAction: 'view_target_results',
+                    // Name the failed deploy's GitOps record when Compose
+                    // opened one, so the settled row correlates to it. An
+                    // untracked deploy carries no id and the field stays absent.
+                    ...(result.deployGitopsOperationId
+                        ? { deployGitopsOperationId: result.deployGitopsOperationId }
+                        : {}),
                 });
                 return { status: 'blocked', reason };
             }
-            this.settleAttempt(app.id, envelope, this.finalizeReconcileOutcome(stackName, undefined));
+            const settledResult = this.finalizeReconcileOutcome(stackName, undefined);
+            // The successful tracked deploy's GitOps operation id rides on
+            // the settled row so the attempt's evidence names the exact
+            // deploy that ran under it; an untracked deploy (null id)
+            // leaves the field absent.
+            this.settleAttempt(app.id, envelope, {
+                ...settledResult,
+                ...(result.gitopsOperationId
+                    ? { deployGitopsOperationId: result.gitopsOperationId }
+                    : {}),
+            });
             return { status: 'dispatched' };
         } catch (e) {
             // Guards, revalidation, the pipeline, and the binding all run inside
@@ -3611,7 +3784,7 @@ export class GitSourceService {
             // settled row keeps only the scrubbed message, not the stack.
             console.error(
                 `[GitSource] Dispatch of ${sanitizeForLog(stackName)} threw (filesUntrusted=${progress.filesUntrusted}):`,
-                e instanceof Error ? e.stack ?? e.message : String(e),
+                errorForLog(e),
             );
             const reason = scrubCredentials(e instanceof Error ? (e.message || e.name) : String(e));
             if (progress.filesUntrusted) {
@@ -3622,7 +3795,7 @@ export class GitSourceService {
                 // case happened when the second did, so it names only what
                 // both share: completion failed and the files may be updated.
                 const promotedReason = `The promotion did not complete cleanly: ${reason}. The stack's Compose files may already be updated.`;
-                this.settleAttempt(generation.applicationId, envelope, {
+                this.settlePostCommitAttempt(stackName, opts.actor, generation.applicationId, envelope, {
                     outcome: 'recovery_required',
                     reason: promotedReason,
                     nextAction: 'view_target_results',
@@ -3764,12 +3937,21 @@ export class GitSourceService {
                 reason: 'The live Compose invocation no longer matches the last applied generation. Review the change plan before dispatching again.',
             };
         }
-        // A null stored fingerprint means "cannot compare", not "no drift":
-        // a pull that could not compute a change plan records none, and
-        // migrated rows never record one (dispatch's acceptance-evidence
-        // guard already refuses those). The remaining candidate and plan
-        // checks still ran, so promotion proceeds.
-        if (genRow.change_plan_fingerprint !== null && plan.fingerprint !== genRow.change_plan_fingerprint) {
+        // The fingerprint comparison is the only proof here that the accepted
+        // generation still describes the only change it was accepted for, so
+        // it fails closed: a generation row with no recorded fingerprint has
+        // no evidence to compare against, which is a refusal, not a pass.
+        // (Candidate staging records the plan's fingerprint whenever pull
+        // computed one; a null stored value means pull could not, or the row
+        // predates the evidence, and neither case is proof of no drift.) A
+        // mismatch of recorded evidence refuses the same way.
+        if (genRow.change_plan_fingerprint === null) {
+            return {
+                ok: false,
+                reason: 'The accepted generation records no change-plan evidence to compare against the live target. Fetch and accept again before dispatching.',
+            };
+        }
+        if (plan.fingerprint !== genRow.change_plan_fingerprint) {
             return {
                 ok: false,
                 reason: 'The live target no longer matches the accepted generation; review the change plan before dispatching again.',
@@ -3962,13 +4144,15 @@ export class GitSourceService {
          * target's applied generation when it opens the deploy's own GitOps
          * operation, so the pointer must already name this generation by the
          * time Compose runs, the same position manual apply's applied()
-         * transition occupies. The shipped hook does not throw: recordGitOps
-         * converts a throwing transition into a false return, and the caller
-         * classifies the rejection through its own flag. The progress flag is
-         * already set when this hook runs, so a throwing hook added later
-         * would still be classified recovery_required.
+         * transition occupies. The hook's return gates the deploy branch:
+         * false stops the pipeline before the policy gate is evaluated or
+         * Compose runs, and the result reports bindRejected. The shipped hook
+         * does not throw: recordGitOps converts a throwing transition into a
+         * false return. The progress flag is already set when this hook runs,
+         * so a throwing hook added later would still be classified
+         * recovery_required by the caller.
          */
-        postPromote?: () => void;
+        postPromote?: () => boolean;
     }): Promise<GitApplyResult> {
         const { stackName, commitSha, src, nodeId, applyOperationId, gitopsEnv, gitopsApp, gitopsGenerationId } = args;
         // Byte-parity with main: recovery capture and the policy gate fall
@@ -4035,7 +4219,7 @@ export class GitSourceService {
                 throw e;
             }
             const raw = e instanceof Error ? e.message : String(e);
-            console.error(`[GitSource] promotion failed for ${sanitizeForLog(stackName)}:`, e instanceof Error ? e.stack ?? e.message : raw);
+            console.error(`[GitSource] promotion failed for ${sanitizeForLog(stackName)}:`, errorForLog(e));
             const sensitivePaths = manifest.inputs
                 .filter((i) => i.sensitivity === 'high' && i.materializedPath !== null)
                 .map((i) => i.materializedPath!);
@@ -4118,8 +4302,15 @@ export class GitSourceService {
         // The caller's post-commit bind (Direct dispatch's targetApplied)
         // runs at the same position manual apply's acceptance transition
         // occupies, so the deploy branch below reads a target pointer that
-        // already names this generation.
-        args.postPromote?.();
+        // already names this generation. The hook gates the deploy branch:
+        // an explicit false (the bind was rejected) stops the pipeline here,
+        // before the policy gate is evaluated and before Compose runs. The
+        // recovery capture stays for the operator: the promotion did commit,
+        // so the pre-promote generation remains the rollback cover, and the
+        // recovery capture row is its own durable record.
+        if (args.postPromote?.() === false) {
+            return { applied: true, deployed: false, bindRejected: true, recoveryId };
+        }
 
         const shouldDeploy = args.deploy;
         const diag = isDebugEnabled();
@@ -4209,7 +4400,19 @@ export class GitSourceService {
                 }
                 const scrubbed = scrubCredentials((e as Error).message || String(e));
                 console.error(`[GitSource] Auto-deploy failed for ${stackName}: ${scrubbed}`);
-                return { applied: true, deployed: false, deployError: scrubbed, recoveryId };
+                // ComposeService stamps the GitOps deploy operation id on the
+                // error it rethrows when the deploy was tracked; read it
+                // type-guarded so an untracked deploy (no stamp) simply yields
+                // no correlation instead of trusting an untyped field.
+                const stamped: unknown = (e as { gitopsDeployOperationId?: unknown }).gitopsDeployOperationId;
+                const deployOpId = typeof stamped === 'string' ? stamped : undefined;
+                return {
+                    applied: true,
+                    deployed: false,
+                    deployError: scrubbed,
+                    recoveryId,
+                    ...(deployOpId ? { deployGitopsOperationId: deployOpId } : {}),
+                };
             }
         }
 
