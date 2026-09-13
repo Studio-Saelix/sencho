@@ -234,6 +234,48 @@ describe('SourceController automatic acceptance', () => {
         );
     });
 
+    it('logs the refusal when the dispatch boundary blocks an accepted generation', async () => {
+        stageCandidate('app-dispatch-blocked', 'dispatch-blocked-web', 'gen-dispatch-blocked');
+        mockDue([armDuePoll('app-dispatch-blocked')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        // The acceptance stands while the apply is refused, so the durable
+        // rows alone cannot explain why nothing moved: the blocked arm must
+        // log the reason the boundary returned.
+        const dispatch = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
+            .mockResolvedValue({ status: 'blocked', reason: 'The live target no longer matches the accepted generation.' });
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        expect(getApp('app-dispatch-blocked').accepted_generation_id).toBe('gen-dispatch-blocked');
+        expect(warnSpy.mock.calls.some((args) => String(args[0]).includes('[SourceController] automatic dispatch blocked for app-dispatch-blocked')
+            && String(args[0]).includes('no longer matches'))).toBe(true);
+    });
+
+    it('logs the manual remedy when the dispatch fails before reserving an attempt', async () => {
+        stageCandidate('app-dispatch-throw', 'dispatch-throw-web', 'gen-dispatch-throw');
+        mockDue([armDuePoll('app-dispatch-throw')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        // A throw means nothing was reserved, so no row exists and the next
+        // tick will not retry: the log is the only evidence, and it must say
+        // what stands (the acceptance) and what the operator must do.
+        const dispatch = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
+            .mockRejectedValue(new Error('simulated pre-reservation store failure'));
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        expect(getApp('app-dispatch-throw').accepted_generation_id).toBe('gen-dispatch-throw');
+        expect(errorSpy.mock.calls.some((args) => String(args[0]).includes('[SourceController] automatic dispatch failed for app-dispatch-throw before reserving an attempt')
+            && String(args[0]).includes('dispatch it manually'))).toBe(true);
+    });
+
     it('holds a blocked candidate for review without accepting it', async () => {
         stageCandidate('app-blocked', 'blocked-web', 'gen-blocked');
         mockDue([armDuePoll('app-blocked')]);
