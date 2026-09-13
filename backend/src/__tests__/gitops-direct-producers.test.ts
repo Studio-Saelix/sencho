@@ -403,6 +403,26 @@ describe('Direct Git producers drive the revision state', () => {
                   AND stage IN ('deploy_started', 'deploy_bound')`)
       .all(stackName, result.gitopsOperationId) as Array<{ stage: string }>;
     expect(deployHistory.map((row) => row.stage).sort()).toEqual(['deploy_bound', 'deploy_started']);
+
+    // ── a caller with durable prior intent supplies its own id ─────────
+    // Git dispatch journals a deploy intent before handing the stack to
+    // Compose and threads the journaled id into the invocation, so startup
+    // recovery finds this deploy's rows by that exact id. The service suite
+    // proves the threading with a mocked deployStack; only the real adapter
+    // can prove it honors the supplied id rather than minting its own.
+    const suppliedId = '0f0f0f0f-1e1e-2d2d-3c3c-4b4b4b4b4b4b';
+    const threaded = await composeSvc.deployStack(stackName, undefined, undefined, {
+      source: 'git_apply',
+      actor: 'tester',
+      gitopsDeployOperationId: suppliedId,
+    });
+    expect(threaded.gitopsOperationId).toBe(suppliedId);
+    const threadedHistory = DatabaseService.getInstance().getDb()
+      .prepare(`SELECT stage FROM gitops_history
+                WHERE stack_name = ? AND operation_id = ?
+                  AND stage IN ('deploy_started', 'deploy_bound')`)
+      .all(stackName, suppliedId) as Array<{ stage: string }>;
+    expect(threadedHistory.map((row) => row.stage).sort()).toEqual(['deploy_bound', 'deploy_started']);
   });
 
   it('reports the deployed generation from an update so health can bind to it', async () => {
