@@ -9,7 +9,7 @@ import {
   encodeArtifactEvidenceJson,
   encodeGitOpsEvidenceLimitations,
 } from './json';
-import { insertHistory, type GitOpsHistoryStage, type HistoryOutcome } from './history';
+import { insertHistory, type DeployDispatchedPayload, type GitOpsHistoryStage, type HistoryOutcome, type PromotionCommittedPayload } from './history';
 import { emptyTargetRow, GitOpsStore } from './store';
 import type {
   ArtifactQualification,
@@ -1064,6 +1064,84 @@ export class GitOpsTransitions {
         after: { ...result },
       });
       return { settled: historyId !== null };
+    })();
+  }
+
+  /**
+   * Witness that an accepted-generation promotion committed to the
+   * filesystem.
+   *
+   * Dispatch calls this at the promotion commit boundary, before any source
+   * bookkeeping runs, so the evidence exists in exactly the crash window
+   * where the rewritten files do but the source rows do not. Recovery reads
+   * it scoped to the dispatch's own
+   * operation id: a later generation that happens to share an earlier one's
+   * commit SHA or plan fingerprint cannot inherit its promotion evidence, and
+   * a crash between the file rewrite and the source-row update still reports
+   * that the promotion ran. A bare history insert, replay-safe like the
+   * reservation.
+   */
+  promotionCommitted(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+    generationId: string;
+    commitSha: string;
+    planFingerprint: string;
+  }): { recorded: boolean } {
+    const payload: PromotionCommittedPayload = {
+      generationId: args.generationId,
+      commitSha: args.commitSha,
+      planFingerprint: args.planFingerprint,
+    };
+    return this.raw().transaction(() => {
+      const app = this.requireApp(args.applicationId);
+      const historyId = this.history(app, args.envelope, {
+        stage: 'promotion_committed',
+        outcome: 'committed',
+        before: {},
+        after: { ...payload },
+        generationId: args.generationId,
+        commitSha: args.commitSha,
+      });
+      return { recorded: historyId !== null };
+    })();
+  }
+
+  /**
+   * Record that a bound dispatch is about to hand its generation to Compose,
+   * naming the deploy operation id the dispatch minted for it.
+   *
+   * Dispatch threads that id into the deploy invocation, so Compose's own
+   * deploy transitions land under it (see `beginGitOpsDeploy`). This row is
+   * the durable deploy intent: recovery of a dispatch that bound but never
+   * settled reads it to tell "Compose was never reached" from "the deploy ran
+   * and its settlement was lost", and to name the exact deploy operation
+   * either way. Bare history insert scoped to the dispatch's operation,
+   * replay-safe.
+   */
+  deployDispatched(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+    generationId: string;
+    commitSha: string;
+    deployOperationId: string;
+  }): { recorded: boolean } {
+    const payload: DeployDispatchedPayload = {
+      generationId: args.generationId,
+      commitSha: args.commitSha,
+      deployOperationId: args.deployOperationId,
+    };
+    return this.raw().transaction(() => {
+      const app = this.requireApp(args.applicationId);
+      const historyId = this.history(app, args.envelope, {
+        stage: 'deploy_dispatched',
+        outcome: 'committed',
+        before: {},
+        after: { ...payload },
+        generationId: args.generationId,
+        commitSha: args.commitSha,
+      });
+      return { recorded: historyId !== null };
     })();
   }
 
@@ -2376,6 +2454,7 @@ export class GitOpsTransitions {
       generationId?: string | null;
       artifactSetId?: string | null;
       sourceAcceptanceRef?: string | null;
+      commitSha?: string | null;
     },
   ): string | null {
     const nodeId = fields.nodeId ?? null;
@@ -2393,6 +2472,7 @@ export class GitOpsTransitions {
       generationId: fields.generationId,
       artifactSetId: fields.artifactSetId,
       sourceAcceptanceRef: fields.sourceAcceptanceRef,
+      commitSha: fields.commitSha,
       at: envelope.at,
     });
   }

@@ -799,8 +799,15 @@ export class ComposeService {
    * target has nothing applied, has no deploy identity to record, so the whole
    * thing is a no-op. Recording never fails the deploy: the store describes
    * what happened, it does not make it happen.
+   *
+   * `deployOperationId` lets a caller with durable prior intent (Git dispatch's
+   * `deploy_dispatched` record, when that journal write succeeded) open this
+   * deploy's transitions under an id it
+   * already knows, so recovery of an interrupted attempt can find this deploy's
+   * rows by exact id rather than guessing which deploy ran under it. Ordinary
+   * callers omit it and get a freshly minted id, unchanged behavior.
    */
-  private beginGitOpsDeploy(stackName: string): GitOpsDeployHandle | null {
+  private beginGitOpsDeploy(stackName: string, deployOperationId?: string): GitOpsDeployHandle | null {
     try {
       const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
       if (!app || app.lifecycle_status !== 'active') return null;
@@ -809,7 +816,12 @@ export class ComposeService {
       if (!target || target.target_status !== 'active' || !generationId) return null;
 
       const tx = GitOpsTransitions.getInstance();
-      const envelope = { operationId: randomUUID(), actor: 'system:compose', trigger: 'deploy', at: Date.now() };
+      const envelope = {
+        operationId: deployOperationId ?? randomUUID(),
+        actor: 'system:compose',
+        trigger: 'deploy',
+        at: Date.now(),
+      };
       const record = (what: string, write: () => void): boolean => {
         try {
           write();
@@ -909,8 +921,13 @@ export class ComposeService {
 
     // ComposeService is the only producer of deploy events: every deploy path
     // (manual, bulk, Git auto-deploy, App Store, scheduler, webhook) funnels
-    // through here, so recording it anywhere else would double-count.
-    const gitopsDeploy = this.beginGitOpsDeploy(stackName);
+    // through here, so recording it anywhere else would double-count. A Git
+    // dispatch deploy passes the id it durably recorded as its deploy intent
+    // (when the intent journal write succeeded; dispatch withholds the id
+    // otherwise), so recovery of an interrupted attempt finds this deploy's
+    // rows by exact id; every other caller lets an id be minted here,
+    // unchanged.
+    const gitopsDeploy = this.beginGitOpsDeploy(stackName, ctx?.gitopsDeployOperationId);
     let composeHandedOff = false;
 
     try {

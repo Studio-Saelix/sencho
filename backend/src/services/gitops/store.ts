@@ -326,6 +326,21 @@ export class GitOpsStore {
   }
 
   /**
+   * The row for one exact stage under an exact operation id, or undefined
+   * when it was never written. The read companion to
+   * `hasStageRowForAttempt`, for recovery passes that need the row's own
+   * recorded payload (for example the deploy intent's operation id) rather
+   * than just its existence.
+   */
+  getStageRowForAttempt(applicationId: string, operationId: string, stage: GitOpsHistoryStage): GitOpsHistoryRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_history
+       WHERE application_id = ? AND operation_id = ? AND stage = ?
+       LIMIT 1`,
+    ).get(applicationId, operationId, stage) as GitOpsHistoryRow | undefined;
+  }
+
+  /**
    * Every reservation with no matching settled row, oldest first: an
    * attempt that started but never recorded a result, most likely because
    * the process crashed between reservation and settlement. Startup

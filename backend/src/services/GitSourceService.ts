@@ -34,7 +34,7 @@ import { nativeGitTransport, verifyFastForward } from './git/nativeGitTransport'
 import { fingerprintFromKnownHostsLine } from './git/sshTrust';
 import { validateCaBundlePem } from './git/caBundle';
 import { GitOpsStore } from './gitops/store';
-import type { GitOpsHistoryCursor } from './gitops/history';
+import { isDeployDispatchedPayload, type GitOpsHistoryCursor } from './gitops/history';
 import { projectApplication } from './gitops/derive';
 import { outcomeFromSourceFacet, parseReconcileResultPayload, type ReconcileOutcome, type ReconcileResult } from './gitops/outcomes';
 import { coalesceKey, deliveryKey, type ReconcileRequest, type ReconcileTrigger } from './gitops/triggers';
@@ -2825,12 +2825,13 @@ export class GitSourceService {
      * result (up to and including a real fetch or apply that already
      * touched the filesystem) into a thrown error for the caller. The
      * attempt is left unsettled on this path, which is exactly the signal
-     * startup recovery looks for. The deferral is lossless for refusals
-     * (pre-bind, guard, revalidation): recovery re-derives the same
-     * classification from source state. It is not lossless past the bind,
-     * where the deploy outcome lives only in this result: recovery's
-     * bind-evidence arm projects the source facet (which reads converged
-     * after a completed promotion), so the caller must mirror any failed
+     * startup recovery looks for. Recovery reconstructs dispatch attempts
+     * from their own witness and deploy-intent rows, so the outcome and next
+     * action survive a lost settle; the reason wording is more general than
+     * the live refusal's. The reconstruction is weaker when those writes
+     * could not land (a store outage spanning the whole dispatch): recovery
+     * then reads only the source projection, which reads converged after a
+     * completed promotion, so the caller must still mirror any failed
      * post-bind settle into the activity feed rather than rely on the
      * attempt row alone.
      */
@@ -2851,11 +2852,13 @@ export class GitSourceService {
 
     /**
      * Settle a post-commit dispatch result (bind rejection, failed deploy,
-     * or a throw past the promotion boundary). If the durable write fails,
-     * startup recovery's bind-evidence arm re-derives the source facet,
-     * which does not reconstruct a recovery_required classification, so the
+     * or a throw past the promotion boundary). When the durable write fails,
+     * startup recovery reconstructs the same outcome and next action from
+     * the attempt's witness and deploy-intent rows wherever they were
+     * written (the reason wording differs by design: the live settlement
+     * carries the error detail, recovery states the evidence), but the
      * result must not rest on the attempt row alone: mirror it into the
-     * activity feed, which the operator timeline already renders.
+     * activity feed too, which the operator timeline already renders.
      */
     private settlePostCommitAttempt(
         stackName: string,
@@ -2995,25 +2998,45 @@ export class GitSourceService {
 
     /**
      * Startup settlement for a dispatch attempt that reserved but never
-     * settled: which pipeline stages left durable evidence decides what is
-     * truthful. The plain source projection cannot tell "accepted but never
-     * promoted" from "promoted, files on disk, bind never ran"; both project
-     * as no_source_change, and the second one is a lie about the target.
+     * settled: which pipeline stages left durable, operation-scoped
+     * evidence decides what is truthful. The plain source projection cannot
+     * tell "accepted but never promoted" from "promoted, files on disk, bind
+     * never ran"; both project as no_source_change, and the second one is a
+     * lie about the target. Source-level rows (the applied mark, the last
+     * plan record) are deliberately not consulted: a later generation that
+     * shares an earlier one's commit SHA or plan fingerprint would inherit
+     * the earlier promotion's evidence, and a crash between the file rewrite
+     * and the source-row update would leave the promotion unproven.
      *
-     * Three evidence states, in order of how far the attempt got:
+     * Two witness rows, written by this attempt at the pipeline boundaries
+     * they prove, decide the arms:
+     *  - `promotion_committed`, written the moment the filesystem commit
+     *    lands, before any source bookkeeping: the files hold the accepted
+     *    generation from here on, whatever later crash follows.
+     *  - `deploy_dispatched`, written after the bind and immediately before
+     *    Compose is handed the stack, naming the exact deploy operation id
+     *    the dispatch minted for that Compose run.
+     *
+     * In order of how far the attempt got:
      *  - this operation's own `target_applied` row (or a target row already
      *    naming this generation from an earlier operation): the bind
-     *    happened, only the settle is missing. The source projection is
-     *    then truthful; the deploy stage has its own operation envelope and
-     *    its own startup interruption settlement, so it is never inferred
-     *    from this attempt's history.
-     *  - no bind, but the promotion's post-commit bookkeeping landed (the
-     *    applied mark, or the last-plan 'applied' record for this exact
-     *    plan fingerprint): recovery_required with view-target-results, the
-     *    same classification the live bind-rejection path applies. The
-     *    promotion's completion bookkeeping ran, so the live files hold the
-     *    accepted generation while the target pointer still names the
-     *    previous one; the bind is the missing step, not the write.
+     *    happened, only the settle is missing. The deploy intent then
+     *    reconstructs what Compose did: no intent row means the pipeline
+     *    stopped before Compose was ever handed the stack (or was an
+     *    apply-only completion; both left no deploy, so the source
+     *    projection is truthful). An intent row names the deploy's own
+     *    operation id: no `deploy_started` row under that id means Compose
+     *    never recorded opening the deploy, which settles as blocked with a
+     *    retry; a bound deploy settles from the source projection plus the
+     *    exact deploy id; a failed or unbound deploy settles
+     *    recovery_required; a started deploy with no terminal settles as
+     *    unproven. Recovery never redeploys: it only reads what was
+     *    recorded.
+     *  - no bind but a promotion witness: recovery_required with
+     *    view-target-results, the same classification the live
+     *    bind-rejection path applies. The files hold the accepted generation
+     *    while the target pointer still names the previous one; the bind is
+     *    the missing step, not the write.
      *  - neither: promotion is unproven, so nothing is claimed about the
      *    files. While this generation is still the accepted one the honest
      *    settlement is that the dispatch did not complete and can be
@@ -3039,15 +3062,9 @@ export class GitSourceService {
         const bindRecorded = store.hasStageRowForAttempt(applicationId, operationId, 'target_applied')
             || target?.applied_generation_id === generationId;
         if (bindRecorded) {
-            return this.deriveReconcileResult(app.stack_name);
+            return this.reconstructBoundDispatchResult(store, app.stack_name, applicationId, operationId, genRow.commit_sha);
         }
-        const src = DatabaseService.getInstance().getGitSource(app.stack_name);
-        const promotionCommitted = !!src && (
-            src.last_applied_commit_sha === genRow.commit_sha
-            || (genRow.change_plan_fingerprint !== null
-                && src.last_plan_outcome === 'applied'
-                && src.last_plan_fingerprint === genRow.change_plan_fingerprint)
-        );
+        const promotionCommitted = store.hasStageRowForAttempt(applicationId, operationId, 'promotion_committed');
         if (promotionCommitted) {
             return {
                 outcome: 'recovery_required',
@@ -3059,12 +3076,90 @@ export class GitSourceService {
         if (app.accepted_generation_id === generationId) {
             return {
                 outcome: 'unknown',
-                reason: 'The dispatch was interrupted before the accepted generation was promoted. Nothing was applied; dispatch it again.',
+                reason: 'The dispatch was interrupted before its promotion was recorded; nothing was proven applied. Dispatch it again.',
                 nextAction: 'retry',
                 commitSha: genRow.commit_sha,
             };
         }
         return this.deriveReconcileResult(app.stack_name);
+    }
+
+    /**
+     * Reconstruct what a bound dispatch's deploy did, from the attempt's own
+     * `deploy_dispatched` intent row plus the deploy's own history rows
+     * (written by ComposeService under the exact operation id the intent
+     * names). The arms exist because settling a bound-but-unsettled attempt
+     * from the source projection alone lost the distinction between "Compose
+     * was never reached", "the deploy ran and only the settle was lost", and
+     * "the deploy failed and only the settle was lost", and left the settled
+     * row without the canonical deploy id on any of those paths. Recovery
+     * only reads recorded history; it never redeploys.
+     */
+    private reconstructBoundDispatchResult(
+        store: GitOpsStore,
+        stackName: string,
+        applicationId: string,
+        operationId: string,
+        commitSha: string,
+    ): ReconcileResult {
+        const intentRow = store.getStageRowForAttempt(applicationId, operationId, 'deploy_dispatched');
+        if (!intentRow) {
+            // Three ways to arrive: an apply-only completion, a crash before
+            // the intent was journaled, or an intent journal write that failed
+            // (the designed fallback: Compose minted its own id and the deploy
+            // may have run untracked). None of them proves a tracked deploy
+            // for this attempt, so the source projection (files applied,
+            // generation bound) is the truthful settlement, claiming less than
+            // the intent-linked arms rather than more.
+            return this.deriveReconcileResult(stackName);
+        }
+        const deployOperationId = GitSourceService.deployOperationIdFromIntentRow(intentRow);
+        if (!store.hasStageRowForAttempt(applicationId, deployOperationId, 'deploy_started')) {
+            // The dispatch journaled a deploy Compose never recorded opening:
+            // either the crash landed between the journal and Compose
+            // starting, or Compose reached its own early guards (or their
+            // recording failed) without a deploy operation. Either way no
+            // deploy evidence exists, so nothing is claimed to have run: the
+            // honest settlement is that no deploy record backs this dispatch,
+            // and the deploy can be retried, with the rewritten files as the
+            // evidence. The reason says the record is missing, not that the
+            // deploy never happened: an untracked deploy is indistinguishable
+            // from an interrupted one from here. No deploy id is named on the
+            // row: there is no deploy record to point at.
+            return {
+                outcome: 'blocked',
+                reason: 'The promotion and binding completed, but no Compose deploy record was found for this dispatch.',
+                nextAction: 'retry',
+                commitSha,
+            };
+        }
+        const linked = { deployGitopsOperationId: deployOperationId, commitSha };
+        if (store.hasStageRowForAttempt(applicationId, deployOperationId, 'deploy_bound')) {
+            // The deploy completed and bound the generation; only this
+            // attempt's settle was lost. The source projection now reads
+            // truthfully, plus the exact deploy id the live settle would
+            // have named.
+            return { ...this.deriveReconcileResult(stackName), ...linked };
+        }
+        if (store.hasStageRowForAttempt(applicationId, deployOperationId, 'deploy_failed')
+            || store.hasStageRowForAttempt(applicationId, deployOperationId, 'deploy_unbound')) {
+            return {
+                outcome: 'recovery_required',
+                reason: 'The promotion and binding completed, but the deploy this dispatch started failed.',
+                nextAction: 'view_target_results',
+                ...linked,
+            };
+        }
+        // Compose opened the deploy and no terminal row landed: the deploy
+        // itself was interrupted mid-flight. Its own startup recovery settles
+        // the target-level story; this attempt's row reports the outcome as
+        // unproven and names the deploy record to inspect.
+        return {
+            outcome: 'unknown',
+            reason: 'The deploy this dispatch started has no recorded outcome; it may not have finished. Check the target results before dispatching again.',
+            nextAction: 'view_target_results',
+            ...linked,
+        };
     }
 
     /** The follower-link operation id recorded on a reservation, if any. */
@@ -3094,6 +3189,24 @@ export class GitSourceService {
             throw new GitOpsJsonError('reserved attempt dispatchGenerationId must be a string');
         }
         return decoded.dispatchGenerationId;
+    }
+
+    /**
+     * The deploy operation id recorded on a dispatch attempt's
+     * `deploy_dispatched` intent row. A row whose payload is not a
+     * `DeployDispatchedPayload` with a UUID-shaped id (a pre-writer row, or
+     * one written by a broken producer) is a storage bug, not a response
+     * variation, so it throws: the recovery pass logs the row as
+     * unrecoverable rather than guessing a deploy correlation. Without the
+     * shape check a non-id value would silently route every lookup to rows
+     * that can never exist, settling a real deploy as "no record found".
+     */
+    private static deployOperationIdFromIntentRow(row: GitOpsHistoryRow): string {
+        const decoded = decodeGitOpsJson(row.after_json);
+        if (!isDeployDispatchedPayload(decoded)) {
+            throw new GitOpsJsonError('deploy_dispatched intent row has no valid deploy operation id');
+        }
+        return decoded.deployOperationId;
     }
 
     private static deliveryIntentFromStartedAttempt(row: GitOpsHistoryRow): ReconcileDeliveryIntent {
@@ -3717,6 +3830,51 @@ export class GitSourceService {
                         envelope,
                     });
                 }),
+                // The promotion witness rides the filesystem-commit boundary:
+                // written under this dispatch's own operation id the moment
+                // the files are rewritten, before any source bookkeeping, so
+                // recovery can prove the promotion from this attempt's
+                // evidence alone. A failed witness write is logged by
+                // recordGitOps and does not abort a promotion that already
+                // happened; recovery then falls back to "unproven", which
+                // errs toward retry, never toward claiming files changed.
+                promotionWitness: () => this.recordGitOps(stackName, 'promotion witness', () => {
+                    GitOpsTransitions.getInstance().promotionCommitted({
+                        applicationId: app.id,
+                        envelope,
+                        generationId: generation.generationId,
+                        commitSha: generation.commitSha,
+                        planFingerprint: revalidation.plan.fingerprint,
+                    });
+                }),
+                // The deploy intent: mint the deploy operation id first,
+                // journal it, and hand the journaled id to the pipeline so
+                // Compose opens its deploy transitions under it. The id
+                // returned is read back from the stored row, not the locally
+                // minted one, so what Compose receives is always the exact id
+                // recovery will look up (a dedupe replay keeps the stored id).
+                // If the journal write fails the id is withheld (undefined),
+                // Compose mints its own as before, and recovery of an
+                // interrupted attempt falls back to the source projection,
+                // which is what it could say without the intent anyway.
+                deployDispatchIntent: () => {
+                    const deployOperationId = crypto.randomUUID();
+                    const recorded = this.recordGitOps(stackName, 'deploy intent', () => {
+                        GitOpsTransitions.getInstance().deployDispatched({
+                            applicationId: app.id,
+                            envelope,
+                            generationId: generation.generationId,
+                            commitSha: generation.commitSha,
+                            deployOperationId,
+                        });
+                    });
+                    if (!recorded) return undefined;
+                    const intentRow = GitOpsStore.getInstance()
+                        .getStageRowForAttempt(app.id, envelope.operationId, 'deploy_dispatched');
+                    if (!intentRow) return undefined;
+                    const journaled = decodeGitOpsJson(intentRow.after_json);
+                    return isDeployDispatchedPayload(journaled) ? journaled.deployOperationId : undefined;
+                },
             });
             if (result.bindRejected) {
                 // The bind ran after promotion committed, inside the
@@ -3766,13 +3924,18 @@ export class GitSourceService {
             // The successful tracked deploy's GitOps operation id rides on
             // the settled row so the attempt's evidence names the exact
             // deploy that ran under it; an untracked deploy (null id)
-            // leaves the field absent.
-            this.settleAttempt(app.id, envelope, {
+            // leaves the field absent. settlePostCommitAttempt keeps the
+            // live write authoritative and mirrors only on failure, matching
+            // the deploy-failure arm: recovery reconstructs this
+            // classification from the deploy's terminal history when the
+            // write fails.
+            const settledPayload: ReconcileResult = {
                 ...settledResult,
                 ...(result.gitopsOperationId
                     ? { deployGitopsOperationId: result.gitopsOperationId }
                     : {}),
-            });
+            };
+            this.settlePostCommitAttempt(stackName, opts.actor, app.id, envelope, settledPayload);
             return { status: 'dispatched' };
         } catch (e) {
             // Guards, revalidation, the pipeline, and the binding all run inside
@@ -4097,7 +4260,10 @@ export class GitSourceService {
      * health gate after. The dispatch caller's postPromote bind runs
      * between the acceptance transition and the deploy branch, so both
      * callers hold the target pointer when the deploy opens its own GitOps
-     * operation. Callers arrive with the change plan already
+     * operation. Two evidence slots sit inside that order on the dispatch
+     * path: the promotion witness writes at the filesystem-commit boundary,
+     * before the last-plan write, and the deploy intent writes immediately
+     * before `deployStack`. Callers arrive with the change plan already
      * validated against live state; everything here is what must
      * happen identically no matter who drove the plan. Cache
      * invalidation and the post-deploy scan live here, not in any
@@ -4153,6 +4319,29 @@ export class GitSourceService {
          * recovery_required by the caller.
          */
         postPromote?: () => boolean;
+        /**
+         * Optional hook at the filesystem-commit boundary, running the moment
+         * the promotion has committed and before any source bookkeeping.
+         * Dispatch passes a writer for the operation-scoped promotion witness
+         * here, so the durable evidence that the files were rewritten exists
+         * in exactly the crash window where the files are rewritten but the
+         * source rows are not yet updated. The shipped hook does not throw
+         * (recordGitOps converts a failure into a logged no-op), and a
+         * recording failure must not abort a promotion that already
+         * happened.
+         */
+        promotionWitness?: () => void;
+        /**
+         * Optional hook at the deploy-intent boundary, running after the
+         * policy gate and the recovery finalize and immediately before
+         * `deployStack`. Dispatch passes a writer for the durable deploy
+         * intent here and returns the deploy operation id it recorded; the
+         * id is threaded into the deploy's invocation context, so Compose
+         * opens its own deploy transitions under the exact id the dispatch
+         * journaled. Returning undefined (no hook, or a failed intent
+         * write) lets Compose mint its own id, the pre-existing behavior.
+         */
+        deployDispatchIntent?: () => string | undefined;
     }): Promise<GitApplyResult> {
         const { stackName, commitSha, src, nodeId, applyOperationId, gitopsEnv, gitopsApp, gitopsGenerationId } = args;
         // Byte-parity with main: recovery capture and the policy gate fall
@@ -4260,6 +4449,12 @@ export class GitSourceService {
         // The promotion has committed: the live Compose files now hold the
         // incoming generation, and every step from here is bookkeeping.
         args.progress.filesUntrusted = true;
+        // Witness the commit before any bookkeeping runs. If the process dies
+        // between this line and the source-row updates below, the files are
+        // rewritten while the source rows still describe the previous
+        // generation; the witness is the only durable evidence that survives
+        // that window, and recovery reads it in preference to source state.
+        args.promotionWitness?.();
         const appliedSpec = this.deriveAppliedSpec(src.compose_paths, src.context_dir);
         db.setGitSourceLastPlan(stackName, plan.fingerprint, 'applied');
         DriftLedgerService.getInstance().resolveManagedPathConflicts(nodeId, stackName);
@@ -4346,12 +4541,18 @@ export class GitSourceService {
                 if (recoveryId) {
                     await finalizeRecoveryCurrent(recoveryId, false);
                 }
+                // Journal the deploy intent (and the exact deploy operation
+                // id it names) immediately before handing the stack to
+                // Compose, so a crash between binding and deploy leaves
+                // durable evidence that Compose was reached for, and a
+                // tracked deploy's rows land under the journaled id.
+                const deployOpIntent = args.deployDispatchIntent?.();
                 // Shared stack lock already held as git_apply for capture→deploy.
                 const autoDeploy = await ComposeService.getInstance(nodeId).deployStack(
                     stackName,
                     undefined,
                     undefined,
-                    { source: 'git_apply', actor },
+                    { source: 'git_apply', actor, ...(deployOpIntent ? { gitopsDeployOperationId: deployOpIntent } : {}) },
                 );
                 if (recoveryId) {
                     if (!recoverySvc.markImmediateVerified(recoveryId)) {
