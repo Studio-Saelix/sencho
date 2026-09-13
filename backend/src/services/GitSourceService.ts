@@ -3348,10 +3348,13 @@ export class GitSourceService {
      * immediately before promotion: the acceptance, the live application
      * row, the target candidate pointer, and a change plan recomputed from
      * the candidate's staged content must all still agree. A disagreement
-     * leaves source acceptance intact and settles a blocked dispatch with
-     * no promotion and no Compose execution. Every refusal settles as
-     * blocked rather than throwing: dispatch reports an outcome, it does
-     * not raise one at its callers.
+     * leaves source acceptance intact and refuses the dispatch with no
+     * promotion and no Compose execution. Refusals return a blocked outcome
+     * rather than throwing: dispatch reports an outcome, it does not raise
+     * one at its callers. Once the attempt is reserved, the refusal also
+     * settles the durable row: blocked pre-promotion, recovery_required past
+     * the commit boundary. Entry-guard refusals return before any
+     * reservation exists.
      */
     public async dispatchAcceptedGeneration(
         generation: AcceptedGeneration,
@@ -3370,9 +3373,9 @@ export class GitSourceService {
             return { status: 'blocked', reason: `No Git source is configured for ${stackName}.` };
         }
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
-        // The durable attempt is reserved inside the lock, not here: a
-        // dispatch refused at the lock never started any work, so it must
-        // not leave a reservation for startup recovery to chase.
+        // Nothing is reserved until the stack lock is held: a dispatch
+        // refused at the lock never started any work, so it must not leave a
+        // reservation for startup recovery to chase.
         const lock = await StackOpLockService.getInstance().runExclusive(
             nodeId,
             stackName,
@@ -3444,12 +3447,16 @@ export class GitSourceService {
         }
         const settleRefusal = (
             outcome: 'blocked' | 'recovery_required',
-            nextAction: 'resolve_conflict' | 'view_target_results',
+            nextAction: ReconcileResult['nextAction'],
             raw: string,
         ): DispatchResult => {
-            // Scrub at the one choke point all refusals pass through: reasons
-            // assembled from validation errors can carry credential-shaped text,
-            // and every settled row is operator-visible durable state.
+            // Scrub at the choke point for guard, revalidation, and
+            // generic-catch refusals: reasons assembled from validation
+            // errors can carry credential-shaped text, and every settled row
+            // is operator-visible durable state. The post-commit arms
+            // (bindRejected, deployError, filesUntrusted catch) settle
+            // directly with literal or already-scrubbed reasons; keep it
+            // that way.
             const reason = scrubCredentials(raw);
             this.settleAttempt(generation.applicationId, envelope, { outcome, reason, nextAction });
             return { status: 'blocked', reason };
@@ -3459,6 +3466,10 @@ export class GitSourceService {
         // recovery_required with view_target_results instead, so the next
         // action matches the settled outcome instead of contradicting it.
         const settleBlocked = (raw: string): DispatchResult => settleRefusal('blocked', 'resolve_conflict', raw);
+        // An explicitly transient refusal (the candidate read that says "try
+        // again") must not prescribe conflict resolution: the settled row is
+        // the operator's advice, and the advice here is to dispatch again.
+        const settleTransient = (raw: string): DispatchResult => settleRefusal('blocked', 'retry', raw);
         // The pipeline flags when the live files stop being trustworthy; a
         // throw past that boundary settles recovery_required via the catch
         // below. Same by-reference pattern as the started.settled wrapper.
@@ -3504,8 +3515,18 @@ export class GitSourceService {
 
             const revalidation = await this.revalidateAcceptedTarget(generation, genRow, src, stackName);
             if (!revalidation.ok) {
-                return settleBlocked(revalidation.reason);
+                return revalidation.transient
+                    ? settleTransient(revalidation.reason)
+                    : settleBlocked(revalidation.reason);
             }
+            // The Direct target binds inside the pipeline via postPromote,
+            // once the promotion has committed, at manual apply's applied()
+            // position: the deploy branch opens its GitOps operation against
+            // the target's applied generation, so the pointer must already
+            // name this generation when Compose runs. bindRejected (below)
+            // classifies a rejected bind with the recovery_required
+            // vocabulary the rewritten files warrant.
+            let bindRejected = false;
             const result = await this.completeGitApply({
                 stackName,
                 commitSha: generation.commitSha,
@@ -3530,6 +3551,18 @@ export class GitSourceService {
                 bypassPolicy: false,
                 started: { app: null, env: null, settled: true },
                 progress,
+                postPromote: () => {
+                    bindRejected = !this.recordGitOps(stackName, 'target binding', () => {
+                        GitOpsTransitions.getInstance().targetApplied(nodeId, {
+                            applicationId: app.id,
+                            generationId: generation.generationId,
+                            artifactSetId,
+                            sourceAcceptanceId,
+                            authority: 'operator',
+                            envelope,
+                        });
+                    });
+                },
             });
             if (!result.applied) {
                 // Defensive parity with the promotion boundary: a pipeline
@@ -3543,24 +3576,12 @@ export class GitSourceService {
                         'The promotion did not complete cleanly. The stack\'s Compose files may already be updated.')
                     : settleBlocked('The completion pipeline did not apply the accepted generation.');
             }
-
-            // Promotion committed; the target binds to the already-accepted
-            // generation now, never before.
-            const bound = this.recordGitOps(stackName, 'target binding', () => {
-                GitOpsTransitions.getInstance().targetApplied(nodeId, {
-                    applicationId: app.id,
-                    generationId: generation.generationId,
-                    artifactSetId,
-                    sourceAcceptanceId,
-                    authority: 'operator',
-                    envelope,
-                });
-            });
-            if (!bound) {
-                // Same post-commit boundary as the catch below: recordGitOps
-                // converts a throwing binding transition into this false
-                // return instead of rethrowing, so classify it here with the
-                // recovery_required vocabulary the rewritten files warrant.
+            if (bindRejected) {
+                // The bind ran after promotion committed, inside the
+                // pipeline. Its rejection is the post-commit boundary, so it
+                // classifies recovery_required like the throw paths there,
+                // whether or not the deploy branch then ran (matching manual
+                // apply's rejected acceptance transition).
                 const reason = 'The promotion committed, but the Direct target could not be bound to the accepted generation.';
                 this.settleAttempt(app.id, envelope, {
                     outcome: 'recovery_required',
@@ -3638,7 +3659,17 @@ export class GitSourceService {
               legacyOwnedPaths: string[] | undefined;
               pending: { candidateRelPath: string; files: ComposeFile[]; envContent: string | null };
           }
-        | { ok: false; reason: string }
+        | {
+              ok: false;
+              reason: string;
+              /**
+               * The refusal is transient (an IO blip reading the candidate or
+               * its staged sync env), not a state the operator has to resolve:
+               * the settled attempt should advise a retry, not conflict
+               * resolution.
+               */
+              transient?: boolean;
+          }
     > {
         const manifestSvc = GitProjectManifestService.getInstance();
         const priorRead = await manifestSvc.readManifest(stackName, src.repo_url, src.branch);
@@ -3671,7 +3702,7 @@ export class GitSourceService {
                     `[GitSource] dispatch candidate access failed for ${sanitizeForLog(stackName)}:`,
                     accessErr instanceof Error ? accessErr.message : String(accessErr),
                 );
-                return { ok: false, reason: 'Cannot read the accepted candidate; try again.' };
+                return { ok: false, reason: 'Cannot read the accepted candidate; try again.', transient: true };
             }
             return { ok: false, reason: 'The accepted candidate is no longer staged; pull the source again.' };
         }
@@ -3699,7 +3730,7 @@ export class GitSourceService {
                         `[GitSource] dispatch could not read the staged sync env for ${sanitizeForLog(stackName)}:`,
                         envErr instanceof Error ? envErr.message : String(envErr),
                     );
-                    return { ok: false, reason: 'Cannot read the accepted candidate; try again.' };
+                    return { ok: false, reason: 'Cannot read the accepted candidate; try again.', transient: true };
                 }
             }
         }
@@ -3881,7 +3912,10 @@ export class GitSourceService {
      * order: last-plan 'applied', conflict resolution, apply activity, and
      * cache invalidation precede the applied mark; the acceptance follows
      * it; the deploy branch hands recovery off before Compose and links the
-     * health gate after. Callers arrive with the change plan already
+     * health gate after. The dispatch caller's postPromote bind runs
+     * between the acceptance transition and the deploy branch, so both
+     * callers hold the target pointer when the deploy opens its own GitOps
+     * operation. Callers arrive with the change plan already
      * validated against live state; everything here is what must
      * happen identically no matter who drove the plan. Cache
      * invalidation and the post-deploy scan live here, not in any
@@ -3921,11 +3955,26 @@ export class GitSourceService {
          * its own error handling (the applyFailed wrapper) does not consult it.
          */
         progress: { filesUntrusted: boolean };
+        /**
+         * Optional hook at the post-commit boundary, running after the
+         * acceptance transition and before the deploy branch. Direct
+         * dispatch passes the target bind here: beginGitOpsDeploy reads the
+         * target's applied generation when it opens the deploy's own GitOps
+         * operation, so the pointer must already name this generation by the
+         * time Compose runs, the same position manual apply's applied()
+         * transition occupies. The shipped hook does not throw: recordGitOps
+         * converts a throwing transition into a false return, and the caller
+         * classifies the rejection through its own flag. The progress flag is
+         * already set when this hook runs, so a throwing hook added later
+         * would still be classified recovery_required.
+         */
+        postPromote?: () => void;
     }): Promise<GitApplyResult> {
         const { stackName, commitSha, src, nodeId, applyOperationId, gitopsEnv, gitopsApp, gitopsGenerationId } = args;
-        // Byte-parity with main: recovery capture fell back to 'git-source'
-        // while the policy gate and Compose fell back to 'system:git-source'.
-        // activity rows used the resolved `actor` either way.
+        // Byte-parity with main: recovery capture and the policy gate fall
+        // back to 'git-source'; the Compose deploy and the health gate fall
+        // back to 'system:git-source'. Activity rows use the resolved
+        // `actor` either way.
         const actor = args.actor ?? 'system:git-source';
         const captureActor = args.actor ?? 'git-source';
         const { manifest, prior, plan } = args;
@@ -4066,6 +4115,12 @@ export class GitSourceService {
             if (!recorded) this.abandonGitOpsOperation(stackName, gitopsApp.id, gitopsEnv);
         }
 
+        // The caller's post-commit bind (Direct dispatch's targetApplied)
+        // runs at the same position manual apply's acceptance transition
+        // occupies, so the deploy branch below reads a target pointer that
+        // already names this generation.
+        args.postPromote?.();
+
         const shouldDeploy = args.deploy;
         const diag = isDebugEnabled();
         if (diag) console.log('[GitSource:diag] apply wrote stack=%s sha=%s deploy=%s', sanitizeForLog(stackName), sanitizeForLog(commitSha.slice(0, 7)), sanitizeForLog(shouldDeploy));
@@ -4092,7 +4147,7 @@ export class GitSourceService {
                 await assertPolicyGateAllows(
                     stackName,
                     nodeId,
-                    buildSystemPolicyGateOptions(actor, {
+                    buildSystemPolicyGateOptions(captureActor, {
                         bypass: args.bypassPolicy === true,
                         auditPath: `/api/stacks/${stackName}/git-source/apply`,
                     }),
