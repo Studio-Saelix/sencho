@@ -313,6 +313,11 @@ export interface GitApplyOpts {
 }
 
 type GitApplyResult = {
+    /**
+     * Always true on a non-throwing pipeline path (every failure throws);
+     * kept for the public apply response shape, so dispatch's guard reads
+     * as defense, not decay.
+     */
     applied: boolean;
     deployed: boolean;
     deployError?: string;
@@ -3402,6 +3407,19 @@ export class GitSourceService {
                 opts.trigger,
                 Date.now(),
             );
+            if (!allocated.reserved) {
+                // A freshly allocated id collided with an existing reservation
+                // row. Re-running the promotion would double-apply work someone
+                // else already recorded, so report truthfully and leave that
+                // attempt to its own owner (or to startup recovery).
+                console.error(
+                    `[GitSource] Dispatch of ${sanitizeForLog(stackName)} allocated an already-reserved operation id ${sanitizeForLog(allocated.operationId)}.`,
+                );
+                return {
+                    status: 'blocked',
+                    reason: 'A dispatch attempt for this stack is already recorded; check its outcome before dispatching again.',
+                };
+            }
             envelope = this.gitopsEnvelope(allocated.operationId, opts.actor, opts.trigger);
         } catch (e) {
             console.error(
@@ -3413,61 +3431,71 @@ export class GitSourceService {
                 reason: "This stack's GitOps tracking is unavailable; reconfigure the source before dispatching again.",
             };
         }
-        const settleBlocked = (reason: string): DispatchResult => {
-            this.settleAttempt(generation.applicationId, envelope, { outcome: 'blocked', reason, nextAction: 'resolve_conflict' });
+        const settleRefusal = (
+            outcome: 'blocked' | 'recovery_required',
+            nextAction: 'resolve_conflict' | 'view_target_results',
+            raw: string,
+        ): DispatchResult => {
+            // Scrub at the one choke point all refusals pass through: reasons
+            // assembled from validation errors can carry credential-shaped text,
+            // and every settled row is operator-visible durable state.
+            const reason = scrubCredentials(raw);
+            this.settleAttempt(generation.applicationId, envelope, { outcome, reason, nextAction });
             return { status: 'blocked', reason };
         };
-
-        // Re-read everything the acceptance was decided under. A newer pull,
-        // a pause, or a mode change between acceptance and dispatch must
-        // refuse promotion here, not race it.
-        const app = store.getApplication(generation.applicationId);
-        if (!app || app.stack_name !== stackName) {
-            return settleBlocked('No Direct stack is bound to this application.');
-        }
-        if (app.suspended_at) {
-            return settleBlocked(`Reconciliation is suspended for ${stackName}.`);
-        }
-        if (app.target_mode !== 'direct') {
-            return settleBlocked('The application is no longer in Direct mode.');
-        }
-        if (app.accepted_generation_id !== generation.generationId) {
-            return settleBlocked('The accepted generation changed before dispatch could promote it.');
-        }
-        const genRow = store.getGeneration(generation.generationId);
-        if (!genRow || genRow.commit_sha !== generation.commitSha) {
-            return settleBlocked('The dispatch contract disagrees with the accepted generation.');
-        }
-        const target = store.getTarget(app.id, nodeId);
-        if (!target) {
-            return settleBlocked('No Direct target is bound to this application.');
-        }
-        if (target.target_status !== 'active') {
-            return settleBlocked('The Direct target is tombstoned.');
-        }
-        if (target.candidate_generation_id !== generation.generationId) {
-            return settleBlocked('The target candidate no longer matches the accepted generation.');
-        }
-        // targetApplied() only accepts the exact artifact set and acceptance
-        // reference the source layer recorded; capture them while narrowed.
-        if (!app.artifact_set_id || !app.source_acceptance_ref) {
-            return settleBlocked('The accepted generation has no recorded acceptance evidence to bind.');
-        }
-        const artifactSetId = app.artifact_set_id;
-        const sourceAcceptanceId = app.source_acceptance_ref;
-
-        let result: { applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string };
-        // Both the revalidation and the pipeline run inside one try: discovery,
-        // candidate validation, or the change-plan recompute can themselves
-        // throw, and a throw here would escape runExclusive with the attempt
-        // still reserved, violating the no-throw dispatch contract.
-        let revalidation: Awaited<ReturnType<GitSourceService['revalidateAcceptedTarget']>>;
+        // A refusal before the promotion boundary settles blocked with
+        // resolve_conflict; the call sites past that boundary settle
+        // recovery_required with view_target_results instead, so the next
+        // action matches the settled outcome instead of contradicting it.
+        const settleBlocked = (raw: string): DispatchResult => settleRefusal('blocked', 'resolve_conflict', raw);
+        // The pipeline flags when the live files stop being trustworthy; a
+        // throw past that boundary settles recovery_required via the catch
+        // below. Same by-reference pattern as the started.settled wrapper.
+        const progress = { filesUntrusted: false };
         try {
-            revalidation = await this.revalidateAcceptedTarget(generation, genRow, src, stackName);
+            // Re-read everything the acceptance was decided under. A newer pull,
+            // a pause, or a mode change between acceptance and dispatch must
+            // refuse promotion here, not race it.
+            const app = store.getApplication(generation.applicationId);
+            if (!app || app.stack_name !== stackName) {
+                return settleBlocked('No Direct stack is bound to this application.');
+            }
+            if (app.suspended_at) {
+                return settleBlocked(`Reconciliation is suspended for ${stackName}.`);
+            }
+            if (app.target_mode !== 'direct') {
+                return settleBlocked('The application is no longer in Direct mode.');
+            }
+            if (app.accepted_generation_id !== generation.generationId) {
+                return settleBlocked('The accepted generation changed before dispatch could promote it.');
+            }
+            const genRow = store.getGeneration(generation.generationId);
+            if (!genRow || genRow.commit_sha !== generation.commitSha) {
+                return settleBlocked('The dispatch contract disagrees with the accepted generation.');
+            }
+            const target = store.getTarget(app.id, nodeId);
+            if (!target) {
+                return settleBlocked('No Direct target is bound to this application.');
+            }
+            if (target.target_status !== 'active') {
+                return settleBlocked('The Direct target is tombstoned.');
+            }
+            if (target.candidate_generation_id !== generation.generationId) {
+                return settleBlocked('The target candidate no longer matches the accepted generation.');
+            }
+            // targetApplied() only accepts the exact artifact set and acceptance
+            // reference the source layer recorded; capture them while narrowed.
+            if (!app.artifact_set_id || !app.source_acceptance_ref) {
+                return settleBlocked('The accepted generation has no recorded acceptance evidence to bind.');
+            }
+            const artifactSetId = app.artifact_set_id;
+            const sourceAcceptanceId = app.source_acceptance_ref;
+
+            const revalidation = await this.revalidateAcceptedTarget(generation, genRow, src, stackName);
             if (!revalidation.ok) {
                 return settleBlocked(revalidation.reason);
             }
-            result = await this.completeGitApply({
+            const result = await this.completeGitApply({
                 stackName,
                 commitSha: generation.commitSha,
                 src,
@@ -3490,40 +3518,87 @@ export class GitSourceService {
                 deploy: src.auto_deploy_on_apply,
                 bypassPolicy: false,
                 started: { app: null, env: null, settled: true },
+                progress,
             });
-        } catch (e) {
-            return settleBlocked(e instanceof Error ? e.message : String(e));
-        }
-        if (!result.applied) {
-            return settleBlocked('The completion pipeline did not apply the accepted generation.');
-        }
+            if (!result.applied) {
+                // Defensive parity with the promotion boundary: a pipeline
+                // that reports not-applied over files the flag says are
+                // rewritten must not settle as a plain resolve-conflict
+                // refusal. Both arms are unreachable today (the pipeline
+                // only ever returns applied: true); the flag classifies the
+                // impossible state by the file evidence, not by hope.
+                return progress.filesUntrusted
+                    ? settleRefusal('recovery_required', 'view_target_results',
+                        'The promotion did not complete cleanly. The stack\'s Compose files may already be updated.')
+                    : settleBlocked('The completion pipeline did not apply the accepted generation.');
+            }
 
-        // Promotion committed; the target binds to the already-accepted
-        // generation now, never before.
-        const bound = this.recordGitOps(stackName, 'target binding', () => {
-            GitOpsTransitions.getInstance().targetApplied(nodeId, {
-                applicationId: app.id,
-                generationId: generation.generationId,
-                artifactSetId,
-                sourceAcceptanceId,
-                authority: 'operator',
-                envelope,
+            // Promotion committed; the target binds to the already-accepted
+            // generation now, never before.
+            const bound = this.recordGitOps(stackName, 'target binding', () => {
+                GitOpsTransitions.getInstance().targetApplied(nodeId, {
+                    applicationId: app.id,
+                    generationId: generation.generationId,
+                    artifactSetId,
+                    sourceAcceptanceId,
+                    authority: 'operator',
+                    envelope,
+                });
             });
-        });
-        if (!bound) {
-            return settleBlocked('The promotion committed, but the Direct target could not be bound to the accepted generation.');
+            if (!bound) {
+                // Same post-commit boundary as the catch below: recordGitOps
+                // converts a throwing binding transition into this false
+                // return instead of rethrowing, so classify it here with the
+                // recovery_required vocabulary the rewritten files warrant.
+                const reason = 'The promotion committed, but the Direct target could not be bound to the accepted generation.';
+                this.settleAttempt(app.id, envelope, {
+                    outcome: 'recovery_required',
+                    reason,
+                    nextAction: 'view_target_results',
+                });
+                return { status: 'blocked', reason };
+            }
+            if (result.deployError) {
+                const reason = `The source applied, but the deploy failed: ${result.deployError}`;
+                this.settleAttempt(app.id, envelope, {
+                    outcome: 'recovery_required',
+                    reason,
+                    nextAction: 'view_target_results',
+                });
+                return { status: 'blocked', reason };
+            }
+            this.settleAttempt(app.id, envelope, this.finalizeReconcileOutcome(stackName, undefined));
+            return { status: 'dispatched' };
+        } catch (e) {
+            // Guards, revalidation, the pipeline, and the binding all run inside
+            // this try: a live read (computeChangePlan's authored-invocation read
+            // deliberately throws on transient IO failures), a candidate file
+            // read, or a store access must settle the reserved attempt and
+            // return an outcome, never escape runExclusive with it open.
+            // Log first: this is the only handler for these throws, and the
+            // settled row keeps only the scrubbed message, not the stack.
+            console.error(
+                `[GitSource] Dispatch of ${sanitizeForLog(stackName)} threw (filesUntrusted=${progress.filesUntrusted}):`,
+                e instanceof Error ? e.stack ?? e.message : String(e),
+            );
+            const reason = scrubCredentials(e instanceof Error ? (e.message || e.name) : String(e));
+            if (progress.filesUntrusted) {
+                // Two producers reach this with the flag set: a throw from
+                // post-promotion bookkeeping (promotion committed), and a
+                // promote failure whose automatic restore also failed (live
+                // files half-mutated). The wording must not claim the first
+                // case happened when the second did, so it names only what
+                // both share: completion failed and the files may be updated.
+                const promotedReason = `The promotion did not complete cleanly: ${reason}. The stack's Compose files may already be updated.`;
+                this.settleAttempt(generation.applicationId, envelope, {
+                    outcome: 'recovery_required',
+                    reason: promotedReason,
+                    nextAction: 'view_target_results',
+                });
+                return { status: 'blocked', reason: promotedReason };
+            }
+            return settleBlocked(reason);
         }
-        if (result.deployError) {
-            const reason = `The source applied, but the deploy failed: ${result.deployError}`;
-            this.settleAttempt(app.id, envelope, {
-                outcome: 'recovery_required',
-                reason,
-                nextAction: 'view_target_results',
-            });
-            return { status: 'blocked', reason };
-        }
-        this.settleAttempt(app.id, envelope, this.finalizeReconcileOutcome(stackName, undefined));
-        return { status: 'dispatched' };
     }
 
     /**
@@ -3647,6 +3722,11 @@ export class GitSourceService {
                 reason: 'The live Compose invocation no longer matches the last applied generation. Review the change plan before dispatching again.',
             };
         }
+        // A null stored fingerprint means "cannot compare", not "no drift":
+        // a pull that could not compute a change plan records none, and
+        // migrated rows never record one (dispatch's acceptance-evidence
+        // guard already refuses those). The remaining candidate and plan
+        // checks still ran, so promotion proceeds.
         if (genRow.change_plan_fingerprint !== null && plan.fingerprint !== genRow.change_plan_fingerprint) {
             return {
                 ok: false,
@@ -3792,13 +3872,9 @@ export class GitSourceService {
      * it; the deploy branch hands recovery off before Compose and links the
      * health gate after. Callers arrive with the change plan already
      * validated against live state; everything here is what must
-     * happen identically no matter who drove the plan.
-     *
-     * Cache invalidation and the post-deploy scan live here, not in any
-     * route: promotion rewrites the authoritative Compose files, so caches
-     * are stale whether or not a deploy follows, and the scan runs only
-     * after a successful deploy. That placement must fire exactly once per
-     * successful promotion, from every trigger.
+     * happen identically no matter who drove the plan. Cache
+     * invalidation and the post-deploy scan live here, not in any
+     * route, so every trigger gets them exactly once.
      */
     private async completeGitApply(args: {
         stackName: string;
@@ -3823,6 +3899,17 @@ export class GitSourceService {
         deploy: boolean;
         bypassPolicy: boolean;
         started: { app: GitOpsApplicationRow | null; env: ReturnType<GitSourceService['gitopsEnvelope']> | null; settled: boolean };
+        /**
+         * By-reference out-param, required so no caller can silently opt out of
+         * the classification below: set to true the moment the live Compose
+         * files are no longer trustworthy as the previous generation's: either
+         * promoteGeneration committed, or its failure left them mutated with
+         * the automatic restore also failing (recovery_required). A throw after
+         * that point is classified by the dispatch caller as recovery_required
+         * rather than a plain refusal. applyLockedBody passes an unused one;
+         * its own error handling (the applyFailed wrapper) does not consult it.
+         */
+        progress: { filesUntrusted: boolean };
     }): Promise<{ applied: boolean; deployed: boolean; deployError?: string; recoveryId?: string }> {
         const { stackName, commitSha, src, nodeId, applyOperationId, gitopsEnv, gitopsApp, gitopsGenerationId } = args;
         // Byte-parity with main: recovery capture fell back to 'git-source'
@@ -3878,7 +3965,15 @@ export class GitSourceService {
                     );
                 }
             }
-            if (e instanceof GitSourceError) throw e;
+            if (e instanceof GitSourceError) {
+                // Fail dangerous before the rethrow: promoteGeneration throws
+                // no GitSourceError today, so one reaching here has unknown
+                // provenance relative to the file mutation, and its message
+                // cannot be trusted to mean "pre-mutation". The dispatch
+                // caller must treat the live files as untrusted.
+                args.progress.filesUntrusted = true;
+                throw e;
+            }
             const raw = e instanceof Error ? e.message : String(e);
             console.error(`[GitSource] promotion failed for ${sanitizeForLog(stackName)}:`, e instanceof Error ? e.stack ?? e.message : raw);
             const sensitivePaths = manifest.inputs
@@ -3889,6 +3984,14 @@ export class GitSourceService {
                 redacted = redacted.split(rel).join('[redacted]');
             }
             const phase = e instanceof PromoteGenerationError ? e.phase : 'pre_mutation';
+            if (phase === 'recovery_required') {
+                // The automatic restore failed, so the live Compose files may
+                // already be the incoming generation's or a mix of both. Past
+                // that boundary a throw must settle recovery_required for the
+                // dispatch caller, not a plain refusal. 'restored' keeps the
+                // flag false: the files were rolled back, blocked is truthful.
+                args.progress.filesUntrusted = true;
+            }
             if (phase === 'restored') {
                 db.setGitSourceLastPlan(stackName, plan.fingerprint, 'rolled_back');
                 this.recordGitActivity(
@@ -3910,6 +4013,9 @@ export class GitSourceService {
             }
             throw new GitSourceError('GIT_ERROR', scrubCredentials(redacted));
         }
+        // The promotion has committed: the live Compose files now hold the
+        // incoming generation, and every step from here is bookkeeping.
+        args.progress.filesUntrusted = true;
         const appliedSpec = this.deriveAppliedSpec(src.compose_paths, src.context_dir);
         db.setGitSourceLastPlan(stackName, plan.fingerprint, 'applied');
         DriftLedgerService.getInstance().resolveManagedPathConflicts(nodeId, stackName);
@@ -4356,6 +4462,9 @@ export class GitSourceService {
                 deploy: opts.deploy ?? src.auto_deploy_on_apply,
                 bypassPolicy: opts.bypassPolicy === true,
                 started,
+                // applyLockedBody's wrapper tracks the operation via `started`;
+                // this flag exists only to keep the pipeline signature honest.
+                progress: { filesUntrusted: false },
             });
         } else {
             throw new GitSourceError('PLAN_UNAVAILABLE', 'Pending update cannot be reviewed; pull again.');

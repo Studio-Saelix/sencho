@@ -2040,6 +2040,53 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
         }
     });
 
+    it('applies a webhook delivery without deploying when auto-deploy is off', async () => {
+        // Truth-table counterpart to the deploy-fail case: with
+        // auto_deploy_on_apply off, a successful webhook apply writes the
+        // files and settles the attempt, and the deploy engine is never
+        // touched.
+        const sha = 'b0'.repeat(20);
+        mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const { ComposeService } = await import('../services/ComposeService');
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack');
+
+        try {
+            await svc.upsert({
+                stackName: 'webhook-apply-only',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                autoApplyOnWebhook: true,
+                autoDeployOnApply: false,
+            });
+            const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('webhook-apply-only')!.id;
+            const settledBefore = historyOperationIds(applicationId, 'source_reconcile_settled').length;
+
+            const result = await svc.handleWebhookPull('webhook-apply-only', true, 'delivery-apply-only');
+
+            expect(result.status).toBe('success');
+            expect(saveSpy).toHaveBeenCalledTimes(1);
+            expect(deploySpy).not.toHaveBeenCalled();
+            // An auto-apply delivery tracks two reconciles (fetch + apply),
+            // so assert convergence instead of an exact count: settled rows
+            // grew, and none were left open.
+            expect(historyOperationIds(applicationId, 'source_reconcile_settled').length).toBeGreaterThan(settledBefore);
+            expect(GitOpsStore.getInstance().listUnsettledReconcileAttempts().some((r) => r.application_id === applicationId)).toBe(false);
+        } finally {
+            validateSpy.mockRestore();
+            saveSpy.mockRestore();
+            deploySpy.mockRestore();
+        }
+    });
+
     it('logs the recognized delivery id as a traceability breadcrumb when a webhook pull fails', async () => {
         const svc = GitSourceService.getInstance();
         mockSuccessfulClone({ sha: '6'.repeat(40) });
@@ -4843,6 +4890,261 @@ describe('GitSourceService.apply', () => {
             }
         });
 
+        it('settles the reserved attempt as blocked when a store read throws before promotion', async () => {
+            const sha = 'e1'.repeat(20);
+            const svc = await seedPending('dispatch-throw-pre', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-throw-pre');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-throw-pre')!.id;
+            const startedBefore = historyOperationIds(applicationId, 'source_reconcile_started').length;
+            const settledBefore = settledAttemptsForApplication(applicationId).length;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            // A throw from revalidation (here the prior-manifest read the plan
+            // recompute depends on) must settle the reserved attempt and
+            // return blocked, never escape runExclusive with it open.
+            const readSpy = vi.spyOn(GitProjectManifestService.prototype, 'readManifest')
+                .mockRejectedValueOnce(new Error('transient read failure'));
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration');
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(/transient read failure/),
+                });
+                // The dispatch catch is the only handler for this throw: the
+                // settled row keeps the scrubbed reason, the stack lives here.
+                expect(errorSpy).toHaveBeenCalledWith(
+                    expect.stringContaining('Dispatch of dispatch-throw-pre threw'),
+                    expect.stringContaining('transient read failure'),
+                );
+                expect(promoteSpy).not.toHaveBeenCalled();
+                expect(historyOperationIds(applicationId, 'source_reconcile_started')).toHaveLength(startedBefore + 1);
+                const settled = settledAttemptsForApplication(applicationId);
+                expect(settled).toHaveLength(settledBefore + 1);
+                expect(JSON.parse(settled[settled.length - 1]!.after_json!)).toMatchObject({ outcome: 'blocked' });
+            } finally {
+                readSpy.mockRestore();
+                promoteSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
+        });
+
+        it('settles recovery_required when the pipeline throws after the promotion committed', async () => {
+            const sha = 'e2'.repeat(20);
+            const svc = await seedPending('dispatch-throw-post', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-throw-post');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-throw-post')!.id;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            // The applied-mark write runs after the promotion committed and
+            // after the progress flag flips; a throw there is a completion
+            // failure over rewritten files, not a refusal.
+            const markSpy = vi.spyOn(DatabaseService.prototype, 'markGitSourceApplied')
+                .mockImplementationOnce(() => { throw new Error('simulated bookkeeping failure'); });
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(
+                        /did not complete cleanly.*may already be updated/s,
+                    ),
+                });
+                const settled = settledAttemptsForApplication(applicationId);
+                expect(JSON.parse(settled[settled.length - 1]!.after_json!)).toMatchObject({
+                    outcome: 'recovery_required',
+                    nextAction: 'view_target_results',
+                });
+            } finally {
+                promoteSpy.mockRestore();
+                markSpy.mockRestore();
+            }
+        });
+
+        it('settles recovery_required when promotion fails and the automatic restore also fails', async () => {
+            const sha = 'e5'.repeat(20);
+            const svc = await seedPending('dispatch-restore-failed', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-restore-failed');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-restore-failed')!.id;
+            const { GitProjectManifestService, PromoteGenerationError } = await import('../services/GitProjectManifestService');
+            // The `recovery_required` phase means the live Compose files were
+            // already renamed away from the previous generation and the
+            // automatic restore failed on top of that. Past that boundary the
+            // dispatch outcome must be recovery_required like a post-promotion
+            // throw, not a plain refusal that tells the operator to resolve a
+            // conflict over untouched files.
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration')
+                .mockRejectedValue(new PromoteGenerationError('recovery_required', new Error('simulated restore failure')));
+            const targetSpy = vi.spyOn(GitOpsTransitions.prototype, 'targetApplied');
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(
+                        /did not complete cleanly.*simulated restore failure.*may already be updated/s,
+                    ),
+                });
+                const settled = settledAttemptsForApplication(applicationId);
+                expect(JSON.parse(settled[settled.length - 1]!.after_json!)).toMatchObject({
+                    outcome: 'recovery_required',
+                    nextAction: 'view_target_results',
+                });
+                // The promotion never committed, so the target binding that
+                // follows a successful pipeline must not have happened.
+                expect(targetSpy).not.toHaveBeenCalled();
+            } finally {
+                promoteSpy.mockRestore();
+                targetSpy.mockRestore();
+            }
+        });
+
+        it('settles plain blocked when promotion fails but the automatic restore succeeded', async () => {
+            const sha = 'e6'.repeat(20);
+            const svc = await seedPending('dispatch-restore-ok', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-restore-ok');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-restore-ok')!.id;
+            const { GitProjectManifestService, PromoteGenerationError } = await import('../services/GitProjectManifestService');
+            // The 'restored' phase means the failed promotion was fully rolled
+            // back: the live files still hold the previous generation, so the
+            // honest dispatch outcome is the plain blocked refusal, not the
+            // recovery_required wording reserved for untrusted files.
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration')
+                .mockRejectedValue(new PromoteGenerationError('restored', new Error('simulated promote failure')));
+            const targetSpy = vi.spyOn(GitOpsTransitions.prototype, 'targetApplied');
+            const startedBefore = historyOperationIds(applicationId, 'source_reconcile_started').length;
+            const settledBefore = settledAttemptsForApplication(applicationId).length;
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringContaining('simulated promote failure'),
+                });
+                const settled = settledAttemptsForApplication(applicationId);
+                expect(settled).toHaveLength(settledBefore + 1);
+                const settledRow = JSON.parse(settled[settled.length - 1]!.after_json!);
+                expect(settledRow).toMatchObject({
+                    outcome: 'blocked',
+                    nextAction: 'resolve_conflict',
+                });
+                expect(settledRow.reason).not.toMatch(/may already be updated/);
+                // The source row's bookkeeping distinguishes the rollback from
+                // a plain failure, same as the manual apply path.
+                expect(DatabaseService.getInstance().getGitSource('dispatch-restore-ok')?.last_plan_outcome)
+                    .toBe('rolled_back');
+                expect(targetSpy).not.toHaveBeenCalled();
+                expect(historyOperationIds(applicationId, 'source_reconcile_started')).toHaveLength(startedBefore + 1);
+            } finally {
+                promoteSpy.mockRestore();
+                targetSpy.mockRestore();
+            }
+        });
+
+        it('settles recovery_required when the promotion committed but the target binding write fails', async () => {
+            const sha = 'e8'.repeat(20);
+            const svc = await seedPending('dispatch-bind-fails', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-bind-fails');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-bind-fails')!.id;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            // recordGitOps turns a throwing transition into a false return,
+            // so a rejected binding never reaches the catch below the
+            // pipeline: the !bound branch must apply the same
+            // recovery_required classification the throw path uses, since
+            // the live files are rewritten either way.
+            const targetSpy = vi.spyOn(GitOpsTransitions.prototype, 'targetApplied')
+                .mockImplementation(() => { throw new Error('simulated binding rejection'); });
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(/could not be bound/i),
+                });
+                const settled = settledAttemptsForApplication(applicationId);
+                expect(JSON.parse(settled[settled.length - 1]!.after_json!)).toMatchObject({
+                    outcome: 'recovery_required',
+                    nextAction: 'view_target_results',
+                });
+            } finally {
+                promoteSpy.mockRestore();
+                targetSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
+        });
+
+        it('blocks without settling when the reservation collides with an existing attempt', async () => {
+            const sha = 'e3'.repeat(20);
+            const svc = await seedPending('dispatch-reserved-false', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-reserved-false');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-reserved-false')!.id;
+            const startedBefore = historyOperationIds(applicationId, 'source_reconcile_started').length;
+            const settledBefore = settledAttemptsForApplication(applicationId).length;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const reserveSpy = vi.spyOn(GitOpsTransitions.prototype, 'allocateReconcileAttempt')
+                .mockImplementationOnce(() => ({ operationId: 'collided:attempt:1', reserved: false }));
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration');
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(/already recorded/i),
+                });
+                // Nothing was reserved, so nothing may be settled: the
+                // colliding attempt belongs to its own owner (or startup
+                // recovery), and a second promote would double-apply.
+                expect(promoteSpy).not.toHaveBeenCalled();
+                expect(historyOperationIds(applicationId, 'source_reconcile_started')).toHaveLength(startedBefore);
+                expect(settledAttemptsForApplication(applicationId)).toHaveLength(settledBefore);
+            } finally {
+                reserveSpy.mockRestore();
+                promoteSpy.mockRestore();
+            }
+        });
+
+        it('promotes when the generation records no plan fingerprint to compare', async () => {
+            const sha = 'e4'.repeat(20);
+            const svc = await seedPending('dispatch-null-fingerprint', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-null-fingerprint');
+            const generation = await acceptedGenerationById(generationId);
+            // The recorded plan evidence must exist before it is erased, or
+            // the test would prove nothing about the null branch.
+            expect(GitOpsStore.getInstance().getGeneration(generationId)?.change_plan_fingerprint).not.toBeNull();
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE gitops_generations SET change_plan_fingerprint = NULL WHERE id = ?')
+                .run(generationId);
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+
+                // A null stored fingerprint means "cannot compare", not
+                // "drifted": the candidate and plan checks still ran, so a
+                // generation that recorded no plan evidence still promotes.
+                expect(result).toEqual({ status: 'dispatched' });
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+            } finally {
+                promoteSpy.mockRestore();
+            }
+        });
+
         it('blocks a direct-mode dispatch when the generation names an application that no longer exists', async () => {
             const sha = 'd9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9';
             const svc = await seedPending('dispatch-no-stack', 'services:\n  x:\n    image: alpine\n', sha);
@@ -4856,6 +5158,55 @@ describe('GitSourceService.apply', () => {
                 status: 'blocked',
                 reason: expect.stringMatching(/no direct stack is bound/i),
             });
+        });
+
+        it('leaves an unsettled dispatch attempt for startup recovery when the in-process settle fails, and recovery settles it once under the original id', async () => {
+            const sha = 'e7'.repeat(20);
+            const svc = await seedPending('dispatch-settle-crash', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-settle-crash');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-settle-crash')!.id;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            // A settle write that throws is the in-test stand-in for dying
+            // between the promotion and the settled row: settleAttempt
+            // swallows the failure, the dispatch still reports dispatched,
+            // and the reservation stays open exactly the way startup
+            // recovery expects to find it.
+            const settleSpy = vi.spyOn(GitOpsTransitions.prototype, 'settleReconcileAttempt')
+                .mockImplementationOnce(() => { throw new Error('simulated settle failure'); });
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(result).toEqual({ status: 'dispatched' });
+
+                const started = historyOperationIds(applicationId, 'source_reconcile_started');
+                const dispatchOp = started[started.length - 1]!;
+                expect(settledAttemptsForApplication(applicationId)
+                    .some((row) => row.operation_id === dispatchOp)).toBe(false);
+
+                // Recovery closes the attempt under the original dispatch
+                // operation id, deriving the outcome from current state
+                // rather than re-executing the promotion.
+                await svc.recoverUnsettledReconcileAttempts();
+                const settledOnce = settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp);
+                expect(settledOnce).toHaveLength(1);
+                expect(JSON.parse(settledOnce[0]!.after_json!)).toHaveProperty('outcome');
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+
+                // A second recovery pass adds nothing: the history dedupe
+                // index makes the first settled result permanent.
+                await svc.recoverUnsettledReconcileAttempts();
+                expect(settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp)).toHaveLength(1);
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+            } finally {
+                promoteSpy.mockRestore();
+                settleSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
         });
     });
 
