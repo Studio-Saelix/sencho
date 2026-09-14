@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent, act, renderHook } from '@testing-library/react';
 import { AppearanceSection } from '../AppearanceSection';
 import { useTheme } from '@/hooks/use-theme';
@@ -21,7 +21,7 @@ describe('AppearanceSection', () => {
     beforeEach(() => resetTheme());
 
     it('renders the four refresh sections above Theme', () => {
-        render(<AppearanceSection />);
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         expect(screen.getByText('Visual style')).toBeTruthy();
         expect(screen.getByText('Security visualization')).toBeTruthy();
         expect(screen.getByText('Readability')).toBeTruthy();
@@ -29,7 +29,7 @@ describe('AppearanceSection', () => {
     });
 
     it('selecting the Calm card applies the calm resolution to <html>', () => {
-        render(<AppearanceSection />);
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         fireEvent.click(screen.getByRole('button', { name: /Calm/i }));
         expect(document.documentElement.dataset.headings).toBe('clean');
         expect(document.documentElement.dataset.chartStyle).toBe('muted');
@@ -38,7 +38,7 @@ describe('AppearanceSection', () => {
     });
 
     it('Calm and Signature preset apply write reducedMotion; Effects alone does not', () => {
-        render(<AppearanceSection />);
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         // Baseline Signature clears Motion.
         expect(document.documentElement.dataset.motion).toBeUndefined();
 
@@ -66,7 +66,7 @@ describe('AppearanceSection', () => {
     });
 
     it('shows the constrained-graphics callout when Reduced motion is off, and hides it when on', () => {
-        render(<AppearanceSection />);
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         expect(screen.getByText('Constrained graphics')).toBeTruthy();
 
         // Reduced effects alone must not hide the Motion guidance.
@@ -85,14 +85,14 @@ describe('AppearanceSection', () => {
     });
 
     it('states that log chip color applies on multi-service or multi-container stacks', () => {
-        render(<AppearanceSection />);
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         expect(
             screen.getByText(/Applies to service chips on multi-service or multi-container stacks/i),
         ).toBeTruthy();
     });
 
     it('readability locks the header + chart controls and disables the glow slider', () => {
-        const { container } = render(<AppearanceSection />);
+        const { container } = render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         // Baseline: nothing reduced, so no slider is disabled.
         expect(container.querySelectorAll('[data-disabled]').length).toBe(0);
         expect(screen.getByRole('radiogroup', { name: 'Header style' }).getAttribute('aria-disabled')).toBeNull();
@@ -108,7 +108,7 @@ describe('AppearanceSection', () => {
     });
 
     it('reduced motion is independent of readability and toggles data-motion on <html>', () => {
-        render(<AppearanceSection />);
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         const motion = () => screen.getByRole('switch', { name: 'Reduced motion' }) as HTMLButtonElement;
         expect(document.documentElement.dataset.motion).toBeUndefined();
         // Readability flattens effects but must not disable the motion toggle.
@@ -119,7 +119,7 @@ describe('AppearanceSection', () => {
     });
 
     it('readability also locks the Visual style cards and the Border brightness slider', () => {
-        const { container } = render(<AppearanceSection />);
+        const { container } = render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         const calmCard = () => screen.getByRole('button', { name: /readable default/i }) as HTMLButtonElement;
         const sigCard = () => screen.getByRole('button', { name: /Today's look/i }) as HTMLButtonElement;
         const borderLocked = () => !!container.querySelector('[aria-label="Border brightness"][data-disabled]');
@@ -137,7 +137,7 @@ describe('AppearanceSection', () => {
     });
 
     it('de-selects both visual-style cards when a custom sub-axis is chosen', () => {
-        render(<AppearanceSection />);
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         // Baseline is Signature, so the Signature card reads selected.
         expect(screen.getByRole('button', { name: /Today's look/i }).getAttribute('aria-pressed')).toBe('true');
         // A custom chart palette (Heat) makes the trio match no preset.
@@ -147,7 +147,7 @@ describe('AppearanceSection', () => {
     });
 
     it('de-selects when only the header style diverges (not just the chart palette)', () => {
-        render(<AppearanceSection />);
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         // Baseline Signature; flipping only Header style to Clean breaks the match.
         fireEvent.click(screen.getByRole('radio', { name: 'Clean' }));
         expect(screen.getByRole('button', { name: /Today's look/i }).getAttribute('aria-pressed')).toBe('false');
@@ -155,7 +155,7 @@ describe('AppearanceSection', () => {
     });
 
     it('reset to default restores Calm and locks while readability is on', () => {
-        render(<AppearanceSection />);
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         fireEvent.click(screen.getByRole('radio', { name: 'Heat' }));
         expect(document.documentElement.dataset.chartStyle).toBe('heat');
 
@@ -171,7 +171,7 @@ describe('AppearanceSection', () => {
 
     it('shows Navigation style and mode-conditional controls', () => {
         localStorage.clear();
-        render(<AppearanceSection />);
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         expect(screen.getByText('Navigation')).toBeTruthy();
         const navigationStyle = screen.getByRole('radiogroup', { name: 'Navigation style' });
         expect(navigationStyle).toBeTruthy();
@@ -190,7 +190,7 @@ describe('AppearanceSection', () => {
 
     it('offers only Compact launcher and Smart bar, with Compact first', () => {
         localStorage.clear();
-        render(<AppearanceSection />);
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         const options = screen.getAllByRole('radio', { name: /bar|launcher/i }).map((el) => el.textContent);
         expect(options).toEqual(['Compact launcher', 'Smart bar']);
         expect(screen.queryByRole('radio', { name: 'Classic bar' })).toBeNull();
@@ -199,13 +199,35 @@ describe('AppearanceSection', () => {
 
     it('disables Reset to defaults while default eligibility has not settled', () => {
         localStorage.clear();
-        render(<AppearanceSection quickLinkCandidates={[]} defaultQuickLinkEligibility={null} />);
+        render(<AppearanceSection quickLinkCandidates={[]} defaultQuickLinkEligibility={null} onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         expect((screen.getByRole('button', { name: 'Reset to defaults' }) as HTMLButtonElement).disabled).toBe(true);
     });
 
     it('enables Reset to defaults once default eligibility has settled', () => {
         localStorage.clear();
-        render(<AppearanceSection quickLinkCandidates={[]} defaultQuickLinkEligibility={['dashboard']} />);
+        render(<AppearanceSection quickLinkCandidates={[]} defaultQuickLinkEligibility={['dashboard']} onResetAppearance={() => {}} onResetNavigation={() => {}} />);
         expect((screen.getByRole('button', { name: 'Reset to defaults' }) as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it('the complete-domain reset buttons call the shared domain-reset handlers', () => {
+        const onResetAppearance = vi.fn();
+        const onResetNavigation = vi.fn();
+        render(<AppearanceSection onResetAppearance={onResetAppearance} onResetNavigation={onResetNavigation} />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Reset all appearance preferences' }));
+        expect(onResetAppearance).toHaveBeenCalledTimes(1);
+        expect(onResetNavigation).not.toHaveBeenCalled();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Reset all navigation preferences' }));
+        expect(onResetNavigation).toHaveBeenCalledTimes(1);
+        expect(onResetAppearance).toHaveBeenCalledTimes(1);
+    });
+
+    it('the account-synced footer and reset helpers state the account scope', () => {
+        render(<AppearanceSection onResetAppearance={() => {}} onResetNavigation={() => {}} />);
+        expect(screen.getByText(/saved to your account · every device picks it up on sign-in/i)).toBeTruthy();
+        expect(screen.getAllByText(/for your account on every device/i).length).toBe(2);
+        // The retired browser-local wording must not resurface.
+        expect(screen.queryByText(/this browser/i)).toBeNull();
     });
 });

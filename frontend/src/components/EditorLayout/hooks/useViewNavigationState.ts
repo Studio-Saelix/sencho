@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
 import { useNodes } from '@/context/NodeContext';
@@ -21,6 +21,12 @@ import { useExperimental } from '@/hooks/useExperimental';
 import { canScheduleAny } from '@/lib/scheduledActions';
 import { buildNavigationModel } from '@/lib/navigation/buildNavigationModel';
 import { recommendedQuickLinkIds, type NavDestination } from '@/lib/navigation/appNavRegistry';
+import {
+  setEligibilitySettled,
+  clearEligibility,
+  currentGeneration,
+  type EligibilityOwnership,
+} from '@/lib/preferences/preferenceEvents';
 
 export type { ActiveView };
 export { HUB_ONLY_VIEWS };
@@ -36,7 +42,7 @@ interface UseViewNavigationStateOptions {
 
 export function useViewNavigationState(options?: UseViewNavigationStateOptions) {
   const { onNavigateToDashboard, hasFleetCapability = false, containerLabelsEnabled = false } = options ?? {};
-  const { isAdmin, can, permissionsStatus, permissions } = useAuth();
+  const { isAdmin, can, permissionsStatus, permissions, user } = useAuth();
   const { isPaid, licenseStatus } = useLicense();
   const { activeNode } = useNodes();
   const isRemote = activeNode?.type === 'remote';
@@ -142,6 +148,40 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     const roleCtx: ReachabilityContext = { ...reachCtx, isRemote: false };
     return recommendedQuickLinkIds.filter((id) => !isViewHidden(id, roleCtx));
   }, [reachCtx]);
+
+  // Readiness bridge (per-user preference sync): publish settled eligibility to
+  // the module-level store the always-mounted sync owner consumes. Ownership is
+  // captured from THIS authorization snapshot (the account id and identity
+  // generation that produced this eligibility value), so a publication from a
+  // superseded producer (account switched, logout) is rejected by the store and
+  // can never appear current for the next account. Teardown clears only its own
+  // ownership, so an obsolete cleanup cannot erase a newer account's publication.
+  const eligibilityOwnershipRef = useRef<EligibilityOwnership | null>(null);
+  const publishedEligibilityRef = useRef<readonly ActiveView[] | null | undefined>(undefined);
+
+  useEffect(() => {
+    if (!authzReady(reachCtx)) return;
+    // Capture ownership from the snapshot this eligibility value came from.
+    eligibilityOwnershipRef.current = { userId: user?.userId ?? null, generation: currentGeneration() };
+  }, [reachCtx, user, permissionsStatus]);
+
+  useEffect(() => {
+    if (!authzReady(reachCtx)) return;
+    const ownership = eligibilityOwnershipRef.current;
+    if (!ownership) return;
+    if (publishedEligibilityRef.current === defaultQuickLinkEligibility) return;
+    publishedEligibilityRef.current = defaultQuickLinkEligibility;
+    setEligibilitySettled(ownership, defaultQuickLinkEligibility === null ? null : [...defaultQuickLinkEligibility]);
+  }, [reachCtx, defaultQuickLinkEligibility]);
+
+  useEffect(() => {
+    // Teardown is scoped to the ownership captured above: only a publication
+    // still owned by THIS producer is cleared.
+    return () => {
+      const ownership = eligibilityOwnershipRef.current;
+      if (ownership) clearEligibility(ownership);
+    };
+  }, []);
 
   useEffect(() => {
     if (!authzReady(reachCtx)) return;

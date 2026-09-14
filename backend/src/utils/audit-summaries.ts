@@ -60,6 +60,11 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /users/*/roles': 'Assigned role',
   'DELETE /users/*/roles': 'Removed role assignment',
 
+  // Per-user interface preferences
+  'POST /user-preferences/*/migrate': 'Migrated interface preferences',
+  'PUT /user-preferences': 'Updated interface preferences',
+  'DELETE /user-preferences': 'Reset interface preferences',
+
   // Auth
   'PUT /auth/password': 'Changed password',
   'POST /auth/generate-node-token': 'Generated node token',
@@ -165,8 +170,17 @@ const SORTED_PATTERNS = Object.entries(AUDIT_ROUTE_SUMMARIES)
  */
 export function getAuditSummary(method: string, apiPath: string, statusCode?: number): string {
   const normalized = apiPath.replace(/^\//, '');
-  // Do not claim a successful prune when the request was rejected or blocked.
+  // Do not claim a successful action when the request was rejected, blocked,
+  // or conflict-resolved. Per-user preference writes carry machine codes in
+  // the response body, so the status code is the only honest signal here.
   if (typeof statusCode === 'number' && statusCode >= 400) {
+    if (normalized.startsWith('user-preferences')) {
+      let kind = 'Update';
+      if (normalized.includes('/migrate')) kind = 'Migration';
+      else if (method === 'GET') kind = 'Read';
+      else if (method === 'DELETE') kind = 'Reset';
+      return `${kind} of interface preferences failed (${statusCode})`;
+    }
     if (method === 'POST' && normalized.startsWith('system/prune/system')) {
       if (statusCode === 409) return 'Prune blocked: plan stale';
       if (statusCode === 400) return 'Prune request rejected';

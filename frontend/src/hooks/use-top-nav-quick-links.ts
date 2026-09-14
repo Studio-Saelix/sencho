@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { isQuickLinkEligibleId } from '@/lib/navigation/appNavRegistry';
 import type { ActiveView } from '@/lib/router/routeTypes';
 import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
+import { notifyPreferenceWrite } from '@/lib/preferences/preferenceEvents';
+import { readQuickLinksProvenance, type QuickLinksProvenance } from '@/lib/preferences/quickLinksProvenance';
 
 export const TOP_NAV_QUICK_LINKS_KEY = 'sencho.appearance.topNavQuickLinks';
 export const MAX_QUICK_LINKS = 8;
@@ -28,6 +30,36 @@ export function sanitizeQuickLinkIds(ids: unknown): ActiveView[] {
 type StoredQuickLinksState =
   | { status: 'valid'; ids: ActiveView[] }
   | { status: 'unset' }; // covers missing key, malformed JSON, and non-array JSON alike
+
+/** Current pin provenance without subscribing (sync layer use): 'unset' means
+ *  never persisted; 'valid' includes a deliberately saved empty list. */
+export function currentQuickLinksProvenance(): QuickLinksProvenance {
+  return readQuickLinksProvenance();
+}
+
+/** Current pin list without subscribing (sync layer use). */
+export function currentQuickLinks(): ActiveView[] {
+  return sanitizeQuickLinkIds(readQuickLinksRaw());
+}
+
+function readQuickLinksRaw(): unknown {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(TOP_NAV_QUICK_LINKS_KEY);
+    if (raw === null) return [];
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
+}
+
+/** Apply a pin list through the same path a user commit uses. Hydration-side
+ *  writes do not notify the sync bus (the caller decides). */
+export function applyQuickLinks(ids: ActiveView[]): void {
+  const sanitized = sanitizeQuickLinkIds(ids);
+  writeStored(sanitized);
+  window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
+}
 
 function writeStored(ids: ActiveView[]): boolean {
   try {
@@ -135,6 +167,14 @@ export function useTopNavQuickLinks(defaultEligibleIds?: readonly ActiveView[] |
     }
   }, [applyState]);
 
+  // The user-facing setters mark the operation as a write (queued to the sync
+  // bus). The eligibility seed effect above intentionally does NOT: derived
+  // state is never uploaded as a user write.
+  const userCommit = useCallback((next: ActiveView[]) => {
+    commit(next);
+    notifyPreferenceWrite('navigation', ['quickLinks']);
+  }, [commit]);
+
   // Seed defaults once eligibility is settled (even a confirmed-empty list: defaultEligibleIds
   // is only ever non-null once proven, never merely "not yet failed") and no valid preference has
   // ever been saved. Fires at most once in practice: the moment it commits, storage holds a valid
@@ -149,24 +189,26 @@ export function useTopNavQuickLinks(defaultEligibleIds?: readonly ActiveView[] |
 
   const resetQuickLinks = useCallback(() => {
     if (defaultEligibleIds == null) return; // guarded in the UI too; defense in depth
-    commit([...defaultEligibleIds]);
-  }, [commit, defaultEligibleIds]);
+    userCommit([...defaultEligibleIds]);
+  }, [userCommit, defaultEligibleIds]);
 
   const addQuickLink = useCallback((value: ActiveView) => {
     if (!isQuickLinkEligibleId(value)) return;
     const prevIds = idsOf(stateRef.current);
     if (prevIds.includes(value) || prevIds.length >= MAX_QUICK_LINKS) return;
-    commit([...prevIds, value]);
-  }, [commit]);
+    userCommit([...prevIds, value]);
+  }, [userCommit]);
 
   const removeQuickLink = useCallback((value: ActiveView) => {
-    commit(idsOf(stateRef.current).filter((id) => id !== value));
-  }, [commit]);
+    userCommit(idsOf(stateRef.current).filter((id) => id !== value));
+  }, [userCommit]);
+
+  const setPersistedIds = userCommit;
 
   return {
     persistedIds: idsOf(state),
     canReset: defaultEligibleIds != null,
-    setPersistedIds: commit,
+    setPersistedIds,
     addQuickLink,
     removeQuickLink,
     resetQuickLinks,

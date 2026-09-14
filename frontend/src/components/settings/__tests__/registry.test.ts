@@ -107,11 +107,11 @@ describe('settings registry', () => {
         }
     });
 
-    it('scopes the browser-local sections to the browser', () => {
-        // Appearance is the only remaining browser-local section. Stacks moved to
-        // node scope when Deploy Guardrails (backend settings) were added to it
-        // alongside the existing browser-local Workflow controls.
-        expect(SETTINGS_ITEMS.find(i => i.id === 'appearance')?.scope).toBe('browser');
+    it('scopes Appearance to the account and Stacks to the node', () => {
+        // Appearance persists per signed-in account on the server (account scope).
+        // Stacks moved to node scope when Deploy Guardrails (backend settings) were
+        // added to it alongside the existing browser-local Workflow controls.
+        expect(SETTINGS_ITEMS.find(i => i.id === 'appearance')?.scope).toBe('account');
         expect(SETTINGS_ITEMS.find(i => i.id === 'stacks')?.scope).toBe('node');
     });
 
@@ -127,6 +127,11 @@ describe('scopeLabel', () => {
     const item = (over: Partial<SettingsItemMeta>): SettingsItemMeta => ({
         id: 'stacks', group: 'infrastructure', label: 'X', description: '',
         keywords: [], tier: null, scope: 'global', ...over,
+    });
+
+    it('reads account for account-synced sections regardless of their group', () => {
+        expect(scopeLabel(item({ scope: 'account', group: 'personal' }))).toBe('account');
+        expect(scopeLabel(item({ scope: 'account', group: 'infrastructure' }))).toBe('account');
     });
 
     it('reads browser for browser-scoped sections regardless of their group', () => {

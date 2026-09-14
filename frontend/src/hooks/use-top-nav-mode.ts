@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
+import { notifyPreferenceWrite } from '@/lib/preferences/preferenceEvents';
 
 export const TOP_NAV_MODE_KEY = 'sencho.appearance.topNavMode';
 
@@ -24,6 +25,22 @@ function readStored(): TopNavMode {
   }
 }
 
+/** Read the current nav mode without subscribing (sync layer use). */
+export function currentTopNavMode(): TopNavMode {
+  return readStored();
+}
+
+/** Apply a nav mode through the same path a user commit uses. Hydration-side
+ *  writes do not notify the sync bus. */
+export function applyTopNavMode(next: TopNavMode): void {
+  try {
+    window.localStorage.setItem(TOP_NAV_MODE_KEY, next);
+  } catch {
+    // ignore; localStorage may be unavailable
+  }
+  window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
+}
+
 export function useTopNavMode(): [TopNavMode, (next: TopNavMode) => void] {
   const [mode, setModeState] = useState<TopNavMode>(readStored);
 
@@ -45,13 +62,9 @@ export function useTopNavMode(): [TopNavMode, (next: TopNavMode) => void] {
   }, []);
 
   const setMode = useCallback((next: TopNavMode) => {
-    try {
-      window.localStorage.setItem(TOP_NAV_MODE_KEY, next);
-    } catch {
-      // ignore; localStorage may be unavailable
-    }
+    applyTopNavMode(next);
     setModeState(next);
-    window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
+    notifyPreferenceWrite('navigation', ['mode']);
   }, []);
 
   return [mode, setMode];

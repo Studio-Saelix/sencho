@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useEffect, useCallback, useRef, ty
 import { markMilestone } from '@/lib/hydrationTiming';
 import { clearStackStatusesFetch } from '@/lib/stackStatusesFetch';
 import { resolveCan } from '@/lib/resolveCan';
+import { bumpGeneration, resetPreferenceSync } from '@/lib/preferences/preferenceEvents';
 
 type AppStatus = 'loading' | 'needsSetup' | 'notAuthenticated' | 'mfaChallenge' | 'authenticated';
 
@@ -17,6 +18,10 @@ export type PermissionAction =
 
 interface UserInfo {
   username: string;
+  /** Numeric account id (stable across renames, changes when the account is
+   *  deleted and recreated under the same name). Used by the preference sync
+   *  layer to own cached per-user state. */
+  userId: number;
   role: UserRole;
 }
 
@@ -48,9 +53,26 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+/** localStorage signal key: login/logout writes it so other tabs re-run
+ *  checkAuth (cookies are not visible across tabs via storage events). */
+const AUTH_SIGNAL_KEY = 'sencho.auth.signal';
+
+/** Called by login/logout paths to wake other tabs. */
+function signalAuthChanged(): void {
+  try {
+    localStorage.setItem(AUTH_SIGNAL_KEY, String(Date.now()));
+  } catch {
+    // ignore; cross-tab refresh is best-effort
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [appStatus, setAppStatus] = useState<AppStatus>('loading');
   const [user, setUser] = useState<UserInfo | null>(null);
+  // The last resolved account id, so a re-check that lands on a different
+  // user (cross-tab login of another account, deleted-and-recreated account)
+  // is detectable as an identity transition.
+  const resolvedUserIdRef = useRef<number | null>(null);
   const [permissions, setPermissions] = useState<PermissionsData | null>(null);
   const [permissionsStatus, setPermissionsStatus] = useState<PermissionsStatus>('loading');
   const permissionRequestRef = useRef(0);
@@ -59,6 +81,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     permissionRequestRef.current += 1;
     setPermissions(null);
     setPermissionsStatus('loading');
+  }, []);
+
+  // Identity transitions invalidate all async preference work captured under
+  // the previous identity AND clear the sync bus state (queued edits, failed
+  // operations, unsaved episodes): a stale Retry under a new account must
+  // never replay the previous account's writes.
+  const noteIdentityTransition = useCallback(() => {
+    bumpGeneration();
+    resetPreferenceSync();
   }, []);
 
   const loadPermissions = useCallback(async () => {
@@ -95,13 +126,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setAppStatus('needsSetup');
         setUser(null);
         resetPermissions();
+        resolvedUserIdRef.current = null;
+        noteIdentityTransition();
         return;
       }
 
       if (statusData.mfaPending) {
         setUser(null);
         resetPermissions();
+        resolvedUserIdRef.current = null;
         setAppStatus('mfaChallenge');
+        noteIdentityTransition();
         return;
       }
 
@@ -110,16 +145,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const data = await authResponse.json();
         setUser(data.user ?? null);
         setAppStatus('authenticated');
+        // A successful check that resolves to a DIFFERENT account than the
+        // last one (cross-tab login of another user, account swap) is an
+        // identity transition: stale preference work captured for the old
+        // account must be invalidated before the new account's state loads.
+        const nextUserId = typeof data.user?.userId === 'number' ? data.user.userId : null;
+        if (nextUserId !== resolvedUserIdRef.current) {
+          resolvedUserIdRef.current = nextUserId;
+          noteIdentityTransition();
+        }
         await loadPermissions();
       } else {
         setUser(null);
         resetPermissions();
+        resolvedUserIdRef.current = null;
         setAppStatus('notAuthenticated');
+        noteIdentityTransition();
       }
     } catch {
       setUser(null);
       resetPermissions();
+      resolvedUserIdRef.current = null;
       setAppStatus('notAuthenticated');
+      noteIdentityTransition();
     }
   };
 
@@ -136,10 +184,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       clearStackStatusesFetch();
       setUser(null);
       resetPermissions();
+      resolvedUserIdRef.current = null;
       setAppStatus('notAuthenticated');
+      noteIdentityTransition();
     };
     window.addEventListener('sencho-unauthorized', handleUnauthorized);
     return () => window.removeEventListener('sencho-unauthorized', handleUnauthorized);
+  }, []);
+
+  // Cross-tab identity changes: cookies are not storage events, so a second
+  // tab's login/logout writes a signal key and this tab re-runs checkAuth.
+  useEffect(() => {
+    function onStorage(event: StorageEvent) {
+      if (event.key !== AUTH_SIGNAL_KEY || event.newValue === null) return;
+      try {
+        localStorage.removeItem(AUTH_SIGNAL_KEY);
+      } catch {
+        // ignore; the signal still processed this tab
+      }
+      void checkAuth();
+    }
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
   }, []);
 
   const can = useCallback((
@@ -166,6 +232,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const data = await response.json();
 
       if (response.ok && data.success) {
+        signalAuthChanged();
         if (data.mfaRequired) {
           await checkAuth();
           return { success: true, mfaRequired: true };
@@ -193,6 +260,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const data = await response.json();
 
       if (response.ok && data.success) {
+        signalAuthChanged();
         if (data.mfaRequired) {
           await checkAuth();
           return { success: true, mfaRequired: true };
@@ -240,7 +308,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       clearStackStatusesFetch();
       setUser(null);
       resetPermissions();
+      resolvedUserIdRef.current = null;
       setAppStatus('notAuthenticated');
+      noteIdentityTransition();
     }
   };
 
@@ -256,7 +326,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       clearStackStatusesFetch();
       setUser(null);
       resetPermissions();
+      resolvedUserIdRef.current = null;
       setAppStatus('notAuthenticated');
+      noteIdentityTransition();
+      signalAuthChanged();
     }
   };
 

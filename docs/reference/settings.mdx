@@ -34,7 +34,7 @@ Every section renders inside the same masthead-and-sidebar layout. The masthead 
 
 | Pill | Meaning |
 |------|---------|
-| **SCOPE** `operator` / `browser` / `global` | Setting applies to your account (`operator`), to this browser only (`browser`, for browser-local sections such as Appearance), or to the whole instance (`global`, every other non-node group) |
+| **SCOPE** `operator` / `account` / `browser` / `global` | Setting applies to your account (`operator`), to your saved interface preferences, synced across your devices (`account`, for Appearance), to this browser only (`browser`, for browser-local workflow toggles), or to the whole instance (`global`, every other non-node group) |
 | **NODE** `<node name>` | Setting is per-node and is currently being edited against this node |
 | **EDITED** `<count>` pending / `saved` | The current section has unsaved changes |
 | Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `DURATION`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (Admiral Account); `OPERATORS` (Users); `PROVIDERS`, `ENABLED` (SSO); `CHANNELS` (Channels); `ROUTES`, `ENABLED` (Notification Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `PROVIDER`, `USED` (Recovery Vault); `DEV MODE` (Developer Diagnostics) |
@@ -98,9 +98,9 @@ See [Two-Factor Authentication](/features/two-factor-authentication) for the enr
 
 ## Appearance
 
-**Scope:** This browser (preferences are saved to local storage)
+**Scope:** Account (preferences are saved to your account and synced to every device you sign in from)
 
-Control how Sencho looks and how dense the workspace feels. Each browser remembers its own choices so a compact laptop setup does not force the same rhythm on a larger desktop. See [Appearance](/features/appearance) for the full walkthrough.
+Control how Sencho looks and how dense the workspace feels. Your choices follow your account: sign in on another browser or device and the same look is already there. See [Appearance](/features/appearance) for the full walkthrough.
 
 <Frame>
   <img src="/images/settings/appearance-density.png" alt="Appearance settings showing the Density selector" />
@@ -631,7 +631,7 @@ Checks what deployments depend on: the Docker engine, the Compose plugin, the co
 
 | Action | Description |
 |--------|-------------|
-| **Reset interface preferences** | Clears density and editor display options from this browser's local storage and reloads the page. Use this if a display setting wedges the layout. |
+| **Reset interface preferences** | Restores every appearance and navigation preference to their defaults for your account and clears the browser-local editor toggles, then reloads the page. Use this if a display setting wedges the layout. |
 | **Recovery guide** | Opens the step-by-step recovery guide at docs.sencho.io. |
 
 ### Command-line recovery

@@ -1,4 +1,4 @@
-import { Check, Info } from 'lucide-react';
+import { Check, Info, RotateCcw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Combobox } from '@/components/ui/combobox';
 import { Slider } from '@/components/ui/slider';
@@ -147,9 +147,13 @@ function VisualCard({
 export function AppearanceSection({
     quickLinkCandidates = [],
     defaultQuickLinkEligibility,
+    onResetAppearance,
+    onResetNavigation,
 }: {
     quickLinkCandidates?: NavDestination[];
     defaultQuickLinkEligibility?: ActiveView[] | null;
+    onResetAppearance: () => void;
+    onResetNavigation: () => void;
 }) {
     const [density, setDensity] = useDensity();
     const [chipColorMode, setChipColorMode] = useLogChipColorMode();
@@ -233,7 +237,7 @@ export function AppearanceSection({
                 </SettingsField>
             </SettingsSection>
 
-            <SettingsSection title="Readability" kicker="this browser">
+            <SettingsSection title="Readability" kicker="your account">
                 <SettingsField
                     label="Readability mode"
                     helper="One switch: upright headings, muted flat charts, reduced effects, and a contrast lift."
@@ -275,7 +279,7 @@ export function AppearanceSection({
                 </SettingsField>
             </SettingsSection>
 
-            <SettingsSection title="Motion & effects" kicker="this browser">
+            <SettingsSection title="Motion & effects" kicker="your account">
                 {!reducedMotion ? (
                     <SettingsCallout
                         tone="warn"
@@ -337,7 +341,7 @@ export function AppearanceSection({
                 </SettingsActions>
             </SettingsSection>
 
-            <SettingsSection title="Theme" kicker="this browser">
+            <SettingsSection title="Theme" kicker="your account">
                 <div className="pt-3">
                     <ThemePreview />
                 </div>
@@ -395,7 +399,7 @@ export function AppearanceSection({
                 </SettingsActions>
             </SettingsSection>
 
-            <SettingsSection title="Typography" kicker="this browser">
+            <SettingsSection title="Typography" kicker="your account">
                 <SettingsField
                     label="Interface font"
                     helper="The sans face for body, labels, navigation, and buttons. Heading style follows your Visual style choice."
@@ -432,7 +436,7 @@ export function AppearanceSection({
                 </SettingsField>
             </SettingsSection>
 
-            <SettingsSection title="Display" kicker="this browser">
+            <SettingsSection title="Display" kicker="your account">
                 <SettingsField
                     label="Density"
                     helper={DENSITY_DESCRIPTIONS[density]}
@@ -460,7 +464,7 @@ export function AppearanceSection({
                 </SettingsField>
             </SettingsSection>
 
-            <SettingsSection title="Navigation" kicker="this browser">
+            <SettingsSection title="Navigation" kicker="your account">
                 <SettingsField
                     label="Navigation style"
                     helper="Compact launcher is the recommended default: destinations live in a menu with optional quick links. Smart bar keeps primary destinations visible with the rest under More."
@@ -471,6 +475,17 @@ export function AppearanceSection({
                         onChange={setTopNavMode}
                         ariaLabel="Navigation style"
                     />
+                </SettingsField>
+
+                <SettingsField
+                    label="Reset all navigation preferences"
+                    helper="Restore the navigation style, quick links, and labels to their defaults, for your account on every device."
+                    align="start"
+                >
+                    <SettingsSecondaryButton type="button" onClick={onResetNavigation} aria-label="Reset all navigation preferences">
+                        <RotateCcw className="h-4 w-4" />
+                        Reset
+                    </SettingsSecondaryButton>
                 </SettingsField>
 
                 {topNavMode === 'smart' && (
@@ -557,8 +572,19 @@ export function AppearanceSection({
             </SettingsSection>
 
             <p className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle/70">
-                ⓘ saved to this browser only · every device remembers its own choice
+                ⓘ saved to your account · every device picks it up on sign-in
             </p>
+
+            <SettingsField
+                label="Reset all appearance preferences"
+                helper="Restore every visual, display, and navigation preference in this section to its default, for your account on every device."
+                align="start"
+            >
+                <SettingsSecondaryButton type="button" onClick={onResetAppearance} aria-label="Reset all appearance preferences">
+                    <RotateCcw className="h-4 w-4" />
+                    Reset
+                </SettingsSecondaryButton>
+            </SettingsField>
         </div>
     );
 }
