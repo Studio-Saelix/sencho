@@ -33,7 +33,11 @@ import { validateStackPatternForRedos } from '../helpers/stackPattern';
 
 export { validateStackPatternForRedos } from '../helpers/stackPattern';
 import { getErrorMessage } from '../utils/errors';
-import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
+import {
+  prepareOutboundRegistryDeliveryBody,
+  registryDeliveryRefusal,
+  throwRegistryDeliveryRefusal,
+} from '../helpers/registryDeliveryOutbound';
 import { parseIntParam } from '../utils/parseIntParam';
 import { parseRequestedTargetVersion, pickCompareTarget } from '../utils/targetVersion';
 import {
@@ -2866,7 +2870,7 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
     body: {},
   });
   if (!augmented.ok) {
-    throw new Error(augmented.error);
+    throwRegistryDeliveryRefusal(augmented);
   }
   const deployRes = await safeRemoteFetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/deploy`, {
     method: 'POST',
@@ -3016,6 +3020,13 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       res.status(409).json({ error: getErrorMessage(error, 'Restore conflict'), code: conflict });
       return;
     }
+    // A registry delivery refusal answers with its own status and code so
+    // callers can distinguish it from a generic restore failure.
+    const refusal = registryDeliveryRefusal(error);
+    if (refusal) {
+      res.status(refusal.status).json({ error: getErrorMessage(error, 'Registry delivery refused'), code: refusal.code });
+      return;
+    }
     console.error('[Fleet Snapshot] Restore error:', error);
     res.status(500).json({ error: 'Failed to restore stack from snapshot' });
   }
@@ -3033,6 +3044,8 @@ interface SnapshotRestoreResult {
   error?: string;
   /** A non-fatal documentation-notes restore failure; files still restored. */
   notesError?: string;
+  /** Machine-readable registry delivery refusal code, when the redeploy failed on one. */
+  code?: string;
 }
 
 fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Request, res: Response): Promise<void> => {
@@ -3128,7 +3141,7 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
         }
         results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored, notesError });
       } catch (e) {
-        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed') });
+        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed'), code: registryDeliveryRefusal(e)?.code });
       }
     }
 

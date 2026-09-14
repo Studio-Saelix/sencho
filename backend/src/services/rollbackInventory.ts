@@ -12,6 +12,7 @@ import { collectManifestFilePaths } from '../helpers/manifestFilePaths';
 import { isHostAbsolutePath, parseDeclaredInputs } from '../helpers/composeInputParse';
 import { isValidRelativeStackPath, isValidStackName } from '../utils/validation';
 import { authoredComposeEnvFileArgs, authoredComposeFileArgs } from '../utils/authoredComposeArgs';
+import { gitSourceLocalComposeFiles } from '../utils/gitComposeFiles';
 import type {
   ComposeInputEntry,
   GitProjectManifest,
@@ -296,7 +297,7 @@ async function resolveGitInventory(
     composeArgsPrefix: [...read.project.invocation],
     projectDirectory: read.project.effectiveProjectDir,
     projectName: read.project.projectName || stackName,
-    explicitComposeFiles: [...read.project.composeFiles],
+    explicitComposeFiles: [...gitSourceLocalComposeFiles(read.project.composeFiles)],
     meshOverrideRelativePath: null,
     meshEnabled,
   };

@@ -17,7 +17,12 @@ import { safeAxiosTransport } from '../utils/outboundTarget';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import { LicenseService } from './LicenseService';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions, describePolicyBlock, triggerPostDeployScan } from '../helpers/policyGate';
-import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
+import {
+    appendRegistryDeliveryCode,
+    prepareOutboundRegistryDeliveryBody,
+    registryDeliveryRefusal,
+    throwRegistryDeliveryRefusal,
+} from '../helpers/registryDeliveryOutbound';
 import { getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
@@ -84,6 +89,8 @@ export class BlueprintOwnershipProbeError extends Error {
 export interface DeployOutcome {
     status: BlueprintDeploymentStatus;
     error?: string;
+    /** Machine-readable registry delivery refusal code, when the deploy failed on one. */
+    code?: string;
 }
 
 type LocalMarkerRead =
@@ -330,11 +337,17 @@ export class BlueprintService {
                     sanitizeForLog(blueprint.name), node.id, Date.now() - started);
                 return { status: 'name_conflict', error: 'name_conflict' };
             }
-            const message = BlueprintService.formatError(err);
+            // A registry delivery refusal keeps its machine-readable code on
+            // the outcome; the message also carries it because the blueprint
+            // deployment's last_error record is a string column.
+            const refusal = registryDeliveryRefusal(err);
+            const message = refusal
+                ? appendRegistryDeliveryCode(BlueprintService.formatError(err), refusal.code)
+                : BlueprintService.formatError(err);
             this.setStatus(blueprint.id, node.id, 'failed', 'deploy_fail', { last_error: message });
             console.error('[BlueprintService] deploy failed blueprint=%s node=%s durationMs=%s error=%s',
                 sanitizeForLog(blueprint.name), node.id, Date.now() - started, sanitizeForLog(message));
-            return { status: 'failed', error: message };
+            return { status: 'failed', error: message, code: refusal?.code };
         } finally {
             this.releaseLock(blueprint.id, node.id);
         }
@@ -656,7 +669,7 @@ export class BlueprintService {
             body: applyBody,
         });
         if (!augmented.ok) {
-            throw new Error(augmented.error);
+            throwRegistryDeliveryRefusal(augmented);
         }
 
         // Atomic apply: the remote validates ownership and writes under its stack lock.

@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'events';
 import type { Request, Response } from 'express';
 import { setupTestDb } from './helpers/setupTestDb';
-import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 
 const mockWouldAttempt = vi.fn();
@@ -28,21 +27,20 @@ describe('registry delivery proxy hop abort', () => {
     const { ensureRegistryDeliveryHopAbortController } = await import('../helpers/registryDeliveryProxy');
     const { req, res } = mockReqRes();
 
-    let resolveProbe: ((value: boolean) => void) | undefined;
-    mockWouldAttempt.mockImplementation(() => new Promise<boolean>((resolve) => {
+    let resolveProbe: ((value: { kind: 'supported' } | null) => void) | undefined;
+    mockWouldAttempt.mockImplementation(() => new Promise<{ kind: 'supported' } | null>((resolve) => {
       resolveProbe = resolve;
     }));
 
     ensureRegistryDeliveryHopAbortController(req, res);
     const probe = mockWouldAttempt(
       NodeRegistry.getInstance().getDefaultNodeId(),
-      DatabaseService.getInstance().getNode(NodeRegistry.getInstance().getDefaultNodeId())!,
       'POST',
       '/api/blueprints/apply-local',
     );
 
     req.emit('aborted');
-    resolveProbe?.(true);
+    resolveProbe?.({ kind: 'supported' });
 
     await probe;
     expect(req.registryDeliveryAbortController?.signal.aborted).toBe(true);
@@ -52,10 +50,9 @@ describe('registry delivery proxy hop abort', () => {
     const { decideRegistryDeliveryProxyHop } = await import('../helpers/registryDeliveryProxy');
     const { req, res } = mockReqRes();
     const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
-    const node = DatabaseService.getInstance().getNode(nodeId)!;
 
-    let resolveProbe: ((value: boolean) => void) | undefined;
-    mockWouldAttempt.mockImplementation(() => new Promise<boolean>((resolve) => {
+    let resolveProbe: ((value: { kind: 'supported' } | null) => void) | undefined;
+    mockWouldAttempt.mockImplementation(() => new Promise<{ kind: 'supported' } | null>((resolve) => {
       resolveProbe = resolve;
     }));
 
@@ -63,13 +60,12 @@ describe('registry delivery proxy hop abort', () => {
       req,
       res,
       nodeId,
-      node,
       'POST',
       '/api/blueprints/apply-local',
     );
 
     req.emit('aborted');
-    resolveProbe?.(true);
+    resolveProbe?.({ kind: 'supported' });
 
     await expect(decision).resolves.toEqual({ action: 'aborted' });
   });
@@ -78,7 +74,6 @@ describe('registry delivery proxy hop abort', () => {
     const { evaluateRegistryDeliveryProxyGate } = await import('../helpers/registryDeliveryProxy');
     const { req, res } = mockReqRes();
     const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
-    const node = DatabaseService.getInstance().getNode(nodeId)!;
 
     Object.defineProperty(req, 'aborted', { value: true, configurable: true });
 
@@ -87,7 +82,6 @@ describe('registry delivery proxy hop abort', () => {
         req,
         res,
         nodeId,
-        node,
         'POST',
         '/api/blueprints/apply-local',
       ),
@@ -98,19 +92,51 @@ describe('registry delivery proxy hop abort', () => {
     const { evaluateRegistryDeliveryProxyGate } = await import('../helpers/registryDeliveryProxy');
     const { req, res } = mockReqRes();
     const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
-    const node = DatabaseService.getInstance().getNode(nodeId)!;
 
-    mockWouldAttempt.mockResolvedValue(false);
+    mockWouldAttempt.mockResolvedValue({ kind: 'unsupported' });
 
     await expect(
       evaluateRegistryDeliveryProxyGate(
         req,
         res,
         nodeId,
-        node,
         'POST',
         '/api/blueprints/apply-local',
       ),
+    ).resolves.toEqual({ outcome: 'continue' });
+  });
+
+  it('maps a supported probe to run-delivery carrying the probe', async () => {
+    const { evaluateRegistryDeliveryProxyGate } = await import('../helpers/registryDeliveryProxy');
+    const { req, res } = mockReqRes();
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+
+    mockWouldAttempt.mockResolvedValue({ kind: 'supported' });
+
+    await expect(
+      evaluateRegistryDeliveryProxyGate(
+        req,
+        res,
+        nodeId,
+        'POST',
+        '/api/blueprints/apply-local',
+      ),
+    ).resolves.toEqual({ outcome: 'run-delivery', probe: { kind: 'supported' } });
+  });
+
+  it('maps a null probe (non-eligible route) to skip and continue at the gate', async () => {
+    const { decideRegistryDeliveryProxyHop, evaluateRegistryDeliveryProxyGate } = await import('../helpers/registryDeliveryProxy');
+    const { req, res } = mockReqRes();
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+
+    mockWouldAttempt.mockResolvedValue(null);
+
+    await expect(
+      decideRegistryDeliveryProxyHop(req, res, nodeId, 'GET', '/api/stacks'),
+    ).resolves.toEqual({ action: 'skip' });
+
+    await expect(
+      evaluateRegistryDeliveryProxyGate(req, res, nodeId, 'GET', '/api/stacks'),
     ).resolves.toEqual({ outcome: 'continue' });
   });
 });

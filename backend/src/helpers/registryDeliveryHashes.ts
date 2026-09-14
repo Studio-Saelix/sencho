@@ -42,6 +42,48 @@ export function hashBlueprintPostApplySource(
   return hash.digest('hex');
 }
 
+/**
+ * Stable hash of a live project's registry-delivery selection: the named
+ * compose files (or the default root four when none are selected), then the
+ * named env files (or `.env`). For a single-root live stack this is
+ * digest-identical to hashProjectSource, because the selection resolves to the
+ * same four compose names plus `.env` in the same order.
+ */
+export function hashSelectionInputs(
+  projectDir: string,
+  composeFiles: string[] | undefined,
+  envFiles: string[],
+): string {
+  const hash = crypto.createHash('sha256');
+  const baseResolved = path.resolve(projectDir);
+  const names =
+    composeFiles !== undefined && composeFiles.length > 0
+      ? composeFiles
+      : ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
+  for (const name of names) {
+    const filePath = path.resolve(baseResolved, name);
+    if (!filePath.startsWith(baseResolved + path.sep)) continue;
+    const content = readRegularFileSync(filePath, baseResolved);
+    if (!content) continue;
+    hash.update(name);
+    hash.update('\0');
+    hash.update(content);
+    hash.update('\n');
+  }
+  const envNames = envFiles.length > 0 ? envFiles.map(f => path.basename(f)) : ['.env'];
+  for (const name of envNames) {
+    const filePath = path.resolve(baseResolved, name);
+    if (!filePath.startsWith(baseResolved + path.sep)) continue;
+    const content = readRegularFileSync(filePath, baseResolved);
+    if (!content) continue;
+    hash.update(name);
+    hash.update('\0');
+    hash.update(content);
+    hash.update('\n');
+  }
+  return hash.digest('hex');
+}
+
 /** Stable hash of the live project file bundle used for live-project delivery. */
 export function hashProjectSource(projectDir: string): string {
   const hash = crypto.createHash('sha256');
@@ -116,5 +158,17 @@ export function hashActionSet(actions: readonly string[]): string {
   return crypto
     .createHash('sha256')
     .update(actions.slice().sort().join('\n'))
+    .digest('hex');
+}
+
+/**
+ * Stable hash of the canonical, sorted exact pull reference list. The input is
+ * expected to already be canonicalized and sorted (see normalizePullRefList);
+ * this sorts a defensive copy so the hash is independent of caller ordering.
+ */
+export function hashPullRefList(refs: readonly string[]): string {
+  return crypto
+    .createHash('sha256')
+    .update(refs.slice().sort().join('\n'))
     .digest('hex');
 }
