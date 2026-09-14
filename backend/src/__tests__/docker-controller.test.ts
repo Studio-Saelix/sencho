@@ -585,9 +585,8 @@ describe('DockerController - getDiskUsage', () => {
   });
 
   it('getDiskUsage with excludeHeldImages fails closed to zero when the held lookup fails', async () => {
-    // A null held lookup means "held state unknown"; the predicate protects
-    // every image, matching the delete guard and the prune plan. The figure
-    // claims 0 rather than advertising bytes no prune can free.
+    // Held state unknown: claim 0. Prune skips every image, so the figure
+    // must not advertise bytes no prune can free.
     vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(null);
     mockDocker.df.mockResolvedValue({
       ImageUsage: { Reclaimable: 1_500 },
@@ -606,6 +605,33 @@ describe('DockerController - getDiskUsage', () => {
     const plain = await dc.getDiskUsage();
     expect(plain.reclaimableImages).toBe(1_500);
     expect(plain.reclaimableImageCount).toBe(1);
+  });
+
+  it('getDiskUsage with excludeHeldImages claims 0 bytes when two unused images share a layer and the held lookup fails', async () => {
+    // Discriminating assertion is reclaimableImages (bytes). Treating every
+    // unused image as held subtracts unique bytes (500 + 500) from the
+    // daemon figure (1_500) and leaves a 500-byte shared-layer residue.
+    // Count already reaches 0 on that path; the figure must be 0.
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(null);
+    vi.spyOn(ServiceUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(null);
+    mockDocker.df.mockResolvedValue({
+      ImageUsage: { Reclaimable: 1_500 },
+      Images: [
+        { Id: 'img-a', Containers: 0, Size: 1_000, VirtualSize: 1_000, SharedSize: 500 },
+        { Id: 'img-b', Containers: 0, Size: 1_000, VirtualSize: 1_000, SharedSize: 500 },
+      ],
+      Volumes: [],
+      Containers: [],
+    });
+
+    const dc = DockerController.getInstance(1);
+    const excluded = await dc.getDiskUsage({ excludeHeldImages: true });
+    expect(excluded.reclaimableImages).toBe(0);
+    expect(excluded.reclaimableImageCount).toBe(0);
+
+    const plain = await dc.getDiskUsage();
+    expect(plain.reclaimableImages).toBe(1_500);
+    expect(plain.reclaimableImageCount).toBe(2);
   });
 
   it('getDiskUsage with excludeHeldImages subtracts service-scoped holds too', async () => {

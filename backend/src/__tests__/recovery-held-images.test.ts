@@ -4,7 +4,7 @@
  * not just the ones the other service happens to hold.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { buildUnifiedHeldImagePredicate } from '../services/recoveryHeldImages';
+import { buildUnifiedHeldImagePredicate, readHeldImageLookup } from '../services/recoveryHeldImages';
 import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryService';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 
@@ -40,6 +40,34 @@ describe('buildUnifiedHeldImagePredicate', () => {
     const predicate = buildUnifiedHeldImagePredicate(1);
 
     expect(predicate('sha256:anything')).toBe(true);
+  });
+});
+
+describe('readHeldImageLookup', () => {
+  it('is known when both services return held sets', () => {
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set());
+    vi.spyOn(ServiceUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set(['sha256:held']));
+
+    const held = readHeldImageLookup(1);
+    expect(held.unknown).toBe(false);
+    if (!held.unknown) {
+      expect(held.isHeld('sha256:held')).toBe(true);
+      expect(held.isHeld('sha256:other')).toBe(false);
+    }
+  });
+
+  it('is unknown when StackUpdateRecoveryService.getHeldImageIds returns null', () => {
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(null);
+    vi.spyOn(ServiceUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set());
+
+    expect(readHeldImageLookup(1).unknown).toBe(true);
+  });
+
+  it('is unknown when ServiceUpdateRecoveryService.getHeldImageIds returns null', () => {
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set());
+    vi.spyOn(ServiceUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(null);
+
+    expect(readHeldImageLookup(1).unknown).toBe(true);
   });
 });
 

@@ -331,9 +331,12 @@ class DockerController {
    * `excludeHeldImages` makes the figure mean "what a prune can actually
    * free": rollback-held images (sencho-rb/*:hold) are counted by the daemon
    * as unused but every Sencho prune path refuses to remove them, so figures
-   * that claim prunability must subtract them. The default keeps the raw
-   * daemon math for callers whose claim is "unused Docker data" (the
-   * MonitorService janitor alert), not "what a prune frees".
+   * that claim prunability must subtract them. When held state cannot be
+   * read, reclaimable image bytes and count are 0 so the figure cannot
+   * exceed what prune will free (unique-byte subtraction can leave
+   * shared-layer residue). The default keeps the raw daemon math for
+   * callers whose claim is "unused Docker data" (the MonitorService
+   * janitor alert), not "what a prune frees".
    */
   public async getDiskUsage(opts?: { excludeHeldImages: boolean }) {
     const df = await this.docker.df();
@@ -422,20 +425,24 @@ class DockerController {
       // adjusted, so bytes and count stay consistent subsets of the base
       // figures. Dynamic import avoids the static cycle (StackUpdateRecoveryService
       // imports this class; see getClassifiedResources below for the same pattern).
-      const { buildUnifiedHeldImagePredicate } = await import('./recoveryHeldImages');
-      const isImageHeld = buildUnifiedHeldImagePredicate(this.nodeId);
-      const sharedSizes = DockerController.mapSharedSizesFromDf(df);
-      let heldBytes = 0;
-      let heldCount = 0;
-      for (const img of df.Images) {
-        if (!img?.Id || (img.Containers ?? 0) !== 0 || !isImageHeld(img.Id)) continue;
-        heldBytes += DockerController.imageUniqueBytes(img, sharedSizes);
-        heldCount += 1;
+      const { readHeldImageLookup } = await import('./recoveryHeldImages');
+      const held = readHeldImageLookup(this.nodeId);
+      if (held.unknown) {
+        images = { bytes: 0, count: 0 };
+      } else {
+        const sharedSizes = DockerController.mapSharedSizesFromDf(df);
+        let heldBytes = 0;
+        let heldCount = 0;
+        for (const img of df.Images) {
+          if (!img?.Id || (img.Containers ?? 0) !== 0 || !held.isHeld(img.Id)) continue;
+          heldBytes += DockerController.imageUniqueBytes(img, sharedSizes);
+          heldCount += 1;
+        }
+        images = {
+          bytes: Math.max(0, images.bytes - heldBytes),
+          count: Math.max(0, images.count - heldCount),
+        };
       }
-      images = {
-        bytes: Math.max(0, images.bytes - heldBytes),
-        count: Math.max(0, images.count - heldCount),
-      };
     }
 
     const containers = df.Containers ? reclaimableContainers(df.Containers) : { bytes: 0, count: 0 };
