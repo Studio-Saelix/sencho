@@ -332,6 +332,16 @@ type GitApplyResult = {
      */
     bindRejected?: true;
     /**
+     * Set when the dispatch's deploy-intent hook returned null: the intent
+     * could not be durably recorded and read back, so the pipeline refused
+     * to hand the stack to Compose rather than start a deploy no recovery
+     * row could later link to the attempt. Exclusive with `deployError` and
+     * the deploy id fields (Compose never ran); the promotion and the bind
+     * both completed. Manual apply passes no intent hook and never sees
+     * this arm.
+     */
+    deployIntentUnavailable?: true;
+    /**
      * Canonical GitOps deploy operation id (ComposeService's beginGitOpsDeploy
      * identity), not this method's own apply/dispatch operation id. A string
      * means a tracked deploy succeeded; null means the deploy succeeded but
@@ -2826,8 +2836,9 @@ export class GitSourceService {
      * touched the filesystem) into a thrown error for the caller. The
      * attempt is left unsettled on this path, which is exactly the signal
      * startup recovery looks for. Recovery reconstructs dispatch attempts
-     * from their own witness and deploy-intent rows, so the outcome and next
-     * action survive a lost settle; the reason wording is more general than
+     * from their own witness, deploy-intent, and refusal-witness rows, so
+     * the outcome and next action survive a lost settle; the reason wording
+     * is more general than
      * the live refusal's. The reconstruction is weaker when those writes
      * could not land (a store outage spanning the whole dispatch): recovery
      * then reads only the source projection, which reads converged after a
@@ -2851,12 +2862,13 @@ export class GitSourceService {
     }
 
     /**
-     * Settle a post-commit dispatch result (bind rejection, failed deploy,
-     * or a throw past the promotion boundary). When the durable write fails,
-     * startup recovery reconstructs the same outcome and next action from
-     * the attempt's witness and deploy-intent rows wherever they were
-     * written (the reason wording differs by design: the live settlement
-     * carries the error detail, recovery states the evidence), but the
+     * Settle a post-commit dispatch result (bind rejection, deploy-intent
+     * refusal, failed deploy, or a throw past the promotion boundary). When
+     * the durable write fails, startup recovery reconstructs the same
+     * outcome and next action from the attempt's promotion witness, deploy
+     * intent, or refusal witness rows wherever they were written (the
+     * reason wording differs by design: the live settlement carries the
+     * error detail, recovery states the evidence), but the
      * result must not rest on the attempt row alone: mirror it into the
      * activity feed too, which the operator timeline already renders.
      */
@@ -3008,19 +3020,27 @@ export class GitSourceService {
      * the earlier promotion's evidence, and a crash between the file rewrite
      * and the source-row update would leave the promotion unproven.
      *
-     * Two witness rows, written by this attempt at the pipeline boundaries
+     * Three witness rows, written by this attempt at the pipeline boundaries
      * they prove, decide the arms:
-     *  - `promotion_committed`, written the moment the filesystem commit
-     *    lands, before any source bookkeeping: the files hold the accepted
-     *    generation from here on, whatever later crash follows.
+     *  - `promotion_committed`, written immediately after the filesystem
+     *    commit returns, before any source bookkeeping: the files hold the
+     *    accepted generation from here on, whatever later crash follows. A
+     *    crash or write failure in the short interval around this write
+     *    leaves the promotion unwitnessed, and recovery then reports the
+     *    attempt unproven rather than guessing.
      *  - `deploy_dispatched`, written after the bind and immediately before
      *    Compose is handed the stack, naming the exact deploy operation id
      *    the dispatch minted for that Compose run.
+     *  - `deploy_intent_refused`, written when the intent could not be
+     *    recorded and read back and the pipeline refused to start the
+     *    deploy: it tells the refusal apart from an apply-only completion,
+     *    which share the absence of an intent row.
      *
      * In order of how far the attempt got:
      *  - this operation's own `target_applied` row (or a target row already
      *    naming this generation from an earlier operation): the bind
-     *    happened, only the settle is missing. The deploy intent then
+     *    happened, only the settle is missing. A refusal witness settles
+     *    recovery_required naming no deploy id; otherwise the deploy intent
      *    reconstructs what Compose did: no intent row means the pipeline
      *    stopped before Compose was ever handed the stack (or was an
      *    apply-only completion; both left no deploy, so the source
@@ -3102,15 +3122,39 @@ export class GitSourceService {
         operationId: string,
         commitSha: string,
     ): ReconcileResult {
+        if (store.hasStageRowForAttempt(applicationId, operationId, 'deploy_intent_refused')) {
+            // The live pipeline journaled its refusal to start the deploy:
+            // the intent could not be recorded and read back, so Compose
+            // was never handed the stack. Mirror the live refusal arm's
+            // classification; the source projection cannot tell the
+            // refusal from an apply-only completion and would claim the
+            // quiet converged result. The check runs before the intent
+            // lookup so a journaled-but-unreadable intent row (the
+            // read-back variant of the refusal) reconstructs the same way
+            // instead of throwing as a storage bug.
+            return {
+                outcome: 'recovery_required',
+                reason: 'The promotion and binding completed, but the deploy intent could not be recorded and read back, so no deploy was started.',
+                nextAction: 'view_target_results',
+                commitSha,
+            };
+        }
         const intentRow = store.getStageRowForAttempt(applicationId, operationId, 'deploy_dispatched');
         if (!intentRow) {
-            // Three ways to arrive: an apply-only completion, a crash before
-            // the intent was journaled, or an intent journal write that failed
-            // (the designed fallback: Compose minted its own id and the deploy
-            // may have run untracked). None of them proves a tracked deploy
-            // for this attempt, so the source projection (files applied,
-            // generation bound) is the truthful settlement, claiming less than
-            // the intent-linked arms rather than more.
+            // An apply-only completion (the pipeline never opened a deploy
+            // branch), or a crash between the bind and the intent
+            // journaling: the refusal variants journal a
+            // `deploy_intent_refused` witness above when that write lands,
+            // so they reconstruct as the refusal there; a store outage that
+            // also lost the refusal witness lands here, where the source
+            // projection claims the quiet converged result (the same
+            // residual window a lost promotion witness leaves, inherent to
+            // best-effort journaling). Dispatch never hands the stack to
+            // Compose without first
+            // reading back the journaled intent row, so no deploy ran for
+            // this attempt either way: the source projection (files applied,
+            // generation bound) is the truthful settlement, claiming less
+            // than the intent-linked arms rather than more.
             return this.deriveReconcileResult(stackName);
         }
         const deployOperationId = GitSourceService.deployOperationIdFromIntentRow(intentRow);
@@ -3796,6 +3840,10 @@ export class GitSourceService {
             // hook stops the pipeline there: the bindRejected arm (below)
             // classifies the rejection with the recovery_required vocabulary
             // the rewritten files warrant, and no deploy ever ran.
+            // Captured by the deploy-intent hook on the refusal path so the
+            // settled reason can name why the intent failed (2.1 of the
+            // review round: a cause-less refusal is undebuggable).
+            let intentRefusalCause: string | undefined;
             const result = await this.completeGitApply({
                 stackName,
                 commitSha: generation.commitSha,
@@ -3830,14 +3878,18 @@ export class GitSourceService {
                         envelope,
                     });
                 }),
-                // The promotion witness rides the filesystem-commit boundary:
-                // written under this dispatch's own operation id the moment
-                // the files are rewritten, before any source bookkeeping, so
-                // recovery can prove the promotion from this attempt's
-                // evidence alone. A failed witness write is logged by
-                // recordGitOps and does not abort a promotion that already
-                // happened; recovery then falls back to "unproven", which
-                // errs toward retry, never toward claiming files changed.
+                // The promotion witness rides the post-commit boundary:
+                // written under this dispatch's own operation id
+                // immediately after promoteGeneration() has committed the
+                // files and before any source bookkeeping, so recovery can
+                // prove the promotion from this attempt's evidence alone in
+                // every crash window past that point. The commit itself
+                // happens inside promoteGeneration(): a process exit between
+                // that internal commit and this write, or a failed witness
+                // write with no later evidence row landing, leaves the
+                // promotion unwitnessed, and recovery then falls back to
+                // "unproven", which errs toward retry, never toward claiming
+                // files changed.
                 promotionWitness: () => this.recordGitOps(stackName, 'promotion witness', () => {
                     GitOpsTransitions.getInstance().promotionCommitted({
                         applicationId: app.id,
@@ -3852,14 +3904,45 @@ export class GitSourceService {
                 // Compose opens its deploy transitions under it. The id
                 // returned is read back from the stored row, not the locally
                 // minted one, so what Compose receives is always the exact id
-                // recovery will look up (a dedupe replay keeps the stored id).
-                // If the journal write fails the id is withheld (undefined),
-                // Compose mints its own as before, and recovery of an
-                // interrupted attempt falls back to the source projection,
-                // which is what it could say without the intent anyway.
-                deployDispatchIntent: () => {
+                // recovery will look up (a dedupe replay reports recorded:true
+                // even when it kept the stored id; the read-back below is the
+                // authority on what is actually stored).
+                // A dispatch that cannot durably record and read back its
+                // intent returns null and the pipeline refuses to start the
+                // deploy: an untracked Compose run would leave no evidence
+                // row recovery could link the deploy to, and recovery would
+                // have to judge the attempt from source state alone. Refusing
+                // keeps every settled row's claims backed by recorded rows.
+                // Each refusal also journals a `deploy_intent_refused`
+                // witness (best-effort like the promotion witness), so an
+                // attempt whose settle write failed in the same window still
+                // reconstructs as the refusal at recovery instead of an
+                // apply-only completion.
+                deployDispatchIntent: (): string | null => {
                     const deployOperationId = crypto.randomUUID();
-                    const recorded = this.recordGitOps(stackName, 'deploy intent', () => {
+                    const refuse = (cause: string): null => {
+                        // The cause rides into the operator-visible settled
+                        // reason, so it is scrubbed like every other error
+                        // string the dispatch persists.
+                        intentRefusalCause = scrubCredentials(cause);
+                        if (!this.recordGitOps(stackName, 'deploy intent refusal witness', () => {
+                            GitOpsTransitions.getInstance().deployIntentRefused({
+                                applicationId: app.id,
+                                envelope,
+                                generationId: generation.generationId,
+                                commitSha: generation.commitSha,
+                            });
+                        })) {
+                            // recordGitOps already logged the rejection; the
+                            // operation id ties that line to the intent
+                            // failure being journaled here.
+                            console.error(
+                                `[GitOps] Deploy intent refusal witness unavailable for ${sanitizeForLog(stackName)} (operation ${sanitizeForLog(envelope.operationId)}); recovery of an unsettled attempt may misread this refusal as an apply-only completion`,
+                            );
+                        }
+                        return null;
+                    };
+                    try {
                         GitOpsTransitions.getInstance().deployDispatched({
                             applicationId: app.id,
                             envelope,
@@ -3867,13 +3950,51 @@ export class GitSourceService {
                             commitSha: generation.commitSha,
                             deployOperationId,
                         });
-                    });
-                    if (!recorded) return undefined;
-                    const intentRow = GitOpsStore.getInstance()
-                        .getStageRowForAttempt(app.id, envelope.operationId, 'deploy_dispatched');
-                    if (!intentRow) return undefined;
-                    const journaled = decodeGitOpsJson(intentRow.after_json);
-                    return isDeployDispatchedPayload(journaled) ? journaled.deployOperationId : undefined;
+                    } catch (error) {
+                        console.error(
+                            `[GitOps] Could not record deploy intent for ${sanitizeForLog(stackName)} (operation ${sanitizeForLog(envelope.operationId)}):`,
+                            errorForLog(error),
+                        );
+                        return refuse(error instanceof Error ? error.message : String(error));
+                    }
+                    const intentRow = (() => {
+                        try {
+                            return GitOpsStore.getInstance()
+                                .getStageRowForAttempt(app.id, envelope.operationId, 'deploy_dispatched');
+                        } catch (error) {
+                            // The write landed but the read-back throws (a
+                            // store still unhealthy in the write's wake):
+                            // this is the same refusal, not a deploy
+                            // failure. It must not escape into the
+                            // pipeline's deploy-error arm, which would
+                            // misreport it as "the deploy failed" when
+                            // Compose was never called.
+                            return refuse(error instanceof Error ? error.message : String(error));
+                        }
+                    })();
+                    if (intentRow === null) return null;
+                    let journaled: unknown = undefined;
+                    if (intentRow) {
+                        try {
+                            journaled = decodeGitOpsJson(intentRow.after_json);
+                        } catch (error) {
+                            // A corrupt row is the same refusal as a payload
+                            // that fails the guard: the stored intent cannot
+                            // be trusted, so the deploy cannot be started
+                            // against it. The throw must not escape into the
+                            // pipeline's deploy-error arm, which would
+                            // misreport this refusal as a failed deploy.
+                            // The decode error rides into the cause so the
+                            // corruption is debuggable from the settled row.
+                            return refuse(`the stored intent payload failed validation: ${error instanceof Error ? error.message : String(error)}`);
+                        }
+                    }
+                    if (!isDeployDispatchedPayload(journaled)) {
+                        return refuse(intentRow
+                            ? 'the stored intent payload failed validation'
+                            : 'the journaled intent row could not be read back');
+                    }
+                    return journaled.deployOperationId;
                 },
             });
             if (result.bindRejected) {
@@ -3885,6 +4006,28 @@ export class GitSourceService {
                 // along so this row has the same evidence shape recovery
                 // writes for the identical classification.
                 const reason = 'The promotion committed, but the Direct target could not be bound to the accepted generation.';
+                this.settlePostCommitAttempt(stackName, opts.actor, app.id, envelope, {
+                    outcome: 'recovery_required',
+                    reason,
+                    nextAction: 'view_target_results',
+                    commitSha: generation.commitSha,
+                });
+                return { status: 'blocked', reason };
+            }
+            if (result.deployIntentUnavailable) {
+                // The promotion and the bind completed, but the deploy
+                // intent could not be recorded and read back, so the
+                // pipeline refused to hand the stack to Compose: the files
+                // and the target pointer are real, the deploy simply never
+                // started. Classify like the other post-commit arms; the
+                // operator inspects the target (its running services are
+                // still the previous generation's) and can deploy the stack
+                // themselves. Compose never ran, so no deploy id is claimed
+                // on the row. The refusal witness row the hook journaled
+                // lets recovery reconstruct this exact classification if the
+                // settle write fails in the same window.
+                const cause = intentRefusalCause ? ` (${intentRefusalCause})` : '';
+                const reason = `The promotion committed, but the deploy intent could not be recorded and read back${cause}, so the deploy was not started.`;
                 this.settlePostCommitAttempt(stackName, opts.actor, app.id, envelope, {
                     outcome: 'recovery_required',
                     reason,
@@ -4261,9 +4404,11 @@ export class GitSourceService {
      * between the acceptance transition and the deploy branch, so both
      * callers hold the target pointer when the deploy opens its own GitOps
      * operation. Two evidence slots sit inside that order on the dispatch
-     * path: the promotion witness writes at the filesystem-commit boundary,
-     * before the last-plan write, and the deploy intent writes immediately
-     * before `deployStack`. Callers arrive with the change plan already
+     * path: the promotion witness writes immediately after the filesystem
+     * commit returns, before the last-plan write, and the deploy intent
+     * writes immediately before `deployStack`, whose null return stops the
+     * pipeline there rather than starting an untracked deploy. Callers
+     * arrive with the change plan already
      * validated against live state; everything here is what must
      * happen identically no matter who drove the plan. Cache
      * invalidation and the post-deploy scan live here, not in any
@@ -4320,15 +4465,19 @@ export class GitSourceService {
          */
         postPromote?: () => boolean;
         /**
-         * Optional hook at the filesystem-commit boundary, running the moment
-         * the promotion has committed and before any source bookkeeping.
-         * Dispatch passes a writer for the operation-scoped promotion witness
-         * here, so the durable evidence that the files were rewritten exists
-         * in exactly the crash window where the files are rewritten but the
-         * source rows are not yet updated. The shipped hook does not throw
-         * (recordGitOps converts a failure into a logged no-op), and a
-         * recording failure must not abort a promotion that already
-         * happened.
+         * Optional hook running immediately after the promotion has
+         * committed (the file rewrite completes inside promoteGeneration();
+         * this fires on its return) and before any source bookkeeping.
+         * Dispatch passes a writer for the operation-scoped promotion
+         * witness here, so the durable evidence that the files were
+         * rewritten exists in every crash window after the promotion, apart
+         * from the short interval between the internal commit and this hook.
+         * The shipped hook does not throw (recordGitOps converts a failure
+         * into a logged no-op), and a recording failure must not abort a
+         * promotion that already happened: with no later evidence row
+         * landed, recovery reports the promotion unproven and recommends a
+         * retry (if the bind still lands afterward, recovery reconstructs
+         * from the bind and deploy-intent arms instead).
          */
         promotionWitness?: () => void;
         /**
@@ -4338,10 +4487,17 @@ export class GitSourceService {
          * intent here and returns the deploy operation id it recorded; the
          * id is threaded into the deploy's invocation context, so Compose
          * opens its own deploy transitions under the exact id the dispatch
-         * journaled. Returning undefined (no hook, or a failed intent
-         * write) lets Compose mint its own id, the pre-existing behavior.
+         * journaled. Returning null (a failed intent write or read-back)
+         * makes the pipeline refuse to start the deploy and report
+         * `deployIntentUnavailable`, because a deploy with no journaled
+         * intent leaves recovery unable to tell what Compose did under the
+         * attempt; the shipped hook also journals a refusal witness, so
+         * recovery of an attempt whose settle write failed in the same
+         * window reconstructs the refusal instead of an apply-only
+         * completion. Returning undefined (manual apply passes no hook)
+         * keeps the pre-existing behavior of letting Compose mint its own id.
          */
-        deployDispatchIntent?: () => string | undefined;
+        deployDispatchIntent?: () => string | null | undefined;
     }): Promise<GitApplyResult> {
         const { stackName, commitSha, src, nodeId, applyOperationId, gitopsEnv, gitopsApp, gitopsGenerationId } = args;
         // Byte-parity with main: recovery capture and the policy gate fall
@@ -4546,7 +4702,17 @@ export class GitSourceService {
                 // Compose, so a crash between binding and deploy leaves
                 // durable evidence that Compose was reached for, and a
                 // tracked deploy's rows land under the journaled id.
+                // A null from the hook means the intent could not be
+                // durably recorded and read back: refuse to start the
+                // deploy, because an untracked Compose run would leave
+                // recovery with nothing to link it to this attempt. Manual
+                // apply passes no hook (undefined) and keeps the pre-existing
+                // untracked behavior, which its own settle path does not
+                // depend on.
                 const deployOpIntent = args.deployDispatchIntent?.();
+                if (deployOpIntent === null) {
+                    return { applied: true, deployed: false, deployIntentUnavailable: true, recoveryId };
+                }
                 // Shared stack lock already held as git_apply for capture→deploy.
                 const autoDeploy = await ComposeService.getInstance(nodeId).deployStack(
                     stackName,
@@ -4569,10 +4735,11 @@ export class GitSourceService {
                 if (recoveryId) {
                     recoverySvc.linkGateOrRetain(recoveryId, healthGateId);
                 }
-                // The deploy's canonical GitOps identity is the operation id
-                // ComposeService minted for it, logged here so an operator can
-                // match the apply against the deploy's own transitions by the
-                // same id.
+                // The deploy's canonical GitOps operation id, logged here so
+                // an operator can match the apply against the deploy's own
+                // transitions by the same id (dispatch's journaled intent
+                // names it; a non-dispatch caller's Compose run mints its
+                // own).
                 console.log(
                     `[GitSource] Applied and deployed ${stackName} at ${commitSha.slice(0, 7)}${autoDeploy.gitopsOperationId ? ` (deploy op ${GitSourceService.shortOperationId(autoDeploy.gitopsOperationId)})` : ''}`,
                 );

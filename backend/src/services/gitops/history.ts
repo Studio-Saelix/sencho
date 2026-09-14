@@ -48,6 +48,7 @@ export type GitOpsHistoryStage =
   | 'deploy_bound'
   | 'deploy_dispatched'
   | 'deploy_failed'
+  | 'deploy_intent_refused'
   | 'deploy_started'
   | 'deploy_unbound'
   | 'dismissed'
@@ -94,6 +95,17 @@ export type DeployDispatchedPayload = {
   generationId: string;
   commitSha: string;
   deployOperationId: string;
+};
+
+/**
+ * Payload of a `deploy_intent_refused` witness row: the dispatch journaled
+ * that it refused to start its deploy because the intent could not be
+ * recorded and read back. Recovery reads presence only (the refusal names
+ * no deploy to correlate), so no payload guard is needed.
+ */
+export type DeployIntentRefusedPayload = {
+  generationId: string;
+  commitSha: string;
 };
 
 /**

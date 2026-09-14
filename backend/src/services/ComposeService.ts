@@ -800,12 +800,13 @@ export class ComposeService {
    * thing is a no-op. Recording never fails the deploy: the store describes
    * what happened, it does not make it happen.
    *
-   * `deployOperationId` lets a caller with durable prior intent (Git dispatch's
-   * `deploy_dispatched` record, when that journal write succeeded) open this
-   * deploy's transitions under an id it
-   * already knows, so recovery of an interrupted attempt can find this deploy's
-   * rows by exact id rather than guessing which deploy ran under it. Ordinary
-   * callers omit it and get a freshly minted id, unchanged behavior.
+   * `deployOperationId` lets a caller with durable prior intent (Git
+   * dispatch's `deploy_dispatched` record; a dispatch whose intent could
+   * not be recorded never calls this) open this deploy's transitions under
+   * an id it already knows, so recovery of an interrupted attempt can find
+   * this deploy's rows by exact id rather than guessing which deploy ran
+   * under it. Ordinary callers omit it and get a freshly minted id,
+   * unchanged behavior.
    */
   private beginGitOpsDeploy(stackName: string, deployOperationId?: string): GitOpsDeployHandle | null {
     try {
@@ -923,8 +924,8 @@ export class ComposeService {
     // (manual, bulk, Git auto-deploy, App Store, scheduler, webhook) funnels
     // through here, so recording it anywhere else would double-count. A Git
     // dispatch deploy passes the id it durably recorded as its deploy intent
-    // (when the intent journal write succeeded; dispatch withholds the id
-    // otherwise), so recovery of an interrupted attempt finds this deploy's
+    // (a dispatch whose intent could not be recorded never reaches this call
+    // at all), so recovery of an interrupted attempt finds this deploy's
     // rows by exact id; every other caller lets an id be minted here,
     // unchanged.
     const gitopsDeploy = this.beginGitOpsDeploy(stackName, ctx?.gitopsDeployOperationId);

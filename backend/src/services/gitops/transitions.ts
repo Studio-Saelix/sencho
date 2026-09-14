@@ -9,7 +9,7 @@ import {
   encodeArtifactEvidenceJson,
   encodeGitOpsEvidenceLimitations,
 } from './json';
-import { insertHistory, type DeployDispatchedPayload, type GitOpsHistoryStage, type HistoryOutcome, type PromotionCommittedPayload } from './history';
+import { insertHistory, type DeployDispatchedPayload, type DeployIntentRefusedPayload, type GitOpsHistoryStage, type HistoryOutcome, type PromotionCommittedPayload } from './history';
 import { emptyTargetRow, GitOpsStore } from './store';
 import type {
   ArtifactQualification,
@@ -1135,6 +1135,43 @@ export class GitOpsTransitions {
       const app = this.requireApp(args.applicationId);
       const historyId = this.history(app, args.envelope, {
         stage: 'deploy_dispatched',
+        outcome: 'committed',
+        before: {},
+        after: { ...payload },
+        generationId: args.generationId,
+        commitSha: args.commitSha,
+      });
+      return { recorded: historyId !== null };
+    })();
+  }
+
+  /**
+   * Record that a bound dispatch refused to start its deploy because the
+   * deploy intent could not be durably recorded and read back.
+   *
+   * The refusal witness exists so recovery's reconstruction of an
+   * unsettled attempt matches what the live pipeline would have settled:
+   * without it, a failed intent write leaves no `deploy_dispatched` row,
+   * and the no-intent arm reads an apply-only completion (source
+   * projection, converged) where the live path said recovery-required.
+   * The row names no deploy operation (there is none), so recovery acts
+   * on its presence alone. Bare history insert scoped to the dispatch's
+   * operation, replay-safe like the intent row.
+   */
+  deployIntentRefused(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+    generationId: string;
+    commitSha: string;
+  }): { recorded: boolean } {
+    const payload: DeployIntentRefusedPayload = {
+      generationId: args.generationId,
+      commitSha: args.commitSha,
+    };
+    return this.raw().transaction(() => {
+      const app = this.requireApp(args.applicationId);
+      const historyId = this.history(app, args.envelope, {
+        stage: 'deploy_intent_refused',
         outcome: 'committed',
         before: {},
         after: { ...payload },
