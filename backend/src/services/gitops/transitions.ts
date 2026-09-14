@@ -997,6 +997,18 @@ export class GitOpsTransitions {
    * marker to settle an interrupted dispatch against pipeline-stage
    * evidence instead of the plain source-facet projection, which cannot
    * tell "never promoted" from "promoted but never settled".
+   *
+   * `dispatchDeployRequested` records, on that same reservation row, that
+   * the dispatch asked the pipeline to deploy. It is the one durable fact
+   * about deploy intent written before any step that can fail for
+   * persistence reasons, so on rows that carry it an outage that spans the
+   * whole deploy branch (where the intent row, the refusal witness, and the
+   * settle all fail together) cannot be misread: recovery consults it when
+   * the later deploy-evidence rows are absent, and a deploy-requested
+   * attempt never settles through the apply-only source projection, which
+   * would report a requested-and-never-started deploy as quiet
+   * convergence. Reservations written before this fact existed carry no
+   * key and keep the conservative projection reading.
    */
   allocateReconcileAttempt(
     applicationId: string,
@@ -1005,6 +1017,7 @@ export class GitOpsTransitions {
     at: number,
     followerOf?: string,
     dispatchGenerationId?: string,
+    dispatchDeployRequested?: boolean,
   ): { operationId: string; reserved: boolean } {
     return this.raw().transaction(() => {
       const app = this.requireApp(applicationId);
@@ -1014,7 +1027,7 @@ export class GitOpsTransitions {
       const envelope: EventEnvelope = { operationId, actor, trigger, at };
       return {
         operationId,
-        reserved: this.insertReconcileReservation(app, envelope, followerOf, undefined, dispatchGenerationId),
+        reserved: this.insertReconcileReservation(app, envelope, followerOf, undefined, dispatchGenerationId, dispatchDeployRequested),
       };
     })();
   }
@@ -1031,6 +1044,7 @@ export class GitOpsTransitions {
     followerOf: string | undefined,
     deliveryIntent?: ReconcileDeliveryIntent,
     dispatchGenerationId?: string,
+    dispatchDeployRequested?: boolean,
   ): boolean {
     return this.history(app, envelope, {
       stage: 'source_reconcile_started',
@@ -1040,6 +1054,9 @@ export class GitOpsTransitions {
         ...(followerOf ? { followerOf } : {}),
         ...(deliveryIntent ? { deliveryIntent } : {}),
         ...(dispatchGenerationId ? { dispatchGenerationId } : {}),
+        // Written only when true, so apply-only dispatches and legacy
+        // reservations keep the exact payload shape readers already handle.
+        ...(dispatchDeployRequested ? { dispatchDeployRequested: true } : {}),
       },
     }) !== null;
   }
@@ -1156,11 +1173,14 @@ export class GitOpsTransitions {
    * The refusal witness exists so recovery's reconstruction of an
    * unsettled attempt matches what the live pipeline would have settled:
    * without it, a failed intent write leaves no `deploy_dispatched` row,
-   * and the no-intent arm reads an apply-only completion (source
-   * projection, converged) where the live path said recovery-required.
-   * The row names no deploy operation (there is none), so recovery acts
-   * on its presence alone. Bare history insert scoped to the dispatch's
-   * operation, replay-safe like the intent row.
+   * and recovery falls back to the reservation's deploy-request fact
+   * (absent on reservations written before that fact existed, where the
+   * attempt then reads as the apply-only completion the projection
+   * describes). The witness names the refusal specifically, so the
+   * reconstruction states the refusal rather than the generic no-record
+   * outcome. The row names no deploy operation (there is none), so
+   * recovery acts on its presence alone. Bare history insert scoped to the
+   * dispatch's operation, replay-safe like the intent row.
    */
   deployIntentRefused(args: {
     applicationId: string;

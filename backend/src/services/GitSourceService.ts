@@ -2836,15 +2836,18 @@ export class GitSourceService {
      * touched the filesystem) into a thrown error for the caller. The
      * attempt is left unsettled on this path, which is exactly the signal
      * startup recovery looks for. Recovery reconstructs dispatch attempts
-     * from their own witness, deploy-intent, and refusal-witness rows, so
-     * the outcome and next action survive a lost settle; the reason wording
-     * is more general than
-     * the live refusal's. The reconstruction is weaker when those writes
-     * could not land (a store outage spanning the whole dispatch): recovery
-     * then reads only the source projection, which reads converged after a
-     * completed promotion, so the caller must still mirror any failed
-     * post-bind settle into the activity feed rather than rely on the
-     * attempt row alone.
+     * from the reservation's deploy-request fact plus their own witness,
+     * deploy-intent, and refusal-witness rows, so the outcome and next
+     * action survive a lost settle; the reason wording is more general than
+     * the live refusal's. For a dispatch reservation that recorded the
+     * deploy-request fact, even a store outage spanning the whole deploy
+     * branch (intent, witness, and settle all lost together) cannot make
+     * recovery claim convergence for a requested deploy: the reservation
+     * recorded the request before promotion ran (reservations from before
+     * the fact existed, and unmarked manual-apply reservations, keep the
+     * pre-existing projection reading). The activity-feed mirror
+     * still matters: it is the operator-visible trace until the next
+     * startup's recovery pass lands.
      */
     private settleAttempt(applicationId: string, envelope: EventEnvelope, result: ReconcileResult): boolean {
         try {
@@ -2865,10 +2868,11 @@ export class GitSourceService {
      * Settle a post-commit dispatch result (bind rejection, deploy-intent
      * refusal, failed deploy, or a throw past the promotion boundary). When
      * the durable write fails, startup recovery reconstructs the same
-     * outcome and next action from the attempt's promotion witness, deploy
-     * intent, or refusal witness rows wherever they were written (the
-     * reason wording differs by design: the live settlement carries the
-     * error detail, recovery states the evidence), but the
+     * outcome class from the attempt's promotion witness, deploy intent,
+     * refusal witness, or the reservation's deploy-request fact, whichever
+     * was recorded (the reason wording differs by design: the live
+     * settlement carries the error detail, recovery states the evidence),
+     * but the
      * result must not rest on the attempt row alone: mirror it into the
      * activity feed too, which the operator timeline already renders.
      */
@@ -3036,6 +3040,11 @@ export class GitSourceService {
      *    recorded and read back and the pipeline refused to start the
      *    deploy: it tells the refusal apart from an apply-only completion,
      *    which share the absence of an intent row.
+     *  - the reservation's own `dispatchDeployRequested` fact, written
+     *    before promotion ran: when both deploy-evidence rows are absent it
+     *    still distinguishes a requested deploy whose persistence all failed
+     *    from an apply-only completion, so the source projection is only
+     *    trusted for attempts that never asked for a deploy.
      *
      * In order of how far the attempt got:
      *  - this operation's own `target_applied` row (or a target row already
@@ -3043,9 +3052,12 @@ export class GitSourceService {
      *    happened, only the settle is missing. A refusal witness settles
      *    recovery_required naming no deploy id; otherwise the deploy intent
      *    reconstructs what Compose did: no intent row means the pipeline
-     *    stopped before Compose was ever handed the stack (or was an
-     *    apply-only completion; both left no deploy, so the source
-     *    projection is truthful). An intent row names the deploy's own
+     *    stopped before Compose was ever handed the stack; the reservation's
+     *    deploy-request fact then tells whether that stop was an apply-only
+     *    completion (source projection is truthful) or a deploy that was
+     *    requested with no deploy record behind it (recovery_required with
+     *    view-target-results, since the record is only an absence).
+     *    An intent row names the deploy's own
      *    operation id: no `deploy_started` row under that id means Compose
      *    never recorded opening the deploy, which settles as blocked with a
      *    retry; a bound deploy settles from the source projection plus the
@@ -3064,7 +3076,12 @@ export class GitSourceService {
      *    retried; if acceptance has moved on since, the source projection
      *    describes the new state truthfully.
      */
-    private dispatchStageResult(applicationId: string, operationId: string, generationId: string): ReconcileResult {
+    private dispatchStageResult(
+        applicationId: string,
+        operationId: string,
+        generationId: string,
+        deployRequested: boolean,
+    ): ReconcileResult {
         const store = GitOpsStore.getInstance();
         const app = store.getApplication(applicationId);
         if (!app?.stack_name) return GitSourceService.noApplicationResult();
@@ -3083,7 +3100,7 @@ export class GitSourceService {
         const bindRecorded = store.hasStageRowForAttempt(applicationId, operationId, 'target_applied')
             || target?.applied_generation_id === generationId;
         if (bindRecorded) {
-            return this.reconstructBoundDispatchResult(store, app.stack_name, applicationId, operationId, genRow.commit_sha);
+            return this.reconstructBoundDispatchResult(store, app.stack_name, applicationId, operationId, genRow.commit_sha, deployRequested);
         }
         const promotionCommitted = store.hasStageRowForAttempt(applicationId, operationId, 'promotion_committed');
         if (promotionCommitted) {
@@ -3122,6 +3139,7 @@ export class GitSourceService {
         applicationId: string,
         operationId: string,
         commitSha: string,
+        deployRequested: boolean,
     ): ReconcileResult {
         if (store.hasStageRowForAttempt(applicationId, operationId, 'deploy_intent_refused')) {
             // The live pipeline journaled its refusal to start the deploy:
@@ -3142,20 +3160,35 @@ export class GitSourceService {
         }
         const intentRow = store.getStageRowForAttempt(applicationId, operationId, 'deploy_dispatched');
         if (!intentRow) {
-            // An apply-only completion (the pipeline never opened a deploy
-            // branch), or a crash between the bind and the intent
-            // journaling: the refusal variants journal a
-            // `deploy_intent_refused` witness above when that write lands,
-            // so they reconstruct as the refusal there; a store outage that
-            // also lost the refusal witness lands here, where the source
-            // projection claims the quiet converged result (the same
-            // residual window a lost promotion witness leaves, inherent to
-            // best-effort journaling). Dispatch never hands the stack to
-            // Compose without first
-            // reading back the journaled intent row, so no deploy ran for
-            // this attempt either way: the source projection (files applied,
-            // generation bound) is the truthful settlement, claiming less
-            // than the intent-linked arms rather than more.
+            if (deployRequested) {
+                // The reservation recorded that this dispatch asked the
+                // pipeline to deploy, and no intent or refusal witness row
+                // survived: either a store outage spanning the whole deploy
+                // branch (intent write, witness write, and live settle all
+                // failed together), or the process died between the bind and
+                // the intent journaling. Either way no deploy can have run:
+                // dispatch never hands the stack to Compose without a
+                // journaled-and-read-back intent it can name. The honest
+                // settlement is the requested deploy with no deploy record
+                // behind it; the source projection would claim the applied
+                // and bound generation converged while a deploy the operator
+                // asked for never happened. The reason states the evidence,
+                // not the cause: the record cannot tell an outage from a
+                // crash in this window.
+                return {
+                    outcome: 'recovery_required',
+                    reason: 'The promotion and binding completed, but the dispatch requested a deploy that left no durable deploy record, so no deploy was started.',
+                    nextAction: 'view_target_results',
+                    commitSha,
+                };
+            }
+            // An apply-only completion: the reservation says no deploy was
+            // ever asked for, so the pipeline legitimately closed after the
+            // bind without opening a deploy branch, and the source
+            // projection (files applied, generation bound) is the truthful
+            // settlement. This is also the arm a dispatch reservation from
+            // before the deploy-request fact existed reads through, the
+            // same conservative fallback the marker's absence always had.
             return this.deriveReconcileResult(stackName);
         }
         const deployOperationId = GitSourceService.deployOperationIdFromIntentRow(intentRow);
@@ -3236,6 +3269,24 @@ export class GitSourceService {
             throw new GitOpsJsonError('reserved attempt dispatchGenerationId must be a string');
         }
         return decoded.dispatchGenerationId;
+    }
+
+    /**
+     * Whether a dispatch reservation recorded that its pipeline was asked
+     * to deploy. Absent (an apply-only dispatch, or a reservation written
+     * before this fact existed) reads as false: the reservation only ever
+     * carried the marker, so those attempts fall back to the evidence rows
+     * exactly as before. Anything other than `true` when present is a
+     * producer bug the same way a malformed generation marker is.
+     */
+    private static dispatchDeployRequestedFromStartedAttempt(row: GitOpsHistoryRow): boolean {
+        const decoded = decodeGitOpsJson(row.after_json);
+        if (!isRecord(decoded)) throw new GitOpsJsonError('reserved attempt metadata must be an object');
+        if (!('dispatchDeployRequested' in decoded)) return false;
+        if (decoded.dispatchDeployRequested !== true) {
+            throw new GitOpsJsonError('reserved attempt dispatchDeployRequested must be true when present');
+        }
+        return true;
     }
 
     /**
@@ -3402,7 +3453,12 @@ export class GitSourceService {
                     }
                     const dispatchGenerationId = GitSourceService.dispatchGenerationIdFromStartedAttempt(row);
                     settle(row, dispatchGenerationId
-                        ? this.dispatchStageResult(row.application_id, row.operation_id, dispatchGenerationId)
+                        ? this.dispatchStageResult(
+                            row.application_id,
+                            row.operation_id,
+                            dispatchGenerationId,
+                            GitSourceService.dispatchDeployRequestedFromStartedAttempt(row),
+                        )
                         : this.deriveResultForApplication(row.application_id));
                 } catch (e) {
                     noteFailure(row, e);
@@ -3723,6 +3779,10 @@ export class GitSourceService {
         if (!src) {
             return { status: 'blocked', reason: `No Git source is configured for ${stackName}.` };
         }
+        // One local feeds both the reservation's deploy-request fact and
+        // the pipeline's deploy argument, so the durable fact the recovery
+        // reads can never diverge from what this dispatch actually does.
+        const deployRequested = src.auto_deploy_on_apply;
 
         let envelope: ReturnType<GitSourceService['gitopsEnvelope']>;
         try {
@@ -3736,6 +3796,13 @@ export class GitSourceService {
                 // exact generation, so startup recovery can settle an
                 // interrupted attempt against pipeline-stage evidence.
                 generation.generationId,
+                // The same row records whether the dispatch will ask the
+                // pipeline to deploy. This is the only durable deploy-request
+                // fact written before any fallible deploy step, so a store
+                // outage that loses the intent, the refusal witness, and the
+                // settle together still leaves recovery able to tell a
+                // requested deploy from an apply-only completion.
+                deployRequested,
             );
             if (!allocated.reserved) {
                 // A freshly allocated id collided with an existing reservation
@@ -3867,7 +3934,7 @@ export class GitSourceService {
                 plan: revalidation.plan,
                 pending: revalidation.pending,
                 legacyOwnedPaths: revalidation.legacyOwnedPaths,
-                deploy: src.auto_deploy_on_apply,
+                deploy: deployRequested,
                 bypassPolicy: false,
                 started: { app: null, env: null, settled: true },
                 progress,
@@ -3938,9 +4005,13 @@ export class GitSourceService {
                         })) {
                             // recordGitOps already logged the rejection; the
                             // operation id ties that line to the intent
-                            // failure being journaled here.
+                            // failure being journaled here. The reservation's
+                            // deploy-request fact still distinguishes this
+                            // attempt from an apply-only completion if the
+                            // settle is lost too, so the witness is
+                            // belt-and-suspenders, not the last line.
                             console.error(
-                                `[GitOps] Deploy intent refusal witness unavailable for ${sanitizeForLog(stackName)} (operation ${sanitizeForLog(envelope.operationId)}); recovery of an unsettled attempt may misread this refusal as an apply-only completion`,
+                                `[GitOps] Deploy intent refusal witness unavailable for ${sanitizeForLog(stackName)} (operation ${sanitizeForLog(envelope.operationId)}); recovery falls back to the reservation's recorded deploy request`,
                             );
                         }
                         return null;
