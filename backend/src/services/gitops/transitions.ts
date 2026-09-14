@@ -1108,10 +1108,14 @@ export class GitOpsTransitions {
   }
 
   /**
-   * Record that a bound dispatch is about to hand its generation to Compose,
-   * naming the deploy operation id the dispatch minted for it.
+   * Record that a bound dispatch entered its deploy branch, naming the
+   * deploy operation id the dispatch minted for the Compose run it intends
+   * to start.
    *
-   * Dispatch threads that id into the deploy invocation, so Compose's own
+   * The intent is journaled before the branch's fallible preparation (the
+   * policy gate, the recovery handoff) so an attempt that reached the
+   * deploy branch can never be mistaken for an apply-only completion.
+   * Dispatch threads the id into the deploy invocation, so Compose's own
    * deploy transitions land under it (see `beginGitOpsDeploy`). This row is
    * the durable deploy intent: recovery of a dispatch that bound but never
    * settled reads it to tell "Compose was never reached" from "the deploy ran

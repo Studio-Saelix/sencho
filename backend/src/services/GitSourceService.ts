@@ -3028,9 +3028,10 @@ export class GitSourceService {
      *    crash or write failure in the short interval around this write
      *    leaves the promotion unwitnessed, and recovery then reports the
      *    attempt unproven rather than guessing.
-     *  - `deploy_dispatched`, written after the bind and immediately before
-     *    Compose is handed the stack, naming the exact deploy operation id
-     *    the dispatch minted for that Compose run.
+     *  - `deploy_dispatched`, written after the bind, at the top of the
+     *    deploy branch (before the policy gate and the recovery handoff can
+     *    stop it), naming the exact deploy operation id the dispatch minted
+     *    for that Compose run.
      *  - `deploy_intent_refused`, written when the intent could not be
      *    recorded and read back and the pipeline refused to start the
      *    deploy: it tells the refusal apart from an apply-only completion,
@@ -3160,9 +3161,11 @@ export class GitSourceService {
         const deployOperationId = GitSourceService.deployOperationIdFromIntentRow(intentRow);
         if (!store.hasStageRowForAttempt(applicationId, deployOperationId, 'deploy_started')) {
             // The dispatch journaled a deploy Compose never recorded opening:
-            // either the crash landed between the journal and Compose
-            // starting, or Compose reached its own early guards (or their
-            // recording failed) without a deploy operation. Either way no
+            // the crash landed between the journal and Compose starting, a
+            // fallible deploy preparation (the policy gate, the recovery
+            // handoff) stopped the branch right after the journal, or
+            // Compose reached its own early guards (or their recording
+            // failed) without a deploy operation. Either way no
             // deploy evidence exists, so nothing is claimed to have run: the
             // honest settlement is that no deploy record backs this dispatch,
             // and the deploy can be retried, with the rewritten files as the
@@ -3841,8 +3844,8 @@ export class GitSourceService {
             // classifies the rejection with the recovery_required vocabulary
             // the rewritten files warrant, and no deploy ever ran.
             // Captured by the deploy-intent hook on the refusal path so the
-            // settled reason can name why the intent failed (2.1 of the
-            // review round: a cause-less refusal is undebuggable).
+            // settled reason can name why the intent failed: a cause-less
+            // refusal is undebuggable for the operator.
             let intentRefusalCause: string | undefined;
             const result = await this.completeGitApply({
                 stackName,
@@ -4406,8 +4409,9 @@ export class GitSourceService {
      * operation. Two evidence slots sit inside that order on the dispatch
      * path: the promotion witness writes immediately after the filesystem
      * commit returns, before the last-plan write, and the deploy intent
-     * writes immediately before `deployStack`, whose null return stops the
-     * pipeline there rather than starting an untracked deploy. Callers
+     * writes at the top of the deploy branch, before the policy gate and
+     * the recovery handoff, whose null return stops the pipeline there
+     * rather than starting an untracked deploy. Callers
      * arrive with the change plan already
      * validated against live state; everything here is what must
      * happen identically no matter who drove the plan. Cache
@@ -4456,8 +4460,9 @@ export class GitSourceService {
          * operation, so the pointer must already name this generation by the
          * time Compose runs, the same position manual apply's applied()
          * transition occupies. The hook's return gates the deploy branch:
-         * false stops the pipeline before the policy gate is evaluated or
-         * Compose runs, and the result reports bindRejected. The shipped hook
+         * false stops the pipeline before the branch opens, so before the
+         * deploy intent, the policy gate, the recovery handoff, and Compose,
+         * and the result reports bindRejected. The shipped hook
          * does not throw: recordGitOps converts a throwing transition into a
          * false return. The progress flag is already set when this hook runs,
          * so a throwing hook added later would still be classified
@@ -4481,12 +4486,12 @@ export class GitSourceService {
          */
         promotionWitness?: () => void;
         /**
-         * Optional hook at the deploy-intent boundary, running after the
-         * policy gate and the recovery finalize and immediately before
-         * `deployStack`. Dispatch passes a writer for the durable deploy
-         * intent here and returns the deploy operation id it recorded; the
-         * id is threaded into the deploy's invocation context, so Compose
-         * opens its own deploy transitions under the exact id the dispatch
+         * Optional hook at the deploy-intent boundary, running at the top of
+         * the deploy branch, before the policy gate and the recovery
+         * finalize. Dispatch passes a writer for the durable deploy intent
+         * here and returns the deploy operation id it recorded; the id is
+         * threaded into the deploy's invocation context, so Compose opens
+         * its own deploy transitions under the exact id the dispatch
          * journaled. Returning null (a failed intent write or read-back)
          * makes the pipeline refuse to start the deploy and report
          * `deployIntentUnavailable`, because a deploy with no journaled
@@ -4655,7 +4660,8 @@ export class GitSourceService {
         // occupies, so the deploy branch below reads a target pointer that
         // already names this generation. The hook gates the deploy branch:
         // an explicit false (the bind was rejected) stops the pipeline here,
-        // before the policy gate is evaluated and before Compose runs. The
+        // before the deploy intent is journaled, before the policy gate is
+        // evaluated, and before Compose runs. The
         // recovery capture stays for the operator: the promotion did commit,
         // so the pre-promote generation remains the rollback cover, and the
         // recovery capture row is its own durable record.
@@ -4686,6 +4692,27 @@ export class GitSourceService {
 
         if (shouldDeploy) {
             try {
+                // Journal the deploy intent (and the exact deploy operation
+                // id it names) before any fallible deploy preparation: the
+                // policy gate below can block and the recovery handoff can
+                // throw, so durable intent must already exist when they do.
+                // An attempt that reached the deploy branch and vanished
+                // without an intent row would read as an apply-only
+                // completion, which is the false convergence the intent
+                // exists to prevent.
+                // A null from the hook means the intent could not be
+                // durably recorded and read back: refuse to start the
+                // deploy, because an untracked Compose run would leave
+                // recovery with nothing to link it to this attempt. Manual
+                // apply passes no hook (undefined) and keeps the pre-existing
+                // untracked behavior, which its own settle path does not
+                // depend on. The journaled id is threaded into the deploy
+                // invocation below, so the tracked deploy's rows land under
+                // the intent row's exact id.
+                const deployOpIntent = args.deployDispatchIntent?.();
+                if (deployOpIntent === null) {
+                    return { applied: true, deployed: false, deployIntentUnavailable: true, recoveryId };
+                }
                 await assertPolicyGateAllows(
                     stackName,
                     nodeId,
@@ -4696,22 +4723,6 @@ export class GitSourceService {
                 );
                 if (recoveryId) {
                     await finalizeRecoveryCurrent(recoveryId, false);
-                }
-                // Journal the deploy intent (and the exact deploy operation
-                // id it names) immediately before handing the stack to
-                // Compose, so a crash between binding and deploy leaves
-                // durable evidence that Compose was reached for, and a
-                // tracked deploy's rows land under the journaled id.
-                // A null from the hook means the intent could not be
-                // durably recorded and read back: refuse to start the
-                // deploy, because an untracked Compose run would leave
-                // recovery with nothing to link it to this attempt. Manual
-                // apply passes no hook (undefined) and keeps the pre-existing
-                // untracked behavior, which its own settle path does not
-                // depend on.
-                const deployOpIntent = args.deployDispatchIntent?.();
-                if (deployOpIntent === null) {
-                    return { applied: true, deployed: false, deployIntentUnavailable: true, recoveryId };
                 }
                 // Shared stack lock already held as git_apply for capture→deploy.
                 const autoDeploy = await ComposeService.getInstance(nodeId).deployStack(
