@@ -4,6 +4,7 @@ import * as path from 'path';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions } from './transitions';
 import { GitSourceService } from '../GitSourceService';
+import { buildAcceptedGeneration } from './handoff';
 import { DatabaseService } from '../DatabaseService';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from './types';
 import { classifyFailure, nextRetryAt, isGitSourceErrorCode, effectivePollIntervalSecs } from './backoff';
@@ -14,7 +15,7 @@ import { NodeRegistry } from '../NodeRegistry';
 import { gitSourceLocalComposeFiles } from '../../utils/gitComposeFiles';
 import { extractImagesFromCompose, loadDotEnv } from '../ImageUpdateService';
 import type { ReconcileOutcome } from './outcomes';
-import { sanitizeForLog } from '../../utils/safeLog';
+import { redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
 
 /** Outcomes that mean the tick accomplished its work and the source may sleep again. */
 const SUCCESS_SHAPED_OUTCOMES: ReadonlySet<ReconcileOutcome> = new Set<ReconcileOutcome>([
@@ -35,9 +36,10 @@ const SUCCESS_SHAPED_OUTCOMES: ReadonlySet<ReconcileOutcome> = new Set<Reconcile
  * with backoff (see backoff.ts). For an automatic-policy source holding a
  * validated candidate, the tick also evaluates the candidate against the
  * security policy and, when it is allowed, accepts it on the policy's behalf
- * (authority 'configured_policy') and dispatches the apply through
- * reconcile({intent:'apply'}), the same fused fetch+apply path a manual
- * apply runs. Review-policy sources stage candidates for a human; manual
+ * (authority 'configured_policy') and hands the accepted generation to the
+ * shared dispatch boundary (GitSourceService.dispatchAcceptedGeneration),
+ * which revalidates the live target under the stack lock before promoting.
+ * Review-policy sources stage candidates for a human; manual
  * sources never join the unattended cadence.
  *
  * Remaining gap against the source policy design: a retry always re-issues
@@ -375,24 +377,36 @@ export class SourceController {
             this.warnSkipped(app.id, 'automatic acceptance failed', e);
             return;
         }
-        // The acceptance cleared the candidate pointer; dispatch the
-        // generation the way the webhook auto-apply path does, through the
-        // same reconcile() apply intent a manual apply runs.
+        // The acceptance cleared the candidate pointer; hand the accepted
+        // generation to the shared dispatch boundary, which revalidates the
+        // live target under the stack lock and promotes the generation's own
+        // staged candidate (the deploy choice is read from the source row
+        // there, under the lock). A reserved dispatch never throws: refusals
+        // come back as blocked outcomes. The try/catch stays for the
+        // pre-reservation entry guards (store reads on a failing database).
         try {
-            await GitSourceService.getInstance().reconcile({
-                intent: 'apply',
-                applicationId: app.id,
-                stackName,
-                trigger,
-                actor: 'system:source-controller',
-                commitSha: generation.commit_sha,
-                planFingerprint: generation.change_plan_fingerprint ?? '',
-                deploy: DatabaseService.getInstance().getGitSource(stackName)?.auto_deploy_on_apply ?? false,
-            });
+            const dispatch = await GitSourceService.getInstance().dispatchAcceptedGeneration(
+                buildAcceptedGeneration(generation),
+                { targetMode: 'direct', nodeId: NodeRegistry.getInstance().getDefaultNodeId(), bindingRevision: null },
+                { trigger, actor: 'system:source-controller' },
+            );
+            if (dispatch.status === 'blocked') {
+                // The acceptance stands while the apply is refused, so the
+                // row alone cannot explain why nothing moved: log the reason.
+                console.warn(
+                    `[SourceController] automatic dispatch blocked for ${sanitizeForLog(app.id)}: ${sanitizeForLog(dispatch.reason)}`,
+                );
+            }
         } catch (e) {
+            // Reaching here means nothing was reserved, so no durable row
+            // exists and the next tick will not retry (the acceptance cleared
+            // the candidate pointer). The log is the only evidence: say what
+            // stands and what the operator must do. Scrub the whole stack:
+            // dispatch throws can carry credential-shaped transport text, and
+            // nothing downstream redacts what lands in the server log.
             console.error(
-                `[SourceController] apply dispatch failed for ${sanitizeForLog(app.id)}:`,
-                e instanceof Error ? e.message : String(e),
+                `[SourceController] automatic dispatch failed for ${sanitizeForLog(app.id)} before reserving an attempt. The generation remains accepted and will not auto-apply; dispatch it manually:`,
+                redactSensitiveText(e instanceof Error ? e.stack ?? e.message : String(e)),
             );
         }
     }

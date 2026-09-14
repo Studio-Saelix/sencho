@@ -35,7 +35,7 @@ function spec(name: string): EffectiveServiceSpec {
 
 beforeEach(() => {
   state.updateStack.mockReset();
-  state.updateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+  state.updateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
   state.model = null;
 });
 

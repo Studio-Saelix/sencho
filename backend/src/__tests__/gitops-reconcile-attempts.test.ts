@@ -76,6 +76,26 @@ describe('reconcile attempt reservation and settlement', () => {
     expect(settled).toBeDefined();
   });
 
+  it('persists the deploy correlation on the settled row and reads it back', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-settle-corr', 'settle-corr-web'), nodeId: 1, envelope: env('op-act-corr') });
+    tx.reserveReconcileAttempt('app-settle-corr', env('op-corr-1'));
+
+    tx.settleReconcileAttempt('app-settle-corr', env('op-corr-1'), {
+      outcome: 'recovery_required',
+      reason: 'The deploy failed after the promotion committed.',
+      nextAction: 'view_target_results',
+      deployGitopsOperationId: 'deploy-op-persisted',
+    });
+
+    // Readers of a settled attempt (recovery and duplicate-delivery
+    // resolution) share one payload validator, so the correlation must
+    // survive the write-to-JSON-to-parse round trip unchanged.
+    const settled = store.getSettledAttempt('app-settle-corr', 'op-corr-1');
+    expect(JSON.parse(settled!.after_json!)).toMatchObject({ deployGitopsOperationId: 'deploy-op-persisted' });
+  });
+
   it('settling twice for the same operation is a no-op the second time', () => {
     const tx = GitOpsTransitions.getInstance();
     tx.activateDirect({ application: app('app-settle2', 'settle2-web'), nodeId: 1, envelope: env('op-act-settle2') });
@@ -94,6 +114,27 @@ describe('reconcile attempt reservation and settlement', () => {
 
     expect(first.settled).toBe(true);
     expect(second.settled).toBe(false);
+  });
+
+  it('scopes stage-row lookups to the exact operation, not the application', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-stage-scope', 'stage-scope-web'), nodeId: 1, envelope: env('op-act-scope') });
+    tx.reserveReconcileAttempt('app-stage-scope', env('op-scope-1'));
+    tx.settleReconcileAttempt('app-stage-scope', env('op-scope-1'), {
+      outcome: 'no_source_change',
+      reason: 'done',
+      nextAction: 'none',
+    });
+    tx.reserveReconcileAttempt('app-stage-scope', env('op-scope-2'));
+
+    // Interrupted-dispatch recovery asks "did *this* attempt reach stage X",
+    // so a sibling attempt's stage evidence must not answer for it: the
+    // settled row exists for its own operation only.
+    expect(store.hasStageRowForAttempt('app-stage-scope', 'op-scope-1', 'source_reconcile_settled')).toBe(true);
+    expect(store.hasStageRowForAttempt('app-stage-scope', 'op-scope-2', 'source_reconcile_settled')).toBe(false);
+    // A different stage of the same operation is likewise absent.
+    expect(store.hasStageRowForAttempt('app-stage-scope', 'op-scope-1', 'target_applied')).toBe(false);
   });
 
   it('has no settled attempt for a reservation that was never settled', () => {

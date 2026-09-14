@@ -1,5 +1,6 @@
 import type { RefKind } from '../git/types';
 import type { GitSourceErrorCode } from '../GitSourceService';
+import type { ReconcileResult } from './outcomes';
 import { DatabaseService } from '../DatabaseService';
 import {
   decodeArtifactEvidenceJson,
@@ -8,7 +9,7 @@ import {
   encodeArtifactEvidenceJson,
   encodeGitOpsEvidenceLimitations,
 } from './json';
-import { insertHistory, type GitOpsHistoryStage, type HistoryOutcome } from './history';
+import { insertHistory, type DeployDispatchedPayload, type DeployIntentRefusedPayload, type GitOpsHistoryStage, type HistoryOutcome, type PromotionCommittedPayload } from './history';
 import { emptyTargetRow, GitOpsStore } from './store';
 import type {
   ArtifactQualification,
@@ -990,6 +991,24 @@ export class GitOpsTransitions {
    * thing here that is not a bare history insert, since a fresh id has to
    * come from somewhere durable. Only the allocated id's uniqueness is
    * load-bearing; its embedded sequence number is for traceability.
+   *
+   * `dispatchGenerationId` marks the reservation as an accepted-generation
+   * dispatch and names the generation it promotes. Recovery reads the
+   * marker to settle an interrupted dispatch against pipeline-stage
+   * evidence instead of the plain source-facet projection, which cannot
+   * tell "never promoted" from "promoted but never settled".
+   *
+   * `dispatchDeployRequested` records, on that same reservation row, that
+   * the dispatch asked the pipeline to deploy. It is the one durable fact
+   * about deploy intent written before any step that can fail for
+   * persistence reasons, so on rows that carry it an outage that spans the
+   * whole deploy branch (where the intent row, the refusal witness, and the
+   * settle all fail together) cannot be misread: recovery consults it when
+   * the later deploy-evidence rows are absent, and a deploy-requested
+   * attempt never settles through the apply-only source projection, which
+   * would report a requested-and-never-started deploy as quiet
+   * convergence. Reservations written before this fact existed carry no
+   * key and keep the conservative projection reading.
    */
   allocateReconcileAttempt(
     applicationId: string,
@@ -997,6 +1016,8 @@ export class GitOpsTransitions {
     trigger: string,
     at: number,
     followerOf?: string,
+    dispatchGenerationId?: string,
+    dispatchDeployRequested?: boolean,
   ): { operationId: string; reserved: boolean } {
     return this.raw().transaction(() => {
       const app = this.requireApp(applicationId);
@@ -1004,7 +1025,10 @@ export class GitOpsTransitions {
       this.raw().prepare('UPDATE gitops_applications SET attempt_seq = ? WHERE id = ?').run(seq, applicationId);
       const operationId = `${applicationId}:attempt:${seq}`;
       const envelope: EventEnvelope = { operationId, actor, trigger, at };
-      return { operationId, reserved: this.insertReconcileReservation(app, envelope, followerOf) };
+      return {
+        operationId,
+        reserved: this.insertReconcileReservation(app, envelope, followerOf, undefined, dispatchGenerationId, dispatchDeployRequested),
+      };
     })();
   }
 
@@ -1019,6 +1043,8 @@ export class GitOpsTransitions {
     envelope: EventEnvelope,
     followerOf: string | undefined,
     deliveryIntent?: ReconcileDeliveryIntent,
+    dispatchGenerationId?: string,
+    dispatchDeployRequested?: boolean,
   ): boolean {
     return this.history(app, envelope, {
       stage: 'source_reconcile_started',
@@ -1027,6 +1053,10 @@ export class GitOpsTransitions {
       after: {
         ...(followerOf ? { followerOf } : {}),
         ...(deliveryIntent ? { deliveryIntent } : {}),
+        ...(dispatchGenerationId ? { dispatchGenerationId } : {}),
+        // Written only when true, so apply-only dispatches and legacy
+        // reservations keep the exact payload shape readers already handle.
+        ...(dispatchDeployRequested ? { dispatchDeployRequested: true } : {}),
       },
     }) !== null;
   }
@@ -1040,7 +1070,7 @@ export class GitOpsTransitions {
   settleReconcileAttempt(
     applicationId: string,
     envelope: EventEnvelope,
-    result: { outcome: string; reason: string; nextAction: string; retryAt?: number; commitSha?: string },
+    result: ReconcileResult,
   ): { settled: boolean } {
     return this.raw().transaction(() => {
       const app = this.requireApp(applicationId);
@@ -1051,6 +1081,128 @@ export class GitOpsTransitions {
         after: { ...result },
       });
       return { settled: historyId !== null };
+    })();
+  }
+
+  /**
+   * Witness that an accepted-generation promotion committed to the
+   * filesystem.
+   *
+   * Dispatch calls this at the promotion commit boundary, before any source
+   * bookkeeping runs, so the evidence exists in exactly the crash window
+   * where the rewritten files do but the source rows do not. Recovery reads
+   * it scoped to the dispatch's own
+   * operation id: a later generation that happens to share an earlier one's
+   * commit SHA or plan fingerprint cannot inherit its promotion evidence, and
+   * a crash between the file rewrite and the source-row update still reports
+   * that the promotion ran. A bare history insert, replay-safe like the
+   * reservation.
+   */
+  promotionCommitted(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+    generationId: string;
+    commitSha: string;
+    planFingerprint: string;
+  }): { recorded: boolean } {
+    const payload: PromotionCommittedPayload = {
+      generationId: args.generationId,
+      commitSha: args.commitSha,
+      planFingerprint: args.planFingerprint,
+    };
+    return this.raw().transaction(() => {
+      const app = this.requireApp(args.applicationId);
+      const historyId = this.history(app, args.envelope, {
+        stage: 'promotion_committed',
+        outcome: 'committed',
+        before: {},
+        after: { ...payload },
+        generationId: args.generationId,
+        commitSha: args.commitSha,
+      });
+      return { recorded: historyId !== null };
+    })();
+  }
+
+  /**
+   * Record that a bound dispatch entered its deploy branch, naming the
+   * deploy operation id the dispatch minted for the Compose run it intends
+   * to start.
+   *
+   * The intent is journaled before the branch's fallible preparation (the
+   * policy gate, the recovery handoff) so an attempt that reached the
+   * deploy branch can never be mistaken for an apply-only completion.
+   * Dispatch threads the id into the deploy invocation, so Compose's own
+   * deploy transitions land under it (see `beginGitOpsDeploy`). This row is
+   * the durable deploy intent: recovery of a dispatch that bound but never
+   * settled reads it to tell "Compose was never reached" from "the deploy ran
+   * and its settlement was lost", and to name the exact deploy operation
+   * either way. Bare history insert scoped to the dispatch's operation,
+   * replay-safe.
+   */
+  deployDispatched(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+    generationId: string;
+    commitSha: string;
+    deployOperationId: string;
+  }): { recorded: boolean } {
+    const payload: DeployDispatchedPayload = {
+      generationId: args.generationId,
+      commitSha: args.commitSha,
+      deployOperationId: args.deployOperationId,
+    };
+    return this.raw().transaction(() => {
+      const app = this.requireApp(args.applicationId);
+      const historyId = this.history(app, args.envelope, {
+        stage: 'deploy_dispatched',
+        outcome: 'committed',
+        before: {},
+        after: { ...payload },
+        generationId: args.generationId,
+        commitSha: args.commitSha,
+      });
+      return { recorded: historyId !== null };
+    })();
+  }
+
+  /**
+   * Record that a bound dispatch refused to start its deploy because the
+   * deploy intent could not be durably recorded and read back.
+   *
+   * The refusal witness exists so recovery's reconstruction of an
+   * unsettled attempt matches what the live pipeline would have settled:
+   * without it, a failed intent write leaves no `deploy_dispatched` row,
+   * and recovery falls back to the reservation's deploy-request fact
+   * (absent on reservations written before that fact existed, where the
+   * attempt then reads as the apply-only completion the projection
+   * describes). The witness names the refusal specifically, so the
+   * reconstruction states the refusal rather than the generic no-record
+   * outcome. The row names no deploy operation (there is none), so
+   * recovery acts on its presence alone. Bare history insert scoped to the
+   * dispatch's operation, replay-safe like the intent row.
+   */
+  deployIntentRefused(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+    generationId: string;
+    commitSha: string;
+  }): { recorded: boolean } {
+    const payload: DeployIntentRefusedPayload = {
+      generationId: args.generationId,
+      commitSha: args.commitSha,
+    };
+    return this.raw().transaction(() => {
+      const app = this.requireApp(args.applicationId);
+      const historyId = this.history(app, args.envelope, {
+        stage: 'deploy_intent_refused',
+        outcome: 'committed',
+        before: {},
+        after: { ...payload },
+        generationId: args.generationId,
+        commitSha: args.commitSha,
+      });
+      return { recorded: historyId !== null };
     })();
   }
 
@@ -2363,6 +2515,7 @@ export class GitOpsTransitions {
       generationId?: string | null;
       artifactSetId?: string | null;
       sourceAcceptanceRef?: string | null;
+      commitSha?: string | null;
     },
   ): string | null {
     const nodeId = fields.nodeId ?? null;
@@ -2380,6 +2533,7 @@ export class GitOpsTransitions {
       generationId: fields.generationId,
       artifactSetId: fields.artifactSetId,
       sourceAcceptanceRef: fields.sourceAcceptanceRef,
+      commitSha: fields.commitSha,
       at: envelope.at,
     });
   }

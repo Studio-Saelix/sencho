@@ -256,7 +256,7 @@ vi.mock('../services/network/resolveMissingExternalNetworks', () => ({
   resolveMissingExternalNetworks: (...args: unknown[]) => mockResolveMissingExternalNetworks(...args),
 }));
 
-import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
+import { ComposeService, getComposeRollbackInfo, type GitOpsDeployHandle } from '../services/ComposeService';
 import { DriftLedgerService } from '../services/DriftLedgerService';
 
 const originalComposeTimeout = process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS;
@@ -775,7 +775,7 @@ describe('ComposeService - deployStack', () => {
     const promise = ComposeService.getInstance(1).deployStack('my-stack');
     await vi.advanceTimersByTimeAsync(3100);
 
-    await expect(promise).resolves.toEqual({ recoveryId: null, deployedGenerationId: null });
+    await expect(promise).resolves.toEqual({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
     expect(mockGetLegacyOrphanContainersByStack).toHaveBeenCalledWith('my-stack');
   });
 
@@ -879,7 +879,7 @@ describe('ComposeService - deployStack', () => {
     await vi.advanceTimersByTimeAsync(3100);
     const result = await promise;
 
-    expect(result).toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null });
+    expect(result).toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null, gitopsOperationId: null });
     expect(mockCaptureCandidate).toHaveBeenCalledWith(expect.objectContaining({
       stackName: 'my-stack',
       operationKind: 'deployment',
@@ -1097,6 +1097,101 @@ describe('ComposeService - deployStack', () => {
     expect(error!.message).toContain('CONTAINER_CRASHED');
     expect(mockRestoreStackFiles).not.toHaveBeenCalled();
   });
+
+  // The Git dispatch settlement correlates a failed deploy to its GitOps
+  // operation by reading the id ComposeService stamps on the error before
+  // rethrowing. These tests spy the private tracking opener directly (the
+  // suite's mocked DatabaseService never yields a live application for the
+  // real store), so what they pin is the stamping contract on both rethrow
+  // arms, not the store lookups behind it. GitOpsDeployHandle is imported
+  // from the production module, so the spy cannot drift from its shape.
+  function mockTrackedDeploy(handle: GitOpsDeployHandle | null) {
+    return vi.spyOn(
+      ComposeService.prototype as unknown as {
+        beginGitOpsDeploy: (stackName: string) => GitOpsDeployHandle | null;
+      },
+      'beginGitOpsDeploy',
+    ).mockReturnValue(handle);
+  }
+  const trackedHandle = (): GitOpsDeployHandle => ({
+    generationId: 'gen-1',
+    gitopsOperationId: 'deploy-op-tracked',
+    bound: vi.fn(),
+    failed: vi.fn(),
+  });
+
+  it('stamps the GitOps deploy operation id on a failed plain deploy error', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([{ Id: 'crashed-c1', State: 'exited' }]);
+    mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
+    mockContainerLogs.mockResolvedValue(Buffer.from('Error'));
+    const spy = mockTrackedDeploy(trackedHandle());
+
+    try {
+      const svc = ComposeService.getInstance(1);
+      const result = svc.deployStack('my-stack').then(() => null, (e: Error) => e);
+
+      await vi.runAllTimersAsync();
+      const error = await result;
+      expect((error as Error & { gitopsDeployOperationId?: string }).gitopsDeployOperationId)
+        .toBe('deploy-op-tracked');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('stamps the GitOps deploy operation id on the atomic rollback wrapper', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([{
+      Id: 'crashed-c1',
+      State: 'exited',
+      Labels: { 'com.docker.compose.project': 'my-stack' },
+    }]);
+    mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
+    mockContainerLogs.mockResolvedValue(Buffer.from('Error'));
+    const spy = mockTrackedDeploy(trackedHandle());
+
+    try {
+      const svc = ComposeService.getInstance(1);
+      const result = svc.deployStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
+
+      await vi.runAllTimersAsync();
+      const error = await result;
+      expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: true });
+      // The caller catches the wrapper, not the inner error, so the id must be
+      // mirrored onto the wrapper itself.
+      expect((error as Error & { gitopsDeployOperationId?: string }).gitopsDeployOperationId)
+        .toBe('deploy-op-tracked');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('stamps the GitOps deploy operation id on a failed update error', async () => {
+    // updateStack opens its GitOps deploy handle immediately before the
+    // recreate, so the same crashed-container probe its post-mutation path
+    // reaches must carry the id too: the stamp is mirrored on this seam so
+    // any caller correlating a failed deploy reads it off the thrown error
+    // whichever mutation method ran.
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([{ Id: 'crashed-c1', State: 'exited' }]);
+    mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
+    mockContainerLogs.mockResolvedValue(Buffer.from('Error'));
+    const spy = mockTrackedDeploy(trackedHandle());
+
+    try {
+      const svc = ComposeService.getInstance(1);
+      const result = svc.updateStack('my-stack').then(() => null, (e: Error) => e);
+
+      await vi.runAllTimersAsync();
+      const error = await result;
+      expect((error as Error).message).toContain('CONTAINER_CRASHED');
+      expect((error as Error & { gitopsDeployOperationId?: string }).gitopsDeployOperationId)
+        .toBe('deploy-op-tracked');
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 // ── updateStack: build-aware ───────────────────────────────────────────
@@ -1256,7 +1351,7 @@ describe('ComposeService - updateStack prune-on-update', () => {
 
     // The update already succeeded before the prune ran, so a prune failure
     // must neither reject nor trigger the atomic restore.
-    await expect(promise).resolves.toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null });
+    await expect(promise).resolves.toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null, gitopsOperationId: null });
     expect(mockRestoreStackFiles).not.toHaveBeenCalled();
   });
 
@@ -1270,7 +1365,7 @@ describe('ComposeService - updateStack prune-on-update', () => {
     const promise = svc.updateStack('my-stack');
     await vi.advanceTimersByTimeAsync(3100);
 
-    await expect(promise).resolves.toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null });
+    await expect(promise).resolves.toEqual({ recoveryId: 'recovery-1', deployedGenerationId: null, gitopsOperationId: null });
   });
 });
 

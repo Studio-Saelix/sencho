@@ -54,4 +54,13 @@ export interface DeployInvocationContext {
     | 'webhook'
     | 'blueprint'
     | 'mesh_redeploy';
+  /**
+   * When set, Compose opens its GitOps deploy operation under this exact id
+   * instead of minting its own. Git dispatch passes the id it durably
+   * recorded as its deploy intent, and never starts a deploy whose intent
+   * could not be recorded, so startup recovery of an interrupted dispatch
+   * can find this deploy's transitions by that id and never has to guess
+   * which deploy ran under the attempt.
+   */
+  gitopsDeployOperationId?: string;
 }

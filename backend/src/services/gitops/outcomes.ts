@@ -1,4 +1,5 @@
 import type { SourceFacet } from './types';
+import { isRecord } from './json';
 
 /**
  * Normalized reconcile outcomes. Silence is not an acceptable GitOps
@@ -39,7 +40,49 @@ export type ReconcileResult = {
   retryAt?: number;
   nextPollAt?: number;
   commitSha?: string;
+  /**
+   * Canonical GitOps deploy operation id (ComposeService's
+   * beginGitOpsDeploy identity) of the deploy this attempt's settlement
+   * corresponds to. Present when a dispatch settled after a tracked
+   * deploy ran, on both its success and failure arms, so the durable row
+   * names the exact deploy operation its evidence references.
+   */
+  deployGitopsOperationId?: string;
 };
+
+/**
+ * Validate a settled attempt's recorded result as read back from storage.
+ * `after_json` is a free-form JSON column, so the history writer's static
+ * typing does not constrain it; this is its runtime boundary. Unknown keys
+ * are dropped so a stored payload cannot smuggle fields into readers. That
+ * makes this parser a maintenance contract: a new ReconcileResult field
+ * must get a matching line here, or it silently vanishes from every
+ * recovery read.
+ */
+export function parseReconcileResultPayload(value: unknown): ReconcileResult | null {
+  if (
+    !isRecord(value)
+    || !isReconcileOutcome(value.outcome)
+    || typeof value.reason !== 'string'
+    || !isNextAction(value.nextAction)
+  ) {
+    return null;
+  }
+  const result: ReconcileResult = {
+    outcome: value.outcome,
+    reason: value.reason,
+    nextAction: value.nextAction,
+    retryAt: typeof value.retryAt === 'number' ? value.retryAt : undefined,
+    nextPollAt: typeof value.nextPollAt === 'number' ? value.nextPollAt : undefined,
+    commitSha: typeof value.commitSha === 'string' ? value.commitSha : undefined,
+    deployGitopsOperationId: typeof value.deployGitopsOperationId === 'string' ? value.deployGitopsOperationId : undefined,
+  };
+  if (result.retryAt === undefined) delete result.retryAt;
+  if (result.nextPollAt === undefined) delete result.nextPollAt;
+  if (result.commitSha === undefined) delete result.commitSha;
+  if (result.deployGitopsOperationId === undefined) delete result.deployGitopsOperationId;
+  return result;
+}
 
 /** Every ReconcileOutcome member, for runtime validation of a value read back from storage. */
 const RECONCILE_OUTCOMES: ReadonlySet<string> = new Set<ReconcileOutcome>([

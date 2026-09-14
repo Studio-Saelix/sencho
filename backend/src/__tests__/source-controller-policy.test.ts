@@ -54,6 +54,14 @@ function spyOnReconcile() {
     return vi.spyOn(GitSourceService.getInstance(), 'reconcile');
 }
 
+/** Stub the shared dispatch boundary so an accepted candidate never runs a
+ *  real promotion against these fixtures; acceptance tests assert the handoff,
+ *  and dispatch's own behavior is covered in git-source-service.test.ts. */
+function spyOnDispatch() {
+    return vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
+        .mockResolvedValue({ status: 'dispatched' });
+}
+
 async function advanceOneTick(): Promise<void> {
     await vi.advanceTimersByTimeAsync(TICK_MS);
 }
@@ -194,8 +202,8 @@ describe('SourceController automatic acceptance', () => {
         mockDue([armDuePoll('app-accept')]);
         evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
         const reconcile = spyOnReconcile()
-            .mockResolvedValueOnce({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' })
-            .mockResolvedValueOnce(okResult);
+            .mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        const dispatch = spyOnDispatch();
 
         controller.start();
         await advanceOneTick();
@@ -209,16 +217,75 @@ describe('SourceController automatic acceptance', () => {
             expect.any(Array),
             expect.objectContaining({ actor: 'system:source-controller', bypass: false }),
         );
-        expect(reconcile).toHaveBeenLastCalledWith(expect.objectContaining({
-            intent: 'apply',
-            applicationId: 'app-accept',
-            stackName: 'accept-web',
-            trigger: 'poll',
-            actor: 'system:source-controller',
-            commitSha: 'c'.repeat(40),
-            planFingerprint: 'f'.repeat(64),
-            deploy: false,
-        }));
+        // The apply is no longer a fused reconcile: the accepted generation
+        // travels through the shared dispatch boundary with the generation's
+        // own contract, a direct-mode context, and the poll trigger.
+        expect(reconcile).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledWith(
+            expect.objectContaining({
+                generationId: 'gen-accept',
+                applicationId: 'app-accept',
+                commitSha: 'c'.repeat(40),
+                changePlanFingerprint: 'f'.repeat(64),
+            }),
+            expect.objectContaining({ targetMode: 'direct', bindingRevision: null }),
+            { trigger: 'poll', actor: 'system:source-controller' },
+        );
+    });
+
+    it('logs the refusal when the dispatch boundary blocks an accepted generation', async () => {
+        stageCandidate('app-dispatch-blocked', 'dispatch-blocked-web', 'gen-dispatch-blocked');
+        mockDue([armDuePoll('app-dispatch-blocked')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        // The acceptance stands while the apply is refused, so the durable
+        // rows alone cannot explain why nothing moved: the blocked arm must
+        // log the reason the boundary returned.
+        const dispatch = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
+            .mockResolvedValue({ status: 'blocked', reason: 'The live target no longer matches the accepted generation.' });
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        expect(getApp('app-dispatch-blocked').accepted_generation_id).toBe('gen-dispatch-blocked');
+        expect(warnSpy.mock.calls.some((args) => String(args[0]).includes('[SourceController] automatic dispatch blocked for app-dispatch-blocked')
+            && String(args[0]).includes('no longer matches'))).toBe(true);
+    });
+
+    it('logs the manual remedy, without the credential, when the dispatch fails before reserving an attempt', async () => {
+        stageCandidate('app-dispatch-throw', 'dispatch-throw-web', 'gen-dispatch-throw');
+        mockDue([armDuePoll('app-dispatch-throw')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        // A throw means nothing was reserved, so no row exists and the next
+        // tick will not retry: the log is the only evidence, and it must say
+        // what stands (the acceptance) and what the operator must do. The
+        // error text emulates a transport failure embedding a credential,
+        // which the handler must redact before the stack reaches the server
+        // log: this line is the only record that will ever exist.
+        const dispatch = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
+            .mockRejectedValue(Object.assign(
+                new Error("fatal: cannot reach 'https://user:sup3rs3cr3t@example.com/repo.git/'"),
+                { stack: "Error: fatal: cannot reach 'https://user:sup3rs3cr3t@example.com/repo.git/'\n    at dispatchAcceptedGeneration (test)" },
+            ));
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        expect(getApp('app-dispatch-throw').accepted_generation_id).toBe('gen-dispatch-throw');
+        const calls = errorSpy.mock.calls.filter((args) => String(args[0]).includes('[SourceController] automatic dispatch failed for app-dispatch-throw before reserving an attempt'));
+        expect(calls.some((args) => String(args[0]).includes('dispatch it manually'))).toBe(true);
+        // The scrubbed error is the second argument, and neither the message
+        // nor the stack may carry the credential through to the server log.
+        expect(calls).toHaveLength(1);
+        const loggedError = String(calls[0]![1]);
+        expect(loggedError).not.toContain('sup3rs3cr3t');
+        expect(loggedError).toContain('[redacted]');
     });
 
     it('holds a blocked candidate for review without accepting it', async () => {
@@ -400,6 +467,10 @@ describe('SourceController automatic acceptance', () => {
             policy: policyRow(),
         });
         spyOnReconcile().mockResolvedValue(okResult);
+        // The apply leg is this test's only side effect on the generation row
+        // path; stubbing it keeps the assertion about acceptance evidence,
+        // not dispatch.
+        spyOnDispatch();
         const before = { ...GitOpsStore.getInstance().getGeneration('gen-evidence')! };
 
         controller.start();
