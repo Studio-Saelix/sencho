@@ -51,6 +51,10 @@ export const MANAGED_ROOT_NAME = 'git-managed';
 export const MANIFEST_FILENAME = 'manifest.v1.json';
 export const PROMOTION_MARKER = 'promotion.json';
 export const CANDIDATE_COMPLETE_MARKER = '.candidate-complete';
+
+type CandidateClaims =
+    | { complete: true; dirs: ReadonlySet<string> }
+    | { complete: false };
 export const GENERATIONS_DIR = 'generations';
 const DETACH_RECOVERY_MARKER = 'detach-recovery.v1.json';
 
@@ -421,10 +425,19 @@ export class GitProjectManifestService {
 
     /** Atomic manifest write (tmp + rename). */
     async writeManifest(stackName: string, manifest: GitProjectManifest): Promise<void> {
-        const dir = this.managedRoot(stackName);
-        await fs.promises.mkdir(dir, { recursive: true });
-        const target = path.join(dir, MANIFEST_FILENAME);
-        const tmp = path.join(dir, `${MANIFEST_FILENAME}.tmp`);
+        // Inline barrier at the mkdir/write/rename sinks (CodeQL path-injection):
+        // confine the resolved managed directory to the managed area before any
+        // filesystem call touches it, then confine the filenames joined onto it.
+        const root = path.resolve(this.managedRoot(stackName));
+        if (!root.startsWith(managedAreaBase() + path.sep)) {
+            throw Object.assign(new Error('Path escapes the managed area'), { code: 'INVALID_PATH' });
+        }
+        const target = path.resolve(root, MANIFEST_FILENAME);
+        const tmp = path.resolve(root, `${MANIFEST_FILENAME}.tmp`);
+        if (!target.startsWith(root + path.sep) || !tmp.startsWith(root + path.sep)) {
+            throw Object.assign(new Error('Path escapes managed project directory'), { code: 'INVALID_PATH' });
+        }
+        await fs.promises.mkdir(root, { recursive: true });
         await fs.promises.writeFile(tmp, JSON.stringify(manifest, null, 2), 'utf8');
         await fs.promises.rename(tmp, target);
     }
@@ -1268,12 +1281,20 @@ export class GitProjectManifestService {
      * is finalized; an uncommitted promotion restores the prior generation.
      * A third state is treated as an operator edit, so recovery declines and
      * flags migration_required. Interrupted detach snapshots are restored first.
+     * Complete candidate claims hold the directory basenames that durable state
+     * still references. Incomplete claims preserve every candidate because
+     * ownership is uncertain.
      */
     async sweepManagedArea(
         stackName: string,
-        opts: { repoUrl: string; branch: string; stackExists: boolean },
+        opts: {
+            repoUrl: string;
+            branch: string;
+            stackExists: boolean;
+            candidateClaims: CandidateClaims;
+        },
     ): Promise<void> {
-        const { repoUrl, branch, stackExists } = opts;
+        const { repoUrl, branch, stackExists, candidateClaims } = opts;
         if (!stackExists) {
             await this.deleteManagedArea(stackName);
             return;
@@ -1359,44 +1380,64 @@ export class GitProjectManifestService {
             }
         }
 
-        // Orphan candidates: incomplete or stale.
+        if (!candidateClaims.complete) {
+            await this.flagRecoveryRequired(
+                stackName,
+                `candidate ownership for ${sanitizeForLog(stackName)} could not be established`,
+            );
+            return;
+        }
+
+        // With a complete claim inventory, reap candidates that are incomplete
+        // or stale and unclaimed.
         const dir = this.generationsDir(stackName);
+        let entries: fs.Dirent[];
         try {
-            const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-            const now = Date.now();
-            const areaBase = managedAreaBase();
-            for (const entry of entries) {
-                if (!entry.isDirectory() || !entry.name.startsWith('candidate-')) continue;
-                const abs = path.resolve(dir, entry.name);
-                // Inline containment barrier at the removal sink (see
-                // `managedAreaBase`): the analyzer credits this literal
-                // comparison, not the positional check below it.
-                if (!abs.startsWith(areaBase + path.sep)) {
-                    console.warn(`[GitManifest] refusing to reap orphan candidate ${sanitizeForLog(entry.name)} for ${sanitizeForLog(stackName)}: it resolves outside the managed area`);
-                    continue;
-                }
-                // Same positional barrier as generation pruning: the boot sweep
-                // reaps candidate directories nobody claims, which is precisely
-                // the kind of unattended delete a planted link would steer.
-                if (!await isRealPathAtManagedLocation(abs)) {
-                    console.warn(`[GitManifest] refusing to reap orphan candidate ${sanitizeForLog(entry.name)} for ${sanitizeForLog(stackName)}: it is not at its own location in the managed area`);
-                    continue;
-                }
-                const complete = await fs.promises
-                    .access(path.join(abs, CANDIDATE_COMPLETE_MARKER))
-                    .then(() => true)
-                    .catch(() => false);
-                if (!complete) {
-                    await fs.promises.rm(abs, { recursive: true, force: true });
-                    continue;
-                }
-                const st = await fs.promises.stat(abs);
-                if (now - st.mtimeMs > ORPHAN_CANDIDATE_AGE_MS) {
-                    await fs.promises.rm(abs, { recursive: true, force: true });
-                }
+            entries = await fs.promises.readdir(dir, { withFileTypes: true });
+        } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+            throw e;
+        }
+        const now = Date.now();
+        const areaBase = managedAreaBase();
+        for (const entry of entries) {
+            if (!entry.isDirectory() || !entry.name.startsWith('candidate-')) continue;
+            // A claimed candidate is still needed regardless of age or
+            // completeness. Claims come from application pointers, the
+            // source pending record, and generation rows linked to
+            // unsettled attempts. Together they are the durable ownership
+            // record that makes recovery before cleanup safe.
+            if (candidateClaims.dirs.has(entry.name)) continue;
+            const abs = path.resolve(dir, entry.name);
+            // Inline containment barrier at the removal sink (see
+            // `managedAreaBase`): the analyzer credits this literal
+            // comparison, not the positional check below it.
+            if (!abs.startsWith(areaBase + path.sep)) {
+                console.warn(`[GitManifest] refusing to reap orphan candidate ${sanitizeForLog(entry.name)} for ${sanitizeForLog(stackName)}: it resolves outside the managed area`);
+                continue;
             }
-        } catch {
-            // no generations dir yet
+            // Same positional barrier as generation pruning: the boot sweep
+            // reaps candidate directories nobody claims, which is precisely
+            // the kind of unattended delete a planted link would steer.
+            if (!await isRealPathAtManagedLocation(abs)) {
+                console.warn(`[GitManifest] refusing to reap orphan candidate ${sanitizeForLog(entry.name)} for ${sanitizeForLog(stackName)}: it is not at its own location in the managed area`);
+                continue;
+            }
+            let complete = true;
+            try {
+                await fs.promises.access(path.join(abs, CANDIDATE_COMPLETE_MARKER));
+            } catch (e) {
+                if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+                complete = false;
+            }
+            if (!complete) {
+                await fs.promises.rm(abs, { recursive: true, force: true });
+                continue;
+            }
+            const st = await fs.promises.stat(abs);
+            if (now - st.mtimeMs > ORPHAN_CANDIDATE_AGE_MS) {
+                await fs.promises.rm(abs, { recursive: true, force: true });
+            }
         }
     }
 

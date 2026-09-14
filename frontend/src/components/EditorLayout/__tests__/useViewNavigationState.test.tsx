@@ -391,6 +391,51 @@ describe('useViewNavigationState', () => {
     expect(values).toContain('audit-log');
   });
 
+  // ── defaultQuickLinkEligibility: settled default eligibility for quick links ─
+
+  it('defaultQuickLinkEligibility is null while permissions are still loading', () => {
+    mockAuth(true, () => true, 'loading');
+    mockLicense(true, 'ready');
+    const { result } = renderHook(() => useViewNavigationState());
+    expect(result.current.defaultQuickLinkEligibility).toBeNull();
+  });
+
+  it('defaultQuickLinkEligibility is null while license status is still loading', () => {
+    mockAuth(true, () => true, 'ready');
+    mockLicense(true, 'loading');
+    const { result } = renderHook(() => useViewNavigationState());
+    expect(result.current.defaultQuickLinkEligibility).toBeNull();
+  });
+
+  it('defaultQuickLinkEligibility is a non-null, role-filtered list once settled', () => {
+    mockPaidAdmin();
+    const { result } = renderHook(() => useViewNavigationState());
+    expect(result.current.defaultQuickLinkEligibility).toEqual([
+      'dashboard', 'fleet', 'resources', 'security', 'auto-updates', 'scheduled-ops',
+    ]);
+  });
+
+  it('excludes admin-only and scheduling-gated defaults for a non-admin community user', () => {
+    // mockCommunityUser grants node:read (so Fleet, which is gated on that permission
+    // alone, stays included) but not admin or any scheduling-capable permission.
+    mockCommunityUser();
+    const { result } = renderHook(() => useViewNavigationState());
+    expect(result.current.defaultQuickLinkEligibility).toEqual(['dashboard', 'fleet', 'resources', 'security']);
+  });
+
+  it('still includes hub-only defaults on a remote node, unlike the display-time navItems list', () => {
+    mockPaidAdmin();
+    mockActiveNode('remote');
+    const { result } = renderHook(() => useViewNavigationState());
+    // Contrast with the "hides hub-only views" test above: navItems (display) drops
+    // these on a remote node, but defaultQuickLinkEligibility must not, since
+    // recommended defaults reflect the operator's role, not the active node tab.
+    expect(result.current.navItems.map(i => i.value)).not.toContain('fleet');
+    expect(result.current.defaultQuickLinkEligibility).toEqual([
+      'dashboard', 'fleet', 'resources', 'security', 'auto-updates', 'scheduled-ops',
+    ]);
+  });
+
   // ── auto-redirect when on a hub-only view and node switches to remote ──────
 
   it('auto-redirects to dashboard when active view is hub-only and node becomes remote', () => {

@@ -149,7 +149,10 @@ function migrateOne(source: StackGitSource): MigrationResult {
     // would go on claiming the name.
     lifecycleStatus: 'active',
     at,
-  });
+    // Match the SQL migration's rule for existing rows: the stored boolean
+    // maps 1 to automatic and 0 to review, so a migrated application keeps
+    // the policy its source already expressed.
+  }, source.auto_apply_on_webhook ? 'automatic' : 'review');
 
   return DatabaseService.getInstance().getDb().transaction((): MigrationResult => {
     if (trust.kind === 'trusted' && stackPresent) {
@@ -226,6 +229,12 @@ function migrateAccepted(
     actor: envelope.actor,
     previous_generation_id: null,
     redacted_limitations_json: '[]',
+    portable_manifest_json: null,
+    compose_inputs_json: null,
+    source_policy_evidence_json: null,
+    security_policy_evidence_json: null,
+    support_requirements_json: null,
+    compatibility_requirements_json: null,
     created_at: envelope.at,
   };
   store.insertGeneration(generation);

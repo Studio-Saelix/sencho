@@ -27,13 +27,17 @@ export type SelfDevBuildDetectResult =
     | { kind: 'inconclusive'; reason: string };
 
 /** The subset of `docker image inspect` output the detector reads. */
-interface InspectedImage {
+export interface InspectedImage {
     RepoDigests: string[];
     Os: string;
     Architecture: string;
 }
 
-async function defaultInspectImage(imageId: string): Promise<InspectedImage> {
+/** Bounded read of `docker image inspect` (RepoDigests, OS, architecture) for a
+ * resolved image. Reused by `SelfIdentityService` for revision enrichment;
+ * callers wrap it so any rejection stays isolated from the fields already
+ * captured. */
+export async function defaultInspectImage(imageId: string): Promise<InspectedImage> {
     const inspect = await DockerController.getInstance().getDocker().getImage(`sha256:${imageId}`).inspect();
     return { RepoDigests: inspect.RepoDigests ?? [], Os: inspect.Os, Architecture: inspect.Architecture };
 }

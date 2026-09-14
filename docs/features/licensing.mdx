@@ -108,7 +108,7 @@ The **Plan** card lists:
 - **License** (Community only): a link to view the AGPLv3 source on GitHub.
 - **Recovery Vault** (Admiral only): confirms the entitlement is included in your subscription.
 - **Hardened Build** (Admiral only): a **Switch to Hardened** button; see [Switching to Hardened Build](#switching-to-hardened-build) below.
-- **Current image** and **Channel**: the image reference and channel (`Community` or `Hardened`) this control plane is currently running.
+- **Current image** and **Channel**: the image reference and channel (`Community` or `Hardened`) this control plane is currently running. These rows reflect the running build, not the configured target, so a compose edit does not change them until the container is recreated. A hardened image is shown as `Restricted` to non-administrators.
 - **Customer**, **Product**, and **License key** (active licenses only): purchase metadata and your key masked to its last four characters (`****-****-****-XXXX`). The full key is never re-displayed after activation.
 
 ## Switching to Hardened Build

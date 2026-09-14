@@ -26,8 +26,10 @@ describe('appNavRegistry', () => {
     expect([...recommendedQuickLinkIds]).toEqual([
       'dashboard',
       'fleet',
-      'security',
       'resources',
+      'security',
+      'auto-updates',
+      'scheduled-ops',
     ]);
     for (const id of recommendedQuickLinkIds) {
       const item = APP_NAV_REGISTRY.find((entry) => entry.value === id);
@@ -36,11 +38,11 @@ describe('appNavRegistry', () => {
     }
   });
 
-  it('keeps Networking after Resources in Classic order metadata', () => {
+  it('keeps Networking after Resources in navOrder metadata', () => {
     const resources = APP_NAV_REGISTRY.find((item) => item.value === 'resources');
     const networking = APP_NAV_REGISTRY.find((item) => item.value === 'networking');
     expect(resources).toBeDefined();
     expect(networking).toBeDefined();
-    expect(networking!.classicOrder).toBeGreaterThan(resources!.classicOrder);
+    expect(networking!.navOrder).toBeGreaterThan(resources!.navOrder);
   });
 });

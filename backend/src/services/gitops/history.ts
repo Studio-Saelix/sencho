@@ -46,7 +46,9 @@ export type GitOpsHistoryStage =
   | 'config_changed_pending_cleared'
   | 'create_failed'
   | 'deploy_bound'
+  | 'deploy_dispatched'
   | 'deploy_failed'
+  | 'deploy_intent_refused'
   | 'deploy_started'
   | 'deploy_unbound'
   | 'dismissed'
@@ -59,6 +61,7 @@ export type GitOpsHistoryStage =
   | 'operation_interrupted'
   | 'partial_cleared'
   | 'partially_rolled_out'
+  | 'promotion_committed'
   | 'recovery_failed'
   | 'recovery_started'
   | 'recovery_succeeded'
@@ -70,11 +73,54 @@ export type GitOpsHistoryStage =
   | 'rollout_unpaused'
   | 'source_accepted'
   | 'source_conflict_blocker'
+  | 'source_poll_scheduled'
+  | 'source_policy_changed'
+  | 'source_reconcile_started'
+  | 'source_reconcile_settled'
   | 'source_retry_scheduled'
   | 'source_suspended'
   | 'source_unsuspended'
   | 'target_applied'
   | 'target_tombstoned';
+
+/** Payload of a `promotion_committed` witness row, read by dispatch recovery. */
+export type PromotionCommittedPayload = {
+  generationId: string;
+  commitSha: string;
+  planFingerprint: string;
+};
+
+/** Payload of a `deploy_dispatched` intent row, read by dispatch recovery. */
+export type DeployDispatchedPayload = {
+  generationId: string;
+  commitSha: string;
+  deployOperationId: string;
+};
+
+/**
+ * Payload of a `deploy_intent_refused` witness row: the dispatch journaled
+ * that it refused to start its deploy because the intent could not be
+ * recorded and read back. Recovery reads presence only (the refusal names
+ * no deploy to correlate), so no payload guard is needed.
+ */
+export type DeployIntentRefusedPayload = {
+  generationId: string;
+  commitSha: string;
+};
+
+/**
+ * True when a decoded history payload is a well-formed `deploy_dispatched`
+ * intent. The deploy id must be UUID-shaped, not merely a string: recovery
+ * correlates Compose's deploy rows by exact lookup on it, and a non-id value
+ * (a producer bug, a colliding key) would silently settle every dispatch as
+ * "no deploy record" instead of surfacing the storage bug.
+ */
+export function isDeployDispatchedPayload(value: unknown): value is DeployDispatchedPayload {
+  return isRecord(value)
+    && typeof value.generationId === 'string'
+    && typeof value.commitSha === 'string'
+    && isGitOpsUuid(value.deployOperationId);
+}
 
 export type HistoryInsert = {
   application: GitOpsApplicationRow;
@@ -282,6 +328,17 @@ export function encodeHistoryCursor(cursor: GitOpsHistoryCursor): string {
 
 /** History ids are minted with `randomUUID()`, so anything else is not one. */
 const HISTORY_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * True for the canonical `randomUUID()` textual form, lowercase hex.
+ *
+ * Every GitOps operation id (history row ids, reconcile attempt ids, deploy
+ * operation ids) is minted with `randomUUID()`, so readers decoding a stored
+ * id can reject anything else as a producer bug rather than trust its shape.
+ */
+function isGitOpsUuid(value: unknown): value is string {
+  return typeof value === 'string' && HISTORY_ID_RE.test(value);
+}
 
 /**
  * Parse a caller-supplied cursor, returning null for anything malformed.

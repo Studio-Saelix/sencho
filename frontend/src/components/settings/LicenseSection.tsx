@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { toast } from '@/components/ui/toast-store';
 import { useLicense } from '@/context/LicenseContext';
+import { useBuildInfo } from '@/hooks/useBuildInfo';
 import { TierBadge } from '@/components/TierBadge';
 import {
     Crown, CheckCircle, XCircle, Clock, ExternalLink,
@@ -47,8 +48,8 @@ function formatChannel(channel: ImageChannel): string {
             return 'Community';
         case 'hardened':
             return 'Hardened';
-        default:
-            return 'Custom';
+        case 'unknown':
+            return 'Unknown';
     }
 }
 
@@ -64,6 +65,7 @@ function getTierMastheadValue(tier?: string): string {
 
 export function LicenseSection() {
     const { license, isPaid, activate, deactivate } = useLicense();
+    const { buildInfo, status: buildInfoStatus } = useBuildInfo();
     const [licenseKeyInput, setLicenseKeyInput] = useState('');
     const [isActivating, setIsActivating] = useState(false);
     const [isDeactivating, setIsDeactivating] = useState(false);
@@ -253,16 +255,28 @@ export function LicenseSection() {
                 ) : null}
                 <SettingsField
                     label="Current image"
-                    helper={channelStatus?.channel === 'hardened' && !channelStatus.composeImageRef
+                    helper={buildInfo?.restricted
                         ? 'Hardened image details are available to administrators only.'
                         : 'Current image channel for this control plane.'}
                 >
                     <span className="font-mono text-xs text-stat-value break-all">
-                        {channelStatus?.composeImageRef ?? formatChannel(channelStatus?.channel ?? 'unknown')}
+                        {buildInfo?.restricted
+                            ? 'Restricted'
+                            : buildInfoStatus === 'loading'
+                                ? '…'
+                                : buildInfoStatus === 'error'
+                                    ? 'Unknown'
+                                    : buildInfo?.imageRef ?? 'Unknown'}
                     </span>
                 </SettingsField>
                 <SettingsField label="Channel">
-                    <span className="text-sm text-stat-value">{formatChannel(channelStatus?.channel ?? 'unknown')}</span>
+                    <span className="text-sm text-stat-value">
+                        {buildInfoStatus === 'loading'
+                            ? '…'
+                            : buildInfoStatus === 'error' || !buildInfo
+                                ? 'Unknown'
+                                : formatChannel(buildInfo.imageChannel)}
+                    </span>
                 </SettingsField>
                 {channelStatus?.operation?.state === 'failed' ? (
                     <SettingsField

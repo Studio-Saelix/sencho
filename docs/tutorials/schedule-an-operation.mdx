@@ -22,10 +22,10 @@ This tutorial covers one recurring **Restart Stack** task on the hub. It does no
 
 <Steps>
   <Step title="Open the Schedules page">
-    In the top navigation, click **More**, then under **Operations** pick **Schedules**.
+    Open the navigation launcher (the top-left menu icon), then under **Operations** pick **Schedules**. If you use Smart bar instead, click **More** and find Schedules there under the same **Operations** group.
 
     <Frame>
-      <img src="/images/tutorials/schedule-an-operation/more-menu-schedules.png" alt="The More navigation menu with Audit under Security & review, Logs, Update, and Schedules under Operations, and Console under Tools." />
+      <img src="/images/tutorials/schedule-an-operation/more-menu-schedules.png" alt="The navigation launcher's Navigate panel with Audit under Security & review, Logs, Update, and Schedules under Operations, and Console under Tools." />
     </Frame>
 
     The page opens on the **Timeline** view: a 24-hour strip with five lanes, one per operation category (Lifecycle, Updates, Security, Upkeep, Backups). With no tasks yet, it shows the empty-state message `Nothing scheduled in the next 24 hours`.
@@ -100,7 +100,7 @@ The footer confirms the schedule is alive: the next run time is shown there too,
 
 ## If something goes wrong
 
-**You don't see Schedules in the More menu.** Schedules is a hub-level view. If a remote node is the active selection, the More menu shows only **Console**, and the hub-only views (Schedules, Audit, Logs, Update) are missing. Click the node switcher next to the Sencho logo, pick **Local**, and reopen **More**: Schedules is back under **Operations**.
+**You don't see Schedules in the launcher or More menu.** Schedules is a hub-level view. If a remote node is the active selection, the hub-only views (Schedules, Audit, Logs, Update) are missing. Click the node switcher next to the Sencho logo, pick **Local**, and reopen the launcher (or **More**): Schedules is back under **Operations**.
 
 A run that fails shows a red **Failed** badge in the row and an error-level notification; the failure notification carries the task name and the error so you can diagnose without opening the run history. The task stays enabled and fires again at its next cron tick, or you can click **Run now** to retry immediately. See [Scheduled Operations · Troubleshooting](/features/scheduled-operations#troubleshooting) for the full failure list.
 

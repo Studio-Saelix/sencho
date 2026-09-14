@@ -22,7 +22,7 @@ import {
   isAuthoritativeNegativePreview,
   buildDetectionDisabledPreview,
 } from '../services/UpdatePreviewService';
-import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
+import { GitSourceService, GitSourceError, repoHost as gitRepoHost, type SourcePolicy } from '../services/GitSourceService';
 import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { validateCaBundlePem } from '../services/git/caBundle';
@@ -1100,6 +1100,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       ca_bundle,
       auto_apply_on_webhook,
       auto_deploy_on_apply,
+      source_policy,
       deploy_now,
       skip_scan,
     } = req.body ?? {};
@@ -1126,6 +1127,14 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
     }
     if (auto_deploy_on_apply !== undefined && typeof auto_deploy_on_apply !== 'boolean') {
       return res.status(400).json({ error: 'auto_deploy_on_apply must be a boolean' });
+    }
+    if (
+      source_policy !== undefined &&
+      source_policy !== 'manual' &&
+      source_policy !== 'review' &&
+      source_policy !== 'automatic'
+    ) {
+      return res.status(400).json({ error: 'source_policy must be "manual", "review", or "automatic"' });
     }
     const resolvedAuthType = auth_type === 'token' ? 'token' : auth_type === 'deploy_key' ? 'deploy_key' : 'none';
     const repoUrlError = repoUrlRejectionMessage(repo_url);
@@ -1194,6 +1203,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       caBundle: typeof ca_bundle === 'string' ? ca_bundle : null,
       autoApplyOnWebhook,
       autoDeployOnApply,
+      sourcePolicy: source_policy as SourcePolicy | undefined,
       auditContext: {
         username: auditActorUsername(req),
         method: req.method,

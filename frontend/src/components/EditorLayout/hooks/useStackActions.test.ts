@@ -152,6 +152,7 @@ function setup(over: {
   removeNotificationsForStack?: (nodeId: number, stackName: string) => void;
   isAdmin?: boolean;
   canReapplyCompose?: boolean;
+  hasServiceScopedUpdate?: boolean;
 } = {}) {
   const editorState = makeEditorState(over.editorState);
   const stackListState = makeStackListState(over.stackList);
@@ -185,6 +186,7 @@ function setup(over: {
       diffPreviewEnabled: false,
       hasUpdateGuard: over.hasUpdateGuard ?? false,
       hasGuidedExternalNetworkPreflight: over.hasGuidedExternalNetworkPreflight ?? false,
+      hasServiceScopedUpdate: over.hasServiceScopedUpdate ?? false,
       canEditStack: over.canEditStack ?? (() => true),
       onDeletedOpenStack,
       removeNotificationsForStack,
@@ -389,6 +391,272 @@ describe('useStackActions node binding', () => {
     await result.current.restartStack(mouseEvent);
     expect(postCallFor('/restart')).toEqual(expect.objectContaining({ nodeId: 1 }));
     expect(lastRunWithLogParams).toEqual(expect.objectContaining({ nodeId: 1 }));
+  });
+});
+
+// Node-pin regression for the compose/env editor chain (#1854): every request a
+// loadFile -> edit -> saveFile operation issues must target the node the tab
+// captured, never the localStorage value some other tab rewrote mid-session.
+// The suite mocks apiFetch, so these assert the explicit nodeId CALL OPTION;
+// the option-to-header mapping is proven in src/lib/__tests__/api.test.ts
+// ("apiFetch nodeId override"), and browser-level integration by the two-tab
+// e2e in e2e/editor-save-deploy.spec.ts.
+describe('useStackActions editor request node pinning', () => {
+  // URL-keyed dispatcher: order-independent, unlike mockResolvedValueOnce
+  // chains that silently desynchronize when the chain changes.
+  function mockEditorChain(overrides: { put?: Response } = {}) {
+    vi.mocked(apiFetch).mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? 'GET';
+      if (u === '/stacks/web.yml' && method === 'GET') {
+        return Promise.resolve(new Response('services: {}', { status: 200 }));
+      }
+      if ((u === '/stacks/web.yml' || u.includes('/stacks/web.yml/env?file=')) && method === 'PUT') {
+        // A forced retry (no If-Match) always succeeds; the server never
+        // answers a forced PUT with 412, and an unconditional 412 here would
+        // recurse saveFile forever.
+        const hasIfMatch = !!(init?.headers as Record<string, string> | undefined)?.['If-Match'];
+        if (overrides.put && hasIfMatch) return Promise.resolve(overrides.put);
+        return Promise.resolve(new Response(null, { status: 200 }));
+      }
+      if (u === '/stacks/web.yml/envs') {
+        return Promise.resolve(new Response(JSON.stringify({ envFiles: ['.env'] }), { status: 200 }));
+      }
+      if (u.startsWith('/stacks/web.yml/env?file=')) {
+        return Promise.resolve(new Response('KEY=value', { status: 200 }));
+      }
+      if (u === '/stacks/web/containers') {
+        return Promise.resolve(new Response('[]', { status: 200 }));
+      }
+      if (u === '/stacks/web.yml/backup') {
+        return Promise.resolve(new Response(JSON.stringify({ exists: false }), { status: 200 }));
+      }
+      if (u === '/stacks/web/effective-services') {
+        return Promise.resolve(new Response(JSON.stringify({ renderable: false, services: [] }), { status: 200 }));
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+  }
+
+  function callFor(fragment: string, method = 'GET') {
+    const call = vi.mocked(apiFetch).mock.calls.find(
+      c => String(c[0]).includes(fragment) && ((c[1] as RequestInit | undefined)?.method ?? 'GET') === method,
+    );
+    expect(call, `expected a ${method} call matching ${fragment}`).toBeDefined();
+    return (call![1] ?? {}) as RequestInit & { nodeId?: number | null };
+  }
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+    lastRunWithLogParams = null;
+  });
+
+  it('saveFile PUT carries the captured active node id', async () => {
+    mockEditorChain();
+    const { result } = setup();
+    const ok = await result.current.saveFile();
+    expect(ok).toBe(true);
+    expect(callFor('/stacks/web.yml', 'PUT')).toEqual(expect.objectContaining({ nodeId: 1 }));
+  });
+
+  it('loadFile pins every hydration GET to the captured node', async () => {
+    mockEditorChain();
+    // Equal content/originalContent buffers make the fixture a pure load with
+    // no dirty-state interaction.
+    const { result } = setup({
+      hasServiceScopedUpdate: true,
+      editorState: { content: 'same', originalContent: 'same' },
+    });
+    await result.current.loadFile('web.yml');
+    const expected = [
+      '/stacks/web.yml',            // compose GET
+      '/stacks/web.yml/envs',       // env list
+      '/stacks/web.yml/env?file=',  // env content
+      '/stacks/web/containers',     // container list
+      '/stacks/web.yml/backup',     // backup info
+      '/stacks/web/effective-services',
+    ];
+    for (const fragment of expected) {
+      expect(callFor(fragment)).toEqual(expect.objectContaining({ nodeId: 1 }));
+    }
+    const other = vi.mocked(apiFetch).mock.calls.filter(
+      c => ((c[1] as RequestInit & { nodeId?: number | null } | undefined)?.nodeId ?? null) !== 1,
+    );
+    expect(other, 'no request in the load chain may carry a different node').toHaveLength(0);
+  });
+
+  it('changeEnvFile GET carries the captured node id', async () => {
+    mockEditorChain();
+    const { result } = setup();
+    await result.current.changeEnvFile('.env');
+    expect(callFor('/stacks/web.yml/env?file=', 'GET')).toEqual(
+      expect.objectContaining({ nodeId: 1 }),
+    );
+  });
+
+  it('env saveFile PUT carries the captured node id', async () => {
+    mockEditorChain();
+    const { result } = setup({
+      editorState: { activeTab: 'env', selectedEnvFile: '.env', envContent: 'K=v', originalEnvContent: 'K=v' },
+    });
+    const ok = await result.current.saveFile();
+    expect(ok).toBe(true);
+    expect(callFor('/stacks/web.yml/env?file=', 'PUT')).toEqual(expect.objectContaining({ nodeId: 1 }));
+  });
+
+  it('the 412 overwrite retry reuses the same captured node id on both PUTs', async () => {
+    mockEditorChain({
+      put: new Response(
+        JSON.stringify({ currentContent: 'remote edit' }),
+        { status: 412, headers: { 'Content-Type': 'application/json' } },
+      ),
+    });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      // composeEtag gives the initial PUT an If-Match header, which is what the
+      // server answers 412 to; the forced retry sends no If-Match and succeeds.
+      const { result } = setup({ editorState: { composeEtag: '"etag-1"' } });
+      const ok = await result.current.saveFile();
+      expect(ok).toBe(true);
+      const puts = vi.mocked(apiFetch).mock.calls.filter(
+        c => String(c[0]) === '/stacks/web.yml' && (c[1] as RequestInit | undefined)?.method === 'PUT',
+      );
+      expect(puts).toHaveLength(2); // initial + force retry
+      const nodeIds = puts.map(
+        c => (c[1] as RequestInit & { nodeId?: number | null }).nodeId,
+      );
+      expect(nodeIds).toEqual([1, 1]);
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('loadFileOnNode pins the whole chain to the target node and survives a rerender mid-load', async () => {
+    // The env-chain GETs are held until the component has re-rendered with the
+    // new node active, so the containers fetch is already armed with the load
+    // target when the operator's context settles. A live-ref expectation (the
+    // pre-fix behavior) would then mark the target node's response stale; the
+    // pin must keep it accepted.
+    let releaseChain: ((r: Response) => void) | null = null;
+    const held = (): Promise<Response> =>
+      new Promise<Response>((resolve) => { releaseChain = resolve; });
+    vi.mocked(apiFetch).mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? 'GET';
+      if (u === '/stacks/webapp.yml' && method === 'GET') {
+        return Promise.resolve(new Response('services: {}', { status: 200 }));
+      }
+      if (u === '/stacks/webapp.yml/envs' || u === '/stacks/webapp/containers') {
+        return held();
+      }
+      if (u === '/stacks/webapp.yml/backup') {
+        return Promise.resolve(new Response(JSON.stringify({ exists: false }), { status: 200 }));
+      }
+      if (u === '/stacks/webapp/effective-services') {
+        return Promise.resolve(new Response(JSON.stringify({ renderable: false, services: [] }), { status: 200 }));
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+
+    const targetNode = { id: 2, type: 'remote' } as Parameters<typeof useStackActions>[0]['activeNode'];
+    // Equal content buffers keep the fixture a pure load with no dirty-state
+    // interaction (the stackList mock starts with no file selected, so the
+    // unsaved-changes gate is not even reached).
+    // The stackList mock must track setSelectedFile so the ownership ref
+    // (synced from stackListState.selectedFile each render) sees the file the
+    // load claimed; a frozen null would mark every mid-flight fetch stale.
+    const live = setup({
+      hasServiceScopedUpdate: true,
+      editorState: { content: 'same', originalContent: 'same' },
+      stackList: { selectedFile: null },
+    });
+    (live.stackListState.setSelectedFile as unknown as { mockImplementation: (fn: (f: string | null) => void) => void })
+      .mockImplementation((f: string | null) => {
+        (live.stackListState as unknown as { selectedFile: string | null }).selectedFile = f;
+      });
+    const { result, rerender, activeNodeHolder, editorState } = live;
+
+    let loadPromise!: Promise<void>;
+    act(() => {
+      loadPromise = result.current.loadFileOnNode(targetNode!, 'webapp.yml');
+    });
+    // loadFileOnNode captured the target before any re-render.
+    expect(callFor('/stacks/webapp.yml')).toEqual(expect.objectContaining({ nodeId: 2 }));
+
+    // The operator's context settles on the new node (rerender) while the
+    // envs GET is still in flight, so the containers expectation is built
+    // BEFORE the flip (from the captured pin), not after it.
+    activeNodeHolder.current = targetNode;
+    rerender();
+    // Drain the microtask queue so the held envs GET is observed as in-flight.
+    await act(async () => { await Promise.resolve(); });
+    expect(releaseChain).not.toBeNull();
+
+    await act(async () => {
+      releaseChain?.(new Response(JSON.stringify({ envFiles: [] }), { status: 200 }));
+      // Let the env chain settle (empty list) so the containers GET fires
+      // while the flipped context is live; its response is released next.
+      // Bounded drain instead of a fixed tick count: it exits as soon as the
+      // containers GET is observed and fails loudly if it never appears.
+      for (let i = 0; i < 100; i++) {
+        await Promise.resolve();
+        if (vi.mocked(apiFetch).mock.calls.some(
+          c => String(c[0]) === '/stacks/webapp/containers',
+        )) break;
+      }
+    });
+    expect(callFor('/stacks/webapp/containers')).toEqual(expect.objectContaining({ nodeId: 2 }));
+
+    await act(async () => {
+      releaseChain?.(new Response(JSON.stringify([{ Id: 'c1', Names: ['/webapp'], State: 'running' }]), { status: 200 }));
+      await loadPromise;
+    });
+    // Target-node containers were ACCEPTED (not rejected as stale).
+    expect(editorState.setContainers).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ Id: 'c1' })]),
+    );
+    expect(editorState.setContainersLoadStatus).toHaveBeenCalledWith('success');
+
+    // Every request in the chain targeted node 2, and none targeted node 1.
+    const calls = vi.mocked(apiFetch).mock.calls;
+    const wrong = calls.filter(
+      c => ((c[1] as RequestInit & { nodeId?: number | null } | undefined)?.nodeId ?? null) !== 2,
+    );
+    expect(wrong, 'every chained request must carry nodeId: 2').toHaveLength(0);
+  });
+
+  it('absent active node and absent expected node are the same local identity (no false stale)', async () => {
+    const setContainers = vi.fn();
+    const setContainersLoadStatus = vi.fn();
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(JSON.stringify([{ Id: 'c1', Names: ['/web'], State: 'running' }]), { status: 200 }),
+    );
+    const { result } = setup({
+      activeNode: null,
+      editorState: {
+        containers: [],
+        containersLoadStatus: 'success',
+        containersLoadError: null,
+        setContainers,
+        setContainersLoadStatus,
+        setContainersLoadError: vi.fn(),
+      } as never,
+    });
+    await act(async () => {
+      await result.current.refreshSelectedContainers('web', 'web.yml');
+      // The Retry affordance derives its expectation the same way; a regression
+      // in either one-line normalization would false-stale on a local load.
+      await result.current.retryContainersLoad();
+    });
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/stacks/web/containers',
+      expect.objectContaining({ nodeId: null }),
+    );
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+    expect(setContainers).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ Id: 'c1' })]),
+    );
+    expect(setContainersLoadStatus).toHaveBeenCalledWith('success');
   });
 });
 

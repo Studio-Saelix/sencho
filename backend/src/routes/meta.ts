@@ -1,9 +1,10 @@
 import { Router, type Request, type Response } from 'express';
 import { getActiveCapabilities, getSenchoVersion } from '../services/CapabilityRegistry';
 import { classifyImageChannel } from '../helpers/imageChannel';
-import { isRepinBlocked } from '../helpers/selfUpdateCompose';
+import { classifyBuildChannel, isRepinBlocked } from '../helpers/selfUpdateCompose';
 import { MeshService } from '../services/MeshService';
 import SelfUpdateService from '../services/SelfUpdateService';
+import SelfIdentityService from '../services/SelfIdentityService';
 
 // Captured at boot. Exposed via /api/health and /api/meta so the Fleet update
 // overlay can distinguish a brand-new process from the old one still mid-pull.
@@ -41,6 +42,7 @@ metaRouter.get('/meta', async (_req: Request, res: Response): Promise<void> => {
   const updateError = selfUpdate.getLastError();
   const pin = await selfUpdate.getPinInfo({ cacheOnly: true });
   const updateBlocked = pin ? isRepinBlocked(pin.pinKind) : false;
+  const runningRef = SelfIdentityService.getInstance().getBuildInfo().imageRef;
   res.json({
     version: getSenchoVersion(),
     capabilities: getActiveCapabilities(),
@@ -50,6 +52,10 @@ metaRouter.get('/meta', async (_req: Request, res: Response): Promise<void> => {
       imagePinKind: pin.pinKind,
       imageChannel: classifyImageChannel(pin.composeImageRef),
     } : {}),
+    // Bounded build channel of the RUNNING image (stable|dev|preview|unknown).
+    // Like imagePinKind, this is a non-sensitive enum; no image reference is
+    // ever exposed on this public endpoint.
+    ...(runningRef ? { buildChannel: classifyBuildChannel(runningRef) } : {}),
     updateBlocked,
     ...(updateError ? { updateError: 'update_failed' } : {}),
   });

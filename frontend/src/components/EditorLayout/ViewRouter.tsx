@@ -114,6 +114,7 @@ export interface ViewRouterProps {
     urlHydratingStack: string | null;
     isFileLoading: boolean;
     quickLinkCandidates?: NavDestination[];
+    defaultQuickLinkEligibility?: ActiveView[] | null;
 }
 
 export function ViewRouter({
@@ -148,6 +149,7 @@ export function ViewRouter({
     urlHydratingStack,
     isFileLoading,
     quickLinkCandidates,
+    defaultQuickLinkEligibility,
 }: ViewRouterProps): ReactNode {
     const { can, permissionsStatus } = useAuth();
     const { isPaid, licenseReady } = useLicense();
@@ -161,6 +163,7 @@ export function ViewRouter({
                 onMutePrefillConsumed={onMutePrefillConsumed}
                 onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
                 quickLinkCandidates={quickLinkCandidates}
+                defaultQuickLinkEligibility={defaultQuickLinkEligibility}
             />
         );
     }

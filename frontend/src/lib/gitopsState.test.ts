@@ -34,6 +34,7 @@ const SOURCE_STATUSES: GitOpsSourceStatus[] = [
   'source_reconcile_required',
   'source_superseded',
   'applying',
+  'source_poll_scheduled',
   'source_retry_scheduled',
   'source_suspended',
   'source_failed',

@@ -832,10 +832,17 @@ export function createRemoteProxyMiddleware(): RequestHandler {
 /** Max request body size for buffered settings writes (same as ALERT_PROXY_BODY_LIMIT). */
 const SETTINGS_PROXY_BODY_LIMIT = 100 * 1024;
 
-/** True when the request is a settings write destined for a remote node (path is post-/api strip). */
+/**
+ * True when the request configures a remote node's own settings and must run
+ * the node-admin elevation check on the hop (path is post-/api strip).
+ */
 function isSettingsWrite(req: Request): boolean {
   if (req.method !== 'POST' && req.method !== 'PATCH') return false;
-  return /^\/settings\/?$/.test(req.path);
+  if (/^\/settings\/?$/.test(req.path)) return true;
+  // Polling cadence is configured per instance, so the hub PATCH must reach
+  // the target node's own route; classify it like a settings write so the
+  // same node-admin elevation check applies before the hop.
+  return /^\/git-sources\/polling\/?$/.test(req.path);
 }
 
 /**

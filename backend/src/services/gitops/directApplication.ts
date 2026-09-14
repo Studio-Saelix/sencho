@@ -5,6 +5,7 @@ import { MANAGED_ROOT_NAME } from './managedPaths';
 import { encodeGitOpsJson } from './json';
 import { materializationFingerprint } from './fingerprint';
 import { parseLegacyRepoUrl, parseStorableRepoUrl, secretFreeRepoUrl, secretFreeRepoUrlFromStorable, serializeRepoIdentity, serializeRepoIdentityFromStorable, type RepoIdentity } from './repoIdentity';
+import type { SourcePolicy } from './types';
 import type { RefKind } from '../git/types';
 import type {
   GitOpsApplicationRow,
@@ -116,7 +117,7 @@ export function buildDirectApplicationRow(args: {
   identity: DirectSourceIdentity;
   lifecycleStatus: 'creating' | 'active';
   at: number;
-}): GitOpsApplicationRow {
+}, policy: SourcePolicy): GitOpsApplicationRow {
   return {
     id: args.id,
     lifecycle_key: `direct:${args.stackName}`,
@@ -157,6 +158,10 @@ export function buildDirectApplicationRow(args: {
     pause_at: null,
     pause_reason: null,
     source_suspended_reason: null,
+    source_policy: policy,
+    poll_interval_secs: null,
+    next_poll_at: null,
+    attempt_seq: 0,
     partial_json: null,
     failure_stage: null,
     failure_class: null,
@@ -217,6 +222,12 @@ export function buildGenerationRow(args: {
     actor: args.actor,
     previous_generation_id: null,
     redacted_limitations_json: '[]',
+    portable_manifest_json: null,
+    compose_inputs_json: null,
+    source_policy_evidence_json: null,
+    security_policy_evidence_json: null,
+    support_requirements_json: null,
+    compatibility_requirements_json: null,
     created_at: args.at,
   };
 }

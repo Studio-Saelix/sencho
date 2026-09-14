@@ -132,6 +132,12 @@ export const SOURCE_STATE: Record<GitOpsSourceStatus, GitOpsStateMeta> = {
     line: 'A commit is being applied to the stack directory.',
     icon: Upload,
   },
+  source_poll_scheduled: {
+    label: 'poll scheduled',
+    tone: 'neutral',
+    line: 'The source is healthy and waiting for its next scheduled poll.',
+    icon: Clock,
+  },
   source_retry_scheduled: {
     label: 'retry scheduled',
     tone: 'warning',
