@@ -4885,6 +4885,463 @@ describe('GitSourceService.apply', () => {
             }
         });
 
+        it('refuses to start the deploy when the deploy intent cannot be journaled', async () => {
+            const sha = 'c4'.repeat(20);
+            const svc = await seedPending('refuse-deploy-no-intent', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('refuse-deploy-no-intent');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('refuse-deploy-no-intent')!.id;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack')
+                .mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+            // The intent journal write itself fails. The dispatch must then
+            // refuse to hand the stack to Compose: a deploy that runs with
+            // no journaled intent leaves recovery unable to link whatever
+            // Compose did to this attempt, which is exactly the false
+            // convergence the intent exists to prevent. The simulated
+            // failure also carries a credential-shaped store URL: the
+            // capture into the operator-visible reason must scrub it.
+            const intentSpy = vi.spyOn(GitOpsTransitions.prototype, 'deployDispatched')
+                .mockImplementation(() => {
+                    throw new Error('simulated intent journal failure at https://user:sup3rs3cr3t@db.internal:5432/gitops');
+                });
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run('refuse-deploy-no-intent');
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(deploySpy).not.toHaveBeenCalled();
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(/deploy intent could not be recorded/i),
+                });
+                // The promotion and the bind did happen; the attempt settles
+                // post-commit (the files are real) without claiming a deploy
+                // id, since Compose never ran.
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+                const started = historyOperationIds(applicationId, 'source_reconcile_started');
+                const dispatchOp = started[started.length - 1]!;
+                expect(GitOpsStore.getInstance()
+                    .getStageRowForAttempt(applicationId, dispatchOp, 'deploy_dispatched')).toBeUndefined();
+                // The refusal itself is journaled: it is the only evidence
+                // that separates "refused to deploy" from "apply-only
+                // completion" for recovery of an unsettled attempt.
+                expect(GitOpsStore.getInstance()
+                    .hasStageRowForAttempt(applicationId, dispatchOp, 'deploy_intent_refused')).toBe(true);
+                const settled = settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp);
+                expect(settled).toHaveLength(1);
+                const payload = JSON.parse(settled[0]!.after_json!);
+                expect(payload).toMatchObject({
+                    outcome: 'recovery_required',
+                    reason: expect.stringMatching(/deploy intent could not be recorded/i),
+                    nextAction: 'view_target_results',
+                    commitSha: sha,
+                });
+                // The settled reason carries why the intent failed: a
+                // cause-less refusal is undebuggable for the operator.
+                expect(payload.reason).toMatch(/simulated intent journal failure/);
+                // The reason is a durable, operator-visible row, so the
+                // credential in the simulated store error must not survive
+                // the capture: scrubbing runs before the cause is embedded.
+                expect(payload.reason).not.toContain('sup3rs3cr3t');
+                expect(payload.reason).toContain('***');
+                expect(payload.deployGitopsOperationId).toBeUndefined();
+                // Refusing the deploy logs the intent failure at the journal
+                // site: it is the operator's real-time trace of why the
+                // deploy never started, so a silent drop is a regression
+                // this pins. The logged text is scrubbed too.
+                expect(errorSpy).toHaveBeenCalled();
+                const logged = errorSpy.mock.calls
+                    .map((args) => args.map(String).join('\n')).join('\n');
+                expect(logged).not.toContain('sup3rs3cr3t');
+                // Recovery has nothing to reconstruct and nothing to redeploy:
+                // the attempt already settled, so a recovery pass leaves it
+                // at one settlement.
+                await svc.recoverUnsettledReconcileAttempts();
+                expect(settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp)).toHaveLength(1);
+                expect(deploySpy).not.toHaveBeenCalled();
+            } finally {
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+                intentSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
+        });
+
+        it('refuses to start the deploy when the journaled intent cannot be read back', async () => {
+            const sha = 'c5'.repeat(20);
+            const svc = await seedPending('refuse-deploy-intent-unreadable', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('refuse-deploy-intent-unreadable');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('refuse-deploy-intent-unreadable')!.id;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack')
+                .mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+            // The write-failure refusal above pins the recording branch; this
+            // one pins the read-back branch of the same tri-state contract,
+            // specifically that a corrupt stored row must not escape the
+            // hook's null contract as a thrown decode error: an escaping
+            // throw lands in the pipeline's deploy-error arm and misreports
+            // the refusal as a failed deploy. The row writes fine but its
+            // stored payload cannot be decoded, so the intent cannot be
+            // trusted. A drift here (returning undefined instead of null)
+            // would silently restore the old untracked-deploy behavior,
+            // which recovery can then only judge from source state.
+            const realRead = GitOpsStore.prototype.getStageRowForAttempt
+                .bind(GitOpsStore.getInstance());
+            const readSpy = vi.spyOn(GitOpsStore.prototype, 'getStageRowForAttempt')
+                .mockImplementation((...args: Parameters<GitOpsStore['getStageRowForAttempt']>) => {
+                    const row = realRead(...args);
+                    if (args[2] === 'deploy_dispatched' && row) {
+                        return { ...row, after_json: 'not json {' };
+                    }
+                    return row;
+                });
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run('refuse-deploy-intent-unreadable');
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(deploySpy).not.toHaveBeenCalled();
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(/deploy intent could not be recorded/i),
+                });
+                const started = historyOperationIds(applicationId, 'source_reconcile_started');
+                const dispatchOp = started[started.length - 1]!;
+                // Unlike the write-failure variant, the intent row exists in
+                // history: it was the stored payload being undecodable, not
+                // the write, that failed. Read past the spy so this is the
+                // row as stored.
+                const intentCount = DatabaseService.getInstance().getDb()
+                    .prepare(`SELECT COUNT(*) AS n FROM gitops_history
+                              WHERE application_id = ? AND operation_id = ? AND stage = 'deploy_dispatched'`)
+                    .get(applicationId, dispatchOp) as { n: number };
+                expect(intentCount.n).toBe(1);
+                // The refusal is journaled even though the row exists: the
+                // stored intent cannot be trusted, so the recovery arms must
+                // see a refusal witness, not the corrupt row.
+                expect(GitOpsStore.getInstance()
+                    .hasStageRowForAttempt(applicationId, dispatchOp, 'deploy_intent_refused')).toBe(true);
+                const settled = settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp);
+                expect(settled).toHaveLength(1);
+                const payload = JSON.parse(settled[0]!.after_json!);
+                expect(payload).toMatchObject({
+                    outcome: 'recovery_required',
+                    reason: expect.stringMatching(/deploy intent could not be recorded/i),
+                    nextAction: 'view_target_results',
+                    commitSha: sha,
+                });
+                // The read-back refusal names its own cause: a corrupt
+                // stored row must settle differently from a failed write,
+                // and the throw must not escape into the deploy-error arm.
+                expect(payload.reason).toMatch(/failed validation/);
+                expect(payload.deployGitopsOperationId).toBeUndefined();
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+            } finally {
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+                readSpy.mockRestore();
+            }
+        });
+
+        it('refuses the deploy when the intent read-back itself throws', async () => {
+            const sha = 'c7'.repeat(20);
+            const svc = await seedPending('refuse-deploy-readback-throws', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('refuse-deploy-readback-throws');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('refuse-deploy-readback-throws')!.id;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack')
+                .mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+            // The write lands but the store is still unhealthy and the
+            // read-back throws right after it. A throw here must take the
+            // refusal path (witness journaled, recovery-required settle)
+            // rather than escaping the hook into the deploy-error arm, which
+            // would misreport "the deploy failed" for a deploy Compose never
+            // started. This pins that third refusal branch.
+            const realRead = GitOpsStore.prototype.getStageRowForAttempt
+                .bind(GitOpsStore.getInstance());
+            const readSpy = vi.spyOn(GitOpsStore.prototype, 'getStageRowForAttempt')
+                .mockImplementation((...args: Parameters<GitOpsStore['getStageRowForAttempt']>) => {
+                    if (args[2] === 'deploy_dispatched') {
+                        throw new Error('simulated read-back store failure');
+                    }
+                    return realRead(...args);
+                });
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run('refuse-deploy-readback-throws');
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(deploySpy).not.toHaveBeenCalled();
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(/deploy intent could not be recorded and read back[\s\S]*simulated read-back store failure/i),
+                });
+                const started = historyOperationIds(applicationId, 'source_reconcile_started');
+                const dispatchOp = started[started.length - 1]!;
+                const settled = settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp);
+                expect(settled).toHaveLength(1);
+                const payload = JSON.parse(settled[0]!.after_json!);
+                expect(payload).toMatchObject({
+                    outcome: 'recovery_required',
+                    nextAction: 'view_target_results',
+                    commitSha: sha,
+                });
+                expect(payload.deployGitopsOperationId).toBeUndefined();
+                // Refusal-shaped, not deploy-failure-shaped: the reason must
+                // not claim the deploy itself failed.
+                expect(payload.reason).not.toMatch(/deploy failed/i);
+                expect(GitOpsStore.getInstance()
+                    .hasStageRowForAttempt(applicationId, dispatchOp, 'deploy_intent_refused')).toBe(true);
+            } finally {
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+                readSpy.mockRestore();
+            }
+        });
+
+        it('recovery reconstructs the deploy-intent refusal when the settle write fails in the same window', async () => {
+            const sha = 'c6'.repeat(20);
+            const svc = await seedPending('refuse-deploy-settle-lost', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('refuse-deploy-settle-lost');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('refuse-deploy-settle-lost')!.id;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack')
+                .mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+            // The compounding failure the refusal witness exists for: the
+            // intent journal throws AND the refusal's settle write fails in
+            // the same window. Without the witness the attempt would stay
+            // open with a bound target and no intent row, and recovery's
+            // no-intent arm would read an apply-only completion (the source
+            // projection converged), contradicting what the live refusal
+            // would have settled. With it, recovery reconstructs the same
+            // recovery_required classification from recorded evidence.
+            const intentSpy = vi.spyOn(GitOpsTransitions.prototype, 'deployDispatched')
+                .mockImplementation(() => { throw new Error('simulated intent journal failure'); });
+            const settleSpy = vi.spyOn(GitOpsTransitions.prototype, 'settleReconcileAttempt')
+                .mockImplementationOnce(() => { throw new Error('simulated settle failure'); });
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run('refuse-deploy-settle-lost');
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(result.status).toBe('blocked');
+                const started = historyOperationIds(applicationId, 'source_reconcile_started');
+                const dispatchOp = started[started.length - 1]!;
+                // The in-process settle was lost: the attempt is open, the
+                // way startup recovery expects to find it.
+                expect(settledAttemptsForApplication(applicationId)
+                    .some((row) => row.operation_id === dispatchOp)).toBe(false);
+                // The refusal witness survived: it is the only durable
+                // evidence separating this attempt from an apply-only
+                // completion.
+                expect(GitOpsStore.getInstance()
+                    .hasStageRowForAttempt(applicationId, dispatchOp, 'deploy_intent_refused')).toBe(true);
+
+                await svc.recoverUnsettledReconcileAttempts();
+                const settledOnce = settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp);
+                expect(settledOnce).toHaveLength(1);
+                const payload = JSON.parse(settledOnce[0]!.after_json!);
+                expect(payload).toMatchObject({
+                    outcome: 'recovery_required',
+                    reason: expect.stringMatching(/deploy intent could not be recorded and read back/i),
+                    nextAction: 'view_target_results',
+                    commitSha: sha,
+                });
+                expect(payload.deployGitopsOperationId).toBeUndefined();
+                // Recovery judged from the witness: one promotion, no
+                // deploy, ever.
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+                expect(deploySpy).not.toHaveBeenCalled();
+
+                await svc.recoverUnsettledReconcileAttempts();
+                expect(settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp)).toHaveLength(1);
+                expect(deploySpy).not.toHaveBeenCalled();
+            } finally {
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+                intentSpy.mockRestore();
+                settleSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
+        });
+
+        it('recovers a journaled-but-corrupt intent row as the refusal, not a storage bug', async () => {
+            const sha = 'd5'.repeat(20);
+            const svc = await seedPending('refuse-deploy-corrupt-row-recovery', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('refuse-deploy-corrupt-row-recovery');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('refuse-deploy-corrupt-row-recovery')!.id;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack')
+                .mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+            // Pins the refusal-before-intent check order in
+            // reconstructBoundDispatchResult. The live dispatch refuses on an
+            // undecodable read-back and journals the witness, but its settle
+            // is lost in the same window, so recovery must classify the
+            // attempt. A corrupt intent row still exists when recovery reads
+            // it: if recovery decoded the intent first (to correlate a
+            // deploy), the storage-bug throw would leave the attempt
+            // unsettled forever. The witness check running first makes the
+            // corrupt row moot, exactly as the live decode refusal did.
+            const realRead = GitOpsStore.prototype.getStageRowForAttempt
+                .bind(GitOpsStore.getInstance());
+            const readSpy = vi.spyOn(GitOpsStore.prototype, 'getStageRowForAttempt')
+                .mockImplementation((...args: Parameters<GitOpsStore['getStageRowForAttempt']>) => {
+                    const row = realRead(...args);
+                    if (args[2] === 'deploy_dispatched' && row) {
+                        return { ...row, after_json: 'not json {' };
+                    }
+                    return row;
+                });
+            const settleSpy = vi.spyOn(GitOpsTransitions.prototype, 'settleReconcileAttempt')
+                .mockImplementationOnce(() => { throw new Error('simulated settle failure'); });
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run('refuse-deploy-corrupt-row-recovery');
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(result.status).toBe('blocked');
+                expect(deploySpy).not.toHaveBeenCalled();
+                const started = historyOperationIds(applicationId, 'source_reconcile_started');
+                const dispatchOp = started[started.length - 1]!;
+                expect(settledAttemptsForApplication(applicationId)
+                    .some((row) => row.operation_id === dispatchOp)).toBe(false);
+                expect(GitOpsStore.getInstance()
+                    .hasStageRowForAttempt(applicationId, dispatchOp, 'deploy_intent_refused')).toBe(true);
+
+                // The read-back spy only corrupts what the live pipeline
+                // sees. Make the corruption real in storage before recovery
+                // runs, so recovery reads the row every future reader will.
+                readSpy.mockRestore();
+                DatabaseService.getInstance().getDb()
+                    .prepare(`UPDATE gitops_history SET after_json = 'not json {'
+                              WHERE application_id = ? AND operation_id = ? AND stage = 'deploy_dispatched'`)
+                    .run(applicationId, dispatchOp);
+
+                await svc.recoverUnsettledReconcileAttempts();
+                const settledOnce = settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp);
+                expect(settledOnce).toHaveLength(1);
+                const payload = JSON.parse(settledOnce[0]!.after_json!);
+                expect(payload).toMatchObject({
+                    outcome: 'recovery_required',
+                    reason: expect.stringMatching(/deploy intent could not be recorded and read back/i),
+                    nextAction: 'view_target_results',
+                    commitSha: sha,
+                });
+                expect(payload.deployGitopsOperationId).toBeUndefined();
+                // Classified from the witness, not from the corrupt row: the
+                // recovery pass must not have touched the intent payload at
+                // all (the throw it would have caused is the regression).
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+                expect(deploySpy).not.toHaveBeenCalled();
+
+                await svc.recoverUnsettledReconcileAttempts();
+                expect(settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp)).toHaveLength(1);
+            } finally {
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+                readSpy.mockRestore();
+                settleSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
+        });
+
+        it('still refuses and settles when the refusal witness write itself fails', async () => {
+            const sha = 'd6'.repeat(20);
+            const svc = await seedPending('refuse-deploy-witness-lost', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('refuse-deploy-witness-lost');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('refuse-deploy-witness-lost')!.id;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack')
+                .mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+            // The intent journal throws AND the refusal witness write fails
+            // with it. The witness is best-effort like the promotion witness,
+            // so a failed witness write must not turn the refusal into an
+            // escape: the dispatch still refuses, the still-healthy settle
+            // lands, and the witness outage is logged. That log line is the
+            // operator's only notice that recovery of an unsettled version of
+            // this attempt would see no witness, so it is pinned here.
+            const intentSpy = vi.spyOn(GitOpsTransitions.prototype, 'deployDispatched')
+                .mockImplementation(() => { throw new Error('simulated intent journal failure'); });
+            const witnessSpy = vi.spyOn(GitOpsTransitions.prototype, 'deployIntentRefused')
+                .mockImplementation(() => { throw new Error('simulated witness journal failure'); });
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run('refuse-deploy-witness-lost');
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(deploySpy).not.toHaveBeenCalled();
+                expect(result).toEqual({
+                    status: 'blocked',
+                    reason: expect.stringMatching(/deploy intent could not be recorded/i),
+                });
+                const started = historyOperationIds(applicationId, 'source_reconcile_started');
+                const dispatchOp = started[started.length - 1]!;
+                expect(GitOpsStore.getInstance()
+                    .hasStageRowForAttempt(applicationId, dispatchOp, 'deploy_intent_refused')).toBe(false);
+                const settled = settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp);
+                expect(settled).toHaveLength(1);
+                const payload = JSON.parse(settled[0]!.after_json!);
+                expect(payload).toMatchObject({
+                    outcome: 'recovery_required',
+                    reason: expect.stringMatching(/simulated intent journal failure/i),
+                    nextAction: 'view_target_results',
+                    commitSha: sha,
+                });
+                const logged = errorSpy.mock.calls
+                    .map((args) => args.map(String).join('\n')).join('\n');
+                expect(logged).toContain('refusal witness unavailable');
+                // The attempt settled, so recovery has nothing to add even
+                // though no witness exists: the live classification stands.
+                await svc.recoverUnsettledReconcileAttempts();
+                expect(settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp)).toHaveLength(1);
+                expect(deploySpy).not.toHaveBeenCalled();
+            } finally {
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+                intentSpy.mockRestore();
+                witnessSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
+        });
+
         it('keeps the deploy-op segment out of the evidence line when the deploy was untracked', async () => {
             const sha = 'fb'.repeat(20);
             const svc = await seedPending('dispatch-deploy-untracked', 'services:\n  x:\n    image: alpine\n', sha);
