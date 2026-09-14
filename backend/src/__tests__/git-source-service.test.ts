@@ -5695,6 +5695,200 @@ describe('GitSourceService.apply', () => {
             }
         });
 
+        it('recovery reconstructs a compound deploy-branch outage from the reservation fact, never a quiet convergence', async () => {
+            const sha = 'cb'.repeat(20);
+            const svc = await seedPending('dispatch-request-fact-outage', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-request-fact-outage');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-request-fact-outage')!.id;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack')
+                .mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+            // The compound outage the reservation's deploy-request fact
+            // exists to survive: the intent journal throws, the refusal
+            // witness write throws with it, and the live settle fails in the
+            // same window, so none of the three post-bind evidence rows
+            // survive. The promotion and bind completed with durable rows,
+            // so recovery reaches the bound no-intent state with nothing but
+            // the reservation to read. Before the fact existed, that state
+            // reconstructed as the source projection: a quiet
+            // no-source-change convergence for a deploy the operator asked
+            // for that never happened.
+            const intentSpy = vi.spyOn(GitOpsTransitions.prototype, 'deployDispatched')
+                .mockImplementation(() => { throw new Error('simulated intent journal failure'); });
+            const witnessSpy = vi.spyOn(GitOpsTransitions.prototype, 'deployIntentRefused')
+                .mockImplementation(() => { throw new Error('simulated witness journal failure'); });
+            const settleSpy = vi.spyOn(GitOpsTransitions.prototype, 'settleReconcileAttempt')
+                .mockImplementationOnce(() => { throw new Error('simulated settle failure'); });
+            const deriveSpy = vi.spyOn(svc as unknown as { deriveReconcileResult: (s: string) => unknown }, 'deriveReconcileResult')
+                .mockImplementation(() => { throw new Error('the source projection must not decide a deploy-requested attempt'); });
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run('dispatch-request-fact-outage');
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(deploySpy).not.toHaveBeenCalled();
+                expect(result.status).toBe('blocked');
+                const started = historyOperationIds(applicationId, 'source_reconcile_started');
+                const dispatchOp = started[started.length - 1]!;
+                // The outage left no evidence rows: neither the intent nor
+                // its refusal witness landed, and the settle write was lost,
+                // exactly the state startup recovery must judge.
+                expect(settledAttemptsForApplication(applicationId)
+                    .some((row) => row.operation_id === dispatchOp)).toBe(false);
+                const store = GitOpsStore.getInstance();
+                expect(store.getStageRowForAttempt(applicationId, dispatchOp, 'deploy_dispatched')).toBeUndefined();
+                expect(store.hasStageRowForAttempt(applicationId, dispatchOp, 'deploy_intent_refused')).toBe(false);
+                // The durable proof the fact is the only line that survived:
+                // the reservation row itself records the deploy request,
+                // written before promotion ran.
+                const reservation = store.getStartedAttempt(applicationId, dispatchOp)!;
+                expect(JSON.parse(reservation.after_json)).toMatchObject({
+                    dispatchGenerationId: generationId,
+                    dispatchDeployRequested: true,
+                });
+
+                await svc.recoverUnsettledReconcileAttempts();
+                const settledOnce = settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp);
+                expect(settledOnce).toHaveLength(1);
+                const payload = JSON.parse(settledOnce[0]!.after_json!);
+                // The fact decides the arm: the requested deploy left no
+                // durable record, so recovery states that and stops the
+                // source projection from ever being consulted for this
+                // attempt (the derive spy throws if it is).
+                expect(payload).toMatchObject({
+                    outcome: 'recovery_required',
+                    reason: expect.stringMatching(/requested a deploy that left no durable deploy record/i),
+                    nextAction: 'view_target_results',
+                    commitSha: sha,
+                });
+                expect(payload.deployGitopsOperationId).toBeUndefined();
+                expect(deriveSpy).not.toHaveBeenCalled();
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+                expect(deploySpy).not.toHaveBeenCalled();
+
+                await svc.recoverUnsettledReconcileAttempts();
+                expect(settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp)).toHaveLength(1);
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+            } finally {
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+                intentSpy.mockRestore();
+                witnessSpy.mockRestore();
+                settleSpy.mockRestore();
+                deriveSpy.mockRestore();
+            }
+        });
+
+        it('keeps the source projection truthful for an apply-only dispatch whose settle was lost', async () => {
+            const sha = 'cd'.repeat(20);
+            const svc = await seedPending('dispatch-request-fact-apply-only', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-request-fact-apply-only');
+            const generation = await acceptedGenerationById(generationId);
+            const applicationId = liveApp('dispatch-request-fact-apply-only')!.id;
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration').mockResolvedValue(undefined);
+            // auto_deploy_on_apply stays off: the point is that the
+            // deploy-request arm does NOT fire for an apply-only dispatch,
+            // so the reservation must carry no fact at all.
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 0 WHERE stack_name = ?')
+                .run('dispatch-request-fact-apply-only');
+            // Let the live dispatch settle normally, then delete its
+            // settled row to reproduce the state a lost settle write leaves:
+            // a bound, apply-only attempt with no deploy evidence anywhere.
+            const realDerive = (svc as unknown as { deriveReconcileResult: (s: string) => { outcome: string } }).deriveReconcileResult.bind(svc);
+            let deriveCount = 0;
+            const deriveSpy = vi.spyOn(svc as unknown as { deriveReconcileResult: (s: string) => { outcome: string } }, 'deriveReconcileResult')
+                .mockImplementation((stack: string) => { deriveCount++; return realDerive(stack); });
+
+            try {
+                const result = await svc.dispatchAcceptedGeneration(generation, directContext, manualDispatch);
+                expect(result).toEqual({ status: 'dispatched' });
+                const started = historyOperationIds(applicationId, 'source_reconcile_started');
+                const dispatchOp = started[started.length - 1]!;
+                const reservation = GitOpsStore.getInstance().getStartedAttempt(applicationId, dispatchOp)!;
+                expect('dispatchDeployRequested' in JSON.parse(reservation.after_json)).toBe(false);
+                DatabaseService.getInstance().getDb()
+                    .prepare("DELETE FROM gitops_history WHERE application_id = ? AND operation_id = ? AND stage = 'source_reconcile_settled'")
+                    .run(applicationId, dispatchOp);
+                const deriveCallsBefore = deriveCount;
+
+                await svc.recoverUnsettledReconcileAttempts();
+                const settledOnce = settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp);
+                expect(settledOnce).toHaveLength(1);
+                const payload = JSON.parse(settledOnce[0]!.after_json!);
+                // An apply-only completion is exactly what the source
+                // projection describes truthfully; the new arm must not
+                // convert it into a phantom deploy failure.
+                expect(payload).toMatchObject({ outcome: 'no_source_change', nextAction: 'none' });
+                expect(deriveCount).toBeGreaterThan(deriveCallsBefore);
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+            } finally {
+                promoteSpy.mockRestore();
+                deriveSpy.mockRestore();
+            }
+        });
+
+        it('recovery reads a legacy marked reservation without the deploy-request fact as apply-only, never throwing', async () => {
+            const sha = 'ce'.repeat(20);
+            const svc = await seedPending('dispatch-request-fact-legacy', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptCandidate('dispatch-request-fact-legacy');
+            const applicationId = liveApp('dispatch-request-fact-legacy')!.id;
+            // Backward compatibility with reservations written before the
+            // fact existed: a marked dispatch reservation whose payload
+            // carries only the generation marker must decode (not throw) and
+            // fall to the conservative apply-only reading when its settle is
+            // missing. A dispatch whose persistence all failed under the old
+            // build stays misreadable as convergence (the outage predates the
+            // fact); what must not happen is recovery rejecting the row and
+            // leaving the attempt stuck open forever.
+            const { reserved } = GitOpsTransitions.getInstance()
+                .allocateReconcileAttempt(applicationId, 'tester', 'manual', Date.now(), undefined, generationId);
+            expect(reserved).toBe(true);
+            const started = historyOperationIds(applicationId, 'source_reconcile_started');
+            const dispatchOp = started[started.length - 1]!;
+            const reservation = GitOpsStore.getInstance().getStartedAttempt(applicationId, dispatchOp)!;
+            const legacyPayload = JSON.parse(reservation.after_json) as Record<string, unknown>;
+            expect('dispatchDeployRequested' in legacyPayload).toBe(false);
+            // Bind the generation on the target row directly: this
+            // reproduces the durable bind the outage also leaves behind,
+            // which is what routes recovery into the bound no-intent state
+            // (an unbound row would take the promotion-witness arm instead).
+            const nodeId = await defaultNodeId();
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE gitops_target_current SET applied_generation_id = ? WHERE application_id = ? AND node_id = ?')
+                .run(generationId, applicationId, nodeId);
+            // The source facet after acceptance, promotion, and a bind
+            // without a deploy: whatever it projects, the invariant this
+            // test pins is that recovery settled from it, not by throwing
+            // over the missing fact and not as the deploy-requested failure.
+            const liveOutcome = (svc as unknown as { deriveReconcileResult: (s: string) => { outcome: string } }).deriveReconcileResult('dispatch-request-fact-legacy').outcome;
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+            try {
+                await svc.recoverUnsettledReconcileAttempts();
+                const settledOnce = settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === dispatchOp);
+                expect(settledOnce).toHaveLength(1);
+                const payload = JSON.parse(settledOnce[0]!.after_json!) as { outcome: string; reason?: string };
+                expect(payload.outcome).toBe(liveOutcome);
+                expect(payload.reason ?? '').not.toMatch(/no durable deploy record/i);
+                // The row decoded cleanly: recovery logged nothing for it.
+                const logged = errorSpy.mock.calls
+                    .map((args) => args.map(String).join('\n')).join('\n');
+                expect(logged).not.toContain(dispatchOp);
+            } finally {
+                errorSpy.mockRestore();
+            }
+        });
+
         it('keeps the deploy-op segment out of the evidence line when the deploy was untracked', async () => {
             const sha = 'fb'.repeat(20);
             const svc = await seedPending('dispatch-deploy-untracked', 'services:\n  x:\n    image: alpine\n', sha);
