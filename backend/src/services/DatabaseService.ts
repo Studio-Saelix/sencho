@@ -244,7 +244,11 @@ export interface HealthGateRunRow {
     failure_source: 'primary' | 'collateral' | null;
     /**
      * Reserved for the GitOps deploy path: the generation live when this run
-     * started. No writer populates it yet, so it is currently always null.
+     * started. Populated from beginStack's binding argument and the deploy
+     * callers pass it when their mutation was GitOps-tracked, plus recovery
+     * reservations (reserveRecoveryRun); null otherwise and for legacy rows.
+     * The stage-aware retry reads it to decide whether a failed stack
+     * verdict belongs to the currently applied generation.
      */
     deployed_generation_id?: string | null;
 }
@@ -4318,6 +4322,13 @@ stmt.run('gitops_schema_version', '1');
     public getLatestHealthGateRun(nodeId: number, stackName: string): HealthGateRunRow | undefined {
         return this.db.prepare(
             'SELECT * FROM health_gate_runs WHERE node_id = ? AND stack_name = ? ORDER BY started_at DESC, id DESC LIMIT 1'
+        ).get(nodeId, stackName) as HealthGateRunRow | undefined;
+    }
+
+    /** The most recent stack-scoped run for the stack (service gates excluded). */
+    public getLatestStackHealthGateRun(nodeId: number, stackName: string): HealthGateRunRow | undefined {
+        return this.db.prepare(
+            "SELECT * FROM health_gate_runs WHERE node_id = ? AND stack_name = ? AND target_scope = 'stack' ORDER BY started_at DESC, id DESC LIMIT 1"
         ).get(nodeId, stackName) as HealthGateRunRow | undefined;
     }
 
