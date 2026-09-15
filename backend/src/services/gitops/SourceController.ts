@@ -42,10 +42,12 @@ const SUCCESS_SHAPED_OUTCOMES: ReadonlySet<ReconcileOutcome> = new Set<Reconcile
  * Review-policy sources stage candidates for a human; manual
  * sources never join the unattended cadence.
  *
- * Remaining gap against the source policy design: a retry always re-issues
- * a fetch rather than resuming at the stage that failed (fetch vs. apply
- * dispatch). Stage-aware retry is follow-on work once failures can carry
- * enough durable context to resume mid-application.
+ * Stage-aware retry lives in GitSourceService.retry(): an operator retry
+ * at a source-stage failure re-issues a fetch, while an accepted
+ * generation still awaiting its dispatch is retried against the dispatch
+ * stage directly, never refetched or re-accepted. This controller's own
+ * automated retry scheduling stays at the fetch stage, where every
+ * transient failure it classifies can occur.
  *
  * One self-rescheduling timer drives the scan, matching ImageUpdateService.
  * The re-arm always runs, even when a scan throws, so one bad tick (a
@@ -62,10 +64,12 @@ export class SourceController {
     private timer: NodeJS.Timeout | null = null;
     private polling = false;
     // Bumped by cancelPending(), so by stop() and restartPolling(). tick() has
-    // no internal await point today, so nothing can currently call either one
+    // no internal await point, so nothing can currently call either one
     // mid-tick; this is a second, currently-redundant line of defense against a
-    // stale timer firing, kept cheap on purpose for when stage-aware retry (see
-    // above) gives evaluate() a real yield point.
+    // stale timer firing, kept cheap on purpose (an integer compare checked at
+    // tick entry and before re-arming). Stage-aware retry landed in
+    // GitSourceService.retry() instead of evaluate(), so no yield point was
+    // introduced here after all.
     private scheduleGeneration = 0;
     private readonly inFlight = new Set<string>();
 
@@ -387,7 +391,7 @@ export class SourceController {
         try {
             const dispatch = await GitSourceService.getInstance().dispatchAcceptedGeneration(
                 buildAcceptedGeneration(generation),
-                { targetMode: 'direct', nodeId: NodeRegistry.getInstance().getDefaultNodeId(), bindingRevision: null },
+                GitSourceService.directDispatchContext(),
                 { trigger, actor: 'system:source-controller' },
             );
             if (dispatch.status === 'blocked') {

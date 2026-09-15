@@ -7746,6 +7746,754 @@ describe('GitSourceService.apply', () => {
         });
     });
 
+    describe('stage-aware retry', () => {
+        /**
+         * Accept the staged candidate at the source layer (what a controller
+         * auto-acceptance or an operator review does). Leaves the
+         * application in the accepted-but-undispatched state the dispatch
+         * arm of retry() targets: acceptance clears the application
+         * candidate pointer and the source failure columns, while the
+         * target's candidate pointer still names the accepted generation.
+         */
+        function acceptPendingCandidate(stackName: string): string {
+            const app = liveApp(stackName)!;
+            const generationId = app.candidate_generation_id!;
+            GitOpsTransitions.getInstance().sourceAccepted({
+                applicationId: app.id,
+                generationId,
+                artifactSetId: newGitOpsId(),
+                sourceAcceptanceId: newGitOpsId(),
+                authority: 'operator',
+                envelope: testEnvelope(),
+            });
+            return generationId;
+        }
+
+        async function asyncDefaultNodeId(): Promise<number> {
+            const { NodeRegistry } = await import('../services/NodeRegistry');
+            return NodeRegistry.getInstance().getDefaultNodeId();
+        }
+
+        /**
+         * Park a stack in the state the deploy arm of retry() owns: the
+         * promotion committed, the target bound the accepted generation,
+         * and the deploy that followed failed. The state is produced by
+         * running the promote arm for real (one retry, auto-deploy on,
+         * deploy stubbed to record its failure and throw), so the durable
+         * evidence the resume reads is transition-written, not SQL-
+         * fabricated. The spies stay installed (and their call counts
+         * cleared) so the test re-arms the deploy for the resume and
+         * counts what the resume does and never does.
+         */
+        async function appliedWithFailedDeploy(stackName: string, sha: string) {
+            const svc = await seedPending(stackName, 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptPendingCandidate(stackName);
+            const applicationId = liveApp(stackName)!.id;
+            const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run(stackName);
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration')
+                .mockImplementation(async () => {});
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack')
+                .mockImplementation(async (_stack, _ws, _atomic, ctx) => {
+                    const tx = GitOpsTransitions.getInstance();
+                    const env = {
+                        operationId: ctx!.gitopsDeployOperationId!,
+                        actor: 'system:compose',
+                        trigger: 'deploy',
+                        at: Date.now(),
+                    };
+                    tx.deployStarted(applicationId, nodeId, generationId, env);
+                    tx.deployFailed(applicationId, nodeId, 'pre_mutation', env);
+                    // Stamp the id on the error the way the real tracked
+                    // deploy does (ComposeService's wrapped rethrow), so
+                    // the settle and the response carry the correlation.
+                    const err = new Error('simulated deploy failure') as Error & { gitopsDeployOperationId?: string };
+                    err.gitopsDeployOperationId = ctx!.gitopsDeployOperationId;
+                    throw err;
+                });
+
+            // The promote arm runs to its deploy-failure settle: blocked,
+            // naming the failed deploy, with the target applied and its
+            // failure_stage on 'deploy'.
+            const first = await svc.retry(stackName, { actor: 'tester' });
+            expect(first.outcome).toBe('blocked');
+            expect(first.reason).toMatch(/^The source applied, but the deploy failed: /);
+            const target = GitOpsStore.getInstance().getTarget(applicationId, nodeId)!;
+            expect(target.applied_generation_id).toBe(generationId);
+            expect(target.failure_stage).toBe('deploy');
+            promoteSpy.mockClear();
+            deploySpy.mockClear();
+            return { svc, applicationId, nodeId, generationId, promoteSpy, deploySpy };
+        }
+
+        it('dispatches the accepted generation when nothing was ever promoted, without refetching or re-accepting', async () => {
+            const sha = 't1t1t1t1t1t1t1t1t1t1t1t1t1t1t1t1t1t1t1t1';
+            const svc = await seedPending('retry-dispatch-arm', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptPendingCandidate('retry-dispatch-arm');
+            const applicationId = liveApp('retry-dispatch-arm')!.id;
+            const startedBefore = historyOperationIds(applicationId, 'source_reconcile_started').length;
+            const acceptedBefore = liveApp('retry-dispatch-arm')!.accepted_generation_id;
+            mockGitClone.mockClear();
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration')
+                .mockImplementation(async () => {});
+
+            try {
+                const result = await svc.retry('retry-dispatch-arm', { actor: 'tester' });
+
+                // The dispatch arm ran through the shared boundary: the
+                // generation promoted and the target bound, no fetch ran,
+                // and acceptance was not re-run.
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+                expect(reconcileSpy).not.toHaveBeenCalled();
+                expect(mockGitClone).not.toHaveBeenCalled();
+                expect(result.outcome).toBe('no_source_change');
+                const app = liveApp('retry-dispatch-arm')!;
+                expect(app.accepted_generation_id).toBe(acceptedBefore);
+                expect(app.accepted_generation_id).toBe(generationId);
+                const target = GitOpsStore.getInstance().getTarget(applicationId, await asyncDefaultNodeId())!;
+                expect(target.applied_generation_id).toBe(generationId);
+                // The retry's dispatch reserved its own attempt, marked as a
+                // dispatch of exactly this generation, and settled it.
+                const startedIds = historyOperationIds(applicationId, 'source_reconcile_started');
+                expect(startedIds).toHaveLength(startedBefore + 1);
+                const retryOperationId = startedIds[startedIds.length - 1]!;
+                const reserved = GitOpsStore.getInstance().getStartedAttempt(applicationId, retryOperationId)!;
+                expect(reserved.trigger).toBe('retry');
+                expect(JSON.parse(reserved.after_json).dispatchGenerationId).toBe(generationId);
+                expect(GitOpsStore.getInstance().getSettledAttempt(applicationId, retryOperationId)).toBeDefined();
+            } finally {
+                reconcileSpy.mockRestore();
+                promoteSpy.mockRestore();
+            }
+        });
+
+        it('refetches when a source-stage failure persists alongside undelivered dispatch evidence', async () => {
+            const sha = 't2t2t2t2t2t2t2t2t2t2t2t2t2t2t2t2t2t2t2t2';
+            const svc = await seedPending('retry-source-stage-precedence', 'services:\n  x:\n    image: alpine\n', sha);
+            acceptPendingCandidate('retry-source-stage-precedence');
+            const applicationId = liveApp('retry-source-stage-precedence')!.id;
+            // A validation failure recorded after acceptance: the fetch arm
+            // owns the newer evidence, so the dispatch pointer does not win.
+            DatabaseService.getInstance().getDb().prepare(
+                "UPDATE gitops_applications SET failure_stage = 'validation', failure_class = 'validation', failure_at = ? WHERE id = ?",
+            ).run(Date.now(), applicationId);
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration');
+
+            try {
+                await svc.retry('retry-source-stage-precedence', { actor: 'tester' });
+
+                expect(reconcileSpy).toHaveBeenCalledWith(expect.objectContaining({ trigger: 'retry', intent: 'fetch' }));
+                expect(promoteSpy).not.toHaveBeenCalled();
+            } finally {
+                reconcileSpy.mockRestore();
+                promoteSpy.mockRestore();
+            }
+        });
+
+        it('maps a blocked dispatch to a blocked outcome with the refusal advice, reserving nothing', async () => {
+            const sha = 't3t3t3t3t3t3t3t3t3t3t3t3t3t3t3t3t3t3t3t3';
+            const svc = await seedPending('retry-dispatch-blocked', 'services:\n  x:\n    image: alpine\n', sha);
+            acceptPendingCandidate('retry-dispatch-blocked');
+            const applicationId = liveApp('retry-dispatch-blocked')!.id;
+            const startedBefore = historyOperationIds(applicationId, 'source_reconcile_started').length;
+            const nodeId = await asyncDefaultNodeId();
+            expect(StackOpLockService.getInstance().tryAcquire(nodeId, 'retry-dispatch-blocked', 'deploy', 'tester').acquired).toBe(true);
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+            mockGitClone.mockClear();
+
+            try {
+                const result = await svc.retry('retry-dispatch-blocked', { actor: 'tester' });
+
+                expect(result).toEqual({
+                    outcome: 'blocked',
+                    reason: 'Another operation (deploy) is already in progress for retry-dispatch-blocked.',
+                    nextAction: 'retry',
+                });
+                expect(reconcileSpy).not.toHaveBeenCalled();
+                expect(mockGitClone).not.toHaveBeenCalled();
+                // The lock refusal happened before any reservation, so
+                // retry leaves no unsettled attempt behind.
+                expect(historyOperationIds(applicationId, 'source_reconcile_started')).toHaveLength(startedBefore);
+            } finally {
+                reconcileSpy.mockRestore();
+                StackOpLockService.getInstance().release(nodeId, 'retry-dispatch-blocked');
+            }
+        });
+
+        it('defers to the in-flight projection instead of starting a second operation', async () => {
+            const sha = 't4t4t4t4t4t4t4t4t4t4t4t4t4t4t4t4t4t4t4t4';
+            const svc = await seedPending('retry-mid-operation', 'services:\n  x:\n    image: alpine\n', sha);
+            acceptPendingCandidate('retry-mid-operation');
+            const applicationId = liveApp('retry-mid-operation')!.id;
+            // A crash window: the row still carries the apply-started
+            // marker although no work is running. Recovery owns that
+            // evidence; retry must not race it with a fetch or a dispatch.
+            DatabaseService.getInstance().getDb().prepare(
+                "UPDATE gitops_applications SET active_operation_stage = 'apply_started', active_operation_id = 'op-crash', active_operation_at = ? WHERE id = ?",
+            ).run(Date.now(), applicationId);
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+            const dispatchSpy = vi.spyOn(svc, 'dispatchAcceptedGeneration');
+
+            try {
+                const result = await svc.retry('retry-mid-operation', { actor: 'tester' });
+
+                expect(result.outcome).toBe('unknown');
+                expect(result.reason).toMatch(/in flight/i);
+                expect(reconcileSpy).not.toHaveBeenCalled();
+                expect(dispatchSpy).not.toHaveBeenCalled();
+            } finally {
+                reconcileSpy.mockRestore();
+                dispatchSpy.mockRestore();
+            }
+        });
+
+        it('refetches once the accepted generation has been delivered and its deploy settled', async () => {
+            const sha = 't5t5t5t5t5t5t5t5t5t5t5t5t5t5t5t5t5t5t5t5';
+            const svc = await seedPending('retry-after-delivery', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptPendingCandidate('retry-after-delivery');
+            const applicationId = liveApp('retry-after-delivery')!.id;
+            // The dispatch evidence is gone: the target applied the
+            // generation and its deploy failure columns are clear (they
+            // were never written here, which is exactly the still-healthy
+            // state deploy-bound leaves), so the only re-evaluation left
+            // is a source fetch. The deploy arm must not fire without a
+            // recorded target-level deploy failure.
+            DatabaseService.getInstance().getDb().prepare(
+                'UPDATE gitops_target_current SET applied_generation_id = ?, candidate_generation_id = NULL WHERE application_id = ?',
+            ).run(generationId, applicationId);
+            mockGitClone.mockClear();
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { ComposeService } = await import('../services/ComposeService');
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack');
+
+            try {
+                const result = await svc.retry('retry-after-delivery', { actor: 'tester' });
+
+                expect(reconcileSpy).toHaveBeenCalledWith(expect.objectContaining({ trigger: 'retry', intent: 'fetch' }));
+                expect(deploySpy).not.toHaveBeenCalled();
+                expect(result.outcome).toBe('pending_review');
+            } finally {
+                reconcileSpy.mockRestore();
+                validateSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
+        });
+
+        it('resumes only the deploy when the applied generation\'s deploy failed, without fetching, promoting, or re-binding', async () => {
+            const sha = 't8t8t8t8t8t8t8t8t8t8t8t8t8t8t8t8t8t8t8t8';
+            const { svc, applicationId, nodeId, generationId, promoteSpy, deploySpy } =
+                await appliedWithFailedDeploy('retry-deploy-resume', sha);
+            mockGitClone.mockClear();
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+            const { HealthGateService } = await import('../services/HealthGateService');
+            const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack');
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+            const startedBefore = historyOperationIds(applicationId, 'source_reconcile_started').length;
+            const targetAppliedBefore = historyOperationIds(applicationId, 'target_applied').length;
+
+            try {
+                const result = await svc.retry('retry-deploy-resume', { actor: 'tester' });
+
+                // The fetch arm never ran: no reconcile call, no git clone.
+                expect(reconcileSpy).not.toHaveBeenCalled();
+                expect(mockGitClone).not.toHaveBeenCalled();
+                // Promotion and re-binding are refused by the applied
+                // pointer, and the resume honors that: the shared promote
+                // machinery is untouched.
+                expect(promoteSpy).not.toHaveBeenCalled();
+                // The same applied generation is deployed again, under a
+                // freshly journaled intent of this retry attempt.
+                expect(deploySpy).toHaveBeenCalledTimes(1);
+                const startedIds = historyOperationIds(applicationId, 'source_reconcile_started');
+                expect(startedIds).toHaveLength(startedBefore + 1);
+                const retryOperationId = startedIds[startedIds.length - 1]!;
+                const reserved = GitOpsStore.getInstance().getStartedAttempt(applicationId, retryOperationId)!;
+                expect(reserved.trigger).toBe('retry');
+                const markers = JSON.parse(reserved.after_json!);
+                expect(markers.dispatchGenerationId).toBe(generationId);
+                expect(markers.dispatchDeployRequested).toBe(true);
+                const intentRow = GitOpsStore.getInstance()
+                    .getStageRowForAttempt(applicationId, retryOperationId, 'deploy_dispatched')!;
+                const intent = JSON.parse(intentRow.after_json!);
+                expect(intent.generationId).toBe(generationId);
+                expect(intent.deployOperationId).toBeDefined();
+                // The second deploy's own rows land under the journaled id
+                // for this generation: started, then failed at pre_mutation.
+                expect(historyOperationIds(applicationId, 'deploy_started')).toContain(intent.deployOperationId);
+                expect(historyOperationIds(applicationId, 'deploy_failed')).toContain(intent.deployOperationId);
+                // Compose was handed exactly the journaled deploy id, under
+                // git_apply provenance by the raw retry actor.
+                expect(deploySpy).toHaveBeenCalledWith('retry-deploy-resume', undefined, undefined,
+                    expect.objectContaining({
+                        source: 'git_apply',
+                        actor: 'tester',
+                        gitopsDeployOperationId: intent.deployOperationId,
+                    }));
+                // The deploy failed again, so no health gate was opened.
+                expect(beginSpy).not.toHaveBeenCalled();
+                // The attempt is durably recorded and settled, carrying the
+                // same deploy-failure classification the promote arm's
+                // failed deploy writes, plus the exact failed deploy id.
+                const settled = settledAttemptsForApplication(applicationId)
+                    .find((row) => row.operation_id === retryOperationId);
+                expect(settled).toBeDefined();
+                expect(JSON.parse(settled!.after_json!)).toMatchObject({
+                    outcome: 'recovery_required',
+                    reason: 'The source applied, but the deploy failed: simulated deploy failure',
+                    nextAction: 'view_target_results',
+                    deployGitopsOperationId: intent.deployOperationId,
+                });
+                // The response matches the promote arm's vocabulary for the
+                // same settled classification: blocked, view target results.
+                expect(result).toEqual({
+                    outcome: 'blocked',
+                    reason: 'The source applied, but the deploy failed: simulated deploy failure',
+                    nextAction: 'view_target_results',
+                });
+                // Direct re-bind did not happen: no new target_applied
+                // history row, and the applied pointer still names the
+                // same generation it named before the resume.
+                expect(historyOperationIds(applicationId, 'target_applied'))
+                    .toHaveLength(targetAppliedBefore);
+                expect(GitOpsStore.getInstance().getTarget(applicationId, nodeId)!.applied_generation_id)
+                    .toBe(generationId);
+            } finally {
+                reconcileSpy.mockRestore();
+                beginSpy.mockRestore();
+                errorSpy.mockRestore();
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
+        });
+
+        it('settles the deploy resume as a success when the retried deploy binds, and the source is delivered again', async () => {
+            const sha = 't9t9t9t9t9t9t9t9t9t9t9t9t9t9t9t9t9t9t9t9';
+            const { svc, applicationId, nodeId, generationId, promoteSpy, deploySpy } =
+                await appliedWithFailedDeploy('retry-deploy-resume-wins', sha);
+            // Re-arm the stub for the resume: this time the deploy opens
+            // under the journaled id and binds the same generation, the way
+            // ComposeService's tracked deploy does.
+            deploySpy.mockImplementation(async (_stack, _ws, _atomic, ctx) => {
+                const tx = GitOpsTransitions.getInstance();
+                const env = {
+                    operationId: ctx!.gitopsDeployOperationId!,
+                    actor: 'system:compose',
+                    trigger: 'deploy',
+                    at: Date.now(),
+                };
+                tx.deployStarted(applicationId, nodeId, generationId, env);
+                tx.deployBound(applicationId, nodeId, generationId, env);
+                return {
+                    recoveryId: null,
+                    deployedGenerationId: generationId,
+                    gitopsOperationId: ctx!.gitopsDeployOperationId!,
+                };
+            });
+            mockGitClone.mockClear();
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+            const { HealthGateService } = await import('../services/HealthGateService');
+            const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-resume');
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+
+            try {
+                const result = await svc.retry('retry-deploy-resume-wins', { actor: 'tester' });
+
+                expect(reconcileSpy).not.toHaveBeenCalled();
+                expect(mockGitClone).not.toHaveBeenCalled();
+                expect(promoteSpy).not.toHaveBeenCalled();
+                expect(deploySpy).toHaveBeenCalledTimes(1);
+                // A successful resume deploy opens the same health gate and
+                // post-deploy scan the pipeline's deploy branch does.
+                expect(beginSpy).toHaveBeenCalledWith(nodeId, 'retry-deploy-resume-wins', 'deploy', 'system:git-source', { deployedGenerationId: generationId });
+                await vi.waitFor(() => expect(mockTriggerPostDeployScan).toHaveBeenCalledWith('retry-deploy-resume-wins', nodeId));
+                // The retry's settle carries the exact deploy that ran.
+                const startedIds = historyOperationIds(applicationId, 'source_reconcile_started');
+                const retryOperationId = startedIds[startedIds.length - 1]!;
+                const intentRow = GitOpsStore.getInstance()
+                    .getStageRowForAttempt(applicationId, retryOperationId, 'deploy_dispatched')!;
+                const deployId = JSON.parse(intentRow.after_json!).deployOperationId as string;
+                const settled = settledAttemptsForApplication(applicationId)
+                    .find((row) => row.operation_id === retryOperationId);
+                expect(JSON.parse(settled!.after_json!)).toMatchObject({
+                    outcome: 'no_source_change',
+                    deployGitopsOperationId: deployId,
+                });
+                expect(result.outcome).toBe('no_source_change');
+                expect(result.deployGitopsOperationId).toBe(deployId);
+
+                // With the deploy evidence cleared by the bind, a further
+                // retry is a plain source fetch again: the deploy arm does
+                // not fire forever on a delivered generation.
+                reconcileSpy.mockClear();
+                mockTriggerPostDeployScan.mockClear();
+                const again = await svc.retry('retry-deploy-resume-wins', { actor: 'tester' });
+                expect(reconcileSpy).toHaveBeenCalledWith(expect.objectContaining({ trigger: 'retry', intent: 'fetch' }));
+                expect(again.outcome).toBe('pending_review');
+            } finally {
+                reconcileSpy.mockRestore();
+                beginSpy.mockRestore();
+                validateSpy.mockRestore();
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
+        });
+
+        it('refuses the deploy resume when the evidence moved before the lock, settling the refusal', async () => {
+            const sha = 't10a10a10a10a10a10a10a10a10a10a10a10a10';
+            const { svc, applicationId, promoteSpy, deploySpy } =
+                await appliedWithFailedDeploy('retry-deploy-resume-race', sha);
+            mockGitClone.mockClear();
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+            const startedBefore = historyOperationIds(applicationId, 'source_reconcile_started').length;
+            // The entry predicate sees the deploy failure; by the time the
+            // in-lock revalidation reads the target, a successful deploy
+            // has cleared it. The resume must refuse and touch nothing.
+            const realTarget = GitOpsStore.prototype.getTarget;
+            const targetSpy = vi.spyOn(GitOpsStore.prototype, 'getTarget');
+            let targetCalls = 0;
+            targetSpy.mockImplementation((applicationIdArg: string, nodeIdArg: number) => {
+                targetCalls++;
+                const row = realTarget.call(GitOpsStore.getInstance(), applicationIdArg, nodeIdArg);
+                // The entry read (call 1) keeps the failure evidence; the
+                // in-lock revalidation (call 2) sees it cleared.
+                if (row && targetCalls === 2) return { ...row, failure_stage: null, failure_class: null, failure_at: null };
+                return row;
+            });
+
+            try {
+                const result = await svc.retry('retry-deploy-resume-race', { actor: 'tester' });
+
+                expect(result.outcome).toBe('blocked');
+                expect(result.reason).toMatch(/nothing was re-deployed/);
+                expect(result.nextAction).toBe('view_target_results');
+                expect(deploySpy).not.toHaveBeenCalled();
+                expect(promoteSpy).not.toHaveBeenCalled();
+                expect(reconcileSpy).not.toHaveBeenCalled();
+                expect(mockGitClone).not.toHaveBeenCalled();
+                // The refusal happened after the reservation, so it is
+                // settled as a blocked attempt, and it is the only new row.
+                const startedIds = historyOperationIds(applicationId, 'source_reconcile_started');
+                expect(startedIds).toHaveLength(startedBefore + 1);
+                const settled = settledAttemptsForApplication(applicationId)
+                    .find((row) => row.operation_id === startedIds[startedIds.length - 1]!);
+                expect(JSON.parse(settled!.after_json!)).toMatchObject({
+                    outcome: 'blocked',
+                    nextAction: 'view_target_results',
+                });
+            } finally {
+                reconcileSpy.mockRestore();
+                targetSpy.mockRestore();
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
+        });
+
+        it('refuses the deploy resume while the stack lock is held, reserving nothing', async () => {
+            const sha = 't11b11b11b11b11b11b11b11b11b11b11b11b11b';
+            const { applicationId, promoteSpy, deploySpy } =
+                await appliedWithFailedDeploy('retry-deploy-resume-blocked', sha);
+            const nodeId = await asyncDefaultNodeId();
+            expect(StackOpLockService.getInstance().tryAcquire(nodeId, 'retry-deploy-resume-blocked', 'deploy', 'tester').acquired).toBe(true);
+            const svc = GitSourceService.getInstance();
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+            const startedBefore = historyOperationIds(applicationId, 'source_reconcile_started').length;
+
+            try {
+                const result = await svc.retry('retry-deploy-resume-blocked', { actor: 'tester' });
+
+                expect(result).toEqual({
+                    outcome: 'blocked',
+                    reason: 'Another operation (deploy) is already in progress for retry-deploy-resume-blocked.',
+                    nextAction: 'retry',
+                });
+                expect(deploySpy).not.toHaveBeenCalled();
+                expect(promoteSpy).not.toHaveBeenCalled();
+                expect(reconcileSpy).not.toHaveBeenCalled();
+                // The lock refusal happened before any reservation: a
+                // resume that started nothing leaves no attempt to chase.
+                expect(historyOperationIds(applicationId, 'source_reconcile_started')).toHaveLength(startedBefore);
+            } finally {
+                reconcileSpy.mockRestore();
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+                StackOpLockService.getInstance().release(nodeId, 'retry-deploy-resume-blocked');
+            }
+        });
+
+        it('fetches when a newer source-stage failure outranks the deploy evidence', async () => {
+            const sha = 'x12x12x12x12x12x12x12x12x12x12x12x12x12';
+            const { svc, applicationId, promoteSpy, deploySpy } =
+                await appliedWithFailedDeploy('retry-deploy-arm-fetch-precedence', sha);
+            // A fetch failure recorded after the deploy failed: the
+            // application-row source evidence is newer than the target-row
+            // deploy evidence, and the fetch arm owns the precedence. The
+            // class rides along for realism; the arm routing reads the
+            // stage only.
+            DatabaseService.getInstance().getDb().prepare(
+                "UPDATE gitops_applications SET failure_stage = 'fetch', failure_class = 'auth', failure_at = ? WHERE id = ?",
+            ).run(Date.now(), applicationId);
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+
+            try {
+                await svc.retry('retry-deploy-arm-fetch-precedence', { actor: 'tester' });
+
+                expect(reconcileSpy).toHaveBeenCalledWith(expect.objectContaining({ trigger: 'retry', intent: 'fetch' }));
+                // Neither resume arm ran beside the fetch.
+                expect(deploySpy).not.toHaveBeenCalled();
+                expect(promoteSpy).not.toHaveBeenCalled();
+                // The fetch arm never touches target evidence: the deploy
+                // failure stands until a deploy succeeds.
+                const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+                const target = GitOpsStore.getInstance().getTarget(applicationId, nodeId)!;
+                expect(target.failure_stage).toBe('deploy');
+            } finally {
+                reconcileSpy.mockRestore();
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
+        });
+
+        it('refuses the deploy resume when its reservation collides, settling nothing', async () => {
+            const sha = 'x13x13x13x13x13x13x13x13x13x13x13x13';
+            const { svc, applicationId, promoteSpy, deploySpy } =
+                await appliedWithFailedDeploy('retry-deploy-resume-collision', sha);
+            const startedBefore = historyOperationIds(applicationId, 'source_reconcile_started').length;
+            const settledBefore = settledAttemptsForApplication(applicationId).length;
+            const reserveSpy = vi.spyOn(GitOpsTransitions.prototype, 'allocateReconcileAttempt')
+                .mockImplementationOnce(() => ({ operationId: 'collided:attempt:1', reserved: false }));
+
+            try {
+                const result = await svc.retry('retry-deploy-resume-collision', { actor: 'tester' });
+
+                expect(result).toEqual({
+                    outcome: 'blocked',
+                    reason: 'A dispatch attempt for this stack is already recorded; check its outcome before dispatching again.',
+                    nextAction: 'view_target_results',
+                });
+                expect(deploySpy).not.toHaveBeenCalled();
+                expect(promoteSpy).not.toHaveBeenCalled();
+                // Nothing was reserved, so nothing may be settled: the
+                // colliding attempt belongs to its own owner, and the
+                // deploy-resume must not speak for it.
+                expect(historyOperationIds(applicationId, 'source_reconcile_started')).toHaveLength(startedBefore);
+                expect(settledAttemptsForApplication(applicationId)).toHaveLength(settledBefore);
+            } finally {
+                reserveSpy.mockRestore();
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
+        });
+
+        it('recovers an interrupted deploy resume from its journaled deploy evidence without re-running anything', async () => {
+            const sha = 'x14x14x14x14x14x14x14x14x14x14x14x14';
+            const { svc, applicationId, nodeId, generationId, promoteSpy, deploySpy } =
+                await appliedWithFailedDeploy('retry-deploy-resume-recovered', sha);
+            // A crash window for the resume: the retried deploy records its
+            // failure under the journaled id, then the resume's own settle
+            // dies. The attempt stays unsettled while its deploy evidence
+            // stands, which startup recovery must read as the failed deploy
+            // it was, reconstructing the settle from recorded rows only.
+            deploySpy.mockImplementation(async (_stack, _ws, _atomic, ctx) => {
+                const tx = GitOpsTransitions.getInstance();
+                const env = {
+                    operationId: ctx!.gitopsDeployOperationId!,
+                    actor: 'system:compose',
+                    trigger: 'deploy',
+                    at: Date.now(),
+                };
+                tx.deployStarted(applicationId, nodeId, generationId, env);
+                tx.deployFailed(applicationId, nodeId, 'pre_mutation', env);
+                throw new Error('simulated deploy failure');
+            });
+            const settleSpy = vi.spyOn(GitOpsTransitions.prototype, 'settleReconcileAttempt')
+                .mockImplementationOnce(() => { throw new Error('simulated crash before settle'); });
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+            try {
+                await svc.retry('retry-deploy-resume-recovered', { actor: 'tester' });
+
+                const started = historyOperationIds(applicationId, 'source_reconcile_started');
+                const retryOperationId = started[started.length - 1]!;
+                const intentRow = GitOpsStore.getInstance()
+                    .getStageRowForAttempt(applicationId, retryOperationId, 'deploy_dispatched')!;
+                const deployId = JSON.parse(intentRow.after_json!).deployOperationId as string;
+                expect(historyOperationIds(applicationId, 'deploy_failed')).toContain(deployId);
+                // The live settle died, so the attempt is still open.
+                expect(settledAttemptsForApplication(applicationId)
+                    .some((row) => row.operation_id === retryOperationId)).toBe(false);
+
+                await svc.recoverUnsettledReconcileAttempts();
+
+                const settled = settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === retryOperationId);
+                expect(settled).toHaveLength(1);
+                // The reconstruction names the promotion and binding the
+                // resume took as its evidence, plus the exact failed deploy.
+                expect(JSON.parse(settled[0]!.after_json!)).toMatchObject({
+                    outcome: 'recovery_required',
+                    reason: 'The promotion and binding completed, but the deploy this dispatch started failed.',
+                    nextAction: 'view_target_results',
+                    deployGitopsOperationId: deployId,
+                    commitSha: sha,
+                });
+                // Recovery re-ran nothing: the deploy arm never promotes
+                // (the helper's counts were cleared after the seeding
+                // promote-arm run), and reconstruction is read-only.
+                expect(promoteSpy).not.toHaveBeenCalled();
+                expect(deploySpy).toHaveBeenCalledTimes(1);
+
+                await svc.recoverUnsettledReconcileAttempts();
+                expect(settledAttemptsForApplication(applicationId)
+                    .filter((row) => row.operation_id === retryOperationId)).toHaveLength(1);
+                expect(promoteSpy).not.toHaveBeenCalled();
+                expect(deploySpy).toHaveBeenCalledTimes(1);
+            } finally {
+                settleSpy.mockRestore();
+                errorSpy.mockRestore();
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
+        });
+
+        it('refuses the deploy resume when its intent cannot be journaled, settling the refusal without deploying', async () => {
+            const sha = 'x15x15x15x15x15x15x15x15x15x15x15x15';
+            const { svc, applicationId, promoteSpy, deploySpy } =
+                await appliedWithFailedDeploy('retry-deploy-resume-intent-refused', sha);
+            const startedBefore = historyOperationIds(applicationId, 'source_reconcile_started').length;
+            const intentSpy = vi.spyOn(GitOpsTransitions.prototype, 'deployDispatched')
+                .mockImplementationOnce(() => { throw new Error('simulated intent journal failure'); });
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+            try {
+                const result = await svc.retry('retry-deploy-resume-intent-refused', { actor: 'tester' });
+
+                // A resume that cannot record and read back its deploy
+                // intent refuses to start an untracked deploy: Compose was
+                // never handed the stack.
+                expect(deploySpy).not.toHaveBeenCalled();
+                expect(promoteSpy).not.toHaveBeenCalled();
+                expect(result.outcome).toBe('blocked');
+                expect(result.nextAction).toBe('view_target_results');
+                expect(result.reason).toMatch(/deploy retry could not record and read back its deploy intent/);
+                const started = historyOperationIds(applicationId, 'source_reconcile_started');
+                expect(started).toHaveLength(startedBefore + 1);
+                const retryOperationId = started[started.length - 1]!;
+                // The refusal journals its witness (so recovery of an
+                // unsettled version of this attempt reads the refusal, not
+                // an apply-only completion) and settles recovery_required
+                // against the applied files, naming the cause. Compose
+                // never ran, so no deploy id is claimed.
+                expect(GitOpsStore.getInstance()
+                    .hasStageRowForAttempt(applicationId, retryOperationId, 'deploy_intent_refused')).toBe(true);
+                const settled = settledAttemptsForApplication(applicationId)
+                    .find((row) => row.operation_id === retryOperationId);
+                const payload = JSON.parse(settled!.after_json!);
+                expect(payload).toMatchObject({
+                    outcome: 'recovery_required',
+                    reason: 'The deploy retry could not record and read back its deploy intent (simulated intent journal failure), so the deploy was not started.',
+                    nextAction: 'view_target_results',
+                });
+                expect(payload).not.toHaveProperty('deployGitopsOperationId');
+            } finally {
+                intentSpy.mockRestore();
+                errorSpy.mockRestore();
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
+        });
+
+        it('defers to the recovery evidence for every unfinished recovery phase', async () => {
+            const sha = 't6t6t6t6t6t6t6t6t6t6t6t6t6t6t6t6t6t6t6t6';
+            const svc = await seedPending('retry-recovery-restoring', 'services:\n  x:\n    image: alpine\n', sha);
+            acceptPendingCandidate('retry-recovery-restoring');
+            const applicationId = liveApp('retry-recovery-restoring')!.id;
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+            const dispatchSpy = vi.spyOn(svc, 'dispatchAcceptedGeneration');
+
+            // The guard defers on any phase except the settled 'complete'
+            // receipt. 'capturing' is schema-legal with no production
+            // writer yet: pinning it here freezes the fail-safe inversion
+            // for the day one lands, and it is projection-transparent
+            // today, so the report is the accepted-state projection while
+            // the contract is that no work starts. 'failed' runs last
+            // because it also sets the recovery failure columns, which the
+            // projection reads independently of the phase.
+            const cases: Array<{ phase: string; outcome: string; reason?: RegExp }> = [
+                { phase: 'restoring', outcome: 'recovery_required' },
+                { phase: 'compensating', outcome: 'recovery_required' },
+                { phase: 'capturing', outcome: 'no_source_change' },
+                { phase: 'failed', outcome: 'recovery_required', reason: /Recovery itself failed \(post_mutation\)/ },
+            ];
+
+            try {
+                for (const c of cases) {
+                    // 'failed' normally arrives with the recovery failure
+                    // columns from recoveryFailed/rollbackPartialFailed;
+                    // the distinguishing reason proves which projection was
+                    // read rather than a generic one.
+                    DatabaseService.getInstance().getDb().prepare(
+                        c.phase === 'failed'
+                            ? "UPDATE gitops_applications SET recovery_phase = 'failed', failure_stage = 'recovery', failure_class = 'post_mutation' WHERE id = ?"
+                            : 'UPDATE gitops_applications SET recovery_phase = ? WHERE id = ?',
+                    ).run(...(c.phase === 'failed' ? [applicationId] : [c.phase, applicationId]));
+                    reconcileSpy.mockClear();
+                    dispatchSpy.mockClear();
+
+                    const result = await svc.retry('retry-recovery-restoring', { actor: 'tester' });
+
+                    expect(result.outcome, c.phase).toBe(c.outcome);
+                    if (c.reason) expect(result.reason).toMatch(c.reason);
+                    expect(reconcileSpy, c.phase).not.toHaveBeenCalled();
+                    expect(dispatchSpy, c.phase).not.toHaveBeenCalled();
+                }
+            } finally {
+                reconcileSpy.mockRestore();
+                dispatchSpy.mockRestore();
+            }
+        });
+
+        it('retries normally after a completed rollback (complete phase is a receipt, not outstanding work)', async () => {
+            const sha = 't7t7t7t7t7t7t7t7t7t7t7t7t7t7t7t7t7t7t7t7';
+            const svc = await seedPending('retry-recovery-complete', 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptPendingCandidate('retry-recovery-complete');
+            const applicationId = liveApp('retry-recovery-complete')!.id;
+            // recoverySucceeded/rollbackCompleted persist 'complete' and
+            // nothing clears it; a settled receipt must not permanently
+            // degrade every future retry on this source to a projection
+            // read. The undelivered dispatch evidence still routes to the
+            // dispatch arm.
+            DatabaseService.getInstance().getDb().prepare(
+                "UPDATE gitops_applications SET recovery_phase = 'complete' WHERE id = ?",
+            ).run(applicationId);
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration')
+                .mockImplementation(async () => {});
+
+            try {
+                const result = await svc.retry('retry-recovery-complete', { actor: 'tester' });
+
+                expect(reconcileSpy).not.toHaveBeenCalled();
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+                expect(result.outcome).toBe('no_source_change');
+                const target = GitOpsStore.getInstance().getTarget(applicationId, await asyncDefaultNodeId())!;
+                expect(target.applied_generation_id).toBe(generationId);
+            } finally {
+                reconcileSpy.mockRestore();
+                promoteSpy.mockRestore();
+            }
+        });
+    });
+
     it('throws when pending has been cleared between pull and apply', async () => {
         const svc = await seedPending('apply-cleared', 'services:\n  x:\n    image: alpine\n', 'aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1');
         DatabaseService.getInstance().clearGitSourcePending('apply-cleared');
