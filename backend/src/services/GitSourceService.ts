@@ -3627,8 +3627,13 @@ export class GitSourceService {
     }
 
     /**
-     * Resume acting on a source. Does not itself fetch; the next scheduled
-     * poll, retry, or manual reconcile picks the source back up.
+     * Resume acting on a source. Clears suspension and re-arms the steady-
+     * state poll cursor; it does not itself fetch. The immediate wake is the
+     * resume route's job: after this method returns, the route fires
+     * SourceController.evaluateNow() so the source is re-evaluated right
+     * away (re-resolving source state and, for an automatic source, target
+     * binding through the shared acceptance/dispatch arm) instead of idling
+     * until the next scheduled poll or retry.
      *
      * Unlike suspend(), a refused resume is tolerated rather than surfaced.
      * The result is read back from the row after the attempted write, so a

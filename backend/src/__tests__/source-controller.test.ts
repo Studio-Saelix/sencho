@@ -7,6 +7,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
+import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitSourceService } from '../services/GitSourceService';
 import { SourceController } from '../services/gitops/SourceController';
@@ -212,5 +213,200 @@ describe('SourceController', () => {
         await advanceOneTick();
 
         expect(reconcile).toHaveBeenCalledTimes(1);
+    });
+
+    describe('evaluateNow (resume re-evaluation)', () => {
+        /** Insert a live automatic application row for a stack name. */
+        function seedLive(stackName: string): GitOpsApplicationRow {
+            const app = autoFixture(`app-${stackName}`, stackName);
+            GitOpsStore.getInstance().insertApplication(app);
+            return app;
+        }
+
+        it('fetches a live automatic source immediately, tagged with the resume trigger', async () => {
+            seedLive('now-web');
+            const reconcile = spyOnReconcile().mockResolvedValue(okResult);
+
+            await controller.evaluateNow('now-web');
+
+            expect(reconcile).toHaveBeenCalledTimes(1);
+            expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+                intent: 'fetch',
+                applicationId: 'app-now-web',
+                stackName: 'now-web',
+                trigger: 'resume',
+            }));
+            // No timer was running: nothing here waited for a tick.
+            expect(vi.getTimerCount()).toBe(0);
+        });
+
+        it('skips a manual-policy source without reconciling it', async () => {
+            const app: GitOpsApplicationRow = { ...autoFixture('app-now-manual', 'now-manual-web'), source_policy: 'manual' };
+            GitOpsStore.getInstance().insertApplication(app);
+            const reconcile = spyOnReconcile();
+
+            await controller.evaluateNow('now-manual-web');
+
+            expect(reconcile).not.toHaveBeenCalled();
+        });
+
+        it('skips a suspended source, so a resume race never wakes it early', async () => {
+            const app = { ...autoFixture('app-now-susp', 'now-susp-web'), suspended_at: Date.now() };
+            GitOpsStore.getInstance().insertApplication(app);
+            const reconcile = spyOnReconcile();
+
+            await controller.evaluateNow('now-susp-web');
+
+            expect(reconcile).not.toHaveBeenCalled();
+        });
+
+        it('is a silent no-op for a stack with no live application', async () => {
+            const reconcile = spyOnReconcile();
+
+            await controller.evaluateNow('now-missing');
+
+            expect(reconcile).not.toHaveBeenCalled();
+        });
+
+        it('parks a resume wake while a tick owns the application and runs it once when the tick settles', async () => {
+            const app = seedLive('now-busy');
+            // The scan's due list is mocked to the same row, so the tick's
+            // evaluation and the resume path address one identical id.
+            mockDue([app]);
+            let settleFirstCall!: (result: ReconcileResult) => void;
+            const firstCall = new Promise<ReconcileResult>((resolve) => { settleFirstCall = resolve; });
+            const reconcile = spyOnReconcile().mockReturnValueOnce(firstCall).mockResolvedValue(okResult);
+
+            controller.start();
+            await advanceOneTick();
+            expect(reconcile).toHaveBeenCalledTimes(1);
+
+            // Two resumes arrive while the tick's evaluation is still
+            // pending: neither starts work beside it, and together they
+            // coalesce into the single wake they asked for.
+            await controller.evaluateNow('now-busy');
+            await controller.evaluateNow('now-busy');
+            expect(reconcile).toHaveBeenCalledTimes(1);
+
+            settleFirstCall(okResult);
+            // Flush the tick's continuation chain (evaluate's post-reconcile
+            // steps plus the scan's inFlight release, which drains the
+            // parked wake into a fresh resume evaluation).
+            await vi.advanceTimersByTimeAsync(0);
+
+            // The wake was honored without any second manual call: the
+            // park-then-drain is what the operator's resume bought. The
+            // two parked resumes produced exactly one fresh evaluation,
+            // tagged as a resume, and the drain's own release leaves no
+            // further wake parked (a third call would have landed).
+            expect(reconcile).toHaveBeenCalledTimes(2);
+            expect(reconcile.mock.calls[1]![0]).toMatchObject({ trigger: 'resume' });
+            // "At most one" pinned: the drain's settle releases the slot
+            // with nothing left parked, so no third evaluation ever fires.
+            await vi.advanceTimersByTimeAsync(0);
+            expect(reconcile).toHaveBeenCalledTimes(2);
+        });
+
+        it('drops a parked wake whose source went stale, without evaluating it', async () => {
+            const app = seedLive('now-stale');
+            mockDue([app]);
+            let settleFirstCall!: (result: ReconcileResult) => void;
+            const firstCall = new Promise<ReconcileResult>((resolve) => { settleFirstCall = resolve; });
+            const reconcile = spyOnReconcile().mockReturnValueOnce(firstCall).mockResolvedValue(okResult);
+
+            controller.start();
+            await advanceOneTick();
+            expect(reconcile).toHaveBeenCalledTimes(1);
+
+            await controller.evaluateNow('now-stale');
+            expect(reconcile).toHaveBeenCalledTimes(1);
+            // The drain re-reads eligibility, so the stale wake is dropped
+            // exactly as a fresh call would drop it: no evaluation of a
+            // suspended source.
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE gitops_applications SET suspended_at = ? WHERE id = ?')
+                .run(Date.now(), app.id);
+            settleFirstCall(okResult);
+            await vi.advanceTimersByTimeAsync(0);
+
+            expect(reconcile).toHaveBeenCalledTimes(1);
+        });
+
+        it('drains the parked wake even when the owning evaluation crashes past the reconcile', async () => {
+            const app = seedLive('now-owner-crash');
+            mockDue([app]);
+            let settleFirstCall!: (result: ReconcileResult) => void;
+            const firstCall = new Promise<ReconcileResult>((resolve) => { settleFirstCall = resolve; });
+            const reconcile = spyOnReconcile().mockReturnValueOnce(firstCall).mockResolvedValue(okResult);
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+            // The crash lands in evaluate()'s post-reconcile tail (the row
+            // re-read), not in reconcile itself: the owner's chain rejects,
+            // the scan's load-bearing catch logs it, and the release's
+            // finally must still drain the wake. The mock is once-only, so
+            // the drained evaluation's own re-read falls through to the
+            // real store.
+            vi.spyOn(GitOpsStore.getInstance(), 'getApplication')
+                .mockImplementationOnce(() => { throw new Error('simulated crash after reconcile'); });
+
+            controller.start();
+            await advanceOneTick();
+            expect(reconcile).toHaveBeenCalledTimes(1);
+
+            await controller.evaluateNow('now-owner-crash');
+            settleFirstCall(okResult);
+            await vi.advanceTimersByTimeAsync(0);
+
+            expect(reconcile).toHaveBeenCalledTimes(2);
+            expect(reconcile.mock.calls[1]![0]).toMatchObject({ trigger: 'resume' });
+            const logged = errorSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
+            expect(logged).toContain('evaluation crashed');
+            errorSpy.mockRestore();
+        });
+
+        it('logs a parked-wake drain whose prologue throws instead of rejecting unhandled', async () => {
+            const app = seedLive('now-drain-throws');
+            mockDue([app]);
+            let settleFirstCall!: (result: ReconcileResult) => void;
+            const firstCall = new Promise<ReconcileResult>((resolve) => { settleFirstCall = resolve; });
+            const reconcile = spyOnReconcile().mockReturnValueOnce(firstCall).mockResolvedValue(okResult);
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+            controller.start();
+            await advanceOneTick();
+            await controller.evaluateNow('now-drain-throws');
+            expect(reconcile).toHaveBeenCalledTimes(1);
+
+            // evaluateNow's eligibility read runs before its own catch, so
+            // a store failure at that point rejects the call. The drain is
+            // a detached fire-and-forget (nothing above it in the release
+            // chain can catch), so it must carry its own guard: the
+            // rejection becomes a logged line, never an unhandled rejection
+            // (which would take the process down).
+            vi.spyOn(GitOpsStore.getInstance(), 'getLiveDirectApplication')
+                .mockImplementationOnce(() => { throw new Error('database is locked'); });
+            settleFirstCall(okResult);
+            await vi.advanceTimersByTimeAsync(0);
+            await vi.advanceTimersByTimeAsync(0);
+
+            // No resume evaluation ran (the prologue died before it), but
+            // the failure was logged rather than silently escaping.
+            expect(reconcile).toHaveBeenCalledTimes(1);
+            const logged = errorSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
+            expect(logged).toContain('parked-wake drain could not start');
+            errorSpy.mockRestore();
+        });
+
+        it('survives a reconcile rejection without throwing at the route', async () => {
+            seedLive('now-throws');
+            spyOnReconcile().mockRejectedValue(new Error('boom'));
+            // evaluate() logs the reconcile failure itself and returns;
+            // evaluateNow must not turn it into a rejection for the caller.
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+            await expect(controller.evaluateNow('now-throws')).resolves.toBeUndefined();
+
+            expect(errorSpy).toHaveBeenCalledTimes(1);
+            errorSpy.mockRestore();
+        });
     });
 });
