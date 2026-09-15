@@ -766,6 +766,30 @@ stackGitSourceRouter.post('/:stackName/git-source/resume', async (req: Request, 
     const result = await GitSourceService.getInstance().resume(stackName, {
       actor: req.user?.username ?? 'unknown',
     });
+    // A resumed source is re-evaluated immediately rather than idling
+    // until its next poll or retry cursor: the controller's resume trigger
+    // re-resolves source state and, for an automatic source, target
+    // binding through the shared acceptance/dispatch arm. Fire-and-forget
+    // by design: this response reports that suspension was cleared, not
+    // the outcome of a reconcile that has not finished yet, and the
+    // durable row plus the next tick are the authority on the latter.
+    // The wake has its own guard: a synchronous failure starting it (a
+    // store error before any evaluation could run) must not retroactively
+    // fail a resume that already committed, so it is logged, never sent
+    // to sendGitSourceError. evaluateNow absorbs evaluation failures
+    // itself; the rejection arm only catches a future refactor letting one
+    // escape.
+    const logWakeFailure = (error: unknown): void => {
+      console.error(
+        `[GitSources] Resume re-evaluation could not start for ${sanitizeForLog(stackName)}:`,
+        error instanceof Error ? error.message : String(error),
+      );
+    };
+    try {
+      SourceController.getInstance().evaluateNow(stackName).catch(logWakeFailure);
+    } catch (error) {
+      logWakeFailure(error);
+    }
     res.json(result);
   } catch (error) {
     sendGitSourceError(res, error);
