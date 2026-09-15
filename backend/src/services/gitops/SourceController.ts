@@ -15,6 +15,7 @@ import { NodeRegistry } from '../NodeRegistry';
 import { gitSourceLocalComposeFiles } from '../../utils/gitComposeFiles';
 import { extractImagesFromCompose, loadDotEnv } from '../ImageUpdateService';
 import type { ReconcileOutcome } from './outcomes';
+import type { ReconcileTrigger } from './triggers';
 import { redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
 
 /** Outcomes that mean the tick accomplished its work and the source may sleep again. */
@@ -43,11 +44,14 @@ const SUCCESS_SHAPED_OUTCOMES: ReadonlySet<ReconcileOutcome> = new Set<Reconcile
  * sources never join the unattended cadence.
  *
  * Stage-aware retry lives in GitSourceService.retry(): an operator retry
- * at a source-stage failure re-issues a fetch, while an accepted
- * generation still awaiting its dispatch is retried against the dispatch
- * stage directly, never refetched or re-accepted. This controller's own
- * automated retry scheduling stays at the fetch stage, where every
- * transient failure it classifies can occur.
+ * at a source-stage failure re-issues a fetch, an accepted generation
+ * still awaiting its promotion is retried against the shared dispatch
+ * boundary, and a generation already applied whose deploy failed resumes
+ * at the deploy alone; a source-stage failure outranks dispatch evidence,
+ * and a suspended, in-flight, or under-recovery source defers before any
+ * arm runs. Neither retry arm ever refetches or re-accepts.
+ * This controller's own automated retry scheduling stays at the fetch
+ * stage, where every transient failure it classifies can occur.
  *
  * One self-rescheduling timer drives the scan, matching ImageUpdateService.
  * The re-arm always runs, even when a scan throws, so one bad tick (a
@@ -72,6 +76,15 @@ export class SourceController {
     // introduced here after all.
     private scheduleGeneration = 0;
     private readonly inFlight = new Set<string>();
+    /**
+     * Resume wakes that arrived while their application was already being
+     * evaluated. Keyed by application id (so repeated wakes coalesce into
+     * the one evaluation they asked for) holding the stack name the drain
+     * re-reads eligibility from. Lives only until the in-flight owner
+     * releases the slot: a marker exists only while some evaluation owns
+     * the slot, and that owner's release consumes it.
+     */
+    private readonly pendingWakes = new Map<string, string>();
 
     private constructor() { }
 
@@ -220,11 +233,98 @@ export class SourceController {
                     `[SourceController] evaluation crashed for ${sanitizeForLog(app.id)}:`,
                     e instanceof Error ? e.message : String(e),
                 ))
-                .finally(() => this.inFlight.delete(app.id));
+                .finally(() => this.releaseAndDrainWake(app.id));
         }
     }
 
-    private async evaluate(app: GitOpsApplicationRow): Promise<void> {
+    /**
+     * Release an application's evaluation slot and honor any resume wake
+     * parked against it. The wake's evaluateNow runs synchronously before
+     * this returns, so no timer tick can claim the freed slot in between:
+     * a parked operator resume wins the slot against the cadence, which
+     * is the point of a wake. evaluateNow re-reads the row and re-decides
+     * eligibility, so a wake that went stale while parked (re-suspended,
+     * switched to manual, deleted) is dropped exactly as a fresh call
+     * would drop it. evaluateNow's own catch only covers its evaluation
+     * arm: its synchronous prologue (the row read and eligibility guard)
+     * can reject before that catch exists, and this drain runs inside a
+     * release finally with nothing above it to catch, so the detached
+     * wake carries the same defensive log the resume route applies to its
+     * fire-and-forget wake. The void states that the drain is detached
+     * from the releasing evaluation's caller.
+     */
+    private releaseAndDrainWake(applicationId: string): void {
+        this.inFlight.delete(applicationId);
+        const wakeStackName = this.pendingWakes.get(applicationId);
+        if (wakeStackName !== undefined) {
+            this.pendingWakes.delete(applicationId);
+            this.evaluateNow(wakeStackName).catch((e) => console.error(
+                `[SourceController] parked-wake drain could not start for ${sanitizeForLog(applicationId)}:`,
+                e instanceof Error ? e.message : String(e),
+            ));
+        }
+    }
+
+    /**
+     * Run one unattended evaluation for a stack right now, without waiting
+     * for the timer. The resume route calls this after clearing
+     * suspension so the woken source is re-evaluated immediately (source
+     * state and, through the automatic arm, target binding and dispatch)
+     * instead of idling until the next poll or retry cursor lands.
+     * Eligibility is re-decided here rather than inherited from the
+     * due-scan, because this path bypasses the scan: only a live (active or
+     * creating), direct, non-manual, unsuspended source with a stack name is
+     * evaluated. A row that is due for neither poll nor retry is still
+     * evaluated: the operator's resume is the wake. Nothing is thrown at the
+     * caller when the row simply is not eligible; whether the source runs on
+     * a cursor or on demand is the scheduling code's business, and an
+     * ineligible row is not an error.
+     *
+     * An application already being evaluated is never queued behind itself:
+     * the wake is parked instead of discarded, and the in-flight owner's
+     * release runs at most one fresh resume evaluation for it (see
+     * releaseAndDrainWake). Repeated wakes coalesce into the one evaluation
+     * they asked for; eligibility is re-read at drain time, so a wake that
+     * went stale while parked is dropped exactly as a fresh call would drop
+     * it.
+     *
+     * Fetches fired here coalesce with any concurrent tick through the
+     * reconcile submission's per-application joining, so an immediate
+     * evaluation landing seconds before a timer tick cannot double-fetch.
+     */
+    public async evaluateNow(stackName: string): Promise<void> {
+        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        if (!app) return;
+        if (app.source_policy === 'manual' || app.suspended_at) return;
+        if (this.inFlight.has(app.id)) {
+            // Park rather than discard: the resume is a request to
+            // re-evaluate after whatever is running now settles, and an
+            // evaluation about to finish would otherwise silently swallow
+            // the operator's wake (the next timer tick can be a full poll
+            // interval away).
+            this.pendingWakes.set(app.id, stackName);
+            return;
+        }
+        this.inFlight.add(app.id);
+        try {
+            await this.evaluate(app, 'resume');
+        } catch (e) {
+            // Same load-bearing catch the tick path wraps evaluations in:
+            // everything past the reconcile call (the row re-read,
+            // scheduling, automatic acceptance) runs on this promise chain,
+            // and a rejection escaping here would be an unhandled one for
+            // the route that fired it. The durable row is authoritative;
+            // the next tick remains the safety net.
+            console.error(
+                `[SourceController] immediate evaluation crashed for ${sanitizeForLog(app.id)}:`,
+                e instanceof Error ? e.message : String(e),
+            );
+        } finally {
+            this.releaseAndDrainWake(app.id);
+        }
+    }
+
+    private async evaluate(app: GitOpsApplicationRow, triggerOverride?: ReconcileTrigger): Promise<void> {
         if (!app.stack_name) {
             console.warn(`[SourceController] Skipping ${sanitizeForLog(app.id)}: direct-mode application has no stack_name.`);
             return;
@@ -238,13 +338,16 @@ export class SourceController {
         }
         const stackName = app.stack_name;
         const isRetry = app.retry_at !== null && app.retry_at <= Date.now();
+        // An out-of-band caller (the resume path) names its own trigger; a
+        // timer tick derives it from the row's cursors as before.
+        const trigger: ReconcileTrigger = triggerOverride ?? (isRetry ? 'retry' : 'poll');
         let result;
         try {
             result = await GitSourceService.getInstance().reconcile({
                 intent: 'fetch',
                 applicationId: app.id,
                 stackName,
-                trigger: isRetry ? 'retry' : 'poll',
+                trigger,
                 actor: 'system:source-controller',
             });
         } catch (e) {
@@ -272,7 +375,7 @@ export class SourceController {
             // refuses a durable blocked candidate below
             // (requireAcceptableCandidate guards against an outcome that
             // misreports the row's state).
-            await this.maybeAcceptAutomaticCandidate(fresh, stackName, isRetry ? 'retry' : 'poll');
+            await this.maybeAcceptAutomaticCandidate(fresh, stackName, trigger);
         }
     }
 
@@ -334,7 +437,7 @@ export class SourceController {
     private async maybeAcceptAutomaticCandidate(
         app: GitOpsApplicationRow,
         stackName: string,
-        trigger: 'poll' | 'retry',
+        trigger: ReconcileTrigger,
     ): Promise<void> {
         if (app.source_policy !== 'automatic') return;
         if (!app.candidate_generation_id || app.accepted_generation_id === app.candidate_generation_id) return;
