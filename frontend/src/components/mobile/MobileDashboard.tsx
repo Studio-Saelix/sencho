@@ -4,16 +4,23 @@ import { useDashboardData } from '@/components/dashboard';
 import { deriveHealth } from '@/components/dashboard/deriveHealth';
 import { useGitOpsSourceStates } from '@/components/dashboard/useGitOpsSourceStates';
 import GitOpsBadge from '@/components/gitops/GitOpsBadge';
-import type { HealthLevel, NotificationItem, StackCpuSeries, StackStatusEntry } from '@/components/dashboard/types';
-import { Bar, Kicker, Masthead, MSparkline, SectionHead, StateDot } from './mobile-ui';
+import type { HealthLevel, NotificationItem } from '@/components/dashboard/types';
+import { SegmentedControl } from '@/components/ui/segmented-control';
+import {
+  STACK_HEALTH_COLLAPSE_SIZE,
+  useStackHealthScope,
+  type StackHealthNavTarget,
+  type StackHealthScopeMode,
+} from '@/components/dashboard/useStackHealthScope';
+import type { RowState } from '@/components/dashboard/classifyRow';
+import { Bar, Kicker, Masthead, MSparkline, StateDot } from './mobile-ui';
 import { NodeSwitcher } from '@/components/NodeSwitcher';
 
 interface MobileDashboardProps {
   notifications: NotificationItem[];
   /** Notification bell + more-menu cluster for the masthead right slot. */
   headerActions: ReactNode;
-  onNavigateToStack: (stackFile: string) => void;
-  onViewAllStacks: () => void;
+  onNavigateToStack: (target: StackHealthNavTarget) => void;
   /** Opens the Nodes settings section from the masthead node switcher. */
   onManageNodes: () => void;
 }
@@ -40,15 +47,6 @@ function formatAgo(ms: number): string {
   if (c < 60_000) return `${Math.round(c / 1000)}s`;
   if (c < 3_600_000) return `${Math.round(c / 60_000)}m`;
   return `${Math.round(c / 3_600_000)}h`;
-}
-
-type RowState = 'healthy' | 'warn' | 'error';
-
-function classifyRow(status: StackStatusEntry['status'], peakCpu: number): RowState {
-  if (status === 'exited') return 'error';
-  if (peakCpu >= 90) return 'error';
-  if (peakCpu >= 80) return 'warn';
-  return 'healthy';
 }
 
 const ROW_TINT: Record<RowState, string> = {
@@ -78,10 +76,27 @@ function StripCell({ label, value, bar }: { label: string; value: string; bar?: 
   );
 }
 
-export function MobileDashboard({ notifications, headerActions, onNavigateToStack, onViewAllStacks, onManageNodes }: MobileDashboardProps) {
+export function MobileDashboard({ notifications, headerActions, onNavigateToStack, onManageNodes }: MobileDashboardProps) {
   const { activeNode } = useNodes();
   const data = useDashboardData();
   const gitopsSourceStates = useGitOpsSourceStates();
+  const [scope, setScope] = useState<StackHealthScopeMode>('this-node');
+  const [expanded, setExpanded] = useState(false);
+  const health = useStackHealthScope({
+    scope,
+    stackStatuses: data.stackStatuses,
+    stackStatusesFreshness: data.stackStatusesFreshness,
+    stackStatusesLoadStatus: data.stackStatusesLoadStatus,
+    stackStatusesLoadError: data.stackStatusesLoadError,
+    retryStackStatuses: data.retryStackStatuses,
+    metrics: data.metrics,
+    stackCpuSeries: data.stackCpuSeries,
+    gitopsSourceStates,
+    stackUpdates: {},
+  });
+  useEffect(() => {
+    setExpanded(false);
+  }, [scope]);
   const activeNodeName = activeNode?.name || 'Local';
 
   // Re-render every few seconds so the "sync Xs" freshness label advances
@@ -114,30 +129,12 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
     return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }, [cpuHistory, cpuPeak, data.historyEndAt]);
 
-  const healthRows = useMemo(() => {
-    const list = Object.entries(data.stackStatuses).map(([file, entry]) => {
-      const name = file.replace(/\.(ya?ml)$/, '');
-      const series: StackCpuSeries | undefined = data.stackCpuSeries[name];
-      const peakCpu = series?.peakValue ?? 0;
-      return {
-        file,
-        name,
-        status: entry.status,
-        cpu: series?.latestValue ?? 0,
-        points: series?.points ?? [],
-        peakCpu,
-        state: classifyRow(entry.status, peakCpu),
-      };
-    });
-    const order: Record<RowState, number> = { error: 0, warn: 1, healthy: 2 };
-    list.sort((a, b) => order[a.state] - order[b.state] || b.peakCpu - a.peakCpu);
-    return list;
-  }, [data.stackStatuses, data.stackCpuSeries]);
-
-  const visibleRows = healthRows.slice(0, 6);
+  const healthRows = health.rows;
+  const visibleRows = expanded ? healthRows : healthRows.slice(0, STACK_HEALTH_COLLAPSE_SIZE);
+  const needsExpansion = healthRows.length > STACK_HEALTH_COLLAPSE_SIZE;
   const stackCount = healthRows.length;
-  const upCount = healthRows.filter(r => r.status === 'running').length;
-  const downCount = healthRows.filter(r => r.status === 'exited').length;
+  const upCount = healthRows.filter((r) => r.status === 'running').length;
+  const downCount = healthRows.filter((r) => r.status === 'exited').length;
   const syncLabel = data.lastSyncAt ? `sync ${formatAgo(now - data.lastSyncAt)}` : 'connecting…';
 
   const cpuSub = cpuHistory.length > 0
@@ -145,69 +142,80 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
     : 'collecting metrics…';
 
   let stackHealthBody: ReactNode;
-  if (data.stackStatusesLoadStatus === 'idle' || data.stackStatusesLoadStatus === 'loading') {
+  if (health.view === 'loading') {
     stackHealthBody = (
       <p className="px-1 py-4 font-mono text-[12px] text-stat-subtitle">Loading stacks…</p>
     );
-  } else if (data.stackStatusesLoadStatus === 'error') {
+  } else if (health.view === 'unavailable') {
     stackHealthBody = (
       <div className="flex flex-col items-start gap-2 px-1 py-4">
         <p className="font-mono text-[12px] text-stat-subtitle">
-          {data.stackStatusesLoadError ?? 'Could not load stack health.'}
+          {health.viewError ?? 'Could not load stack health.'}
         </p>
         <button
           type="button"
-          onClick={data.retryStackStatuses}
+          onClick={health.retry}
           className="font-mono text-[12px] text-brand underline-offset-2 hover:underline"
         >
           Retry
         </button>
       </div>
     );
-  } else if (visibleRows.length === 0) {
+  } else if (health.view === 'empty' || visibleRows.length === 0) {
     stackHealthBody = (
       <p className="px-1 py-4 font-mono text-[12px] text-stat-subtitle">No stacks yet.</p>
     );
   } else {
     stackHealthBody = (
       <div className="flex flex-col gap-px">
-        {visibleRows.map(row => {
-          const gitopsSourceState = gitopsSourceStates[row.name];
+        {visibleRows.map((row) => {
+          const nodeLabel = scope === 'all-nodes' ? row.node.name : activeNodeName;
           return (
-          <button
-            key={row.file}
-            type="button"
-            onClick={() => onNavigateToStack(row.file)}
-            className={`flex min-h-11 items-center gap-2.5 rounded-[7px] px-2.5 py-[9px] text-left ${ROW_TINT[row.state]}`}
-          >
-            <StateDot tone={ROW_TONE[row.state]} size={7} glow={row.state !== 'healthy'} />
-            <span className="min-w-0 flex-1">
-              <span className="block truncate font-mono text-[13px] text-stat-value">{row.name}</span>
-              {/* The GitOps state joins the node name on the sub-line, where
-                  there is room for a word. Touch has no hover, so the badge's
-                  title tooltip cannot be the only carrier of the state. */}
-              <span className="flex min-w-0 items-center gap-1.5">
-                <span className="truncate font-mono text-[10px] text-stat-icon">{activeNodeName}</span>
-                {gitopsSourceState && (
-                  <GitOpsBadge facet="source" status={gitopsSourceState} className="min-w-0" />
+            <button
+              key={row.key}
+              type="button"
+              onClick={() => onNavigateToStack({ node: row.node, file: row.file })}
+              className={`flex min-h-11 items-center gap-2.5 rounded-[7px] px-2.5 py-[9px] text-left ${ROW_TINT[row.state]} ${row.freshness === 'stale' ? 'opacity-50' : ''}`}
+              title={row.freshness === 'stale' ? 'Status data is stale' : undefined}
+            >
+              <StateDot tone={ROW_TONE[row.state]} size={7} glow={row.state !== 'healthy'} />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-mono text-[13px] text-stat-value">{row.name}</span>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span className="truncate font-mono text-[10px] text-stat-icon">
+                    {nodeLabel}
+                    {' · '}
+                    {row.status}
+                  </span>
+                  {row.gitopsSourceState && (
+                    <GitOpsBadge facet="source" status={row.gitopsSourceState} className="min-w-0" />
+                  )}
+                </span>
+              </span>
+              <span className="block h-[18px] w-[60px] shrink-0">
+                {row.series.length > 1 ? (
+                  <MSparkline values={row.series} height={18} color={ROW_STROKE[row.state]} peak={false} />
+                ) : (
+                  <span className="block h-full w-full border-b border-dashed border-hairline" />
                 )}
               </span>
-            </span>
-            <span className="block h-[18px] w-[60px] shrink-0">
-              {row.points.length > 1 ? (
-                <MSparkline values={row.points} height={18} color={ROW_STROKE[row.state]} peak={false} />
-              ) : (
-                <span className="block h-full w-full border-b border-dashed border-hairline" />
-              )}
-            </span>
-            <span
-              className={`w-[34px] shrink-0 text-right font-mono tabular-nums text-[12px] ${row.cpu >= 80 ? 'text-warning' : 'text-stat-subtitle'}`}
-            >
-              {`${row.cpu.toFixed(0)}%`}
-            </span>
-          </button>
+              <span
+                className={`w-[34px] shrink-0 text-right font-mono tabular-nums text-[12px] ${(row.cpu ?? 0) >= 80 ? 'text-warning' : 'text-stat-subtitle'}`}
+              >
+                {row.cpu !== null ? `${row.cpu.toFixed(0)}%` : '--'}
+              </span>
+            </button>
           );
         })}
+        {needsExpansion ? (
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            className="px-2.5 py-2 text-left font-mono text-[12px] text-brand underline-offset-2 hover:underline"
+          >
+            {expanded ? 'Show less' : `Show all ${healthRows.length} stacks`}
+          </button>
+        ) : null}
       </div>
     );
   }
@@ -270,9 +278,21 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
 
         {/* stack health */}
         <div>
-          <SectionHead right={<button type="button" onClick={onViewAllStacks} className="text-brand">view all →</button>}>
-            stack health
-          </SectionHead>
+          <div className="flex items-center justify-between gap-2 border-t border-hairline pt-[9px] mb-[9px]">
+            <Kicker>stack health</Kicker>
+            {health.showScopeControl ? (
+              <SegmentedControl
+                ariaLabel="Stack health node scope"
+                className="max-md:[&_button]:min-h-11"
+                value={scope}
+                onChange={setScope}
+                options={[
+                  { value: 'this-node', label: 'This node' },
+                  { value: 'all-nodes', label: 'All nodes' },
+                ]}
+              />
+            ) : null}
+          </div>
           {stackHealthBody}
         </div>
       </div>

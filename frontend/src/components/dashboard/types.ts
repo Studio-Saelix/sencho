@@ -93,6 +93,8 @@ export interface StackStatusEntry {
   runningSince?: number;
   /** Provenance of the stack: 'git' when linked to a Git source, else 'local'. */
   source?: 'local' | 'git';
+  /** Runtime Docker network names. Omitted when none were observed or the payload was malformed. */
+  networks?: string[];
 }
 
 export type HealthLevel = 'healthy' | 'degraded' | 'critical';
@@ -114,6 +116,8 @@ export interface DashboardData {
   stackStatuses: Record<string, StackStatusEntry>;
   stackStatusesLoadStatus: StackStatusesLoadStatus;
   stackStatusesLoadError: string | null;
+  /** Whether visible statuses are from the latest success or retained after a failed poll. */
+  stackStatusesFreshness: 'current' | 'stale';
   retryStackStatuses: () => void;
   lastSyncAt: number | null;
   nodeCount: number;

@@ -22,6 +22,7 @@ import type { StackUpdateInfo } from '@/types/imageUpdates';
 import type { SecurityTab, FleetTab } from '@/lib/events';
 import { isStackEditorDeepLink, isHostConsoleStackDeepLink } from '@/lib/router/readUrlRouteState';
 import type { NavDestination } from '@/lib/navigation/appNavRegistry';
+import type { StackHealthNavTarget } from '../dashboard/useStackHealthScope';
 
 // Paid-tier views are loaded on demand. Their internal PaidGate /
 // CapabilityGate wrappers render
@@ -96,7 +97,7 @@ export interface ViewRouterProps {
     muteRulePrefill: MuteRuleDraft | null;
     onMutePrefillConsumed: () => void;
     notifications: NotificationItem[];
-    onNavigateToStack: (stackFile: string) => void;
+    onNavigateToStack: (target: StackHealthNavTarget) => void;
     onOpenSettingsSection: (section: SectionId) => void;
     onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
     onClearNotifications: () => void;
