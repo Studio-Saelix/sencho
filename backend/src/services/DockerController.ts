@@ -139,6 +139,8 @@ export interface BulkStackInfo {
   total?: number;
   /** True when this stack is the running Sencho instance (compose project matches stack name). */
   isSelf?: boolean;
+  /** Unique runtime Docker network names from listContainers NetworkSettings. Omitted when none were observed. */
+  networks?: string[];
 }
 
 export interface ClassifiedImage {
@@ -2401,6 +2403,7 @@ class DockerController {
     // so the status can distinguish a fully-up stack from one that is partially
     // degraded (some running, some crashed).
     const countsByStack: Record<string, { running: number; failed: number; total: number }> = {};
+    const networksByStack: Record<string, Set<string>> = {};
     for (const name of stackNames) {
       countsByStack[name] = { running: 0, failed: 0, total: 0 };
     }
@@ -2414,6 +2417,15 @@ class DockerController {
 
       const counts = countsByStack[stackDir];
       counts.total += 1;
+
+      const netSettings = (container as { NetworkSettings?: { Networks?: Record<string, unknown> } })
+        .NetworkSettings?.Networks;
+      if (netSettings && typeof netSettings === 'object') {
+        const names = (networksByStack[stackDir] ??= new Set<string>());
+        for (const netName of Object.keys(netSettings)) {
+          if (netName) names.add(netName);
+        }
+      }
 
       if (container.State === 'running') {
         counts.running += 1;
@@ -2449,6 +2461,10 @@ class DockerController {
       else result[name].status = 'running';
       result[name].running = running;
       result[name].total = total;
+      const netNames = networksByStack[name];
+      if (netNames && netNames.size > 0) {
+        result[name].networks = [...netNames].sort((a, b) => a.localeCompare(b));
+      }
     }
 
     // Resolve real uptime: oldest StartedAt across each stack's running

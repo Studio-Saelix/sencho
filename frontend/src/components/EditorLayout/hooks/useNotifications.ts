@@ -200,7 +200,12 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
             };
             setNotifications(prev => [tagged, ...prev].sort((a, b) => b.timestamp - a.timestamp));
           } else if (msg.type === 'state-invalidate') {
-            window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: msg }));
+            const hubLocal = nodesRef.current.find(n => n.type === 'local');
+            const nodeId = hubLocal?.id
+              ?? (typeof msg.nodeId === 'number' ? msg.nodeId : undefined);
+            window.dispatchEvent(new CustomEvent('sencho:state-invalidate', {
+              detail: { ...msg, nodeId },
+            }));
             onStateInvalidateRef.current();
             if (msg.scope === 'notifications') {
               reconcileNotificationsInvalidateRef.current(msg);

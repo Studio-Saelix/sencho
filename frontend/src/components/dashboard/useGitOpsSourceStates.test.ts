@@ -12,8 +12,8 @@ vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: activeN
 const ok = (rows: unknown) => ({ ok: true, status: 200, json: async () => rows });
 
 /** Fire the invalidate the publisher's event turns into on the client. */
-const announceGitOps = () => {
-  window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'gitops' } }));
+const announceGitOps = (nodeId = 1) => {
+  window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'gitops', nodeId } }));
 };
 
 describe('useGitOpsSourceStates', () => {
@@ -125,6 +125,17 @@ describe('useGitOpsSourceStates', () => {
     const { result } = renderHook(() => useGitOpsSourceStates());
 
     await waitFor(() => expect(result.current).toEqual({ bookstack: 'candidate_ready' }));
+  });
+
+  it('ignores a gitops announcement for a different node', async () => {
+    apiFetch.mockResolvedValue(ok([]));
+    renderHook(() => useGitOpsSourceStates());
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+
+    act(() => { announceGitOps(99); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
   });
 
   it('ignores an announcement from another scope', async () => {

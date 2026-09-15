@@ -12,6 +12,7 @@ import type {
   StackCpuSeries,
   StackStatusesLoadStatus,
 } from './types';
+import { parseStackStatusesMap } from './parseStackStatusEntry';
 
 const DEFAULT_STATS: Stats = { active: 0, managed: 0, unmanaged: 0, exited: 0, total: 0 };
 const SPARK_BUCKETS = 20;
@@ -92,19 +93,6 @@ export function buildNetHistory(
 // is chosen so a single transient hiccup does not trip the indicator.
 const METRICS_STALE_THRESHOLD = 3;
 
-const VALID_STACK_STATUS_VALUES = new Set(['running', 'exited', 'unknown', 'partial']);
-
-// A malformed per-stack entry (null, a bare string, or an object missing
-// `status`) must never reach the table renderer, which indexes straight into
-// `entry.status` and other fields without a null check.
-function isValidStatusEntry(value: unknown): value is StackStatusEntry {
-  return (
-    !!value
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && VALID_STACK_STATUS_VALUES.has((value as { status?: unknown }).status as string)
-  );
-}
 
 export function useDashboardData(): DashboardData {
   const { activeNode, nodes } = useNodes();
@@ -116,6 +104,7 @@ export function useDashboardData(): DashboardData {
   const [stackStatuses, setStackStatuses] = useState<Record<string, StackStatusEntry>>({});
   const [stackStatusesLoadStatus, setStackStatusesLoadStatus] = useState<StackStatusesLoadStatus>('idle');
   const [stackStatusesLoadError, setStackStatusesLoadError] = useState<string | null>(null);
+  const [stackStatusesFreshness, setStackStatusesFreshness] = useState<'current' | 'stale'>('current');
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
   const [metricsStale, setMetricsStale] = useState(false);
 
@@ -249,6 +238,7 @@ export function useDashboardData(): DashboardData {
     setStackStatuses(data);
     setStackStatusesLoadStatus('success');
     setStackStatusesLoadError(null);
+    setStackStatusesFreshness('current');
     hadNonEmptyStatusesRef.current = Object.keys(data).length > 0;
   }, [isCurrentStatusesFetch]);
 
@@ -262,6 +252,9 @@ export function useDashboardData(): DashboardData {
     // Soft: prior non-empty rows stay visible on a transient failure. Prior
     // confirmed-empty becomes a recoverable error so a soft failure can never
     // look identical to "no stacks".
+    if (hadNonEmptyStatusesRef.current) {
+      setStackStatusesFreshness('stale');
+    }
     if (mode === 'soft' && hadNonEmptyStatusesRef.current) return;
     setStackStatusesLoadStatus('error');
     setStackStatusesLoadError(failureMessage);
@@ -286,42 +279,32 @@ export function useDashboardData(): DashboardData {
     try {
       const result = await fetchStackStatusesShared(currentNodeId);
       if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
-      if (!result.ok) {
+      if (result.failure === 'auth-abort') {
+        // Logout clears the coalescer mid-flight; do not leave the card on
+        // skeletons if the session teardown is slow to unmount Home.
         commitStackStatusesFailure(
           currentNodeId,
           generation,
           mode,
-          `Could not load stack health (${result.status}).`,
+          'Could not load stack health.',
         );
         return;
       }
-      const body = result.body;
-      if (body && typeof body === 'object' && !Array.isArray(body)) {
-        // Drop any entry isValidStatusEntry rejects rather than trusting the
-        // whole map: one bad entry must not crash or misrepresent the rest of
-        // a valid response.
-        const rawEntries = Object.entries(body as Record<string, unknown>);
-        const sanitized: Record<string, StackStatusEntry> = {};
-        for (const [file, entry] of rawEntries) {
-          if (isValidStatusEntry(entry)) {
-            sanitized[file] = entry;
-          } else {
-            console.error('[Dashboard] Dropped malformed stack status entry:', file, entry);
-          }
-        }
-        // A non-empty map where every entry failed validation is a malformed
-        // response, not a confirmed-empty fleet: committing it as success
-        // would be indistinguishable from a genuine empty fleet.
-        if (rawEntries.length > 0 && Object.keys(sanitized).length === 0) {
-          commitStackStatusesFailure(
-            currentNodeId,
-            generation,
-            mode,
-            'Stack health response was invalid.',
-          );
-          return;
-        }
-        commitStackStatusesSuccess(currentNodeId, generation, sanitized);
+      if (!result.ok) {
+        const timeoutMsg = result.failure === 'timeout'
+          ? 'Stack health request timed out.'
+          : `Could not load stack health (${result.status}).`;
+        commitStackStatusesFailure(
+          currentNodeId,
+          generation,
+          mode,
+          timeoutMsg,
+        );
+        return;
+      }
+      const parsed = parseStackStatusesMap(result.body);
+      if (parsed.kind === 'ok') {
+        commitStackStatusesSuccess(currentNodeId, generation, parsed.entries);
         return;
       }
       commitStackStatusesFailure(
@@ -355,6 +338,7 @@ export function useDashboardData(): DashboardData {
     setStackStatuses({}); // eslint-disable-line react-hooks/set-state-in-effect
     setStackStatusesLoadStatus('loading');
     setStackStatusesLoadError(null);
+    setStackStatusesFreshness('current');
     const currentNodeId = nodeId;
     // Stay in loading while NodeContext has not resolved activeNode; do not
     // fetch against an unknown target (and do not treat that window as empty).
@@ -397,7 +381,9 @@ export function useDashboardData(): DashboardData {
       if (sysData) setSystemStats(sysData);
       await fetchStackStatuses(currentNodeId, 'soft');
     };
-    const onInvalidate = () => {
+    const onInvalidate = (event: Event) => {
+      const nodeIdFromEvent = (event as CustomEvent<{ nodeId?: unknown }>).detail?.nodeId;
+      if (typeof nodeIdFromEvent !== 'number' || nodeIdFromEvent !== currentNodeId) return;
       if (!active || nodeIdRef.current !== currentNodeId) return;
       if (invalidateTimer) clearTimeout(invalidateTimer);
       invalidateTimer = setTimeout(() => {
@@ -501,6 +487,7 @@ export function useDashboardData(): DashboardData {
     stackStatuses,
     stackStatusesLoadStatus,
     stackStatusesLoadError,
+    stackStatusesFreshness,
     retryStackStatuses,
     lastSyncAt,
     nodeCount: nodes.length,

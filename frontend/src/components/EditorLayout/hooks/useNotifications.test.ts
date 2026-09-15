@@ -229,8 +229,8 @@ describe('useNotifications', () => {
     // The dashboard badges refetch off the window event, not off the callback
     // below, so narrowing this dispatch into one scope branch would leave them
     // permanently stale while every callback assertion stayed green.
-    const seen: Array<{ scope?: string }> = [];
-    const onWindow = (e: Event) => seen.push((e as CustomEvent<{ scope?: string }>).detail);
+    const seen: Array<{ scope?: string; nodeId?: number }> = [];
+    const onWindow = (e: Event) => seen.push((e as CustomEvent<{ scope?: string; nodeId?: number }>).detail);
     window.addEventListener('sencho:state-invalidate', onWindow);
     try {
       renderHook(() =>
@@ -245,11 +245,15 @@ describe('useNotifications', () => {
           data: JSON.stringify({
             type: 'state-invalidate', scope: 'gitops', action: 'applied',
             applicationId: 'app-1', targetMode: 'direct', stackName: 'foo',
-            blueprintId: null, nodeId: 1, ts: 1000,
+            blueprintId: null, nodeId: 99, ts: 1000,
           }),
         });
       });
-      expect(seen.filter((d) => d?.scope === 'gitops')).toHaveLength(1);
+      const gitops = seen.filter((d) => d?.scope === 'gitops');
+      expect(gitops).toHaveLength(1);
+      // Local socket payload nodeId is the remote's own numbering; rebroadcast
+      // must use the hub local node id so consumers can target the control node.
+      expect(gitops[0]?.nodeId).toBe(localNode.id);
     } finally {
       window.removeEventListener('sencho:state-invalidate', onWindow);
     }

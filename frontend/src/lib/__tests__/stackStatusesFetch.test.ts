@@ -46,7 +46,10 @@ describe('fetchStackStatusesShared', () => {
     const a = fetchStackStatusesShared(1);
     const b = fetchStackStatusesShared(1);
     expect(apiFetchSpy).toHaveBeenCalledTimes(1);
-    expect(apiFetchSpy).toHaveBeenCalledWith('/stacks/statuses', { nodeId: 1 });
+    expect(apiFetchSpy).toHaveBeenCalledWith(
+      '/stacks/statuses',
+      expect.objectContaining({ nodeId: 1, signal: expect.any(AbortSignal) }),
+    );
 
     gate.release(jsonResponse({ 'demo.yml': { status: 'running' } }));
     const [ra, rb] = await Promise.all([a, b]);
@@ -86,7 +89,10 @@ describe('fetchStackStatusesShared', () => {
   it('forwards explicit null as the local key and apiFetch nodeId', async () => {
     apiFetchSpy.mockResolvedValueOnce(jsonResponse({}));
     await fetchStackStatusesShared(null);
-    expect(apiFetchSpy).toHaveBeenCalledWith('/stacks/statuses', { nodeId: null });
+    expect(apiFetchSpy).toHaveBeenCalledWith(
+      '/stacks/statuses',
+      expect.objectContaining({ nodeId: null, signal: expect.any(AbortSignal) }),
+    );
   });
 
   it('ignores localStorage divergence when an explicit nodeId is passed', async () => {
@@ -97,7 +103,10 @@ describe('fetchStackStatusesShared', () => {
     const a = fetchStackStatusesShared(3);
     const b = fetchStackStatusesShared(3);
     expect(apiFetchSpy).toHaveBeenCalledTimes(1);
-    expect(apiFetchSpy).toHaveBeenCalledWith('/stacks/statuses', { nodeId: 3 });
+    expect(apiFetchSpy).toHaveBeenCalledWith(
+      '/stacks/statuses',
+      expect.objectContaining({ nodeId: 3, signal: expect.any(AbortSignal) }),
+    );
     gate.release(jsonResponse({}));
     await Promise.all([a, b]);
     localStorage.removeItem('sencho-active-node');
@@ -111,8 +120,9 @@ describe('fetchStackStatusesShared', () => {
 
     const pending = fetchStackStatusesShared(1);
     window.dispatchEvent(new Event('sencho-unauthorized'));
-    gate.release(jsonResponse({ before: { status: 'running' } }));
-    await pending;
+    const aborted = await pending;
+    expect(aborted.failure).toBe('auth-abort');
+    expect(aborted.ok).toBe(false);
 
     const next = await fetchStackStatusesShared(1);
     expect(apiFetchSpy).toHaveBeenCalledTimes(2);
@@ -120,7 +130,7 @@ describe('fetchStackStatusesShared', () => {
     expect((next.body as Record<string, unknown>).after).toBeTruthy();
   });
 
-  it('clearStackStatusesFetch clears without requiring the window event', async () => {
+  it('clearStackStatusesFetch aborts the owner as auth-abort', async () => {
     const gate = deferredResponse();
     apiFetchSpy
       .mockReturnValueOnce(gate.promise)
@@ -128,8 +138,8 @@ describe('fetchStackStatusesShared', () => {
 
     const pending = fetchStackStatusesShared(1);
     clearStackStatusesFetch();
-    gate.release(jsonResponse({ stale: true }));
-    await pending;
+    const aborted = await pending;
+    expect(aborted.failure).toBe('auth-abort');
 
     await fetchStackStatusesShared(1);
     expect(apiFetchSpy).toHaveBeenCalledTimes(2);
@@ -160,18 +170,26 @@ describe('fetchStackStatusesShared', () => {
     expect(freshResult.body).toEqual(joinedResult.body);
   });
 
-  it('does not retain a rejected promise for later callers', async () => {
+  it('does not retain a failed transport result for later callers', async () => {
     apiFetchSpy
       .mockRejectedValueOnce(new Error('network down'))
       .mockResolvedValueOnce(jsonResponse({ ok: { status: 'running' } }));
 
-    await expect(fetchStackStatusesShared(1)).rejects.toThrow('network down');
+    const failed = await fetchStackStatusesShared(1);
+    expect(failed).toEqual({
+      ok: false,
+      status: 0,
+      proxied: false,
+      body: null,
+      coalesced: false,
+      failure: 'http',
+    });
     const recovered = await fetchStackStatusesShared(1);
     expect(apiFetchSpy).toHaveBeenCalledTimes(2);
     expect(recovered.ok).toBe(true);
   });
 
-  it('propagates JSON decode failures to both waiters and clears the slot', async () => {
+  it('settles JSON decode failures for both waiters and clears the slot', async () => {
     const bad = new Response('not-json', {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
@@ -182,10 +200,69 @@ describe('fetchStackStatusesShared', () => {
 
     const a = fetchStackStatusesShared(1);
     const b = fetchStackStatusesShared(1);
-    await expect(a).rejects.toThrow();
-    await expect(b).rejects.toThrow();
+    const [ar, br] = await Promise.all([a, b]);
+    expect(ar.ok).toBe(false);
+    expect(ar.failure).toBe('http');
+    expect(br.ok).toBe(false);
+    expect(br.failure).toBe('http');
+    expect(br.coalesced).toBe(true);
     const recovered = await fetchStackStatusesShared(1);
     expect(recovered.ok).toBe(true);
     expect(apiFetchSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('fetchStackStatusesShared timeout and auth abort', () => {
+  let apiFetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    __resetStackStatusesFetchForTests();
+    apiFetchSpy = vi.spyOn(api, 'apiFetch');
+  });
+
+  afterEach(() => {
+    __resetStackStatusesFetchForTests();
+    apiFetchSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('settles owner and joiner with the same timeout result and frees the slot', async () => {
+    const gate = deferredResponse();
+    apiFetchSpy.mockReturnValueOnce(gate.promise);
+
+    const owner = fetchStackStatusesShared(1);
+    const joiner = fetchStackStatusesShared(1);
+    await vi.advanceTimersByTimeAsync(8000);
+    const [a, b] = await Promise.all([owner, joiner]);
+    expect(a.ok).toBe(false);
+    expect(a.failure).toBe('timeout');
+    expect(b.failure).toBe('timeout');
+    expect(b.coalesced).toBe(true);
+    expect(a.status).toBe(0);
+
+    apiFetchSpy.mockResolvedValueOnce(jsonResponse({ after: { status: 'running' } }));
+    const next = await fetchStackStatusesShared(1);
+    expect(next.ok).toBe(true);
+    expect(next.failure).toBeUndefined();
+    expect(next.coalesced).toBe(false);
+    expect(apiFetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('auth-clear aborts the owner as auth-abort, not timeout', async () => {
+    const gate = deferredResponse();
+    apiFetchSpy.mockReturnValueOnce(gate.promise);
+
+    const pending = fetchStackStatusesShared(7);
+    clearStackStatusesFetch();
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(result.failure).toBe('auth-abort');
+    expect(result.status).toBe(0);
+
+    apiFetchSpy.mockResolvedValueOnce(jsonResponse({}));
+    const next = await fetchStackStatusesShared(7);
+    expect(next.failure).toBeUndefined();
+    expect(next.ok).toBe(true);
   });
 });
