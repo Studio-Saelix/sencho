@@ -471,10 +471,30 @@ export class SourceController {
             );
             return;
         }
+        let acceptGeneration: GitOpsGenerationRow;
+        try {
+            const revalidated = await GitSourceService.getInstance().revalidateSourceCandidateBeforeAccept({
+                stackName,
+                generation,
+                evaluation,
+                trigger,
+                actor: 'system:source-controller',
+            });
+            if (revalidated.status === 'refuse') {
+                console.warn(
+                    `[SourceController] automatic candidate held for ${sanitizeForLog(app.id)}: ${sanitizeForLog(revalidated.reason)}`,
+                );
+                return;
+            }
+            acceptGeneration = revalidated.generation;
+        } catch (e) {
+            this.warnSkipped(app.id, 'source revalidation failed', e);
+            return;
+        }
         try {
             GitOpsTransitions.getInstance().sourceAccepted({
                 applicationId: app.id,
-                generationId: generation.id,
+                generationId: acceptGeneration.id,
                 artifactSetId: newGitOpsId(),
                 sourceAcceptanceId: newGitOpsId(),
                 authority: 'configured_policy',
@@ -493,7 +513,7 @@ export class SourceController {
         // pre-reservation entry guards (store reads on a failing database).
         try {
             const dispatch = await GitSourceService.getInstance().dispatchAcceptedGeneration(
-                buildAcceptedGeneration(generation),
+                buildAcceptedGeneration(acceptGeneration),
                 GitSourceService.directDispatchContext(),
                 { trigger, actor: 'system:source-controller' },
             );

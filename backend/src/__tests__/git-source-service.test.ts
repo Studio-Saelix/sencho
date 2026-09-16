@@ -2752,6 +2752,31 @@ describe('GitSourceService.pull', () => {
         await cleanupStackDir('pull-repeat');
     });
 
+    it('a pull against a staged candidate missing its content digest mints anew', async () => {
+        const svc = GitSourceService.getInstance();
+        await createFromGit('pull-nohash', '8888888888888888888888888888888888888888');
+        const base = generationCount('pull-nohash');
+        const updatedSha = '9999999999999999999999999999999999999999';
+        const cloneMock = {
+            compose: 'services:\n  web:\n    image: nginx:1.29\n',
+            sha: updatedSha,
+        };
+        mockSuccessfulClone(cloneMock);
+        await svc.pull('pull-nohash');
+        const stagedId = GitOpsStore.getInstance().getLiveDirectApplication('pull-nohash')!.candidate_generation_id;
+        expect(stagedId).toBeTruthy();
+
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE gitops_generations SET compose_inputs_json = NULL WHERE id = ?')
+            .run(stagedId);
+
+        mockSuccessfulClone(cloneMock);
+        await svc.pull('pull-nohash');
+        expect(generationCount('pull-nohash')).toBe(base + 2);
+        expect(GitOpsStore.getInstance().getLiveDirectApplication('pull-nohash')!.candidate_generation_id).not.toBe(stagedId);
+        await cleanupStackDir('pull-nohash');
+    });
+
     it('a pull whose source fingerprint drifted from the staged candidate mints anew', async () => {
         const svc = GitSourceService.getInstance();
         await createFromGit('pull-fp-drift', '4444444444444444444444444444444444444444');

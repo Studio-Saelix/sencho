@@ -179,6 +179,24 @@ test.describe('git source authentication docs screenshots', () => {
     }, stackName);
   });
 
+  test('tutorial empty git source sheet', async ({ page }) => {
+    await loginAs(page);
+    const stackName = 'marketing-site';
+    await createStack(page, stackName);
+    await page.goto('/');
+    await page.getByText(stackName).first().click();
+    await page.getByRole('button', { name: /Git Source/i }).click();
+    await expect(page.getByRole('dialog').getByRole('heading', { name: /git source/i })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: /sheet location/i })).toContainText('Git source');
+    const dialog = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: /git source/i }) });
+    await dialog.screenshot({
+      path: path.join(DOCS_IMAGES, 'tutorials', 'connect-a-git-source', 'git-source-panel-empty.png'),
+    });
+    await page.evaluate(async (name) => {
+      await fetch(`/api/stacks/${name}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
+    }, stackName);
+  });
+
   test('create stack from git tab with deploy key options', async ({ page }) => {
     await loginAs(page);
     await page.getByRole('button', { name: 'Create Stack' }).click();

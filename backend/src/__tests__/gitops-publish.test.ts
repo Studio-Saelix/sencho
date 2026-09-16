@@ -19,6 +19,8 @@ import {
   setGitOpsEventSink,
   type GitOpsInvalidateEvent,
 } from '../services/gitops/publish';
+import { drainSettledOutboxRow, repairGitOpsSettledOutbox, settledNotificationDedupeKey } from '../services/gitops/outbox';
+import { decodeSettledAttemptPayload, encodeSettledAttemptPayload } from '../services/gitops/attemptPayload';
 
 /**
  * The real module, with the enqueue entry point wrapped in a spy.
@@ -186,6 +188,140 @@ describe('gitops transition announcements', () => {
     // the transition committed, and the count describes the transition.
     expect(GitOpsMetricsService.getInstance().snapshot().map((e) => e.stage))
       .toEqual(['applied', 'fetch_started', 'fetched']);
+  });
+
+  const writeSettled = (operationId: string): string => {
+    const id = insertHistory(db(), {
+      application: directApplicationFixture(`app-${operationId}`, `stack-${operationId}`),
+      nodeId: 3,
+      dedupeTarget: 'app',
+      operationId,
+      stage: 'source_reconcile_settled',
+      outcome: 'committed',
+      trigger: 'poll',
+      actor: 'system:source-controller',
+      before: {},
+      after: { outcome: 'no_source_change', reason: 'ok', nextAction: 'none' },
+      at: 4242,
+    });
+    if (!id) throw new Error('expected settled history insert');
+    return id;
+  };
+
+  it('inserts an outbox row in the same transaction as a settled history commit', () => {
+    const historyId = writeSettled('op-outbox');
+    const outbox = db().prepare(
+      'SELECT settled_history_id, payload_version, drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { settled_history_id: string; payload_version: number; drained_at: number | null };
+    expect(outbox.settled_history_id).toBe(historyId);
+    expect(outbox.payload_version).toBe(1);
+    expect(outbox.drained_at).toBeNull();
+  });
+
+  it('rolls the outbox row back with the settled history row', async () => {
+    expect(() => db().transaction(() => {
+      writeSettled('op-outbox-rollback');
+      throw new Error('transition rejected');
+    })()).toThrow('transition rejected');
+    await settle();
+    const count = db().prepare(
+      "SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE settled_history_id IN (SELECT id FROM gitops_history WHERE operation_id = 'op-outbox-rollback')",
+    ).get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it('drains a settled row once and a second repair is a no-op', async () => {
+    const historyId = writeSettled('op-outbox-repair');
+    resetGitOpsPublicationsForTests();
+    repairGitOpsSettledOutbox();
+    const first = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
+    ).get(`gitops:settled:${historyId}`) as { n: number };
+    expect(first.n).toBe(1);
+    const drained = db().prepare(
+      'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null };
+    expect(drained.drained_at).not.toBeNull();
+    repairGitOpsSettledOutbox();
+    const second = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
+    ).get(`gitops:settled:${historyId}`) as { n: number };
+    expect(second.n).toBe(1);
+  });
+
+  it('does not insert a second notification when the unique key collides', () => {
+    const historyId = writeSettled('op-outbox-dedupe');
+    resetGitOpsPublicationsForTests();
+    DatabaseService.getInstance().addNotificationHistory(3, {
+      level: 'info',
+      category: 'git_pull_ready',
+      message: 'pre-existing',
+      timestamp: 1,
+      gitops_operation_id: 'op-outbox-dedupe',
+      dedupe_key: settledNotificationDedupeKey(historyId),
+    });
+    drainSettledOutboxRow(db(), historyId);
+    const count = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
+    ).get(settledNotificationDedupeKey(historyId)) as { n: number };
+    expect(count.n).toBe(1);
+    const note = db().prepare(
+      'SELECT message FROM notification_history WHERE dedupe_key = ?',
+    ).get(settledNotificationDedupeKey(historyId)) as { message: string };
+    expect(note.message).toBe('pre-existing');
+    const drained = db().prepare(
+      'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null };
+    expect(drained.drained_at).not.toBeNull();
+  });
+
+  it('fans out from the decoded payload rather than the history row', () => {
+    const historyId = writeSettled('op-outbox-payload');
+    resetGitOpsPublicationsForTests();
+    db().prepare(
+      'UPDATE gitops_settled_outbox SET payload_json = ? WHERE settled_history_id = ?',
+    ).run(encodeSettledAttemptPayload({
+      version: 1,
+      settledHistoryId: historyId,
+      applicationId: 'app-op-outbox-payload',
+      operationId: 'op-outbox-payload',
+      stackName: 'stack-op-outbox-payload',
+      nodeId: 3,
+      outcome: 'blocked',
+      nextAction: 'none',
+      reason: 'decoded-reason',
+      trigger: 'poll',
+      actor: 'system:source-controller',
+      at: 4242,
+    }), historyId);
+    drainSettledOutboxRow(db(), historyId);
+    const note = db().prepare(
+      'SELECT message, category FROM notification_history WHERE dedupe_key = ?',
+    ).get(settledNotificationDedupeKey(historyId)) as { message: string; category: string };
+    expect(note.category).toBe('git_plan_blocked');
+    expect(note.message).toContain('decoded-reason');
+  });
+
+  it('fails closed on an unknown payload version instead of inventing evidence', () => {
+    const historyId = writeSettled('op-outbox-version');
+    resetGitOpsPublicationsForTests();
+    db().prepare(
+      'UPDATE gitops_settled_outbox SET payload_version = 99, drained_at = NULL WHERE settled_history_id = ?',
+    ).run(historyId);
+    db().prepare('DELETE FROM notification_history WHERE gitops_operation_id = ?').run('op-outbox-version');
+    drainSettledOutboxRow(db(), historyId);
+    expect(decodeSettledAttemptPayload('{"version":99}', 99)).toEqual({
+      ok: false,
+      limitation: expect.stringContaining('version_unsupported'),
+    });
+    const note = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id = ?',
+    ).get('op-outbox-version') as { n: number };
+    expect(note.n).toBe(0);
+    const undrained = db().prepare(
+      'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null };
+    expect(undrained.drained_at).toBeNull();
   });
 });
 

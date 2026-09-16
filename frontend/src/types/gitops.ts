@@ -27,7 +27,16 @@ export type Connectivity = 'unknown' | 'reachable' | 'unreachable' | 'stale';
 
 export type LkgUnavailableReason = 'generation_missing' | 'recovery_unretainable';
 
-export type GitOpsAvailableAction = 'fetch' | 'apply' | 'dismiss' | 'deploy' | 'approve_legacy' | 'none';
+export type GitOpsAvailableAction =
+  | 'fetch'
+  | 'apply'
+  | 'dismiss'
+  | 'deploy'
+  | 'approve_legacy'
+  | 'suspend'
+  | 'resume'
+  | 'retry'
+  | 'none';
 
 // --- limitations ------------------------------------------------------------
 

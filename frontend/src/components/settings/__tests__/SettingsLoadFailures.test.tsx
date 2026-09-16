@@ -26,7 +26,7 @@ vi.mock('@/hooks/useExperimental', () => ({
 
 const activeNodeState = { id: 1 as number };
 vi.mock('@/context/NodeContext', () => ({
-    useNodes: () => ({ activeNode: { id: activeNodeState.id } }),
+    useNodes: () => ({ activeNode: { id: activeNodeState.id }, hasCapability: () => false }),
 }));
 
 import { apiFetch } from '@/lib/api';

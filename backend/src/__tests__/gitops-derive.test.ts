@@ -628,7 +628,7 @@ describe('gitops derivation', () => {
     store.insertApplication(interruptedApp('app-int-ap-block', { candidate_plan_blocked: 1 }));
     projection = projectApplication('app-int-ap-block', false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
-    expect(projection.availableActions).toEqual(['dismiss']);
+    expect(projection.availableActions).toEqual(['dismiss', 'suspend']);
   });
 
   it('offers ordinary apply only when the candidate generation is present, owned, and current', () => {
@@ -732,7 +732,7 @@ describe('gitops derivation', () => {
     let projection = projectApplication('app-acc-valid', false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
     expect(projection.facets.source.status).toBe('application_generation_accepted');
-    expect(projection.availableActions).toEqual(['none']);
+    expect(projection.availableActions).toEqual(['suspend']);
 
     // Missing: the accepted pointer names a generation that is gone, so
     // neither the fingerprint nor the sha comparison can run and success
@@ -950,6 +950,83 @@ describe('gitops derivation', () => {
     expect(projection.availableActions).toEqual(['none']);
     expect(projection.drift).toHaveLength(1);
     expect(projection.drift[0].action).toBe('none');
+  });
+
+  it('offers suspend on a live Direct source and never retry', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertGeneration(gen('gen-app-live-suspend', 'app-live-suspend'));
+    store.insertApplication(rawApp('app-live-suspend', {
+      stack_name: 'live-suspend-web',
+      accepted_generation_id: 'gen-app-live-suspend',
+      desired_commit_sha: 'abc123',
+    }));
+    const projection = projectApplication('app-live-suspend', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.availableActions).toContain('suspend');
+    expect(projection.availableActions).not.toContain('resume');
+    expect(projection.availableActions).not.toContain('retry');
+  });
+
+  it('offers resume on a suspended Direct source and never retry', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(rawApp('app-suspended', {
+      stack_name: 'suspended-web',
+      suspended_at: 10,
+      source_suspended_reason: 'paused',
+      retry_at: 99,
+      retry_count: 2,
+      failure_stage: 'fetch',
+      failure_class: 'NETWORK_TIMEOUT',
+      failure_at: 1,
+    }));
+    const projection = projectApplication('app-suspended', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('source_suspended');
+    expect(projection.availableActions).toContain('resume');
+    expect(projection.availableActions).not.toContain('suspend');
+    expect(projection.availableActions).not.toContain('retry');
+  });
+
+  it('offers retry only for retry-eligible failures that are not suspended', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(rawApp('app-failed-retry', {
+      stack_name: 'failed-retry-web',
+      failure_stage: 'fetch',
+      failure_class: 'NETWORK_TIMEOUT',
+      failure_at: 1,
+    }));
+    let projection = projectApplication('app-failed-retry', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('source_failed');
+    expect(projection.availableActions).toContain('retry');
+    expect(projection.availableActions).toContain('suspend');
+    expect(projection.availableActions).not.toContain('resume');
+
+    store.insertApplication(rawApp('app-retry-sched', {
+      stack_name: 'retry-sched-web',
+      retry_at: 50,
+      retry_count: 1,
+    }));
+    projection = projectApplication('app-retry-sched', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('source_retry_scheduled');
+    expect(projection.availableActions).toContain('retry');
+    expect(projection.availableActions).toContain('suspend');
+  });
+
+  it('does not offer controller actions on Blueprint applications', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(rawApp('app-bp-ctrl', {
+      target_mode: 'blueprint',
+      blueprint_id: 31,
+      lifecycle_key: 'blueprint:31',
+      stack_name: null,
+    }));
+    const projection = projectApplication('app-bp-ctrl', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.availableActions).not.toContain('suspend');
+    expect(projection.availableActions).not.toContain('resume');
+    expect(projection.availableActions).not.toContain('retry');
   });
 });
 

@@ -2,6 +2,8 @@ import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
 import { decodeGitOpsJson, encodeGitOpsJson, isRecord, GitOpsJsonError } from './json';
 import { enqueueHistoryPublication } from './publish';
+import { insertSettledOutbox } from './outbox';
+import { SETTLED_ATTEMPT_PAYLOAD_VERSION } from './attemptPayload';
 import { sanitizeForLog } from '../../utils/safeLog';
 import type {
   GitOpsApplicationRow,
@@ -220,6 +222,22 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
     row.redactedReasonClass ?? null,
   );
   if (result.changes !== 1) return null;
+  if (row.stage === 'source_reconcile_settled') {
+    insertSettledOutbox(db, {
+      version: SETTLED_ATTEMPT_PAYLOAD_VERSION,
+      settledHistoryId: id,
+      applicationId: row.application.id,
+      operationId: row.operationId,
+      stackName: row.application.stack_name,
+      nodeId: row.nodeId,
+      outcome: typeof row.after.outcome === 'string' ? row.after.outcome : 'unknown',
+      nextAction: typeof row.after.nextAction === 'string' ? row.after.nextAction : 'none',
+      reason: typeof row.after.reason === 'string' ? row.after.reason : null,
+      trigger: row.trigger,
+      actor: row.actor,
+      at: row.at,
+    });
+  }
   enqueueHistoryPublication({
     db,
     id,

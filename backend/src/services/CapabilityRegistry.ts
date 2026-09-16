@@ -68,6 +68,7 @@ export const CAPABILITIES = [
   'scoped-stack-auth-evidence',
   'remote-registry-credentials',
   'remote-registry-exact-ref-proof-v1',
+  'gitops-source-controller',
 ] as const;
 
 /**
@@ -140,6 +141,10 @@ export const REMOTE_REGISTRY_CREDENTIALS_CAPABILITY =
  */
 export const REMOTE_REGISTRY_EXACT_REF_PROOF_V1_CAPABILITY =
   'remote-registry-exact-ref-proof-v1' as const satisfies Capability;
+
+/** Direct GitOps source-controller routes and source-policy representation. Not Blueprint source evaluation. */
+export const GITOPS_SOURCE_CONTROLLER_CAPABILITY =
+  'gitops-source-controller' as const satisfies Capability;
 
 /** Contract version the hub and target negotiate for exact-ref proof. */
 export const REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION = 1;

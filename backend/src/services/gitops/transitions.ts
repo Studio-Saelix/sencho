@@ -411,6 +411,9 @@ export class GitOpsTransitions {
    * promotion; `targetApplied` binds the target only after promotion commits.
    */
   sourceAccepted(args: AppliedArgs): TransitionResult {
+    // Application-row pointer move only. Generation content is written
+    // exclusively by insertGeneration; this transition must never UPDATE a
+    // generation row.
     return this.mutateApp(args.applicationId, args.envelope, 'source_accepted', 'committed', (app) => {
       // Unlike applied() (preserved byte-identical, predates suspension),
       // this new entry point is the one a suspended source must refuse: no

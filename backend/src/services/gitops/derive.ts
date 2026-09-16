@@ -814,6 +814,18 @@ function deriveActions(
   if (app.candidate_generation_id && !app.active_operation_stage) actions.add('dismiss');
   if (targets.some((target) => targetDeployLegal(app, target))) actions.add('deploy');
   if (placement.status === 'placement_review_pending') actions.add('approve_legacy');
+  // Controller controls are Direct-only. In-flight and recovery statuses
+  // already returned ['none'] above, so those never offer suspend/resume/retry.
+  if (app.target_mode === 'direct') {
+    if (app.suspended_at) {
+      actions.add('resume');
+    } else {
+      actions.add('suspend');
+      if (source.status === 'source_failed' || source.status === 'source_retry_scheduled') {
+        actions.add('retry');
+      }
+    }
+  }
   if (actions.size === 0) return ['none'];
   return Array.from(actions);
 }

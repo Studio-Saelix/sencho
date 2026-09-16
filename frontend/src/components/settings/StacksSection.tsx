@@ -22,6 +22,7 @@ import { useNodeSettingsLoad } from './useNodeSettingsLoad';
 import { SettingsLoadGate } from './SettingsLoadError';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { NumberChip } from './SystemControls';
+import { GitPollingControl } from './GitPollingControl';
 
 const DEPLOY_STYLE_OPTIONS: { value: DeployFeedbackStyle; label: string }[] = [
     { value: 'modal', label: 'Modal' },
@@ -198,6 +199,7 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
 
             <SettingsLoadGate phase={phase} isCurrentNodeLoaded={isCurrentNodeLoaded} skeleton={<GuardrailSkeleton />}>
                 <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
+                    <GitPollingControl />
                     <SettingsSection title="Deploy Guardrails" kicker="this node">
                         <p className="pb-2 text-sm leading-relaxed text-stat-subtitle">
                             Node-level safety checks and post-deploy observation used during stack deploys and updates.

@@ -33,6 +33,7 @@ describe('gitops schema', () => {
       'gitops_intent_revisions',
       'gitops_migration_checkpoints',
       'gitops_rollout_candidates',
+      'gitops_settled_outbox',
       'gitops_target_current',
     ]);
     const version = db.prepare(

@@ -38,9 +38,10 @@ async function openGitSourcePanel(page: Page) {
   const gitBtn = page.getByRole('button', { name: /Git Source/i });
   await expect(gitBtn).toBeVisible({ timeout: 10_000 });
   await gitBtn.click();
-  // Match the title heading specifically; the modal also has a mono kicker
-  // ("<STACK> · GIT SOURCE") that would satisfy a plain getByText match.
+  // Sheet chrome: heading plus crumb. The old centered modal used a kicker
+  // ("<STACK> · GIT SOURCE") that a plain getByText match would also hit.
   await expect(page.getByRole('dialog').getByRole('heading', { name: /git source/i })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByRole('navigation', { name: /sheet location/i })).toContainText('Git source');
 }
 
 test.describe('Git Sources', () => {
@@ -196,8 +197,61 @@ test.describe('Git Sources', () => {
     await expect(page.getByRole('alertdialog')).toBeVisible({ timeout: 5_000 });
     await page.getByRole('alertdialog').getByRole('button', { name: /^Detach$/ }).click();
 
-    // After detach, the "Detach" button is gone from the panel footer.
+    // After detach, the "Detach" button is gone from the confirm dialog.
     await expect(page.getByRole('dialog').getByRole('button', { name: /^Detach$/ })).not.toBeVisible({ timeout: 5_000 });
+  });
+
+  test('sheet chrome offers suspend and resume for a linked source', async ({ page }) => {
+    const putStatus = await page.evaluate(async (name) => {
+      const res = await fetch(`/api/stacks/${name}/git-source`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          repo_url: 'https://github.com/docker/awesome-compose.git',
+          branch: 'master',
+          compose_path: 'nginx-golang/compose.yaml',
+          sync_env: false,
+          auth_type: 'none',
+          auto_apply_on_webhook: false,
+          auto_deploy_on_apply: false,
+        }),
+      });
+      return res.status;
+    }, TEST_STACK);
+    if (putStatus >= 400) {
+      test.skip(true, `Upstream dry-run returned ${putStatus}; skipping suspend path`);
+      return;
+    }
+
+    await openGitSourcePanel(page);
+    await expect(page.getByRole('navigation', { name: /sheet location/i })).toContainText(TEST_STACK);
+    await expect(page.getByRole('button', { name: /^suspend$/i })).toBeVisible();
+
+    await page.getByRole('button', { name: /^suspend$/i }).click();
+    const suspendDialog = page.getByRole('alertdialog');
+    await expect(suspendDialog).toBeVisible({ timeout: 5_000 });
+    await suspendDialog.getByRole('button', { name: /^suspend$/i }).click();
+
+    await expect(page.getByRole('button', { name: /^resume$/i })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('button', { name: /^suspend$/i })).toHaveCount(0);
+
+    await page.getByRole('button', { name: /^resume$/i }).click();
+    await expect(page.getByText(/reconciliation resumed/i)).toBeVisible({ timeout: 10_000 });
+    // Resume kicks evaluateNow, which is fetching for a while. availableActions
+    // is empty during that fetch, so wait for the source to leave checking
+    // before asserting Suspend is back.
+    await expect.poll(async () => {
+      const body = await page.evaluate(async (name) => {
+        const res = await fetch(`/api/stacks/${name}/git-source`, { credentials: 'include' });
+        return res.json();
+      }, TEST_STACK) as { gitopsRevision?: { facets?: { source?: { status?: string } } } };
+      const status = body.gitopsRevision?.facets?.source?.status;
+      return Boolean(status && status !== 'checking_fetching' && status !== 'applying');
+    }, { timeout: 30_000, intervals: [1_000] }).toBeTruthy();
+    await page.keyboard.press('Escape');
+    await openGitSourcePanel(page);
+    await expect(page.getByRole('button', { name: /^suspend$/i })).toBeVisible({ timeout: 10_000 });
   });
 });
 

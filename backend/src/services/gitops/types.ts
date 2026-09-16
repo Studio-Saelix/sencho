@@ -760,7 +760,16 @@ export type GitOpsHistoryEvidenceFields = {
 };
 
 export type GitOpsLimitation = { code: string; message: string; evidence: unknown };
-export type GitOpsAvailableAction = 'fetch' | 'apply' | 'dismiss' | 'deploy' | 'approve_legacy' | 'none';
+export type GitOpsAvailableAction =
+  | 'fetch'
+  | 'apply'
+  | 'dismiss'
+  | 'deploy'
+  | 'approve_legacy'
+  | 'suspend'
+  | 'resume'
+  | 'retry'
+  | 'none';
 
 export type ConfiguredPolicy =
   | { kind: 'git_source'; autoApplyOnWebhook: boolean; autoDeployOnApply: boolean }
