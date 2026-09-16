@@ -575,6 +575,24 @@ describe('SourceController automatic acceptance', () => {
         expect(GitOpsStore.getInstance().listGenerationsForApplication('app-ev-nohash')).toHaveLength(1);
     });
 
+    it('does not accept when a compose path escapes the candidate directory', async () => {
+        stageCandidate('app-ev-escape', 'ev-escape-web', 'gen-ev-escape');
+        DatabaseService.getInstance().getDb().prepare(
+            'UPDATE gitops_applications SET compose_paths_json = ? WHERE id = ?',
+        ).run(JSON.stringify(['compose.yaml', '../outside.yaml']), 'app-ev-escape');
+        mockDue([armDuePoll('app-ev-escape')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(okResult);
+        const dispatch = spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('app-ev-escape').accepted_generation_id).toBeNull();
+        expect(dispatch).not.toHaveBeenCalled();
+        expect(GitOpsStore.getInstance().listGenerationsForApplication('app-ev-escape')).toHaveLength(1);
+    });
+
     it('does not accept when candidate compose files were removed after staging', async () => {
         stageCandidate('app-ev-removed', 'ev-removed-web', 'gen-ev-removed');
         const composePath = path.join(

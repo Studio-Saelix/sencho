@@ -124,8 +124,13 @@ function candidateContentSha256FromDisk(
     const candidateAbs = path.resolve(stackManagedRoot(stackName), candidateRelPath);
     const parts: Array<{ path: string; content: Buffer }> = [];
     for (const local of localFiles) {
+        // Inline containment at the read sink. CodeQL does not credit the
+        // wrapped isPathWithinBase helper, so resolve against the candidate
+        // dir and check startsWith right here.
+        const abs = path.resolve(candidateAbs, local.replace(/\\/g, '/'));
+        if (!abs.startsWith(candidateAbs + path.sep)) return null;
         try {
-            parts.push({ path: local, content: readFileSync(path.join(candidateAbs, local)) });
+            parts.push({ path: local, content: readFileSync(abs) });
         } catch {
             return null;
         }
@@ -4438,7 +4443,13 @@ export class GitSourceService {
         const candidateAbs = path.resolve(stackManagedRoot(stackName), generation.candidate_dir);
         const parts: Array<{ path: string; content: Buffer }> = [];
         for (const local of localFiles) {
-            const abs = path.join(candidateAbs, local);
+            // Inline containment at the read sink. CodeQL does not credit the
+            // wrapped isPathWithinBase helper, so resolve against the candidate
+            // dir and check startsWith right here.
+            const abs = path.resolve(candidateAbs, local.replace(/\\/g, '/'));
+            if (!abs.startsWith(candidateAbs + path.sep)) {
+                return { status: 'refuse', reason: 'The staged candidate path is not inside the generation directory.' };
+            }
             try {
                 parts.push({ path: local, content: readFileSync(abs) });
             } catch (err: unknown) {
