@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { useNodes } from '@/context/NodeContext';
 import type { NotificationItem } from './dashboard/types';
 import type { SectionId } from './settings/types';
@@ -13,7 +12,8 @@ import {
 } from './dashboard';
 import { DashboardActivityCard } from './dashboard/DashboardActivityCard';
 import { useGitOpsSourceStates } from './dashboard/useGitOpsSourceStates';
-import { useStackHealthScope, type StackHealthNavTarget, type StackHealthScopeMode } from './dashboard/useStackHealthScope';
+import { useStackHealthScope, type StackHealthNavTarget } from './dashboard/useStackHealthScope';
+import { useStackHealthScopePreference } from './dashboard/useStackHealthScopePreference';
 
 interface HomeDashboardProps {
   onNavigateToStack?: (target: StackHealthNavTarget) => void;
@@ -29,7 +29,7 @@ export default function HomeDashboard({ onNavigateToStack, onOpenSettingsSection
   const { activeNode, nodes } = useNodes();
   const data = useDashboardData();
   const gitopsSourceStates = useGitOpsSourceStates();
-  const [scope, setScope] = useState<StackHealthScopeMode>('this-node');
+  const [scope, setScope] = useStackHealthScopePreference();
   const health = useStackHealthScope({
     scope,
     stackStatuses: data.stackStatuses,

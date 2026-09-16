@@ -60,6 +60,44 @@ describe('StackHealthTable expansion and navigation', () => {
     expect(onNavigateToStack).toHaveBeenCalledWith({ node: LOCAL_NODE, file: 'web.yml' });
   });
 
+  it('gives NETWORKS a clipped track wider than PORT so long names cannot paint over it', () => {
+    render(
+      <StackHealthTable
+        {...tableProps({
+          rows: rowsFromStatuses({
+            'web.yml': { status: 'running', networks: ['this-is-a-very-long-compose-network-name'] },
+          }),
+          coverage: { k: 1, m: 1, n: 1 },
+        })}
+      />,
+    );
+    const row = screen.getByRole('button', { name: /web/i });
+    expect(row.className).toMatch(/168px/);
+    expect(row.className).not.toMatch(/88px/);
+    const networkName = screen.getByText('this-is-a-very-long-compose-network-name');
+    expect(networkName).toHaveClass('truncate');
+    expect(networkName.parentElement).toHaveClass('overflow-hidden');
+  });
+
+  it('keeps All nodes NETWORKS immediately before PORT at 168px', () => {
+    render(
+      <StackHealthTable
+        {...tableProps({
+          scope: 'all-nodes',
+          rows: rowsFromStatuses({
+            'web.yml': { status: 'running', networks: ['this-is-a-very-long-compose-network-name'] },
+          }),
+          coverage: { k: 1, m: 1, n: 1 },
+        })}
+      />,
+    );
+    const row = screen.getByRole('button', { name: /web/i });
+    expect(row.className).toMatch(/168px_56px/);
+    const networkName = screen.getByText('this-is-a-very-long-compose-network-name');
+    expect(networkName).toHaveClass('truncate');
+    expect(networkName.parentElement).toHaveClass('overflow-hidden');
+  });
+
   it('renders -- for missing CPU and memory', () => {
     render(
       <StackHealthTable

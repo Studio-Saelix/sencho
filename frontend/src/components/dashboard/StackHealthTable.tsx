@@ -27,8 +27,8 @@ interface StackHealthTableProps {
 
 type SortKey = 'stack' | 'up' | 'cpu' | 'mem';
 
-const THIS_NODE_GRID = 'grid-cols-[minmax(0,1fr)_64px_64px_88px_56px_52px_52px_72px_110px_16px] min-w-[760px]';
-const ALL_NODES_GRID = 'grid-cols-[minmax(0,1fr)_88px_64px_64px_88px_56px_52px_52px_72px_110px_16px] min-w-[860px]';
+const THIS_NODE_GRID = 'grid-cols-[minmax(0,1fr)_64px_64px_168px_56px_52px_52px_72px_110px_16px] min-w-[840px]';
+const ALL_NODES_GRID = 'grid-cols-[minmax(0,1fr)_88px_64px_64px_168px_56px_52px_52px_72px_110px_16px] min-w-[940px]';
 
 function formatMemory(mb: number): string {
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
@@ -86,13 +86,10 @@ const sparkStroke: Record<RowState, string> = {
 function NetworksCell({ networks }: { networks?: string[] }) {
   if (!networks || networks.length === 0) return <>--</>;
   const [first, ...rest] = networks;
-  if (rest.length === 0) {
-    return <span className="truncate">{first}</span>;
-  }
   return (
-    <span className="truncate" title={networks.join(', ')}>
+    <span className="block min-w-0 truncate" title={rest.length > 0 ? networks.join(', ') : undefined}>
       {first}
-      <span className="text-stat-subtitle">{` +${rest.length}`}</span>
+      {rest.length > 0 ? <span className="text-stat-subtitle">{` +${rest.length}`}</span> : null}
     </span>
   );
 }
@@ -317,7 +314,7 @@ export function StackHealthTable({
                 <span className="truncate font-mono text-[11px] uppercase tracking-wide text-stat-subtitle">
                   {row.source === 'git' ? 'Git' : 'Local'}
                 </span>
-                <span className="min-w-0 font-mono text-xs text-stat-subtitle">
+                <span className="min-w-0 overflow-hidden font-mono text-xs text-stat-subtitle">
                   <NetworksCell networks={row.networks} />
                 </span>
                 <span className="truncate font-mono text-xs tabular-nums text-stat-subtitle">

@@ -55,7 +55,7 @@ While the dashboard is loading the CPU tile reads `--` and the caption shows `co
 
 ## Stack health
 
-A mono table of every stack discovered on the active node by default, sorted so the stacks demanding attention sit at the top. When your inventory has more than one node, a **This node | All nodes** control appears in the card header. **All nodes** fans out the same status, metrics, and GitOps lookups to every other reachable node and merges the results as each node answers, so a slow or denied node never blocks the rest.
+A mono table of every stack discovered on the active node by default, sorted so the stacks demanding attention sit at the top. When your inventory has more than one node, a **This node | All nodes** control appears in the card header. The last choice is remembered when you leave Home, switch nodes, or come back from another view. **All nodes** fans out the same status, metrics, and GitOps lookups to every other reachable node and merges the results as each node answers, so a slow or denied node never blocks the rest.
 
 <Frame>
   <img src="/images/dashboard/stack-health.png" alt="Stack health table titled 'Stack health' with a This node / All nodes control, coverage subtitle, and STACK / STATE / SOURCE / NETWORKS / PORT / UP / CPU / MEM / CPU · 10m columns listing stacks with row tints and sparklines." />

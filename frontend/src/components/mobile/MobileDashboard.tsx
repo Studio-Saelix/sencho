@@ -10,8 +10,8 @@ import {
   STACK_HEALTH_COLLAPSE_SIZE,
   useStackHealthScope,
   type StackHealthNavTarget,
-  type StackHealthScopeMode,
 } from '@/components/dashboard/useStackHealthScope';
+import { useStackHealthScopePreference } from '@/components/dashboard/useStackHealthScopePreference';
 import type { RowState } from '@/components/dashboard/classifyRow';
 import { Bar, Kicker, Masthead, MSparkline, StateDot } from './mobile-ui';
 import { NodeSwitcher } from '@/components/NodeSwitcher';
@@ -80,7 +80,7 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
   const { activeNode } = useNodes();
   const data = useDashboardData();
   const gitopsSourceStates = useGitOpsSourceStates();
-  const [scope, setScope] = useState<StackHealthScopeMode>('this-node');
+  const [scope, setScope] = useStackHealthScopePreference();
   const [expanded, setExpanded] = useState(false);
   const health = useStackHealthScope({
     scope,
