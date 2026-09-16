@@ -33,7 +33,7 @@ const useAuthMock = vi.fn((): AuthMock => ({
     can: () => true,
 }));
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => useAuthMock() }));
-vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 'local' } }) }));
+vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 'local' }, hasCapability: () => false }) }));
 vi.mock('@/context/LicenseContext', () => ({ useLicense: vi.fn(() => ({ isPaid: true })) }));
 vi.mock('../MastheadStatsContext', () => ({ useMastheadStats: () => {} }));
 
