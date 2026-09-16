@@ -514,4 +514,16 @@ CREATE INDEX IF NOT EXISTS idx_gitops_history_stack_created
 -- different column, so without this one that route sorts the whole table.
 CREATE INDEX IF NOT EXISTS idx_gitops_history_created
   ON gitops_history(created_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS gitops_settled_outbox (
+  settled_history_id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL,
+  payload_version INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  drained_at INTEGER NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gitops_settled_outbox_undrained
+  ON gitops_settled_outbox(created_at)
+  WHERE drained_at IS NULL;
 `;

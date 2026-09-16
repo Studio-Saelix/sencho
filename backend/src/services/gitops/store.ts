@@ -214,6 +214,12 @@ export class GitOpsStore {
     return this.db().prepare('SELECT * FROM gitops_generations WHERE id = ?').get(id) as GitOpsGenerationRow | undefined;
   }
 
+  listGenerationsForApplication(applicationId: string): GitOpsGenerationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_generations WHERE application_id = ? ORDER BY created_at ASC, id ASC`,
+    ).all(applicationId) as GitOpsGenerationRow[];
+  }
+
   /** Generations whose creating reconcile attempt has not durably settled. */
   listGenerationsClaimedByUnsettledAttempts(applicationId: string): GitOpsGenerationRow[] {
     return this.db().prepare(
@@ -380,13 +386,13 @@ export class GitOpsStore {
   /**
    * The most recently settled attempt for an application, for API and UI
    * projection. Distinct from getSettledAttempt, which looks up one exact
-   * operation rather than the newest one.
+   * operation rather than the newest one. Readers authorize the returned
+   * row through classifyHistoryRow before exposing it.
+   *
+   * Ordered by created_at then rowid (SQLite's implicit insertion-order key),
+   * not the id column: id is a random UUID and does not sort by recency.
    */
   latestSettledAttempt(applicationId: string): GitOpsHistoryRow | undefined {
-    // rowid (SQLite's implicit insertion-order key), not the id column: id
-    // is a random UUID and does not sort by recency the way rowid does, so
-    // it cannot break a created_at tie between two attempts settled within
-    // the same millisecond.
     return this.db().prepare(
       `SELECT * FROM gitops_history
        WHERE application_id = ? AND stage = 'source_reconcile_settled'

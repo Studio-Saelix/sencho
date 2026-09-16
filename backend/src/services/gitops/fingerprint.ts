@@ -37,3 +37,21 @@ export function canonicalMaterialConfigJson(input: MaterialConfigInput): string 
 export function materializationFingerprint(input: MaterialConfigInput): string {
   return createHash('sha256').update(canonicalMaterialConfigJson(input)).digest('hex');
 }
+
+/**
+ * Fingerprint of the staged candidate's compose files. insertGeneration
+ * records it as candidateContentSha256; source revalidation refuses when
+ * it is missing or no longer matches the files on disk. Paths are sorted
+ * so the hash is independent of the compose-path array's original order.
+ */
+export function candidateContentFingerprint(parts: ReadonlyArray<{ path: string; content: string | Buffer }>): string {
+  const hash = createHash('sha256');
+  const sorted = [...parts].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  for (const part of sorted) {
+    hash.update(part.path);
+    hash.update('\0');
+    hash.update(part.content);
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+}

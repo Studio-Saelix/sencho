@@ -20,8 +20,10 @@ import { directApplicationFixture } from './helpers/gitopsFixtures';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
 import { stackManagedRoot } from '../services/gitops/directApplication';
+import { candidateContentFingerprint } from '../services/gitops/fingerprint';
 import { GitSourceService } from '../services/GitSourceService';
 import { SourceController } from '../services/gitops/SourceController';
+import { DatabaseService } from '../services/DatabaseService';
 import type { GitOpsApplicationRow } from '../services/gitops/types';
 import type { ReconcileResult } from '../services/gitops/outcomes';
 
@@ -72,11 +74,14 @@ function getApp(id: string): GitOpsApplicationRow {
     return app;
 }
 
+const STAGED_COMPOSE = 'services:\n  web:\n    image: nginx:1.27\n';
+const STAGED_CONTENT_SHA = candidateContentFingerprint([{ path: 'compose.yaml', content: STAGED_COMPOSE }]);
+
 /** Write the compose file the controller reads as candidate evidence. */
 function stageCandidateComposeFile(stackName: string, generationId: string): void {
     const dir = path.join(stackManagedRoot(stackName), 'generations', `candidate-${generationId}`);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: nginx:1.27\n');
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), STAGED_COMPOSE);
 }
 
 /**
@@ -95,7 +100,12 @@ function stageCandidate(
     stackName: string,
     generationId: string,
     policy: 'manual' | 'review' | 'automatic' = 'automatic',
-    opts: { blocked?: boolean } = {},
+    opts: {
+        blocked?: boolean;
+        sourceEvidence?: string | null;
+        securityEvidence?: string | null;
+        composeInputs?: string | null;
+    } = {},
 ): void {
     const app = { ...directApplicationFixture(appId, stackName), source_policy: policy };
     GitOpsTransitions.getInstance().activateDirect({
@@ -125,9 +135,15 @@ function stageCandidate(
         previous_generation_id: null,
         redacted_limitations_json: '[]',
         portable_manifest_json: null,
-        compose_inputs_json: null,
-        source_policy_evidence_json: null,
-        security_policy_evidence_json: null,
+        compose_inputs_json: opts.composeInputs === undefined
+            ? JSON.stringify({ candidateContentSha256: STAGED_CONTENT_SHA })
+            : opts.composeInputs,
+        source_policy_evidence_json: opts.sourceEvidence === undefined
+            ? JSON.stringify({ sourcePolicy: policy })
+            : opts.sourceEvidence,
+        security_policy_evidence_json: opts.securityEvidence === undefined
+            ? JSON.stringify({ status: 'allowed', policyId: null })
+            : opts.securityEvidence,
         support_requirements_json: null,
         compatibility_requirements_json: null,
         created_at: Date.now(),
@@ -433,7 +449,9 @@ describe('SourceController automatic acceptance', () => {
         // change landed. The evaluation returns 'allowed', but by then the
         // durable row has left 'automatic' through the real transition, so
         // the acceptance boundary re-reading the row inside its transaction
-        // must refuse and the candidate must stay staged.
+        // must refuse. Revalidation mints a replacement that records the
+        // live source policy; the original generation stays byte-identical
+        // and nothing is accepted.
         stageCandidate('app-raced', 'raced-web', 'gen-raced');
         mockDue([armDuePoll('app-raced')]);
         evaluateCandidatePolicy.mockImplementation(async () => {
@@ -446,6 +464,7 @@ describe('SourceController automatic acceptance', () => {
         });
         const reconcile = spyOnReconcile()
             .mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        const original = { ...GitOpsStore.getInstance().getGeneration('gen-raced')! };
 
         controller.start();
         await advanceOneTick();
@@ -454,13 +473,16 @@ describe('SourceController automatic acceptance', () => {
         const row = getApp('app-raced');
         expect(row.source_policy).toBe('review');
         expect(row.accepted_generation_id).toBeNull();
-        expect(row.candidate_generation_id).toBe('gen-raced');
+        expect(row.candidate_generation_id).not.toBe('gen-raced');
+        expect(GitOpsStore.getInstance().getGeneration('gen-raced')).toEqual(original);
         expect(reconcile).toHaveBeenCalledTimes(1);
         expect(reconcile).not.toHaveBeenCalledWith(expect.objectContaining({ intent: 'apply' }));
     });
 
     it('leaves the accepted generation row byte-for-byte unchanged', async () => {
-        stageCandidate('app-evidence', 'evidence-web', 'gen-evidence');
+        stageCandidate('app-evidence', 'evidence-web', 'gen-evidence', 'automatic', {
+            securityEvidence: JSON.stringify({ status: 'allowed', policyId: 7 }),
+        });
         mockDue([armDuePoll('app-evidence')]);
         evaluateCandidatePolicy.mockResolvedValue({
             status: 'allowed',
@@ -485,8 +507,197 @@ describe('SourceController automatic acceptance', () => {
         expect(GitOpsStore.getInstance().getGeneration('gen-evidence')).toEqual(before);
     });
 
+    it('inserts a new generation when security-policy evidence changed after candidate creation', async () => {
+        stageCandidate('app-ev-changed', 'ev-changed-web', 'gen-ev-changed', 'automatic', {
+            securityEvidence: JSON.stringify({ status: 'allowed', policyId: 1 }),
+        });
+        mockDue([armDuePoll('app-ev-changed')]);
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'allowed',
+            policy: policyRow(),
+        });
+        spyOnReconcile().mockResolvedValue(okResult);
+        const dispatch = spyOnDispatch();
+        const before = { ...GitOpsStore.getInstance().getGeneration('gen-ev-changed')! };
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(GitOpsStore.getInstance().getGeneration('gen-ev-changed')).toEqual(before);
+        const generations = GitOpsStore.getInstance().listGenerationsForApplication('app-ev-changed');
+        expect(generations).toHaveLength(2);
+        const replacement = generations.find((row) => row.id !== 'gen-ev-changed');
+        expect(replacement).toBeDefined();
+        expect(replacement!.previous_generation_id).toBe('gen-ev-changed');
+        expect(replacement!.security_policy_evidence_json).toContain('"policyId":7');
+        expect(getApp('app-ev-changed').accepted_generation_id).toBe(replacement!.id);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        expect(dispatch.mock.calls[0][0].generationId).toBe(replacement!.id);
+    });
+
+    it('does not accept when the application fingerprint changed after candidate creation', async () => {
+        stageCandidate('app-fp-changed', 'fp-changed-web', 'gen-fp-changed');
+        DatabaseService.getInstance().getDb().prepare(
+            'UPDATE gitops_applications SET materialization_fingerprint = ? WHERE id = ?',
+        ).run('b'.repeat(64), 'app-fp-changed');
+        mockDue([armDuePoll('app-fp-changed')]);
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'allowed',
+            policy: policyRow(),
+        });
+        spyOnReconcile().mockResolvedValue(okResult);
+        const dispatch = spyOnDispatch();
+        const before = { ...GitOpsStore.getInstance().getGeneration('gen-fp-changed')! };
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(GitOpsStore.getInstance().getGeneration('gen-fp-changed')).toEqual(before);
+        expect(GitOpsStore.getInstance().listGenerationsForApplication('app-fp-changed')).toHaveLength(1);
+        expect(getApp('app-fp-changed').accepted_generation_id).toBeNull();
+        expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it('does not accept when the recorded content digest is missing', async () => {
+        stageCandidate('app-ev-nohash', 'ev-nohash-web', 'gen-ev-nohash', 'automatic', {
+            composeInputs: null,
+        });
+        mockDue([armDuePoll('app-ev-nohash')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(okResult);
+        const dispatch = spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('app-ev-nohash').accepted_generation_id).toBeNull();
+        expect(dispatch).not.toHaveBeenCalled();
+        expect(GitOpsStore.getInstance().listGenerationsForApplication('app-ev-nohash')).toHaveLength(1);
+    });
+
+    it('does not accept when candidate compose files were removed after staging', async () => {
+        stageCandidate('app-ev-removed', 'ev-removed-web', 'gen-ev-removed');
+        const composePath = path.join(
+            stackManagedRoot('ev-removed-web'),
+            'generations',
+            'candidate-gen-ev-removed',
+            'compose.yaml',
+        );
+        fs.unlinkSync(composePath);
+        mockDue([armDuePoll('app-ev-removed')]);
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'allowed',
+            policy: policyRow(),
+        });
+        spyOnReconcile().mockResolvedValue(okResult);
+        const dispatch = spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('app-ev-removed').accepted_generation_id).toBeNull();
+        expect(getApp('app-ev-removed').candidate_generation_id).toBe('gen-ev-removed');
+        expect(dispatch).not.toHaveBeenCalled();
+        expect(GitOpsStore.getInstance().listGenerationsForApplication('app-ev-removed')).toHaveLength(1);
+    });
+
+    it('does not accept when candidate compose files were replaced after staging', async () => {
+        stageCandidate('app-ev-replaced', 'ev-replaced-web', 'gen-ev-replaced');
+        const composePath = path.join(
+            stackManagedRoot('ev-replaced-web'),
+            'generations',
+            'candidate-gen-ev-replaced',
+            'compose.yaml',
+        );
+        fs.writeFileSync(composePath, 'services:\n  web:\n    image: nginx:1.28\n');
+        mockDue([armDuePoll('app-ev-replaced')]);
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'allowed',
+            policy: policyRow(),
+        });
+        spyOnReconcile().mockResolvedValue(okResult);
+        const dispatch = spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('app-ev-replaced').accepted_generation_id).toBeNull();
+        expect(dispatch).not.toHaveBeenCalled();
+        expect(GitOpsStore.getInstance().listGenerationsForApplication('app-ev-replaced')).toHaveLength(1);
+    });
+
+    it('does not accept when candidate compose files were modified after staging', async () => {
+        stageCandidate('app-ev-modified', 'ev-modified-web', 'gen-ev-modified');
+        const composePath = path.join(
+            stackManagedRoot('ev-modified-web'),
+            'generations',
+            'candidate-gen-ev-modified',
+            'compose.yaml',
+        );
+        fs.appendFileSync(composePath, '# drifted\n');
+        mockDue([armDuePoll('app-ev-modified')]);
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'allowed',
+            policy: policyRow(),
+        });
+        spyOnReconcile().mockResolvedValue(okResult);
+        const dispatch = spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('app-ev-modified').accepted_generation_id).toBeNull();
+        expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it('reuses the existing generation when evidence is unchanged', async () => {
+        stageCandidate('app-ev-same', 'ev-same-web', 'gen-ev-same', 'automatic', {
+            securityEvidence: JSON.stringify({ status: 'allowed', policyId: 7 }),
+        });
+        mockDue([armDuePoll('app-ev-same')]);
+        evaluateCandidatePolicy.mockResolvedValue({
+            status: 'allowed',
+            policy: policyRow(),
+        });
+        spyOnReconcile().mockResolvedValue(okResult);
+        spyOnDispatch();
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(getApp('app-ev-same').accepted_generation_id).toBe('gen-ev-same');
+        expect(GitOpsStore.getInstance().listGenerationsForApplication('app-ev-same')).toHaveLength(1);
+    });
+
+    it('inserts a new generation when source-policy evidence changed after candidate creation', async () => {
+        stageCandidate('app-src-changed', 'src-changed-web', 'gen-src-changed', 'automatic', {
+            sourceEvidence: JSON.stringify({ sourcePolicy: 'review' }),
+        });
+        mockDue([armDuePoll('app-src-changed')]);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue(okResult);
+        const dispatch = spyOnDispatch();
+        const before = { ...GitOpsStore.getInstance().getGeneration('gen-src-changed')! };
+
+        controller.start();
+        await advanceOneTick();
+
+        expect(GitOpsStore.getInstance().getGeneration('gen-src-changed')).toEqual(before);
+        const generations = GitOpsStore.getInstance().listGenerationsForApplication('app-src-changed');
+        expect(generations).toHaveLength(2);
+        const replacement = generations.find((row) => row.id !== 'gen-src-changed');
+        expect(replacement).toBeDefined();
+        expect(replacement!.previous_generation_id).toBe('gen-src-changed');
+        expect(replacement!.source_policy_evidence_json).toContain('"sourcePolicy":"automatic"');
+        expect(getApp('app-src-changed').accepted_generation_id).toBe(replacement!.id);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        expect(dispatch.mock.calls[0][0].generationId).toBe(replacement!.id);
+    });
+
     it('leaves no security-policy evidence behind when the candidate is held', async () => {
-        stageCandidate('app-ev-held', 'ev-held-web', 'gen-ev-held');
+        stageCandidate('app-ev-held', 'ev-held-web', 'gen-ev-held', 'automatic', {
+            securityEvidence: null,
+        });
         mockDue([armDuePoll('app-ev-held')]);
         evaluateCandidatePolicy.mockResolvedValue({
             status: 'blocked',

@@ -1,4 +1,4 @@
-import { promises as fsPromises, existsSync } from 'fs';
+import { promises as fsPromises, existsSync, readFileSync } from 'fs';
 import crypto from 'crypto';
 import os from 'os';
 import path from 'path';
@@ -46,7 +46,9 @@ import {
     type EventEnvelope,
     type ReconcileDeliveryIntent,
 } from './gitops/transitions';
-import { decodeGitOpsJson, isRecord, GitOpsJsonError } from './gitops/json';
+import { decodeGitOpsJson, encodeGitOpsJson, isRecord, GitOpsJsonError } from './gitops/json';
+import { candidateContentFingerprint } from './gitops/fingerprint';
+import type { CandidatePolicyEvaluation } from './PolicyEnforcement';
 import {
     buildCreateCheckpointRow,
     buildDirectApplicationRow,
@@ -94,6 +96,54 @@ export type GitSourceErrorCode =
     | 'LEGACY_PENDING'
     | 'PLAN_UNAVAILABLE'
     | 'OPERATION_IN_FLIGHT';
+
+export type SourceRevalidationResult =
+    | { status: 'reuse'; generation: GitOpsGenerationRow }
+    | { status: 'replaced'; generation: GitOpsGenerationRow }
+    | { status: 'refuse'; reason: string };
+
+/** Content digest recorded at insertGeneration. Missing means auto-accept must refuse. */
+function storedCandidateContentSha256(raw: string | null): string | null {
+    if (!raw) return null;
+    let decoded: unknown;
+    try {
+        decoded = decodeGitOpsJson(raw);
+    } catch {
+        return null;
+    }
+    if (!isRecord(decoded) || typeof decoded.candidateContentSha256 !== 'string') return null;
+    return decoded.candidateContentSha256;
+}
+
+function candidateContentSha256FromDisk(
+    stackName: string,
+    candidateRelPath: string,
+    composePaths: readonly string[],
+): string | null {
+    const localFiles = gitSourceLocalComposeFiles([...composePaths]);
+    const candidateAbs = path.resolve(stackManagedRoot(stackName), candidateRelPath);
+    const parts: Array<{ path: string; content: Buffer }> = [];
+    for (const local of localFiles) {
+        try {
+            parts.push({ path: local, content: readFileSync(path.join(candidateAbs, local)) });
+        } catch {
+            return null;
+        }
+    }
+    return candidateContentFingerprint(parts);
+}
+
+function composeInputsForCandidate(
+    stackName: string,
+    candidateRelPath: string,
+    composePaths: readonly string[],
+): { composeFileOrder: string[]; candidateContentSha256?: string } {
+    const composeFileOrder = [...composePaths];
+    const candidateContentSha256 = candidateContentSha256FromDisk(stackName, candidateRelPath, composePaths);
+    return candidateContentSha256
+        ? { composeFileOrder, candidateContentSha256 }
+        : { composeFileOrder };
+}
 
 export class GitSourceError extends Error {
     constructor(
@@ -2377,6 +2427,12 @@ export class GitSourceService {
                     actor,
                     at: gitopsEnv.at,
                     planBlocked: plan?.blocked === true,
+                    composeInputs: composeInputsForCandidate(
+                        stackName,
+                        materialization.value.candidateRelPath,
+                        src.compose_paths,
+                    ),
+                    sourcePolicyEvidence: { sourcePolicy: gitopsApp.source_policy },
                 }));
                 if (plan?.blocked) tx.sourceConflictBlocker(gitopsApp.id, generationId, gitopsEnv);
                 else tx.candidateReady(gitopsApp.id, generationId, reviewRequired, gitopsEnv);
@@ -4347,6 +4403,103 @@ export class GitSourceService {
     }
 
     /**
+     * Source revalidation under the Git mutex, immediately before
+     * sourceAccepted. Generation rows are append-only: a stale candidate is
+     * left byte-identical and, when policy or fingerprints changed, a new
+     * generation carrying current evidence is inserted and becomes the
+     * candidate. A modified, missing, or unreadable candidate is refused.
+     */
+    public async revalidateSourceCandidateBeforeAccept(opts: {
+        stackName: string;
+        generation: GitOpsGenerationRow;
+        evaluation: CandidatePolicyEvaluation;
+        trigger: ReconcileTrigger;
+        actor: string;
+    }): Promise<SourceRevalidationResult> {
+        return this.withStackLock(opts.stackName, () => this.revalidateSourceCandidateLocked(opts));
+    }
+
+    private async revalidateSourceCandidateLocked(opts: {
+        stackName: string;
+        generation: GitOpsGenerationRow;
+        evaluation: CandidatePolicyEvaluation;
+        trigger: ReconcileTrigger;
+        actor: string;
+    }): Promise<SourceRevalidationResult> {
+        const { stackName, generation, evaluation, trigger, actor } = opts;
+        const app = GitOpsStore.getInstance().getApplication(generation.application_id);
+        if (!app) return { status: 'refuse', reason: 'application disappeared during revalidation' };
+        if (!app.materialization_fingerprint) {
+            return { status: 'refuse', reason: 'The application has no materialization fingerprint.' };
+        }
+
+        const composePaths: string[] = app.compose_paths_json ? JSON.parse(app.compose_paths_json) : [];
+        const localFiles = gitSourceLocalComposeFiles(composePaths);
+        const candidateAbs = path.resolve(stackManagedRoot(stackName), generation.candidate_dir);
+        const parts: Array<{ path: string; content: Buffer }> = [];
+        for (const local of localFiles) {
+            const abs = path.join(candidateAbs, local);
+            try {
+                parts.push({ path: local, content: readFileSync(abs) });
+            } catch (err: unknown) {
+                const missing = typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT';
+                return {
+                    status: 'refuse',
+                    reason: missing
+                        ? 'The staged candidate is no longer present.'
+                        : 'The staged candidate is unreadable.',
+                };
+            }
+        }
+        const storedContent = storedCandidateContentSha256(generation.compose_inputs_json);
+        if (storedContent === null) {
+            return { status: 'refuse', reason: 'The staged candidate has no recorded content digest.' };
+        }
+        if (candidateContentFingerprint(parts) !== storedContent) {
+            return { status: 'refuse', reason: 'The staged candidate changed after it was recorded.' };
+        }
+        if (generation.materialization_fingerprint !== app.materialization_fingerprint) {
+            return { status: 'refuse', reason: 'The source fingerprint changed after this candidate was recorded.' };
+        }
+
+        const sourceEvidenceJson = encodeGitOpsJson({ sourcePolicy: app.source_policy });
+        const securityEvidenceJson = encodeGitOpsJson({
+            status: evaluation.status,
+            policyId: evaluation.policy?.id ?? null,
+        });
+        if (
+            generation.source_policy_evidence_json === sourceEvidenceJson
+            && generation.security_policy_evidence_json === securityEvidenceJson
+        ) {
+            return { status: 'reuse', generation };
+        }
+
+        const next: GitOpsGenerationRow = {
+            ...generation,
+            id: newGitOpsId(),
+            source_policy_evidence_json: sourceEvidenceJson,
+            security_policy_evidence_json: securityEvidenceJson,
+            previous_generation_id: generation.id,
+            operation_id: newGitOpsId(),
+            trigger,
+            actor,
+            created_at: Date.now(),
+        };
+        DatabaseService.getInstance().getDb().transaction(() => {
+            GitOpsStore.getInstance().insertGeneration(next);
+            GitOpsTransitions.getInstance().candidateReady(
+                app.id,
+                next.id,
+                app.source_policy !== 'automatic',
+                { operationId: next.operation_id, actor, trigger, at: next.created_at },
+            );
+        })();
+        const inserted = GitOpsStore.getInstance().getGeneration(next.id);
+        if (!inserted) return { status: 'refuse', reason: 'Replacement generation was not persisted.' };
+        return { status: 'replaced', generation: inserted };
+    }
+
+    /**
      * Route an accepted generation to its target. Blueprint mode always
      * blocks (BlueprintTargetAdapter; rollout orchestration does not exist
      * yet). Direct mode promotes the generation's own staged candidate
@@ -6079,6 +6232,12 @@ export class GitSourceService {
                             trigger: envelope.trigger,
                             actor: envelope.actor,
                             at: envelope.at,
+                            composeInputs: composeInputsForCandidate(
+                                input.stackName,
+                                staged.candidateRelPath,
+                                input.composePaths,
+                            ),
+                            sourcePolicyEvidence: { sourcePolicy: effectivePolicy },
                         }),
                         checkpoint: buildCreateCheckpointRow({
                             applicationId,

@@ -124,6 +124,13 @@ export async function runGitOpsSourceRecovery(): Promise<void> {
   } catch (err) {
     console.warn('[GitManifest] Managed-area sweep failed:', err instanceof Error ? err.message : String(err));
   }
+
+  try {
+    const { repairGitOpsSettledOutbox } = await import('../services/gitops/outbox');
+    repairGitOpsSettledOutbox();
+  } catch (err) {
+    console.error('[GitOps] Settled-outbox repair failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+  }
 }
 
 /**

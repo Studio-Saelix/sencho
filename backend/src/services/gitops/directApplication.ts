@@ -200,6 +200,9 @@ export function buildGenerationRow(args: {
   at: number;
   /** A blocked change plan is recorded, but such a generation can never apply. */
   planBlocked?: boolean;
+  composeInputs?: unknown;
+  sourcePolicyEvidence?: unknown;
+  securityPolicyEvidence?: unknown;
 }): GitOpsGenerationRow {
   return {
     id: args.id,
@@ -223,9 +226,15 @@ export function buildGenerationRow(args: {
     previous_generation_id: null,
     redacted_limitations_json: '[]',
     portable_manifest_json: null,
-    compose_inputs_json: null,
-    source_policy_evidence_json: null,
-    security_policy_evidence_json: null,
+    compose_inputs_json: args.composeInputs === undefined
+      ? null
+      : encodeGitOpsJson(args.composeInputs),
+    source_policy_evidence_json: args.sourcePolicyEvidence === undefined
+      ? null
+      : encodeGitOpsJson(args.sourcePolicyEvidence),
+    security_policy_evidence_json: args.securityPolicyEvidence === undefined
+      ? null
+      : encodeGitOpsJson(args.securityPolicyEvidence),
     support_requirements_json: null,
     compatibility_requirements_json: null,
     created_at: args.at,
