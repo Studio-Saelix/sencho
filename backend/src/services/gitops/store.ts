@@ -519,6 +519,16 @@ export class GitOpsStore {
     ).run(scope, schemaVersion, fingerprint, at);
   }
 
+  replaceApplicationEvidenceLimitations(
+    applicationId: string,
+    evidenceLimitationsJson: string | null,
+    updatedAt: number,
+  ): void {
+    this.db().prepare(
+      `UPDATE gitops_applications SET evidence_limitations_json=?, updated_at=? WHERE id=?`,
+    ).run(evidenceLimitationsJson, updatedAt, applicationId);
+  }
+
   /**
    * Persist an application's mutable columns without going through a
    * transition.

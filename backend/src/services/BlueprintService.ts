@@ -33,6 +33,7 @@ import {
     parseBlueprintMarker,
     type BlueprintMarker,
 } from '../helpers/blueprintMarker';
+import { GitManagedContentError, isGitManagedBlueprint } from './gitops/gitManaged';
 import {
     commitBlueprintDeploymentCause,
     commitBlueprintDeploymentRemoved,
@@ -287,6 +288,9 @@ export class BlueprintService {
      * name-conflict guard and the local/remote dispatch.
      */
     async deployToNode(blueprint: Blueprint, node: Node): Promise<DeployOutcome> {
+        if (isGitManagedBlueprint(blueprint)) {
+            throw new GitManagedContentError('Blueprint content is Git-managed and cannot be deployed inline');
+        }
         if (!this.acquireLock(blueprint.id, node.id)) {
             return { status: 'pending' };
         }
@@ -542,6 +546,10 @@ export class BlueprintService {
         const expected = parseBlueprintMarker(markerContent);
         if (!expected) {
             throw new Error('Invalid blueprint marker');
+        }
+        const blueprint = DatabaseService.getInstance().getBlueprint(expected.blueprintId);
+        if (blueprint && isGitManagedBlueprint(blueprint)) {
+            throw new GitManagedContentError('Blueprint content is Git-managed and cannot be deployed inline');
         }
         const fs = FileSystemService.getInstance(nodeId);
         const lock = await StackOpLockService.getInstance().runExclusive(

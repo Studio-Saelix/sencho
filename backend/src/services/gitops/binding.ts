@@ -1,28 +1,20 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { DatabaseService, type Blueprint } from '../DatabaseService';
 import { BlueprintService } from '../BlueprintService';
 import { buildBlueprintPreview, type BlueprintPreviewResult } from '../blueprintPreviewProjection';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, GitOpsTransitionError, type EventEnvelope } from './transitions';
-import type { GitOpsApplicationRow } from './types';
+import type { GitOpsApplicationRow, GitOpsIntentRevisionRow, GitOpsRolloutCandidateRow } from './types';
+import { decodeGitOpsEvidenceLimitations, encodeGitOpsEvidenceLimitations } from './json';
+import { isGitManagedBlueprint } from './gitManaged';
 
-export class GitManagedContentError extends Error {
-  readonly code = 'git_managed_content';
-  constructor(message = 'Blueprint content is Git-managed and cannot be edited inline') {
-    super(message);
-    this.name = 'GitManagedContentError';
-  }
-}
+export { GitManagedContentError, isGitManagedBlueprint } from './gitManaged';
 
 export class GitOpsBindingError extends Error {
   constructor(public readonly code: string, message: string) {
     super(message);
     this.name = 'GitOpsBindingError';
   }
-}
-
-export function isGitManagedBlueprint(blueprint: Pick<Blueprint, 'content_origin'>): boolean {
-  return blueprint.content_origin === 'git';
 }
 
 export type BindingMarkerClassification = 'managed' | 'unmanaged' | 'conflicting' | 'unproven';
@@ -163,6 +155,45 @@ export class GitOpsBindingService {
     const db = DatabaseService.getInstance();
     db.updateBlueprintContentOrigin(blueprint.id, 'git', applicationId);
     db.clearBlueprintApproval(blueprint.id);
+    this.markRolloutBlocked(blueprint, applicationId, actor);
+  }
+
+  private markRolloutBlocked(blueprint: Blueprint, applicationId: string, actor: string | null): void {
+    const envelope = this.envelope(actor);
+    const tx = GitOpsTransitions.getInstance();
+    const store = GitOpsStore.getInstance();
+    let app = store.getApplication(applicationId);
+    if (!app) return;
+    if (!app.intent_revision_id) {
+      tx.intentRevised({
+        applicationId,
+        intent: blockedIntentRow(applicationId, blueprint, envelope),
+        envelope,
+      });
+      app = store.getApplication(applicationId);
+      if (!app) return;
+    }
+    if (!app.rollout_candidate_id && app.intent_revision_id) {
+      tx.rolloutCandidateOpened({
+        applicationId,
+        candidate: blockedCandidateRow(applicationId, app.intent_revision_id, blueprint, envelope),
+        envelope,
+      });
+    }
+    app = store.getApplication(applicationId);
+    if (!app) return;
+    store.replaceApplicationEvidenceLimitations(
+      applicationId,
+      encodeGitOpsEvidenceLimitations(
+        decodeGitOpsEvidenceLimitations(app.evidence_limitations_json),
+        'git_managed_rollout_not_enabled',
+        {
+          code: 'git_managed_rollout_not_enabled',
+          detail: 'Blueprint rollout generations are not enabled',
+        },
+      ),
+      envelope.at,
+    );
   }
 
   private restoreInline(blueprintId: number): void {
@@ -288,4 +319,51 @@ function rollbackLimitationsFor(transition: BindingPreview['transition']): strin
     'Conversion changes placement authority only; the Git source and credentials stay on the original application.',
     'Git-managed Blueprints cannot deploy until Blueprint rollout generations are enabled.',
   ];
+}
+
+function blockedIntentRow(
+  applicationId: string,
+  blueprint: Blueprint,
+  envelope: EventEnvelope,
+): GitOpsIntentRevisionRow {
+  return {
+    id: randomUUID(),
+    application_id: applicationId,
+    blueprint_id: blueprint.id,
+    compose_content_sha256: createHash('sha256').update(blueprint.compose_content).digest('hex'),
+    blueprint_revision: blueprint.revision,
+    deploy_stack_name: blueprint.name,
+    selector_json: JSON.stringify(blueprint.selector),
+    pinned_node_id: blueprint.pinned_node_id,
+    cordon_implications_json: JSON.stringify({ pinnedOverridesCordon: blueprint.pinned_node_id !== null }),
+    rollout_strategy_json: JSON.stringify({ driftMode: blueprint.drift_mode, enabled: blueprint.enabled }),
+    runtime_drift_policy: blueprint.drift_mode,
+    stateful_policy_json: null,
+    health_failure_rollback_policy_json: null,
+    operation_id: envelope.operationId,
+    actor: envelope.actor,
+    created_at: envelope.at,
+  };
+}
+
+function blockedCandidateRow(
+  applicationId: string,
+  intentRevisionId: string,
+  blueprint: Blueprint,
+  envelope: EventEnvelope,
+): GitOpsRolloutCandidateRow {
+  const nodeIds = blueprint.selector.type === 'nodes' ? [...blueprint.selector.ids].sort((a, b) => a - b) : [];
+  return {
+    id: randomUUID(),
+    application_id: applicationId,
+    intent_revision_id: intentRevisionId,
+    compose_content_sha256: createHash('sha256').update(blueprint.compose_content).digest('hex'),
+    accepted_generation_id: null,
+    artifact_set_id: null,
+    required_targets_json: JSON.stringify({ nodeIds }),
+    authoritative: 1,
+    provenance: 'intent_change',
+    operation_id: envelope.operationId,
+    created_at: envelope.at,
+  };
 }

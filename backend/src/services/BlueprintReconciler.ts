@@ -23,6 +23,7 @@ import {
 } from './blueprintPreviewProjection';
 import { commitBlueprintDeploymentCause } from './gitops/blueprintDeploymentProducers';
 import { GitOpsStore } from './gitops/store';
+import { isGitManagedBlueprint } from './gitops/gitManaged';
 
 const RECONCILER_INTERVAL_MS = 60_000;
 const RECONCILER_INITIAL_DELAY_MS = 5_000;
@@ -216,6 +217,10 @@ export class BlueprintReconciler {
         if (!blueprint || !blueprint.enabled) {
             return { outcomes: [], refused: true };
         }
+        if (isGitManagedBlueprint(blueprint)) {
+            diagnosticLog('reconcileConfirmedPlan skipped: git-managed content', { blueprintId });
+            return { outcomes: [], refused: true };
+        }
         const parsed = parseApprovedBlastJson(blueprint.approved_blast_json);
         // Same fail-closed gate as tick reconcile: never execute when approval is
         // missing, invalid, or the stored fingerprint no longer matches live intent.
@@ -259,6 +264,10 @@ export class BlueprintReconciler {
     }
 
     private async reconcileBlueprint(blueprint: Blueprint, allNodes: Node[]): Promise<void> {
+        if (isGitManagedBlueprint(blueprint)) {
+            diagnosticLog('reconcile skipped: git-managed content', { blueprintId: blueprint.id });
+            return;
+        }
         const preview = await buildBlueprintPreview(blueprint.id);
         if (!preview) return;
 
@@ -669,6 +678,10 @@ export class BlueprintReconciler {
     async forceDeploy(blueprintId: number, nodeId: number): Promise<void> {
         const blueprint = DatabaseService.getInstance().getBlueprint(blueprintId);
         if (!blueprint) return;
+        if (isGitManagedBlueprint(blueprint)) {
+            console.warn(`[BlueprintReconciler] forceDeploy refused for git-managed blueprint ${blueprintId}`);
+            return;
+        }
         const node = DatabaseService.getInstance().getNode(nodeId);
         if (!node) return;
         const dep = DatabaseService.getInstance().getDeployment(blueprintId, nodeId);
