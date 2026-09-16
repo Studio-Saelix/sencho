@@ -140,6 +140,59 @@ export class GitOpsStore {
   }
 
   /**
+   * The live Blueprint-mode (or demoted inline) application that still holds
+   * the original Direct stack as its credential carrier.
+   */
+  getLiveBlueprintApplicationBySourceStack(stackName: string): GitOpsApplicationRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE configured_source_stack_name = ?
+         AND target_mode IN ('inline_blueprint','blueprint')
+         AND lifecycle_status IN ('active','creating')`,
+    ).get(stackName) as GitOpsApplicationRow | undefined;
+  }
+
+  getLiveBlueprintModeApplicationByRepoUrl(repoUrl: string): GitOpsApplicationRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE configured_repo_url = ?
+         AND target_mode = 'blueprint'
+         AND lifecycle_status IN ('active','creating')`,
+    ).get(repoUrl) as GitOpsApplicationRow | undefined;
+  }
+
+  /**
+   * The only writer allowed to change target_mode. Returns 1 when the
+   * expected current mode matched; 0 means the row was gone or already moved.
+   */
+  updateApplicationTargetBinding(args: {
+    id: string;
+    expectedMode: GitOpsApplicationRow['target_mode'];
+    targetMode: GitOpsApplicationRow['target_mode'];
+    stackName: string | null;
+    blueprintId: number | null;
+    configuredSourceStackName: string | null;
+    configuredRepoUrl: string | null;
+    updatedAt: number;
+  }): number {
+    return this.db().prepare(
+      `UPDATE gitops_applications
+       SET target_mode = ?, stack_name = ?, blueprint_id = ?,
+           configured_source_stack_name = ?, configured_repo_url = ?, updated_at = ?
+       WHERE id = ? AND target_mode = ?`,
+    ).run(
+      args.targetMode,
+      args.stackName,
+      args.blueprintId,
+      args.configuredSourceStackName,
+      args.configuredRepoUrl,
+      args.updatedAt,
+      args.id,
+      args.expectedMode,
+    ).changes;
+  }
+
+  /**
    * The most recently detached Direct application for a stack, if any.
    *
    * Consulted only after the live lookup misses. `applicationTombstoned` keeps

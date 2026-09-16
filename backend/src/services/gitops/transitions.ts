@@ -153,6 +153,190 @@ export class GitOpsTransitions {
     })();
   }
 
+  convertDirectToBlueprint(args: {
+    applicationId: string;
+    blueprintId: number;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.commitTargetBinding({
+      applicationId: args.applicationId,
+      envelope: args.envelope,
+      expectedMode: 'direct',
+      next: (app) => {
+        if (!app.stack_name) {
+          throw new GitOpsTransitionError('direct application is missing a stack name');
+        }
+        if (!app.configured_repo_url) {
+          throw new GitOpsTransitionError('blueprint mode requires a configured repo url');
+        }
+        return {
+          targetMode: 'blueprint',
+          stackName: null,
+          blueprintId: args.blueprintId,
+          configuredSourceStackName: app.stack_name,
+          configuredRepoUrl: app.configured_repo_url,
+        };
+      },
+      matchesDestination: (app) => (
+        app.target_mode === 'blueprint' && app.blueprint_id === args.blueprintId
+      ),
+      assertReady: (app) => {
+        const live = this.store().getLiveBlueprintApplication(args.blueprintId);
+        if (live && live.id !== app.id) {
+          throw new GitOpsTransitionError('live blueprint application already exists');
+        }
+        if (app.configured_repo_url) {
+          const sameRepo = this.store().getLiveBlueprintModeApplicationByRepoUrl(app.configured_repo_url);
+          if (sameRepo && sameRepo.id !== app.id) {
+            throw new GitOpsTransitionError('live blueprint application already claims this repo');
+          }
+        }
+      },
+    });
+  }
+
+  convertBlueprintToDirect(args: {
+    applicationId: string;
+    stackName: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.commitTargetBinding({
+      applicationId: args.applicationId,
+      envelope: args.envelope,
+      expectedMode: 'blueprint',
+      next: (app) => ({
+        targetMode: 'direct',
+        stackName: args.stackName,
+        blueprintId: null,
+        configuredSourceStackName: null,
+        configuredRepoUrl: app.configured_repo_url,
+      }),
+      matchesDestination: (app) => (
+        app.target_mode === 'direct' && app.stack_name === args.stackName
+      ),
+      assertReady: (app) => {
+        const live = this.store().getLiveDirectApplication(args.stackName);
+        if (live && live.id !== app.id) {
+          throw new GitOpsTransitionError('live direct application already exists');
+        }
+      },
+    });
+  }
+
+  blueprintModeDemoted(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.commitTargetBinding({
+      applicationId: args.applicationId,
+      envelope: args.envelope,
+      expectedMode: 'blueprint',
+      next: (app) => {
+        if (app.blueprint_id === null) {
+          throw new GitOpsTransitionError('an inline blueprint application needs a blueprint id');
+        }
+        return {
+          targetMode: 'inline_blueprint',
+          stackName: null,
+          blueprintId: app.blueprint_id,
+          configuredSourceStackName: null,
+          configuredRepoUrl: null,
+        };
+      },
+      matchesDestination: (app) => app.target_mode === 'inline_blueprint',
+      assertReady: () => undefined,
+    });
+  }
+
+  blueprintModePromoted(args: {
+    applicationId: string;
+    configuredRepoUrl: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.commitTargetBinding({
+      applicationId: args.applicationId,
+      envelope: args.envelope,
+      expectedMode: 'inline_blueprint',
+      next: (app) => {
+        if (app.blueprint_id === null) {
+          throw new GitOpsTransitionError('an inline blueprint application needs a blueprint id');
+        }
+        return {
+          targetMode: 'blueprint',
+          stackName: null,
+          blueprintId: app.blueprint_id,
+          configuredSourceStackName: app.configured_source_stack_name,
+          configuredRepoUrl: args.configuredRepoUrl,
+        };
+      },
+      matchesDestination: (app) => (
+        app.target_mode === 'blueprint' && app.configured_repo_url === args.configuredRepoUrl
+      ),
+      assertReady: (app) => {
+        const sameRepo = this.store().getLiveBlueprintModeApplicationByRepoUrl(args.configuredRepoUrl);
+        if (sameRepo && sameRepo.id !== app.id) {
+          throw new GitOpsTransitionError('live blueprint application already claims this repo');
+        }
+      },
+    });
+  }
+
+  private commitTargetBinding(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+    expectedMode: GitOpsApplicationRow['target_mode'];
+    next: (app: GitOpsApplicationRow) => {
+      targetMode: GitOpsApplicationRow['target_mode'];
+      stackName: string | null;
+      blueprintId: number | null;
+      configuredSourceStackName: string | null;
+      configuredRepoUrl: string | null;
+    };
+    matchesDestination: (app: GitOpsApplicationRow) => boolean;
+    assertReady: (app: GitOpsApplicationRow) => void;
+  }): TransitionResult {
+    return this.raw().transaction(() => {
+      const app = this.store().getApplication(args.applicationId);
+      if (!app) throw new GitOpsTransitionError('application not found');
+      if (args.matchesDestination(app)) {
+        const historyId = this.history(app, args.envelope, {
+          stage: 'application_retargeted',
+          outcome: 'committed',
+          before: { targetMode: args.expectedMode },
+          after: { targetMode: app.target_mode },
+        });
+        return { historyIds: historyId ? [historyId] : [], replayed: !historyId };
+      }
+      if (app.target_mode !== args.expectedMode) {
+        throw new GitOpsTransitionError(`current mode must be ${args.expectedMode}`);
+      }
+      args.assertReady(app);
+      const next = args.next(app);
+      const changes = this.store().updateApplicationTargetBinding({
+        id: app.id,
+        expectedMode: args.expectedMode,
+        targetMode: next.targetMode,
+        stackName: next.stackName,
+        blueprintId: next.blueprintId,
+        configuredSourceStackName: next.configuredSourceStackName,
+        configuredRepoUrl: next.configuredRepoUrl,
+        updatedAt: args.envelope.at,
+      });
+      if (changes !== 1) {
+        throw new GitOpsTransitionError('application target binding changed concurrently');
+      }
+      const updated = this.store().getApplication(app.id);
+      if (!updated) throw new GitOpsTransitionError('application not found');
+      const historyId = this.history(updated, args.envelope, {
+        stage: 'application_retargeted',
+        outcome: 'committed',
+        before: { targetMode: args.expectedMode },
+        after: { targetMode: next.targetMode },
+      });
+      return { historyIds: historyId ? [historyId] : [], replayed: !historyId };
+    })();
+  }
+
   fetched(applicationId: string, commitSha: string, envelope: EventEnvelope, resolvedRefKind: RefKind | null = null): TransitionResult {
     return this.mutateApp(applicationId, envelope, 'fetched', 'committed', (app) => {
       this.requireMatchingFetch(app, envelope);
@@ -2638,7 +2822,10 @@ export class GitOpsTransitions {
    * compile, appear in the history snapshot, and then be silently dropped at
    * commit. Only identity and provenance are excluded, because they are fixed
    * at insert: id, lifecycle_key, target_mode, stack_name, blueprint_id,
-   * created_at.
+   * created_at. Binding transitions change target_mode, stack_name,
+   * blueprint_id, and configured_source_stack_name only through the guarded
+   * store UPDATE. Ordinary pointer writes must not become a second
+   * target-mode mutation path.
    */
   private writeApplication(app: GitOpsApplicationRow): void {
     this.raw().prepare(

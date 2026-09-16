@@ -9034,11 +9034,10 @@ stmt.run('gitops_schema_version', '1');
         contentOrigin: 'inline' | 'git',
         applicationId: string | null,
     ): Blueprint | undefined {
-        if (contentOrigin === 'git') {
-            if (!applicationId) {
-                throw new Error('git content origin requires application_id');
-            }
-        } else if (applicationId !== null) {
+        if (contentOrigin === 'git' && !applicationId) {
+            throw new Error('git content origin requires application_id');
+        }
+        if (contentOrigin === 'inline' && applicationId !== null) {
             throw new Error('inline content origin requires application_id to be null');
         }
         const existing = this.getBlueprint(id);

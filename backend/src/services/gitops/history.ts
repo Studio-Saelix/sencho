@@ -27,6 +27,7 @@ export type HistoryOutcome = GitOpsHistoryRow['outcome'];
  */
 export type GitOpsHistoryStage =
   | 'application_activated'
+  | 'application_retargeted'
   | 'application_tombstoned'
   | 'applied'
   | 'apply_failed'
