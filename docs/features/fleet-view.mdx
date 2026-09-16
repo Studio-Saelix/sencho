@@ -309,7 +309,7 @@ When you click **Update** on the local row, a confirmation dialog appears first 
 
 ## How fleet data is fetched
 
-Fleet View queries every registered node in parallel. Each node responds independently; one slow or offline node does not block the rest. Local node data comes from the host Docker socket and system stats directly. Remote node data is fetched over the [Distributed API proxy](/features/multi-node) using each node's bearer token.
+Fleet View queries every registered node in parallel. A remote that does not answer within a few seconds is marked unreachable so it cannot block the rest; the next overview refresh retries it. Local node data comes from the host Docker socket and system stats directly. Remote node data is fetched over the [Distributed API proxy](/features/multi-node) using each node's bearer token.
 
 <Note>
   Fleet View always runs on your control (local) Sencho instance. It is never proxied through a remote node.
@@ -318,6 +318,9 @@ Fleet View queries every registered node in parallel. Each node responds indepen
 ## Troubleshooting
 
 <AccordionGroup>
+  <Accordion title="A remote card shows unreachable even though Test connection succeeds">
+    Fleet Overview gives each remote a short window to return live stats. Last successful contact is preserved and still shows under Node details. **Settings → Infrastructure → Nodes → Test connection** uses a longer handshake, so it can succeed on a slow WAN link while Overview still marks the node unreachable for that cycle. Wait for the next overview refresh (every 30 seconds), or run Test connection on that node's Settings row to confirm the API URL and token.
+  </Accordion>
   <Accordion title="A remote node's Current version reads 'unknown'">
     The control instance could not resolve the remote's `/api/meta` endpoint. Open **Settings → Infrastructure → Nodes**, click **Test connection** on the row, and read the toast. The most common causes are a wrong API URL or scheme, a token that has been rotated on the remote (issue a new one and update the saved row), or a firewall or reverse proxy that is not forwarding to the remote's Sencho port. Once the remote is reachable, its version surfaces on the next fleet refresh and the **Update** button becomes available again.
   </Accordion>

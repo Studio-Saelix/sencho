@@ -374,6 +374,11 @@ function offlineRemoteOverview(node: Node, status: 'online' | 'offline'): FleetN
   };
 }
 
+// Per-remote overview probe budget. A configured-but-dead proxy host must
+// degrade to offline inside this window so one unreachable node cannot hold
+// GET /api/fleet/overview (and the Fleet, Heartbeat, and Mobile loading states).
+const FLEET_OVERVIEW_PROBE_TIMEOUT_MS = 3000;
+
 async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise<FleetNodeOverview> {
   const target = NodeRegistry.getInstance().getProxyTarget(node.id);
   if (!target) {
@@ -391,10 +396,11 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
   const t0 = Date.now();
 
   try {
+    const signal = AbortSignal.timeout(FLEET_OVERVIEW_PROBE_TIMEOUT_MS);
     const [statsRes, systemStatsRes, stacksRes] = await Promise.allSettled([
-      safeRemoteFetch(`${baseUrl}/api/stats`, { headers, signal: AbortSignal.timeout(10000) }, target.trustedLoopback),
-      safeRemoteFetch(`${baseUrl}/api/system/stats`, { headers, signal: AbortSignal.timeout(10000) }, target.trustedLoopback),
-      safeRemoteFetch(`${baseUrl}/api/stacks`, { headers, signal: AbortSignal.timeout(10000) }, target.trustedLoopback),
+      safeRemoteFetch(`${baseUrl}/api/stats`, { headers, signal }, target.trustedLoopback),
+      safeRemoteFetch(`${baseUrl}/api/system/stats`, { headers, signal }, target.trustedLoopback),
+      safeRemoteFetch(`${baseUrl}/api/stacks`, { headers, signal }, target.trustedLoopback),
     ]);
 
     interface RemoteSystemStats {
@@ -625,18 +631,7 @@ fleetRouter.get('/overview', authMiddleware, async (req: Request, res: Response)
     const overview: FleetNodeOverview[] = results.map((result, i) => {
       if (result.status === 'fulfilled') return result.value;
       console.error(`[Fleet] Failed to fetch node ${nodes[i].name}:`, result.reason);
-      return {
-        id: nodes[i].id,
-        name: nodes[i].name,
-        type: nodes[i].type,
-        status: 'offline' as const,
-        stats: null,
-        systemStats: null,
-        stacks: null,
-        cordoned: nodes[i].cordoned,
-        cordoned_at: nodes[i].cordoned_at,
-        cordoned_reason: nodes[i].cordoned_reason,
-      };
+      return offlineRemoteOverview(nodes[i], 'offline');
     });
 
     if (debug) {
