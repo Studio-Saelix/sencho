@@ -28,7 +28,7 @@ Writes land in the stack's existing directory using the same storage Sencho uses
 
 Git Source opens as a right-side sheet from the stack editor toolbar. It is not a centered dialog. The chrome is the same sheet used elsewhere in Sencho: a crumb (`Stack › {name} › Git source`), the heading **Git source**, a one-line summary of the linked ref, a toolbar, body sections, and a freshness line in the footer.
 
-The toolbar carries **Save** or **Update**, **Pull now** when a source is linked, **Suspend** or **Resume** when that action is offered, and **Remove** when a source is linked. Nested pull/apply and detach confirmations stay as separate dialogs on top of the sheet.
+The toolbar carries **Save** or **Update**, **Pull now** when a source is linked and not suspended, **Suspend** or **Resume** when that action is offered, and **Remove** when a source is linked. Nested pull/apply and detach confirmations stay as separate dialogs on top of the sheet.
 
 The body groups three sections:
 
@@ -55,7 +55,7 @@ These are the states you will see most often.
 | **Reconcile required** | What was reconciled no longer matches the configuration in force. Pull again to rebuild the plan. |
 | **Applying** | A commit is being written to the stack directory. |
 | **Retry scheduled** | The last attempt failed and another is queued. |
-| **Suspended** | Reconciliation is paused until you resume. Polling, webhooks, and automatic apply stay off for this source. |
+| **Suspended** | Reconciliation is paused until you resume. Polling, webhooks, automatic apply, and Pull now stay off for this source. |
 | **Source failed** | The last operation on this source failed. |
 | **Outcome unknown** | An operation was interrupted, so Sencho cannot confirm how it ended. |
 | **Recovering** | A recovery is running on this stack. |
@@ -141,7 +141,7 @@ Review-only sources still fetch on the schedule and stage a plan for review. Aut
 
 ## Suspend, resume, and retry
 
-**Suspend** pauses reconciliation for one source: polling, webhooks, and automatic apply stop until you resume. Pull now and save stay available. An optional reason is stored with the suspension.
+**Suspend** pauses reconciliation for one source: polling, webhooks, and automatic apply stop until you resume. Save stays available; resume before pulling again. An optional reason is stored with the suspension.
 
 **Resume** clears the pause and re-evaluates the source immediately rather than waiting for the next poll.
 

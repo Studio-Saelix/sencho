@@ -2406,7 +2406,8 @@ export class GitSourceService {
                     staged.commit_sha === fetched.commitSha &&
                     staged.materialization_fingerprint === identity.fingerprint &&
                     staged.plan_blocked === (plan?.blocked === true ? 1 : 0) &&
-                    gitopsApp.review_required === (reviewRequired ? 1 : 0)
+                    gitopsApp.review_required === (reviewRequired ? 1 : 0) &&
+                    storedCandidateContentSha256(staged.compose_inputs_json) !== null
                 ) {
                     return;
                 }

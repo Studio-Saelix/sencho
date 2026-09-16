@@ -573,7 +573,7 @@ export function GitSourcePanel({
   const showPendingReview = Boolean(pending && !showControllerCard);
 
   const secondaryActions: SystemSheetAction[] = [];
-  if (source) {
+  if (source && sourceFacet?.status !== 'source_suspended') {
     secondaryActions.push({
       label: pulling ? 'Pulling' : 'Pull now',
       onClick: () => { void pullNow(); },
@@ -824,7 +824,7 @@ export function GitSourcePanel({
         onConfirm={suspendSource}
       >
         <p className="text-sm text-stat-subtitle">
-          Stops polling, webhooks, and automatic apply for this source until you resume. Pull now and save stay available.
+          Stops polling, webhooks, and automatic apply for this source until you resume. Save stays available; resume before pulling again.
         </p>
         <label className="mt-3 block text-sm font-medium text-stat-value" htmlFor="git-suspend-reason">
           Reason (optional)

@@ -12,6 +12,9 @@ const nodeCtl = vi.hoisted(() => ({
   activeNodeMeta: { capabilities: ['gitops-source-controller'] } as { capabilities: string[] } | null,
   hasCapability: vi.fn(() => true),
 }));
+const authCtl = vi.hoisted(() => ({
+  canManage: true,
+}));
 vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({
     activeNode: nodeCtl.activeNode,
@@ -20,7 +23,9 @@ vi.mock('@/context/NodeContext', () => ({
   }),
 }));
 vi.mock('@/context/AuthContext', () => ({
-  useAuth: () => ({ can: () => true }),
+  useAuth: () => ({
+    can: (action: string) => (action === 'node:manage' ? authCtl.canManage : true),
+  }),
 }));
 
 import { apiFetch } from '@/lib/api';
@@ -38,6 +43,7 @@ describe('GitPollingControl', () => {
     nodeCtl.activeNode = { id: 1 };
     nodeCtl.activeNodeMeta = { capabilities: ['gitops-source-controller'] };
     nodeCtl.hasCapability.mockReturnValue(true);
+    authCtl.canManage = true;
   });
 
   it('renders off when GET returns poll_interval_mins 0', async () => {
@@ -95,6 +101,15 @@ describe('GitPollingControl', () => {
     nodeCtl.activeNodeMeta = null;
     render(<GitPollingControl />);
     expect(screen.queryByRole('switch', { name: /poll git sources/i })).not.toBeInTheDocument();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('does not fetch polling settings without node:manage', async () => {
+    authCtl.canManage = false;
+    render(<GitPollingControl />);
+    const toggle = await screen.findByRole('switch', { name: /poll git sources/i });
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    expect(toggle).toBeDisabled();
     expect(apiFetch).not.toHaveBeenCalled();
   });
 });

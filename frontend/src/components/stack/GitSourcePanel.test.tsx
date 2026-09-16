@@ -672,6 +672,7 @@ describe('GitSourcePanel controller controls', () => {
     expect(await screen.findByRole('button', { name: /^resume$/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^suspend$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^retry$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /pull now/i })).not.toBeInTheDocument();
   });
 
   it('hides Resume when the source-controller capability is missing', async () => {
@@ -680,7 +681,7 @@ describe('GitSourcePanel controller controls', () => {
       jsonRes(linkedWith(controllerRevision({ status: 'source_suspended', actions: ['resume'] }))),
     );
     render(panel());
-    await screen.findByRole('button', { name: /pull now/i });
+    await screen.findByRole('button', { name: /^update$/i });
     expect(screen.queryByRole('button', { name: /^resume$/i })).not.toBeInTheDocument();
   });
 
@@ -691,7 +692,7 @@ describe('GitSourcePanel controller controls', () => {
     render(
       <GitSourcePanel open onOpenChange={vi.fn()} stackName="web" canEdit={false} isDarkMode={false} />,
     );
-    await screen.findByRole('button', { name: /pull now/i });
+    await screen.findByTestId('git-controller-state');
     expect(screen.queryByRole('button', { name: /^resume$/i })).not.toBeInTheDocument();
   });
 

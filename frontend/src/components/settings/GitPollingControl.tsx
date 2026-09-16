@@ -23,6 +23,7 @@ export function GitPollingControl() {
   const canEdit = canManageNode(can, activeNode?.id);
   const metaReady = !activeNode || activeNodeMeta != null;
   const hasController = metaReady && hasCapability(GITOPS_SOURCE_CONTROLLER_CAPABILITY);
+  const shouldFetchSettings = hasController && canEdit;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [mins, setMins] = useState(0);
@@ -46,9 +47,13 @@ export function GitPollingControl() {
   }, []);
 
   useEffect(() => {
-    if (!hasController) return;
+    if (!shouldFetchSettings) {
+      setMins(0);
+      setLoading(false);
+      return;
+    }
     void load();
-  }, [load, activeNode?.id, hasController]);
+  }, [load, activeNode?.id, shouldFetchSettings]);
 
   const save = async (next: number) => {
     setSaving(true);

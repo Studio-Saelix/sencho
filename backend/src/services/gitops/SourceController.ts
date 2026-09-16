@@ -471,7 +471,7 @@ export class SourceController {
             );
             return;
         }
-        let acceptGeneration = generation;
+        let acceptGeneration: GitOpsGenerationRow;
         try {
             const revalidated = await GitSourceService.getInstance().revalidateSourceCandidateBeforeAccept({
                 stackName,
