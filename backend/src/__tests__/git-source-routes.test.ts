@@ -883,6 +883,8 @@ describe('POST /api/stacks/:stackName/git-source/resume', () => {
     it('returns the normalized result', async () => {
         const resumeSpy = vi.spyOn(GitSourceService.getInstance(), 'resume')
             .mockResolvedValue({ outcome: 'no_source_change', reason: 'ok', nextAction: 'none' });
+        const { SourceController } = await import('../services/gitops/SourceController');
+        const evaluateSpy = vi.spyOn(SourceController.getInstance(), 'evaluateNow').mockResolvedValue();
         const res = await request(app)
             .post('/api/stacks/existing-stack/git-source/resume')
             .set('Authorization', `Bearer ${adminToken()}`)
@@ -890,7 +892,38 @@ describe('POST /api/stacks/:stackName/git-source/resume', () => {
         expect(res.status).toBe(200);
         expect(res.body.outcome).toBe('no_source_change');
         expect(resumeSpy).toHaveBeenCalledWith('existing-stack', expect.objectContaining({ actor: expect.any(String) }));
+        // The route wakes the source immediately: the controller's resume
+        // evaluation is fired for the same stack the service just resumed.
+        expect(evaluateSpy).toHaveBeenCalledWith('existing-stack');
         resumeSpy.mockRestore();
+        evaluateSpy.mockRestore();
+    });
+
+    it('still returns the resume outcome when the immediate evaluation cannot start', async () => {
+        const resumeSpy = vi.spyOn(GitSourceService.getInstance(), 'resume')
+            .mockResolvedValue({ outcome: 'no_source_change', reason: 'ok', nextAction: 'none' });
+        const { SourceController } = await import('../services/gitops/SourceController');
+        const evaluateSpy = vi.spyOn(SourceController.getInstance(), 'evaluateNow')
+            .mockRejectedValue(new Error('database is locked'));
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            const res = await request(app)
+                .post('/api/stacks/existing-stack/git-source/resume')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({});
+            // The response reports that suspension was cleared, not the
+            // outcome of an evaluation that never ran: it stays 200 with
+            // resume's derived result, and the failure is logged, not
+            // swallowed.
+            expect(res.status).toBe(200);
+            expect(res.body.outcome).toBe('no_source_change');
+            await new Promise((resolve) => setImmediate(resolve));
+            expect(errorSpy).toHaveBeenCalledTimes(1);
+        } finally {
+            resumeSpy.mockRestore();
+            evaluateSpy.mockRestore();
+            errorSpy.mockRestore();
+        }
     });
 
     it('denies without the stack:edit permission', async () => {

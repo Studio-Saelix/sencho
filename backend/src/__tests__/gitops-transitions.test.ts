@@ -735,6 +735,107 @@ describe('gitops transitions', () => {
     expect(application.suspended_at).not.toBeNull();
   });
 
+  it('keeps a rollout pause across source suspension and resume', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-pause-coex', 'pause-coex-web'), nodeId: 1, envelope: envelope('op-act-pause-coex') });
+    tx.rolloutPaused('app-pause-coex', null, 'waiting for the maintenance window', envelope('op-rp-app'));
+    tx.rolloutPaused('app-pause-coex', 1, 'fleet rollout paused', envelope('op-rp-target'));
+
+    tx.sourceSuspended('app-pause-coex', 'operator hold', envelope('op-susp-pause-coex'));
+    // Suspension is a decision about future source work. It is not a rollout
+    // pause, and it must neither overwrite one nor read like one.
+    let application = store.getApplication('app-pause-coex')!;
+    expect(application.source_suspended_reason).toBe('operator hold');
+    expect(application.pause_reason).toBe('waiting for the maintenance window');
+    expect(store.getTarget('app-pause-coex', 1)?.pause_reason).toBe('fleet rollout paused');
+
+    tx.sourceUnsuspended('app-pause-coex', envelope('op-unsusp-pause-coex'));
+    application = store.getApplication('app-pause-coex')!;
+    expect(application.suspended_at).toBeNull();
+    expect(application.source_suspended_reason).toBeNull();
+    // The rollout's own pause survives the whole suspend/resume cycle on
+    // both rows: only rolloutUnpaused clears it.
+    expect(application.pause_at).not.toBeNull();
+    expect(application.pause_reason).toBe('waiting for the maintenance window');
+    const target = store.getTarget('app-pause-coex', 1)!;
+    expect(target.pause_at).not.toBeNull();
+    expect(target.pause_reason).toBe('fleet rollout paused');
+  });
+
+  it('records a promotion whose apply completed after suspension interrupted it', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-susp-promo', 'susp-promo-web'), nodeId: 1, envelope: envelope('op-act-susp-promo') });
+    store.insertGeneration(gen('gen-susp-promo', 'app-susp-promo'));
+    tx.fetchStarted('app-susp-promo', envelope('op-f-susp-promo'));
+    tx.fetched('app-susp-promo', 'abc123', envelope('op-f-susp-promo'));
+    tx.candidateReady('app-susp-promo', 'gen-susp-promo', false, envelope('op-c-susp-promo'));
+    const applyOp = envelope('op-a-susp-promo');
+    tx.applyStarted('app-susp-promo', 'gen-susp-promo', applyOp);
+
+    // Suspension interrupts the in-flight operation without discarding it:
+    // the apply is marked interrupted, and the candidate stays staged.
+    tx.sourceSuspended('app-susp-promo', 'operator hold', envelope('op-susp-susp-promo'));
+    expect(store.getApplication('app-susp-promo')?.interruption_stage).toBe('apply_started');
+
+    // The apply's terminal event still lands after the interrupt. Suspension
+    // gates new work (fetch, apply, accept); it never cancels the accounting
+    // of work that already committed to disk.
+    tx.applied({
+      applicationId: 'app-susp-promo',
+      generationId: 'gen-susp-promo',
+      artifactSetId: 'art-susp-promo',
+      sourceAcceptanceId: 'acc-susp-promo',
+      authority: 'operator',
+      envelope: applyOp,
+    });
+    const application = store.getApplication('app-susp-promo')!;
+    expect(application.accepted_generation_id).toBe('gen-susp-promo');
+    expect(application.interruption_stage).toBeNull();
+    // Recording an in-flight promotion does not resume anything.
+    expect(application.suspended_at).not.toBeNull();
+    expect(store.getTarget('app-susp-promo', 1)?.applied_generation_id).toBe('gen-susp-promo');
+  });
+
+  it('accepts a matching late deploy result for a suspended source', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-late-dep', 'late-dep-web', 'gen-late-dep', 'art-late-dep', 'acc-late-dep');
+    const deployOp = envelope('op-dep-late');
+    tx.deployStarted('app-late-dep', 1, 'gen-late-dep', deployOp);
+
+    // The deploy is in flight when the operator suspends. Suspension gates
+    // new source work, and it interrupts an operation the application row
+    // still shows as active; a deploy is tracked on the target row alone, so
+    // an in-flight deploy is left running rather than marked interrupted.
+    tx.sourceSuspended('app-late-dep', 'operator hold', envelope('op-susp-late-dep'));
+    const suspended = store.getTarget('app-late-dep', 1)!;
+    expect(suspended.active_operation_stage).toBe('deploy_started');
+    expect(suspended.interruption_stage).toBeNull();
+
+    // Its terminal events are therefore admissible while the source is
+    // suspended: requireMatchingDeploy matches the live operation and
+    // records its outcome, so evidence of a deploy nobody can recall is
+    // kept, not dropped.
+    tx.deployBound('app-late-dep', 1, 'gen-late-dep', deployOp);
+    let target = store.getTarget('app-late-dep', 1)!;
+    expect(target.deployed_generation_id).toBe('gen-late-dep');
+    expect(target.failure_stage).toBeNull();
+
+    // The failure arm behaves the same way: a later deploy for the same
+    // applied generation records its failure while still suspended.
+    tx.deployStarted('app-late-dep', 1, 'gen-late-dep', envelope('op-dep-late-2'));
+    tx.deployFailed('app-late-dep', 1, 'post_mutation', envelope('op-dep-late-2'));
+    target = store.getTarget('app-late-dep', 1)!;
+    expect(target.failure_stage).toBe('deploy');
+    expect(target.failure_class).toBe('post_mutation');
+    expect(target.deployed_generation_id).toBe('gen-late-dep');
+    // Neither terminal resumed anything: recording is accounting, not a
+    // source operation.
+    expect(store.getApplication('app-late-dep')?.suspended_at).not.toBeNull();
+  });
+
   it('targetApplied binds a Direct target only after the generation is accepted', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
