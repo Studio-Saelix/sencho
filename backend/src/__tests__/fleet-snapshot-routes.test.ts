@@ -14,6 +14,17 @@ import * as policyGate from '../helpers/policyGate';
 import { RollbackGenerationStore } from '../services/RollbackGenerationStore';
 import type { ResolvedRollbackInventory, RollbackGenerationManifest } from '../types/rollbackGeneration';
 
+vi.mock('../helpers/registryDeliveryOutbound', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('../helpers/registryDeliveryOutbound')>();
+    return {
+        ...actual,
+        prepareOutboundRegistryDeliveryBody: vi.fn(
+            (...args: Parameters<typeof actual.prepareOutboundRegistryDeliveryBody>) =>
+                actual.prepareOutboundRegistryDeliveryBody(...args),
+        ),
+    };
+});
+
 let tmpDir: string;
 let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
@@ -1337,5 +1348,88 @@ describe('Snapshot restore: recovery generation contract', () => {
             .send({ files: [{ filename: 'compose.yaml', content: compose }] });
         expect(res.status).toBe(200);
         expect(fs.readFileSync(composePath('apply-large'), 'utf-8')).toBe(compose);
+    });
+});
+
+describe('Fleet snapshot restore: registry delivery refusal codes', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+    });
+
+    // The file-apply POST is satisfied by a plain 200; the queued refusal is
+    // consumed by the redeploy's single registry-gate call, before any fetch.
+    function stubApplyFetch() {
+        const fetchMock = vi.fn(async () => ({ ok: true, status: 200, text: async () => '' } as unknown as Response));
+        vi.stubGlobal('fetch', fetchMock);
+        return fetchMock;
+    }
+
+    it('answers a refused redeploy with the refusal status and code', async () => {
+        const db = DatabaseService.getInstance();
+        const remoteId = db.addNode({ name: 'remote-refusal-single', type: 'remote', api_url: 'http://remote:1852', api_token: 'tok', compose_dir: '/app/compose', is_default: false });
+        const snapId = db.createSnapshot('remote-refusal-single', 'admin', 1, 1, '[]', '[]');
+        db.insertSnapshotFiles(snapId, [
+            { nodeId: remoteId, nodeName: 'remote-refusal-single', stackName: 'fref', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
+        const fetchMock = stubApplyFetch();
+
+        const outbound = await import('../helpers/registryDeliveryOutbound');
+        vi.mocked(outbound.prepareOutboundRegistryDeliveryBody).mockResolvedValueOnce({
+            ok: false as const,
+            status: 409,
+            code: 'REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE',
+            error: 'Registry credentials unavailable for challenged image hosts',
+        });
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${snapId}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: remoteId, stackName: 'fref', redeploy: true });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE');
+        // The JSON error field carries the clean refusal message; the code
+        // rides in the structured field only.
+        expect(res.body.error).toBe('Registry credentials unavailable for challenged image hosts');
+        // The file-apply POST did go out (one call); the refusal preempted
+        // the redeploy fetch.
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('records the refusal code on a failed restore-all row', async () => {
+        const db = DatabaseService.getInstance();
+        const remoteId = db.addNode({ name: 'remote-refusal-all', type: 'remote', api_url: 'http://remote:1852', api_token: 'tok', compose_dir: '/app/compose', is_default: false });
+        const snapId = db.createSnapshot('remote-refusal-all', 'admin', 1, 1, '[]', '[]');
+        db.insertSnapshotFiles(snapId, [
+            { nodeId: remoteId, nodeName: 'remote-refusal-all', stackName: 'frefall', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
+        const fetchMock = stubApplyFetch();
+
+        const outbound = await import('../helpers/registryDeliveryOutbound');
+        vi.mocked(outbound.prepareOutboundRegistryDeliveryBody).mockResolvedValueOnce({
+            ok: false as const,
+            status: 409,
+            code: 'REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE',
+            error: 'Registry credentials unavailable for challenged image hosts',
+        });
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${snapId}/restore-all`)
+            .set('Cookie', adminCookie)
+            .send({ redeploy: true });
+
+        expect(res.status).toBe(200);
+        expect(res.body.failed).toBe(1);
+        const row = (res.body.results as Array<{ stackName: string; success: boolean; error: string; code?: string }>)
+            .find((r) => r.stackName === 'frefall');
+        expect(row?.success).toBe(false);
+        // The row's error field carries the plain refusal message; the code
+        // rides in the structured field only.
+        expect(row?.error).toBe('Registry credentials unavailable for challenged image hosts');
+        expect(row?.code).toBe('REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 });

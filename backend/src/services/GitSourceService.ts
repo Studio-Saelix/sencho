@@ -7105,6 +7105,8 @@ export class GitSourceService {
                 candidateRelPath: materialization.value.candidateRelPath,
                 composeFiles: fetched.composeFiles,
                 envContent: fetched.envContent,
+                contextDir: input.contextDir,
+                syncEnv: input.syncEnv,
                 materialization: materialization.value,
                 warnings: fetched.warnings,
             });
@@ -7163,6 +7165,8 @@ export class GitSourceService {
                 candidateRelPath: pending.candidateRelPath,
                 composeFiles: pending.files,
                 envContent,
+                contextDir: src.context_dir,
+                syncEnv: src.sync_env,
                 materialization: {
                     inventory: pending.inventory,
                     contextCopyPlans: [],

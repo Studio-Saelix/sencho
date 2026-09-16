@@ -10,6 +10,17 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import axios from 'axios';
 
+vi.mock('../helpers/registryDeliveryOutbound', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('../helpers/registryDeliveryOutbound')>();
+    return {
+        ...actual,
+        prepareOutboundRegistryDeliveryBody: vi.fn(
+            (...args: Parameters<typeof actual.prepareOutboundRegistryDeliveryBody>) =>
+                actual.prepareOutboundRegistryDeliveryBody(...args),
+        ),
+    };
+});
+
 let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let BlueprintService: typeof import('../services/BlueprintService').BlueprintService;
@@ -299,5 +310,36 @@ describe('BlueprintService remote deploy', () => {
             .some((a) => a.resource_type === 'stack' && a.resource_id === bpObj.name && a.node_id === node.id)).toBe(false);
 
         db.deleteUser(userId);
+    });
+
+    it('keeps the registry delivery refusal code when the gate refuses the apply', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const db = DatabaseService.getInstance();
+        const nodeObj = db.getNode(node.id)!;
+        const bpObj = db.getBlueprint(bp.id)!;
+
+        // hasNameConflict probes the remote stack list before the apply;
+        // satisfy it so the failure under test is the registry gate refusal.
+        vi.spyOn(axios, 'get').mockResolvedValue({ status: 200, data: [] });
+        const postSpy = vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: {} });
+
+        const outbound = await import('../helpers/registryDeliveryOutbound');
+        vi.mocked(outbound.prepareOutboundRegistryDeliveryBody).mockResolvedValueOnce({
+            ok: false as const,
+            status: 409,
+            code: 'REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE',
+            error: 'Registry credentials unavailable for challenged image hosts',
+        });
+
+        const result = await BlueprintService.getInstance().deployToNode(bpObj, nodeObj);
+
+        expect(result.status).toBe('failed');
+        expect(result.code).toBe('REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE');
+        expect(result.error).toContain('[REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE]');
+        expect(postSpy).not.toHaveBeenCalled();
+
+        const dep = db.getDeployment(bp.id, node.id);
+        expect(dep?.last_error).toContain('[REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE]');
     });
 });

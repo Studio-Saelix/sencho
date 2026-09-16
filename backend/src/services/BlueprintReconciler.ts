@@ -35,6 +35,8 @@ export interface ConfirmedActionOutcome {
     action: PreviewAction;
     status: ConfirmedActionOutcomeStatus;
     error?: string | null;
+    /** Machine-readable registry delivery refusal code, when the action failed on one. */
+    code?: string;
 }
 
 export interface ConfirmedPlanResult {
@@ -106,7 +108,7 @@ function mapDeployOutcome(
     if (result.status === 'pending' || result.status === 'deploying' || result.status === 'withdrawing') {
         return { ...base, status: 'pending', error: result.error ?? null };
     }
-    return { ...base, status: 'failed', error: result.error ?? result.status };
+    return { ...base, status: 'failed', error: result.error ?? result.status, code: result.code };
 }
 
 function isDeveloperModeEnabled(): boolean {

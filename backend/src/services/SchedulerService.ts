@@ -33,7 +33,12 @@ import type { ScanAllNodeImagesResult } from './TrivyService';
 import TrivyInstaller from './TrivyInstaller';
 import { CloudBackupService } from './CloudBackupService';
 import { buildSystemPolicyGateOptions } from '../helpers/policyGate';
-import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
+import {
+    appendRegistryDeliveryCode,
+    prepareOutboundRegistryDeliveryBody,
+    registryDeliveryRefusal,
+    throwRegistryDeliveryRefusal,
+} from '../helpers/registryDeliveryOutbound';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { excludeSelfContainers } from '../helpers/excludeSelfContainers';
 import { enforcePolicyPreDeploy } from './PolicyEnforcement';
@@ -1121,7 +1126,18 @@ export class SchedulerService {
     private rethrowRemoteProxyError(nodeId: number, err: unknown): never {
         const tag = this.remoteProxyNodeTag(nodeId);
         if (err instanceof Error && err.message.startsWith(tag)) throw err;
-        throw new Error(this.remoteProxyFailureMessage(nodeId, getErrorMessage(err, 'Remote proxy request failed')));
+        const baseMessage = this.remoteProxyFailureMessage(nodeId, getErrorMessage(err, 'Remote proxy request failed'));
+        // Registry delivery refusals keep their status and machine-readable
+        // code, and the code rides inside the message too because the task
+        // run's durable record (last_error) is a string column.
+        const refusal = registryDeliveryRefusal(err);
+        if (refusal) {
+            const wrapped = new Error(appendRegistryDeliveryCode(baseMessage, refusal.code));
+            (wrapped as { status?: number }).status = refusal.status;
+            (wrapped as { code?: string }).code = refusal.code;
+            throw wrapped;
+        }
+        throw new Error(baseMessage);
     }
 
     private async resolveContainerId(task: ScheduledTask): Promise<{ id: string; name: string }> {
@@ -1260,7 +1276,7 @@ export class SchedulerService {
                 body: {},
             });
             if (!augmented.ok) {
-                throw new Error(augmented.error);
+                throwRegistryDeliveryRefusal(augmented);
             }
             const response = await safeRemoteFetch(`${baseUrl}/api/stacks/${routeSuffix}`, {
                 method: 'POST',

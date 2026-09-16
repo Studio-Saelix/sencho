@@ -9,11 +9,13 @@ import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
 import { StackOpLockService } from '../services/StackOpLockService';
 import { discoverRegistryReferences } from '../services/registryReferenceDiscovery';
+import { REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION } from '../services/CapabilityRegistry';
+import { normalizePullRefList } from './registryPullReference';
 import type { RegistryDeliveryEnvelope } from './registryDeliveryContext';
-import { hashActionSet, hashProjectSource } from './registryDeliveryHashes';
+import { hashActionSet, hashSelectionInputs, hashPullRefList } from './registryDeliveryHashes';
 import type { RegistryDeliveryStage } from './registryOpClassifier';
 import { isValidStackName } from '../utils/validation';
-import { resolveComposeEnvForDiscovery } from './registryDeliveryComposeEnv';
+import { resolveRegistryDeliverySelection } from './registryDeliverySelection';
 
 export interface RegistryDeliverySeamInput {
   envelope: RegistryDeliveryEnvelope;
@@ -92,6 +94,10 @@ export async function resolveRegistryAuthAtSeam(
   if (input.service && payload.service && payload.service !== input.service) {
     throw new Error('Attestation service mismatch');
   }
+  assertClaim(
+    payload.deliveryContractVersion === REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION,
+    'Delivery contract version mismatch',
+  );
 
   const heldLock = StackOpLockService.getInstance().get(input.nodeId, input.stack);
   const jtiForLock = payload.jti_t;
@@ -109,6 +115,7 @@ export async function resolveRegistryAuthAtSeam(
   const prepId = input.envelope.prepId ?? (typeof payload.prepId === 'string' ? payload.prepId : undefined);
   let sourceHash: string;
   let referencedHosts: string[];
+  let rawPullRefs: string[];
 
   if (prepId) {
     assertClaim(
@@ -123,11 +130,21 @@ export async function resolveRegistryAuthAtSeam(
       payload.sourceHash === sourceHash,
       'Prepared source hash mismatch',
     );
-    const discovery = discoverRegistryReferences(
+    const selection = await resolveRegistryDeliverySelection({
+      kind: entry.sourceKind,
+      stackName: input.stack,
+      nodeId: input.nodeId,
+      rootDir: payloadPath,
+      capturedBasis: entry.capturedBasis,
+    });
+    const discovery = await discoverRegistryReferences(
       payloadPath,
-      resolveComposeEnvForDiscovery(payloadPath),
+      selection.envVars,
+      input.service,
+      selection.composeFiles,
     );
     referencedHosts = discovery.referencedHosts;
+    rawPullRefs = discovery.referencedPullRefs;
   } else {
     if (!isValidStackName(input.stack)) {
       throw new Error('Invalid stack name');
@@ -138,22 +155,38 @@ export async function resolveRegistryAuthAtSeam(
     if (!projectDir.startsWith(baseResolved + path.sep)) {
       throw new Error('Invalid stack path');
     }
-    sourceHash = hashProjectSource(projectDir);
+    const selection = await resolveRegistryDeliverySelection({
+      kind: 'live-project',
+      stackName: input.stack,
+      nodeId: input.nodeId,
+      rootDir: projectDir,
+    });
+    sourceHash = hashSelectionInputs(projectDir, selection.composeFiles, selection.envFiles);
     assertClaim(
       payload.sourceHash === sourceHash,
       'Project source hash mismatch',
     );
-    const discovery = discoverRegistryReferences(
+    const discovery = await discoverRegistryReferences(
       projectDir,
-      resolveComposeEnvForDiscovery(projectDir),
+      selection.envVars,
+      input.service,
+      selection.composeFiles,
     );
     referencedHosts = discovery.referencedHosts;
+    rawPullRefs = discovery.referencedPullRefs;
   }
 
   const referencedHostsHash = delivery.hashHostList(referencedHosts);
   assertClaim(
     payload.referencedHostsHash === referencedHostsHash,
     'Referenced hosts hash mismatch',
+  );
+
+  const referencedPullRefs = normalizePullRefList(rawPullRefs);
+  const referencedPullRefsHash = hashPullRefList(referencedPullRefs);
+  assertClaim(
+    payload.referencedPullRefsHash === referencedPullRefsHash,
+    'Referenced pull refs hash mismatch',
   );
 
   const registry = RegistryService.getInstance();

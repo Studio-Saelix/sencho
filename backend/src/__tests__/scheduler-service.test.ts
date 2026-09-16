@@ -232,8 +232,20 @@ vi.mock('../services/PolicyEnforcement', () => ({
   enforcePolicyPreDeploy: mockEnforcePolicyPreDeploy,
 }));
 
+vi.mock('../helpers/registryDeliveryOutbound', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../helpers/registryDeliveryOutbound')>();
+  return {
+    ...actual,
+    prepareOutboundRegistryDeliveryBody: vi.fn(
+      (...args: Parameters<typeof actual.prepareOutboundRegistryDeliveryBody>) =>
+        actual.prepareOutboundRegistryDeliveryBody(...args),
+    ),
+  };
+});
+
 import { SchedulerService } from '../services/SchedulerService';
 import { StackOpLockService } from '../services/StackOpLockService';
+import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -2159,6 +2171,33 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     expect(errorMsg).toContain('already restarted: api');
     expect(errorMsg).toContain('worker');
     expect(errorMsg).toContain('boom');
+  });
+
+  it('keeps the registry delivery refusal code in the persisted task and run errors', async () => {
+    const fetchMock = stubRemote();
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_start', { node_id: 2 }));
+
+    vi.mocked(prepareOutboundRegistryDeliveryBody).mockResolvedValueOnce({
+      ok: false as const,
+      status: 409,
+      code: 'REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE',
+      error: 'Registry credentials unavailable for challenged image hosts',
+    });
+
+    await SchedulerService.getInstance().triggerTask(300);
+
+    // The refusal is answered before any proxy fetch leaves the hub.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({
+      status: 'failure',
+      error: expect.stringContaining('[REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE]'),
+    }));
+    expect(mockUpdateScheduledTask).toHaveBeenCalledWith(300, expect.objectContaining({
+      last_status: 'failure',
+      last_error: expect.stringContaining(
+        'Remote node "remote" (id=2): Registry credentials unavailable for challenged image hosts [REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE]',
+      ),
+    }));
   });
 });
 
