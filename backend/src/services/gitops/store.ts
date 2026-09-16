@@ -585,7 +585,7 @@ export class GitOpsStore {
   insertApplication(row: GitOpsApplicationRow): void {
     this.db().prepare(
       `INSERT INTO gitops_applications (
-        id, lifecycle_key, lifecycle_status, target_mode, stack_name, blueprint_id,
+        id, lifecycle_key, lifecycle_status, target_mode, stack_name, configured_source_stack_name, blueprint_id,
         configured_repo_url, repo_identity_json, configured_ref, compose_paths_json,
         context_dir, sync_env, env_path, materialization_fingerprint, desired_commit_sha,
         fetched_commit_sha, fetched_resolved_ref_kind, candidate_generation_id, accepted_generation_id,
@@ -599,9 +599,10 @@ export class GitOpsStore {
         recovery_ref, recovery_phase, interruption_stage, interruption_at,
         interruption_operation_id, interruption_generation_id, evidence_fresh_at,
         evidence_limitations_json, created_at, updated_at
-      ) VALUES (${Array(60).fill('?').join(', ')})`,
+      ) VALUES (${Array(61).fill('?').join(', ')})`,
     ).run(
-      row.id, row.lifecycle_key, row.lifecycle_status, row.target_mode, row.stack_name, row.blueprint_id,
+      row.id, row.lifecycle_key, row.lifecycle_status, row.target_mode, row.stack_name,
+      row.configured_source_stack_name, row.blueprint_id,
       row.configured_repo_url, row.repo_identity_json, row.configured_ref, row.compose_paths_json,
       row.context_dir, row.sync_env, row.env_path, row.materialization_fingerprint, row.desired_commit_sha,
       row.fetched_commit_sha, row.fetched_resolved_ref_kind, row.candidate_generation_id, row.accepted_generation_id,

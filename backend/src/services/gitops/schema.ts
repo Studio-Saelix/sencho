@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   )),
   target_mode TEXT NOT NULL CHECK (target_mode IN ('direct','inline_blueprint','blueprint')),
   stack_name TEXT NULL,
+  configured_source_stack_name TEXT NULL,
   blueprint_id INTEGER NULL,
   configured_repo_url TEXT NULL,
   repo_identity_json TEXT NULL,

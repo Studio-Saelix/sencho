@@ -348,6 +348,7 @@ export function blankInlineApplication(id: string, blueprintId: number, at: numb
     lifecycle_status: 'active' as const,
     target_mode: 'inline_blueprint' as const,
     stack_name: null,
+    configured_source_stack_name: null,
     blueprint_id: blueprintId,
     configured_repo_url: null,
     repo_identity_json: null,

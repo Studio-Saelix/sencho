@@ -47,6 +47,8 @@ export type GitOpsApplicationRow = {
   lifecycle_status: GitOpsLifecycleStatus;
   target_mode: GitOpsTargetMode;
   stack_name: string | null;
+  /** Original Direct stack identity, retained after conversion to blueprint mode. */
+  configured_source_stack_name: string | null;
   blueprint_id: number | null;
   configured_repo_url: string | null;
   repo_identity_json: string | null;

@@ -68,6 +68,21 @@ describe('gitops schema', () => {
     expect(candidateCols.has('preflight_fingerprint')).toBe(false);
   });
 
+  it('retains a source stack reference when an application targets a Blueprint', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance().getDb();
+    const columns = db.pragma('table_info(gitops_applications)') as Array<{ name: string }>;
+    expect(columns.map(column => column.name)).toContain('configured_source_stack_name');
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(directApp('source-reference', 'source-web'));
+    expect(db.prepare('SELECT configured_source_stack_name FROM gitops_applications WHERE id = ?')
+      .get('source-reference')).toEqual({ configured_source_stack_name: null });
+    db.prepare(`UPDATE gitops_applications SET target_mode = 'blueprint', blueprint_id = 90,
+      configured_source_stack_name = stack_name, stack_name = NULL WHERE id = ?`).run('source-reference');
+    expect(db.prepare('SELECT stack_name, configured_source_stack_name FROM gitops_applications WHERE id = ?')
+      .get('source-reference')).toEqual({ stack_name: null, configured_source_stack_name: 'source-web' });
+  });
+
   it('accepts recovery health triggers and keeps deployed_generation_id', async () => {
     const { DatabaseService } = await import('../services/DatabaseService');
     const db = DatabaseService.getInstance();
@@ -486,6 +501,7 @@ function directApp(id: string, stackName: string): GitOpsApplicationRow {
     lifecycle_status: 'active',
     target_mode: 'direct',
     stack_name: stackName,
+    configured_source_stack_name: null,
     blueprint_id: null,
     configured_repo_url: 'https://github.com/org/repo.git',
     repo_identity_json: '{"host":"github.com","pathname":"/org/repo.git"}',
