@@ -234,7 +234,11 @@ describe('GET /api/fleet/overview remote probe budget', () => {
       [healthyId]: { apiUrl: HEALTHY_BASE, apiToken: 'test-token', trustedLoopback: false },
     });
     mockFetch((url, init) => {
-      if (url.startsWith(HEALTHY_BASE)) return healthyHandler(HEALTHY_BASE)(url, init);
+      try {
+        if (new URL(url).origin === HEALTHY_BASE) return healthyHandler(HEALTHY_BASE)(url, init);
+      } catch {
+        // Invalid URLs are not the healthy host.
+      }
       return hungUntilAbort(init);
     });
 
