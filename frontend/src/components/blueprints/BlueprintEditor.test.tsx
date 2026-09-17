@@ -92,7 +92,7 @@ beforeEach(() => {
 
 describe('BlueprintEditor Git-managed compose', () => {
   it('omits compose_content and keeps the editor read-only', async () => {
-    const onSubmit = vi.fn(async (_input: UpdateBlueprintInput) => {});
+    const onSubmit = vi.fn<(input: UpdateBlueprintInput) => Promise<void>>(async () => {});
     render(
       <BlueprintEditor
         mode="edit"
@@ -114,7 +114,7 @@ describe('BlueprintEditor Git-managed compose', () => {
   });
 
   it('still sends compose_content for Inline edits', async () => {
-    const onSubmit = vi.fn(async (_input: UpdateBlueprintInput) => {});
+    const onSubmit = vi.fn<(input: UpdateBlueprintInput) => Promise<void>>(async () => {});
     render(
       <BlueprintEditor
         mode="edit"
