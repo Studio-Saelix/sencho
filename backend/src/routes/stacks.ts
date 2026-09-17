@@ -1297,6 +1297,10 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
       });
       return;
     }
+    if (result.code === 'source_claimed_by_blueprint') {
+      res.status(409).json({ error: result.error, code: result.code });
+      return;
+    }
     if (result.code === 'fs_failed') {
       res.status(500).json({
         error: `${result.error}. Stack containers may have been stopped but on-disk files remain. Retry the delete or clean the files manually.`,

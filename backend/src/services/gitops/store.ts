@@ -39,18 +39,21 @@ export type AssertNoLiveBlueprintResult =
  * SQL instead of a copy. Each is served by a partial index whose WHERE
  * clause mirrors the query's static terms (see idx_gitops_app_poll_due /
  * idx_gitops_app_retry_due in schema.ts); changing a term here must change
- * it there in the same commit. Both scans are Direct-only and Active-only,
- * and these terms are load-bearing: a detached row must not be fetched at
- * all, and a Blueprint-mode row would reach the controller's evaluate()
- * with no stack name, which returns early, so selecting it would only
- * re-wake it every tick with a misleading warning. The poll scan
- * additionally excludes rows with any retry cursor (past or future):
- * retry-due rows arrive via the retry scan, and a row still inside its
- * backoff window must not be refetched by a due poll cursor, so the
- * retry cursor stays the next wake.
+ * it there in the same commit. Both scans cover live Direct sources and
+ * converted Blueprint sources that still hold a stack identity. Native
+ * Blueprint rows with no `configured_source_stack_name` stay out, matching
+ * listActiveSourceApplications, so evaluate() is never woken without a
+ * stack to fetch against. Detached rows stay out via lifecycle_status.
+ * The poll scan additionally excludes rows with any retry cursor (past or
+ * future): retry-due rows arrive via the retry scan, and a row still
+ * inside its backoff window must not be refetched by a due poll cursor, so
+ * the retry cursor stays the next wake.
  */
+export const SOURCE_APPLICATION_MODE_SQL =
+  `(target_mode = 'direct' OR (target_mode = 'blueprint' AND configured_source_stack_name IS NOT NULL))`;
+
 export const SOURCES_DUE_FOR_POLL_SQL = `SELECT * FROM gitops_applications
-       WHERE target_mode = 'direct'
+       WHERE ${SOURCE_APPLICATION_MODE_SQL}
          AND lifecycle_status = 'active'
          AND suspended_at IS NULL
          AND active_operation_stage IS NULL
@@ -63,7 +66,7 @@ export const SOURCES_DUE_FOR_POLL_SQL = `SELECT * FROM gitops_applications
 export const APPLICATIONS_DUE_FOR_RETRY_SQL = `SELECT * FROM gitops_applications
        WHERE retry_at IS NOT NULL
          AND retry_at <= ?
-         AND target_mode = 'direct'
+         AND ${SOURCE_APPLICATION_MODE_SQL}
          AND lifecycle_status = 'active'
          AND suspended_at IS NULL
          AND active_operation_stage IS NULL
@@ -150,6 +153,12 @@ export class GitOpsStore {
          AND target_mode IN ('inline_blueprint','blueprint')
          AND lifecycle_status IN ('active','creating')`,
     ).get(stackName) as GitOpsApplicationRow | undefined;
+  }
+
+  /** Live Direct application, or the converted Blueprint source that still holds this stack. */
+  getLiveSourceApplication(stackName: string): GitOpsApplicationRow | undefined {
+    return this.getLiveDirectApplication(stackName)
+      ?? this.getLiveBlueprintApplicationBySourceStack(stackName);
   }
 
   getLiveBlueprintModeApplicationByRepoUrl(repoUrl: string): GitOpsApplicationRow | undefined {
@@ -254,12 +263,25 @@ export class GitOpsStore {
     ).all() as GitOpsApplicationRow[];
   }
 
-  /** Every live Direct application, for configuration-wide rescheduling. */
+  /** Every live Direct application, for Direct-only configuration scans. */
   listActiveDirectApplications(): GitOpsApplicationRow[] {
     return this.db().prepare(
       `SELECT * FROM gitops_applications
        WHERE target_mode = 'direct' AND lifecycle_status = 'active'
        ORDER BY stack_name ASC`,
+    ).all() as GitOpsApplicationRow[];
+  }
+
+  /**
+   * Live sources the controller may reschedule: Direct applications, plus
+   * Blueprint-mode applications that still hold a converted stack identity.
+   */
+  listActiveSourceApplications(): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE lifecycle_status = 'active'
+         AND ${SOURCE_APPLICATION_MODE_SQL}
+       ORDER BY COALESCE(stack_name, configured_source_stack_name) ASC`,
     ).all() as GitOpsApplicationRow[];
   }
 
@@ -455,22 +477,20 @@ export class GitOpsStore {
   }
 
   /**
-   * Direct sources whose poll time has arrived: active, not suspended, no
-   * operation in flight, and no retry cursor (the retry scan owns a row in
-   * backoff). Blueprint-mode applications are never polled here
-   * -- source evaluation for them is blocked at the evaluation boundary
-   * until an application-keyed source engine exists for that mode.
+   * Direct and Blueprint-mode sources whose poll time has arrived: active,
+   * not suspended, no operation in flight, and no retry cursor (the retry
+   * scan owns a row in backoff).
    */
   listSourcesDueForPoll(now: number, limit = 200): GitOpsApplicationRow[] {
     return this.db().prepare(SOURCES_DUE_FOR_POLL_SQL).all(now, limit) as GitOpsApplicationRow[];
   }
 
   /**
-   * Active Direct applications with a scheduled retry that has come due:
-   * not suspended, no operation in flight. Poll eligibility and retry
-   * eligibility are deliberately separate queries, since a retry can be
-   * due on an application whose poll cadence would not otherwise select
-   * it yet.
+   * Active Direct or Blueprint-mode applications with a scheduled retry that
+   * has come due: not suspended, no operation in flight. Poll eligibility
+   * and retry eligibility are deliberately separate queries, since a retry
+   * can be due on an application whose poll cadence would not otherwise
+   * select it yet.
    */
   listApplicationsDueForRetry(now: number, limit = 200): GitOpsApplicationRow[] {
     return this.db().prepare(APPLICATIONS_DUE_FOR_RETRY_SQL).all(now, limit) as GitOpsApplicationRow[];

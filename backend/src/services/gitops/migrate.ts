@@ -112,10 +112,10 @@ function migrateOne(source: StackGitSource): MigrationResult {
     return { stackName, outcome: 'skipped_current' };
   }
 
-  // A stack created through the new path already describes itself. Migration
-  // never touches it: its pointers were written with proof this pass does not
-  // have.
-  if (store.getLiveDirectApplication(stackName)) {
+  // A stack created through the new path, or a converted Blueprint source,
+  // already describes itself. Migration never touches it: its pointers were
+  // written with proof this pass does not have.
+  if (store.getLiveSourceApplication(stackName)) {
     store.upsertMigrationCheckpoint(scope, MIGRATION_SCHEMA_VERSION, identity.fingerprint, Date.now());
     return { stackName, outcome: 'skipped_live_application' };
   }

@@ -164,6 +164,7 @@ export class GitOpsBindingService {
     const store = GitOpsStore.getInstance();
     let app = store.getApplication(applicationId);
     if (!app) return;
+
     if (!app.intent_revision_id) {
       tx.intentRevised({
         applicationId,
@@ -173,6 +174,7 @@ export class GitOpsBindingService {
       app = store.getApplication(applicationId);
       if (!app) return;
     }
+
     if (!app.rollout_candidate_id && app.intent_revision_id) {
       tx.rolloutCandidateOpened({
         applicationId,
@@ -180,17 +182,16 @@ export class GitOpsBindingService {
         envelope,
       });
     }
+
     app = store.getApplication(applicationId);
     if (!app) return;
+    const code = 'git_managed_rollout_not_enabled';
     store.replaceApplicationEvidenceLimitations(
       applicationId,
       encodeGitOpsEvidenceLimitations(
         decodeGitOpsEvidenceLimitations(app.evidence_limitations_json),
-        'git_managed_rollout_not_enabled',
-        {
-          code: 'git_managed_rollout_not_enabled',
-          detail: 'Blueprint rollout generations are not enabled',
-        },
+        code,
+        { code, detail: 'Blueprint rollout generations are not enabled' },
       ),
       envelope.at,
     );
@@ -321,6 +322,10 @@ function rollbackLimitationsFor(transition: BindingPreview['transition']): strin
   ];
 }
 
+function composeContentSha256(blueprint: Blueprint): string {
+  return createHash('sha256').update(blueprint.compose_content).digest('hex');
+}
+
 function blockedIntentRow(
   applicationId: string,
   blueprint: Blueprint,
@@ -330,7 +335,7 @@ function blockedIntentRow(
     id: randomUUID(),
     application_id: applicationId,
     blueprint_id: blueprint.id,
-    compose_content_sha256: createHash('sha256').update(blueprint.compose_content).digest('hex'),
+    compose_content_sha256: composeContentSha256(blueprint),
     blueprint_revision: blueprint.revision,
     deploy_stack_name: blueprint.name,
     selector_json: JSON.stringify(blueprint.selector),
@@ -357,7 +362,7 @@ function blockedCandidateRow(
     id: randomUUID(),
     application_id: applicationId,
     intent_revision_id: intentRevisionId,
-    compose_content_sha256: createHash('sha256').update(blueprint.compose_content).digest('hex'),
+    compose_content_sha256: composeContentSha256(blueprint),
     accepted_generation_id: null,
     artifact_set_id: null,
     required_targets_json: JSON.stringify({ nodeIds }),

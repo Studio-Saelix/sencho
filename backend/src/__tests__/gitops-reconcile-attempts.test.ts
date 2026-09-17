@@ -331,18 +331,50 @@ describe('poll and retry eligibility queries', () => {
     expect(store.listApplicationsDueForRetry(1_000).map((a) => a.id)).not.toContain('app-poll-backoff');
   });
 
-  it('excludes a Blueprint-mode application from polling', () => {
+  it('includes a Blueprint-mode application in polling', () => {
     const store = GitOpsStore.getInstance();
     store.insertApplication({
       ...app('app-poll-bp', 'unused-bp'),
       stack_name: null,
       blueprint_id: 42,
       target_mode: 'blueprint',
+      configured_source_stack_name: 'unused-bp',
       configured_repo_url: 'https://github.com/org/repo.git',
       next_poll_at: 1_000,
     });
     const due = store.listSourcesDueForPoll(1_000);
-    expect(due.map((a) => a.id)).not.toContain('app-poll-bp');
+    expect(due.map((a) => a.id)).toContain('app-poll-bp');
+  });
+
+  it('excludes a Blueprint-mode application with no stack identity from polling', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication({
+      ...app('app-poll-bp-native', 'unused-bp-native'),
+      stack_name: null,
+      blueprint_id: 45,
+      target_mode: 'blueprint',
+      configured_source_stack_name: null,
+      configured_repo_url: 'https://github.com/org/repo.git',
+      next_poll_at: 1_000,
+    });
+    const due = store.listSourcesDueForPoll(1_000);
+    expect(due.map((a) => a.id)).not.toContain('app-poll-bp-native');
+  });
+
+  it('excludes an inline Blueprint application from polling', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication({
+      ...app('app-poll-inline', 'unused-inline'),
+      stack_name: null,
+      blueprint_id: 44,
+      target_mode: 'inline_blueprint',
+      configured_repo_url: null,
+      repo_identity_json: null,
+      configured_ref: null,
+      next_poll_at: 1_000,
+    });
+    const due = store.listSourcesDueForPoll(1_000);
+    expect(due.map((a) => a.id)).not.toContain('app-poll-inline');
   });
 
   it('lists an application whose retry_at has arrived', () => {
@@ -392,23 +424,19 @@ describe('poll and retry eligibility queries', () => {
     expect(due.map((a) => a.id)).not.toContain('app-retry-detached');
   });
 
-  it('excludes a Blueprint-mode application even when its retry time has arrived', () => {
+  it('includes a Blueprint-mode application once its retry time has arrived', () => {
     const store = GitOpsStore.getInstance();
-    // Retry scheduling currently serves the Direct controller only. A
-    // Blueprint-mode wake would reach evaluate() with no stack name, which
-    // returns early, so selecting the row would only re-wake it every tick
-    // with a misleading warning. Until Blueprint fetch gains a retry path,
-    // the scan must not select it.
     store.insertApplication({
       ...app('app-retry-bp', 'unused-bp-retry'),
       stack_name: null,
       blueprint_id: 43,
       target_mode: 'blueprint',
+      configured_source_stack_name: 'unused-bp-retry',
       configured_repo_url: 'https://github.com/org/repo.git',
       retry_at: 1_000,
     });
     const due = store.listApplicationsDueForRetry(1_000);
-    expect(due.map((a) => a.id)).not.toContain('app-retry-bp');
+    expect(due.map((a) => a.id)).toContain('app-retry-bp');
   });
 });
 

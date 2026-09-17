@@ -64,7 +64,7 @@ export type DeleteDeployedStackResult =
   | { ok: true; status: 'deleted' | 'already_absent' }
   | {
       ok: false;
-      code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed' | 'name_conflict' | 'failed';
+      code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed' | 'name_conflict' | 'source_claimed_by_blueprint' | 'failed';
       error: string;
       existingAction?: string;
     };
@@ -217,6 +217,13 @@ export class DeployedStackDeletionService {
   ): Promise<DeleteDeployedStackResult> {
     const { nodeId, stackName, pruneVolumes } = input;
     const db = DatabaseService.getInstance();
+    if (GitOpsStore.getInstance().getLiveBlueprintApplicationBySourceStack(stackName)) {
+      return {
+        ok: false,
+        code: 'source_claimed_by_blueprint',
+        error: 'This stack is bound to a Blueprint. Retire or detach the binding before deleting it.',
+      };
+    }
 
     // Continuation loads ownership from the persisted intent; first call uses input.
     let requiredBlueprintId: number | null =

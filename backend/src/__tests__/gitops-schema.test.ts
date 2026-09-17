@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { isHubOnlyPath } from '../helpers/proxyExemptPaths';
-import { APPLICATIONS_DUE_FOR_RETRY_SQL, GitOpsStore, emptyTargetRow, SOURCES_DUE_FOR_POLL_SQL } from '../services/gitops/store';
+import { APPLICATIONS_DUE_FOR_RETRY_SQL, GitOpsStore, emptyTargetRow, SOURCES_DUE_FOR_POLL_SQL, SOURCE_APPLICATION_MODE_SQL } from '../services/gitops/store';
 import { encodeArtifactEvidenceJson } from '../services/gitops/json';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
 
@@ -233,12 +233,12 @@ describe('gitops schema', () => {
       sql.split('\n').map((line) => line.trim().replace(/^(WHERE|AND)\s+/i, '').trim()).filter((line) => line.length > 0);
 
     const pollTerms = staticTerms(SOURCES_DUE_FOR_POLL_SQL).filter((t) =>
-      t.startsWith("target_mode = 'direct'") || t.startsWith("lifecycle_status = 'active'") || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL') || t.startsWith('next_poll_at IS NOT NULL') || t.startsWith('retry_at IS NULL'));
+      t.startsWith(SOURCE_APPLICATION_MODE_SQL) || t.startsWith("lifecycle_status = 'active'") || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL') || t.startsWith('next_poll_at IS NOT NULL') || t.startsWith('retry_at IS NULL'));
     for (const term of pollTerms) {
       expect(sqlOf('idx_gitops_app_poll_due')).toContain(term);
     }
     expect(pollTerms).toEqual([
-      "target_mode = 'direct'",
+      SOURCE_APPLICATION_MODE_SQL,
       "lifecycle_status = 'active'",
       'suspended_at IS NULL',
       'active_operation_stage IS NULL',
@@ -247,13 +247,13 @@ describe('gitops schema', () => {
     ]);
 
     const retryTerms = staticTerms(APPLICATIONS_DUE_FOR_RETRY_SQL).filter((t) =>
-      t.startsWith('retry_at IS NOT NULL') || t.startsWith("target_mode = 'direct'") || t.startsWith("lifecycle_status = 'active'") || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL'));
+      t.startsWith('retry_at IS NOT NULL') || t.startsWith(SOURCE_APPLICATION_MODE_SQL) || t.startsWith("lifecycle_status = 'active'") || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL'));
     for (const term of retryTerms) {
       expect(sqlOf('idx_gitops_app_retry_due')).toContain(term);
     }
     expect(retryTerms).toEqual([
       'retry_at IS NOT NULL',
-      "target_mode = 'direct'",
+      SOURCE_APPLICATION_MODE_SQL,
       "lifecycle_status = 'active'",
       'suspended_at IS NULL',
       'active_operation_stage IS NULL',

@@ -39,8 +39,7 @@ import { parseIntParam } from '../utils/parseIntParam';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isSqliteUniqueViolation, getErrorMessage } from '../utils/errors';
-import { GitManagedContentError, isGitManagedBlueprint } from '../services/gitops/gitManaged';
-import { GitOpsBindingError } from '../services/gitops/binding';
+import { GitManagedContentError, GitOpsBindingError, isGitManagedBlueprint } from '../services/gitops/binding';
 
 export const blueprintsRouter = Router();
 
@@ -73,9 +72,22 @@ function desiredNodeIdsFor(blueprint: Blueprint): number[] {
         .map(node => node.id);
 }
 
+const GIT_MANAGED_INLINE_ERROR = 'Blueprint content is Git-managed and cannot be applied inline';
+
 function refuseGitManagedContent(res: Response, blueprint: Blueprint, error: string): boolean {
     if (!isGitManagedBlueprint(blueprint)) return false;
     res.status(409).json({ error, code: 'git_managed_content' });
+    return true;
+}
+
+function refuseGitManagedConflict(res: Response, error: unknown): boolean {
+    if (
+        !(error instanceof GitManagedContentError)
+        && !(error instanceof GitOpsBindingError && error.code === 'git_managed_content')
+    ) {
+        return false;
+    }
+    res.status(409).json({ error: error.message, code: error.code });
     return true;
 }
 
@@ -389,10 +401,7 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
         commitBlueprintDelete(id, req.user?.username ?? null);
         res.status(204).end();
     } catch (error) {
-        if (error instanceof GitOpsBindingError && error.code === 'git_managed_content') {
-            res.status(409).json({ error: error.message, code: error.code });
-            return;
-        }
+        if (refuseGitManagedConflict(res, error)) return;
         console.error('[Blueprints] Delete error:', error);
         res.status(500).json({ error: 'Failed to delete blueprint' });
     }
@@ -448,10 +457,7 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
             res.status(500).json({ error: error.message });
             return;
         }
-        if (error instanceof GitManagedContentError) {
-            res.status(409).json({ error: error.message, code: error.code });
-            return;
-        }
+        if (refuseGitManagedConflict(res, error)) return;
         console.error('[Blueprints] apply-local error:', sanitizeForLog(getErrorMessage(error, 'apply failed')));
         res.status(500).json({ error: getErrorMessage(error, 'Blueprint apply failed') });
     }
@@ -513,11 +519,7 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
     try {
         const blueprint = DatabaseService.getInstance().getBlueprint(id);
         if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
-        if (refuseGitManagedContent(
-            res,
-            blueprint,
-            'Blueprint content is Git-managed and cannot be applied inline',
-        )) return;
+        if (refuseGitManagedContent(res, blueprint, GIT_MANAGED_INLINE_ERROR)) return;
         if (!blueprint.enabled) {
             res.status(409).json({ error: 'Blueprint is disabled. Enable it before applying.', code: 'blueprint_disabled' });
             return;
@@ -699,11 +701,7 @@ blueprintsRouter.post('/:id/accept/:nodeId', async (req: Request, res: Response)
     try {
         const blueprint = DatabaseService.getInstance().getBlueprint(id);
         if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
-        if (refuseGitManagedContent(
-            res,
-            blueprint,
-            'Blueprint content is Git-managed and cannot be applied inline',
-        )) return;
+        if (refuseGitManagedContent(res, blueprint, GIT_MANAGED_INLINE_ERROR)) return;
         if (!requirePermission(req, res, 'stack:deploy', 'stack', blueprint.name, nodeId)) return;
         const guard = BlueprintReconciler.getInstance().validateGuardConfirmation(id, nodeId, 'accept');
         if (!guard.ok) {

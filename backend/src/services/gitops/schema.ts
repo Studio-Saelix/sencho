@@ -177,7 +177,7 @@ CREATE INDEX IF NOT EXISTS idx_gitops_app_detached_direct
 DROP INDEX IF EXISTS idx_gitops_app_poll_due;
 CREATE INDEX IF NOT EXISTS idx_gitops_app_poll_due
   ON gitops_applications(next_poll_at)
-  WHERE target_mode = 'direct'
+  WHERE (target_mode = 'direct' OR (target_mode = 'blueprint' AND configured_source_stack_name IS NOT NULL))
     AND lifecycle_status = 'active'
     AND suspended_at IS NULL
     AND active_operation_stage IS NULL
@@ -186,7 +186,7 @@ CREATE INDEX IF NOT EXISTS idx_gitops_app_poll_due
 DROP INDEX IF EXISTS idx_gitops_app_retry_due;
 CREATE INDEX IF NOT EXISTS idx_gitops_app_retry_due
   ON gitops_applications(retry_at)
-  WHERE target_mode = 'direct'
+  WHERE (target_mode = 'direct' OR (target_mode = 'blueprint' AND configured_source_stack_name IS NOT NULL))
     AND lifecycle_status = 'active'
     AND suspended_at IS NULL
     AND active_operation_stage IS NULL

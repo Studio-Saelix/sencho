@@ -50,7 +50,7 @@ describe('Git-managed Blueprint fail-closed gates', () => {
   it('skips reconciler deploy after a Git-managed conversion even when approval is restored', async () => {
     const { blueprint, nodeId } = converted();
     approvePlace(blueprint.id, [nodeId]);
-    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+    const deploySpy = spyDeploy();
     await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
     expect(deploySpy).not.toHaveBeenCalled();
   });
@@ -58,7 +58,7 @@ describe('Git-managed Blueprint fail-closed gates', () => {
   it('refuses a confirmed plan for a Git-managed Blueprint', async () => {
     const { blueprint, nodeId } = converted();
     approvePlace(blueprint.id, [nodeId]);
-    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+    const deploySpy = spyDeploy();
     const plan = await BlueprintReconciler.getInstance().reconcileConfirmedPlan(blueprint.id, [
       { nodeId, action: 'create' },
     ]);
@@ -69,19 +69,17 @@ describe('Git-managed Blueprint fail-closed gates', () => {
 
   it('returns 409 git_managed_content for apply and accept before any deploy work', async () => {
     const { blueprint, nodeId } = converted();
-    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+    const deploySpy = spyDeploy();
     const apply = await request(app)
       .post(`/api/blueprints/${blueprint.id}/apply`)
       .set('Cookie', adminCookie)
       .send({ planFingerprint: 'stale', actions: [{ nodeId, action: 'create' }] });
-    expect(apply.status).toBe(409);
-    expect(apply.body.code).toBe('git_managed_content');
+    expectGitManaged409(apply);
     const accept = await request(app)
       .post(`/api/blueprints/${blueprint.id}/accept/${nodeId}`)
       .set('Cookie', adminCookie)
       .send({ mode: 'fresh' });
-    expect(accept.status).toBe(409);
-    expect(accept.body.code).toBe('git_managed_content');
+    expectGitManaged409(accept);
     expect(deploySpy).not.toHaveBeenCalled();
   });
 
@@ -97,8 +95,7 @@ describe('Git-managed Blueprint fail-closed gates', () => {
     const res = await request(app)
       .delete(`/api/blueprints/${blueprint.id}`)
       .set('Cookie', adminCookie);
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe('git_managed_content');
+    expectGitManaged409(res);
     expect(withdrawSpy).not.toHaveBeenCalled();
     expect(DatabaseService.getInstance().getBlueprint(blueprint.id)?.content_origin).toBe('git');
   });
@@ -130,6 +127,15 @@ describe('Git-managed Blueprint fail-closed gates', () => {
     expect(projection.limitations.some((item) => item.code === 'git_managed_rollout_not_enabled')).toBe(true);
   });
 });
+
+function spyDeploy() {
+  return vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+}
+
+function expectGitManaged409(res: { status: number; body: { code?: string } }): void {
+  expect(res.status).toBe(409);
+  expect(res.body.code).toBe('git_managed_content');
+}
 
 function converted(): { blueprint: import('../services/DatabaseService').Blueprint; nodeId: number; applicationId: string } {
   counter += 1;

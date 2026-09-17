@@ -95,7 +95,8 @@ export type GitSourceErrorCode =
     | 'PLAN_BLOCKED'
     | 'LEGACY_PENDING'
     | 'PLAN_UNAVAILABLE'
-    | 'OPERATION_IN_FLIGHT';
+    | 'OPERATION_IN_FLIGHT'
+    | 'SOURCE_CLAIMED_BY_BLUEPRINT';
 
 export type SourceRevalidationResult =
     | { status: 'reuse'; generation: GitOpsGenerationRow }
@@ -890,6 +891,7 @@ export class GitSourceService {
     }
 
     public async upsert(input: UpsertInput): Promise<PublicGitSource> {
+        this.refuseIfClaimedByBlueprint(input.stackName);
         const db = DatabaseService.getInstance();
         const existing = db.getGitSource(input.stackName);
 
@@ -1065,6 +1067,7 @@ export class GitSourceService {
 
                 const envelope = this.gitopsEnvelope(crypto.randomUUID(), 'system:git-source', 'configure');
                 if (!app && !this.gitopsNameHeld(input.stackName)) {
+                    this.refuseIfClaimedByBlueprint(input.stackName);
                     // Linking a stack that already exists. Nothing is fetched or
                     // accepted yet, so the application starts live with no desired
                     // commit and the projection asks for a fetch.
@@ -1172,6 +1175,7 @@ export class GitSourceService {
      * per disk state, so a late failure leaves detach safely re-runnable.
      */
     public async detach(stackName: string): Promise<void> {
+        this.refuseIfClaimedByBlueprint(stackName);
         return this.withStackLock(stackName, async () => {
             const src = DatabaseService.getInstance().getGitSource(stackName);
             if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
@@ -1310,6 +1314,7 @@ export class GitSourceService {
                 await rollbackAndThrow('Managed project data disappeared during detach');
             }
             try {
+                this.refuseIfClaimedByBlueprint(stackName);
                 // The source row and the GitOps tombstones commit together, so
                 // a detached stack can never leave a live application pointing
                 // at a source that no longer exists. Configured identity and
@@ -2122,6 +2127,7 @@ export class GitSourceService {
         // concurrent delete-source + pull can land a pending row on a stack
         // whose config row has just been removed.
         const actor = opts.actor ?? 'unknown';
+        this.refuseIfClaimedByBlueprint(stackName);
 
         // Reservation and coalescing need a real gitops application to attach a
         // durable attempt to, the same definition pullLocked itself uses to
@@ -2168,27 +2174,56 @@ export class GitSourceService {
     }
 
     /**
-     * The GitOps application tracking this stack, or null when there is none.
+     * The GitOps Direct application tracking this stack, or null when there is none.
      *
-     * Stacks that predate the revision-state model have no application until
-     * migration runs, so every producer is a no-op for them rather than
-     * inventing an application from configuration alone.
+     * Converted Blueprint sources are resolved through liveSourceApplication
+     * instead. Stacks that predate the revision-state model have no
+     * application until migration runs, so every producer is a no-op for
+     * them rather than inventing an application from configuration alone.
      */
     private gitopsApplicationFor(stackName: string): GitOpsApplicationRow | null {
         const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
         return app && app.lifecycle_status === 'active' ? app : null;
     }
 
+    private sourceStackName(app: GitOpsApplicationRow): string | null {
+        return app.stack_name ?? app.configured_source_stack_name;
+    }
+
+    private isLiveSourceFor(stackName: string, applicationId: string): boolean {
+        return this.liveSourceApplication(stackName)?.id === applicationId;
+    }
+
+    /** Active Direct or converted Blueprint source used for fetch bookkeeping. */
+    private activeSourceApplication(stackName: string): GitOpsApplicationRow | null {
+        const app = this.liveSourceApplication(stackName);
+        return app && app.lifecycle_status === 'active' ? app : null;
+    }
+
     /**
-     * Whether any application still holds this stack name.
+     * Whether a live Direct application still holds this stack name.
      *
-     * Wider than `gitopsApplicationFor`, which only reports usable applications.
-     * A `creating` row left by a crash the boot sweep could not settle still
-     * occupies the unique live-application index, so activating over it would
-     * fail the whole save with an internal constraint message.
+     * Converted Blueprint claims are refused separately via
+     * refuseIfClaimedByBlueprint. Wider than `gitopsApplicationFor`, which
+     * only reports usable Direct applications. A `creating` row left by a
+     * crash the boot sweep could not settle still occupies the unique
+     * live-application index, so activating over it would fail the whole
+     * save with an internal constraint message.
      */
     private gitopsNameHeld(stackName: string): boolean {
         return !!GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+    }
+
+    private liveSourceApplication(stackName: string): GitOpsApplicationRow | undefined {
+        return GitOpsStore.getInstance().getLiveSourceApplication(stackName);
+    }
+
+    private refuseIfClaimedByBlueprint(stackName: string): void {
+        if (!GitOpsStore.getInstance().getLiveBlueprintApplicationBySourceStack(stackName)) return;
+        throw new GitSourceError(
+            'SOURCE_CLAIMED_BY_BLUEPRINT',
+            'This Git source is bound to a Blueprint. Retire or detach the binding before changing it here.',
+        );
     }
 
     private gitopsEnvelope(operationId: string, actor: string, trigger: string) {
@@ -2240,7 +2275,7 @@ export class GitSourceService {
         const db = DatabaseService.getInstance();
         const src = db.getGitSource(stackName);
         if (!src) throw new GitSourceError('GIT_ERROR', 'No Git source configured for this stack.');
-        const gitopsApp = this.gitopsApplicationFor(stackName);
+        const gitopsApp = this.activeSourceApplication(stackName);
         // fetchStarted has its own suspension guard, but recordGitOps swallows
         // its rejection (so a fetch that already touched the filesystem is never
         // failed out from under itself), which would let a suspended source keep
@@ -2539,6 +2574,7 @@ export class GitSourceService {
         // can never disagree: two calls that resolve to different deploy
         // behavior must never share a coalesce key, or one could silently
         // receive the other's deployed/not-deployed result.
+        this.refuseIfClaimedByBlueprint(stackName);
         const resolvedDeploy = opts.deploy ?? DatabaseService.getInstance().getGitSource(stackName)?.auto_deploy_on_apply ?? false;
         const finalOpts: GitApplyOpts = { ...opts, deploy: resolvedDeploy, requirePlanFingerprint: opts.requirePlanFingerprint !== false };
         const doApply = (applicationId?: string, operationId?: string) => this.withStackLock(
@@ -2626,7 +2662,7 @@ export class GitSourceService {
 
     /** Refuse work when the application resolved before locking is no longer live. */
     private assertLiveApplication(stackName: string, applicationId: string): void {
-        if (GitOpsStore.getInstance().getLiveDirectApplication(stackName)?.id === applicationId) return;
+        if (this.isLiveSourceFor(stackName, applicationId)) return;
         throw new GitSourceError('OPERATION_IN_FLIGHT', GitSourceService.staleApplicationResult().reason);
     }
 
@@ -2660,7 +2696,7 @@ export class GitSourceService {
             // never equal a real live application's id: the identity guard
             // alone already produces the truthful result, without a stack
             // lock or any work worth protecting.
-            const liveApp = GitOpsStore.getInstance().getLiveDirectApplication(request.stackName);
+            const liveApp = this.liveSourceApplication(request.stackName);
             return liveApp ? GitSourceService.staleApplicationResult() : GitSourceService.noApplicationResult();
         }
 
@@ -3067,11 +3103,13 @@ export class GitSourceService {
     private deriveResultForApplication(applicationId: string): ReconcileResult {
         const store = GitOpsStore.getInstance();
         const app = store.getApplication(applicationId);
-        if (!app?.stack_name) return GitSourceService.noApplicationResult();
-        if (store.getLiveDirectApplication(app.stack_name)?.id !== applicationId) {
+        if (!app) return GitSourceService.noApplicationResult();
+        const stackName = this.sourceStackName(app);
+        if (!stackName) return GitSourceService.noApplicationResult();
+        if (!this.isLiveSourceFor(stackName, applicationId)) {
             return GitSourceService.staleApplicationResult();
         }
-        return this.deriveReconcileResult(app.stack_name);
+        return this.deriveReconcileResult(stackName);
     }
 
     /**
@@ -3146,8 +3184,10 @@ export class GitSourceService {
     ): ReconcileResult {
         const store = GitOpsStore.getInstance();
         const app = store.getApplication(applicationId);
-        if (!app?.stack_name) return GitSourceService.noApplicationResult();
-        if (store.getLiveDirectApplication(app.stack_name)?.id !== applicationId) {
+        if (!app) return GitSourceService.noApplicationResult();
+        const stackName = this.sourceStackName(app);
+        if (!stackName) return GitSourceService.noApplicationResult();
+        if (!this.isLiveSourceFor(stackName, applicationId)) {
             return GitSourceService.staleApplicationResult();
         }
         const genRow = store.getGeneration(generationId);
@@ -3162,7 +3202,7 @@ export class GitSourceService {
         const bindRecorded = store.hasStageRowForAttempt(applicationId, operationId, 'target_applied')
             || target?.applied_generation_id === generationId;
         if (bindRecorded) {
-            return this.reconstructBoundDispatchResult(store, app.stack_name, applicationId, operationId, genRow.commit_sha, deployRequested);
+            return this.reconstructBoundDispatchResult(store, stackName, applicationId, operationId, genRow.commit_sha, deployRequested);
         }
         const promotionCommitted = store.hasStageRowForAttempt(applicationId, operationId, 'promotion_committed');
         if (promotionCommitted) {
@@ -3181,7 +3221,7 @@ export class GitSourceService {
                 commitSha: genRow.commit_sha,
             };
         }
-        return this.deriveReconcileResult(app.stack_name);
+        return this.deriveReconcileResult(stackName);
     }
 
     /**
@@ -3552,7 +3592,7 @@ export class GitSourceService {
 
     /** Run fetch-intent reconcile through the same durable execution as pull(). */
     private async reconcileFetch(request: ReconcileRequest & { intent: 'fetch' }): Promise<ReconcileResult> {
-        const liveApp = GitOpsStore.getInstance().getLiveDirectApplication(request.stackName);
+        const liveApp = this.liveSourceApplication(request.stackName);
         if (!liveApp) return GitSourceService.noApplicationResult();
         if (liveApp.id !== request.applicationId) return GitSourceService.staleApplicationResult();
 
@@ -3637,7 +3677,7 @@ export class GitSourceService {
     }
 
     private deriveReconcileResult(stackName: string): ReconcileResult {
-        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        const app = this.liveSourceApplication(stackName);
         if (!app) {
             return GitSourceService.noApplicationResult();
         }
@@ -3672,7 +3712,7 @@ export class GitSourceService {
      */
     public async suspend(stackName: string, opts: { actor: string; reason?: string }): Promise<ReconcileResult> {
         return this.withStackLock(stackName, async () => {
-            const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            const app = this.liveSourceApplication(stackName);
             if (!app) return GitSourceService.noApplicationResult();
             const envelope = this.gitopsEnvelope(crypto.randomUUID(), opts.actor, 'suspend');
             const reason = opts.reason?.trim() || 'Suspended by operator.';
@@ -3707,7 +3747,7 @@ export class GitSourceService {
      */
     public async resume(stackName: string, opts: { actor: string }): Promise<ReconcileResult> {
         return this.withStackLock(stackName, async () => {
-            const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+            const app = this.liveSourceApplication(stackName);
             if (!app) return GitSourceService.noApplicationResult();
             const envelope = this.gitopsEnvelope(crypto.randomUUID(), opts.actor, 'resume');
             this.recordGitOps(stackName, 'source resume', () => {
@@ -3729,7 +3769,7 @@ export class GitSourceService {
      * the retry discards it).
      */
     private armInitialPollCursor(stackName: string, trigger: 'resume' | 'configure'): void {
-        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        const app = this.liveSourceApplication(stackName);
         if (!app
             || app.source_policy === 'manual'
             || app.suspended_at !== null
@@ -3841,16 +3881,13 @@ export class GitSourceService {
             && run.deployed_generation_id === generationId;
     }
 
-    /**
-     * The dispatch context for the local Direct target: the boundary's
-     * shared construction used by every dispatch of a locally-accepted
-     * generation (automatic controller dispatch, explicit retry). The
-     * nodeId is resolved per call because it is process configuration, not
-     * durable evidence; the dispatch itself re-reads the live target under
-     * the stack lock and treats this context as routing only.
-     */
-    public static directDispatchContext(): DispatchContext {
-        return { targetMode: 'direct', nodeId: NodeRegistry.getInstance().getDefaultNodeId(), bindingRevision: null };
+    /** Routing context from the live application's target mode. Non-direct modes dispatch as Blueprint. */
+    public static dispatchContextFor(app: GitOpsApplicationRow): DispatchContext {
+        return {
+            targetMode: app.target_mode === 'direct' ? 'direct' : 'blueprint',
+            nodeId: NodeRegistry.getInstance().getDefaultNodeId(),
+            bindingRevision: null,
+        };
     }
 
     /**
@@ -3882,7 +3919,7 @@ export class GitSourceService {
      * recovery on all three arms.
      */
     public async retry(stackName: string, opts: { actor: string }): Promise<ReconcileResult> {
-        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        const app = this.liveSourceApplication(stackName);
         if (!app) return GitSourceService.noApplicationResult();
         // A source that is suspended, has an operation in flight, has an
         // unfinished recovery, or has an unrecovered interruption marker
@@ -3939,7 +3976,8 @@ export class GitSourceService {
         let dispatch: DispatchResult;
         try {
             const generationRow = GitOpsStore.getInstance().getGeneration(generationId);
-            if (!generationRow) {
+            const application = GitOpsStore.getInstance().getApplication(applicationId);
+            if (!generationRow || !application) {
                 return {
                     outcome: 'blocked',
                     reason: 'The accepted generation could not be read; its dispatch evidence is unavailable.',
@@ -3948,7 +3986,7 @@ export class GitSourceService {
             }
             dispatch = await this.dispatchAcceptedGeneration(
                 buildAcceptedGeneration(generationRow),
-                GitSourceService.directDispatchContext(),
+                GitSourceService.dispatchContextFor(application),
                 { trigger: 'retry', actor },
             );
         } catch (e) {
@@ -4535,11 +4573,14 @@ export class GitSourceService {
         context: DispatchContext,
         opts: { trigger: ReconcileTrigger; actor: string },
     ): Promise<DispatchResult> {
-        if (context.targetMode === 'blueprint') {
-            return new BlueprintTargetAdapter().dispatch(generation, context);
-        }
         const app = GitOpsStore.getInstance().getApplication(generation.applicationId);
-        if (!app?.stack_name) {
+        if (!app) {
+            return { status: 'blocked', reason: 'The application could not be read; dispatch is unavailable.' };
+        }
+        if (app.target_mode !== 'direct') {
+            return new BlueprintTargetAdapter().dispatch(generation, { ...context, targetMode: 'blueprint' });
+        }
+        if (!app.stack_name) {
             return { status: 'blocked', reason: 'No Direct stack is bound to this application.' };
         }
         const stackName = app.stack_name;
@@ -5921,6 +5962,7 @@ export class GitSourceService {
     }
 
     public dismissPending(stackName: string, actor?: string): void {
+        this.refuseIfClaimedByBlueprint(stackName);
         const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
         if (app?.candidate_generation_id) {
             try {
@@ -6601,13 +6643,14 @@ export class GitSourceService {
      * The candidate directory basenames (e.g. "candidate-<sha>") the boot
      * sweep must not reap for this stack: a row still points at each one, so
      * it is still needed no matter how old or how incomplete it looks on
-     * disk. Direct-mode only, matching the candidate/generation model itself.
+     * disk. Direct applications and converted Blueprint sources both stage
+     * candidates under the original stack directory.
      */
     private claimedCandidateDirsFor(stackName: string): { dirs: Set<string>; complete: boolean } {
         const store = GitOpsStore.getInstance();
         const claimed = new Set<string>();
         let complete = true;
-        const app = store.getLiveDirectApplication(stackName);
+        const app = this.liveSourceApplication(stackName);
         if (app) {
             // candidate_generation_id names the currently staged candidate.
             // accepted_generation_id is set by applySourceAcceptanceMutation
@@ -6866,6 +6909,13 @@ export class GitSourceService {
         }
         if (!existingDelivery && gitopsApp?.suspended_at) {
             return { status: 'skipped', message: 'Reconciliation is suspended for this source.' };
+        }
+        try {
+            this.refuseIfClaimedByBlueprint(stackName);
+        } catch (e) {
+            const msg = e instanceof GitSourceError ? e.message : (e as Error).message;
+            console.warn(`[GitSource] Webhook delivery skipped for ${sanitizeForLog(stackName)}: ${sanitizeForLog(msg)}`);
+            return { status: 'skipped', message: msg };
         }
         if (!gitopsApp) {
             try {
