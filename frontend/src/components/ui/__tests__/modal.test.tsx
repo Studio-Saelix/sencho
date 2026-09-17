@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ComponentProps } from 'react';
-import { ConfirmModal } from '../modal';
+import { ConfirmModal, ModalFooter } from '../modal';
 import { DURATION_BASE_MS } from '@/hooks/useVisualBusy';
 
 function renderConfirm(props: Partial<ComponentProps<typeof ConfirmModal>> = {}) {
@@ -90,5 +90,35 @@ describe('ConfirmModal busy behaviour', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Deleting/i })).toBeInTheDocument();
     });
+  });
+});
+
+describe('ModalFooter containment contract', () => {
+  function renderFooter() {
+    render(
+      <ModalFooter
+        hint="PARENT"
+        hintAccent={'x'.repeat(100)}
+        secondary={<button>Cancel</button>}
+        primary={<button>Create</button>}
+      />,
+    );
+  }
+
+  it('renders secondary before primary in a non-shrinking action group', () => {
+    renderFooter();
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    const create = screen.getByRole('button', { name: 'Create' });
+    expect(cancel.compareDocumentPosition(create) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(create.parentElement).toHaveClass('shrink-0');
+  });
+
+  it('lets the hint side shrink and wrap long unbroken values', () => {
+    renderFooter();
+    const hintWrapper = screen.getByText('x'.repeat(100)).parentElement;
+    expect(hintWrapper).toHaveClass('min-w-0');
+    expect(hintWrapper).toHaveClass('wrap-anywhere');
+    // The footer may flow to a second row instead of pushing the actions out.
+    expect(hintWrapper?.parentElement).toHaveClass('flex-wrap');
   });
 });

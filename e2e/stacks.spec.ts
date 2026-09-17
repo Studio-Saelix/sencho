@@ -134,6 +134,18 @@ test.describe('Stack management', () => {
 
     // AlertDialog confirmation
     await expect(page.getByRole('alertdialog')).toBeVisible({ timeout: 5_000 });
+
+    // The compact one-row footer is preserved when the hint fits: the
+    // VOLUMES KEPT hint and the Delete action share the same flex row.
+    const hint = await page.getByRole('alertdialog').getByText('VOLUMES KEPT', { exact: true }).boundingBox();
+    const action = await page.getByRole('alertdialog').getByRole('button', { name: 'Delete', exact: true }).boundingBox();
+    expect(hint).not.toBeNull();
+    expect(action).not.toBeNull();
+    if (hint && action) {
+      expect(hint.y).toBeLessThan(action.y + action.height);
+      expect(action.y).toBeLessThan(hint.y + hint.height);
+    }
+
     await page.getByRole('alertdialog').getByRole('button', { name: 'Delete' }).click();
 
     // Stack should no longer appear in the sidebar (exact match to avoid false positives from
