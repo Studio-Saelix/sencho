@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Pencil, Pin, Play, Power, Trash2, GitBranch, Unlink } from 'lucide-react';
+import { Pencil, Pin, Play, Power, Trash2, GitBranch, Unlink, CornerDownLeft } from 'lucide-react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
@@ -29,6 +29,7 @@ import { StateReviewDialog } from './StateReviewDialog';
 import { RolloutPreviewDialog } from './RolloutPreviewDialog';
 import { ConvertBlueprintDialog } from './ConvertBlueprintDialog';
 import { DetachBlueprintDialog } from './DetachBlueprintDialog';
+import { RetireBlueprintDialog } from './RetireBlueprintDialog';
 import { ContentOriginBadge } from './ContentOriginBadge';
 import { useNodes } from '@/context/NodeContext';
 import { formatTimeAgo } from '@/lib/relativeTime';
@@ -59,6 +60,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
     const [previewOpen, setPreviewOpen] = useState(false);
     const [convertOpen, setConvertOpen] = useState(false);
     const [detachOpen, setDetachOpen] = useState(false);
+    const [retireOpen, setRetireOpen] = useState(false);
     const { nodes } = useNodes();
 
     // Hold the latest onOpenChange without making it a refresh dependency. Parents
@@ -97,6 +99,9 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
     // Caveats qualify this Blueprint (reapproval, Git-managed rollout), not a node rollout.
     const gitopsCaveats = summary ? liveCaveats(summary.gitopsRevision) : [];
     const gitManaged = blueprint?.content_origin === 'git';
+    const hasActiveDeployments = summary?.deployments.some(
+        (dep) => dep.status !== 'withdrawn',
+    ) ?? false;
     const canApply = !!blueprint && !gitManaged && (can ? can('stack:create') && can('stack:deploy') : canEdit);
     const canDeleteBlueprint = !!blueprint && !gitManaged && (can ? can('stack:delete') : canEdit);
     const canDeployOnNode = (nodeId: number) => !!blueprint
@@ -256,6 +261,12 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                 onClick: () => { if (gitManaged) setDetachOpen(true); else setConvertOpen(true); },
                 disabled: submitting || editMode,
             },
+            ...(gitManaged && !hasActiveDeployments ? [{
+                label: 'Retire to Direct',
+                icon: CornerDownLeft,
+                onClick: () => setRetireOpen(true),
+                disabled: submitting || editMode,
+            }] : []),
             {
                 label: blueprint.enabled ? 'Disable' : 'Enable',
                 icon: Power,
@@ -410,6 +421,12 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                             onOpenChange={setDetachOpen}
                             blueprintId={blueprint.id}
                             onDetached={handleBindingChanged}
+                        />
+                        <RetireBlueprintDialog
+                            open={retireOpen}
+                            onOpenChange={setRetireOpen}
+                            blueprintId={blueprint.id}
+                            onRetired={handleBindingChanged}
                         />
                     </>
                 )}

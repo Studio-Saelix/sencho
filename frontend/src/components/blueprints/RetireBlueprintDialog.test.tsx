@@ -6,8 +6,8 @@ vi.mock('@/lib/blueprintsApi', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/blueprintsApi')>();
   return {
     ...actual,
-    previewDetachContentBinding: vi.fn(),
-    detachContentBinding: vi.fn(),
+    previewRetireContentBinding: vi.fn(),
+    retireContentBinding: vi.fn(),
   };
 });
 
@@ -16,13 +16,13 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 import {
-  detachContentBinding,
-  previewDetachContentBinding,
+  previewRetireContentBinding,
+  retireContentBinding,
 } from '@/lib/blueprintsApi';
-import { DetachBlueprintDialog } from './DetachBlueprintDialog';
+import { RetireBlueprintDialog } from './RetireBlueprintDialog';
 
 const preview: BindingPreview = {
-  transition: 'detach',
+  transition: 'retire',
   currentOrigin: 'git',
   proposedOrigin: 'inline',
   application: {
@@ -37,12 +37,12 @@ const preview: BindingPreview = {
   },
   blueprintPreview: null,
   markers: [],
-  rollbackLimitations: ['Detach restores the frozen Inline snapshot; later Git commits are not written back.'],
+  rollbackLimitations: ['Retire restores Direct targeting using the Blueprint name as the stack identity.'],
 };
 
 beforeEach(() => {
-  vi.mocked(previewDetachContentBinding).mockResolvedValue(preview);
-  vi.mocked(detachContentBinding).mockResolvedValue({
+  vi.mocked(previewRetireContentBinding).mockResolvedValue(preview);
+  vi.mocked(retireContentBinding).mockResolvedValue({
     contentOrigin: 'inline',
     applicationId: null,
     repoUrl: null,
@@ -56,20 +56,20 @@ beforeEach(() => {
   });
 });
 
-describe('DetachBlueprintDialog', () => {
-  it('previews then detaches Git-managed content', async () => {
-    const onDetached = vi.fn();
+describe('RetireBlueprintDialog', () => {
+  it('previews then retires Git-managed content', async () => {
+    const onRetired = vi.fn();
     render(
-      <DetachBlueprintDialog open onOpenChange={vi.fn()} blueprintId={3} onDetached={onDetached} />,
+      <RetireBlueprintDialog open onOpenChange={vi.fn()} blueprintId={3} onRetired={onRetired} />,
     );
 
-    await screen.findByText('Detach restores the frozen Inline snapshot; later Git commits are not written back.');
-    expect(previewDetachContentBinding).toHaveBeenCalledWith(3);
-    expect(screen.getByRole('button', { name: 'Detach' })).toBeEnabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Detach' }));
+    await screen.findByText('Retire restores Direct targeting using the Blueprint name as the stack identity.');
+    expect(previewRetireContentBinding).toHaveBeenCalledWith(3);
+    expect(screen.getByRole('button', { name: 'Retire' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Retire' }));
     await waitFor(() => {
-      expect(detachContentBinding).toHaveBeenCalledWith(3);
-      expect(onDetached).toHaveBeenCalled();
+      expect(retireContentBinding).toHaveBeenCalledWith(3);
+      expect(onRetired).toHaveBeenCalled();
     });
   });
 });

@@ -10,6 +10,7 @@ import {
     type BindingPreview,
     type BlueprintListItem,
 } from '@/lib/blueprintsApi';
+import { BindingPreviewPanel } from './BindingPreviewPanel';
 
 interface AdoptBlueprintDialogProps {
     open: boolean;
@@ -114,13 +115,7 @@ export function AdoptBlueprintDialog({
                                 ))}
                             </select>
                         </label>
-                        {preview && (
-                            <div className="space-y-2 rounded-lg border border-card-border bg-card p-3 max-md:space-y-3">
-                                {preview.rollbackLimitations.map((item) => (
-                                    <p key={item} className="text-xs text-stat-subtitle leading-relaxed">{item}</p>
-                                ))}
-                            </div>
-                        )}
+                        {preview && <BindingPreviewPanel preview={preview} />}
                     </div>
                 )}
             </ModalBody>

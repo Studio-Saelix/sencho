@@ -44,6 +44,8 @@ const preview: BindingPreview = {
     sourcePolicy: 'manual',
     lifecycleStatus: 'active',
   },
+  blueprintPreview: null,
+  markers: [],
   rollbackLimitations: ['Conversion moves a live Git source onto this Blueprint. Credentials stay with that source.'],
 };
 

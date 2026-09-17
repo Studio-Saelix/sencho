@@ -60,6 +60,8 @@ const preview: BindingPreview = {
     sourcePolicy: 'manual',
     lifecycleStatus: 'active',
   },
+  blueprintPreview: null,
+  markers: [],
   rollbackLimitations: ['Adoption moves this live Git source onto the Blueprint. Credentials stay with that source.'],
 };
 

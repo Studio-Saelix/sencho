@@ -114,6 +114,17 @@ describe('Git-managed Blueprint fail-closed gates', () => {
     )).rejects.toBeInstanceOf(GitManagedContentError);
   });
 
+  it('returns 409 git_managed_content when compose_content is posted to a Git-managed Blueprint', async () => {
+    const { blueprint } = converted();
+    const before = DatabaseService.getInstance().getBlueprint(blueprint.id)!.compose_content;
+    const res = await request(app)
+      .put(`/api/blueprints/${blueprint.id}`)
+      .set('Cookie', adminCookie)
+      .send({ compose_content: 'services:\n  web:\n    image: nginx:1.28\n' });
+    expectGitManaged409(res);
+    expect(DatabaseService.getInstance().getBlueprint(blueprint.id)!.compose_content).toBe(before);
+  });
+
   it('projects a blocked rollout after conversion', () => {
     const { applicationId } = converted();
     const application = GitOpsStore.getInstance().getApplication(applicationId)!;

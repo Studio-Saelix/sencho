@@ -1,8 +1,8 @@
 /**
  * Authorization and wiring for Blueprint GitOps content-binding routes.
  *
- * Read stays on node:read (same as Blueprint detail). Convert, preview, and
- * detach require stack:edit. Adopt requires stack:edit and stack:deploy on
+ * Read stays on node:read (same as Blueprint detail). Convert, preview,
+ * detach, and retire require stack:edit. Adopt requires stack:edit and stack:deploy on
  * the named Direct stack, plus stack:edit on the Blueprint name.
  * Community admins are allowed; the descriptor never names the retained
  * source-stack identity.
@@ -124,7 +124,10 @@ describe('content-binding mutations reject viewers', () => {
   it.each([
     { name: 'preview convert', method: 'post' as const, path: '/api/blueprints/1/content-binding/preview', body: { applicationId: 'app-x' } },
     { name: 'convert', method: 'put' as const, path: '/api/blueprints/1/content-binding', body: { applicationId: 'app-x' } },
+    { name: 'detach preview', method: 'post' as const, path: '/api/blueprints/1/content-binding/detach/preview', body: {} },
     { name: 'detach', method: 'delete' as const, path: '/api/blueprints/1/content-binding', body: { applicationId: 'app-x' } },
+    { name: 'retire preview', method: 'post' as const, path: '/api/blueprints/1/content-binding/retire/preview', body: {} },
+    { name: 'retire', method: 'post' as const, path: '/api/blueprints/1/content-binding/retire', body: {} },
     { name: 'preview adopt', method: 'post' as const, path: '/api/stacks/web/git-source/adopt-blueprint/preview', body: { blueprintId: 1 } },
     { name: 'adopt', method: 'post' as const, path: '/api/stacks/web/git-source/adopt-blueprint', body: { blueprintId: 1 } },
   ])('does not let a viewer $name', async ({ method, path, body }) => {
@@ -182,12 +185,65 @@ describe('Admin convert, read, detach, and adopt', () => {
     expect(bound.body.applicationId).toBe(applicationId);
     expectNoSourceIdentity(bound.body);
 
+    const detachPreview = await request(app)
+      .post(`/api/blueprints/${bp.id}/content-binding/detach/preview`)
+      .set('Cookie', adminCookie);
+    expect(detachPreview.status).toBe(200);
+    expect(detachPreview.body.transition).toBe('detach');
+    expect(Array.isArray(detachPreview.body.markers)).toBe(true);
+
     const detach = await request(app)
       .delete(`/api/blueprints/${bp.id}/content-binding`)
       .set('Cookie', adminCookie);
     expect(detach.status).toBe(200);
     expect(detach.body.contentOrigin).toBe('inline');
     expect(detach.body.applicationId).toBeNull();
+  });
+
+  it('lets a Community admin preview and retire a converted Blueprint without active deployments', async () => {
+    setLicense('community');
+    const { blueprint: bp, applicationId } = seedBlueprintAndDirect();
+    await request(app)
+      .put(`/api/blueprints/${bp.id}/content-binding`)
+      .set('Cookie', adminCookie)
+      .send({ applicationId });
+
+    const preview = await request(app)
+      .post(`/api/blueprints/${bp.id}/content-binding/retire/preview`)
+      .set('Cookie', adminCookie);
+    expect(preview.status).toBe(200);
+    expect(preview.body.transition).toBe('retire');
+
+    const retire = await request(app)
+      .post(`/api/blueprints/${bp.id}/content-binding/retire`)
+      .set('Cookie', adminCookie);
+    expect(retire.status).toBe(200);
+    expect(retire.body.contentOrigin).toBe('inline');
+    expect(retire.body.applicationId).toBeNull();
+    expect(GitOpsStore.getInstance().getApplication(applicationId)).toMatchObject({
+      target_mode: 'direct',
+      stack_name: bp.name,
+      configured_source_stack_name: null,
+    });
+  });
+
+  it('returns 409 deployments_active when retire is attempted with live deployments', async () => {
+    const { blueprint: bp, applicationId } = seedBlueprintAndDirect();
+    await request(app)
+      .put(`/api/blueprints/${bp.id}/content-binding`)
+      .set('Cookie', adminCookie)
+      .send({ applicationId });
+    DatabaseService.getInstance().upsertDeployment({
+      blueprint_id: bp.id,
+      node_id: 1,
+      status: 'active',
+    });
+
+    const res = await request(app)
+      .post(`/api/blueprints/${bp.id}/content-binding/retire`)
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('deployments_active');
   });
 
   it('lets a Community admin adopt a Direct stack onto a Blueprint', async () => {

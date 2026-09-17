@@ -2,25 +2,25 @@ import { useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast-store';
-import { detachContentBinding, previewDetachContentBinding } from '@/lib/blueprintsApi';
+import { previewRetireContentBinding, retireContentBinding } from '@/lib/blueprintsApi';
 import { BindingPreviewDialogBody } from './BindingPreviewDialogBody';
 import { useBindingPreview } from './useBindingPreview';
 
-interface DetachBlueprintDialogProps {
+interface RetireBlueprintDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     blueprintId: number;
-    onDetached: () => void;
+    onRetired: () => void;
 }
 
-export function DetachBlueprintDialog({
-    open, onOpenChange, blueprintId, onDetached,
-}: DetachBlueprintDialogProps) {
+export function RetireBlueprintDialog({
+    open, onOpenChange, blueprintId, onRetired,
+}: RetireBlueprintDialogProps) {
     const { preview, loading, loadError } = useBindingPreview(
         open,
         blueprintId,
-        previewDetachContentBinding,
-        'Failed to preview detach',
+        previewRetireContentBinding,
+        'Failed to preview retire',
     );
     const [busy, setBusy] = useState(false);
 
@@ -28,12 +28,12 @@ export function DetachBlueprintDialog({
         if (!preview) return;
         setBusy(true);
         try {
-            await detachContentBinding(blueprintId);
-            toast.success('Blueprint content is Inline again');
-            onDetached();
+            await retireContentBinding(blueprintId);
+            toast.success('Git source restored to Direct targeting');
+            onRetired();
             onOpenChange(false);
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : 'Failed to detach Git-managed content');
+            toast.error(err instanceof Error ? err.message : 'Failed to retire Git-managed content');
         } finally {
             setBusy(false);
         }
@@ -42,22 +42,22 @@ export function DetachBlueprintDialog({
     return (
         <Modal open={open} onOpenChange={onOpenChange} size="lg">
             <ModalHeader
-                kicker="BLUEPRINT · DETACH"
-                title="Detach Git-managed content"
-                description="Restore the frozen Inline snapshot. Later Git commits are not written back."
+                kicker="BLUEPRINT · RETIRE"
+                title="Retire to Direct GitOps"
+                description="Restore Direct targeting using this Blueprint name as the stack identity."
             />
             <ModalBody>
                 <BindingPreviewDialogBody
                     loading={loading}
                     loadError={loadError}
                     preview={preview}
-                    loadErrorMessage="Could not load the detach preview."
+                    loadErrorMessage="Could not load the retire preview."
                 />
             </ModalBody>
             <ModalFooter
                 primary={
                     <Button size="sm" onClick={() => { void confirm(); }} disabled={busy || !preview}>
-                        {busy ? 'Detaching…' : 'Detach'}
+                        {busy ? 'Retiring…' : 'Retire'}
                     </Button>
                 }
                 secondary={

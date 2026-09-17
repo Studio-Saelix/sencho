@@ -10,6 +10,7 @@ import {
     type BindingPreview,
     type DirectGitSourceOption,
 } from '@/lib/blueprintsApi';
+import { BindingPreviewPanel } from './BindingPreviewPanel';
 
 interface ConvertBlueprintDialogProps {
     open: boolean;
@@ -113,17 +114,7 @@ export function ConvertBlueprintDialog({
                                 ))}
                             </select>
                         </label>
-                        {preview && (
-                            <div className="space-y-2 rounded-lg border border-card-border bg-card p-3 max-md:space-y-3">
-                                <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Preview</p>
-                                <p className="text-xs text-stat-subtitle">
-                                    {preview.application.repoUrl ?? 'repository unknown'} · {preview.application.ref ?? 'ref unknown'}
-                                </p>
-                                {preview.rollbackLimitations.map((item) => (
-                                    <p key={item} className="text-xs text-stat-subtitle leading-relaxed">{item}</p>
-                                ))}
-                            </div>
-                        )}
+                        {preview && <BindingPreviewPanel preview={preview} />}
                     </div>
                 )}
             </ModalBody>

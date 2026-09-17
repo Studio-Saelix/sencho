@@ -356,11 +356,21 @@ export interface BindingPreviewApplication {
     lifecycleStatus: string | null;
 }
 
+export type BindingMarkerClassification = 'managed' | 'unmanaged' | 'conflicting' | 'unproven';
+
+export interface BindingPreviewMarker {
+    nodeId: number;
+    nodeName: string;
+    classification: BindingMarkerClassification;
+}
+
 export interface BindingPreview {
     transition: 'adopt' | 'convert' | 'retire' | 'detach';
     currentOrigin: ContentOrigin;
     proposedOrigin: ContentOrigin;
     application: BindingPreviewApplication;
+    blueprintPreview: BlueprintPreview | null;
+    markers: BindingPreviewMarker[];
     rollbackLimitations: string[];
 }
 
@@ -400,12 +410,36 @@ export async function convertContentBinding(
     return expectJson<ContentBindingView>(res, 'Failed to convert this Blueprint to Git-managed content');
 }
 
+export async function previewDetachContentBinding(blueprintId: number): Promise<BindingPreview> {
+    const res = await apiFetch(`/blueprints/${blueprintId}/content-binding/detach/preview`, {
+        method: 'POST',
+        localOnly: true,
+    });
+    return expectJson<BindingPreview>(res, 'Failed to preview detach');
+}
+
 export async function detachContentBinding(blueprintId: number): Promise<ContentBindingView> {
     const res = await apiFetch(`/blueprints/${blueprintId}/content-binding`, {
         method: 'DELETE',
         localOnly: true,
     });
     return expectJson<ContentBindingView>(res, 'Failed to detach Git-managed content');
+}
+
+export async function previewRetireContentBinding(blueprintId: number): Promise<BindingPreview> {
+    const res = await apiFetch(`/blueprints/${blueprintId}/content-binding/retire/preview`, {
+        method: 'POST',
+        localOnly: true,
+    });
+    return expectJson<BindingPreview>(res, 'Failed to preview retire');
+}
+
+export async function retireContentBinding(blueprintId: number): Promise<ContentBindingView> {
+    const res = await apiFetch(`/blueprints/${blueprintId}/content-binding/retire`, {
+        method: 'POST',
+        localOnly: true,
+    });
+    return expectJson<ContentBindingView>(res, 'Failed to retire Git-managed content');
 }
 
 export async function previewAdoptBlueprint(

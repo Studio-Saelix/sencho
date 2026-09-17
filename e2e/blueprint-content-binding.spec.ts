@@ -148,6 +148,7 @@ test.describe('Blueprint Git-managed content binding', () => {
     await page.getByRole('button', { name: 'Cancel' }).click();
     await page.getByRole('button', { name: 'Detach Git' }).click();
     await expect(page.getByRole('heading', { name: 'Detach Git-managed content' })).toBeVisible();
+    await expect(page.getByText('Detach restores the frozen Inline snapshot')).toBeVisible({ timeout: 10_000 });
     await page.getByRole('button', { name: 'Detach', exact: true }).click();
 
     await expect(page.getByText('Inline', { exact: true }).first()).toBeVisible({ timeout: 10_000 });

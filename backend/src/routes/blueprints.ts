@@ -108,6 +108,22 @@ function respondBindingFailure(res: Response, error: unknown, context: string, c
     res.status(500).json({ error: clientMessage });
 }
 
+async function respondBindingPreview(
+    req: Request,
+    res: Response,
+    loadPreview: (blueprintId: number) => Promise<unknown>,
+    context: string,
+    clientMessage: string,
+): Promise<void> {
+    const blueprint = loadBlueprintForBindingEdit(req, res);
+    if (!blueprint) return;
+    try {
+        res.json(await loadPreview(blueprint.id));
+    } catch (error) {
+        respondBindingFailure(res, error, context, clientMessage);
+    }
+}
+
 function loadBlueprintForBindingEdit(req: Request, res: Response): Blueprint | null {
     if (!requirePermission(req, res, 'stack:edit')) return null;
     const id = parseIntParam(req, res, 'id');
@@ -383,6 +399,7 @@ blueprintsRouter.put('/:id', (req: Request, res: Response): void => {
             res.status(409).json({ error: 'A blueprint with that name already exists' });
             return;
         }
+        if (refuseGitManagedConflict(res, error)) return;
         console.error('[Blueprints] Update error:', error);
         res.status(500).json({ error: 'Failed to update blueprint' });
     }
@@ -828,6 +845,37 @@ blueprintsRouter.put('/:id/content-binding', (req: Request, res: Response): void
         res.json(service.describeContentBinding(target.blueprint.id));
     } catch (error) {
         respondBindingFailure(res, error, 'Content-binding convert error', 'Failed to convert Blueprint content binding');
+    }
+});
+
+blueprintsRouter.post('/:id/content-binding/detach/preview', (req, res) => respondBindingPreview(
+    req,
+    res,
+    (blueprintId) => GitOpsBindingService.getInstance().previewDetachToInline(blueprintId),
+    'Content-binding detach preview error',
+    'Failed to preview Blueprint detach',
+));
+
+blueprintsRouter.post('/:id/content-binding/retire/preview', (req, res) => respondBindingPreview(
+    req,
+    res,
+    (blueprintId) => GitOpsBindingService.getInstance().previewRetireToDirect(blueprintId),
+    'Content-binding retire preview error',
+    'Failed to preview Blueprint retire',
+));
+
+blueprintsRouter.post('/:id/content-binding/retire', (req: Request, res: Response): void => {
+    const blueprint = loadBlueprintForBindingEdit(req, res);
+    if (!blueprint) return;
+    try {
+        const service = GitOpsBindingService.getInstance();
+        service.retireToDirect({
+            blueprintId: blueprint.id,
+            actor: auditActorUsername(req),
+        });
+        res.json(service.describeContentBinding(blueprint.id));
+    } catch (error) {
+        respondBindingFailure(res, error, 'Content-binding retire error', 'Failed to retire Blueprint content binding');
     }
 });
 
