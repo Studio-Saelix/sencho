@@ -284,8 +284,8 @@ function pollingSettingsPayload(): {
 } {
   return {
     poll_interval_mins: DatabaseService.getInstance().getGitOpsPollIntervalMins(),
-    per_source: GitOpsStore.getInstance().listActiveDirectApplications().map((app) => ({
-      stack_name: app.stack_name ?? '',
+    per_source: GitOpsStore.getInstance().listActiveSourceApplications().map((app) => ({
+      stack_name: app.stack_name ?? app.configured_source_stack_name ?? '',
       poll_interval_secs: app.poll_interval_secs,
       next_poll_at: app.next_poll_at,
       source_policy: app.source_policy,

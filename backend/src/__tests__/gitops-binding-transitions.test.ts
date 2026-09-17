@@ -175,7 +175,7 @@ describe('gitops binding transitions', () => {
     expect(store.getLiveBlueprintApplicationBySourceStack('old-web')).toBeUndefined();
   });
 
-  it('demotes and promotes Blueprint mode on the same row', () => {
+  it('demotes Blueprint mode back to Inline on the same row', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
     const blueprintId = createBlueprint('bind-flip');
@@ -195,15 +195,6 @@ describe('gitops binding transitions', () => {
     expect(demoted.configured_source_stack_name).toBeNull();
     expect(demoted.configured_repo_url).toBeNull();
     expect(demoted.blueprint_id).toBe(blueprintId);
-
-    tx.blueprintModePromoted({
-      applicationId: 'app-flip',
-      configuredRepoUrl: 'https://github.com/example/flip-web.git',
-      envelope: env('op-promote'),
-    });
-    const promoted = store.getApplication('app-flip')!;
-    expect(promoted.target_mode).toBe('blueprint');
-    expect(promoted.configured_repo_url).toBe('https://github.com/example/flip-web.git');
   });
 });
 

@@ -76,18 +76,25 @@ function blueprintApplicationOwningStack(stackName: string, nodeId: number | und
 }
 
 /**
- * The revision projection for a stack's own Direct Git attachment.
+ * The revision projection for a stack's Git-source sheet.
  *
- * Live applications only. Detach deletes the Git-source row and writes the
- * tombstone in one transaction, so a source row beside a detached application
- * is not a producible state, and the Git-source routes are the only callers.
- * The detached case is reachable through the stack directory instead, which
- * survives a detach, and projectManagedStackRevision below is what answers it.
+ * Live applications only. Prefers a live Direct application for this stack
+ * name; if none, falls back to a Blueprint-mode application that still holds
+ * this stack as its retained credential carrier (`configured_source_stack_name`).
+ * That fallback is how a converted (claimed) source stays visible and
+ * read-only on the Git Source sheet until Detach or Retire.
  *
- * Used by the Git-source routes, which answer specifically about Direct
- * attachment. They must not be answered with some other application's identity,
- * so the Blueprint bridge above is deliberately not applied here. That also
- * keeps them off the read classifier's lifecycle input.
+ * Detach deletes the Git-source row and writes the tombstone in one
+ * transaction, so a source row beside a detached application is not a
+ * producible state. The detached case is reachable through the stack
+ * directory instead, which survives a detach, and
+ * projectManagedStackRevision below is what answers it.
+ *
+ * Distinct from projectManagedStackRevision: this answers "what Git source
+ * is attached to this stack's sheet", including a Blueprint claim that still
+ * owns the credentials. It does not use the deployment-owned Blueprint bridge
+ * (blueprintApplicationOwningStack), which answers "what manages this
+ * directory on this node".
  */
 export function projectStackRevision(stackName: string): GitOpsRevisionProjection {
   const store = GitOpsStore.getInstance();
@@ -116,8 +123,9 @@ export function projectStackRevision(stackName: string): GitOpsRevisionProjectio
  * `deleted` from stack-grant reads for that same reason.
  *
  * Separate from projectStackRevision because the two answer different
- * questions. "What Git source is attached to this stack" must never be answered
- * with a Blueprint's identity; "what manages this stack" must be.
+ * questions. The Git-source sheet resolves Direct or a claimed Blueprint
+ * source by stack / retained-source identity. This managed-stack path also
+ * bridges deployment-owned Blueprint applications that have no Direct claim.
  */
 export function projectManagedStackRevision(stackName: string, nodeId: number | undefined): GitOpsRevisionProjection {
   const store = GitOpsStore.getInstance();

@@ -248,39 +248,6 @@ export class GitOpsTransitions {
     });
   }
 
-  blueprintModePromoted(args: {
-    applicationId: string;
-    configuredRepoUrl: string;
-    envelope: EventEnvelope;
-  }): TransitionResult {
-    return this.commitTargetBinding({
-      applicationId: args.applicationId,
-      envelope: args.envelope,
-      expectedMode: 'inline_blueprint',
-      next: (app) => {
-        if (app.blueprint_id === null) {
-          throw new GitOpsTransitionError('an inline blueprint application needs a blueprint id');
-        }
-        return {
-          targetMode: 'blueprint',
-          stackName: null,
-          blueprintId: app.blueprint_id,
-          configuredSourceStackName: app.configured_source_stack_name,
-          configuredRepoUrl: args.configuredRepoUrl,
-        };
-      },
-      matchesDestination: (app) => (
-        app.target_mode === 'blueprint' && app.configured_repo_url === args.configuredRepoUrl
-      ),
-      assertReady: (app) => {
-        const sameRepo = this.store().getLiveBlueprintModeApplicationByRepoUrl(args.configuredRepoUrl);
-        if (sameRepo && sameRepo.id !== app.id) {
-          throw new GitOpsTransitionError('live blueprint application already claims this repo');
-        }
-      },
-    });
-  }
-
   private commitTargetBinding(args: {
     applicationId: string;
     envelope: EventEnvelope;

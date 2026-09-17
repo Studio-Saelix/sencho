@@ -138,7 +138,7 @@ Enforce's auto-fix only ever redeploys the blueprint's *current* revision to cor
 
 ## The detail sheet
 
-Click any tile in the catalog to open the blueprint detail sheet on the right. The sheet header shows the name, the meta line (`<selector> · <drift mode> · rev <n>`), the action bar, the Inline or Git-managed badge, the description, the deployment table, and a collapsible compose source. Inline Blueprints offer **Apply now**, **Edit**, **Convert to Git**, **Disable**, and **Delete**. Git-managed Blueprints offer **Edit**, **Detach Git**, and **Disable**. **Apply now** is withheld because Git-managed content cannot deploy from the stored snapshot. **Delete** waits until you Detach Git, because the Git source still belongs to this Blueprint.
+Click any tile in the catalog to open the blueprint detail sheet on the right. The sheet header shows the name, the meta line (`<selector> · <drift mode> · rev <n>`), the action bar, the Inline or Git-managed badge, the description, the deployment table, and a collapsible compose source. Inline Blueprints offer **Apply now**, **Edit**, **Convert to Git**, **Disable**, and **Delete**. Git-managed Blueprints offer **Edit**, **Detach Git**, **Retire to Direct** (when no live deployments remain), and **Disable**. **Apply now** is withheld because Git-managed content cannot deploy from the stored snapshot. **Delete** waits until you Detach Git or Retire to Direct, because the Git source still belongs to this Blueprint.
 
 <Frame caption="An Inline Blueprint detail sheet. Header carries the selector and revision; the action bar offers Apply now, Edit, Convert to Git, Disable, and Delete; the deployment table lists one row per resolved node.">
   <img src="/images/blueprint-model/detail-sheet.png" alt="Blueprint detail sheet showing header, action bar, and deployment table" />
@@ -205,11 +205,15 @@ Click **Edit** on the detail sheet. On an Inline Blueprint, editing the compose 
 
 **Convert to Git** moves an existing live Git source onto this Blueprint. Pick the source, review the preview, and confirm. The Blueprint becomes Git-managed: Git is the content authority, the previous YAML is stored as a frozen snapshot, and rollout from that snapshot is blocked. Credentials stay with the Git source. Conversion also returns approval to pending.
 
-The Git Source sheet for that stack becomes read-only until you **Detach Git**. Save, Remove, and Pull now are blocked there.
+The Git Source sheet for that stack becomes read-only until you **Detach Git** or **Retire to Direct**. Save, Remove, and Pull now are blocked there.
 
 ### Detach Git-managed content
 
 **Detach Git** restores Inline editing from the frozen snapshot. Later Git commits are not written back. Detach is refused when that snapshot is empty (no generation exists to restore as Inline content). After detach, **Apply now** and compose editing return.
+
+### Retire to Direct
+
+**Retire to Direct** restores Direct GitOps targeting on the original source stack once every non-withdrawn deployment is gone. Credentials and the Git Source sheet return to that stack. Retire is refused while deployments are still active; withdraw them first, then retire. After retire, the Blueprint is Inline again (with no bound application), and the original stack's Git Source sheet is editable.
 
 ### Confirm a stateful first deploy
 
@@ -241,7 +245,7 @@ In the deployment table, click **Withdraw** on the node's row. For stateless blu
 
 ### Delete the blueprint
 
-Click **Delete** on the detail sheet, then type the blueprint's name to confirm. Stateless deployments, and any deployment that never made it past **Awaiting confirmation**, are withdrawn for you as part of the delete. A stateful or state-unknown blueprint with a deployment that is live on a node refuses to delete; withdraw that deployment from the deployment table first, so you choose the snapshot-or-destroy path for its data, then delete the blueprint. A Git-managed Blueprint also refuses to delete until you **Detach Git**, so the Git source is not severed by removing the Blueprint.
+Click **Delete** on the detail sheet, then type the blueprint's name to confirm. Stateless deployments, and any deployment that never made it past **Awaiting confirmation**, are withdrawn for you as part of the delete. A stateful or state-unknown blueprint with a deployment that is live on a node refuses to delete; withdraw that deployment from the deployment table first, so you choose the snapshot-or-destroy path for its data, then delete the blueprint. A Git-managed Blueprint also refuses to delete until you **Detach Git** or **Retire to Direct**, so the Git source is not severed by removing the Blueprint.
 
 ## Federation: pin a blueprint to a single node
 
@@ -403,7 +407,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
 
 <CardGroup cols={2}>
   <Card title="Git Sources" icon="git-branch" href="/features/git-sources">
-    Live Git sources you can convert onto a Blueprint. After Convert or Adopt, that stack's Git Source sheet is read-only until you Detach Git.
+    Live Git sources you can convert onto a Blueprint. After Convert or Adopt, that stack's Git Source sheet is read-only until you Detach Git or Retire to Direct.
   </Card>
   <Card title="Fleet Federation" icon="network-wired" href="/features/fleet-federation">
     Cordon nodes to block new placements and pin blueprints to a specific node to override the selector.

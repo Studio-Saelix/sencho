@@ -55,6 +55,14 @@ describe('converted GitOps source continuity', () => {
     expect(GitOpsStore.getInstance().listApplicationsDueForRetry(now).map((row) => row.id)).toContain(applicationId);
   });
 
+  it('lists a converted application in the active source projection used by polling settings', () => {
+    const { applicationId, stackName } = converted({ sourcePolicy: 'automatic' });
+    const rows = GitOpsStore.getInstance().listActiveSourceApplications();
+    expect(rows.map((row) => row.id)).toContain(applicationId);
+    const row = rows.find((item) => item.id === applicationId)!;
+    expect(row.stack_name ?? row.configured_source_stack_name).toBe(stackName);
+  });
+
   it('reschedules poll cursors for converted applications', () => {
     const { applicationId } = converted({ sourcePolicy: 'automatic' });
     DatabaseService.getInstance().getDb().prepare(
