@@ -798,3 +798,30 @@ describe('GitSourcePanel controller controls', () => {
     });
   });
 });
+
+describe('GitSourcePanel Blueprint binding', () => {
+  it('shows a claimed source as read-only and hides save', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(liveRevision({
+        targetMode: 'blueprint',
+        stackName: null,
+        blueprintId: 9,
+        availableActions: ['none'],
+      }))),
+    );
+    render(panel());
+    expect(await screen.findByTestId('git-source-claimed')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /update/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /remove/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /pull now/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^review$/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/repository url/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /adopt onto blueprint/i })).not.toBeInTheDocument();
+  });
+
+  it('offers adopt on a live Direct source', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(LINKED_SOURCE));
+    render(panel());
+    expect(await screen.findByRole('button', { name: /adopt onto blueprint/i })).toBeInTheDocument();
+  });
+});

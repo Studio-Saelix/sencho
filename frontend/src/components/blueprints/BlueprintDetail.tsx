@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Pencil, Pin, Play, Power, Trash2 } from 'lucide-react';
+import { Pencil, Pin, Play, Power, Trash2, GitBranch, Unlink } from 'lucide-react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
@@ -27,6 +27,9 @@ import { BlueprintDeploymentTable } from './BlueprintDeploymentTable';
 import { EvictionDialog } from './EvictionDialog';
 import { StateReviewDialog } from './StateReviewDialog';
 import { RolloutPreviewDialog } from './RolloutPreviewDialog';
+import { ConvertBlueprintDialog } from './ConvertBlueprintDialog';
+import { DetachBlueprintDialog } from './DetachBlueprintDialog';
+import { ContentOriginBadge } from './ContentOriginBadge';
 import { useNodes } from '@/context/NodeContext';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import type { PermissionAction } from '@/context/AuthContext';
@@ -54,6 +57,8 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
     const [deleteOpen, setDeleteOpen] = useState(false);
     const [deleteConfirmText, setDeleteConfirmText] = useState('');
     const [previewOpen, setPreviewOpen] = useState(false);
+    const [convertOpen, setConvertOpen] = useState(false);
+    const [detachOpen, setDetachOpen] = useState(false);
     const { nodes } = useNodes();
 
     // Hold the latest onOpenChange without making it a refresh dependency. Parents
@@ -89,19 +94,24 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
     // product can express. Everything else a Blueprint projection carries is
     // rollout surface, which is not this sheet's job.
     const gitopsFaults = summary ? absentFault(summary.gitopsRevision) : [];
-    // Caveats are the exception to the note above: an approval that no longer
-    // covers what the Blueprint asks for is a fact about this Blueprint, not
-    // about a rollout, and nothing else on the sheet says it.
+    // Caveats qualify this Blueprint (reapproval, Git-managed rollout), not a node rollout.
     const gitopsCaveats = summary ? liveCaveats(summary.gitopsRevision) : [];
-    const canApply = !!blueprint && (can ? can('stack:create') && can('stack:deploy') : canEdit);
-    const canDeleteBlueprint = !!blueprint && (can ? can('stack:delete') : canEdit);
+    const gitManaged = blueprint?.content_origin === 'git';
+    const canApply = !!blueprint && !gitManaged && (can ? can('stack:create') && can('stack:deploy') : canEdit);
+    const canDeleteBlueprint = !!blueprint && !gitManaged && (can ? can('stack:delete') : canEdit);
     const canDeployOnNode = (nodeId: number) => !!blueprint
+        && !gitManaged
         && (can ? can('stack:deploy', 'stack', blueprint.name, nodeId) : canEdit);
     const canWithdrawFromNode = (nodeId: number) => !!blueprint
         && (can ? can('stack:delete', 'stack', blueprint.name, nodeId) : canEdit);
 
     async function handleRolloutApplied() {
         await refresh();
+        onChanged();
+    }
+
+    function handleBindingChanged() {
+        void refresh();
         onChanged();
     }
 
@@ -241,6 +251,12 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                 disabled: submitting,
             }] : []),
             {
+                label: gitManaged ? 'Detach Git' : 'Convert to Git',
+                icon: gitManaged ? Unlink : GitBranch,
+                onClick: () => { if (gitManaged) setDetachOpen(true); else setConvertOpen(true); },
+                disabled: submitting || editMode,
+            },
+            {
                 label: blueprint.enabled ? 'Disable' : 'Enable',
                 icon: Power,
                 onClick: handleToggleEnabled,
@@ -293,6 +309,10 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                     </SheetSection>
                 ) : (
                     <>
+                        <SheetSection title="Content" hideHeader>
+                            <ContentOriginBadge origin={blueprint.content_origin} />
+                        </SheetSection>
+
                         {blueprint.pinned_node_id !== null && (
                             <SheetSection title="Pin" hideHeader>
                                 <div className="flex items-start gap-2 rounded-md border border-card-border bg-glass-highlight px-3 py-2">
@@ -376,6 +396,22 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                         onOpenChange={setPreviewOpen}
                         onApplied={handleRolloutApplied}
                     />
+                )}
+                {blueprint && (
+                    <>
+                        <ConvertBlueprintDialog
+                            open={convertOpen}
+                            onOpenChange={setConvertOpen}
+                            blueprintId={blueprint.id}
+                            onConverted={handleBindingChanged}
+                        />
+                        <DetachBlueprintDialog
+                            open={detachOpen}
+                            onOpenChange={setDetachOpen}
+                            blueprintId={blueprint.id}
+                            onDetached={handleBindingChanged}
+                        />
+                    </>
                 )}
                 {blueprint && (
                     <Modal open={deleteOpen} onOpenChange={(o) => { if (!o) { setDeleteOpen(false); setDeleteConfirmText(''); } }} size="md">

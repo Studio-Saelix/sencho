@@ -51,6 +51,8 @@ function blueprint(overrides: Partial<BlueprintListItem> = {}): BlueprintListIte
         updated_at: 0,
         created_by: 'admin',
         pinned_node_id: null,
+        content_origin: 'inline',
+        application_id: null,
         deploymentCounts: {},
         deploymentTotal: 0,
         gitopsRevision: absentRevision(),

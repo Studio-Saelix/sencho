@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Loader2, Trash2, RefreshCw, Save, Pause, Play } from 'lucide-react';
+import { Loader2, Trash2, RefreshCw, Save, Pause, Play, GitBranch } from 'lucide-react';
 import { ConfirmModal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -13,6 +13,7 @@ import { GitSourceDiffDialog, type PullResult, type PublicPendingPlan } from './
 import { GitSourceFields, type ApplyMode } from './GitSourceFields';
 import { GitManifestSummary, type ManifestSummary } from './GitManifestSummary';
 import type { GitBrowseResult } from './GitComposeFilePicker';
+import { AdoptBlueprintDialog } from '@/components/blueprints/AdoptBlueprintDialog';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
 import { SOURCE_STATE_LOOKUP, absentFault, liveSourceFacet, type LiveSourceFacet } from '@/lib/gitopsState';
@@ -66,6 +67,7 @@ interface GitSourcePanelProps {
   isDarkMode: boolean;
   /** Called after any change that may affect the sidebar pending-badge. */
   onSourceChanged?: () => void;
+  canDeploy?: boolean;
 }
 
 function deriveApplyMode(source: GitSource | null, pendingMode: ApplyMode | null): ApplyMode {
@@ -118,6 +120,7 @@ export function GitSourcePanel({
   onOpenChange,
   stackName,
   canEdit,
+  canDeploy = canEdit,
   onSourceChanged,
 }: GitSourcePanelProps) {
   const [loading, setLoading] = useState(true);
@@ -156,6 +159,7 @@ export function GitSourcePanel({
   const [suspending, setSuspending] = useState(false);
   const [resuming, setResuming] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [adoptOpen, setAdoptOpen] = useState(false);
 
   const { runWithLog } = useDeployFeedback();
   const { activeNode, hasCapability } = useNodes();
@@ -552,6 +556,8 @@ export function GitSourcePanel({
     ? `Updated ${new Date(source.updated_at).toLocaleString()}`
     : undefined;
 
+  const claimedByBlueprint = revision?.targetMode === 'blueprint';
+  const canMutateSource = canEdit && !claimedByBlueprint;
   const availableActions: readonly GitOpsAvailableAction[] =
     revision && revision.targetMode !== 'not_applicable' ? revision.availableActions : [];
   const offersController = (action: GitOpsAvailableAction): boolean => (
@@ -570,30 +576,40 @@ export function GitSourcePanel({
       || sourceFacet.status === 'source_suspended'
     ),
   );
-  const showPendingReview = Boolean(pending && !showControllerCard);
+  const showPendingReview = Boolean(pending && !showControllerCard && !claimedByBlueprint);
 
   const secondaryActions: SystemSheetAction[] = [];
-  if (source && sourceFacet?.status !== 'source_suspended') {
-    secondaryActions.push({
-      label: pulling ? 'Pulling' : 'Pull now',
-      onClick: () => { void pullNow(); },
-      disabled: pulling || saving,
-      icon: pulling ? Loader2 : RefreshCw,
-    });
+  if (!claimedByBlueprint) {
+    if (source && sourceFacet?.status !== 'source_suspended') {
+      secondaryActions.push({
+        label: pulling ? 'Pulling' : 'Pull now',
+        onClick: () => { void pullNow(); },
+        disabled: pulling || saving,
+        icon: pulling ? Loader2 : RefreshCw,
+      });
+    }
+    if (offerSuspend) {
+      secondaryActions.push({
+        label: suspending ? 'Suspending' : 'Suspend',
+        onClick: () => setSuspendConfirmOpen(true),
+        disabled: suspending || saving,
+        icon: Pause,
+      });
+    } else if (offerResume) {
+      secondaryActions.push({
+        label: resuming ? 'Resuming' : 'Resume',
+        onClick: () => { void resumeSource(); },
+        disabled: resuming || saving,
+        icon: Play,
+      });
+    }
   }
-  if (offerSuspend) {
+  if (canEdit && canDeploy && source && revision?.targetMode === 'direct') {
     secondaryActions.push({
-      label: suspending ? 'Suspending' : 'Suspend',
-      onClick: () => setSuspendConfirmOpen(true),
-      disabled: suspending || saving,
-      icon: Pause,
-    });
-  } else if (offerResume) {
-    secondaryActions.push({
-      label: resuming ? 'Resuming' : 'Resume',
-      onClick: () => { void resumeSource(); },
-      disabled: resuming || saving,
-      icon: Play,
+      label: 'Adopt onto Blueprint',
+      onClick: () => setAdoptOpen(true),
+      disabled: saving,
+      icon: GitBranch,
     });
   }
 
@@ -606,14 +622,14 @@ export function GitSourcePanel({
         name="Git source"
         meta={sheetMeta}
         size="lg"
-        primaryAction={canEdit ? {
+        primaryAction={canMutateSource ? {
           label: saving ? (source ? 'Updating' : 'Saving') : (source ? 'Update' : 'Save'),
           onClick: () => { void save(); },
           disabled: saving,
           icon: saving ? Loader2 : Save,
         } : undefined}
         secondaryActions={secondaryActions.length > 0 ? secondaryActions : undefined}
-        destructiveAction={source && canEdit ? {
+        destructiveAction={canMutateSource && source ? {
           label: 'Remove',
           onClick: () => setRemoveConfirmOpen(true),
           disabled: deleting || saving,
@@ -714,6 +730,14 @@ export function GitSourcePanel({
             </SheetSection>
 
             <SheetSection title="Repository">
+              {claimedByBlueprint ? (
+                <div className="space-y-2 rounded-lg border border-card-border bg-card p-3" data-testid="git-source-claimed">
+                  <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Bound to a Blueprint</p>
+                  <p className="text-xs text-stat-subtitle leading-relaxed">
+                    This Git source belongs to a Git-managed Blueprint. Save, Remove, and Pull now are blocked here. Use Detach Git on that Blueprint to restore stack-owned editing.
+                  </p>
+                </div>
+              ) : (
               <GitSourceFields
                 variant="edit"
                 stackName={stackName}
@@ -753,6 +777,7 @@ export function GitSourcePanel({
                 onApplyModeChange={setApplyModeOverride}
                 onBrowse={browseRepo}
               />
+              )}
             </SheetSection>
 
             {source && (
@@ -837,6 +862,13 @@ export function GitSourcePanel({
           className="mt-1 w-full rounded-md border border-card-border bg-card px-3 py-2 font-mono text-sm text-stat-value"
         />
       </ConfirmModal>
+
+      <AdoptBlueprintDialog
+        open={adoptOpen}
+        onOpenChange={setAdoptOpen}
+        stackName={stackName}
+        onAdopted={() => { void load(); onSourceChanged?.(); }}
+      />
     </>
   );
 }

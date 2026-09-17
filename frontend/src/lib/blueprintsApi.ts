@@ -2,6 +2,7 @@ import { apiFetch } from './api';
 import type { GitOpsRevisionCarrier, GitOpsRevisionsCarrier } from '@/types/gitops';
 
 export type DriftMode = 'observe' | 'suggest' | 'enforce';
+export type ContentOrigin = 'inline' | 'git';
 export type BlueprintClassification = 'stateless' | 'stateful' | 'unknown';
 export type BlueprintDeploymentStatus =
     | 'pending'
@@ -38,6 +39,8 @@ export interface Blueprint {
     approval_status?: 'pending' | 'approved';
     approved_at?: number | null;
     approved_by?: string | null;
+    content_origin: ContentOrigin;
+    application_id: string | null;
 }
 
 export type EffectiveApproval = 'pending' | 'approved' | 'reapproval_required';
@@ -327,6 +330,127 @@ export async function analyzeCompose(composeContent: string): Promise<AnalyzerRe
         localOnly: true,
     });
     return expectJson<AnalyzerResult>(res, 'Failed to analyze compose');
+}
+
+export interface ContentBindingView {
+    contentOrigin: ContentOrigin;
+    applicationId: string | null;
+    repoUrl: string | null;
+    ref: string | null;
+    composePaths: string[] | null;
+    contextDir: string | null;
+    sourcePolicy: string | null;
+    lifecycleStatus: string | null;
+    blockedRollout: boolean;
+    snapshotPresent: boolean;
+}
+
+export interface BindingPreviewApplication {
+    id: string | null;
+    stackName: string | null;
+    repoUrl: string | null;
+    ref: string | null;
+    composePaths: string[] | null;
+    contextDir: string | null;
+    sourcePolicy: string | null;
+    lifecycleStatus: string | null;
+}
+
+export interface BindingPreview {
+    transition: 'adopt' | 'convert' | 'retire' | 'detach';
+    currentOrigin: ContentOrigin;
+    proposedOrigin: ContentOrigin;
+    application: BindingPreviewApplication;
+    rollbackLimitations: string[];
+}
+
+export interface DirectGitSourceOption {
+    applicationId: string;
+    stackName: string;
+    repoUrl: string;
+    ref: string;
+}
+
+export async function getContentBinding(blueprintId: number): Promise<ContentBindingView> {
+    const res = await apiFetch(`/blueprints/${blueprintId}/content-binding`, { localOnly: true });
+    return expectJson<ContentBindingView>(res, 'Failed to load the Git-managed source');
+}
+
+export async function previewConvertContentBinding(
+    blueprintId: number,
+    applicationId: string,
+): Promise<BindingPreview> {
+    const res = await apiFetch(`/blueprints/${blueprintId}/content-binding/preview`, {
+        method: 'POST',
+        body: JSON.stringify({ applicationId }),
+        localOnly: true,
+    });
+    return expectJson<BindingPreview>(res, 'Failed to preview conversion');
+}
+
+export async function convertContentBinding(
+    blueprintId: number,
+    applicationId: string,
+): Promise<ContentBindingView> {
+    const res = await apiFetch(`/blueprints/${blueprintId}/content-binding`, {
+        method: 'PUT',
+        body: JSON.stringify({ applicationId }),
+        localOnly: true,
+    });
+    return expectJson<ContentBindingView>(res, 'Failed to convert this Blueprint to Git-managed content');
+}
+
+export async function detachContentBinding(blueprintId: number): Promise<ContentBindingView> {
+    const res = await apiFetch(`/blueprints/${blueprintId}/content-binding`, {
+        method: 'DELETE',
+        localOnly: true,
+    });
+    return expectJson<ContentBindingView>(res, 'Failed to detach Git-managed content');
+}
+
+export async function previewAdoptBlueprint(
+    stackName: string,
+    blueprintId: number,
+): Promise<BindingPreview> {
+    const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/adopt-blueprint/preview`, {
+        method: 'POST',
+        body: JSON.stringify({ blueprintId }),
+    });
+    return expectJson<BindingPreview>(res, 'Failed to preview Blueprint adoption');
+}
+
+export async function adoptBlueprintFromStack(
+    stackName: string,
+    blueprintId: number,
+): Promise<ContentBindingView> {
+    const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/adopt-blueprint`, {
+        method: 'POST',
+        body: JSON.stringify({ blueprintId }),
+    });
+    return expectJson<ContentBindingView>(res, 'Failed to adopt this Git source onto a Blueprint');
+}
+
+type GitSourceListRow = {
+    stack_name: string;
+    repo_url: string;
+    branch: string;
+} & Partial<GitOpsRevisionCarrier>;
+
+export async function listDirectGitSourceOptions(): Promise<DirectGitSourceOption[]> {
+    const res = await apiFetch('/git-sources', { localOnly: true });
+    const rows = await expectJson<GitSourceListRow[]>(res, 'Failed to load Git sources');
+    const options: DirectGitSourceOption[] = [];
+    for (const row of rows) {
+        const revision = row.gitopsRevision;
+        if (revision?.targetMode !== 'direct' || !revision.applicationId) continue;
+        options.push({
+            applicationId: revision.applicationId,
+            stackName: row.stack_name,
+            repoUrl: row.repo_url,
+            ref: row.branch,
+        });
+    }
+    return options;
 }
 
 // ---- Node labels ----

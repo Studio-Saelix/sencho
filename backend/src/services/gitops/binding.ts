@@ -364,8 +364,10 @@ function rollbackLimitationsFor(transition: BindingPreview['transition']): strin
     ];
   }
   return [
-    'Conversion changes placement authority only; the Git source and credentials stay on the original application.',
-    'Git-managed Blueprints cannot deploy until Blueprint rollout generations are enabled.',
+    transition === 'adopt'
+      ? 'Adoption moves this live Git source onto the Blueprint. Credentials stay with that source.'
+      : 'Conversion moves a live Git source onto this Blueprint. Credentials stay with that source.',
+    'Git-managed Blueprints cannot deploy from the stored snapshot.',
   ];
 }
 
