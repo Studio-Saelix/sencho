@@ -12,9 +12,11 @@ import {
 } from './dashboard';
 import { DashboardActivityCard } from './dashboard/DashboardActivityCard';
 import { useGitOpsSourceStates } from './dashboard/useGitOpsSourceStates';
+import { useStackHealthScope, type StackHealthNavTarget } from './dashboard/useStackHealthScope';
+import { useStackHealthScopePreference } from './dashboard/useStackHealthScopePreference';
 
 interface HomeDashboardProps {
-  onNavigateToStack?: (stackFile: string) => void;
+  onNavigateToStack?: (target: StackHealthNavTarget) => void;
   onOpenSettingsSection?: (section: SectionId) => void;
   notifications: NotificationItem[];
   onClearNotifications: () => void | Promise<void>;
@@ -27,6 +29,19 @@ export default function HomeDashboard({ onNavigateToStack, onOpenSettingsSection
   const { activeNode, nodes } = useNodes();
   const data = useDashboardData();
   const gitopsSourceStates = useGitOpsSourceStates();
+  const [scope, setScope] = useStackHealthScopePreference();
+  const health = useStackHealthScope({
+    scope,
+    stackStatuses: data.stackStatuses,
+    stackStatusesFreshness: data.stackStatusesFreshness,
+    stackStatusesLoadStatus: data.stackStatusesLoadStatus,
+    stackStatusesLoadError: data.stackStatusesLoadError,
+    retryStackStatuses: data.retryStackStatuses,
+    metrics: data.metrics,
+    stackCpuSeries: data.stackCpuSeries,
+    gitopsSourceStates,
+    stackUpdates,
+  });
   const activeNodeName = activeNode?.name || 'Local';
 
   return (
@@ -49,15 +64,17 @@ export default function HomeDashboard({ onNavigateToStack, onOpenSettingsSection
       />
 
       <StackHealthTable
-        stackStatuses={data.stackStatuses}
-        stackStatusesLoadStatus={data.stackStatusesLoadStatus}
-        stackStatusesLoadError={data.stackStatusesLoadError}
-        onRetryStackStatuses={data.retryStackStatuses}
-        metrics={data.metrics}
-        stackCpuSeries={data.stackCpuSeries}
+        scope={scope}
+        onScopeChange={setScope}
+        showScopeControl={health.showScopeControl}
+        view={health.view}
+        viewError={health.viewError}
+        rows={health.rows}
+        coverage={health.coverage}
+        incomplete={health.incomplete}
+        onRetry={health.retry}
+        onRetryFailedOrStale={health.incomplete ? health.retryFailedOrStale : undefined}
         onNavigateToStack={onNavigateToStack ?? NOOP}
-        stackUpdates={stackUpdates}
-        gitopsSourceStates={gitopsSourceStates}
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

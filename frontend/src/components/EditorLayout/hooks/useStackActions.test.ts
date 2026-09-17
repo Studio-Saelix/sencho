@@ -1191,6 +1191,18 @@ describe('useStackActions loadFile startInComposeEdit + pending options', () => 
     expect(overlayState.setPendingUnsavedLoad).toHaveBeenCalledWith('other.yml');
     expect(overlayState.setPendingLoadOptions).toHaveBeenCalledWith({ startInComposeEdit: true });
   });
+
+  it('loadFileOnNode defers same-filename navigation to a different node when dirty', async () => {
+    const node = { id: 2, type: 'remote' } as Parameters<typeof useStackActions>[0]['activeNode'];
+    const { result, overlayState } = setup({
+      editorState: { content: 'dirty', originalContent: 'clean' },
+      stackList: { selectedFile: 'web.yml' },
+    });
+    await result.current.loadFileOnNode(node!, 'web.yml');
+    expect(overlayState.setPendingUnsavedNode).toHaveBeenCalledWith(node);
+    expect(overlayState.setPendingUnsavedLoad).toHaveBeenCalledWith('web.yml');
+    expect(overlayState.setPendingLoadOptions).toHaveBeenCalledWith(null);
+  });
 });
 
 describe('useStackActions update readiness routing', () => {

@@ -884,12 +884,11 @@ export function useStackActions(options: UseStackActionsOptions) {
 
   const loadFileOnNode = async (node: Node, filename: string, options?: LoadFileOptions) => {
     if (!filename) return;
-    if (
-      !options?.skipUnsavedCheck &&
-      stackListState.selectedFile &&
-      filename !== stackListState.selectedFile &&
-      hasUnsavedChanges()
-    ) {
+    const currentFile = stackListState.selectedFile;
+    const identityChanged = currentFile != null && (
+      filename !== currentFile || node.id !== activeNodeIdRef.current
+    );
+    if (!options?.skipUnsavedCheck && identityChanged && hasUnsavedChanges()) {
       overlayState.setPendingUnsavedNode(node);
       overlayState.setPendingUnsavedLoad(filename);
       overlayState.setPendingLoadOptions(options ?? null);

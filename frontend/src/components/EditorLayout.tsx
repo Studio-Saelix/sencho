@@ -38,7 +38,9 @@ import {
 } from './GlobalCommandPalette';
 import { SENCHO_OPEN_LOGS_EVENT, SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
 import type { SenchoOpenLogsDetail, SenchoOpenStackDetail } from '@/lib/events';
-import { useNodes } from '@/context/NodeContext';
+import { useNodes, type Node } from '@/context/NodeContext';
+import type { StackHealthNavTarget } from './dashboard/useStackHealthScope';
+import { applyStackHealthNavigate } from './dashboard/planStackHealthNavigate';
 import { STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, STACK_DELETE_PRUNE_VOLUMES_CAPABILITY } from '@/lib/capabilities';
 import { useAuth } from '@/context/AuthContext';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
@@ -580,6 +582,18 @@ export default function EditorLayout() {
     void stackActions.loadFile(file);
   };
 
+  const handleStackHealthNavigate = (target: StackHealthNavTarget) => {
+    const node: Node = nodes.find((n) => n.id === target.node.id) ?? target.node;
+    if (isMobile) setPendingDetailStack(target.file);
+    applyStackHealthNavigate({ node, file: target.file }, activeNode?.id, {
+      loadFileOnNode: (targetNode, file) => {
+        void stackActions.loadFileOnNode(targetNode, file);
+      },
+      pendingStackLoadRef,
+      setActiveNode,
+    });
+  };
+
   // Open a specific stack on a node (from Fleet): load it directly if that node
   // is already active, else stash it and switch nodes (the node-switch effect
   // loads the pending stack once the registry settles). Mobile shows the
@@ -1117,7 +1131,7 @@ export default function EditorLayout() {
             muteRulePrefill={muteRulePrefill}
             onMutePrefillConsumed={handleMutePrefillConsumed}
             notifications={notifications}
-            onNavigateToStack={(stackFile) => { void stackActions.loadFile(stackFile); }}
+            onNavigateToStack={handleStackHealthNavigate}
             onOpenSettingsSection={(section) => openSettings(section)}
             onOpenMuteRulesWithPrefill={openMuteRulesWithPrefill}
             onClearNotifications={clearAllNotifications}
@@ -1185,8 +1199,7 @@ export default function EditorLayout() {
               <MobileDashboard
                 notifications={notifications}
                 headerActions={mobileMastheadActions}
-                onNavigateToStack={handleSelectStack}
-                onViewAllStacks={goToMobileList}
+                onNavigateToStack={handleStackHealthNavigate}
                 onManageNodes={() => openSettings('nodes')}
               />
             );

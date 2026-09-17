@@ -1,23 +1,22 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { StackHealthTable } from '../StackHealthTable';
 import type { StackStatusEntry } from '../types';
 import type { StackUpdateInfo } from '@/types/imageUpdates';
+import { rowsFromStatuses, tableProps } from './stackHealthTableTestUtils';
 
 const stackStatuses: Record<string, StackStatusEntry> = {
   'app.yml': { status: 'running', source: 'local' },
 };
 
 function renderTable(stackUpdates: Record<string, StackUpdateInfo>) {
+  const rows = rowsFromStatuses(stackStatuses, {}, stackUpdates);
   return render(
     <StackHealthTable
-      stackStatuses={stackStatuses}
-      stackStatusesLoadStatus="success"
-      stackStatusesLoadError={null}
-      metrics={[]}
-      stackCpuSeries={{}}
-      onNavigateToStack={vi.fn()}
-      stackUpdates={stackUpdates}
+      {...tableProps({
+        rows,
+        coverage: { k: 1, m: 1, n: rows.length },
+      })}
     />,
   );
 }

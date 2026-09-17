@@ -17,7 +17,7 @@ export type GitOpsSourceStateMap = Record<string, GitOpsSourceStatus | undefined
  * that predates the revision model answers rows without one. Typing it as
  * required is what once made a whole map freeze behind a swallowed throw.
  */
-type GitSourceRow = { stack_name: string } & Partial<GitOpsRevisionCarrier>;
+export type GitSourceRow = { stack_name: string } & Partial<GitOpsRevisionCarrier>;
 
 /**
  * Rows to states, keeping a row this build cannot read out of the map.
@@ -25,7 +25,7 @@ type GitSourceRow = { stack_name: string } & Partial<GitOpsRevisionCarrier>;
  * Separate from the fetch so the derivation is one readable pass and the
  * request handling is another.
  */
-function projectSourceStates(rows: GitSourceRow[]): GitOpsSourceStateMap {
+export function projectSourceStates(rows: GitSourceRow[]): GitOpsSourceStateMap {
   const next: GitOpsSourceStateMap = {};
   let unreadable = 0;
   for (const row of rows) {
@@ -109,8 +109,9 @@ export function useGitOpsSourceStates(): GitOpsSourceStateMap {
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const onInvalidate = (e: Event) => {
-      const detail = (e as CustomEvent<{ scope?: string }>).detail;
+      const detail = (e as CustomEvent<{ scope?: string; nodeId?: unknown }>).detail;
       if (detail?.scope !== 'gitops') return;
+      if (typeof detail.nodeId !== 'number' || detail.nodeId !== nodeId) return;
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         timer = null;
@@ -122,7 +123,7 @@ export function useGitOpsSourceStates(): GitOpsSourceStateMap {
       window.removeEventListener('sencho:state-invalidate', onInvalidate);
       if (timer) clearTimeout(timer);
     };
-  }, [fetchStates]);
+  }, [fetchStates, nodeId]);
 
   return states;
 }

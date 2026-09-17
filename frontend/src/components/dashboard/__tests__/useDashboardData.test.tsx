@@ -37,8 +37,10 @@ function okJson(payload: unknown): Response {
   });
 }
 
-function fireInvalidate(detail: { scope?: string; action?: string } = {}) {
-  window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail }));
+function fireInvalidate(detail: { scope?: string; action?: string; nodeId?: number } = {}) {
+  window.dispatchEvent(new CustomEvent('sencho:state-invalidate', {
+    detail: { nodeId: 1, ...detail },
+  }));
 }
 
 const STATS_PAYLOAD = { active: 0, managed: 0, unmanaged: 0, exited: 0, total: 0 };
@@ -279,9 +281,9 @@ describe('useDashboardData stackStatuses load states', () => {
     await act(async () => { vi.advanceTimersByTime(300); });
     expect(resolvers).toHaveLength(1);
 
-    await act(async () => { vi.advanceTimersByTime(10000); });
-    expect(resolvers).toHaveLength(1);
-    await act(async () => { vi.advanceTimersByTime(10000); });
+    // Stay under the statuses owner timeout so the held foreground request
+    // remains in flight; soft polls and invalidate ticks must join it.
+    await act(async () => { vi.advanceTimersByTime(7000); });
     expect(resolvers).toHaveLength(1);
 
     const settled = { 'web.yml': { status: 'running' as const } };
@@ -352,6 +354,57 @@ describe('useDashboardData stackStatuses load states', () => {
 
     expect(result.current.stackStatusesLoadStatus).toBe('success');
     expect(result.current.stackStatuses).toEqual({ 'web.yml': { status: 'running' } });
+  });
+
+  it('marks retained statuses stale on a soft failure and current after recovery', async () => {
+    const resolvers: Array<(r: Response) => void> = [];
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') {
+        return new Promise<Response>((resolve) => { resolvers.push(resolve); });
+      }
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      resolvers[0](okJson({ 'web.yml': { status: 'running' } }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatusesFreshness).toBe('current');
+
+    act(() => { fireInvalidate({ scope: 'container' }); });
+    await act(async () => { vi.advanceTimersByTime(300); });
+    await act(async () => {
+      resolvers[1](new Response('nope', { status: 500 }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatuses).toEqual({ 'web.yml': { status: 'running' } });
+    expect(result.current.stackStatusesFreshness).toBe('stale');
+    expect(result.current.stackStatusesLoadStatus).toBe('success');
+
+    act(() => { fireInvalidate({ scope: 'container' }); });
+    await act(async () => { vi.advanceTimersByTime(300); });
+    await act(async () => {
+      resolvers[2](okJson({ 'web.yml': { status: 'running' } }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatusesFreshness).toBe('current');
+  });
+
+  it('ignores a state-invalidate whose nodeId is not the active node', async () => {
+    renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); });
+    const before = countFetchCalls('/stacks/statuses');
+    act(() => { fireInvalidate({ scope: 'container', nodeId: 99 }); });
+    await act(async () => { vi.advanceTimersByTime(300); });
+    expect(countFetchCalls('/stacks/statuses')).toBe(before);
   });
 
   it('treats a non-empty response where every entry is malformed as an error, not confirmed-empty', async () => {
