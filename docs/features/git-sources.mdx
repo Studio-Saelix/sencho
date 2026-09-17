@@ -30,6 +30,8 @@ Git Source opens as a right-side sheet from the stack editor toolbar. It is not 
 
 The toolbar carries **Save** or **Update**, **Pull now** when a source is linked and not suspended, **Suspend** or **Resume** when that action is offered, and **Remove** when a source is linked. Nested pull/apply and detach confirmations stay as separate dialogs on top of the sheet.
 
+When this Git source belongs to a Git-managed Blueprint, the sheet is read-only. **Save**, **Remove**, and **Pull now** are withheld here. Use **Detach Git** on that Blueprint to restore stack-owned editing. A live Direct source can **Adopt onto Blueprint**, which moves this source onto an Inline Blueprint with the same move semantics as Convert.
+
 The body groups three sections:
 
 - **Status.** Faults, a pending-update card with **Review**, retry or suspended state with **Retry** when that action is offered, qualifications the projection could not prove, and the last-applied commit with the source state.
@@ -355,6 +357,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
 
 ## Known limitations
 
+- **Git-managed Blueprint binding.** Convert or Adopt moves a live Direct source onto a Blueprint. That stack's Git Source sheet is then read-only until you Detach Git on the Blueprint. Git-managed Blueprints bind and show a blocked rollout state; they do not deploy from the stored snapshot. See [Blueprints](/features/blueprint-model).
 - **HTTPS and SSH.** HTTPS uses tokens; SSH uses deploy keys with strict host-key verification. Custom URL schemes are not supported.
 - **No Git LFS.** Compose and env files stored via LFS are rejected. Commit plain files instead.
 - **No submodules.** Submodule contents are not fetched. Inputs and build contexts that reference submodule contents are refused with an actionable message; a warning is shown when `.gitmodules` is present.

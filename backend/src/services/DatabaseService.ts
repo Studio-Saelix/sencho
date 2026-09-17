@@ -22,7 +22,7 @@ import { sanitizeForLog } from '../utils/safeLog';
 import type { GitSourceManifestState } from '../types/gitProjectManifest';
 import type { RollbackOperationKind } from '../types/rollbackGeneration';
 import { collectImageIds, parseServicesJsonStrict } from './recoveryServicesJson';
-import { GITOPS_SCHEMA_SQL } from './gitops/schema';
+import { GITOPS_DUE_INDEX_SQL, GITOPS_SCHEMA_SQL } from './gitops/schema';
 
 export type { SnapshotFileReadResult } from '../helpers/snapshotFileDecrypt';
 export type { RollbackOperationKind } from '../types/rollbackGeneration';
@@ -1980,7 +1980,6 @@ export class DatabaseService {
         // from the CREATE TABLE; older DBs need the additive column here.
         maybeAddCol('gitops_generations', 'resolved_ref_kind', 'TEXT NULL');
         maybeAddCol('gitops_applications', 'fetched_resolved_ref_kind', 'TEXT NULL');
-        maybeAddCol('gitops_applications', 'configured_source_stack_name', 'TEXT NULL');
         // Source suspension reason, distinct from the rollout pause_reason
         // existing installs already have. New installs get it from the
         // CREATE TABLE; older DBs need the additive column here.
@@ -2003,6 +2002,8 @@ export class DatabaseService {
         maybeAddCol('gitops_applications', 'poll_interval_secs', 'INTEGER NULL');
         maybeAddCol('gitops_applications', 'next_poll_at', 'INTEGER NULL');
         maybeAddCol('gitops_applications', 'attempt_seq', 'INTEGER NOT NULL DEFAULT 0');
+        maybeAddCol('gitops_applications', 'configured_source_stack_name', 'TEXT NULL');
+        this.db.exec(GITOPS_DUE_INDEX_SQL);
 
         // Distributed API model columns
         maybeAddCol('nodes', 'api_url', "TEXT DEFAULT ''");

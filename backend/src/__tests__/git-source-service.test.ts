@@ -4733,7 +4733,7 @@ describe('GitSourceService.apply', () => {
 
             expect(result).toEqual({
                 status: 'blocked',
-                reason: 'Blueprint rollout orchestration is not yet implemented.',
+                reason: "This Blueprint's content is Git-managed, so it cannot deploy from the stored snapshot.",
             });
             expect(GitOpsStore.getInstance().getApplication(app.id)?.accepted_generation_id).toBe(generationId);
         });
