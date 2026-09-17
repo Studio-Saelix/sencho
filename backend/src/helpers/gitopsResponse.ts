@@ -90,9 +90,12 @@ function blueprintApplicationOwningStack(stackName: string, nodeId: number | und
  * keeps them off the read classifier's lifecycle input.
  */
 export function projectStackRevision(stackName: string): GitOpsRevisionProjection {
-  const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
-  if (!app) return NOT_APPLICABLE_REVISION;
-  return projectApplication(app.id, healthGateDisabled());
+  const store = GitOpsStore.getInstance();
+  const direct = store.getLiveDirectApplication(stackName);
+  if (direct) return projectApplication(direct.id, healthGateDisabled());
+  const claimed = store.getLiveBlueprintApplicationBySourceStack(stackName);
+  if (claimed) return projectApplication(claimed.id, healthGateDisabled());
+  return NOT_APPLICABLE_REVISION;
 }
 
 /**

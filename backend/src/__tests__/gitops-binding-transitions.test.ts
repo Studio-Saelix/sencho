@@ -148,7 +148,7 @@ describe('gitops binding transitions', () => {
     })).toThrow(/repo/i);
   });
 
-  it('retires a Blueprint-mode application back to Direct with the Blueprint name', () => {
+  it('retires a Blueprint-mode application back to Direct on the retained source stack', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
     const blueprintId = createBlueprint('fleet-web');
@@ -164,12 +164,12 @@ describe('gitops binding transitions', () => {
     });
     tx.convertBlueprintToDirect({
       applicationId: 'app-retire',
-      stackName: 'fleet-web',
+      stackName: 'old-web',
       envelope: env('op-retire'),
     });
     const retired = store.getApplication('app-retire')!;
     expect(retired.target_mode).toBe('direct');
-    expect(retired.stack_name).toBe('fleet-web');
+    expect(retired.stack_name).toBe('old-web');
     expect(retired.configured_source_stack_name).toBeNull();
     expect(retired.blueprint_id).toBeNull();
     expect(store.getLiveBlueprintApplicationBySourceStack('old-web')).toBeUndefined();

@@ -14,6 +14,7 @@ import type { LicenseTier } from '../services/license-types';
 import type { Blueprint } from '../services/DatabaseService';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
+import { commitBlueprintCreate } from '../services/gitops/blueprintProducers';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -30,6 +31,21 @@ function setLicense(tier: LicenseTier): void {
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue(tier);
 }
 
+function seedBlueprintViaProducer(): Blueprint {
+  counter += 1;
+  return commitBlueprintCreate({
+    name: `bp-bind-${counter}`,
+    description: null,
+    compose_content: 'services:\n  app:\n    image: nginx\n',
+    selector: { type: 'nodes', ids: [1] },
+    drift_mode: 'suggest',
+    classification: 'stateless',
+    classification_reasons: [],
+    enabled: true,
+    created_by: 'admin',
+  }, () => [1]);
+}
+
 function seedBlueprint(): Blueprint {
   counter += 1;
   return DatabaseService.getInstance().createBlueprint({
@@ -42,6 +58,34 @@ function seedBlueprint(): Blueprint {
     classification_reasons: [],
     enabled: true,
     created_by: 'admin',
+  });
+}
+
+function seedGitSource(stackName: string): void {
+  DatabaseService.getInstance().upsertGitSource({
+    stack_name: stackName,
+    repo_url: `https://github.com/example/${stackName}.git`,
+    branch: 'main',
+    compose_path: 'compose.yaml',
+    compose_paths: ['compose.yaml'],
+    context_dir: null,
+    sync_env: false,
+    env_path: null,
+    auth_type: 'none',
+    encrypted_token: null,
+    encrypted_deploy_key: null,
+    ssh_known_hosts_entry: null,
+    ssh_host_key_fingerprint: null,
+    encrypted_ca_bundle: null,
+    auto_apply_on_webhook: false,
+    auto_deploy_on_apply: false,
+    last_applied_commit_sha: null,
+    last_applied_content_hash: null,
+    pending_commit_sha: null,
+    pending_compose_content: null,
+    pending_env_content: null,
+    pending_fetched_at: null,
+    last_debounce_at: null,
   });
 }
 
@@ -141,6 +185,7 @@ describe('Admin convert, read, detach, and adopt', () => {
   it('lets a Community admin convert, describe, and detach without leaking source identity', async () => {
     setLicense('community');
     const { blueprint: bp, stackName, applicationId } = seedBlueprintAndDirect();
+    seedGitSource(stackName);
 
     const preview = await request(app)
       .post(`/api/blueprints/${bp.id}/content-binding/preview`)
@@ -168,6 +213,15 @@ describe('Admin convert, read, detach, and adopt', () => {
     expect(GitOpsStore.getInstance().getApplication(applicationId)).toMatchObject({
       target_mode: 'blueprint',
       configured_source_stack_name: stackName,
+    });
+
+    const claimedGet = await request(app)
+      .get(`/api/stacks/${stackName}/git-source`)
+      .set('Cookie', adminCookie);
+    expect(claimedGet.status).toBe(200);
+    expect(claimedGet.body.gitopsRevision).toMatchObject({
+      targetMode: 'blueprint',
+      blueprintId: bp.id,
     });
 
     const detail = await request(app)
@@ -202,7 +256,7 @@ describe('Admin convert, read, detach, and adopt', () => {
 
   it('lets a Community admin preview and retire a converted Blueprint without active deployments', async () => {
     setLicense('community');
-    const { blueprint: bp, applicationId } = seedBlueprintAndDirect();
+    const { blueprint: bp, stackName, applicationId } = seedBlueprintAndDirect();
     await request(app)
       .put(`/api/blueprints/${bp.id}/content-binding`)
       .set('Cookie', adminCookie)
@@ -222,7 +276,7 @@ describe('Admin convert, read, detach, and adopt', () => {
     expect(retire.body.applicationId).toBeNull();
     expect(GitOpsStore.getInstance().getApplication(applicationId)).toMatchObject({
       target_mode: 'direct',
-      stack_name: bp.name,
+      stack_name: stackName,
       configured_source_stack_name: null,
     });
   });
@@ -246,21 +300,24 @@ describe('Admin convert, read, detach, and adopt', () => {
     expect(res.body.code).toBe('deployments_active');
   });
 
-  it('lets a Community admin adopt a Direct stack onto a Blueprint', async () => {
+  it('lets a Community admin adopt a Direct stack onto a production-created Blueprint', async () => {
     setLicense('community');
-    const { blueprint: bp, stackName, applicationId } = seedBlueprintAndDirect();
+    const blueprint = seedBlueprintViaProducer();
+    const stackName = `stack-${blueprint.name}`;
+    const applicationId = seedDirect(stackName);
+    seedGitSource(stackName);
 
     const preview = await request(app)
       .post(`/api/stacks/${stackName}/git-source/adopt-blueprint/preview`)
       .set('Cookie', adminCookie)
-      .send({ blueprintId: bp.id });
+      .send({ blueprintId: blueprint.id });
     expect(preview.status).toBe(200);
     expect(preview.body.transition).toBe('adopt');
 
     const adopt = await request(app)
       .post(`/api/stacks/${stackName}/git-source/adopt-blueprint`)
       .set('Cookie', adminCookie)
-      .send({ blueprintId: bp.id });
+      .send({ blueprintId: blueprint.id });
     expect(adopt.status).toBe(200);
     expect(adopt.body).toMatchObject({
       contentOrigin: 'git',

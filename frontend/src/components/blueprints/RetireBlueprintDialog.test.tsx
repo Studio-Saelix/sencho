@@ -37,7 +37,7 @@ const preview: BindingPreview = {
   },
   blueprintPreview: null,
   markers: [],
-  rollbackLimitations: ['Retire restores Direct targeting using the Blueprint name as the stack identity.'],
+  rollbackLimitations: ['Retire restores Direct targeting on the original Git source stack.'],
 };
 
 beforeEach(() => {
@@ -63,7 +63,7 @@ describe('RetireBlueprintDialog', () => {
       <RetireBlueprintDialog open onOpenChange={vi.fn()} blueprintId={3} onRetired={onRetired} />,
     );
 
-    await screen.findByText('Retire restores Direct targeting using the Blueprint name as the stack identity.');
+    await screen.findByText('Retire restores Direct targeting on the original Git source stack.');
     expect(previewRetireContentBinding).toHaveBeenCalledWith(3);
     expect(screen.getByRole('button', { name: 'Retire' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Retire' }));

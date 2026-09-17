@@ -106,16 +106,12 @@ export class GitOpsBindingService {
   }
 
   adoptDirectToBlueprint(args: BindingArgs): void {
-    const blueprint = this.requireBlueprint(args.blueprintId);
-    const live = GitOpsStore.getInstance().getLiveBlueprintApplication(args.blueprintId);
-    if (live && live.target_mode === 'inline_blueprint') {
-      throw new GitOpsBindingError(
-        'live_inline_blueprint',
-        'This Blueprint already has live Inline content; convert from the Blueprint instead of merging',
-      );
-    }
     DatabaseService.getInstance().getDb().transaction(() => {
-      this.bindDirectApplication(blueprint, args.applicationId, args.actor);
+      const live = GitOpsStore.getInstance().getLiveBlueprintApplication(args.blueprintId);
+      if (live && live.id !== args.applicationId) {
+        GitOpsTransitions.getInstance().applicationTombstoned(live.id, 'deleted', this.envelope(args.actor));
+      }
+      this.bindDirectApplication(this.requireBlueprint(args.blueprintId), args.applicationId, args.actor);
     })();
   }
 
@@ -138,13 +134,21 @@ export class GitOpsBindingService {
         'Retire is blocked while this Blueprint still has active deployments',
       );
     }
-    const applicationId = this.requireBoundApplication(blueprint).id;
+    const app = this.requireBoundApplication(blueprint);
+    const stackName = app.configured_source_stack_name;
+    if (!stackName) {
+      throw new GitOpsBindingError(
+        'application_not_bound',
+        'Bound application has no retained source stack identity',
+      );
+    }
     db.getDb().transaction(() => {
       GitOpsTransitions.getInstance().convertBlueprintToDirect({
-        applicationId,
-        stackName: blueprint.name,
+        applicationId: app.id,
+        stackName,
         envelope: this.envelope(args.actor),
       });
+      this.clearGitManagedRolloutEvidence(app.id);
       this.restoreInline(blueprint.id);
     })();
   }
@@ -234,6 +238,21 @@ export class GitOpsBindingService {
     const db = DatabaseService.getInstance();
     db.updateBlueprintContentOrigin(blueprintId, 'inline', null);
     db.clearBlueprintApproval(blueprintId);
+  }
+
+  private clearGitManagedRolloutEvidence(applicationId: string): void {
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(applicationId);
+    if (!app) return;
+    store.replaceApplicationEvidenceLimitations(
+      applicationId,
+      encodeGitOpsEvidenceLimitations(
+        decodeGitOpsEvidenceLimitations(app.evidence_limitations_json),
+        'git_managed_rollout_not_enabled',
+        null,
+      ),
+      Date.now(),
+    );
   }
 
   private requireBlueprint(blueprintId: number): Blueprint {
@@ -359,7 +378,7 @@ function rollbackLimitationsFor(transition: BindingPreview['transition']): strin
   }
   if (transition === 'retire') {
     return [
-      'Retire restores Direct targeting using the Blueprint name as the stack identity.',
+      'Retire restores Direct targeting on the original Git source stack.',
       'Active deployments must be withdrawn first; snapshots already on nodes are not evicted here.',
     ];
   }

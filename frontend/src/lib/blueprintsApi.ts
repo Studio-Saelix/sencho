@@ -449,6 +449,7 @@ export async function previewAdoptBlueprint(
     const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/adopt-blueprint/preview`, {
         method: 'POST',
         body: JSON.stringify({ blueprintId }),
+        localOnly: true,
     });
     return expectJson<BindingPreview>(res, 'Failed to preview Blueprint adoption');
 }
@@ -460,6 +461,7 @@ export async function adoptBlueprintFromStack(
     const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/adopt-blueprint`, {
         method: 'POST',
         body: JSON.stringify({ blueprintId }),
+        localOnly: true,
     });
     return expectJson<ContentBindingView>(res, 'Failed to adopt this Git source onto a Blueprint');
 }

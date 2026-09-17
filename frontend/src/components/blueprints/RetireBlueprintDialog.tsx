@@ -44,7 +44,7 @@ export function RetireBlueprintDialog({
             <ModalHeader
                 kicker="BLUEPRINT · RETIRE"
                 title="Retire to Direct GitOps"
-                description="Restore Direct targeting using this Blueprint name as the stack identity."
+                description="Restore Direct targeting on the original Git source stack."
             />
             <ModalBody>
                 <BindingPreviewDialogBody

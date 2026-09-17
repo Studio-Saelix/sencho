@@ -66,17 +66,28 @@ describe('GitOps binding service', () => {
     });
   });
 
-  it('refuses adopt when the Blueprint still has a live Inline application', () => {
+  it('adopts a Direct source by tombstoning the live Inline application', () => {
+    const store = GitOpsStore.getInstance();
     const blueprint = create('bp-adopt-inline');
+    const inlineId = store.getLiveBlueprintApplication(blueprint.id)!.id;
     const applicationId = seedDirect('adopt-inline-web');
-    expect(() => GitOpsBindingService.getInstance().adoptDirectToBlueprint({
+
+    GitOpsBindingService.getInstance().adoptDirectToBlueprint({
       blueprintId: blueprint.id,
       applicationId,
       actor: 'tester',
-    })).toThrowError(expect.objectContaining({
-      name: 'GitOpsBindingError',
-      code: 'live_inline_blueprint',
-    }));
+    });
+
+    expect(store.getApplication(inlineId)?.lifecycle_status).toBe('deleted');
+    expect(store.getApplication(applicationId)).toMatchObject({
+      target_mode: 'blueprint',
+      configured_source_stack_name: 'adopt-inline-web',
+      blueprint_id: blueprint.id,
+    });
+    expect(DatabaseService.getInstance().getBlueprint(blueprint.id)).toMatchObject({
+      content_origin: 'git',
+      application_id: applicationId,
+    });
   });
 
   it('blocks retire while deployments are still active', () => {
@@ -106,19 +117,51 @@ describe('GitOps binding service', () => {
     }));
   });
 
-  it('retires Git-managed content back to a Direct application', () => {
+  it('retires Git-managed content back to the original Direct stack identity', () => {
     const { blueprint, applicationId } = bindGit('bp-retire-ok', 'retire-ok-web');
+    DatabaseService.getInstance().upsertGitSource({
+      stack_name: 'retire-ok-web',
+      repo_url: 'https://github.com/example/retire-ok-web.git',
+      branch: 'main',
+      compose_path: 'compose.yaml',
+      compose_paths: ['compose.yaml'],
+      context_dir: null,
+      sync_env: false,
+      env_path: null,
+      auth_type: 'none',
+      encrypted_token: null,
+      encrypted_deploy_key: null,
+      ssh_known_hosts_entry: null,
+      ssh_host_key_fingerprint: null,
+      encrypted_ca_bundle: null,
+      auto_apply_on_webhook: false,
+      auto_deploy_on_apply: false,
+      last_applied_commit_sha: null,
+      last_applied_content_hash: null,
+      pending_commit_sha: null,
+      pending_compose_content: null,
+      pending_env_content: null,
+      pending_fetched_at: null,
+      last_debounce_at: null,
+    });
+    expect(GitOpsStore.getInstance().getApplication(applicationId)?.evidence_limitations_json)
+      .toContain('git_managed_rollout_not_enabled');
+
     GitOpsBindingService.getInstance().retireToDirect({ blueprintId: blueprint.id, actor: 'tester' });
     expect(DatabaseService.getInstance().getBlueprint(blueprint.id)).toMatchObject({
       content_origin: 'inline',
       application_id: null,
     });
-    expect(GitOpsStore.getInstance().getApplication(applicationId)).toMatchObject({
+    const retired = GitOpsStore.getInstance().getApplication(applicationId)!;
+    expect(retired).toMatchObject({
       id: applicationId,
       target_mode: 'direct',
-      stack_name: 'bp-retire-ok',
+      stack_name: 'retire-ok-web',
       configured_source_stack_name: null,
     });
+    expect(retired.evidence_limitations_json ?? '').not.toContain('git_managed_rollout_not_enabled');
+    expect(DatabaseService.getInstance().getGitSource('retire-ok-web')).toBeTruthy();
+    expect(GitOpsStore.getInstance().getLiveDirectApplication('retire-ok-web')?.id).toBe(applicationId);
   });
 
   it('detaches Git-managed content back to Inline editing', () => {
