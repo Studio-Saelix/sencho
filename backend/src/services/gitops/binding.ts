@@ -5,7 +5,7 @@ import { buildBlueprintPreview, type BlueprintPreviewResult } from '../blueprint
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, GitOpsTransitionError, type EventEnvelope } from './transitions';
 import type { GitOpsApplicationRow, GitOpsIntentRevisionRow, GitOpsRolloutCandidateRow } from './types';
-import { decodeGitOpsEvidenceLimitations, encodeGitOpsEvidenceLimitations } from './json';
+import { decodeGitOpsEvidenceLimitations, decodeGitOpsJson, encodeGitOpsEvidenceLimitations } from './json';
 import { isGitManagedBlueprint } from './gitManaged';
 
 export { GitManagedContentError, isGitManagedBlueprint } from './gitManaged';
@@ -28,7 +28,7 @@ export type BindingPreview = {
     stackName: string | null;
     repoUrl: string | null;
     ref: string | null;
-    composePaths: string | null;
+    composePaths: string[] | null;
     contextDir: string | null;
     sourcePolicy: string | null;
     lifecycleStatus: string | null;
@@ -36,6 +36,19 @@ export type BindingPreview = {
   blueprintPreview: BlueprintPreviewResult | null;
   markers: Array<{ nodeId: number; nodeName: string; classification: BindingMarkerClassification }>;
   rollbackLimitations: string[];
+};
+
+export type ContentBindingView = {
+  contentOrigin: 'inline' | 'git';
+  applicationId: string | null;
+  repoUrl: string | null;
+  ref: string | null;
+  composePaths: string[] | null;
+  contextDir: string | null;
+  sourcePolicy: string | null;
+  lifecycleStatus: string | null;
+  blockedRollout: boolean;
+  snapshotPresent: boolean;
 };
 
 type BindingArgs = {
@@ -70,6 +83,26 @@ export class GitOpsBindingService {
 
   async previewDetachToInline(blueprintId: number): Promise<BindingPreview> {
     return this.buildPreview('detach', blueprintId);
+  }
+
+  describeContentBinding(blueprintId: number): ContentBindingView | null {
+    const blueprint = DatabaseService.getInstance().getBlueprint(blueprintId);
+    if (!blueprint) return null;
+    const app = blueprint.application_id
+      ? GitOpsStore.getInstance().getApplication(blueprint.application_id)
+      : undefined;
+    return {
+      contentOrigin: blueprint.content_origin,
+      applicationId: blueprint.application_id,
+      repoUrl: app?.configured_repo_url ?? null,
+      ref: app?.configured_ref ?? null,
+      composePaths: parseComposePathList(app?.compose_paths_json),
+      contextDir: app?.context_dir ?? null,
+      sourcePolicy: app?.source_policy ?? null,
+      lifecycleStatus: app?.lifecycle_status ?? null,
+      blockedRollout: app?.rollout_candidate_id != null,
+      snapshotPresent: blueprint.compose_content !== '',
+    };
   }
 
   adoptDirectToBlueprint(args: BindingArgs): void {
@@ -283,14 +316,28 @@ function proposedOriginFor(transition: BindingPreview['transition']): 'inline' |
 function applicationPreview(app: GitOpsApplicationRow | null): BindingPreview['application'] {
   return {
     id: app?.id ?? null,
-    stackName: app?.stack_name ?? app?.configured_source_stack_name ?? null,
+    stackName: app?.stack_name ?? null,
     repoUrl: app?.configured_repo_url ?? null,
     ref: app?.configured_ref ?? null,
-    composePaths: app?.compose_paths_json ?? null,
+    composePaths: parseComposePathList(app?.compose_paths_json),
     contextDir: app?.context_dir ?? null,
     sourcePolicy: app?.source_policy ?? null,
     lifecycleStatus: app?.lifecycle_status ?? null,
   };
+}
+
+function parseComposePathList(raw: string | null | undefined): string[] | null {
+  if (!raw) return null;
+  try {
+    const parsed = decodeGitOpsJson(raw);
+    if (!Array.isArray(parsed) || !parsed.every((entry): entry is string => typeof entry === 'string')) {
+      return null;
+    }
+    return parsed;
+  } catch (error) {
+    console.error('[GitOpsBinding] compose_paths_json is not valid JSON:', error);
+    return null;
+  }
 }
 
 function classifyMarker(

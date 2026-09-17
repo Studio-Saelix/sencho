@@ -130,6 +130,22 @@ describe('GitOps binding service', () => {
     });
     expect(GitOpsStore.getInstance().getApplication(applicationId)?.target_mode).toBe('inline_blueprint');
   });
+
+  it('describes Git-managed content without the retained source stack identity', () => {
+    const { blueprint, applicationId } = bindGit('bp-describe', 'describe-web');
+    const view = GitOpsBindingService.getInstance().describeContentBinding(blueprint.id);
+    expect(view).toMatchObject({
+      contentOrigin: 'git',
+      applicationId,
+      repoUrl: 'https://github.com/example/describe-web.git',
+      ref: 'main',
+      composePaths: ['compose.yaml'],
+      blockedRollout: true,
+      snapshotPresent: true,
+    });
+    expect(view).not.toHaveProperty('configured_source_stack_name');
+    expect(view).not.toHaveProperty('stackName');
+  });
 });
 
 function bindGit(name: string, stackName: string): { blueprint: Blueprint; applicationId: string } {

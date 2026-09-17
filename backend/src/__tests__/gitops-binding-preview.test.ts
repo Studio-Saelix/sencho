@@ -65,10 +65,13 @@ describe('GitOps binding previews', () => {
     const retirePreview = await svc.previewRetireToDirect(blueprint.id);
     expect(retirePreview.transition).toBe('retire');
     expect(retirePreview.proposedOrigin).toBe('inline');
+    expect(retirePreview.application.stackName).toBeNull();
+    expect(retirePreview.application.composePaths).toEqual(['compose.yaml']);
     assertNoSecrets(retirePreview);
     const detachPreview = await svc.previewDetachToInline(blueprint.id);
     expect(detachPreview.transition).toBe('detach');
     expect(detachPreview.proposedOrigin).toBe('inline');
+    expect(detachPreview.application.stackName).toBeNull();
     assertNoSecrets(detachPreview);
   });
 });
