@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import fs from 'fs';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import path from 'path';
 import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
