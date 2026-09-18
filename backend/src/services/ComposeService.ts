@@ -922,7 +922,7 @@ export class ComposeService {
       assertGitOverlaySource(ctx.source);
     }
     const stackDir = this.resolveStackDir(stackName, ctx);
-    await this.assertRequiredEnvPresent(stackName, stackDir);
+    await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
     await this.assertSafePilotBindMapping(stackName);
     await this.ensureExternalNetworksForDeploy(stackName, ctx);
 

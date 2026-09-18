@@ -4397,14 +4397,26 @@ export class GitSourceService {
                     }),
                 );
                 const autoDeploy = await (async () => {
-                    const manifestRead = await GitProjectManifestService.getInstance().readManifest(
-                        stackName,
-                        src.repo_url,
-                        src.branch,
-                    );
-                    if (!manifestRead || 'corrupt' in manifestRead) {
-                        throw new GitSourceError('GIT_ERROR', 'The managed-project manifest is unavailable for deploy.');
-                    }
+                    const manifestRead = await (async () => {
+                        const onDisk = await GitProjectManifestService.getInstance().readManifest(
+                            stackName,
+                            src.repo_url,
+                            src.branch,
+                        );
+                        if (onDisk !== null && 'corrupt' in onDisk) {
+                            throw new GitSourceError(
+                                'GIT_ERROR',
+                                `The managed-project manifest for ${stackName} cannot be trusted (${onDisk.corrupt}).`,
+                            );
+                        }
+                        if (onDisk) return onDisk;
+                        const generation = buildAcceptedGeneration(genRow);
+                        const revalidation = await this.revalidateAcceptedTarget(generation, genRow, src, stackName);
+                        if (!revalidation.ok) {
+                            throw new GitSourceError('GIT_ERROR', revalidation.reason);
+                        }
+                        return revalidation.manifest;
+                    })();
                     const { ctx, destroyOverlay } = await this.deployContextWithOptionalOverlay({
                         stackName,
                         nodeId,
@@ -5257,6 +5269,14 @@ export class GitSourceService {
             syncEnv: src.sync_env,
             bounds,
         });
+        const classified = await classifyInventoryEncryption(candidateAbs, inventory.inputs);
+        if (classified.composeRefusals.length > 0) {
+            return {
+                ok: false,
+                reason: classified.composeRefusals.map((r) => r.reason).join('; '),
+            };
+        }
+        inventory.inputs = classified.inputs;
         const plan = await this.computeChangePlan({
             stackName,
             commitSha: generation.commitSha,
