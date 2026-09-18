@@ -199,8 +199,24 @@ CREATE TABLE IF NOT EXISTS gitops_generations (
   security_policy_evidence_json TEXT NULL,
   support_requirements_json TEXT NULL,
   compatibility_requirements_json TEXT NULL,
+  secret_capability_json TEXT NULL,
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS gitops_sops_identities (
+  id TEXT PRIMARY KEY,
+  application_id TEXT NOT NULL,
+  stack_name TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  encrypted_identity TEXT NOT NULL,
+  label TEXT NULL,
+  created_at INTEGER NOT NULL,
+  rotated_at INTEGER NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gitops_sops_id_app_stack
+  ON gitops_sops_identities(application_id, stack_name);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gitops_sops_id_recipient
+  ON gitops_sops_identities(application_id, stack_name, recipient);
 CREATE INDEX IF NOT EXISTS idx_gitops_gen_app_created
   ON gitops_generations(application_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_gitops_gen_sha

@@ -270,6 +270,40 @@ export class UpdateGuardService {
       };
     });
 
+    const sopsKeys = await this.collect('repository secrets', stackName, async () => {
+      const gitSource = db.getGitSource(stackName);
+      if (!gitSource) return null;
+
+      const { resolveActiveRequiredRecipients } = await import('./gitops/sops/capability');
+      const { SopsIdentityStore } = await import('./gitops/sops/identityStore');
+      const { GitOpsStore } = await import('./gitops/store');
+      const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+      if (!app) {
+        return { ready: true, detail: 'No GitOps application is linked yet.' };
+      }
+
+      const required = resolveActiveRequiredRecipients({
+        stackName,
+        nodeId,
+        gitopsGenerationId: currentGen?.gitops_generation_id ?? null,
+      });
+      if (required.length === 0) {
+        return { ready: true, detail: 'The restore target does not require SOPS decryption on this node.' };
+      }
+
+      const known = new Set(
+        SopsIdentityStore.getInstance().listPublic(app.id, stackName).map((identity) => identity.recipient),
+      );
+      const missing = required.filter((recipient) => !known.has(recipient));
+      if (missing.length > 0) {
+        return {
+          ready: false,
+          detail: `Rollback restore needs age recipient(s) that are not on this node: ${missing.join(', ')}`,
+        };
+      }
+      return { ready: true, detail: 'Required age identities are available on this node.' };
+    });
+
     const items = buildRollbackItems({
       backup,
       envSummary,
@@ -287,6 +321,7 @@ export class UpdateGuardService {
       recoveryGeneration,
       policyEligibility: policyEligibility === 'error' ? 'error' : policyEligibility,
       managedInputs: managedInputs === 'error' ? 'error' : managedInputs,
+      sopsKeys: sopsKeys === 'error' ? 'error' : sopsKeys,
     }, now);
 
     // Partial-revert disclosure for Git-managed stacks when exact generation

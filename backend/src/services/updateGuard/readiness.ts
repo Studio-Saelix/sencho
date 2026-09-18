@@ -340,6 +340,8 @@ export interface RollbackInputs {
   policyEligibility: 'eligible' | 'eligible_with_warning' | 'prohibited' | 'unknown' | Errored | null;
   /** Whether managed authored inputs are covered by exact inventory. */
   managedInputs: { covered: boolean; detail: string } | Errored | null;
+  /** Age identity readiness for SOPS-encrypted restore targets; null when not Git-managed. */
+  sopsKeys: { ready: boolean; detail: string } | Errored | null;
 }
 
 export function buildRollbackItems(inputs: RollbackInputs, now: number): RollbackReadinessItem[] {
@@ -451,6 +453,17 @@ export function buildRollbackItems(inputs: RollbackInputs, now: number): Rollbac
     items.push({ id: 'managed_inputs', state: 'warning', label: 'Managed inputs', detail: inputs.managedInputs.detail });
   }
 
+  if (inputs.sopsKeys === 'error') {
+    items.push({ id: 'sops_keys', state: 'unknown', label: 'Repository secrets', detail: 'Age identity readiness could not be read.' });
+  } else if (inputs.sopsKeys !== null) {
+    items.push({
+      id: 'sops_keys',
+      state: inputs.sopsKeys.ready ? 'ready' : 'blocked',
+      label: 'Repository secrets',
+      detail: inputs.sopsKeys.detail,
+    });
+  }
+
   const mounts = inputs.containers === 'error'
     ? []
     : [...new Set(inputs.containers.flatMap(c => c.mounts))];
@@ -472,7 +485,7 @@ export function buildRollbackItems(inputs: RollbackInputs, now: number): Rollbac
  */
 export function aggregateRollbackOverall(items: RollbackReadinessItem[]): RollbackOverall {
   const byId = new Map(items.map(i => [i.id, i.state]));
-  if (byId.get('policy_eligibility') === 'blocked') {
+  if (byId.get('policy_eligibility') === 'blocked' || byId.get('sops_keys') === 'blocked') {
     return 'not_ready';
   }
   if (byId.get('compose_source') !== 'ready') {

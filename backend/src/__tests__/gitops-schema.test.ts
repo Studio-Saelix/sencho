@@ -324,6 +324,7 @@ describe('gitops schema', () => {
       security_policy_evidence_json: '{"status":"allowed"}',
       support_requirements_json: '{}',
       compatibility_requirements_json: '{}',
+      secret_capability_json: null,
     });
     const populated = store.getGeneration('gen-portable-new');
     expect(populated?.portable_manifest_json).toBe('{"files":[]}');
@@ -614,6 +615,7 @@ function generation(id: string, applicationId: string): GitOpsGenerationRow {
     security_policy_evidence_json: null,
     support_requirements_json: null,
     compatibility_requirements_json: null,
+    secret_capability_json: null,
     created_at: 1,
   };
 }

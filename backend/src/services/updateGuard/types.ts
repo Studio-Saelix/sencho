@@ -38,7 +38,7 @@ export interface UpdateReadinessReport {
 export type RollbackItemState = 'ready' | 'missing' | 'unknown' | 'not_covered' | 'blocked' | 'warning';
 
 export interface RollbackReadinessItem {
-  id: 'compose_source' | 'env_keys' | 'previous_images' | 'last_deploy' | 'healthchecks' | 'volume_data' | 'policy_eligibility' | 'managed_inputs' | 'recovery_generation';
+  id: 'compose_source' | 'env_keys' | 'previous_images' | 'last_deploy' | 'healthchecks' | 'volume_data' | 'policy_eligibility' | 'managed_inputs' | 'recovery_generation' | 'sops_keys';
   state: RollbackItemState;
   label: string;
   /** Names only for env coverage; values never appear here. */

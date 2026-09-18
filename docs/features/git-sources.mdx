@@ -32,11 +32,12 @@ The toolbar carries **Save** or **Update**, **Pull now** when a source is linked
 
 When this Git source belongs to a Git-managed Blueprint, the sheet is read-only. **Save**, **Remove**, and **Pull now** are withheld here. Use **Detach Git** or **Retire to Direct** on that Blueprint to restore stack-owned editing. A live Direct source can **Adopt onto Blueprint**, which moves this source onto an Inline Blueprint with the same move semantics as Convert.
 
-The body groups three sections:
+The body groups five sections:
 
 - **Status.** Faults, a pending-update card with **Review**, retry or suspended state with **Retry** when that action is offered, qualifications the projection could not prove, and the last-applied commit with the source state.
 - **Repository.** Repository URL, ref, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication, and the apply behavior radio group.
 - **Provider hooks.** One endpoint per supported Git host (GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud). Shown when the stack owns a direct Git source; hidden while the source is read-only on a Git-managed Blueprint.
+- **Repository secrets.** Age identities for SOPS-encrypted env files and file-backed secrets, encrypted-source policy, and a readiness chip for whether this node can decrypt what the repository expects.
 - **Manifest.** The managed-project summary when a source is linked.
 
 Polling interval lives in **Settings → Stacks**, not on this sheet. There is no per-source interval control; a source with no override inherits the node default.
@@ -341,9 +342,27 @@ The in-browser editor and the Git Source sheet both write to the same files, so 
 
 Pulls, applies, and create-from-git operations on the same stack are serialized by a per-stack lock, so a webhook that fires in the middle of a manual apply waits for the apply to finish rather than racing it.
 
+## Repository secrets (SOPS and age)
+
+Some teams store sensitive env files or file-backed secrets in Git as [SOPS](https://github.com/getsops/sops)-encrypted documents. Sencho keeps ciphertext in the repository and on disk. Decryption happens only in a short-lived overlay while validate, apply, deploy, or rollback runs Compose.
+
+Open **Git Source** on a linked stack and scroll to **Repository secrets**.
+
+- **Generate identity** or **Import identity** creates an age key pair on the node that owns this Git source. Sencho shows the public recipient (`age1…`) so you can add it to SOPS files in Git. Private key material never leaves the node and is never returned by the API.
+- **Encrypted source policy** defaults to allowing plaintext secret inputs. Switch to **Require SOPS encryption** when every managed secret-bearing input in the repository must be SOPS-encrypted with age.
+- **Readiness** reports whether this node holds the recipients required by the current candidate generation.
+
+Sencho accepts age (X25519) recipients only. Documents that use PGP, cloud KMS, or other SOPS backends are refused with an unsupported-backend message.
+
+Back up both the Sencho data directory encryption key (`encryption.key`) and any age identities you generate here. Losing either makes ciphertext in Git unrecoverable on that node.
+
 ## Troubleshooting
 
 <AccordionGroup>
+  <Accordion title="Missing or rotated SOPS age key">
+    A pull, apply, deploy, or rollback that needs SOPS decryption fails before Compose runs when this node does not hold a matching age identity. Open **Repository secrets**, confirm the readiness chip, and generate or import the key whose recipient appears in your SOPS files. After rotating a key, re-encrypt repository files with the new recipient before deleting the old identity. Rollback to a generation that still names a removed recipient stays blocked until you restore that identity or advance to a generation encrypted for a key you still hold.
+  </Accordion>
+
   <Accordion title="Repository not found or not accessible">
     Verify the URL is reachable from the Sencho host and ends with `.git`. GitHub returns a "not found" response for both genuinely missing repos and private repos you cannot read, so Sencho tailors the hint based on what you provided:
 

@@ -12,6 +12,7 @@ import { StackOpLockService } from './StackOpLockService';
 import { HealthGateService } from './HealthGateService';
 import { NodeRegistry } from './NodeRegistry';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions, triggerPostDeployScan } from '../helpers/policyGate';
+import type { DeployInvocationContext } from './network/missingExternalNetworksError';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -79,6 +80,15 @@ import { managedAreaBase } from './gitops/managedPaths';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { copyPreparedPayloadDirectory } from '../helpers/registryDeliveryMaterialize';
 import { runDockerCompose as spawnDockerCompose } from '../helpers/dockerComposeRunner';
+import { classifyInventoryEncryption, buildSecretCapability } from './gitops/sops/capability';
+import { getEncryptedSourcePolicy } from './gitops/sops/identityStore';
+import {
+    buildGitOpsDecryptOverlay,
+    destroyGitOpsOverlay,
+    manifestInputsNeedOverlay,
+} from './gitops/sops/prepareOverlay';
+import { newOverlayOperationId } from './gitops/sops/overlay';
+import type { SecretCapability } from './gitops/sops/types';
 
 /**
  * GitSourceService - fetch compose files from a Git repository and apply
@@ -256,6 +266,7 @@ export interface MaterializationResult {
     contextCopyPlans: ContextCopyPlan[];
     candidateRelPath: string;
     validation: { ok: boolean; error?: string };
+    secretCapability: SecretCapability;
 }
 
 export interface UpsertInput {
@@ -1775,6 +1786,28 @@ export class GitSourceService {
             bounds,
         });
 
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication(stackName)?.id ?? stackName;
+        const policy = getEncryptedSourcePolicy(stackName);
+        const classified = await classifyInventoryEncryption(cloneDir, inventory.inputs);
+        if (classified.composeRefusals.length > 0) {
+            throw new GitSourceError(
+                'GIT_ERROR',
+                classified.composeRefusals.map((r) => r.reason).join('; '),
+            );
+        }
+        inventory.inputs = classified.inputs;
+
+        const capabilityResult = buildSecretCapability({
+            policy,
+            inputs: inventory.inputs,
+            applicationId,
+            stackName,
+        });
+        if (capabilityResult.refusal) {
+            throw new GitSourceError('GIT_ERROR', capabilityResult.refusal.reason);
+        }
+
         const actionable = inventory.refusals.filter((r) => r.actionable);
         if (actionable.length > 0) {
             // The abort message is a public surface: high-sensitivity refusal
@@ -1806,13 +1839,50 @@ export class GitSourceService {
         // Stage the synced env into the candidate so validation exercises the
         // exact deploy layout (stack-root .env).
         if (src.sync_env && envContent !== null) {
-            const candidateAbs = path.join(process.env.DATA_DIR || path.join(process.cwd(), 'data'), 'git-managed', String(NodeRegistry.getInstance().getDefaultNodeId()), stackName, candidateRel);
+            const candidateAbs = path.join(process.env.DATA_DIR || path.join(process.cwd(), 'data'), 'git-managed', String(nodeId), stackName, candidateRel);
             await fsPromises.mkdir(candidateAbs, { recursive: true });
             await fsPromises.writeFile(path.join(candidateAbs, '.env'), envContent, 'utf8');
         }
 
-        const validation = await this.validateCandidate(stackName, candidateRel, src.compose_paths, src.context_dir, src.sync_env);
-        return { inventory, contextCopyPlans: inventory.contextCopyPlans, candidateRelPath: candidateRel, validation };
+        const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+        const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, candidateRel);
+        let validation: { ok: boolean; error?: string };
+        if (manifestInputsNeedOverlay({ inputs: inventory.inputs })) {
+            const overlay = await buildGitOpsDecryptOverlay({
+                stackName,
+                nodeId,
+                applicationId,
+                generationId: `validate-${commitSha.slice(0, 12)}`,
+                commitSha,
+                sourceRoot: candidateAbs,
+                manifest: { inputs: inventory.inputs },
+            });
+            if (!overlay) {
+                validation = await this.validateCandidate(stackName, candidateRel, src.compose_paths, src.context_dir, src.sync_env);
+            } else {
+                try {
+                    validation = await this.validateCandidate(
+                        stackName,
+                        candidateRel,
+                        src.compose_paths,
+                        src.context_dir,
+                        src.sync_env,
+                        overlay.overlayDir,
+                    );
+                } finally {
+                    await destroyGitOpsOverlay(overlay.binding);
+                }
+            }
+        } else {
+            validation = await this.validateCandidate(stackName, candidateRel, src.compose_paths, src.context_dir, src.sync_env);
+        }
+        return {
+            inventory,
+            contextCopyPlans: inventory.contextCopyPlans,
+            candidateRelPath: candidateRel,
+            validation,
+            secretCapability: capabilityResult.capability,
+        };
     }
 
     /**
@@ -1827,10 +1897,11 @@ export class GitSourceService {
         composePaths: string[],
         contextDir: string | null,
         syncEnv: boolean,
+        validationRoot?: string,
     ): Promise<{ ok: boolean; error?: string }> {
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
         const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-        const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, candidateRelPath);
+        const candidateAbs = validationRoot ?? path.join(dataDir, 'git-managed', String(nodeId), stackName, candidateRelPath);
         const localFiles = gitSourceLocalComposeFiles(composePaths);
 
         const args = ['compose'];
@@ -1877,6 +1948,50 @@ export class GitSourceService {
 
     private runDockerCompose(args: string[], cwd: string, timeoutMs: number) {
         return spawnDockerCompose(args, cwd, timeoutMs);
+    }
+
+    private async deployContextWithOptionalOverlay(args: {
+        stackName: string;
+        nodeId: number;
+        applicationId: string | null;
+        generationId: string | null;
+        commitSha: string;
+        manifest: GitProjectManifest;
+        source: DeployInvocationContext['source'];
+        actor: string | null | undefined;
+        gitopsDeployOperationId?: string;
+    }): Promise<{ ctx: DeployInvocationContext; destroyOverlay: () => Promise<void> }> {
+        const base: DeployInvocationContext = {
+            source: args.source,
+            actor: args.actor ?? null,
+            gitopsDeployOperationId: args.gitopsDeployOperationId,
+        };
+        if (!args.applicationId || !args.generationId || !manifestInputsNeedOverlay(args.manifest)) {
+            return { ctx: base, destroyOverlay: async () => {} };
+        }
+        const sourceRoot = path.join(NodeRegistry.getInstance().getComposeDir(args.nodeId), args.stackName);
+        const overlay = await buildGitOpsDecryptOverlay({
+            stackName: args.stackName,
+            nodeId: args.nodeId,
+            applicationId: args.applicationId,
+            generationId: args.generationId,
+            commitSha: args.commitSha,
+            operationId: args.gitopsDeployOperationId ?? newOverlayOperationId(),
+            sourceRoot,
+            manifest: args.manifest,
+        });
+        if (!overlay) {
+            return { ctx: base, destroyOverlay: async () => {} };
+        }
+        return {
+            ctx: {
+                ...base,
+                overlayDir: overlay.overlayDir,
+                overlayBinding: overlay.binding,
+                gitopsDeployOperationId: args.gitopsDeployOperationId ?? overlay.operationId,
+            },
+            destroyOverlay: () => destroyGitOpsOverlay(overlay.binding),
+        };
     }
 
     // ─── Hashing + diff ──────────────────────────────────────────────────────
@@ -2519,6 +2634,7 @@ export class GitSourceService {
                         src.compose_paths,
                     ),
                     sourcePolicyEvidence: { sourcePolicy: gitopsApp.source_policy },
+                    secretCapabilityJson: encodeGitOpsJson(materialization.value.secretCapability),
                 }));
                 if (plan?.blocked) tx.sourceConflictBlocker(gitopsApp.id, generationId, gitopsEnv);
                 else tx.candidateReady(gitopsApp.id, generationId, reviewRequired, gitopsEnv);
@@ -4280,12 +4396,37 @@ export class GitSourceService {
                         auditPath: `/api/stacks/${stackName}/git-source/apply`,
                     }),
                 );
-                const autoDeploy = await ComposeService.getInstance(nodeId).deployStack(
-                    stackName,
-                    undefined,
-                    undefined,
-                    { source: 'git_apply', actor, gitopsDeployOperationId: deployOpIntent },
-                );
+                const autoDeploy = await (async () => {
+                    const manifestRead = await GitProjectManifestService.getInstance().readManifest(
+                        stackName,
+                        src.repo_url,
+                        src.branch,
+                    );
+                    if (!manifestRead || 'corrupt' in manifestRead) {
+                        throw new GitSourceError('GIT_ERROR', 'The managed-project manifest is unavailable for deploy.');
+                    }
+                    const { ctx, destroyOverlay } = await this.deployContextWithOptionalOverlay({
+                        stackName,
+                        nodeId,
+                        applicationId,
+                        generationId,
+                        commitSha: genRow.commit_sha,
+                        manifest: manifestRead,
+                        source: 'git_apply',
+                        actor,
+                        gitopsDeployOperationId: deployOpIntent,
+                    });
+                    try {
+                        return await ComposeService.getInstance(nodeId).deployStack(
+                            stackName,
+                            undefined,
+                            undefined,
+                            ctx,
+                        );
+                    } finally {
+                        await destroyOverlay();
+                    }
+                })();
                 HealthGateService.getInstance().beginStack(
                     nodeId,
                     stackName,
@@ -5630,12 +5771,29 @@ export class GitSourceService {
                     await finalizeRecoveryCurrent(recoveryId, false);
                 }
                 // Shared stack lock already held as git_apply for capture→deploy.
-                const autoDeploy = await ComposeService.getInstance(nodeId).deployStack(
-                    stackName,
-                    undefined,
-                    undefined,
-                    { source: 'git_apply', actor, ...(deployOpIntent ? { gitopsDeployOperationId: deployOpIntent } : {}) },
-                );
+                const autoDeploy = await (async () => {
+                    const { ctx, destroyOverlay } = await this.deployContextWithOptionalOverlay({
+                        stackName,
+                        nodeId,
+                        applicationId: gitopsApp?.id ?? null,
+                        generationId: gitopsGenerationId,
+                        commitSha,
+                        manifest,
+                        source: 'git_apply',
+                        actor,
+                        gitopsDeployOperationId: deployOpIntent ?? undefined,
+                    });
+                    try {
+                        return await ComposeService.getInstance(nodeId).deployStack(
+                            stackName,
+                            undefined,
+                            undefined,
+                            ctx,
+                        );
+                    } finally {
+                        await destroyOverlay();
+                    }
+                })();
                 if (recoveryId) {
                     if (!recoverySvc.markImmediateVerified(recoveryId)) {
                         console.warn(`[GitSource] Could not CAS immediate_verified for recovery ${sanitizeForLog(recoveryId)}`);
@@ -6374,6 +6532,9 @@ export class GitSourceService {
                                 input.composePaths,
                             ),
                             sourcePolicyEvidence: { sourcePolicy: effectivePolicy },
+                            secretCapabilityJson: materialization.value
+                                ? encodeGitOpsJson(materialization.value.secretCapability)
+                                : null,
                         }),
                         checkpoint: buildCreateCheckpointRow({
                             applicationId,
@@ -7503,6 +7664,12 @@ export class GitSourceService {
                     contextCopyPlans: [],
                     candidateRelPath: pending.candidateRelPath,
                     validation: { ok: true },
+                    secretCapability: {
+                        policy: getEncryptedSourcePolicy(stackName),
+                        inputs: [],
+                        ready: true,
+                        requiredRecipients: [],
+                    },
                 },
                 warnings: [],
             });

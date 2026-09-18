@@ -1067,6 +1067,7 @@ export class StackUpdateRecoveryService {
     composeUp: (
       overridePath: string,
       invocation: RollbackInvocationRecord | null,
+      overlay?: { overlayDir: string; overlayBinding: import('./gitops/sops/types').OverlayBinding },
     ) => Promise<ComposeMutationResult | void>,
     policyOptions?: PolicyEnforcementOptions,
   ): Promise<boolean> {
@@ -1160,10 +1161,39 @@ export class StackUpdateRecoveryService {
       if (!row.override_path) {
         throw new Error('Recovery generation has no override path');
       }
+
+      let recoveryOverlay: { overlayDir: string; binding: import('./gitops/sops/types').OverlayBinding } | null = null;
+      if (row.gitops_generation_id) {
+        const { prepareRecoveryComposeOverlay, destroyGitOpsOverlay } = await import('./gitops/sops/prepareOverlay');
+        const overlayPrep = await prepareRecoveryComposeOverlay({
+          stackName: row.stack_name,
+          nodeId: row.node_id,
+          gitopsGenerationId: row.gitops_generation_id,
+        });
+        if (overlayPrep && 'error' in overlayPrep) {
+          throw Object.assign(new Error(overlayPrep.error), { code: overlayPrep.failureClass });
+        }
+        if (overlayPrep && 'overlayDir' in overlayPrep) {
+          recoveryOverlay = { overlayDir: overlayPrep.overlayDir, binding: overlayPrep.binding };
+        }
+      }
+
       // Only a callback that reports a Compose mutation licenses the deployed
       // pointer. A restore driven some other way resolves the same, and binding
       // on that would claim a workload nobody launched.
-      const composeResult = await composeUp(row.override_path, restoredInvocation);
+      let composeResult: ComposeMutationResult | void;
+      try {
+        composeResult = await composeUp(
+          row.override_path,
+          restoredInvocation,
+          recoveryOverlay ? { overlayDir: recoveryOverlay.overlayDir, overlayBinding: recoveryOverlay.binding } : undefined,
+        );
+      } finally {
+        if (recoveryOverlay) {
+          const { destroyGitOpsOverlay } = await import('./gitops/sops/prepareOverlay');
+          await destroyGitOpsOverlay(recoveryOverlay.binding);
+        }
+      }
       const probeOk = await this.probeRecoveredStack(
         row.node_id,
         row.stack_name,

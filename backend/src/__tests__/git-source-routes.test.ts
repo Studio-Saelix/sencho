@@ -3144,3 +3144,131 @@ describe('git-source polling settings', () => {
         }
     });
 });
+
+describe('Git source SOPS identities', () => {
+    beforeEach(() => {
+        seedGitSource('existing-stack');
+        DatabaseService.getInstance().getDb()
+            .prepare('DELETE FROM gitops_sops_identities WHERE stack_name = ?')
+            .run('existing-stack');
+    });
+
+    it('GET returns recipients without private key material', async () => {
+        const genRes = await request(app)
+            .post('/api/stacks/existing-stack/git-source/sops-identities')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(genRes.status).toBe(201);
+        expect(genRes.body.recipient).toMatch(/^age1/);
+
+        const res = await request(app)
+            .get('/api/stacks/existing-stack/git-source/sops-identities')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(res.body.identities).toHaveLength(1);
+        expect(JSON.stringify(res.body)).not.toMatch(/AGE-SECRET-KEY/);
+        expect(res.body.encrypted_source_policy).toBe('allow_plaintext');
+    });
+
+    it('denies identity mutations without stack:edit', async () => {
+        const res = await request(app)
+            .post('/api/stacks/existing-stack/git-source/sops-identities')
+            .set('Authorization', `Bearer ${viewerToken()}`)
+            .send({});
+        expect([401, 403]).toContain(res.status);
+        expect(JSON.stringify(res.body)).not.toMatch(/AGE-SECRET-KEY/);
+    });
+
+    it('allows GET with stack:read for viewers', async () => {
+        const res = await request(app)
+            .get('/api/stacks/existing-stack/git-source/sops-identities')
+            .set('Authorization', `Bearer ${viewerToken()}`);
+        expect(res.status).toBe(200);
+    });
+
+    it('persists encrypted_source_policy and leaves it unchanged when omitted on PUT', async () => {
+        const policyBody = {
+            repo_url: 'https://github.com/example/repo.git',
+            branch: 'main',
+            compose_paths: ['compose.yaml'],
+            auth_type: 'none',
+            encrypted_source_policy: 'require_encrypted',
+        };
+        const first = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send(policyBody);
+        expect(first.status).toBe(200);
+
+        const { encrypted_source_policy: _drop, ...withoutPolicy } = policyBody;
+        const second = await request(app)
+            .put('/api/stacks/existing-stack/git-source')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send(withoutPolicy);
+        expect(second.status).toBe(200);
+
+        const read = await request(app)
+            .get('/api/stacks/existing-stack/git-source/sops-identities')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(read.status).toBe(200);
+        expect(read.body.encrypted_source_policy).toBe('require_encrypted');
+    });
+
+    it('blocks delete without acknowledgement when generations require the recipient', async () => {
+        const genRes = await request(app)
+            .post('/api/stacks/existing-stack/git-source/sops-identities')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(genRes.status).toBe(201);
+        const recipient = genRes.body.recipient as string;
+        const appRow = directApplicationFixture('app-sops-impact', 'existing-stack');
+        GitOpsStore.getInstance().insertApplication(appRow);
+        const genId = 'gen-sops-impact';
+        GitOpsStore.getInstance().insertGeneration({
+            id: genId,
+            application_id: appRow.id,
+            commit_sha: 'abc1234567890abcdef1234567890abcdef12345678',
+            repo_url: 'https://github.com/example/repo.git',
+            configured_ref: 'main',
+            resolved_ref_kind: 'branch',
+            repo_identity_json: '{"host":"github.com","pathname":"/example/repo.git"}',
+            manifest_version: 1,
+            candidate_dir: 'generations/candidate',
+            applied_dir: 'generations/applied',
+            expected_invocation_json: '{"composeFileOrder":["compose.yaml"],"projectName":null,"projectDirectory":null,"envFileOrder":[]}',
+            materialization_fingerprint: 'b'.repeat(64),
+            validation_ok: 1,
+            plan_blocked: 0,
+            change_plan_fingerprint: null,
+            operation_id: 'op-sops',
+            trigger: 'manual',
+            actor: 'tester',
+            previous_generation_id: null,
+            redacted_limitations_json: '[]',
+            portable_manifest_json: null,
+            compose_inputs_json: null,
+            source_policy_evidence_json: null,
+            security_policy_evidence_json: null,
+            support_requirements_json: null,
+            compatibility_requirements_json: '{}',
+            secret_capability_json: JSON.stringify({
+                policy: 'allow_plaintext',
+                inputs: [],
+                ready: true,
+                requiredRecipients: [recipient],
+            }),
+            created_at: Date.now(),
+        });
+        DatabaseService.getInstance().getDb().prepare(
+            'UPDATE gitops_applications SET candidate_generation_id = ? WHERE id = ?',
+        ).run(genId, appRow.id);
+
+        const del = await request(app)
+            .delete(`/api/stacks/existing-stack/git-source/sops-identities/${genRes.body.id}`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(del.status).toBe(409);
+        expect(del.body.impact?.[0]?.requiredRecipients).toContain(recipient);
+        expect(JSON.stringify(del.body)).not.toMatch(/AGE-SECRET-KEY/);
+    });
+});

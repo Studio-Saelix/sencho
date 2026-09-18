@@ -78,6 +78,10 @@ export interface ComposeInputEntry {
   deletionAuthority: DeletionAuthority;
   /** Refusal reason / documented limitation. */
   note: string | null;
+  /** How on-disk bytes are encrypted; ciphertext hashes stay on contentSha256. */
+  encryption?: 'none' | 'sops-age' | 'sops-unsupported';
+  /** Age recipient strings when encryption is sops-age. */
+  sopsRecipients?: string[];
 }
 
 export interface RefusalInfo {

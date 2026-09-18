@@ -32,6 +32,7 @@ describe('registryDeliveryGitCandidate helpers', () => {
       contextCopyPlans: [],
       candidateRelPath,
       validation: { ok: true },
+      secretCapability: { policy: "allow_plaintext", inputs: [], ready: true, requiredRecipients: [] },
     };
 
     await writeGitCandidatePreparedMeta(payloadDir, {

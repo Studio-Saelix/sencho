@@ -1,5 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { GitSourceService, type PublicGitSource, type SourcePolicy } from '../services/GitSourceService';
+import type { EncryptedSourcePolicy } from '../services/gitops/sops/types';
+import { SopsIdentityStore, getEncryptedSourcePolicy, setEncryptedSourcePolicy } from '../services/gitops/sops/identityStore';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsBindingError, GitOpsBindingService } from '../services/gitops/binding';
 import { SourceController } from '../services/gitops/SourceController';
@@ -497,6 +499,15 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       res.status(400).json({ error: 'auto_deploy_on_apply must be a boolean' });
       return;
     }
+    const encryptedSourcePolicyRaw = (req.body ?? {}).encrypted_source_policy;
+    if (
+      encryptedSourcePolicyRaw !== undefined
+      && encryptedSourcePolicyRaw !== 'allow_plaintext'
+      && encryptedSourcePolicyRaw !== 'require_encrypted'
+    ) {
+      res.status(400).json({ error: 'encrypted_source_policy must be "allow_plaintext" or "require_encrypted"' });
+      return;
+    }
     const repoUrlError = repoUrlRejectionMessage(repo_url);
     if (repoUrlError) {
       res.status(400).json({ error: repoUrlError });
@@ -583,6 +594,10 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
         ipAddress: req.ip || 'unknown',
       },
     });
+
+    if (encryptedSourcePolicyRaw !== undefined) {
+      setEncryptedSourcePolicy(stackName, encryptedSourcePolicyRaw as EncryptedSourcePolicy);
+    }
 
     // The cached /stacks/statuses payload carries the source label; drop it
     // before responding so a client refetch on this response recomputes. The
@@ -1104,6 +1119,148 @@ stackGitSourceRouter.post('/:stackName/git-source/adopt-blueprint', (req: Reques
     res.json(service.describeContentBinding(target.blueprintId));
   } catch (error) {
     respondBindingFailure(res, error, 'Adopt-blueprint error', 'Failed to adopt Blueprint from Git source');
+  }
+});
+
+function resolveSopsApplicationId(stackName: string): string {
+  return GitOpsStore.getInstance().getLiveDirectApplication(stackName)?.id ?? stackName;
+}
+
+stackGitSourceRouter.get('/:stackName/git-source/sops-identities', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!DatabaseService.getInstance().getGitSource(stackName)) {
+    res.status(404).json({ error: 'Git source not found' });
+    return;
+  }
+  const applicationId = resolveSopsApplicationId(stackName);
+  const policy = getEncryptedSourcePolicy(stackName);
+  const identities = SopsIdentityStore.getInstance().listPublic(applicationId, stackName);
+  const { resolveActiveRequiredRecipients } = await import('../services/gitops/sops/capability');
+  const requiredRecipients = resolveActiveRequiredRecipients({
+    stackName,
+    nodeId: req.nodeId ?? 0,
+  });
+  const readiness = SopsIdentityStore.getInstance().computeReadiness({
+    applicationId,
+    stackName,
+    policy,
+    requiredRecipients,
+  });
+  res.json({
+    encrypted_source_policy: policy,
+    identities,
+    readiness,
+  });
+});
+
+stackGitSourceRouter.post('/:stackName/git-source/sops-identities', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  if (!DatabaseService.getInstance().getGitSource(stackName)) {
+    res.status(404).json({ error: 'Git source not found' });
+    return;
+  }
+  try {
+    const label = typeof req.body?.label === 'string' ? req.body.label : null;
+    const identity = await SopsIdentityStore.getInstance().generateIdentity({
+      applicationId: resolveSopsApplicationId(stackName),
+      stackName,
+      label,
+    });
+    res.status(201).json(identity);
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message || 'Could not generate identity' });
+  }
+});
+
+stackGitSourceRouter.post('/:stackName/git-source/sops-identities/import', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  if (!DatabaseService.getInstance().getGitSource(stackName)) {
+    res.status(404).json({ error: 'Git source not found' });
+    return;
+  }
+  const identity = typeof req.body?.identity === 'string' ? req.body.identity : '';
+  if (!identity.trim()) {
+    res.status(400).json({ error: 'identity is required' });
+    return;
+  }
+  try {
+    const label = typeof req.body?.label === 'string' ? req.body.label : null;
+    const imported = await SopsIdentityStore.getInstance().importIdentity({
+      applicationId: resolveSopsApplicationId(stackName),
+      stackName,
+      identity,
+      label,
+    });
+    res.status(201).json(imported);
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message || 'Could not import identity' });
+  }
+});
+
+stackGitSourceRouter.post('/:stackName/git-source/sops-identities/:id/rotate', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  const id = req.params.id as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  if (!DatabaseService.getInstance().getGitSource(stackName)) {
+    res.status(404).json({ error: 'Git source not found' });
+    return;
+  }
+  try {
+    const label = typeof req.body?.label === 'string' ? req.body.label : null;
+    const result = await SopsIdentityStore.getInstance().rotateIdentity({
+      id,
+      applicationId: resolveSopsApplicationId(stackName),
+      stackName,
+      label,
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message || 'Could not rotate identity' });
+  }
+});
+
+stackGitSourceRouter.delete('/:stackName/git-source/sops-identities/:id', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  const id = req.params.id as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  try {
+    const acknowledge = req.body?.acknowledge_destructive === true;
+    const result = SopsIdentityStore.getInstance().deleteIdentity({
+      id,
+      applicationId: resolveSopsApplicationId(stackName),
+      stackName,
+      acknowledgeDestructive: acknowledge,
+    });
+    if (!result.deleted) {
+      res.status(409).json({ error: 'Identity is in use', impact: result.impact });
+      return;
+    }
+    res.json({ deleted: true, impact: result.impact });
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message || 'Could not delete identity' });
   }
 });
 

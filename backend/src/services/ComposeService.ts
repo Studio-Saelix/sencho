@@ -39,6 +39,8 @@ import {
   MissingExternalNetworksError,
   type DeployInvocationContext,
 } from './network/missingExternalNetworksError';
+import { assertGitOverlaySource } from './gitops/sops/prepareOverlay';
+import { GitOpsDecryptOverlay } from './gitops/sops/overlay';
 import { buildUnifiedHeldImagePredicate } from './recoveryHeldImages';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import type { NotificationCategory } from './NotificationService';
@@ -238,13 +240,26 @@ export class ComposeService {
     await this.execute('docker', args, stackDir, undefined, true);
   }
 
-  private async authoredComposeArgs(stackName: string, action: string[]): Promise<string[]> {
+  private resolveStackDir(stackName: string, ctx?: DeployInvocationContext): string {
+    if (ctx?.overlayDir) {
+      assertGitOverlaySource(ctx.source);
+      if (ctx.overlayBinding) {
+        GitOpsDecryptOverlay.getInstance().assertBinding(ctx.overlayDir, ctx.overlayBinding);
+      }
+      return ctx.overlayDir;
+    }
+    return path.join(this.baseDir, stackName);
+  }
+
+  private async authoredComposeArgs(
+    stackName: string,
+    action: string[],
+    stackDirOverride?: string,
+  ): Promise<string[]> {
     const args: string[] = ['compose'];
-    const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
+    const filePrefix = authoredComposeFileArgs(stackName, this.nodeId, stackDirOverride);
     args.push(...filePrefix);
-    // Pin env resolution to the root .env when a context dir shifts the project
-    // directory, so deploy/update resolve the same effective config the validator did.
-    args.push(...await authoredComposeEnvFileArgs(stackName, this.nodeId));
+    args.push(...await authoredComposeEnvFileArgs(stackName, this.nodeId, stackDirOverride));
 
     const meshEnabled = DatabaseService.getInstance().isMeshStackEnabled(this.nodeId, stackName);
     let overridePath: string | null = null;
@@ -633,7 +648,7 @@ export class ComposeService {
    * no env value is materialized. Default off and any settings-read failure both
    * fall through without blocking.
    */
-  private async assertRequiredEnvPresent(stackName: string): Promise<void> {
+  private async assertRequiredEnvPresent(stackName: string, stackDirOverride?: string): Promise<void> {
     let enabled = false;
     try {
       enabled = DatabaseService.getInstance().getGlobalSettings()['env_block_deploy_on_missing_required'] === '1';
@@ -641,8 +656,31 @@ export class ComposeService {
       return; // safe default: a settings-read failure never blocks a deploy
     }
     if (!enabled) return;
-    const result = await this.renderConfig(stackName);
-    const missing = parseMissingRequiredVars(result.stderr);
+    let missing: string[] = [];
+    if (stackDirOverride) {
+      try {
+        const args = await this.authoredComposeArgs(stackName, ['config', '--quiet'], stackDirOverride);
+        const result = await new Promise<{ stderr: string; code: number | null }>((resolve, reject) => {
+          const child = spawn('docker', args, {
+            cwd: stackDirOverride,
+            env: {
+              ...process.env,
+              PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+            },
+          });
+          let stderr = '';
+          child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+          child.on('error', reject);
+          child.on('close', (code) => resolve({ stderr, code }));
+        });
+        missing = parseMissingRequiredVars(result.stderr);
+      } catch {
+        return;
+      }
+    } else {
+      const result = await this.renderConfig(stackName);
+      missing = parseMissingRequiredVars(result.stderr);
+    }
     if (missing.length === 0) return;
     const plural = missing.length > 1;
     throw new Error(
@@ -880,11 +918,14 @@ export class ComposeService {
     atomic?: boolean,
     ctx?: DeployInvocationContext,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
-    await this.assertRequiredEnvPresent(stackName);
+    if (ctx?.overlayDir) {
+      assertGitOverlaySource(ctx.source);
+    }
+    const stackDir = this.resolveStackDir(stackName, ctx);
+    await this.assertRequiredEnvPresent(stackName, stackDir);
     await this.assertSafePilotBindMapping(stackName);
     await this.ensureExternalNetworksForDeploy(stackName, ctx);
 
-    const stackDir = path.join(this.baseDir, stackName);
     const debug = isDebugEnabled();
     const t0 = Date.now();
     if (debug) console.debug('[ComposeService:debug] deployStack', { stackName, stackDir, atomic });
@@ -944,7 +985,7 @@ export class ComposeService {
       }
 
       await this.withRegistryAuth(async (env) => {
-        const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']);
+        const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans'], stackDir);
         composeHandedOff = true;
         await this.execute('docker', args, stackDir, ws, true, env, getComposeStallTimeoutMs());
       }, sendOutput);
@@ -996,11 +1037,12 @@ export class ComposeService {
         const rolledBack = await compensateOrSwallow(() =>
           recoverySvc.compensateWithCandidate(
             generationId,
-            (overridePath, invocation) => this.composeUpWithRecoveryOverride(
+            (overridePath, invocation, overlay) => this.composeUpWithRecoveryOverride(
               stackName,
               overridePath,
               ws,
               invocation,
+              overlay,
             ),
           ),
         );
@@ -1188,8 +1230,12 @@ export class ComposeService {
     overridePath: string,
     ws?: WebSocket,
     invocation?: RollbackInvocationRecord | null,
+    overlay?: Pick<DeployInvocationContext, 'overlayDir' | 'overlayBinding'>,
   ): Promise<ComposeMutationResult> {
-    const stackDir = path.join(this.baseDir, stackName);
+    if (overlay?.overlayDir && overlay.overlayBinding) {
+      GitOpsDecryptOverlay.getInstance().assertBinding(overlay.overlayDir, overlay.overlayBinding);
+    }
+    const stackDir = overlay?.overlayDir ?? path.join(this.baseDir, stackName);
     const sendOutput = (data: string) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
     };
@@ -1201,6 +1247,7 @@ export class ComposeService {
           ['up', '-d', '--remove-orphans', '--pull', 'never', '--no-build'],
           overridePath,
           invocation ?? null,
+          stackDir,
         ),
         stackDir,
         ws,
@@ -1222,11 +1269,12 @@ export class ComposeService {
     action: string[],
     recoveryOverridePath: string | null,
     invocation?: RollbackInvocationRecord | null,
+    stackDirOverride?: string,
   ): Promise<string[]> {
     const useCaptured = hasUsableCapturedInvocation(invocation);
     const out = useCaptured
       ? ['compose', ...this.composePrefixFromCapturedInvocation(stackName, invocation)]
-      : await this.authoredComposeArgsPrefix(stackName);
+      : await this.authoredComposeArgsPrefix(stackName, stackDirOverride);
 
     if (useCaptured && invocation.meshEnabled) {
       await this.appendCapturedMeshLayer(stackName, out);
@@ -1258,8 +1306,11 @@ export class ComposeService {
   }
 
   /** Slice the global-flag prefix from authoredComposeArgs (no action tokens). */
-  private async authoredComposeArgsPrefix(stackName: string): Promise<string[]> {
-    const withSentinel = await this.authoredComposeArgs(stackName, ['__SENCHO_ACTION_SENTINEL__']);
+  private async authoredComposeArgsPrefix(
+    stackName: string,
+    stackDirOverride?: string,
+  ): Promise<string[]> {
+    const withSentinel = await this.authoredComposeArgs(stackName, ['__SENCHO_ACTION_SENTINEL__'], stackDirOverride);
     const idx = withSentinel.indexOf('__SENCHO_ACTION_SENTINEL__');
     const prefix = idx >= 0 ? withSentinel.slice(0, idx) : withSentinel;
     return [...prefix];
@@ -1553,11 +1604,12 @@ export class ComposeService {
         const rolledBack = await compensateOrSwallow(() =>
           recoverySvc.compensateWithCandidate(
             generationId,
-            (overridePath, invocation) => this.composeUpWithRecoveryOverride(
+            (overridePath, invocation, overlay) => this.composeUpWithRecoveryOverride(
               stackName,
               overridePath,
               ws,
               invocation,
+              overlay,
             ),
           ),
         );

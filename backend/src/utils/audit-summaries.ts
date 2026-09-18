@@ -148,6 +148,12 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   // Blueprints (Federation pin)
   'PUT /blueprints/*/pin': 'Updated blueprint pin',
 
+  // Git source SOPS identities
+  'POST /stacks/*/git-source/sops-identities': 'Generated Git source age identity',
+  'POST /stacks/*/git-source/sops-identities/import': 'Imported Git source age identity',
+  'POST /stacks/*/git-source/sops-identities/*/rotate': 'Rotated Git source age identity',
+  'DELETE /stacks/*/git-source/sops-identities/*': 'Deleted Git source age identity',
+
   // Fleet secrets
   'POST /secrets': 'Created secret',
   'PUT /secrets': 'Updated secret',

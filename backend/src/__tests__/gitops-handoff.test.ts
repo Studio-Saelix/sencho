@@ -38,6 +38,7 @@ function baseRow(overrides: Partial<GitOpsGenerationRow> = {}): GitOpsGeneration
     security_policy_evidence_json: null,
     support_requirements_json: null,
     compatibility_requirements_json: null,
+    secret_capability_json: null,
     created_at: 1,
     ...overrides,
   };
@@ -70,6 +71,7 @@ describe('buildAcceptedGeneration', () => {
       'security_policy_evidence_missing',
       'support_requirements_missing',
       'compatibility_requirements_missing',
+      'secret_capability_missing',
     ]));
   });
 
@@ -94,9 +96,24 @@ describe('buildAcceptedGeneration', () => {
     expect(() => buildAcceptedGeneration(baseRow({ repo_identity_json: 'not json' }))).toThrow();
   });
 
-  it('never populates secretCapability with a value, only its absence as capability metadata', () => {
+  it('decodes secret capability metadata when the row carries it', () => {
+    const capability = {
+      policy: 'allow_plaintext',
+      inputs: [{ role: 'env-file', encryption: 'sops-age', recipientIds: ['age1abc'], sourcePath: '.env' }],
+      ready: true,
+      requiredRecipients: ['age1abc'],
+    };
+    const gen = buildAcceptedGeneration(baseRow({
+      secret_capability_json: JSON.stringify(capability),
+    }));
+    expect(gen.secretCapability).toEqual(capability);
+    expect(gen.limitations).not.toContain('secret_capability_missing');
+  });
+
+  it('records secret_capability_missing on legacy rows without inventing evidence', () => {
     const gen = buildAcceptedGeneration(baseRow());
     expect(gen.secretCapability).toBeNull();
+    expect(gen.limitations).toContain('secret_capability_missing');
   });
 });
 
