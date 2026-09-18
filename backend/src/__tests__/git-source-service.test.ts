@@ -113,11 +113,13 @@ let tmpDir: string;
 let GitSourceService: typeof import('../services/GitSourceService').GitSourceService;
 let GitSourceError: typeof import('../services/GitSourceService').GitSourceError;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
+let parseReconcileResultPayload: typeof import('../services/gitops/outcomes').parseReconcileResultPayload;
 
 beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ GitSourceService, GitSourceError } = await import('../services/GitSourceService'));
     ({ DatabaseService } = await import('../services/DatabaseService'));
+    ({ parseReconcileResultPayload } = await import('../services/gitops/outcomes'));
 });
 
 afterAll(() => {
@@ -2471,6 +2473,90 @@ describe('GitSourceService.pull', () => {
         await svc.pull('pull-reserves');
 
         expect(historyOperationIds(applicationId, 'source_reconcile_settled').length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('returns the canonical result its durable settlement recorded, alongside the legacy pull payload', async () => {
+        await createFromGit('pull-canonical-result', '2'.repeat(40));
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx:2\n', sha: '3'.repeat(40) });
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('pull-canonical-result')!.id;
+
+        const result = await svc.pull('pull-canonical-result');
+
+        expect(result.commitSha).toBe('3'.repeat(40));
+        expect(result.candidateReady).toBe(true);
+        expect(result.reconcile).toBeDefined();
+        const [reservedOperationId] = historyOperationIds(applicationId, 'source_reconcile_settled');
+        expect(reservedOperationId).toBeTruthy();
+        const settledRow = GitOpsStore.getInstance().getSettledAttempt(applicationId, reservedOperationId);
+        expect(settledRow).toBeDefined();
+        expect(result.reconcile).toEqual(
+            parseReconcileResultPayload(JSON.parse(settledRow!.after_json)),
+        );
+    });
+
+    it('reports pending_review for a pull that stages an unapplied candidate, never converged on source equality alone', async () => {
+        await createFromGit('pull-unchanged-source', '2'.repeat(40));
+        const svc = GitSourceService.getInstance();
+        const unchangedSha = '2'.repeat(40);
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx\n', sha: unchangedSha });
+
+        const result = await svc.pull('pull-unchanged-source');
+
+        expect(result.reconcile.outcome).toBe('pending_review');
+        expect(result.reconcile.outcome).not.toBe('converged');
+        expect(result.reconcile.nextAction).toBe('review');
+        await cleanupStackDir('pull-unchanged-source');
+    });
+
+    it('returns an explicit non-throwing fallback result when settlement fails, leaving the attempt unsettled', async () => {
+        await createFromGit('pull-settle-fails', '2'.repeat(40));
+        const svc = GitSourceService.getInstance();
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx:2\n', sha: '3'.repeat(40) });
+        const applicationId = GitOpsStore.getInstance().getLiveDirectApplication('pull-settle-fails')!.id;
+        const settleSpy = vi.spyOn(GitOpsTransitions.prototype, 'settleReconcileAttempt')
+            .mockImplementationOnce(() => { throw new Error('simulated settlement failure'); });
+
+        try {
+            const result = await svc.pull('pull-settle-fails');
+
+            expect(result.commitSha).toBe('3'.repeat(40));
+            expect(result.reconcile.outcome).toBe('unknown');
+            expect(result.reconcile.nextAction).toBe('retry');
+            expect(historyOperationIds(applicationId, 'source_reconcile_settled')).toHaveLength(0);
+        } finally {
+            settleSpy.mockRestore();
+        }
+    });
+
+    it('returns an unknown result only for the coalesced pull whose own settlement fails', async () => {
+        await createFromGit('pull-follower-settle-fails', '2'.repeat(40));
+        const svc = GitSourceService.getInstance();
+        const store = GitOpsStore.getInstance();
+        const applicationId = store.getLiveDirectApplication('pull-follower-settle-fails')!.id;
+        mockSuccessfulClone({ compose: 'services:\n  web:\n    image: nginx:2\n', sha: '3'.repeat(40) });
+        mockGitClone.mockClear();
+        const settle = GitOpsTransitions.prototype.settleReconcileAttempt;
+        const settleSpy = vi.spyOn(GitOpsTransitions.prototype, 'settleReconcileAttempt')
+            .mockImplementationOnce(function (this: GitOpsTransitions, ...args) { return settle.apply(this, args); })
+            .mockImplementationOnce(() => { throw new Error('simulated follower settlement failure'); });
+
+        try {
+            const [leader, follower] = await Promise.all([
+                svc.pull('pull-follower-settle-fails'),
+                svc.pull('pull-follower-settle-fails'),
+            ]);
+            expect(mockGitClone).toHaveBeenCalledTimes(1);
+            expect(leader.reconcile.outcome).toBe('pending_review');
+            expect(follower.commitSha).toBe(leader.commitSha);
+            expect(follower.reconcile).toMatchObject({ outcome: 'unknown', nextAction: 'retry' });
+            const [leaderId, followerId] = historyOperationIds(applicationId, 'source_reconcile_started');
+            expect(store.getSettledAttempt(applicationId, leaderId)).toBeDefined();
+            expect(followerId).toBeTruthy();
+            expect(store.getSettledAttempt(applicationId, followerId)).toBeUndefined();
+        } finally {
+            settleSpy.mockRestore();
+        }
     });
 
     it('stamps the pending fetch record with the same operation id the reserved attempt used, not an independent one', async () => {

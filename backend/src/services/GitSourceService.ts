@@ -320,6 +320,14 @@ export interface PullResult {
     planFingerprint: string | null;
 }
 
+/**
+ * The manual pull response: the legacy pull payload plus the normalized
+ * reconciliation result the attempt settled (or an explicit `unknown`
+ * fallback when the settlement write itself failed, so an unpersisted
+ * outcome is never mistaken for a durable one).
+ */
+export type ManualPullResult = PullResult & { reconcile: ReconcileResult };
+
 export interface PublicPendingPlanView {
     fingerprint: string;
     blocked: boolean;
@@ -434,7 +442,7 @@ type LeaderCompletion<T> = {
 type InFlightMap<T> = Map<string, { operationId: string; promise: Promise<LeaderCompletion<T>> }>;
 
 type ExecutionSubmission<T> =
-    | { kind: 'executed'; execution: SharedExecution<T> }
+    | { kind: 'executed'; execution: SharedExecution<T>; settled: boolean }
     | { kind: 'replayed'; result: ReconcileResult };
 
 type WebhookPullResult = { status: 'success' | 'skipped' | 'error'; message: string };
@@ -2117,7 +2125,7 @@ export class GitSourceService {
         return lastColon === -1 ? operationId.slice(0, 8) : operationId.slice(lastColon + 1);
     }
 
-    public async pull(stackName: string, opts: { actor?: string } = {}): Promise<PullResult> {
+    public async pull(stackName: string, opts: { actor?: string } = {}): Promise<ManualPullResult> {
         // Guarded by the per-stack mutex (see withStackLock). Without this, a
         // concurrent delete-source + pull can land a pending row on a stack
         // whose config row has just been removed.
@@ -2130,7 +2138,7 @@ export class GitSourceService {
         const doPull = this.doPullWork(stackName, actor, gitopsApp?.id);
         if (!gitopsApp) {
             this.refuseUntrackedSource(stackName, actor, 'fetch', true);
-            return doPull();
+            return { ...await doPull(), reconcile: GitSourceService.noApplicationResult() };
         }
 
         const request: ReconcileRequest = { intent: 'fetch', applicationId: gitopsApp.id, stackName, trigger: 'manual', actor };
@@ -2140,7 +2148,26 @@ export class GitSourceService {
             doPull,
             (outcome) => this.fetchExecutionResult(stackName, outcome),
         );
-        return GitSourceService.valueFromSubmission(submission);
+        const value = GitSourceService.valueFromSubmission(submission);
+        return {
+            ...value,
+            reconcile: GitSourceService.settlementResultFromSubmission(submission),
+        };
+    }
+
+    /** Report an explicit unknown result when this submission's settlement failed. */
+    private static settlementResultFromSubmission<T>(submission: ExecutionSubmission<T>): ReconcileResult {
+        if (submission.kind === 'replayed') return submission.result;
+        if (submission.settled) return submission.execution.result;
+        return GitSourceService.unsettledResult();
+    }
+
+    private static unsettledResult(): ReconcileResult {
+        return {
+            outcome: 'unknown',
+            reason: 'The pull succeeded, but its result could not be durably recorded; the attempt will be settled by recovery.',
+            nextAction: 'retry',
+        };
     }
 
     /**
@@ -2739,16 +2766,17 @@ export class GitSourceService {
 
         if (leader && (reserved || leader.operationId === envelope.operationId)) {
             const completion = await leader.promise;
-            if (reserved && completion.settled) {
-                this.settleAttempt(request.applicationId, envelope, completion.execution.result);
-            }
-            return { kind: 'executed', execution: completion.execution };
+            const settled = reserved && completion.settled
+                ? this.settleAttempt(request.applicationId, envelope, completion.execution.result)
+                : completion.settled;
+            return { kind: 'executed', execution: completion.execution, settled };
         }
 
         if (!reserved) {
             const byOperationId = GitSourceService.findByOperationId(map, envelope.operationId);
             if (byOperationId) {
-                return { kind: 'executed', execution: (await byOperationId).execution };
+                const completion = await byOperationId;
+                return { kind: 'executed', execution: completion.execution, settled: completion.settled };
             }
             return {
                 kind: 'replayed',
@@ -2770,7 +2798,7 @@ export class GitSourceService {
         map.set(key, entry);
         try {
             const completion = await promise;
-            return { kind: 'executed', execution: completion.execution };
+            return { kind: 'executed', execution: completion.execution, settled: completion.settled };
         } finally {
             if (map.get(key) === entry) map.delete(key);
         }

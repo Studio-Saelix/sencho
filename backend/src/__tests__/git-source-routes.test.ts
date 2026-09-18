@@ -1635,6 +1635,7 @@ describe('POST /api/stacks/:stackName/git-source/pull permissions and actor', ()
                 invocation: { candidateChanged: false, liveDiverged: false },
             },
             planFingerprint: 'fp',
+            reconcile: { outcome: 'pending_review', reason: 'A candidate is staged and awaiting review.', nextAction: 'review' },
         });
         try {
             const res = await request(app)
@@ -1642,6 +1643,14 @@ describe('POST /api/stacks/:stackName/git-source/pull permissions and actor', ()
                 .set('Authorization', `Bearer ${adminToken()}`);
             expect(res.status).toBe(200);
             expect(pullSpy).toHaveBeenCalledWith('existing-stack', { actor: TEST_USERNAME });
+            expect(res.body.commitSha).toBe('abc');
+            expect(res.body.candidateReady).toBe(true);
+            expect(res.body.planFingerprint).toBe('fp');
+            expect(res.body.reconcile).toEqual({
+                outcome: 'pending_review',
+                reason: 'A candidate is staged and awaiting review.',
+                nextAction: 'review',
+            });
             expect(JSON.stringify(res.body)).not.toContain('incomingCompose');
             expect(JSON.stringify(res.body)).not.toContain('hasLocalChanges');
         } finally {
