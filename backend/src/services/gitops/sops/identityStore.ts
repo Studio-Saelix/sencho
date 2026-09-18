@@ -31,13 +31,13 @@ export class SopsIdentityStore {
     return DatabaseService.getInstance().getDb();
   }
 
-  listPublic(applicationId: string, stackName: string): PublicSopsIdentity[] {
+  listPublic(_applicationId: string, stackName: string): PublicSopsIdentity[] {
     const rows = this.db().prepare(
       `SELECT id, recipient, label, created_at, rotated_at
        FROM gitops_sops_identities
-       WHERE application_id = ? AND stack_name = ?
+       WHERE stack_name = ?
        ORDER BY created_at ASC`,
-    ).all(applicationId, stackName) as Array<Pick<SopsIdentityRow, 'id' | 'recipient' | 'label' | 'created_at' | 'rotated_at'>>;
+    ).all(stackName) as Array<Pick<SopsIdentityRow, 'id' | 'recipient' | 'label' | 'created_at' | 'rotated_at'>>;
     return rows.map((row) => ({
       id: row.id,
       recipient: row.recipient,
@@ -47,11 +47,11 @@ export class SopsIdentityStore {
     }));
   }
 
-  getIdentityMap(applicationId: string, stackName: string): Map<string, string> {
+  getIdentityMap(_applicationId: string, stackName: string): Map<string, string> {
     const rows = this.db().prepare(
       `SELECT recipient, encrypted_identity FROM gitops_sops_identities
-       WHERE application_id = ? AND stack_name = ?`,
-    ).all(applicationId, stackName) as Array<Pick<SopsIdentityRow, 'recipient' | 'encrypted_identity'>>;
+       WHERE stack_name = ?`,
+    ).all(stackName) as Array<Pick<SopsIdentityRow, 'recipient' | 'encrypted_identity'>>;
     const cryptoSvc = CryptoService.getInstance();
     const map = new Map<string, string>();
     for (const row of rows) {
@@ -117,6 +117,14 @@ export class SopsIdentityStore {
     return { id, recipient: args.recipient, label: args.label, createdAt: now, rotatedAt: null };
   }
 
+  /** Rebind identities whose application_id is still the stack-name placeholder. */
+  adoptStackScopedIdentities(applicationId: string, stackName: string): void {
+    this.db().prepare(
+      `UPDATE gitops_sops_identities SET application_id = ?
+       WHERE stack_name = ? AND application_id = ?`,
+    ).run(applicationId, stackName, stackName);
+  }
+
   deleteIdentity(args: {
     id: string;
     applicationId: string;
@@ -125,11 +133,11 @@ export class SopsIdentityStore {
   }): { deleted: boolean; impact: SopsIdentityImpact[] } {
     const row = this.db().prepare(
       `SELECT id, recipient FROM gitops_sops_identities
-       WHERE id = ? AND application_id = ? AND stack_name = ?`,
-    ).get(args.id, args.applicationId, args.stackName) as { id: string; recipient: string } | undefined;
+       WHERE id = ? AND stack_name = ?`,
+    ).get(args.id, args.stackName) as { id: string; recipient: string } | undefined;
     if (!row) throw new Error('Identity not found');
 
-    const impact = this.impactForRecipient(args.applicationId, row.recipient);
+    const impact = this.impactForRecipient(args.applicationId, args.stackName, row.recipient);
     if (impact.length > 0 && !args.acknowledgeDestructive) {
       return { deleted: false, impact };
     }
@@ -145,10 +153,10 @@ export class SopsIdentityStore {
   }): Promise<{ previous: PublicSopsIdentity; next: PublicSopsIdentity; impact: SopsIdentityImpact[] }> {
     const row = this.db().prepare(
       `SELECT id, recipient FROM gitops_sops_identities
-       WHERE id = ? AND application_id = ? AND stack_name = ?`,
-    ).get(args.id, args.applicationId, args.stackName) as { id: string; recipient: string } | undefined;
+       WHERE id = ? AND stack_name = ?`,
+    ).get(args.id, args.stackName) as { id: string; recipient: string } | undefined;
     if (!row) throw new Error('Identity not found');
-    const impact = this.impactForRecipient(args.applicationId, row.recipient);
+    const impact = this.impactForRecipient(args.applicationId, args.stackName, row.recipient);
     const now = Date.now();
     this.db().prepare(
       'UPDATE gitops_sops_identities SET rotated_at = ? WHERE id = ?',
@@ -163,13 +171,14 @@ export class SopsIdentityStore {
     return { previous: { ...previous, rotatedAt: now }, next, impact };
   }
 
-  impactForRecipient(applicationId: string, recipient: string): SopsIdentityImpact[] {
+  impactForRecipient(applicationId: string, stackName: string, recipient: string): SopsIdentityImpact[] {
     const rows = this.db().prepare(
-      `SELECT id, commit_sha, secret_capability_json
-       FROM gitops_generations
-       WHERE application_id = ?
-       ORDER BY created_at DESC`,
-    ).all(applicationId) as Array<{ id: string; commit_sha: string; secret_capability_json: string | null }>;
+      `SELECT g.id, g.commit_sha, g.secret_capability_json
+       FROM gitops_generations g
+       JOIN gitops_applications a ON a.id = g.application_id
+       WHERE a.stack_name = ? OR g.application_id = ?
+       ORDER BY g.created_at DESC`,
+    ).all(stackName, applicationId) as Array<{ id: string; commit_sha: string; secret_capability_json: string | null }>;
 
     const impacts: SopsIdentityImpact[] = [];
     for (const row of rows) {
@@ -195,7 +204,7 @@ export class SopsIdentityStore {
     const identities = this.listPublic(args.applicationId, args.stackName);
     const known = new Set(identities.map((i) => i.recipient));
     const missing = args.requiredRecipients.filter((r) => !known.has(r));
-    const ready = missing.length === 0 && args.requiredRecipients.length >= 0;
+    const ready = missing.length === 0;
     return {
       identities,
       requiredRecipients: args.requiredRecipients,

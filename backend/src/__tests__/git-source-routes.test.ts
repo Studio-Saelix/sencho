@@ -3238,6 +3238,67 @@ describe('Git source SOPS identities', () => {
         }
     });
 
+    it('updates encrypted_source_policy without rewriting the git source', async () => {
+        const upsertSpy = vi.spyOn(GitSourceService.getInstance(), 'upsert');
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source/encrypted-source-policy')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ encrypted_source_policy: 'require_encrypted' });
+        expect(res.status).toBe(200);
+        expect(res.body.encrypted_source_policy).toBe('require_encrypted');
+        expect(upsertSpy).not.toHaveBeenCalled();
+        upsertSpy.mockRestore();
+        const source = DatabaseService.getInstance().getGitSource('existing-stack');
+        expect(source?.repo_url).toBe('https://github.com/example/repo.git');
+    });
+
+    it('rebinding stack-scoped identities after Direct application creation', async () => {
+        const stackName = 'sops-adopt-stack';
+        const composeDir = process.env.COMPOSE_DIR!;
+        fs.mkdirSync(path.join(composeDir, stackName), { recursive: true });
+        fs.writeFileSync(path.join(composeDir, stackName, 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+        seedGitSource(stackName);
+        const genRes = await request(app)
+            .post(`/api/stacks/${stackName}/git-source/sops-identities`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({});
+        expect(genRes.status).toBe(201);
+        const recipient = genRes.body.recipient as string;
+        const before = DatabaseService.getInstance().getDb()
+            .prepare('SELECT application_id FROM gitops_sops_identities WHERE recipient = ?')
+            .get(recipient) as { application_id: string };
+        expect(before.application_id).toBe(stackName);
+
+        const appRow = directApplicationFixture('app-sops-adopt', stackName);
+        GitOpsStore.getInstance().insertApplication(appRow);
+        const listedBeforeAdopt = await request(app)
+            .get(`/api/stacks/${stackName}/git-source/sops-identities`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(listedBeforeAdopt.status).toBe(200);
+        expect(listedBeforeAdopt.body.identities?.some((row: { recipient: string }) => row.recipient === recipient)).toBe(true);
+
+        const { SopsIdentityStore } = await import('../services/gitops/sops/identityStore');
+        SopsIdentityStore.getInstance().adoptStackScopedIdentities(appRow.id, stackName);
+
+        const after = DatabaseService.getInstance().getDb()
+            .prepare('SELECT application_id FROM gitops_sops_identities WHERE recipient = ?')
+            .get(recipient) as { application_id: string };
+        expect(after.application_id).toBe(appRow.id);
+        const read = await request(app)
+            .get(`/api/stacks/${stackName}/git-source/sops-identities`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(read.status).toBe(200);
+        expect(read.body.identities?.some((row: { recipient: string }) => row.recipient === recipient)).toBe(true);
+    });
+
+    it('rejects encrypted_source_policy writes without stack:edit', async () => {
+        const res = await request(app)
+            .put('/api/stacks/existing-stack/git-source/encrypted-source-policy')
+            .set('Authorization', `Bearer ${viewerToken()}`)
+            .send({ encrypted_source_policy: 'require_encrypted' });
+        expect([401, 403]).toContain(res.status);
+    });
+
     it('blocks delete without acknowledgement when generations require the recipient', async () => {
         const appRow = directApplicationFixture('app-sops-impact', 'existing-stack');
         GitOpsStore.getInstance().insertApplication(appRow);

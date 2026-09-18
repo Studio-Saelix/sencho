@@ -39,7 +39,8 @@ import {
   MissingExternalNetworksError,
   type DeployInvocationContext,
 } from './network/missingExternalNetworksError';
-import { assertGitOverlaySource } from './gitops/sops/prepareOverlay';
+import { assertGitOverlaySource, SOPS_DIRECT_MUTATION_MESSAGE } from './gitops/sops/prepareOverlay';
+import { resolveActiveRequiredRecipients } from './gitops/sops/capability';
 import { GitOpsDecryptOverlay } from './gitops/sops/overlay';
 import { buildUnifiedHeldImagePredicate } from './recoveryHeldImages';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -249,6 +250,12 @@ export class ComposeService {
       return ctx.overlayDir;
     }
     return path.join(this.baseDir, stackName);
+  }
+
+  private assertSopsOverlayOrRefuse(stackName: string, overlayDir?: string): void {
+    const required = resolveActiveRequiredRecipients({ stackName, nodeId: this.nodeId });
+    if (required.length === 0 || overlayDir) return;
+    throw new Error(SOPS_DIRECT_MUTATION_MESSAGE);
   }
 
   private async authoredComposeArgs(
@@ -921,6 +928,7 @@ export class ComposeService {
     if (ctx?.overlayDir) {
       assertGitOverlaySource(ctx.source);
     }
+    this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
     const stackDir = this.resolveStackDir(stackName, ctx);
     await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
     await this.assertSafePilotBindMapping(stackName);
@@ -1273,7 +1281,7 @@ export class ComposeService {
   ): Promise<string[]> {
     const useCaptured = hasUsableCapturedInvocation(invocation);
     const out = useCaptured
-      ? ['compose', ...this.composePrefixFromCapturedInvocation(stackName, invocation)]
+      ? ['compose', ...this.composePrefixFromCapturedInvocation(stackName, invocation, stackDirOverride)]
       : await this.authoredComposeArgsPrefix(stackName, stackDirOverride);
 
     if (useCaptured && invocation.meshEnabled) {
@@ -1352,16 +1360,25 @@ export class ComposeService {
     return stackDir;
   }
 
+  /** Rebase a captured absolute stack path onto the overlay root when present. */
+  private remapCapturedAbsToRoot(abs: string, stackDir: string, pathRoot: string): string | null {
+    const remapped = path.resolve(pathRoot, path.relative(stackDir, abs));
+    return isPathWithinBase(remapped, pathRoot) ? remapped : null;
+  }
+
   /**
    * Rebuild a spawn-safe compose global-flag prefix from a generation's
-   * captured invocation. Relative -f / --project-directory paths and absolute
-   * --env-file paths must stay inside the stack directory.
+   * captured invocation. Captured paths must resolve inside the stack
+   * directory; when overlayDir is set, absolute --env-file and
+   * --project-directory paths are rewritten under that overlay.
    */
   private composePrefixFromCapturedInvocation(
     stackName: string,
     invocation: RollbackInvocationRecord,
+    overlayDir?: string,
   ): string[] {
     const stackDir = this.resolveValidatedStackDir(stackName);
+    const pathRoot = overlayDir ? path.resolve(overlayDir) : stackDir;
     // Empty prefix is valid (single-file auto-discovery at capture time).
     const raw = [...invocation.composeArgsPrefix];
     const out: string[] = [];
@@ -1387,7 +1404,11 @@ export class ComposeService {
         if (!isPathWithinBase(abs, stackDir)) {
           throw new Error(`Captured env-file path escapes stack directory for "${stackName}"`);
         }
-        out.push('--env-file', abs);
+        const remapped = this.remapCapturedAbsToRoot(abs, stackDir, pathRoot);
+        if (!remapped) {
+          throw new Error(`Captured env-file path escapes overlay directory for "${stackName}"`);
+        }
+        out.push('--env-file', remapped);
         continue;
       }
       if (token === '--project-directory') {
@@ -1399,7 +1420,11 @@ export class ComposeService {
         if (!isPathWithinBase(abs, stackDir)) {
           throw new Error(`Captured project-directory escapes stack directory for "${stackName}"`);
         }
-        out.push('--project-directory', abs);
+        const remapped = this.remapCapturedAbsToRoot(abs, stackDir, pathRoot);
+        if (!remapped) {
+          throw new Error(`Captured project-directory escapes overlay directory for "${stackName}"`);
+        }
+        out.push('--project-directory', remapped);
         continue;
       }
       if (token === '-p' || token === '--project-name') {
@@ -1420,6 +1445,7 @@ export class ComposeService {
     ws?: WebSocket,
     atomic?: boolean,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
+    this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
@@ -1649,6 +1675,7 @@ export class ComposeService {
    * prune here; the orchestrator owns per-service post-update reconciliation.
    */
   async updateService(stackName: string, serviceName: string, hasBuild: boolean, ws?: WebSocket): Promise<void> {
+    this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
@@ -1676,6 +1703,7 @@ export class ComposeService {
    * never `--remove-orphans`.
    */
   async recreateServiceFromLocal(stackName: string, serviceName: string, ws?: WebSocket): Promise<void> {
+    this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);

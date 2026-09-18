@@ -44,6 +44,36 @@ sops:
       recipients: ['age1example000000000000000000000000000000000000000000000000000'],
     });
   });
+
+  it('detects dotenv-format SOPS with flattened age recipients', () => {
+    const doc = `DB_PASSWORD=ENC[AES256_GCM,data:abc,iv:abc,tag:abc,type:str]
+sops_mac=ENC[AES256_GCM,data:abc,iv:abc,tag:abc,type:str]
+sops_version=3.9.0
+sops_age__list_0__map_recipient=age1example000000000000000000000000000000000000000000000000000
+sops_age__list_0__map_enc=-----BEGIN AGE ENCRYPTED FILE-----\\nYWdlLWVuY3J5cHRpb24ub3JnL3Yx\\n-----END AGE ENCRYPTED FILE-----
+`;
+    expect(detectSopsContent(doc)).toEqual({
+      kind: 'sops-age',
+      recipients: ['age1example000000000000000000000000000000000000000000000000000'],
+    });
+  });
+
+  it('does not classify plaintext dotenv as SOPS', () => {
+    expect(detectSopsContent('DB_PASSWORD=hello\n')).toEqual({ kind: 'none' });
+  });
+
+  it('refuses dotenv SOPS with a KMS backend', () => {
+    const doc = `DB_PASSWORD=ENC[AES256_GCM,data:abc,iv:abc,tag:abc,type:str]
+sops_mac=ENC[AES256_GCM,data:abc,iv:abc,tag:abc,type:str]
+sops_kms__list_0__map_arn=arn:aws:kms:us-east-1:123:key/abc
+`;
+    expect(detectSopsContent(doc).kind).toBe('sops-unsupported');
+  });
+
+  it('refuses ENC values without SOPS metadata instead of treating them as plaintext', () => {
+    const result = detectSopsContent('DB_PASSWORD=ENC[AES256_GCM,data:abc,iv:abc,tag:abc,type:str]\n');
+    expect(result.kind).toBe('sops-unsupported');
+  });
 });
 
 describe('decryptSopsAgeDocument', () => {
@@ -76,6 +106,41 @@ sops:
     expect(detection.kind).toBe('sops-age');
     const decrypted = await decryptSopsAgeDocument(doc, identity);
     expect(decrypted).toContain('DB_PASSWORD: supersecret');
+    expect(decrypted).not.toContain('AGE-SECRET-KEY');
+  });
+
+  it('decrypts a dotenv-format age SOPS document', async () => {
+    const age = await import('age-encryption');
+    const identity = await age.generateIdentity();
+    const recipient = await age.identityToRecipient(identity);
+    const { buildSopsAgeDotenvDocument } = await import('./helpers/sopsFixtures');
+    const doc = await buildSopsAgeDotenvDocument({
+      values: { DB_PASSWORD: 'supersecret' },
+      identity,
+      recipient,
+    });
+    expect(detectSopsContent(doc).kind).toBe('sops-age');
+    const decrypted = await decryptSopsAgeDocument(doc, identity);
+    expect(decrypted).toContain('DB_PASSWORD=supersecret');
+    expect(decrypted).not.toContain('sops_age');
+    expect(decrypted).not.toContain('AGE-SECRET-KEY');
+  });
+
+  it('detects and decrypts INI-format age SOPS with a [sops] section', async () => {
+    const age = await import('age-encryption');
+    const identity = await age.generateIdentity();
+    const recipient = await age.identityToRecipient(identity);
+    const { buildSopsAgeIniDocument } = await import('./helpers/sopsFixtures');
+    const doc = await buildSopsAgeIniDocument({
+      values: { DB_PASSWORD: 'supersecret' },
+      identity,
+      recipient,
+    });
+    expect(detectSopsContent(doc).kind).toBe('sops-age');
+    const decrypted = await decryptSopsAgeDocument(doc, identity);
+    expect(decrypted).toContain('DB_PASSWORD=supersecret');
+    expect(decrypted).not.toContain('[sops]');
+    expect(decrypted).not.toContain('age__list');
     expect(decrypted).not.toContain('AGE-SECRET-KEY');
   });
 });

@@ -1126,6 +1126,26 @@ function resolveSopsApplicationId(stackName: string): string {
   return GitOpsStore.getInstance().getLiveDirectApplication(stackName)?.id ?? stackName;
 }
 
+stackGitSourceRouter.put('/:stackName/git-source/encrypted-source-policy', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  if (!DatabaseService.getInstance().getGitSource(stackName)) {
+    res.status(404).json({ error: 'Git source not found' });
+    return;
+  }
+  const policy = (req.body ?? {}).encrypted_source_policy;
+  if (policy !== 'allow_plaintext' && policy !== 'require_encrypted') {
+    res.status(400).json({ error: 'encrypted_source_policy must be "allow_plaintext" or "require_encrypted"' });
+    return;
+  }
+  setEncryptedSourcePolicy(stackName, policy);
+  res.json({ encrypted_source_policy: getEncryptedSourcePolicy(stackName) });
+});
+
 stackGitSourceRouter.get('/:stackName/git-source/sops-identities', async (req: Request, res: Response): Promise<void> => {
   const stackName = req.params.stackName as string;
   if (!isValidStackName(stackName)) {

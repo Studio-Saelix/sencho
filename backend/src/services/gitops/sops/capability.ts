@@ -121,6 +121,7 @@ export function buildSecretCapability(args: {
       encryption,
       recipientIds: recipients,
       sourcePath: input.sourcePath,
+      materializedPath: input.materializedPath,
     });
   }
 

@@ -344,7 +344,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
 
 ## Repository secrets (SOPS and age)
 
-Some teams store sensitive env files or file-backed secrets in Git as [SOPS](https://github.com/getsops/sops)-encrypted documents. Sencho keeps ciphertext in the repository and on disk. Decryption happens only in a short-lived overlay while validate, apply, deploy, or rollback runs Compose.
+Some teams store sensitive env files or file-backed secrets in Git as [SOPS](https://github.com/getsops/sops)-encrypted documents. Sencho keeps ciphertext in the repository and on disk. Decryption happens only in a short-lived overlay during candidate validation, Git apply, Git deploy, or rollback. A manual Deploy or image Update on a SOPS-managed stack is refused so Compose never reads ciphertext from the live stack directory.
 
 Open **Git Source** on a linked stack and scroll to **Repository secrets**.
 
@@ -352,7 +352,7 @@ Open **Git Source** on a linked stack and scroll to **Repository secrets**.
 - **Encrypted source policy** defaults to allowing plaintext secret inputs. Switch to **Require SOPS encryption** when every managed secret-bearing input in the repository must be SOPS-encrypted with age.
 - **Readiness** reports whether this node holds the recipients required by the current candidate generation.
 
-Sencho accepts age (X25519) recipients only. Documents that use PGP, cloud KMS, or other SOPS backends are refused with an unsupported-backend message.
+Sencho accepts age (X25519) recipients only, in YAML SOPS documents (`sops.age`) and in dotenv or INI stores that flatten age recipients (`sops_age__list_*` keys). Documents that use PGP, cloud KMS, or other SOPS backends are refused with an unsupported-backend message. Encrypted compose files are not supported.
 
 Back up both the Sencho data directory encryption key (`encryption.key`) and any age identities you generate here. Losing either makes ciphertext in Git unrecoverable on that node.
 
@@ -360,7 +360,7 @@ Back up both the Sencho data directory encryption key (`encryption.key`) and any
 
 <AccordionGroup>
   <Accordion title="Missing or rotated SOPS age key">
-    A pull, apply, deploy, or rollback that needs SOPS decryption fails before Compose runs when this node does not hold a matching age identity. Open **Repository secrets**, confirm the readiness chip, and generate or import the key whose recipient appears in your SOPS files. After rotating a key, re-encrypt repository files with the new recipient before deleting the old identity. Rollback to a generation that still names a removed recipient stays blocked until you restore that identity or advance to a generation encrypted for a key you still hold.
+    A Git apply, Git deploy, or rollback that needs SOPS decryption fails before Compose runs when this node does not hold a matching age identity. Open **Repository secrets**, confirm the readiness chip, and generate or import the key whose recipient appears in your SOPS files. After rotating a key, re-encrypt repository files with the new recipient before deleting the old identity. Rollback to a generation that still names a removed recipient stays blocked until you restore that identity or advance to a generation encrypted for a key you still hold. Manual Deploy and image Update stay blocked on SOPS-managed stacks; use Git apply instead.
   </Accordion>
 
   <Accordion title="Repository not found or not accessible">

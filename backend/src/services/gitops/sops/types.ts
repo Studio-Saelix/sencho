@@ -18,6 +18,8 @@ export type SecretCapabilityInput = {
   encryption: InputEncryptionKind;
   recipientIds: string[];
   sourcePath: string | null;
+  /** Stack-relative ciphertext path at this generation. Recovery overlay fails closed when this is missing. */
+  materializedPath: string | null;
 };
 
 /** Redacted capability metadata stored on generations; never contains secret values. */

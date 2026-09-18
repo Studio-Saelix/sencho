@@ -12,6 +12,7 @@ import {
 } from './json';
 import { insertHistory, type DeployDispatchedPayload, type DeployIntentRefusedPayload, type GitOpsHistoryStage, type HistoryOutcome, type PromotionCommittedPayload } from './history';
 import { emptyTargetRow, GitOpsStore } from './store';
+import { SopsIdentityStore } from './sops/identityStore';
 import type {
   ArtifactQualification,
   GitOpsApplicationRow,
@@ -113,6 +114,9 @@ export class GitOpsTransitions {
       const live = this.store().getLiveDirectApplication(args.application.stack_name ?? '');
       if (live) throw new GitOpsTransitionError('live direct application already exists');
       this.store().insertApplication(args.application);
+      if (args.application.stack_name) {
+        SopsIdentityStore.getInstance().adoptStackScopedIdentities(args.application.id, args.application.stack_name);
+      }
       this.store().upsertTarget(emptyTargetRow(args.application.id, args.nodeId, args.envelope.at));
       const historyId = this.history(args.application, args.envelope, {
         stage: 'application_activated',
@@ -657,6 +661,9 @@ export class GitOpsTransitions {
 
       const app = { ...args.application };
       this.store().insertApplication(app);
+      if (app.stack_name) {
+        SopsIdentityStore.getInstance().adoptStackScopedIdentities(app.id, app.stack_name);
+      }
       const target = emptyTargetRow(app.id, args.nodeId, args.envelope.at);
       this.store().upsertTarget(target);
       const historyIds: string[] = [];

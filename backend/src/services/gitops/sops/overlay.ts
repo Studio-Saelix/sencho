@@ -168,7 +168,7 @@ export class GitOpsDecryptOverlay {
 
     try {
       for (const input of args.inputs) {
-        if (input.encryption !== 'sops-age' || !input.materializedPath || !input.sourcePath) continue;
+        if (input.encryption !== 'sops-age' || !input.materializedPath) continue;
         const rel = input.materializedPath.replace(/\\/g, '/');
         if (!isValidRelativeStackPath(rel)) {
           throw new Error('Invalid overlay materialized path');

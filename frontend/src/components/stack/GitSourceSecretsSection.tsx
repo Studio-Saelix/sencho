@@ -39,7 +39,6 @@ interface GitSourceSecretsSectionProps {
   canEdit: boolean;
   linked: boolean;
   disabled?: boolean;
-  onSavePolicy: (policy: 'allow_plaintext' | 'require_encrypted') => Promise<boolean>;
 }
 
 function impactSummary(impact: SopsIdentityImpact[]): string {
@@ -56,7 +55,6 @@ export function GitSourceSecretsSection({
   canEdit,
   linked,
   disabled = false,
-  onSavePolicy,
 }: GitSourceSecretsSectionProps) {
   const [loading, setLoading] = useState(false);
   const [savingPolicy, setSavingPolicy] = useState(false);
@@ -135,8 +133,19 @@ export function GitSourceSecretsSection({
   const savePolicy = async (policy: 'allow_plaintext' | 'require_encrypted') => {
     setSavingPolicy(true);
     try {
-      const ok = await onSavePolicy(policy);
-      if (ok) await load();
+      const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/encrypted-source-policy`, {
+        method: 'PUT',
+        body: JSON.stringify({ encrypted_source_policy: policy }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast.error(typeof err?.error === 'string' ? err.error : 'Could not update encrypted source policy');
+        return;
+      }
+      toast.success('Encrypted source policy updated.');
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not update encrypted source policy');
     } finally {
       setSavingPolicy(false);
     }
@@ -243,7 +252,7 @@ export function GitSourceSecretsSection({
       <div className="space-y-3" data-testid="git-source-secrets">
         <div className="flex items-center justify-between gap-2">
           <p className="text-xs text-stat-subtitle">
-            Age identities decrypt SOPS files only during validate and deploy. Ciphertext stays in the repository and on disk.
+            Age identities decrypt SOPS files only in a short-lived overlay during Git apply, Git deploy, candidate validation, or rollback. Ciphertext stays in the repository and on disk.
           </p>
           <Button type="button" variant="ghost" size="sm" onClick={() => void load()} disabled={loading || disabled}>
             {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}

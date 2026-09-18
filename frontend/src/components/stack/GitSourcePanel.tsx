@@ -245,7 +245,7 @@ export function GitSourcePanel({
     }
   }, [open, load]);
 
-  const buildSaveBody = useCallback((encryptedSourcePolicy?: 'allow_plaintext' | 'require_encrypted') => {
+  const buildSaveBody = useCallback(() => {
     const autoApply = applyMode !== 'review';
     const autoDeploy = applyMode === 'auto-deploy';
     const body: Record<string, unknown> = {
@@ -259,9 +259,6 @@ export function GitSourcePanel({
       auto_deploy_on_apply: autoDeploy,
       source_policy: applyMode === 'review' ? 'review' : 'automatic',
     };
-    if (encryptedSourcePolicy !== undefined) {
-      body.encrypted_source_policy = encryptedSourcePolicy;
-    }
     if (authType === 'token' && token !== '') {
       body.token = token;
     }
@@ -311,27 +308,6 @@ export function GitSourcePanel({
     await load();
     return true;
   }, [load, onSourceChanged, stackName]);
-
-  const saveEncryptedSourcePolicy = useCallback(async (policy: 'allow_plaintext' | 'require_encrypted') => {
-    if (!repoUrl.trim() || !branch.trim() || composePaths.length === 0) {
-      toast.error('Save the repository configuration before changing the encrypted source policy.');
-      return false;
-    }
-    const trimmedUrl = repoUrl.trim();
-    if (!isSupportedGitRepoUrl(trimmedUrl)) {
-      toast.error(UNSUPPORTED_GIT_REPO_URL_MESSAGE);
-      return false;
-    }
-    setSaving(true);
-    try {
-      return await persistGitSource(buildSaveBody(policy), 'Encrypted source policy updated.');
-    } catch (e) {
-      toast.error((e as Error)?.message || 'Network error.');
-      return false;
-    } finally {
-      setSaving(false);
-    }
-  }, [branch, buildSaveBody, composePaths, persistGitSource, repoUrl]);
 
   const save = async () => {
     if (!repoUrl.trim() || !branch.trim() || composePaths.length === 0) {
@@ -852,7 +828,6 @@ export function GitSourcePanel({
                   canEdit={canMutateSource}
                   linked
                   disabled={saving || loading}
-                  onSavePolicy={saveEncryptedSourcePolicy}
                 />
               </SheetSection>
             )}

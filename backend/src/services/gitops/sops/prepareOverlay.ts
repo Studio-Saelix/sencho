@@ -1,14 +1,11 @@
 import path from 'path';
-import type { ComposeInputEntry } from '../../../types/gitProjectManifest';
-import type { GitProjectManifest } from '../../../types/gitProjectManifest';
-import { GitOpsDecryptOverlay, newOverlayOperationId } from './overlay';
+import type { ComposeInputEntry, GitProjectManifest } from '../../../types/gitProjectManifest';
+import { GitOpsDecryptOverlay, newOverlayOperationId, scrubOverlayPaths } from './overlay';
 import { SopsIdentityStore } from './identityStore';
-import type { OverlayBinding } from './types';
+import type { OverlayBinding, SecretCapability, SopsFailureClass } from './types';
 import { SopsDecryptError } from './decode';
-import { scrubOverlayPaths } from './overlay';
 import { parseSecretCapabilityFromJson } from './capability';
 import { GitOpsStore } from '../store';
-import { GitProjectManifestService } from '../../GitProjectManifestService';
 import { NodeRegistry } from '../../NodeRegistry';
 
 const GIT_OVERLAY_SOURCES = new Set([
@@ -16,6 +13,9 @@ const GIT_OVERLAY_SOURCES = new Set([
   'git_apply',
   'rollback',
 ]);
+
+export const SOPS_DIRECT_MUTATION_MESSAGE =
+  'This stack has SOPS-encrypted repository secrets. Deploy or update it through Git apply so Sencho can decrypt them in a controlled overlay.';
 
 export function assertGitOverlaySource(source: string): void {
   if (!GIT_OVERLAY_SOURCES.has(source)) {
@@ -29,6 +29,46 @@ export function manifestInputsNeedOverlay(manifest: Pick<GitProjectManifest, 'in
 
 export function sopsInputsFromManifest(manifest: Pick<GitProjectManifest, 'inputs'>): ComposeInputEntry[] {
   return manifest.inputs.filter((input) => input.encryption === 'sops-age' && input.materializedPath);
+}
+
+function capabilityMismatch(error: string): { error: string; failureClass: SopsFailureClass } {
+  return { error, failureClass: 'capability_mismatch' };
+}
+
+export function sopsInputsFromCapability(
+  cap: SecretCapability,
+): ComposeInputEntry[] | { error: string; failureClass: SopsFailureClass } {
+  const encrypted = cap.inputs.filter((input) => input.encryption === 'sops-age');
+  if (cap.requiredRecipients.length > 0 && encrypted.length === 0) {
+    return capabilityMismatch(
+      'Rollback cannot decrypt this generation because its secret capability does not record encrypted inputs.',
+    );
+  }
+  const inputs: ComposeInputEntry[] = [];
+  for (const input of encrypted) {
+    if (!input.materializedPath) {
+      return capabilityMismatch(
+        'Rollback cannot decrypt this generation because its secret capability does not record encrypted file paths.',
+      );
+    }
+    inputs.push({
+      sourcePath: input.sourcePath ?? input.materializedPath,
+      materializedPath: input.materializedPath,
+      role: input.role as ComposeInputEntry['role'],
+      dependencyKind: 'env_file',
+      ownership: 'managed',
+      provenance: 'fetch',
+      sensitivity: 'high',
+      contentSha256: null,
+      sizeBytes: null,
+      state: 'present',
+      deletionAuthority: 'sencho',
+      note: null,
+      encryption: 'sops-age',
+      sopsRecipients: input.recipientIds,
+    });
+  }
+  return inputs;
 }
 
 export async function buildGitOpsDecryptOverlay(args: {
@@ -84,7 +124,7 @@ export async function prepareRecoveryComposeOverlay(args: {
   stackName: string;
   nodeId: number;
   gitopsGenerationId: string;
-}): Promise<{ overlayDir: string; binding: OverlayBinding } | { error: string; failureClass: 'missing_key' } | null> {
+}): Promise<{ overlayDir: string; binding: OverlayBinding } | { error: string; failureClass: SopsFailureClass } | null> {
   const store = GitOpsStore.getInstance();
   const app = store.getLiveDirectApplication(args.stackName);
   if (!app) return null;
@@ -102,15 +142,9 @@ export async function prepareRecoveryComposeOverlay(args: {
     };
   }
 
-  const manifestSvc = GitProjectManifestService.getInstance();
-  const manifestRead = await manifestSvc.readManifest(args.stackName, genRow.repo_url, genRow.configured_ref);
-  if (!manifestRead || 'corrupt' in manifestRead) {
-    return {
-      error: 'Rollback cannot read the managed-project manifest for this generation.',
-      failureClass: 'missing_key',
-    };
-  }
-  if (!manifestInputsNeedOverlay(manifestRead)) return null;
+  const inputsOrError = sopsInputsFromCapability(cap);
+  if ('error' in inputsOrError) return inputsOrError;
+  if (inputsOrError.length === 0) return null;
 
   const sourceRoot = path.join(NodeRegistry.getInstance().getComposeDir(args.nodeId), args.stackName);
   const overlay = await buildGitOpsDecryptOverlay({
@@ -121,7 +155,7 @@ export async function prepareRecoveryComposeOverlay(args: {
     commitSha: genRow.commit_sha,
     operationId: newOverlayOperationId(),
     sourceRoot,
-    manifest: manifestRead,
+    manifest: { inputs: inputsOrError },
   });
   return overlay;
 }

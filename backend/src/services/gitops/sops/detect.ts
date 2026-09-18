@@ -10,6 +10,7 @@ const UNSUPPORTED_SOPS_BACKENDS = [
 ] as const;
 
 const ENC_VALUE_RE = /^ENC\[AES256_GCM,data:/;
+const ENC_SUBSTRING = 'ENC[AES256_GCM,data:';
 
 export type SopsDetectionResult =
   | { kind: 'none' }
@@ -63,32 +64,37 @@ function documentHasEncValues(node: unknown): boolean {
   return false;
 }
 
+function collectFlatAgeRecipients(content: string): string[] {
+  const re = /^(?:sops_)?age__list_\d+__map_recipient\s*=\s*(age1[0-9a-z]+)\s*$/gim;
+  return [...new Set([...content.matchAll(re)].map((match) => match[1]))];
+}
+
 /**
- * Classify file bytes as plaintext, age-only SOPS, or unsupported SOPS.
- * Does not decrypt or execute plugins.
+ * Detect SOPS dotenv/INI stores: flattened `sops_*` / `age__list_*` keys, a
+ * `[sops]` section, or ENC[AES256_GCM,data: values. Returns null when none of
+ * those markers are present. ENC values without metadata are unsupported, not plaintext.
  */
-export function detectSopsContent(content: string): SopsDetectionResult {
-  const trimmed = content.trim();
-  if (!trimmed) return { kind: 'none' };
+function detectUnstructuredSops(content: string): SopsDetectionResult | null {
+  const hasFlatMeta = /^(?:sops_(?:mac|version|lastmodified|unencrypted_suffix|encrypted_regex|age__)|\[sops])/im.test(content);
+  const hasEnc = content.includes(ENC_SUBSTRING);
+  if (!hasFlatMeta && !hasEnc) return null;
 
-  let doc: unknown;
-  try {
-    doc = parseYaml(trimmed);
-  } catch {
-    if (trimmed.includes('sops:') || trimmed.includes('"sops"')) {
-      return { kind: 'sops-unsupported', reason: 'invalid_sops_document' };
-    }
-    return { kind: 'none' };
+  const unsupported = /^(?:sops_)?(kms|gcp_kms|azure_kv|hc_vault|vault_kv|pgp)(?:__list_|\s*=)/im.exec(content);
+  if (unsupported) {
+    return { kind: 'sops-unsupported', reason: `unsupported_backend:${unsupported[1]}` };
   }
 
-  if (!isRecord(doc) || !isRecord(doc.sops)) {
-    if (documentHasEncValues(doc)) {
-      return { kind: 'sops-unsupported', reason: 'encrypted_values_without_sops_metadata' };
-    }
-    return { kind: 'none' };
+  const recipients = collectFlatAgeRecipients(content);
+  if (recipients.length > 0) {
+    return { kind: 'sops-age', recipients };
   }
+  if (hasFlatMeta) {
+    return { kind: 'sops-unsupported', reason: 'no_age_recipients' };
+  }
+  return { kind: 'sops-unsupported', reason: 'encrypted_values_without_sops_metadata' };
+}
 
-  const sopsMeta = doc.sops;
+function classifyYamlSopsRecord(sopsMeta: Record<string, unknown>): SopsDetectionResult {
   if (typeof sopsMeta.mac !== 'string' || sopsMeta.mac.length === 0) {
     return { kind: 'sops-unsupported', reason: 'missing_sops_mac' };
   }
@@ -104,6 +110,40 @@ export function detectSopsContent(content: string): SopsDetectionResult {
   }
 
   return { kind: 'sops-age', recipients: [...new Set(recipients)] };
+}
+
+/**
+ * Classify file bytes as plaintext, age-only SOPS, or unsupported SOPS.
+ * Does not decrypt or execute plugins. YAML documents with a `sops:` map and
+ * dotenv/INI stores that flatten age recipients are both recognized.
+ */
+export function detectSopsContent(content: string): SopsDetectionResult {
+  const trimmed = content.trim();
+  if (!trimmed) return { kind: 'none' };
+
+  const unstructured = detectUnstructuredSops(trimmed);
+
+  let doc: unknown;
+  try {
+    doc = parseYaml(trimmed);
+  } catch {
+    if (unstructured) return unstructured;
+    if (trimmed.includes('sops:') || trimmed.includes('"sops"')) {
+      return { kind: 'sops-unsupported', reason: 'invalid_sops_document' };
+    }
+    return { kind: 'none' };
+  }
+
+  if (isRecord(doc) && isRecord(doc.sops)) {
+    return classifyYamlSopsRecord(doc.sops);
+  }
+
+  if (unstructured) return unstructured;
+
+  if (documentHasEncValues(doc)) {
+    return { kind: 'sops-unsupported', reason: 'encrypted_values_without_sops_metadata' };
+  }
+  return { kind: 'none' };
 }
 
 export function isComposePrimaryPath(role: string): boolean {
