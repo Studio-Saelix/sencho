@@ -94,6 +94,28 @@ describe('classifyStackApiPath', () => {
         kind: 'named-stack', stackName: 'web', action: 'stack:edit',
       });
     });
+
+    it('maps all git-source/provider-hooks CRUD suffixes to the expected actions', () => {
+      const hookId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+      expect(classifyStackApiPath('GET', '/stacks/web/git-source/provider-hooks')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:read',
+      });
+      expect(classifyStackApiPath('POST', '/stacks/web/git-source/provider-hooks')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:edit',
+      });
+      expect(classifyStackApiPath('POST', `/stacks/web/git-source/provider-hooks/${hookId}/rotate`)).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:edit',
+      });
+      expect(classifyStackApiPath('POST', `/stacks/web/git-source/provider-hooks/${hookId}/test-result`)).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:edit',
+      });
+      expect(classifyStackApiPath('PATCH', `/stacks/web/git-source/provider-hooks/${hookId}`)).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:edit',
+      });
+      expect(classifyStackApiPath('DELETE', `/stacks/web/git-source/provider-hooks/${hookId}`)).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:edit',
+      });
+    });
   });
 
   describe('static exclusions', () => {

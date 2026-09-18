@@ -22,6 +22,9 @@ import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { validateCaBundlePem } from '../services/git/caBundle';
 import { auditActorUsername } from '../helpers/auditActor';
 import { assertSafeOutboundHostname, resolveSafeOutboundHostname, UnsafeOutboundTargetError } from '../utils/outboundTarget';
+import { ProviderWebhookService } from '../services/gitops/providerWebhooks/ProviderWebhookService';
+import { GitProviderWebhookStore } from '../services/gitops/providerWebhooks/store';
+import type { GitProviderEventScope, GitProviderKind } from '../services/gitops/providerWebhooks/types';
 
 // Reasonable upper bounds so a caller cannot flood the service with huge
 // payloads. Generous compared to anything a real Git provider emits.
@@ -32,6 +35,38 @@ const MAX_ENV_PATH_LENGTH = 1024;
 const MAX_TOKEN_LENGTH = 8192;
 const MAX_SUSPEND_REASON_LENGTH = 512;
 const MAX_WEBHOOK_DELIVERY_ID_LENGTH = 512;
+
+const VALID_PROVIDER_KINDS: readonly GitProviderKind[] = [
+  'github',
+  'gitlab',
+  'gitea',
+  'forgejo',
+  'bitbucket_cloud',
+];
+
+const VALID_PROVIDER_EVENT_SCOPES: readonly GitProviderEventScope[] = [
+  'configured_ref',
+  'configured_ref_and_prs',
+];
+
+function isGitProviderKind(value: unknown): value is GitProviderKind {
+  return typeof value === 'string' && (VALID_PROVIDER_KINDS as readonly string[]).includes(value);
+}
+
+function isGitProviderEventScope(value: unknown): value is GitProviderEventScope {
+  return typeof value === 'string' && (VALID_PROVIDER_EVENT_SCOPES as readonly string[]).includes(value);
+}
+
+function directGitSourceAvailable(stackName: string): boolean {
+  const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+  return !!app && app.lifecycle_status === 'active';
+}
+
+function getProviderHookEndpoint(stackName: string, endpointId: string) {
+  const endpoint = GitProviderWebhookStore.getInstance().getEndpoint(endpointId);
+  if (!endpoint || endpoint.stack_name !== stackName) return undefined;
+  return endpoint;
+}
 
 /**
  * Shared handler for the "browse repository" compose-file picker: validate the
@@ -714,6 +749,199 @@ stackGitSourceRouter.post('/:stackName/git-source/webhook-pull', async (req: Req
     res.status(webhookPullStatus(result.status)).json(result);
   } catch (error) {
     sendGitSourceError(res, error);
+  }
+});
+
+stackGitSourceRouter.get('/:stackName/git-source/provider-hooks', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  try {
+    const store = GitProviderWebhookStore.getInstance();
+    const endpoints = store.listEndpoints(stackName).map((endpoint) => ({
+      id: endpoint.id,
+      provider: endpoint.provider,
+      enabled: endpoint.enabled === 1,
+      event_scope: endpoint.event_scope,
+      created_at: endpoint.created_at,
+      updated_at: endpoint.updated_at,
+      deliveries: store.listDeliveries(endpoint.id, 10).map((row) => ({
+        delivery_id: row.delivery_id,
+        state: row.state,
+        event_type: row.event_type,
+        event_action: row.event_action,
+        ref: row.ref,
+        outcome_class: row.outcome_class,
+        received_at: row.received_at,
+        updated_at: row.updated_at,
+      })),
+    }));
+    res.json({
+      endpoints,
+      direct_source: directGitSourceAvailable(stackName),
+    });
+  } catch (error) {
+    console.error('[GitSource] List provider hooks error:', error);
+    res.status(500).json({ error: 'Failed to list provider hooks' });
+  }
+});
+
+stackGitSourceRouter.post('/:stackName/git-source/provider-hooks', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const { provider, event_scope } = req.body ?? {};
+  if (!isGitProviderKind(provider)) {
+    res.status(400).json({ error: `provider must be one of: ${VALID_PROVIDER_KINDS.join(', ')}` });
+    return;
+  }
+  if (event_scope !== undefined && !isGitProviderEventScope(event_scope)) {
+    res.status(400).json({ error: `event_scope must be one of: ${VALID_PROVIDER_EVENT_SCOPES.join(', ')}` });
+    return;
+  }
+  try {
+    const service = GitSourceService.getInstance();
+    if (!service.get(stackName)) {
+      res.status(404).json({ error: 'No Git source configured for this stack' });
+      return;
+    }
+    if (!directGitSourceAvailable(stackName)) {
+      res.status(400).json({ error: 'Provider hooks apply to direct Git sources only' });
+      return;
+    }
+    const existing = GitProviderWebhookStore.getInstance().listEndpoints(stackName)
+      .find((row) => row.provider === provider);
+    if (existing) {
+      res.status(409).json({ error: `A ${provider} endpoint already exists for this source` });
+      return;
+    }
+    const created = ProviderWebhookService.getInstance().createEndpoint({
+      stackName,
+      provider,
+      eventScope: event_scope ?? 'configured_ref',
+    });
+    res.status(201).json({ id: created.id, secret: created.secret });
+  } catch (error) {
+    console.error('[GitSource] Create provider hook error:', error);
+    res.status(500).json({ error: 'Failed to create provider hook' });
+  }
+});
+
+stackGitSourceRouter.post('/:stackName/git-source/provider-hooks/:id/rotate', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  const endpointId = req.params.id as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  try {
+    const endpoint = getProviderHookEndpoint(stackName, endpointId);
+    if (!endpoint) {
+      res.status(404).json({ error: 'Provider hook not found' });
+      return;
+    }
+    const rotated = ProviderWebhookService.getInstance().rotateEndpoint(endpointId);
+    res.json({ secret: rotated.secret });
+  } catch (error) {
+    console.error('[GitSource] Rotate provider hook error:', error);
+    res.status(500).json({ error: 'Failed to rotate provider hook secret' });
+  }
+});
+
+stackGitSourceRouter.post('/:stackName/git-source/provider-hooks/:id/test-result', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  const endpointId = req.params.id as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  try {
+    const endpoint = getProviderHookEndpoint(stackName, endpointId);
+    if (!endpoint) {
+      res.status(404).json({ error: 'Provider hook not found' });
+      return;
+    }
+    const deliveries = GitProviderWebhookStore.getInstance().listDeliveries(endpointId, 5);
+    res.json({ deliveries });
+  } catch (error) {
+    console.error('[GitSource] Provider hook test-result error:', error);
+    res.status(500).json({ error: 'Failed to load provider hook test results' });
+  }
+});
+
+stackGitSourceRouter.patch('/:stackName/git-source/provider-hooks/:id', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  const endpointId = req.params.id as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const { enabled, event_scope } = req.body ?? {};
+  if (enabled !== undefined && typeof enabled !== 'boolean') {
+    res.status(400).json({ error: 'enabled must be a boolean' });
+    return;
+  }
+  if (event_scope !== undefined && !isGitProviderEventScope(event_scope)) {
+    res.status(400).json({ error: `event_scope must be one of: ${VALID_PROVIDER_EVENT_SCOPES.join(', ')}` });
+    return;
+  }
+  if (enabled === undefined && event_scope === undefined) {
+    res.status(400).json({ error: 'No supported fields to update' });
+    return;
+  }
+  try {
+    const endpoint = getProviderHookEndpoint(stackName, endpointId);
+    if (!endpoint) {
+      res.status(404).json({ error: 'Provider hook not found' });
+      return;
+    }
+    GitProviderWebhookStore.getInstance().updateEndpoint(endpointId, {
+      ...(enabled !== undefined ? { enabled: enabled ? 1 : 0 } : {}),
+      ...(event_scope !== undefined ? { event_scope } : {}),
+    });
+    const updated = GitProviderWebhookStore.getInstance().getEndpoint(endpointId)!;
+    res.json({
+      id: updated.id,
+      provider: updated.provider,
+      enabled: updated.enabled === 1,
+      event_scope: updated.event_scope,
+      created_at: updated.created_at,
+      updated_at: updated.updated_at,
+    });
+  } catch (error) {
+    console.error('[GitSource] Update provider hook error:', error);
+    res.status(500).json({ error: 'Failed to update provider hook' });
+  }
+});
+
+stackGitSourceRouter.delete('/:stackName/git-source/provider-hooks/:id', async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  const endpointId = req.params.id as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  try {
+    const endpoint = getProviderHookEndpoint(stackName, endpointId);
+    if (!endpoint) {
+      res.status(404).json({ error: 'Provider hook not found' });
+      return;
+    }
+    GitProviderWebhookStore.getInstance().deleteEndpoint(endpointId);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[GitSource] Delete provider hook error:', error);
+    res.status(500).json({ error: 'Failed to delete provider hook' });
   }
 });
 

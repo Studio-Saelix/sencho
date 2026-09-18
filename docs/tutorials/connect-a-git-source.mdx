@@ -6,7 +6,7 @@ description: Link a running stack to a Git repository, pull a real commit, revie
 
 Say `marketing-site` is a small nginx stack you created directly in Sencho, and your team has decided the compose file should live in a Git repository instead, so changes go through a commit and a pull request before they reach the stack. This walks through connecting that already-running stack to a repository, pulling a real commit a teammate pushed, reviewing the classified change plan Sencho builds against what is on disk, and applying it, which both writes the new files and redeploys the container.
 
-This tutorial covers linking an existing stack to a Git source and running one manual pull-review-apply cycle. It doesn't cover creating a brand-new stack directly from a repository, the three webhook-driven apply modes, polling, suspend, multi-file compose sources, or converting the source onto a Git-managed Blueprint; see the [Git Sources](/features/git-sources) and [Blueprints](/features/blueprint-model) feature pages for those.
+This tutorial covers linking an existing stack to a Git source and running one manual pull-review-apply cycle. It doesn't cover creating a brand-new stack directly from a repository, provider hooks, the three webhook-driven apply modes, polling, suspend, multi-file compose sources, or converting the source onto a Git-managed Blueprint; see the [Git Sources](/features/git-sources) and [Blueprints](/features/blueprint-model) feature pages for those.
 
 ## Prerequisites
 
@@ -91,9 +91,9 @@ Check from two places, since neither alone proves the pull was actually applied 
 
 <CardGroup cols={2}>
   <Card title="Git Sources" icon="code-branch" href="/features/git-sources">
-    Multi-file sources, the three webhook apply modes, private-repo authentication, and the full troubleshooting table.
+    Provider hooks, multi-file sources, the three apply modes, private-repo authentication, and the full troubleshooting table.
   </Card>
   <Card title="Deploy a Stack Automatically From Your CI Pipeline" icon="satellite-dish" href="/tutorials/set-up-a-webhook">
-    Trigger a Git source pull and deploy from CI instead of pulling by hand from the sheet.
+    Trigger a Git source sync from CI when your pipeline already calls Sencho, or use provider hooks on the Git Source sheet when the Git host can post events directly.
   </Card>
 </CardGroup>

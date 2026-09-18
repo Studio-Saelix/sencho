@@ -6,7 +6,7 @@ description: Create a signed webhook that lets an external pipeline trigger a re
 
 Say a small nginx-backed service, `storefront`, gets rebuilt every time its image changes. Without a webhook, redeploying it after a new build means someone opening Sencho and clicking **Update** by hand. This walks through wiring a webhook so an external pipeline can trigger that redeploy itself: you'll create the webhook, stage a new image tag the way a pipeline would, fire a signed HTTP request that stands in for the pipeline's own call, and confirm the container actually recreated on the new image.
 
-This tutorial covers creating and triggering one webhook for the **Deploy (down + up)** action. It doesn't cover the other five actions (Restart, Stop, Start, Pull & Update, Git source sync), writing CI YAML for a specific provider, or key rotation across many webhooks; see the [Webhooks](/features/webhooks) feature page for the complete picture.
+This tutorial covers creating and triggering one webhook for the **Deploy (down + up)** action. It doesn't cover the other five actions (Restart, Stop, Start, Pull & Update, Git source sync), native provider hooks on the Git Source sheet, writing CI YAML for a specific provider, or key rotation across many webhooks; see the [Webhooks](/features/webhooks) and [Git Sources](/features/git-sources) feature pages for the complete picture.
 
 ## Prerequisites
 
@@ -100,7 +100,7 @@ Check from two independent surfaces so you're not trusting a single UI element.
     The full action list, concurrency behavior, execution history retention, and security model.
   </Card>
   <Card title="Git Sources" icon="code-branch" href="/features/git-sources">
-    The Git source sync action pulls the latest commit and deploys, an alternative to bumping a pinned tag by hand.
+    Provider hooks react to pushes from your Git host; the **Git source sync** webhook action is the CI-side equivalent when your pipeline already calls Sencho.
   </Card>
   <Card title="Auto-Update Policies" icon="arrows-rotate" href="/features/auto-update-policies">
     A hands-off way to keep a stack current on a schedule, without needing an external pipeline to call a webhook at all.

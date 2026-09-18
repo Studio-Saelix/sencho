@@ -3,7 +3,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { isDebugEnabled } from '../utils/debug';
 import { getAuditSummary } from '../utils/audit-summaries';
 import { sanitizeForLog } from '../utils/safeLog';
-import { WEBHOOK_TRIGGER_RE } from '../helpers/routePatterns';
+import { GITOPS_HOOK_INGEST_RE, WEBHOOK_TRIGGER_RE } from '../helpers/routePatterns';
 import { authMiddleware } from './auth';
 
 /**
@@ -13,7 +13,11 @@ import { authMiddleware } from './auth';
  * HMAC, not session).
  */
 export const authGate: RequestHandler = (req: Request, res: Response, next: NextFunction): void => {
-  if (req.path.startsWith('/auth/') || WEBHOOK_TRIGGER_RE.test(req.path)) {
+  if (
+    req.path.startsWith('/auth/')
+    || WEBHOOK_TRIGGER_RE.test(req.path)
+    || GITOPS_HOOK_INGEST_RE.test(req.path)
+  ) {
     next();
     return;
   }

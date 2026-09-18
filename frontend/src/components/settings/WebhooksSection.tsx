@@ -245,8 +245,8 @@ export function WebhooksSection() {
                     icon={<Webhook className="h-4 w-4" />}
                     title="No webhooks yet"
                     subtitle={canManageWebhooks
-                        ? 'Create one to trigger stack actions from CI/CD.'
-                        : 'An operator with webhook permission can create webhooks for this instance.'}
+                        ? 'Create one to trigger stack actions from CI/CD. Native Git host hooks are configured on each stack\'s Git source panel; these generic HMAC webhooks stay provider-neutral.'
+                        : 'An operator with webhook permission can create webhooks for this instance. Native Git host hooks are configured on each stack\'s Git source panel.'}
                 />
             )}
 

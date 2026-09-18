@@ -9,6 +9,8 @@ description: Trigger stack actions from CI/CD pipelines via HTTP webhooks with H
 
 Sencho webhooks let external systems trigger stack actions over HTTP. The typical use case: your CI pipeline builds a new image, then calls a Sencho webhook to deploy the updated stack, with no manual intervention required.
 
+For Git-backed stacks, push events from GitHub, GitLab, Gitea, Forgejo, or Bitbucket Cloud can also flow through **provider hooks** on the [Git Sources](/features/git-sources) page. That path keeps the Git host as the caller. This page documents Sencho's own signed webhook endpoints under **Settings → Automation → Webhooks** only.
+
 ## How it works
 
 1. You create a webhook in **Settings → Automation → Webhooks**, targeting a specific stack and action.
@@ -46,7 +48,7 @@ After you click **Create**, the new webhook's secret appears once in a green cal
 | **Stop** | Stops the stack. |
 | **Start** | Starts a stopped stack. |
 | **Pull & Update** | Pulls the latest images and recreates changed containers. |
-| **Git source sync** | Pulls the latest commit from the stack's Git source, then deploys. Requires a [Git source](/features/git-sources) attached to the stack. |
+| **Git source sync** | Fetches the stack's linked Git source and follows its configured apply behavior (review, auto-write, or auto-deploy). Requires a [Git source](/features/git-sources) on the stack. For push events straight from the Git host, see provider hooks on that same page instead of this action. |
 
 ## Managing webhooks
 

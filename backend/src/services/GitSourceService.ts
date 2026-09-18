@@ -37,7 +37,13 @@ import { GitOpsStore } from './gitops/store';
 import { isDeployDispatchedPayload, type GitOpsHistoryCursor } from './gitops/history';
 import { projectApplication } from './gitops/derive';
 import { outcomeFromSourceFacet, parseReconcileResultPayload, type ReconcileOutcome, type ReconcileResult } from './gitops/outcomes';
-import { coalesceKey, deliveryKey, type ReconcileRequest, type ReconcileTrigger } from './gitops/triggers';
+import {
+    acceptanceAuthorityForWebhook,
+    coalesceKey,
+    deliveryKey,
+    type ReconcileRequest,
+    type ReconcileTrigger,
+} from './gitops/triggers';
 import { classifyFailure, effectivePollIntervalSecs } from './gitops/backoff';
 import { BlueprintTargetAdapter, buildAcceptedGeneration, type AcceptedGeneration, type DispatchContext, type DispatchResult } from './gitops/handoff';
 import {
@@ -374,7 +380,14 @@ export interface GitApplyOpts {
     planFingerprint?: string;
     /** Public apply requires a fingerprint. Webhook and internal callers pass false. */
     requirePlanFingerprint?: boolean;
+    /** Drives configured_policy acceptance for automated webhook deliveries. */
+    reconcileTrigger?: ReconcileTrigger;
 }
+
+export type WebhookPullOptions = {
+    trigger?: ReconcileTrigger;
+    actor?: string;
+};
 
 type GitApplyResult = {
     /**
@@ -2741,6 +2754,7 @@ export class GitSourceService {
                     deploy: request.deploy,
                     planFingerprint: request.planFingerprint,
                     requirePlanFingerprint: false,
+                    reconcileTrigger: request.trigger,
                 }, operationId);
             }),
             (outcome) => this.applyExecutionResult(request.stackName, outcome),
@@ -5289,6 +5303,7 @@ export class GitSourceService {
         nodeId: number;
         /** Raw opts.actor. The pipeline keeps main's two distinct fallbacks below. */
         actor: string | undefined;
+        reconcileTrigger?: ReconcileTrigger;
         applyOperationId: string;
         gitopsEnv: ReturnType<GitSourceService['gitopsEnvelope']>;
         gitopsApp: GitOpsApplicationRow | null;
@@ -5509,7 +5524,10 @@ export class GitSourceService {
                     generationId: gitopsGenerationId,
                     artifactSetId: newGitOpsId(),
                     sourceAcceptanceId: newGitOpsId(),
-                    authority: actor === 'system:webhook' ? 'configured_policy' : 'operator',
+                    authority: acceptanceAuthorityForWebhook(
+                        actor ?? 'unknown',
+                        args.reconcileTrigger ?? 'manual',
+                    ),
                     envelope: gitopsEnv,
                 });
             });
@@ -5968,6 +5986,7 @@ export class GitSourceService {
                 // for gate/Compose). Passing the resolved value here would
                 // make the capture fallback unreachable.
                 actor: opts.actor,
+                reconcileTrigger: opts.reconcileTrigger,
                 applyOperationId,
                 gitopsEnv,
                 gitopsApp,
@@ -6867,14 +6886,18 @@ export class GitSourceService {
     // ─── Webhook-triggered pull ──────────────────────────────────────────────
 
     /** Whether this delivery's effective intent requires deploy permission. */
-    public webhookDeliveryRequiresDeploy(stackName: string, deliveryId?: string): boolean {
+    public webhookDeliveryRequiresDeploy(
+        stackName: string,
+        deliveryId?: string,
+        trigger: ReconcileTrigger = 'webhook',
+    ): boolean {
         const source = DatabaseService.getInstance().getGitSource(stackName);
         if (!source) return false;
         const app = this.gitopsApplicationFor(stackName);
         const started = app && deliveryId
             ? GitOpsStore.getInstance().getStartedAttempt(
                 app.id,
-                deliveryKey('webhook', 'fetch', deliveryId),
+                deliveryKey(trigger, 'fetch', deliveryId),
             )
             : undefined;
         if (started) return GitSourceService.deliveryIntentFromStartedAttempt(started).deploy;
@@ -6892,13 +6915,18 @@ export class GitSourceService {
         stackName: string,
         deployAuthorized: boolean,
         deliveryId?: string,
+        options: WebhookPullOptions = {},
     ): Promise<WebhookPullResult> {
-        if (!deliveryId) return this.handleWebhookPullOnce(stackName, undefined, deployAuthorized);
-        const key = `${stackName}:${deliveryId}`;
+        const trigger = options.trigger ?? 'webhook';
+        const actor = options.actor ?? 'system:webhook';
+        if (!deliveryId) {
+            return this.handleWebhookPullOnce(stackName, undefined, deployAuthorized, trigger, actor);
+        }
+        const key = `${stackName}:${trigger}:${deliveryId}`;
         const leader = this.inFlightWebhookDeliveries.get(key);
         if (leader) return leader.promise;
 
-        const promise = this.handleWebhookPullOnce(stackName, deliveryId, deployAuthorized);
+        const promise = this.handleWebhookPullOnce(stackName, deliveryId, deployAuthorized, trigger, actor);
         const entry = { promise };
         this.inFlightWebhookDeliveries.set(key, entry);
         try {
@@ -6914,8 +6942,9 @@ export class GitSourceService {
         stackName: string,
         deliveryId: string | undefined,
         deployAuthorized: boolean,
+        trigger: ReconcileTrigger,
+        actor: string,
     ): Promise<WebhookPullResult> {
-        const actor = 'system:webhook';
         const diag = isDebugEnabled();
         const deliverySuffix = deliveryId ? ` (delivery ${sanitizeForLog(deliveryId)})` : '';
         const db = DatabaseService.getInstance();
@@ -6926,7 +6955,7 @@ export class GitSourceService {
         const startedDelivery = gitopsApp && deliveryId
             ? GitOpsStore.getInstance().getStartedAttempt(
                 gitopsApp.id,
-                deliveryKey('webhook', 'fetch', deliveryId),
+                deliveryKey(trigger, 'fetch', deliveryId),
             )
             : undefined;
         const existingDelivery = !!startedDelivery;
@@ -6987,7 +7016,7 @@ export class GitSourceService {
                 intent: 'fetch',
                 applicationId: gitopsApp.id,
                 stackName,
-                trigger: 'webhook',
+                trigger,
                 actor,
                 deliveryId,
             };
@@ -7035,7 +7064,7 @@ export class GitSourceService {
                 intent: 'apply',
                 applicationId: gitopsApp.id,
                 stackName,
-                trigger: 'webhook',
+                trigger,
                 actor,
                 deliveryId,
                 commitSha,
@@ -7051,6 +7080,7 @@ export class GitSourceService {
                         deploy: deliveryIntent.deploy,
                         actor,
                         requirePlanFingerprint: false,
+                        reconcileTrigger: trigger,
                     }, operationId);
                 }),
                 (outcome) => this.applyExecutionResult(stackName, outcome),

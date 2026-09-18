@@ -2,7 +2,9 @@ import express, { type Request, type Response, type NextFunction, type RequestHa
 import { NodeRegistry } from '../services/NodeRegistry';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
 import { resolveNodeId } from '../helpers/resolveNodeId';
+import { GITOPS_HOOK_INGEST_RE, GITOPS_HOOK_INTERNAL_RE } from '../helpers/routePatterns';
 import { SYNC_BODY_LIMIT, SYNC_ERROR_CODES, SYNC_PATH_PREFIX } from '../services/fleetSyncConstants';
+import { PROVIDER_WEBHOOK_BODY_LIMIT } from '../services/gitops/providerWebhooks/types';
 import { FLEET_SNAPSHOT_APPLY_BODY_LIMIT } from '../utils/snapshot-capture';
 
 // `rawBody` is part of the Express.Request augmentation (see types/express.ts);
@@ -28,6 +30,13 @@ const fleetSyncJsonParser = jsonWithRawBody(SYNC_BODY_LIMIT);
 const fleetSnapshotApplyJsonParser = jsonWithRawBody(FLEET_SNAPSHOT_APPLY_BODY_LIMIT);
 
 const FLEET_SNAPSHOT_APPLY_PATH = /^\/api\/stacks\/[^/]+\/fleet-snapshot-apply$/;
+
+function isGitProviderHookJsonPath(path: string): boolean {
+  const stripped = path.startsWith('/api') ? path.slice(4) : path;
+  return GITOPS_HOOK_INGEST_RE.test(stripped) || GITOPS_HOOK_INTERNAL_RE.test(stripped);
+}
+
+const gitProviderHookJsonParser = jsonWithRawBody(PROVIDER_WEBHOOK_BODY_LIMIT);
 
 /**
  * Parse JSON on local requests but preserve the raw stream for remote proxy
@@ -71,6 +80,16 @@ export const conditionalJsonParser: RequestHandler = (req: Request, res: Respons
   }
   if (FLEET_SNAPSHOT_APPLY_PATH.test(req.path)) {
     fleetSnapshotApplyJsonParser(req, res, next);
+    return;
+  }
+  if (isGitProviderHookJsonPath(req.path)) {
+    gitProviderHookJsonParser(req, res, (err?: unknown) => {
+      if (err && (err as { type?: string })?.type === 'entity.too.large') {
+        res.status(413).json({ error: 'Payload too large' });
+        return;
+      }
+      next(err);
+    });
     return;
   }
   jsonParser(req, res, next);

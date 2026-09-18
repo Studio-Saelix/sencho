@@ -2,7 +2,7 @@ import type { Request } from 'express';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
 import { COOKIE_NAME } from '../helpers/constants';
-import { WEBHOOK_TRIGGER_RE } from '../helpers/routePatterns';
+import { GITOPS_HOOK_INGEST_RE, WEBHOOK_TRIGGER_RE } from '../helpers/routePatterns';
 import { looksLikeApiToken } from '../utils/apiTokenFormat';
 import { validateApiToken } from '../utils/apiTokenAuth';
 import { DatabaseService } from '../services/DatabaseService';
@@ -155,6 +155,7 @@ export const globalApiLimiter = rateLimit({
   skip: (req: Request) => {
     if (req.method === 'GET' && POLLING_EXEMPT_PATHS.has(req.path)) return true;
     if (req.method === 'POST' && WEBHOOK_TRIGGER_RE.test(req.path)) return true;
+    if (req.method === 'POST' && GITOPS_HOOK_INGEST_RE.test(req.path)) return true;
     if (isNodeProxyRequest(req)) return true;
     return false;
   },
@@ -182,6 +183,21 @@ export const webhookTriggerLimiter = rateLimit({
   ...rateLimitBase,
   max: process.env.NODE_ENV === 'production' ? 500 : 5000,
   message: { error: 'Too many webhook triggers. Please try again shortly.' },
+});
+
+export const gitProviderHookIngestLimiter = rateLimit({
+  ...rateLimitBase,
+  max: process.env.NODE_ENV === 'production' ? 120 : 5000,
+  keyGenerator: (req: Request) => {
+    const stripped = req.path.startsWith('/api') ? req.path.slice(4) : req.path;
+    const match = GITOPS_HOOK_INGEST_RE.exec(stripped);
+    if (match) {
+      const endpointId = stripped.split('/').pop();
+      if (endpointId) return `git-provider-hook:${endpointId}`;
+    }
+    return rateLimitKeyGenerator(req);
+  },
+  message: { error: 'Too many provider hook deliveries. Please try again shortly.' },
 });
 
 // Tier 3: Auth endpoint limiter. 15-minute window to blunt brute-force attacks.

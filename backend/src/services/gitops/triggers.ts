@@ -75,3 +75,21 @@ export function coalesceKey(request: ReconcileRequest): string {
 export function deliveryKey(trigger: ReconcileTrigger, intent: ReconcileRequest['intent'], deliveryId: string): string {
   return `${trigger}:${intent}:${deliveryId}`;
 }
+
+/** Triggers whose automated apply records configured_policy acceptance authority. */
+export function isPolicyDrivenWebhookTrigger(trigger: ReconcileTrigger): boolean {
+  return trigger === 'webhook' || trigger === 'provider_event';
+}
+
+export function acceptanceAuthorityForWebhook(
+  actor: string,
+  trigger: ReconcileTrigger,
+): 'configured_policy' | 'operator' {
+  if (
+    isPolicyDrivenWebhookTrigger(trigger)
+    && (actor === 'system:webhook' || actor === 'system:provider_event')
+  ) {
+    return 'configured_policy';
+  }
+  return 'operator';
+}
