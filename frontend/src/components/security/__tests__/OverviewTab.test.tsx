@@ -7,6 +7,18 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { SecurityOverview, PostureReason } from '@/types/security';
 
+// Mutable so individual tests can pin the active node type/capabilities.
+const nodeState: {
+  activeNode: { id: number; type: string } | null;
+  activeNodeMeta: { capabilities: string[] } | null;
+} = { activeNode: { id: 1, type: 'local' }, activeNodeMeta: null };
+
+vi.mock('@/context/NodeContext', () => ({
+  useNodes: () => ({
+    activeNode: nodeState.activeNode,
+    activeNodeMeta: nodeState.activeNodeMeta,
+  }),
+}));
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
@@ -26,6 +38,7 @@ vi.mock('../SecurityMobile', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+import { REMOTE_IMAGE_INSPECT_V1_CAPABILITY } from '@/lib/capabilities';
 import { toast } from '@/components/ui/toast-store';
 import { OverviewTab } from '../OverviewTab';
 import type { ComponentProps } from 'react';
@@ -93,6 +106,8 @@ function renderOverview(
 describe('OverviewTab remediation affordances', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    nodeState.activeNode = { id: 1, type: 'local' };
+    nodeState.activeNodeMeta = null;
   });
 
   it('titles the review queue Why Monitoring when posture is Monitoring without blockers', () => {
@@ -203,6 +218,47 @@ describe('OverviewTab remediation affordances', () => {
     });
     expect(mockedFetch.mock.calls[0][1]).not.toMatchObject({ localOnly: true });
     expect(toast.success).toHaveBeenCalledWith('Image update check started in background.');
+  });
+
+  it('posts the target-local recheck alias on an inspect-v1 remote', async () => {
+    const user = userEvent.setup();
+    nodeState.activeNode = { id: 2, type: 'remote' };
+    nodeState.activeNodeMeta = { capabilities: [REMOTE_IMAGE_INSPECT_V1_CAPABILITY] };
+    mockedFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, message: 'Image update check started in background.' }),
+    });
+    renderOverview(
+      [reason({ kind: 'update_check_uncertain', label: 'Update availability unknown' })],
+      { canManageNode: true, updateChecksDisabled: false },
+    );
+    await user.click(screen.getByRole('button', { name: /check again/i }));
+    await waitFor(() => {
+      expect(mockedFetch).toHaveBeenCalledWith('/image-updates/recheck-target', { method: 'POST' });
+    });
+    expect(mockedFetch).not.toHaveBeenCalledWith('/image-updates/refresh', { method: 'POST' });
+    expect(toast.success).toHaveBeenCalledWith('Image update check started in background.');
+  });
+
+  it('keeps the hub refresh endpoint on a remote without inspect-v1', async () => {
+    const user = userEvent.setup();
+    nodeState.activeNode = { id: 2, type: 'remote' };
+    nodeState.activeNodeMeta = { capabilities: [] };
+    mockedFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, message: 'Image update check started in background.' }),
+    });
+    renderOverview(
+      [reason({ kind: 'update_check_uncertain', label: 'Update availability unknown' })],
+      { canManageNode: true, updateChecksDisabled: false },
+    );
+    await user.click(screen.getByRole('button', { name: /check again/i }));
+    await waitFor(() => {
+      expect(mockedFetch).toHaveBeenCalledWith('/image-updates/refresh', { method: 'POST' });
+    });
+    expect(mockedFetch).not.toHaveBeenCalledWith('/image-updates/recheck-target', { method: 'POST' });
   });
 
   it('hides Check again without node:manage', () => {

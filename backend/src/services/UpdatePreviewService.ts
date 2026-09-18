@@ -405,6 +405,11 @@ export class UpdatePreviewService {
     }
 
     public async getPreview(nodeId: number, stackName: string): Promise<UpdatePreview> {
+        const { NodeRegistry } = await import('./NodeRegistry');
+        if (NodeRegistry.getInstance().getNode(nodeId)?.type === 'remote') {
+            const { RemoteImageUpdateService } = await import('./RemoteImageUpdateService');
+            return RemoteImageUpdateService.getInstance().getPreview(nodeId, stackName, AbortSignal.timeout(90_000));
+        }
         const [stackImages, buildServices] = await Promise.all([
             loadStackImages(nodeId, stackName),
             loadStackBuildServices(nodeId, stackName),

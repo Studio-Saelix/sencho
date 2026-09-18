@@ -22,6 +22,17 @@ export interface RegistryCredentials {
     password: string;
 }
 
+/**
+ * Per-call transport boundary for registry HTTP. The default implementation is
+ * the local-node path (ordinary agents, no address checks); the hub's safe
+ * probe supplies an implementation that enforces the safe-transport rules
+ * (HTTPS, blocked-address, credential-safe token realms) on every hop.
+ */
+export interface RegistryTransport {
+    request(url: string, method: 'GET' | 'HEAD', headers: Record<string, string>, timeoutMs: number): Promise<HttpResult>;
+    getCapped(url: string, headers: Record<string, string>, capBytes: number, timeoutMs: number): Promise<CappedHttpResult>;
+}
+
 export function parseImageRef(imageRef: string): ParsedRef | null {
     if (imageRef.startsWith('sha256:')) return null;
 
@@ -171,6 +182,7 @@ export async function getAuthToken(
     registry: string,
     repo: string,
     credentials?: RegistryCredentials | null,
+    transport?: RegistryTransport,
 ): Promise<string | null> {
     // Transport errors propagate (callers map to REGISTRY_UPSTREAM). null = auth/token failure only.
     const basicHeaders: Record<string, string> = {};
@@ -182,7 +194,7 @@ export async function getAuthToken(
     if (registry === 'registry-1.docker.io') {
         tokenUrl = `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull`;
     } else {
-        const ping = await httpGet(`https://${registry}/v2/`, basicHeaders);
+        const ping = await transportGet(transport, `https://${registry}/v2/`, basicHeaders);
         const wwwAuth = ping.headers['www-authenticate'] as string | undefined;
         if (!wwwAuth) return null;
 
@@ -200,7 +212,10 @@ export async function getAuthToken(
         tokenUrl = `${realmMatch[1]}?${params.toString()}`;
     }
 
-    const tokenRes = await httpGet(tokenUrl, basicHeaders);
+    // A credential-bearing token-realm hop is the boundary the safe transport
+    // must own: on the safe path the adapter re-validates the realm origin and
+    // refuses a plaintext or non-allowlisted realm before any header is sent.
+    const tokenRes = await transportGet(transport, tokenUrl, basicHeaders);
     if (tokenRes.statusCode !== 200) return null;
 
     try {
@@ -210,6 +225,20 @@ export async function getAuthToken(
     } catch {
         return null;
     }
+}
+
+/**
+ * Default local-node transport: the existing ordinary http/https behavior.
+ * Safe-probe callers pass their own {@link RegistryTransport} instead.
+ */
+function transportGet(
+    transport: RegistryTransport | undefined,
+    url: string,
+    headers: Record<string, string>,
+    timeoutMs = 10000,
+): Promise<HttpResult> {
+    if (transport) return transport.request(url, 'GET', headers, timeoutMs);
+    return httpGet(url, headers, timeoutMs);
 }
 
 const MANIFEST_ACCEPT = [
@@ -358,6 +387,7 @@ async function probeManifestForRef(
     tagOrDigest: string,
     credentials: RegistryCredentials | null | undefined,
     ref: string,
+    transport?: RegistryTransport,
 ): Promise<ManifestProbeOutcome> {
     try {
         // Auth transport failures used to collapse to null inside getAuthToken.
@@ -365,7 +395,7 @@ async function probeManifestForRef(
         // digest lookup keeps anonymous fallback here when the token endpoint is down.
         let token: string | null = null;
         try {
-            token = await getAuthToken(registry, repo, credentials);
+            token = await getAuthToken(registry, repo, credentials, transport);
         } catch (authErr) {
             const cause = authErr instanceof Error
                 ? ((authErr as NodeJS.ErrnoException).code ?? authErr.message)
@@ -393,7 +423,7 @@ async function probeManifestForRef(
         if (token) authHeaders['Authorization'] = `Bearer ${token}`;
         const url = `https://${registry}/v2/${repo}/manifests/${tagOrDigest}`;
 
-        const head = await httpRequest(url, 'HEAD', authHeaders);
+        const head = await (transport?.request ?? httpRequest)(url, 'HEAD', authHeaders, 10000);
         if (head.statusCode === 200) {
             const digest = head.headers['docker-content-digest'];
             if (typeof digest === 'string') {
@@ -407,7 +437,7 @@ async function probeManifestForRef(
             return { ok: false, reason: manifestFailureReason(head.statusCode, ref, head.headers) };
         }
 
-        const res = await httpGetCapped(url, authHeaders, MANIFEST_EXPANSION_BODY_CAP_BYTES);
+        const res = await (transport?.getCapped ?? httpGetCapped)(url, authHeaders, MANIFEST_EXPANSION_BODY_CAP_BYTES, 10000);
         if (res.statusCode === 200) {
             const digest = res.headers['docker-content-digest'];
             if (typeof digest === 'string') {
@@ -646,12 +676,13 @@ async function fetchManifestBytesByDigest(
     digest: string,
     authHeaders: Record<string, string>,
     ref: string,
+    transport?: RegistryTransport,
 ): Promise<Buffer> {
     if (!SHA256_DIGEST_RE.test(digest)) {
         throw new Error(`Manifest digest is malformed for ${ref}`);
     }
     const url = `https://${registry}/v2/${repo}/manifests/${digest}`;
-    const res = await httpGetCapped(url, authHeaders, MANIFEST_EXPANSION_BODY_CAP_BYTES);
+    const res = await (transport?.getCapped ?? httpGetCapped)(url, authHeaders, MANIFEST_EXPANSION_BODY_CAP_BYTES, 10000);
     if (res.statusCode !== 200) {
         throw new Error(manifestFailureReason(res.statusCode, ref, res.headers));
     }
@@ -684,6 +715,7 @@ async function resolveIndexClassification(
     authHeaders: Record<string, string>,
     ref: string,
     contentType: string | undefined,
+    transport?: RegistryTransport,
 ): Promise<ManifestClassification> {
     const first = parseIndexBody(primaryBody);
     if (first.kind === 'single') {
@@ -711,7 +743,7 @@ async function resolveIndexClassification(
         }
         visited.add(digest);
 
-        const nestedBytes = await fetchManifestBytesByDigest(registry, repo, digest, authHeaders, ref);
+        const nestedBytes = await fetchManifestBytesByDigest(registry, repo, digest, authHeaders, ref, transport);
         const nested = parseIndexBody(nestedBytes.toString('utf8'));
         if (nested.kind === 'single') {
             // A digest advertised as an index media type resolved to a non-index body.
@@ -749,6 +781,7 @@ async function classifyManifest(
     probeBody: Buffer | null,
     authHeaders: Record<string, string>,
     ref: string,
+    transport?: RegistryTransport,
 ): Promise<ManifestClassification> {
     const cacheKey = manifestClassificationCacheKey(registry, repo, primaryDigest);
     const cache = CacheService.getInstance();
@@ -770,7 +803,7 @@ async function classifyManifest(
             }
             bodyBytes = probeBody;
         } else {
-            bodyBytes = await fetchManifestBytesByDigest(registry, repo, primaryDigest, authHeaders, ref);
+            bodyBytes = await fetchManifestBytesByDigest(registry, repo, primaryDigest, authHeaders, ref, transport);
         }
         return resolveIndexClassification(
             bodyBytes.toString('utf8'),
@@ -780,6 +813,7 @@ async function classifyManifest(
             authHeaders,
             ref,
             contentType,
+            transport,
         );
     });
 }
@@ -821,6 +855,7 @@ export async function compareLocalToRemoteTagDetailed(
     tag: string,
     platform: { os: string; architecture: string },
     credentials?: RegistryCredentials | null,
+    transport?: RegistryTransport,
 ): Promise<{ kind: 'match' | 'update' | 'error'; primaryDigest?: string; reason?: string }> {
     const candidates = localDigests.filter((d) => SHA256_DIGEST_RE.test(d));
     if (candidates.length === 0) {
@@ -829,7 +864,7 @@ export async function compareLocalToRemoteTagDetailed(
     const candidateSet = new Set(candidates.map((d) => d.toLowerCase()));
 
     const ref = `${registry}/${repo}:${tag}`;
-    const probe = await probeManifestForRef(registry, repo, tag, credentials, ref);
+    const probe = await probeManifestForRef(registry, repo, tag, credentials, ref, transport);
     if (!probe.ok) return { kind: 'error', reason: probe.reason };
 
     const { digest: primaryDigest, contentType, body, authHeaders } = probe.result;
@@ -840,7 +875,7 @@ export async function compareLocalToRemoteTagDetailed(
 
     let classification: ManifestClassification;
     try {
-        classification = await classifyManifest(registry, repo, primaryDigest, contentType, body, authHeaders, ref);
+        classification = await classifyManifest(registry, repo, primaryDigest, contentType, body, authHeaders, ref, transport);
     } catch (e) {
         return { kind: 'error', primaryDigest, reason: getErrorMessage(e, `Failed to classify remote manifest for ${ref}`) };
     }
@@ -890,8 +925,9 @@ export async function compareLocalToRemoteTag(
     tag: string,
     platform: { os: string; architecture: string },
     credentials?: RegistryCredentials | null,
+    transport?: RegistryTransport,
 ): Promise<DigestComparisonResult> {
-    const result = await compareLocalToRemoteTagDetailed(localDigests, registry, repo, tag, platform, credentials);
+    const result = await compareLocalToRemoteTagDetailed(localDigests, registry, repo, tag, platform, credentials, transport);
     return result.kind === 'error' ? { kind: 'error', reason: result.reason ?? 'Unknown error' } : { kind: result.kind };
 }
 
@@ -957,10 +993,11 @@ export async function listRegistryTagsResult(
     repo: string,
     credentials?: RegistryCredentials | null,
     opts: { limit?: number; cursor?: string } = {},
+    transport?: RegistryTransport,
 ): Promise<TagListResult> {
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
     try {
-        const token = await getAuthToken(registry, repo, credentials);
+        const token = await getAuthToken(registry, repo, credentials, transport);
         if (!token) {
             return {
                 ok: false,
@@ -972,7 +1009,7 @@ export async function listRegistryTagsResult(
         const params = new URLSearchParams({ n: String(limit) });
         if (opts.cursor) params.set('last', opts.cursor);
         const url = `https://${registry}/v2/${repo}/tags/list?${params.toString()}`;
-        const res = await httpGet(url, headers);
+        const res = await transportGet(transport, url, headers);
         if (res.statusCode !== 200) return tagListFailure(res.statusCode);
         if (res.body.length > TAG_LIST_BODY_CAP) {
             return { ok: false, code: 'REGISTRY_INVALID_RESPONSE', message: 'Registry tag list response too large' };

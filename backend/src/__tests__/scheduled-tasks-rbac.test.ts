@@ -353,6 +353,20 @@ describe('PATCH /:id/toggle and POST /:id/run (RBAC)', () => {
     expect(res.status).toBe(200);
   });
 
+  it('passes the verified acting user to a manual run', async () => {
+    const { SchedulerService } = await import('../services/SchedulerService');
+    const trigger = vi.spyOn(SchedulerService.getInstance(), 'triggerTask').mockResolvedValue(undefined);
+    try {
+      const res = await request(app).post(`/api/scheduled-tasks/${taskId}/run`).set('Cookie', scopedDeployerCookie);
+      expect(res.status).toBe(202);
+      expect(trigger).toHaveBeenCalledWith(taskId, expect.objectContaining({
+        username: 'scoped-deploy', role: 'viewer', userId: expect.any(Number),
+      }));
+    } finally {
+      trigger.mockRestore();
+    }
+  });
+
   it('scoped deployer can run-now their stack task', async () => {
     const res = await request(app).post(`/api/scheduled-tasks/${taskId}/run`).set('Cookie', scopedDeployerCookie);
     // 409 (already running) is also acceptable; 202 is the success case

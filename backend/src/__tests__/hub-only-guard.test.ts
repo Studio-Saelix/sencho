@@ -65,6 +65,20 @@ describe('hubOnlyGuard', () => {
     cleanupTestDb(tmpDir);
   });
 
+  it.each([
+    '/api/image-updates/inspect-facts',
+    '/api/image-updates/inspect-facts/',
+  ])('rejects %s before remote forwarding', async (endpoint) => {
+    const res = await request(app)
+      .post(endpoint)
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId))
+      .send({ contractVersion: 1, requestNonce: 'a'.repeat(32), roster: true });
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
   it('rejects /api/scheduled-tasks with 403 when nodeId targets a remote node', async () => {
     const res = await request(app)
       .get('/api/scheduled-tasks/')

@@ -44,6 +44,8 @@ export const CAPABILITIES = [
   'scoped-stack-auth-evidence',
   'remote-registry-credentials',
   'remote-registry-exact-ref-proof-v1',
+  'remote-image-inspect-v1',
+  'remote-auto-update-checked-v1',
   'gitops-source-controller',
 ] as const;
 
@@ -62,4 +64,6 @@ export const SERVICE_SCOPED_UPDATE_CAPABILITY = 'service-scoped-update' as const
 export const SERVICE_SCOPED_STACK_ALERT_CAPABILITY = 'service-scoped-stack-alert' as const satisfies Capability;
 export const SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY = 'scoped-stack-auth-evidence' as const satisfies Capability;
 export const REMOTE_REGISTRY_CREDENTIALS_CAPABILITY = 'remote-registry-credentials' as const satisfies Capability;
+export const REMOTE_IMAGE_INSPECT_V1_CAPABILITY = 'remote-image-inspect-v1' as const satisfies Capability;
+export const REMOTE_AUTO_UPDATE_CHECKED_V1_CAPABILITY = 'remote-auto-update-checked-v1' as const satisfies Capability;
 export const GITOPS_SOURCE_CONTROLLER_CAPABILITY = 'gitops-source-controller' as const satisfies Capability;

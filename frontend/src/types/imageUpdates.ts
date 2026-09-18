@@ -31,6 +31,22 @@ export interface ImageUpdateStatus {
     enabled?: boolean;
 }
 
+/** Hub-only scanner status selected by targetNodeId, with epoch-ms timestamps. */
+export interface ImageUpdateOverlayStatus {
+    enabled: boolean;
+    checking: boolean;
+    cooldownEndsAt: number | null;
+    lastCheckedAt: number | null;
+    nextRunAt: number | null;
+    mode: string | null;
+    cronExpression: string | null;
+    intervalMinutes: number;
+    intervalUnit: 'minutes';
+    scannerOwner: 'hub' | 'target';
+    capability: 'remote-image-inspect-v1' | null;
+    sidebarIndicators: boolean;
+}
+
 /**
  * Per-stack image-update check outcome. 'ok' = every checkable image was
  * reached; 'partial' = some checkable images errored; 'failed' = no checkable

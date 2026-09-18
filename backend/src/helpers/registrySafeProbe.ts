@@ -108,45 +108,60 @@ export async function assertSafeRegistryHost(host: string): Promise<void> {
   }
 }
 
-function httpsGet(
+export interface SafeRegistryResponse {
+  status: number;
+  headers: Record<string, string | string[] | undefined>;
+  bodyBytes: Buffer;
+}
+
+function httpsRequest(
   rawUrl: string,
+  method: 'GET' | 'HEAD',
   headers: Record<string, string>,
   timeoutMs: number,
+  capBytes: number,
   abortSignal?: AbortSignal,
-): Promise<{ statusCode: number; headers: Record<string, string | string[] | undefined>; body: string }> {
+): Promise<SafeRegistryResponse> {
   return new Promise((resolve, reject) => {
-    const req = https.request(rawUrl, { method: 'GET', headers, agent: safeHttpsAgent }, (res) => {
-      let body = '';
-      let bodyBytes = 0;
+    abortSignal?.throwIfAborted();
+    let settled = false;
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      abortSignal?.removeEventListener('abort', onAbort);
+      action();
+    };
+    const req = https.request(rawUrl, { method, headers, agent: safeHttpsAgent }, (res) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
       res.on('data', (chunk: Buffer) => {
-        bodyBytes += chunk.length;
-        if (bodyBytes > PROBE_BODY_LIMIT_BYTES) {
-          const err = new Error('Registry probe response exceeded the body limit');
-          req.destroy(err);
-          reject(err);
+        if (settled) return;
+        size += chunk.length;
+        if (size > capBytes) {
+          const error = new Error('Registry probe response exceeded the body limit');
+          finish(() => reject(error));
+          req.destroy(error);
           return;
         }
-        body += chunk.toString();
+        chunks.push(chunk);
       });
-      res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, headers: res.headers, body }));
-      res.on('error', reject);
+      res.on('end', () => finish(() => resolve({
+        status: res.statusCode ?? 0, headers: res.headers, bodyBytes: Buffer.concat(chunks, size),
+      })));
+      res.on('error', error => finish(() => reject(error)));
+      res.on('aborted', () => finish(() => reject(new Error('Registry response aborted'))));
     });
-    req.on('error', reject);
-    if (abortSignal) {
-      abortSignal.addEventListener(
-        'abort',
-        () => {
-          if (!req.destroyed) {
-            req.destroy(new Error('Registry probe aborted'));
-          }
-        },
-        { once: true },
-      );
-    }
+    const onAbort = () => {
+      const error = new Error('Registry probe aborted');
+      finish(() => reject(error));
+      req.destroy(error);
+    };
+    req.on('error', error => finish(() => reject(error)));
+    abortSignal?.addEventListener('abort', onAbort, { once: true });
     req.setTimeout(timeoutMs, () => {
-      const err = new Error('Registry probe timed out');
-      req.destroy(err);
-      reject(err);
+      const error = new Error('Registry probe timed out');
+      finish(() => reject(error));
+      req.destroy(error);
     });
     req.end();
   });
@@ -164,24 +179,27 @@ function httpsGet(
  *   - Redirect chains are capped.
  * Throws {@link UnsafeRegistryHopError} for any boundary violation.
  */
-export async function safeRegistryGet(
+export async function safeRegistryRequest(
   rawUrl: string,
+  method: 'GET' | 'HEAD',
   headers: Record<string, string> = {},
   timeoutMs = PROBE_TIMEOUT_MS,
   abortSignal?: AbortSignal,
-): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }> {
+  capBytes = PROBE_BODY_LIMIT_BYTES,
+): Promise<SafeRegistryResponse> {
+  abortSignal?.throwIfAborted();
   let url = rawUrl;
   let origin = new URL(rawUrl).origin;
   await assertSafeHttpsHop(url);
 
   for (let redirects = 0; ; redirects++) {
-    const res = await httpsGet(url, headers, timeoutMs, abortSignal);
+    const res = await httpsRequest(url, method, headers, timeoutMs, capBytes, abortSignal);
     const location = firstHeader(res.headers.location);
     const isRedirect = location != null
-      && (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 303
-        || res.statusCode === 307 || res.statusCode === 308);
+      && (res.status === 301 || res.status === 302 || res.status === 303
+        || res.status === 307 || res.status === 308);
     if (!isRedirect) {
-      return { status: res.statusCode, headers: res.headers, body: res.body };
+      return res;
     }
     if (redirects >= MAX_REDIRECTS) {
       throw new Error('Registry probe exceeded redirect limit');
@@ -197,6 +215,17 @@ export async function safeRegistryGet(
     }
     url = next.toString();
   }
+}
+
+/** Text wrapper retained for anonymous exact-reference proof callers. */
+export async function safeRegistryGet(
+  rawUrl: string,
+  headers: Record<string, string> = {},
+  timeoutMs = PROBE_TIMEOUT_MS,
+  abortSignal?: AbortSignal,
+): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }> {
+  const res = await safeRegistryRequest(rawUrl, 'GET', headers, timeoutMs, abortSignal);
+  return { status: res.status, headers: res.headers, body: res.bodyBytes.toString('utf8') };
 }
 
 function parseTokenRealm(wwwAuth: string | undefined): string | null {

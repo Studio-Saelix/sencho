@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { useNodes } from '@/context/NodeContext';
+import { REMOTE_IMAGE_INSPECT_V1_CAPABILITY } from '@/lib/capabilities';
 import { ShieldOff } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SignalRail, type SignalTile } from '@/components/ui/SignalRail';
@@ -162,6 +164,11 @@ function ReviewQueueCard({
   posture?: SecurityOverview['posture'];
 }) {
   const [checkAgainBusy, setCheckAgainBusy] = useState(false);
+  // The target-local scanner backs Security rechecks, so inspect-v1 remotes
+  // address it directly; hub overlay evidence is not a recheck target.
+  const { activeNode, activeNodeMeta } = useNodes();
+  const targetScannerRefresh = activeNode?.type === 'remote'
+    && (activeNodeMeta?.capabilities.includes(REMOTE_IMAGE_INSPECT_V1_CAPABILITY) ?? false);
   const blockers = reasons.filter((r) => r.severity === 'blocker');
   const nonBlockers = reasons.filter((r) => r.severity !== 'blocker');
   const hasBlockers = blockers.length > 0;
@@ -175,7 +182,7 @@ function ReviewQueueCard({
     if (checkAgainBusy) return;
     setCheckAgainBusy(true);
     try {
-      await triggerNodeImageUpdateCheck();
+      await triggerNodeImageUpdateCheck(targetScannerRefresh);
     } catch (err) {
       toast.error((err as Error)?.message || 'Failed to start image update check');
     } finally {

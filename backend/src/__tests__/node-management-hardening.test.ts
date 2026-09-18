@@ -19,6 +19,7 @@ import { WebSocket } from 'ws';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { MeshProxyTunnelDialer } from '../services/MeshProxyTunnelDialer';
+import { ImageUpdateService } from '../services/ImageUpdateService';
 import { withLoopbackTargetProtection } from './helpers/allowLoopbackTargets';
 
 let tmpDir: string;
@@ -189,6 +190,34 @@ describe('node-management write routes require node:manage', () => {
 });
 
 describe('deleting a node tears down its tunnel or mesh bridge', () => {
+  it('clears scanner runtime state only for the deleted node', async () => {
+    const scanner = ImageUpdateService.getInstance();
+    const id = addPilotNode('nm-scanner-delete');
+    const otherId = addPilotNode('nm-scanner-retained');
+    const enabled = vi.spyOn(ImageUpdateService, 'isChecksEnabled').mockReturnValue(true);
+    let finish!: () => void;
+    const held = new Promise<void>(resolve => { finish = resolve; });
+    const running = scanner.runRemoteScan(id, true, () => held);
+    try {
+      await scanner.runRemoteScan(otherId, true, async () => undefined);
+      const otherStatus = scanner.getRemoteScanStatus(otherId);
+      expect(scanner.getRemoteScanStatus(id)).toMatchObject({ checking: true,
+        lastCheckedAt: expect.any(Number), cooldownEndsAt: expect.any(Number) });
+      const res = await request(app).delete(`/api/nodes/${id}`)
+        .set('Authorization', `Bearer ${tokenForRole('admin')}`);
+      expect(res.status).toBe(200);
+      expect(scanner.getRemoteScanStatus(id)).toMatchObject({ checking: false,
+        lastCheckedAt: null, cooldownEndsAt: null });
+      expect(scanner.getRemoteScanStatus(otherId)).toEqual(otherStatus);
+    } finally {
+      finish();
+      await running;
+      scanner.clearNodeRuntimeMaps(otherId);
+      DatabaseService.getInstance().deleteNode(otherId);
+      enabled.mockRestore();
+    }
+  });
+
   it('closes the active tunnel socket and removes the node row', async () => {
     const db = DatabaseService.getInstance();
     const mgr = PilotTunnelManager.getInstance();

@@ -13,6 +13,7 @@ import { StackOpLockService, stackOpSkipMessage, type StackOpAction } from './St
 import { DeployedStackDeletionService } from './DeployedStackDeletionService';
 import { FileSystemService } from './FileSystemService';
 import { NodeRegistry } from './NodeRegistry';
+import { awaitHubPostUpdateVerification } from './hubPostUpdateVerification';
 import { safeAxiosTransport } from '../utils/outboundTarget';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import { LicenseService } from './LicenseService';
@@ -699,6 +700,22 @@ export class BlueprintService {
         }
         if (res.status >= 400) {
             throw new Error(`blueprint apply: HTTP ${res.status} ${BlueprintService.extractApiError(res.data)}`);
+        }
+        // Verification does not change the already completed apply outcome.
+        const verification = await awaitHubPostUpdateVerification({
+            nodeId: node.id,
+            stack: blueprint.name,
+            targetResponse: { status: res.status, body: res.data },
+            caller: 'blueprint',
+            transport: {
+                recheckRemoteStack: (id, stack, signal) =>
+                    import('./RemoteImageUpdateService').then(
+                        m => m.RemoteImageUpdateService.getInstance().recheckRemoteStack(id, stack, signal),
+                    ),
+            },
+        });
+        if (verification.source === 'hub_authority' && verification.status !== 'verified') {
+            console.warn(`[BlueprintService] Apply completed; verification incomplete for "${blueprint.name}" on node ${node.id}: ${verification.detail}`);
         }
     }
 

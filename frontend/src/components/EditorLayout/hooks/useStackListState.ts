@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { apiFetch } from '@/lib/api';
+import { REMOTE_IMAGE_INSPECT_V1_CAPABILITY } from '@/lib/capabilities';
 import { fetchStackStatusesShared } from '@/lib/stackStatusesFetch';
 import {
   newAttemptId,
@@ -153,7 +154,7 @@ export type HydrationEvidence =
 export type HydrationDisplayState = 'pending' | 'error' | 'current' | 'stale' | 'incomplete';
 
 export function useStackListState() {
-  const { nodes, activeNode } = useNodes();
+  const { nodes, activeNode, activeNodeMeta } = useNodes();
 
   const [files, setFiles] = useState<string[]>([]);
   // Node the current `files` list belongs to (null = local). Stamped together
@@ -255,7 +256,9 @@ export function useStackListState() {
     return 'current';
   })();
 
-  const { stackUpdates, refresh: fetchImageUpdates, sidebarIndicators } = useImageUpdates(activeNode?.id);
+  const usesHubScanner = activeNode?.type === 'remote'
+    && (activeNodeMeta?.capabilities.includes(REMOTE_IMAGE_INSPECT_V1_CAPABILITY) ?? false);
+  const { stackUpdates, refresh: fetchImageUpdates, sidebarIndicators } = useImageUpdates(activeNode?.id, usesHubScanner);
   const sidebarStackUpdates = sidebarIndicators ? stackUpdates : EMPTY_UPDATES;
   const { pinned, pin, unpin, isPinned, evictedOldest } = usePinnedStacks(activeNode?.id);
   const { isCollapsed, toggle: toggleCollapse } = useSidebarGroupCollapse(activeNode?.id);

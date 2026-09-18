@@ -124,6 +124,17 @@ describe('assertSafeRegistryHost', () => {
   });
 });
 
+describe('safeRegistryGet cancellation', () => {
+  it('does not connect when cancelled before the request starts', async () => {
+    const seen = scriptHttps([]);
+    const controller = new AbortController();
+    controller.abort(new Error('Cancelled before probe'));
+    await expect(safeRegistryGet('https://127.0.0.1/v2/', {}, 10000, controller.signal))
+      .rejects.toThrow('Cancelled before probe');
+    expect(seen).toHaveLength(0);
+  });
+});
+
 describe('safeRegistryGet redirect safety', () => {
   it('rejects an HTTPS-to-HTTP downgrade and never replays Authorization', async () => {
     const seen = scriptHttps([

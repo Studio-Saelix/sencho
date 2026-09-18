@@ -17,6 +17,7 @@ import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { PilotCloseCode } from '../pilot/protocol';
 import { MeshProxyTunnelDialer } from '../services/MeshProxyTunnelDialer';
 import { FleetUpdateTrackerService } from '../services/FleetUpdateTrackerService';
+import { ImageUpdateService } from '../services/ImageUpdateService';
 import { FleetSyncService } from '../services/FleetSyncService';
 import { isValidRemoteUrl } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
@@ -481,6 +482,7 @@ nodesRouter.delete('/:id', async (req: Request, res: Response) => {
     NodeRegistry.getInstance().notifyNodeRemoved(id);
     CacheService.getInstance().invalidate(`${REMOTE_META_NAMESPACE}:${id}`);
     FleetUpdateTrackerService.getInstance().delete(id);
+    ImageUpdateService.getInstance().clearNodeRuntimeMaps(id);
     console.log(`[Nodes] Deleted node ${id} ("${sanitizeForLog(existing.name)}")`);
     res.json({ success: true, gitopsRevisions: projectCommittedRevisions(movedBlueprints, 'node delete') });
   } catch (error: unknown) {
