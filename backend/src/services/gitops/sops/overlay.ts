@@ -6,6 +6,7 @@ import type { ComposeInputEntry } from '../../../types/gitProjectManifest';
 import type { OverlayBinding } from './types';
 import { decryptSopsAgeDocument, SopsDecryptError } from './decode';
 import { isValidRelativeStackPath, isValidStackName } from '../../../utils/validation';
+import { NodeRegistry } from '../../NodeRegistry';
 
 const OVERLAY_ROOT = 'git-secrets';
 const OVERLAY_OPERATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -67,6 +68,21 @@ export class GitOpsDecryptOverlay {
     return overlayDir;
   }
 
+  private resolveAllowedSourceRoot(nodeId: number, stackName: string, sourceRootArg: string): string {
+    assertSafeNodeId(nodeId);
+    const safeStack = validatedStackSegment(stackName);
+    const requested = path.resolve(sourceRootArg);
+    const composeStackRoot = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId), safeStack);
+    const dataDir = path.resolve(process.env.DATA_DIR || path.join(process.cwd(), 'data'));
+    const managedStackRoot = path.resolve(dataDir, 'git-managed', String(nodeId), safeStack);
+    for (const base of [composeStackRoot, managedStackRoot]) {
+      if (requested === base || requested.startsWith(base + path.sep)) {
+        return requested;
+      }
+    }
+    throw new Error('Overlay source root is not an allowed stack tree');
+  }
+
   overlayPath(nodeId: number, stackName: string, operationId: string): string {
     return this.resolveOverlayDir(nodeId, stackName, operationId);
   }
@@ -115,7 +131,11 @@ export class GitOpsDecryptOverlay {
       args.binding.stackName,
       args.binding.operationId,
     );
-    const sourceRoot = path.resolve(args.sourceRoot);
+    const sourceRoot = this.resolveAllowedSourceRoot(
+      args.binding.nodeId,
+      args.binding.stackName,
+      args.sourceRoot,
+    );
     if (!fs.existsSync(sourceRoot) || !fs.statSync(sourceRoot).isDirectory()) {
       throw new Error('Overlay source root is missing');
     }
@@ -137,7 +157,14 @@ export class GitOpsDecryptOverlay {
     if (!metaResolved.startsWith(overlayResolved + path.sep)) {
       throw new Error('Overlay metadata path escapes the overlay directory');
     }
-    await fsPromises.writeFile(metaResolved, JSON.stringify(args.binding), { mode: 0o600 });
+    await fsPromises.writeFile(metaResolved, JSON.stringify({
+      applicationId: args.binding.applicationId,
+      commitSha: args.binding.commitSha,
+      generationId: args.binding.generationId,
+      operationId: validatedOperationSegment(args.binding.operationId),
+      stackName: validatedStackSegment(args.binding.stackName),
+      nodeId: args.binding.nodeId,
+    } satisfies OverlayBinding), { mode: 0o600 });
 
     try {
       for (const input of args.inputs) {

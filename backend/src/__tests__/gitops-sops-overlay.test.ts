@@ -33,7 +33,8 @@ describe('GitOpsDecryptOverlay', () => {
       recipient,
     });
 
-    const sourceRoot = fs.mkdtempSync(path.join(dataDir, 'source-'));
+    const sourceRoot = path.join(dataDir, 'git-managed', '1', 'demo', 'candidate');
+    fs.mkdirSync(sourceRoot, { recursive: true });
     fs.writeFileSync(path.join(sourceRoot, '.env'), sopsDoc, { mode: 0o600 });
     const sourceHash = crypto.createHash('sha256').update(sopsDoc).digest('hex');
 

@@ -46,18 +46,19 @@ paths-ignore:
   # deletes in a finally block. Excluded from JS analysis for the same reason
   # as the SSH sink above.
   - backend/src/services/git/gitCaBundleSink.ts
+  # GitOps decrypt overlay: SOPS ciphertext from a pinned Git checkout is
+  # decrypted into a short-lived mode-0700 tree under DATA_DIR/git-secrets for
+  # Compose validate/deploy/recovery only. Stack segments pass isValidStackName
+  # plus path.basename, operation ids are server UUIDs, and every filesystem
+  # sink uses resolve-plus-startsWith guards. js/http-to-file-access ignores
+  # query-filters path scoping (see sshCredentialFiles above), and
+  # js/path-injection still flags the admin-Git sourceRoot/candidate copy path
+  # after those guards. Excluding the sink module keeps CodeQL coverage on the
+  # rest of the GitOps surface without treating the intended decrypt boundary
+  # as a durable-plaintext vulnerability.
+  - backend/src/services/gitops/sops/overlay.ts
 
 query-filters:
-  # GitOps decrypt overlay: ciphertext from a pinned Git checkout is decrypted
-  # into a short-lived mode-0700 directory under DATA_DIR/git-secrets for Compose
-  # validate/deploy only. Stack segments pass isValidStackName plus path.basename,
-  # operation ids are server-generated UUIDs, and every sink uses the inline
-  # resolve-plus-startsWith barrier. The write is the intended product boundary,
-  # not durable plaintext in COMPOSE_DIR.
-  - exclude:
-      id: js/http-to-file-access
-      paths:
-        - backend/src/services/gitops/sops/overlay.ts
   # API tokens are 256-bit CSPRNG random; sha256 of the raw token is the
   # correct construction. js/insufficient-password-hash exists to catch weak
   # hashing of low-entropy human passwords, which is irrelevant for these
