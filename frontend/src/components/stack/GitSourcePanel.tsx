@@ -121,7 +121,6 @@ export function GitSourcePanel({
   onOpenChange,
   stackName,
   canEdit,
-  isDarkMode,
   canDeploy = canEdit,
   onSourceChanged,
 }: GitSourcePanelProps) {
