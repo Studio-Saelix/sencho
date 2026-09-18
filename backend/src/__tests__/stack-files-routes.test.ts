@@ -33,7 +33,7 @@ async function extractTarGz(buf: Buffer): Promise<Record<string, string>> {
   await new Promise<void>((resolve, reject) => {
     extract.on('entry', (header, stream, next) => {
       const chunks: Buffer[] = [];
-      stream.on('data', (c) => chunks.push(c as Buffer));
+      stream.on('data', (c: unknown) => { if (Buffer.isBuffer(c)) chunks.push(c); });
       stream.on('end', () => { out[header.name] = Buffer.concat(chunks).toString('utf-8'); next(); });
       stream.on('error', reject);
     });
