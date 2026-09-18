@@ -26,6 +26,20 @@ import {
 import { TOP_NAV_LABELS_KEY, currentTopNavLabels, applyTopNavLabels } from '@/hooks/use-top-nav-labels';
 import { TOP_NAV_ALIGN_KEY, currentTopNavAlign, applyTopNavAlign, isTopNavAlignExport, type TopNavAlign } from '@/hooks/use-top-nav-align';
 import { currentLogChipColorMode, applyLogChipColorMode, isLogChipColorModeExport, type LogChipColorMode } from '@/hooks/use-log-chip-color-mode';
+import {
+  SIDEBAR_MODE_KEY, SIDEBAR_WIDTH_KEY, SIDEBAR_WIDTH_DEFAULT,
+  currentSidebarMode, currentSidebarWidth,
+  applySidebarModeValue, applySidebarWidthValue,
+  isSidebarMode, sanitizeSidebarWidth,
+  type SidebarMode,
+} from '@/hooks/use-sidebar-layout';
+import {
+  ANATOMY_MODE_KEY, ANATOMY_WIDTH_KEY, ANATOMY_WIDTH_DEFAULT,
+  currentAnatomyMode, currentAnatomyWidth,
+  applyAnatomyModeValue, applyAnatomyWidthValue,
+  isAnatomyMode, sanitizeAnatomyWidth,
+  type AnatomyMode,
+} from '@/hooks/use-anatomy-layout';
 import { recommendedQuickLinkIds } from '@/lib/navigation/appNavRegistry';
 
 export interface AppearanceDocument {
@@ -45,11 +59,15 @@ export interface AppearanceDocument {
   reducedEffects: boolean;
   reducedMotion: boolean;
   readability: boolean;
+  sidebarMode: SidebarMode;
+  sidebarWidth: number;
+  anatomyMode: AnatomyMode;
+  anatomyWidth: number;
 }
 
-/** What the raw theme cache key holds: everything except the two fields
- *  (`density`, `logChipColorMode`) stored under their own keys. */
-export type ThemeCacheDocument = Omit<AppearanceDocument, 'density' | 'logChipColorMode'>;
+/** What the raw theme cache key holds: everything except density, log-chip,
+ *  sidebar-layout, and Anatomy-layout fields stored under their own keys. */
+export type ThemeCacheDocument = Omit<AppearanceDocument, 'density' | 'logChipColorMode' | 'sidebarMode' | 'sidebarWidth' | 'anatomyMode' | 'anatomyWidth'>;
 
 /** Navigation document with unset provenance for the pin list. `unset` means
  *  the hook has never persisted a list (never-seeded or eligibility still
@@ -69,8 +87,8 @@ function clampNumber(value: unknown, bounds: { min: number; max: number; default
   return Math.min(bounds.max, Math.max(bounds.min, value));
 }
 
-/** Serialize the live appearance state (theme + density + log chips) into the
- *  server document shape. */
+/** Serialize the live appearance and pane-layout state into the server
+ *  document shape. */
 export function buildAppearanceDocument(): AppearanceDocument {
   const t = currentThemeState();
   return {
@@ -90,6 +108,10 @@ export function buildAppearanceDocument(): AppearanceDocument {
     reducedEffects: t.reducedEffects,
     reducedMotion: t.reducedMotion,
     readability: t.readability,
+    sidebarMode: currentSidebarMode(),
+    sidebarWidth: currentSidebarWidth(),
+    anatomyMode: currentAnatomyMode(),
+    anatomyWidth: currentAnatomyWidth(),
   };
 }
 
@@ -146,6 +168,12 @@ export function hydrateAppearanceDocument(raw: unknown): void {
   });
   applyDensityValue(isDensity(p.density) ? p.density : 'comfortable');
   applyLogChipColorMode(isLogChipColorModeExport(p.logChipColorMode) ? p.logChipColorMode : 'unified');
+  // A document missing pane-layout fields degrades to the defaults instead of
+  // leaving stale browser-local values behind.
+  applySidebarModeValue(isSidebarMode(p.sidebarMode) ? p.sidebarMode : 'fixed');
+  applySidebarWidthValue(sanitizeSidebarWidth(p.sidebarWidth));
+  applyAnatomyModeValue(isAnatomyMode(p.anatomyMode) ? p.anatomyMode : 'fixed');
+  applyAnatomyWidthValue(sanitizeAnatomyWidth(p.anatomyWidth));
 }
 
 /** The documented calm-default appearance document, used for tombstone
@@ -170,6 +198,10 @@ export function defaultAppearanceDocument(): AppearanceDocument {
     reducedEffects: d.reducedEffects,
     reducedMotion: d.reducedMotion,
     readability: d.readability,
+    sidebarMode: 'fixed',
+    sidebarWidth: SIDEBAR_WIDTH_DEFAULT,
+    anatomyMode: 'fixed',
+    anatomyWidth: ANATOMY_WIDTH_DEFAULT,
   };
 }
 
@@ -219,6 +251,10 @@ export const PREFERENCE_CACHE_KEYS = [
   'sencho-theme', // legacy theme key
   'sencho.appearance.density',
   'sencho.log-chip-color-mode',
+  SIDEBAR_MODE_KEY,
+  SIDEBAR_WIDTH_KEY,
+  ANATOMY_MODE_KEY,
+  ANATOMY_WIDTH_KEY,
   TOP_NAV_MODE_KEY,
   TOP_NAV_QUICK_LINKS_KEY,
   TOP_NAV_LABELS_KEY,
@@ -249,6 +285,10 @@ export function writePreferenceCacheFromDocuments(): void {
       ...appearance,
       density: undefined,
       logChipColorMode: undefined,
+      sidebarMode: undefined,
+      sidebarWidth: undefined,
+      anatomyMode: undefined,
+      anatomyWidth: undefined,
     }));
   } catch {
     // ignore; private mode / quota

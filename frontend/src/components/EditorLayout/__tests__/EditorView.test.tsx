@@ -30,6 +30,9 @@ vi.mock('../editor-view-blocks', () => ({
 vi.mock('../../StackAnatomyPanel', () => ({
   default: () => <div>anatomy-pane</div>,
 }));
+vi.mock('@/components/stack/AnatomyResizePane', () => ({
+  AnatomyResizePane: ({ children }: { children: ReactNode }) => <div data-testid="anatomy-resize-wrapper">{children}</div>,
+}));
 vi.mock('../StackOperationBanner', () => ({ StackOperationBanner: () => null }));
 vi.mock('../../ErrorBoundary', () => ({ default: ({ children }: { children: ReactNode }) => <>{children}</> }));
 vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => false }));
@@ -96,6 +99,28 @@ function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
     ...over,
   };
 }
+
+describe('EditorView Anatomy layout', () => {
+  afterEach(() => localStorage.clear());
+
+  it('keeps the existing equal-pane layout in Fixed mode', () => {
+    render(<EditorView {...makeProps()} />);
+    expect(screen.getByText('anatomy-pane').parentElement).toHaveClass('lg:grid-cols-2');
+    expect(screen.queryByTestId('anatomy-resize-wrapper')).not.toBeInTheDocument();
+  });
+
+  it('wraps only the Anatomy view when Resizable mode is active', () => {
+    localStorage.setItem('sencho.appearance.anatomyMode', 'resizable');
+    render(<EditorView {...makeProps()} />);
+    expect(screen.getByTestId('anatomy-resize-wrapper')).toContainElement(screen.getByText('anatomy-pane'));
+  });
+
+  it('does not apply the Anatomy resizer while the compose editor is open', () => {
+    localStorage.setItem('sencho.appearance.anatomyMode', 'resizable');
+    render(<EditorView {...makeProps({ editingCompose: true })} />);
+    expect(screen.queryByTestId('anatomy-resize-wrapper')).not.toBeInTheDocument();
+  });
+});
 
 describe('EditorView Monaco language prop', () => {
   afterEach(() => {

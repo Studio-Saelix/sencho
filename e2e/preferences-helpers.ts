@@ -11,13 +11,15 @@ import type { APIRequestContext } from '@playwright/test';
 import { request as pwRequest } from '@playwright/test';
 import { TEST_USERNAME, TEST_PASSWORD } from './helpers';
 
-/** The full 16-field appearance document the server schema validates. */
+/** The full 20-field appearance document the server schema validates. */
 export const APPEARANCE_DOC = {
   theme: 'oled', accent: 'violet', uiFont: 'Geist', monoFont: 'Geist Mono',
   visualStyle: 'calm', headingStyle: 'clean', chartStyle: 'muted',
   density: 'compact', logChipColorMode: 'unified',
   borderBoost: 0, glow: 0.16, contrast: 0, typeScale: 1,
   reducedEffects: true, reducedMotion: true, readability: false,
+  sidebarMode: 'fixed', sidebarWidth: 256,
+  anatomyMode: 'fixed', anatomyWidth: 640,
 };
 
 /** The four-field navigation document. */
@@ -95,7 +97,16 @@ export async function deleteE2EUser(request: APIRequestContext, userId: number):
 export async function getPreferences(request: APIRequestContext, userId: number): Promise<{
   preferences: Record<string, PreferenceEnvelope | null>;
 }> {
-  const res = await request.get('/api/user-preferences', { headers: prefHeaders(userId) });
+  // The suite user's GET shares the global per-minute API limiter with every
+  // other request from the same account; a burst of test traffic in the same
+  // window can 429, so retry (up to ~20s worst case) before failing the
+  // suite. Non-429 failures surface immediately.
+  let res = await request.get('/api/user-preferences', { headers: prefHeaders(userId) });
+  for (let attempt = 0; !res.ok() && attempt < 4; attempt += 1) {
+    if (res.status() !== 429) throw new Error(`GET preferences failed with ${res.status()}`);
+    await new Promise((r) => setTimeout(r, 5_000));
+    res = await request.get('/api/user-preferences', { headers: prefHeaders(userId) });
+  }
   if (!res.ok()) throw new Error(`GET preferences failed with ${res.status()}`);
   return (await res.json()) as { preferences: Record<string, PreferenceEnvelope | null> };
 }
