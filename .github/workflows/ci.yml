@@ -182,7 +182,9 @@ jobs:
   e2e:
     name: E2E Tests (Playwright)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 30 minutes: the suite grew with pane-layout journeys and occasional
+    # serial-group retries; 20 minutes was cancelling mid-run on this branch.
+    timeout-minutes: 30
     needs: [backend, frontend]
     # See backend job rationale.
     if: >-
