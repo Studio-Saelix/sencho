@@ -48,6 +48,16 @@ paths-ignore:
   - backend/src/services/git/gitCaBundleSink.ts
 
 query-filters:
+  # GitOps decrypt overlay: ciphertext from a pinned Git checkout is decrypted
+  # into a short-lived mode-0700 directory under DATA_DIR/git-secrets for Compose
+  # validate/deploy only. Stack segments pass isValidStackName plus path.basename,
+  # operation ids are server-generated UUIDs, and every sink uses the inline
+  # resolve-plus-startsWith barrier. The write is the intended product boundary,
+  # not durable plaintext in COMPOSE_DIR.
+  - exclude:
+      id: js/http-to-file-access
+      paths:
+        - backend/src/services/gitops/sops/overlay.ts
   # API tokens are 256-bit CSPRNG random; sha256 of the raw token is the
   # correct construction. js/insufficient-password-hash exists to catch weak
   # hashing of low-entropy human passwords, which is irrelevant for these
