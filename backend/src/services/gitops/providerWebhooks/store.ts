@@ -54,6 +54,10 @@ export class GitProviderWebhookStore {
     DatabaseService.getInstance().deleteGitProviderEndpoint(id);
   }
 
+  public getDelivery(endpointId: string, deliveryId: string): GitProviderDeliveryRow | undefined {
+    return DatabaseService.getInstance().getGitProviderDelivery(endpointId, deliveryId) as GitProviderDeliveryRow | undefined;
+  }
+
   public upsertDelivery(args: {
     endpointId: string;
     deliveryId: string;

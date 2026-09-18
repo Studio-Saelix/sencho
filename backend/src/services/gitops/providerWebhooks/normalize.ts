@@ -4,6 +4,7 @@ import {
   serializeRepoIdentity,
   type RepoIdentity,
 } from '../repoIdentity';
+import type { GitProviderKind } from './types';
 
 function identityFromUrl(url: string): RepoIdentity | null {
   const parsed = parseHttpsRepoUrl(url);
@@ -12,7 +13,10 @@ function identityFromUrl(url: string): RepoIdentity | null {
   if (!legacy.ok) return null;
   return serializeRepoIdentity(legacy.url);
 }
-import type { GitProviderKind } from './types';
+
+function eventActionFromBody(body: Record<string, unknown>): string | null {
+  return typeof body.action === 'string' ? body.action : null;
+}
 
 export type ParsedProviderPayload = {
   eventType: string;
@@ -64,7 +68,7 @@ export function parseProviderPayload(
       const pr = body.pull_request as { number?: number } | undefined;
       return {
         eventType,
-        eventAction: null,
+        eventAction: eventActionFromBody(body),
         repoIdentity: repoFromGithub(body),
         ref,
         candidateSha: after,
@@ -93,7 +97,7 @@ export function parseProviderPayload(
       const pr = body.pull_request as { number?: number } | undefined;
       return {
         eventType,
-        eventAction: null,
+        eventAction: eventActionFromBody(body),
         repoIdentity: repoFromGiteaFamily(body),
         ref,
         candidateSha: after,
@@ -144,4 +148,25 @@ export function isPullRequestLikeEvent(provider: GitProviderKind, eventType: str
   if (provider === 'gitlab') return t === 'merge_request';
   if (provider === 'bitbucket_cloud') return t.includes('pullrequest');
   return t === 'pull_request';
+}
+
+const ACTIONABLE_PR_ACTIONS = new Set([
+  'open',
+  'opened',
+  'reopen',
+  'reopened',
+  'synchronize',
+  'synchronized',
+  'update',
+  'updated',
+  'close',
+  'closed',
+  'merge',
+  'merged',
+]);
+
+/** PR sub-actions that can change the configured ref. Providers that omit an action still queue. */
+export function isActionablePullRequestAction(action: string | null): boolean {
+  if (!action) return true;
+  return ACTIONABLE_PR_ACTIONS.has(action.toLowerCase());
 }

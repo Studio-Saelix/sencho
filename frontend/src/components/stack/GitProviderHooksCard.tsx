@@ -92,7 +92,7 @@ const PROVIDER_SETUP_NOTES: Record<GitProviderKind, string> = {
   github:
     'In the repository webhook settings, set content type to JSON, paste the Sencho secret, and enable push events. Add pull request events when scope includes PRs. GitHub signs payloads with X-Hub-Signature-256.',
   gitlab:
-    'Add a project webhook with the Sencho URL and secret token. Enable push events and merge request events when scope includes PRs. GitLab accepts the secret via X-Gitlab-Token or X-Gitlab-Hook-Signature-256.',
+    'Add a project webhook with the Sencho URL and secret token. Enable push events and merge request events when scope includes PRs. GitLab authenticates with the secret in X-Gitlab-Token.',
   gitea:
     'Create a repository webhook with the Sencho URL and secret. Enable push events and, when scope includes PRs, pull request events. Gitea signs payloads with X-Gitea-Signature.',
   forgejo:

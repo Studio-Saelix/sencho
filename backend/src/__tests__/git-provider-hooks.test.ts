@@ -297,3 +297,72 @@ describe('git provider hooks audit R8: blueprint-adopted source', () => {
     ).toEqual({ n: 0 });
   });
 });
+
+describe('git provider hooks audit F3: ingest-level replay', () => {
+  it('returns duplicate for a replayed delivery id and does not start a second reconcile', async () => {
+    const { GitSourceService } = await import('../services/GitSourceService');
+    const stackName = `provider-hook-replay-${crypto.randomUUID().slice(0, 8)}`;
+    seedGitSource(stackName);
+    const { id, secret } = createGithubEndpoint(stackName);
+    const body = JSON.stringify(githubPushPayload());
+    const deliveryId = crypto.randomUUID();
+    const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+      .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
+
+    const first = await postInternalHook(id, body, secret, { 'x-github-delivery': deliveryId });
+    const second = await postInternalHook(id, body, secret, { 'x-github-delivery': deliveryId });
+
+    expect(first.status).toBe(202);
+    expect(first.body.state).toBe('queued');
+    expect(second.status).toBe(202);
+    expect(second.body.state).toBe('duplicate');
+    expect(handleSpy).toHaveBeenCalledTimes(1);
+    expect(handleSpy).toHaveBeenCalledWith(
+      stackName,
+      true,
+      `provider:${id}:${deliveryId}`,
+      { trigger: 'provider_event', actor: 'system:provider_event' },
+    );
+    const deliveries = GitProviderWebhookStore.getInstance().listDeliveries(id);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]?.state).toBe('queued');
+    handleSpy.mockRestore();
+  });
+});
+
+describe('git provider hooks audit F4: pull request event action', () => {
+  it('records the pull_request action and ignores labeled events even when PR scope is enabled', async () => {
+    const { GitSourceService } = await import('../services/GitSourceService');
+    const stackName = `provider-hook-pr-labeled-${crypto.randomUUID().slice(0, 8)}`;
+    seedGitSource(stackName);
+    const { id, secret } = ProviderWebhookService.getInstance().createEndpoint({
+      stackName,
+      provider: 'github',
+      eventScope: 'configured_ref_and_prs',
+    });
+    const body = JSON.stringify({
+      action: 'labeled',
+      pull_request: { number: 12 },
+      repository: { clone_url: 'https://github.com/example/repo.git' },
+    });
+    const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
+      .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
+
+    const res = await request(app)
+      .post(`/api/gitops/internal/hooks/${id}`)
+      .set('Authorization', `Bearer ${nodeProxyToken()}`)
+      .set('Content-Type', 'application/json')
+      .set('x-github-event', 'pull_request')
+      .set('x-github-delivery', crypto.randomUUID())
+      .set('x-hub-signature-256', githubSign(body, secret))
+      .send(body);
+
+    expect(res.status).toBe(202);
+    expect(res.body.state).toBe('ignored_by_policy');
+    expect(handleSpy).not.toHaveBeenCalled();
+    const delivery = GitProviderWebhookStore.getInstance().listDeliveries(id)[0];
+    expect(delivery?.event_action).toBe('labeled');
+    expect(delivery?.event_type).toBe('pull_request');
+    handleSpy.mockRestore();
+  });
+});

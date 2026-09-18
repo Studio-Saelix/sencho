@@ -5914,8 +5914,20 @@ stmt.run('gitops_schema_version', '1');
     } {
         const now = Date.now();
         const existing = this.db.prepare(
-            'SELECT id FROM git_provider_deliveries WHERE endpoint_id = ? AND delivery_id = ?',
-        ).get(args.endpointId, args.deliveryId) as { id: number } | undefined;
+            'SELECT * FROM git_provider_deliveries WHERE endpoint_id = ? AND delivery_id = ?',
+        ).get(args.endpointId, args.deliveryId) as {
+            id: number;
+            endpoint_id: string;
+            delivery_id: string;
+            state: string;
+            event_type: string | null;
+            event_action: string | null;
+            ref: string | null;
+            candidate_sha: string | null;
+            outcome_class: string | null;
+            received_at: number;
+            updated_at: number;
+        } | undefined;
         if (existing) {
             this.db.prepare(
                 `UPDATE git_provider_deliveries SET
@@ -5978,6 +5990,35 @@ stmt.run('gitops_schema_version', '1');
             received_at: number;
             updated_at: number;
         };
+    }
+
+    public getGitProviderDelivery(endpointId: string, deliveryId: string): {
+        id: number;
+        endpoint_id: string;
+        delivery_id: string;
+        state: string;
+        event_type: string | null;
+        event_action: string | null;
+        ref: string | null;
+        candidate_sha: string | null;
+        outcome_class: string | null;
+        received_at: number;
+        updated_at: number;
+    } | undefined {
+        return this.db.prepare('SELECT * FROM git_provider_deliveries WHERE endpoint_id = ? AND delivery_id = ?')
+            .get(endpointId, deliveryId) as {
+            id: number;
+            endpoint_id: string;
+            delivery_id: string;
+            state: string;
+            event_type: string | null;
+            event_action: string | null;
+            ref: string | null;
+            candidate_sha: string | null;
+            outcome_class: string | null;
+            received_at: number;
+            updated_at: number;
+        } | undefined;
     }
 
     public listGitProviderDeliveries(endpointId: string, limit = 20): Array<{

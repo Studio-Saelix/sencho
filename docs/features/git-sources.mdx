@@ -233,7 +233,7 @@ Recent deliveries for each endpoint appear inline on the Git Source sheet (event
 | Provider | Header(s) Sencho verifies |
 | --- | --- |
 | **GitHub** | `X-Hub-Signature-256` (`sha256=` HMAC of the raw body) |
-| **GitLab** | `X-Gitlab-Token` (shared secret) or `X-Gitlab-Hook-Signature-256` when present |
+| **GitLab** | `X-Gitlab-Token` (shared secret) |
 | **Gitea** | `X-Gitea-Signature` (hex HMAC-SHA256 of the raw body) |
 | **Forgejo** | `X-Forgejo-Signature`, or `X-Gitea-Signature` when Forgejo omits its own header |
 | **Bitbucket Cloud** | `X-Hub-Signature` (`sha256=` HMAC of the raw body) |

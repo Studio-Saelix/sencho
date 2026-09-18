@@ -16,6 +16,7 @@ import {
 import { scopedProviderDeliveryId, deliveryIdFromHeaders, boundDeliveryId } from './deliveryIds';
 import { GitProviderWebhookStore } from './store';
 import {
+  isActionablePullRequestAction,
   isPingEvent,
   isPullRequestLikeEvent,
   isPushLikeEvent,
@@ -33,6 +34,14 @@ import type {
 
 const ROTATION_OVERLAP_MS = 24 * 60 * 60 * 1000;
 const INTERNAL_FORWARD_TIMEOUT_MS = 30_000;
+const SETTLED_INGEST_STATES = new Set<GitProviderDeliveryState>([
+  'queued',
+  'duplicate',
+  'ignored_by_policy',
+  'processing_failed',
+  'unsupported',
+  'malformed',
+]);
 
 export class ProviderWebhookService {
   private static instance: ProviderWebhookService;
@@ -162,7 +171,7 @@ export class ProviderWebhookService {
       return { httpStatus: 400, state: 'malformed', message: 'Malformed JSON payload.' };
     }
 
-    const deliveryId = deliveryIdFromHeaders(args.headers) ?? randomUUID();
+    const deliveryId = boundDeliveryId(deliveryIdFromHeaders(args.headers) ?? randomUUID());
     const parsed = parseProviderPayload(
       endpoint.provider,
       body,
@@ -171,6 +180,11 @@ export class ProviderWebhookService {
     if (!parsed) {
       store.upsertDelivery({ endpointId: endpoint.id, deliveryId, state: 'malformed' });
       return { httpStatus: 400, state: 'malformed', message: 'Unsupported provider payload.' };
+    }
+
+    const prior = store.getDelivery(endpoint.id, deliveryId);
+    if (prior && SETTLED_INGEST_STATES.has(prior.state)) {
+      return { httpStatus: 202, state: 'duplicate', message: 'Duplicate delivery.' };
     }
 
     store.upsertDelivery({
@@ -209,7 +223,7 @@ export class ProviderWebhookService {
     if (isPushLikeEvent(endpoint.provider, parsed.eventType)) {
       shouldQueue = refsMatchConfigured(src.branch, parsed.ref);
     } else if (isPullRequestLikeEvent(endpoint.provider, parsed.eventType)) {
-      shouldQueue = scope === 'configured_ref_and_prs';
+      shouldQueue = scope === 'configured_ref_and_prs' && isActionablePullRequestAction(parsed.eventAction);
     } else {
       store.upsertDelivery({ endpointId: endpoint.id, deliveryId, state: 'unsupported', outcomeClass: parsed.eventType });
       store.pruneDeliveries(endpoint.id);
@@ -301,7 +315,8 @@ export class ProviderWebhookService {
         state: payload.state ?? 'queued',
         message: payload.message ?? 'Accepted.',
       };
-    } catch {
+    } catch (error) {
+      console.error('[GitProviderHooks] Forward to remote node failed:', error);
       return { httpStatus: 500, state: 'processing_failed', message: 'Remote node is unreachable.' };
     }
   }
