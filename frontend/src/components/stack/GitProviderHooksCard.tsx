@@ -65,7 +65,6 @@ interface ProviderHooksResponse {
 interface GitProviderHooksCardProps {
   stackName: string;
   canEdit: boolean;
-  isDarkMode: boolean;
 }
 
 const PROVIDER_OPTIONS: { value: GitProviderKind; label: string }[] = [
@@ -126,7 +125,7 @@ function formatDeliveryState(state: GitProviderDeliveryState): string {
   return state.replace(/_/g, ' ');
 }
 
-export function GitProviderHooksCard({ stackName, canEdit, isDarkMode: _isDarkMode }: GitProviderHooksCardProps) {
+export function GitProviderHooksCard({ stackName, canEdit }: GitProviderHooksCardProps) {
   const { activeNode } = useNodes();
   const [loading, setLoading] = useState(true);
   const [endpoints, setEndpoints] = useState<ProviderHookEndpoint[]>([]);

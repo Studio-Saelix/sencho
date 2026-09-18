@@ -784,7 +784,7 @@ export function GitSourcePanel({
 
             {source && (
               <SheetSection title="Provider hooks">
-                <GitProviderHooksCard stackName={stackName} canEdit={canEdit} isDarkMode={isDarkMode} />
+                <GitProviderHooksCard stackName={stackName} canEdit={canEdit} />
               </SheetSection>
             )}
 

@@ -40,7 +40,7 @@ describe('GitProviderHooksCard', () => {
       }),
     } as Response);
 
-    render(<GitProviderHooksCard stackName="web" canEdit={false} isDarkMode={false} />);
+    render(<GitProviderHooksCard stackName="web" canEdit={false} />);
 
     await waitFor(() => {
       expect(screen.getByText('GitHub')).toBeInTheDocument();
@@ -74,7 +74,7 @@ describe('GitProviderHooksCard', () => {
         }),
       } as Response);
 
-    render(<GitProviderHooksCard stackName="web" canEdit isDarkMode={false} />);
+    render(<GitProviderHooksCard stackName="web" canEdit />);
 
     await waitFor(() => {
       expect(screen.getByText(/add provider hook/i)).toBeInTheDocument();
