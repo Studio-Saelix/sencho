@@ -15,6 +15,7 @@ import { GitOpsTransitions } from '../services/gitops/transitions';
 import { migrateInlineBlueprints } from '../services/gitops/migrate';
 import { commitBlueprintCreate } from '../services/gitops/blueprintProducers';
 import { decodeGitOpsEvidenceLimitations } from '../services/gitops/json';
+import { intentFingerprint, serializeApprovedBlast } from '../services/blueprintApproval';
 
 describe('gitops inline blueprint migration', () => {
   let tmpDir: string;
@@ -62,6 +63,69 @@ describe('gitops inline blueprint migration', () => {
     // Recorded rather than left blank: an absent approval and an approval that
     // no longer authorizes this intent are otherwise indistinguishable.
     expect(limitations.map(l => l.code)).toContain('blueprint_reapproval_required');
+    expect(app.legacy_combined_approval_ref).toBeNull();
+    expect(app.placement_approval_ref).toBeNull();
+    const legacyRows = DatabaseService.getInstance().getDb().prepare(
+      `SELECT id FROM gitops_approvals WHERE application_id = ? AND kind = 'legacy_combined'`,
+    ).all(app.id);
+    expect(legacyRows).toEqual([]);
+  });
+
+  it('records a non-authoritative legacy_combined marker for an approved Blueprint', () => {
+    const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
+    const blueprint = seedLegacy('mig-approved');
+    db.setBlueprintApproval(blueprint.id, {
+      intentFingerprint: intentFingerprint(blueprint),
+      blastJson: serializeApprovedBlast([{ nodeId: 1, outcome: 'place' }]),
+      approvedBy: 'admin',
+    });
+    const refreshed = db.getBlueprint(blueprint.id)!;
+    expect(outcomeFor(refreshed)).toBe('migrated_inline');
+
+    const app = store.getLiveBlueprintApplication(blueprint.id)!;
+    expect(app.legacy_combined_approval_ref).not.toBeNull();
+    expect(app.placement_approval_ref).toBeNull();
+    expect(app.rollout_generation_id).toBeNull();
+
+    const legacy = store.getApproval(app.legacy_combined_approval_ref!)!;
+    expect(legacy.kind).toBe('legacy_combined');
+    expect(legacy.authoritative).toBe(0);
+    expect(legacy.authority).toBe('legacy_combined');
+    // Cannot stand as placement proof.
+    expect(store.resolveApprovalRef(legacy.id, {
+      kind: 'placement_approval',
+      applicationId: app.id,
+      intentRevisionId: app.intent_revision_id!,
+      requiredNodeIds: [1],
+    })).toBeNull();
+  });
+
+  it('backfills legacy_combined for a schema-v1 live app that is still approved', () => {
+    const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
+    const blueprint = seedLegacy('mig-backfill');
+    migrateInlineBlueprints();
+    const app = store.getLiveBlueprintApplication(blueprint.id)!;
+    // Simulate a v1 migration that never wrote legacy_combined.
+    db.getDb().prepare(
+      'UPDATE gitops_applications SET legacy_combined_approval_ref = NULL WHERE id = ?',
+    ).run(app.id);
+    db.getDb().prepare(
+      'DELETE FROM gitops_approvals WHERE application_id = ? AND kind = ?',
+    ).run(app.id, 'legacy_combined');
+    store.upsertMigrationCheckpoint(`inline_blueprint:${blueprint.id}`, 1, intentFingerprint(blueprint), Date.now());
+
+    db.setBlueprintApproval(blueprint.id, {
+      intentFingerprint: intentFingerprint(db.getBlueprint(blueprint.id)!),
+      blastJson: serializeApprovedBlast([{ nodeId: 1, outcome: 'place' }]),
+      approvedBy: 'admin',
+    });
+    migrateInlineBlueprints();
+
+    const after = store.getLiveBlueprintApplication(blueprint.id)!;
+    expect(after.legacy_combined_approval_ref).not.toBeNull();
+    expect(store.getApproval(after.legacy_combined_approval_ref!)!.authoritative).toBe(0);
   });
 
   it('is a no-op on replay', () => {

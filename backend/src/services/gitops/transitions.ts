@@ -3,11 +3,15 @@ import type { GitSourceErrorCode } from '../GitSourceService';
 import type { ReconcileResult } from './outcomes';
 import { DatabaseService } from '../DatabaseService';
 import {
+  canonicalizeNodeIds,
   decodeArtifactEvidenceJson,
+  decodeGitOpsApprovedTargetEffectJson,
   decodeGitOpsEvidenceLimitations,
   decodeGitOpsJson,
   encodeArtifactEvidenceJson,
+  encodeGitOpsApprovedTargetEffectJson,
   encodeGitOpsEvidenceLimitations,
+  encodeGitOpsRequiredTargetsJson,
   encodeObservedArtifactIdentity,
 } from './json';
 import { insertHistory, type DeployDispatchedPayload, type DeployIntentRefusedPayload, type GitOpsHistoryStage, type HistoryOutcome, type PromotionCommittedPayload } from './history';
@@ -22,6 +26,7 @@ import type {
   GitOpsGenerationRow,
   GitOpsIntentRevisionRow,
   GitOpsRolloutCandidateRow,
+  GitOpsRolloutGenerationRow,
   GitOpsTargetCurrentRow,
   SourcePolicy,
 } from './types';
@@ -1472,13 +1477,14 @@ export class GitOpsTransitions {
     intent: GitOpsIntentRevisionRow;
     envelope: EventEnvelope;
   }): TransitionResult {
-    return this.mutateApp(args.applicationId, args.envelope, 'intent_revised', 'committed', (app) => {
+    return this.mutateApp(args.applicationId, args.envelope, 'intent_revised', 'committed', (app, extras) => {
       if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
       if (args.intent.application_id !== args.applicationId) {
         throw new GitOpsTransitionError('intent belongs to another application');
       }
       this.store().insertIntentRevision(args.intent);
       app.intent_revision_id = args.intent.id;
+      this.invalidatePlacementOnMaterialChange(app, args.envelope, extras);
     });
   }
 
@@ -1494,7 +1500,7 @@ export class GitOpsTransitions {
     candidate: GitOpsRolloutCandidateRow;
     envelope: EventEnvelope;
   }): TransitionResult {
-    return this.mutateApp(args.applicationId, args.envelope, 'rollout_candidate_opened', 'committed', (app) => {
+    return this.mutateApp(args.applicationId, args.envelope, 'rollout_candidate_opened', 'committed', (app, extras) => {
       if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
       if (args.candidate.application_id !== args.applicationId) {
         throw new GitOpsTransitionError('candidate belongs to another application');
@@ -1504,7 +1510,175 @@ export class GitOpsTransitions {
       }
       this.store().insertRolloutCandidate(args.candidate);
       app.rollout_candidate_id = args.candidate.id;
+      this.invalidatePlacementOnMaterialChange(app, args.envelope, extras);
     });
+  }
+
+  /**
+   * Record that a Blueprint was approved before placement was a separate fact.
+   *
+   * The row is never authoritative for placement or source acceptance. It only
+   * marks that a combined approval existed so the dual-write period can tell
+   * "never approved" from "approved before Apply wrote a placement row".
+   */
+  legacyCombinedAppended(args: {
+    applicationId: string;
+    approvalId: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateApp(args.applicationId, args.envelope, 'legacy_combined_appended', 'committed', (app) => {
+      if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
+      this.store().insertApproval({
+        id: args.approvalId,
+        kind: 'legacy_combined',
+        authority: 'legacy_combined',
+        authoritative: 0,
+        application_id: args.applicationId,
+        generation_id: null,
+        intent_revision_id: null,
+        artifact_set_id: null,
+        rollout_candidate_id: null,
+        rollout_generation_id: null,
+        source_acceptance_ref: null,
+        placement_approval_ref: null,
+        required_targets_json: null,
+        preflight_fingerprint: null,
+        fingerprint: null,
+        blast_json: null,
+        policy_provenance_json: null,
+        actor: args.envelope.actor,
+        created_at: args.envelope.at,
+      });
+      // Live pointer only. Never copy this id into placement, source, or
+      // authorization slots: resolveApprovalRef refuses that for this kind.
+      app.legacy_combined_approval_ref = args.approvalId;
+    });
+  }
+
+  /**
+   * Operator placement approval opens a rollout generation for the current
+   * intent and candidate.
+   *
+   * History order is placement_approved, then rollout_generation_opened, so a
+   * reader can tell the approval happened before the generation pointer moved.
+   */
+  placementApproved(args: {
+    applicationId: string;
+    approvalId: string;
+    intentRevisionId: string;
+    blastJson: string;
+    requiredNodeIds: readonly number[];
+    fingerprint: string | null;
+    actor: string | null;
+    envelope: EventEnvelope;
+    rolloutGenerationId: string;
+    candidateId: string;
+    strategyJson?: string;
+  }): TransitionResult {
+    return this.mutateApp(
+      args.applicationId,
+      args.envelope,
+      'rollout_generation_opened',
+      'committed',
+      (app, extras) => {
+        if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
+        if (app.intent_revision_id !== args.intentRevisionId) {
+          throw new GitOpsTransitionError('intent revision is not current');
+        }
+        if (app.rollout_candidate_id !== args.candidateId) {
+          throw new GitOpsTransitionError('rollout candidate is not current');
+        }
+        const candidate = this.store().getRolloutCandidate(args.candidateId);
+        if (!candidate || candidate.application_id !== args.applicationId) {
+          throw new GitOpsTransitionError('rollout candidate not found');
+        }
+        if (candidate.intent_revision_id !== args.intentRevisionId) {
+          throw new GitOpsTransitionError('rollout candidate does not match intent');
+        }
+        const requiredNodeIds = canonicalizeNodeIds(args.requiredNodeIds);
+        const requiredTargetsJson = encodeGitOpsRequiredTargetsJson(requiredNodeIds);
+        // Decode before write so a malformed blast never reaches SQLite. The
+        // encode round-trip also enforces canonical nodeId order.
+        const effect = decodeGitOpsApprovedTargetEffectJson(args.blastJson);
+        const blastJson = encodeGitOpsApprovedTargetEffectJson(effect);
+
+        this.store().insertApproval({
+          id: args.approvalId,
+          kind: 'placement_approval',
+          authority: 'operator',
+          authoritative: 1,
+          application_id: args.applicationId,
+          generation_id: null,
+          intent_revision_id: args.intentRevisionId,
+          artifact_set_id: null,
+          rollout_candidate_id: null,
+          rollout_generation_id: null,
+          source_acceptance_ref: null,
+          placement_approval_ref: null,
+          required_targets_json: requiredTargetsJson,
+          preflight_fingerprint: null,
+          fingerprint: args.fingerprint,
+          blast_json: blastJson,
+          policy_provenance_json: null,
+          actor: args.actor,
+          created_at: args.envelope.at,
+        });
+
+        const previousGenerationId = app.rollout_generation_id;
+        if (previousGenerationId) {
+          this.recordRolloutGenerationSuperseded(
+            app,
+            previousGenerationId,
+            args.rolloutGenerationId,
+            args.envelope,
+            extras,
+          );
+        }
+
+        const generation: GitOpsRolloutGenerationRow = {
+          id: args.rolloutGenerationId,
+          application_id: args.applicationId,
+          intent_revision_id: args.intentRevisionId,
+          rollout_candidate_id: args.candidateId,
+          accepted_generation_id: null,
+          artifact_set_id: null,
+          placement_approval_ref: args.approvalId,
+          source_acceptance_ref: null,
+          rollout_authorization_ref: null,
+          required_targets_json: requiredTargetsJson,
+          preflight_fingerprint: null,
+          preflight_evidence_json: null,
+          rollout_strategy_json: args.strategyJson ?? '{}',
+          provenance: 'placement_approval',
+          supersedes_generation_id: previousGenerationId,
+          superseded_at: null,
+          operation_id: args.envelope.operationId,
+          actor: args.actor,
+          trigger: args.envelope.trigger,
+          created_at: args.envelope.at,
+        };
+        this.store().insertRolloutGeneration(generation);
+
+        // A new placement cannot reuse a prior rollout authorization that named
+        // a different placement or frozen set.
+        app.rollout_authorization_ref = null;
+        app.placement_approval_ref = args.approvalId;
+        // Clear the live legacy pointer only. The legacy_combined row stays in
+        // gitops_approvals as history of the pre-decomposition approval.
+        app.legacy_combined_approval_ref = null;
+        app.rollout_generation_id = args.rolloutGenerationId;
+
+        const approved = this.history(app, args.envelope, {
+          stage: 'placement_approved',
+          outcome: 'committed',
+          placementApprovalRef: args.approvalId,
+          rolloutGenerationId: args.rolloutGenerationId,
+          before: { placementApprovalRef: null },
+          after: { placementApprovalRef: args.approvalId, rolloutGenerationId: args.rolloutGenerationId },
+        });
+        if (approved) extras.historyIds.push(approved);
+      },
+    );
   }
 
   /**
@@ -2582,6 +2756,59 @@ export class GitOpsTransitions {
     if (superseded) extras.historyIds.push(superseded);
   }
 
+  /**
+   * Intent or candidate churn invalidates placement and authorization.
+   *
+   * legacy_combined stays: it is a migration marker for a prior combined
+   * approval, not proof of the new intent, and Apply will clear it when a real
+   * placement row lands. A live rollout generation for the old placement is
+   * superseded so nothing executes against a stale frozen target set.
+   */
+  private invalidatePlacementOnMaterialChange(
+    app: GitOpsApplicationRow,
+    envelope: EventEnvelope,
+    extras: { historyIds: string[] },
+  ): void {
+    app.placement_approval_ref = null;
+    app.rollout_authorization_ref = null;
+    if (!app.rollout_generation_id) return;
+    this.recordRolloutGenerationSuperseded(app, app.rollout_generation_id, null, envelope, extras);
+    app.rollout_generation_id = null;
+  }
+
+  /** Mark the prior live generation superseded and append history. */
+  private recordRolloutGenerationSuperseded(
+    app: GitOpsApplicationRow,
+    previousGenerationId: string,
+    nextGenerationId: string | null,
+    envelope: EventEnvelope,
+    extras: { historyIds: string[] },
+  ): void {
+    this.store().markRolloutGenerationSuperseded(previousGenerationId, envelope.at);
+    const superseded = this.history(app, envelope, {
+      stage: 'rollout_generation_superseded',
+      outcome: 'superseded',
+      rolloutGenerationId: previousGenerationId,
+      before: { rolloutGenerationId: previousGenerationId },
+      after: { rolloutGenerationId: nextGenerationId },
+    });
+    if (superseded) extras.historyIds.push(superseded);
+  }
+
+  /**
+   * Clear live placement (and authorization) when Apply refuses after a
+   * dual-write. Leaves legacy_combined provenance alone.
+   */
+  placementInvalidated(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.mutateApp(args.applicationId, args.envelope, 'placement_invalidated', 'committed', (app, extras) => {
+      if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
+      this.invalidatePlacementOnMaterialChange(app, args.envelope, extras);
+    });
+  }
+
   private allowedExpectedAdvance(
     loadedExpectedId: string | null,
     qualification: ArtifactQualification,
@@ -2698,6 +2925,8 @@ export class GitOpsTransitions {
       generationId?: string | null;
       artifactSetId?: string | null;
       sourceAcceptanceRef?: string | null;
+      placementApprovalRef?: string | null;
+      rolloutGenerationId?: string | null;
       commitSha?: string | null;
     },
   ): string | null {
@@ -2716,6 +2945,8 @@ export class GitOpsTransitions {
       generationId: fields.generationId,
       artifactSetId: fields.artifactSetId,
       sourceAcceptanceRef: fields.sourceAcceptanceRef,
+      placementApprovalRef: fields.placementApprovalRef,
+      rolloutGenerationId: fields.rolloutGenerationId,
       commitSha: fields.commitSha,
       at: envelope.at,
     });

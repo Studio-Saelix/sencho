@@ -12,8 +12,10 @@ import { sanitizeForLog } from '../utils/safeLog';
 import {
     type ConfirmableActionRef,
     type PreviewAction,
+    type ApprovedNodeOutcome,
     filterAuthorizedExecutorActions,
     intentFingerprint,
+    outcomeForConfirmableAction,
     parseApprovedBlastJson,
 } from './blueprintApproval';
 import {
@@ -22,8 +24,13 @@ import {
     buildBlueprintPreview,
 } from './blueprintPreviewProjection';
 import { commitBlueprintDeploymentCause } from './gitops/blueprintDeploymentProducers';
-import { GitOpsStore } from './gitops/store';
+import {
+    decodeGitOpsApprovedTargetEffectJson,
+    decodeGitOpsRequiredTargetsJson,
+} from './gitops/json';
+import { GitOpsStore, placementEffectCompatible } from './gitops/store';
 import { isGitManagedBlueprint } from './gitops/gitManaged';
+import type { GitOpsApplicationRow } from './gitops/types';
 
 const RECONCILER_INTERVAL_MS = 60_000;
 const RECONCILER_INITIAL_DELAY_MS = 5_000;
@@ -232,7 +239,12 @@ export class BlueprintReconciler {
             diagnosticLog('reconcileConfirmedPlan skipped: approval missing, invalid, or drifted', { blueprintId });
             return { outcomes: [], refused: true };
         }
-        const authorized = filterAuthorizedExecutorActions(parsed.entries, executorActions);
+        const gitopsGate = this.authorizeAgainstGitOpsPlacement(blueprint, parsed.entries, executorActions);
+        if (!gitopsGate.ok) {
+            diagnosticLog('reconcileConfirmedPlan skipped: GitOps placement gate refused', { blueprintId });
+            return { outcomes: [], refused: true };
+        }
+        const authorized = gitopsGate.authorized;
         const nodes = DatabaseService.getInstance().getNodes();
         const byId = new Map(nodes.map(n => [n.id, n]));
         const outcomes = await this.executeAuthorizedActions(blueprint, byId, authorized);
@@ -284,7 +296,15 @@ export class BlueprintReconciler {
             return;
         }
 
-        const authorized = filterAuthorizedExecutorActions(parsed.entries, preview.executorActions);
+        const gitopsGate = this.authorizeAgainstGitOpsPlacement(blueprint, parsed.entries, preview.executorActions);
+        if (!gitopsGate.ok) {
+            diagnosticLog('reconcile skipped: GitOps placement gate refused; clearing stale approval', {
+                blueprintId: blueprint.id,
+            });
+            DatabaseService.getInstance().clearBlueprintApproval(blueprint.id);
+            return;
+        }
+        const authorized = gitopsGate.authorized;
         if (authorized.length === 0) {
             diagnosticLog('reconcile skipped: no authorized executor actions', { blueprintId: blueprint.id });
             return;
@@ -477,7 +497,122 @@ export class BlueprintReconciler {
             };
             return { ok: false, code: 'STALE_GUARD', error: errors[outcomeNeeded] };
         }
+        const gitopsGate = this.authorizeAgainstGitOpsPlacement(blueprint, parsed.entries, [
+            { nodeId, action: outcomeNeeded === 'place' ? 'create' : 'remove' },
+        ]);
+        if (!gitopsGate.ok || gitopsGate.authorized.length === 0) {
+            return { ok: false, code: 'STALE_GUARD', error: 'Blueprint placement approval no longer authorizes this node' };
+        }
         return { ok: true };
+    }
+
+    /**
+     * After legacy blueprints.approval_* passes, also require a live GitOps
+     * placement_approval when one exists.
+     *
+     * Dual-write period: a live app with no placement_approval_ref still
+     * executes under legacy columns alone. Once placement is set, resolve must
+     * succeed and the frozen required set must not be widened by the current
+     * blast; otherwise refuse closed.
+     */
+    private authorizeAgainstGitOpsPlacement(
+        blueprint: Blueprint,
+        blastEntries: ApprovedNodeOutcome[],
+        executorActions: ConfirmableActionRef[],
+    ): { ok: true; authorized: ConfirmableActionRef[] } | { ok: false } {
+        const store = GitOpsStore.getInstance();
+        const app = store.getLiveBlueprintApplication(blueprint.id);
+        if (!app || !app.placement_approval_ref) {
+            return {
+                ok: true,
+                authorized: filterAuthorizedExecutorActions(blastEntries, executorActions),
+            };
+        }
+        if (!app.intent_revision_id) return { ok: false };
+
+        const frozenRequired = this.frozenRequiredNodeIds(app);
+        if (!frozenRequired) return { ok: false };
+
+        const placement = store.resolveApprovalRef(app.placement_approval_ref, {
+            kind: 'placement_approval',
+            applicationId: app.id,
+            intentRevisionId: app.intent_revision_id,
+            requiredNodeIds: frozenRequired,
+        });
+        if (!placement?.blast_json) return { ok: false };
+
+        // Refuse when the legacy blast would place outside the frozen set
+        // (widen) or remove a still-required node.
+        if (!placementEffectCompatible(blastEntries, frozenRequired)) {
+            return { ok: false };
+        }
+
+        let placementEffect: ApprovedNodeOutcome[];
+        try {
+            placementEffect = decodeGitOpsApprovedTargetEffectJson(placement.blast_json);
+        } catch (error) {
+            console.error(
+                `[BlueprintReconciler] placement blast decode failed for ${placement.id}:`,
+                error instanceof Error ? error.message : String(error),
+            );
+            return { ok: false };
+        }
+
+        const required = new Set(frozenRequired);
+        const effectByNode = new Map(placementEffect.map((e) => [e.nodeId, e.outcome]));
+        const authorized = filterAuthorizedExecutorActions(blastEntries, executorActions)
+            .filter((ref) => this.actionInsideFrozenAuthorization(ref, required, effectByNode));
+        return { ok: true, authorized };
+    }
+
+    private frozenRequiredNodeIds(app: GitOpsApplicationRow): number[] | null {
+        const store = GitOpsStore.getInstance();
+        let requiredTargetsJson: string | null = null;
+        let sourceLabel: string | null = null;
+
+        if (app.rollout_generation_id) {
+            const generation = store.getRolloutGeneration(app.rollout_generation_id);
+            if (!generation || generation.application_id !== app.id) return null;
+            requiredTargetsJson = generation.required_targets_json;
+            sourceLabel = `rollout generation ${app.rollout_generation_id}`;
+        } else if (app.placement_approval_ref) {
+            const approval = store.getApproval(app.placement_approval_ref);
+            if (!approval?.required_targets_json) return null;
+            requiredTargetsJson = approval.required_targets_json;
+            sourceLabel = `placement approval ${app.placement_approval_ref}`;
+        } else {
+            return null;
+        }
+
+        try {
+            return decodeGitOpsRequiredTargetsJson(requiredTargetsJson).nodeIds;
+        } catch (error) {
+            console.error(
+                `[BlueprintReconciler] ${sourceLabel} required_targets decode failed:`,
+                error instanceof Error ? error.message : String(error),
+            );
+            return null;
+        }
+    }
+
+    /**
+     * An executor action must stay inside the frozen place set and the
+     * placement blast: place only on required nodes, remove only when the
+     * blast explicitly removes that node.
+     */
+    private actionInsideFrozenAuthorization(
+        ref: ConfirmableActionRef,
+        required: ReadonlySet<number>,
+        effectByNode: ReadonlyMap<number, 'place' | 'remove'>,
+    ): boolean {
+        const needed = outcomeForConfirmableAction(ref.action);
+        if (!needed) return false;
+        if (needed === 'place') {
+            return required.has(ref.nodeId)
+                && (effectByNode.get(ref.nodeId) === 'place' || !effectByNode.has(ref.nodeId));
+        }
+        if (required.has(ref.nodeId)) return false;
+        return effectByNode.get(ref.nodeId) === 'remove';
     }
 
     /** Public wrapper for preview/approval projection (read-only). */

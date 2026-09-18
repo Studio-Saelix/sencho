@@ -185,6 +185,74 @@ describe('gitops approvals', () => {
       },
     })).toBeNull();
   });
+
+  it('placementApproved opens a generation and clears the live legacy pointer', async () => {
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    GitOpsTransitions.resetForTests();
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    store.insertApplication({
+      ...directApp('app-place', 'place-web'),
+      target_mode: 'inline_blueprint',
+      lifecycle_key: 'inline_blueprint:99',
+      stack_name: null,
+      blueprint_id: 99,
+      configured_repo_url: null,
+      repo_identity_json: null,
+      configured_ref: null,
+      compose_paths_json: null,
+      materialization_fingerprint: null,
+      intent_revision_id: 'intent-place',
+      rollout_candidate_id: 'cand-place',
+      legacy_combined_approval_ref: 'legacy-place',
+    });
+    store.insertIntentRevision(intent('intent-place', 'app-place'));
+    store.insertRolloutCandidate(candidate('cand-place', 'app-place', 'intent-place', 'gen-a'));
+    store.insertApproval({
+      id: 'legacy-place',
+      kind: 'legacy_combined',
+      authority: 'legacy_combined',
+      authoritative: 0,
+      application_id: 'app-place',
+      generation_id: null,
+      intent_revision_id: null,
+      artifact_set_id: null,
+      rollout_candidate_id: null,
+      rollout_generation_id: null,
+      source_acceptance_ref: null,
+      placement_approval_ref: null,
+      required_targets_json: null,
+      preflight_fingerprint: null,
+      fingerprint: null,
+      blast_json: null,
+      policy_provenance_json: null,
+      actor: 'system',
+      created_at: 1,
+    });
+
+    tx.placementApproved({
+      applicationId: 'app-place',
+      approvalId: 'place-new',
+      intentRevisionId: 'intent-place',
+      blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId: 1, outcome: 'place' }]),
+      requiredNodeIds: [1],
+      fingerprint: 'fp'.repeat(32),
+      actor: 'admin',
+      envelope: { operationId: 'op-place', actor: 'admin', trigger: 'blueprint_apply', at: 50 },
+      rolloutGenerationId: 'rgen-place',
+      candidateId: 'cand-place',
+    });
+
+    const app = store.getApplication('app-place')!;
+    expect(app.placement_approval_ref).toBe('place-new');
+    expect(app.legacy_combined_approval_ref).toBeNull();
+    expect(app.rollout_generation_id).toBe('rgen-place');
+    expect(store.getApproval('legacy-place')).toBeDefined();
+    expect(store.getApproval('place-new')?.kind).toBe('placement_approval');
+    const generation = store.getRolloutGeneration('rgen-place')!;
+    expect(generation.provenance).toBe('placement_approval');
+    expect(generation.placement_approval_ref).toBe('place-new');
+  });
 });
 
 function sourceAcceptance(id: string, applicationId: string, generationId: string): GitOpsApprovalRow {
