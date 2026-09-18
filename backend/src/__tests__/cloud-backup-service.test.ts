@@ -176,7 +176,7 @@ describe('CloudBackupService — uploadSnapshot', () => {
             const list: Array<{ name: string; content: string }> = [];
             extract.on('entry', (header, stream, next) => {
                 const chunks: Buffer[] = [];
-                stream.on('data', (c: Buffer) => chunks.push(c));
+                stream.on('data', (c: unknown) => { if (Buffer.isBuffer(c)) chunks.push(c); });
                 stream.on('end', () => { list.push({ name: header.name, content: Buffer.concat(chunks).toString('utf-8') }); next(); });
                 stream.resume();
             });
@@ -230,7 +230,7 @@ describe('CloudBackupService — uploadSnapshot', () => {
             const list: Array<{ name: string; content: string }> = [];
             extract.on('entry', (header, stream, next) => {
                 const chunks: Buffer[] = [];
-                stream.on('data', (c: Buffer) => chunks.push(c));
+                stream.on('data', (c: unknown) => { if (Buffer.isBuffer(c)) chunks.push(c); });
                 stream.on('end', () => { list.push({ name: header.name, content: Buffer.concat(chunks).toString('utf-8') }); next(); });
                 stream.resume();
             });
