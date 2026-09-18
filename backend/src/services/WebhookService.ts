@@ -14,9 +14,20 @@ import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
-import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
+import {
+    appendRegistryDeliveryCode,
+    prepareOutboundRegistryDeliveryBody,
+    registryDeliveryRefusal,
+    throwRegistryDeliveryRefusal,
+} from '../helpers/registryDeliveryOutbound';
 
-type ExecutionResult = { success: boolean; error?: string; duration_ms: number };
+type ExecutionResult = {
+    success: boolean;
+    error?: string;
+    duration_ms: number;
+    /** Machine-readable registry delivery refusal code, when the run failed on one. */
+    code?: string;
+};
 type ExecutionStatus = 'success' | 'failure';
 
 const REMOTE_WEBHOOK_REQUEST_TIMEOUT_MS = 30_000;
@@ -312,9 +323,15 @@ export class WebhookService {
             return { success: true, duration_ms: durationMs };
         } catch (err) {
             const durationMs = Date.now() - startTime;
-            const error = getErrorMessage(err, 'Remote node operation failed');
+            // A registry delivery refusal keeps its machine-readable code on
+            // the result; the message also carries it because the webhook
+            // execution row persists the message string only.
+            const refusal = registryDeliveryRefusal(err);
+            const error = refusal
+                ? appendRegistryDeliveryCode(getErrorMessage(err, 'Remote node operation failed'), refusal.code)
+                : getErrorMessage(err, 'Remote node operation failed');
             this.recordExecution(webhookId, action, 'failure', triggerSource, durationMs, error);
-            return { success: false, error, duration_ms: durationMs };
+            return { success: false, error, duration_ms: durationMs, code: refusal?.code };
         }
     }
 
@@ -380,9 +397,7 @@ export class WebhookService {
                     body: bodyRecord,
                 });
                 if (!augmented.ok) {
-                    const err = new Error(augmented.error);
-                    (err as { status?: number }).status = augmented.status;
-                    throw err;
+                    throwRegistryDeliveryRefusal(augmented);
                 }
                 bodyToSend = augmented.body;
             } else if (method === 'POST') {
@@ -393,9 +408,7 @@ export class WebhookService {
                     body: {},
                 });
                 if (!augmented.ok) {
-                    const err = new Error(augmented.error);
-                    (err as { status?: number }).status = augmented.status;
-                    throw err;
+                    throwRegistryDeliveryRefusal(augmented);
                 }
                 bodyToSend = augmented.body;
             }

@@ -497,6 +497,7 @@ function application(): GitOpsApplicationRow {
     lifecycle_status: 'active',
     target_mode: 'direct',
     stack_name: 'history-web',
+    configured_source_stack_name: null,
     blueprint_id: null,
     configured_repo_url: 'https://github.com/org/repo.git',
     repo_identity_json: '{"host":"github.com","pathname":"/org/repo.git"}',

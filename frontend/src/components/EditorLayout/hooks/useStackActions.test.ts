@@ -1191,6 +1191,18 @@ describe('useStackActions loadFile startInComposeEdit + pending options', () => 
     expect(overlayState.setPendingUnsavedLoad).toHaveBeenCalledWith('other.yml');
     expect(overlayState.setPendingLoadOptions).toHaveBeenCalledWith({ startInComposeEdit: true });
   });
+
+  it('loadFileOnNode defers same-filename navigation to a different node when dirty', async () => {
+    const node = { id: 2, type: 'remote' } as Parameters<typeof useStackActions>[0]['activeNode'];
+    const { result, overlayState } = setup({
+      editorState: { content: 'dirty', originalContent: 'clean' },
+      stackList: { selectedFile: 'web.yml' },
+    });
+    await result.current.loadFileOnNode(node!, 'web.yml');
+    expect(overlayState.setPendingUnsavedNode).toHaveBeenCalledWith(node);
+    expect(overlayState.setPendingUnsavedLoad).toHaveBeenCalledWith('web.yml');
+    expect(overlayState.setPendingLoadOptions).toHaveBeenCalledWith(null);
+  });
 });
 
 describe('useStackActions update readiness routing', () => {
@@ -2676,6 +2688,132 @@ describe('useStackActions reactive external-network retry ownership', () => {
     // (a second deploy POST) must NOT start. The single deploy call is the
     // original attempt that hit the 409.
     expect(deployCalls).toHaveLength(1);
+  });
+});
+
+describe('useStackActions missing required variable guardrail message propagation', () => {
+  function okJson(payload: unknown): Response {
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  it('prefers guardrail-on renderError in missingExternalBlocksDeploy', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const { result } = setup({ hasGuidedExternalNetworkPreflight: true });
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.endsWith('/missing-external-networks')) {
+        return okJson({
+          status: 'render_unavailable',
+          stackName: 'test-stack',
+          networks: [],
+          autoCreateEnabled: false,
+          declaredExternalCount: 0,
+          renderError: 'Deploy blocked: required environment variable DB_PASSWORD is missing. Define it in a .env or env_file, then deploy again.',
+        });
+      }
+      return okJson({});
+    });
+
+    await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    expect(toast.error).toHaveBeenCalledWith('Deploy blocked: required environment variable DB_PASSWORD is missing. Define it in a .env or env_file, then deploy again.');
+    // Should NOT have called /deploy (blocked by missingExternalBlocksDeploy)
+    expect(apiFetch).not.toHaveBeenCalledWith(expect.stringContaining('/deploy'), expect.any(Object));
+  });
+
+  it('prefers guardrail-off neutral diagnostic in missingExternalBlocksDeploy', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const { result } = setup({ hasGuidedExternalNetworkPreflight: true });
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.endsWith('/missing-external-networks')) {
+        return okJson({
+          status: 'render_unavailable',
+          stackName: 'test-stack',
+          networks: [],
+          autoCreateEnabled: false,
+          declaredExternalCount: 0,
+          renderError: 'Required variable DB_PASSWORD has no value, so the effective model cannot be rendered.',
+        });
+      }
+      return okJson({});
+    });
+
+    await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    expect(toast.error).toHaveBeenCalledWith('Required variable DB_PASSWORD has no value, so the effective model cannot be rendered.');
+    // Should NOT have called /deploy (blocked by missingExternalBlocksDeploy)
+    expect(apiFetch).not.toHaveBeenCalledWith(expect.stringContaining('/deploy'), expect.any(Object));
+  });
+
+  it('falls back to generic message when renderError missing (older-node compatibility)', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const { result } = setup({ hasGuidedExternalNetworkPreflight: true });
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.endsWith('/missing-external-networks')) {
+        return okJson({
+          status: 'render_unavailable',
+          stackName: 'test-stack',
+          networks: [],
+          autoCreateEnabled: false,
+          declaredExternalCount: 0,
+          // No renderError field - older node
+        });
+      }
+      return okJson({});
+    });
+
+    await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    expect(toast.error).toHaveBeenCalledWith('Sencho could not render this stack\'s Compose model to check external networks.');
+    // Should NOT have called /deploy (blocked by missingExternalBlocksDeploy)
+    expect(apiFetch).not.toHaveBeenCalledWith(expect.stringContaining('/deploy'), expect.any(Object));
+  });
+
+  it('falls back to generic message when renderError is empty string', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const { result } = setup({ hasGuidedExternalNetworkPreflight: true });
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.endsWith('/missing-external-networks')) {
+        return okJson({
+          status: 'render_unavailable',
+          stackName: 'test-stack',
+          networks: [],
+          autoCreateEnabled: false,
+          declaredExternalCount: 0,
+          renderError: '', // empty string - should fallback
+        });
+      }
+      return okJson({});
+    });
+
+    await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    expect(toast.error).toHaveBeenCalledWith('Sencho could not render this stack\'s Compose model to check external networks.');
+    // Should NOT have called /deploy (blocked by missingExternalBlocksDeploy)
+    expect(apiFetch).not.toHaveBeenCalledWith(expect.stringContaining('/deploy'), expect.any(Object));
+  });
+
+  it('does not call /deploy when guardrail blocks with exact message', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const { result } = setup({ hasGuidedExternalNetworkPreflight: true });
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (url.endsWith('/missing-external-networks')) {
+        return okJson({
+          status: 'render_unavailable',
+          stackName: 'test-stack',
+          networks: [],
+          autoCreateEnabled: false,
+          declaredExternalCount: 0,
+          renderError: 'Deploy blocked: required environment variable DB_PASSWORD is missing. Define it in a .env or env_file, then deploy again.',
+        });
+      }
+      if (url.endsWith('/deploy')) {
+        return okJson({}); // This should NOT be called
+      }
+      return okJson({});
+    });
+
+    await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    expect(toast.error).toHaveBeenCalledWith('Deploy blocked: required environment variable DB_PASSWORD is missing. Define it in a .env or env_file, then deploy again.');
+    expect(apiFetch).not.toHaveBeenCalledWith(expect.stringContaining('/deploy'), expect.any(Object));
   });
 });
 

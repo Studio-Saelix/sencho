@@ -38,9 +38,10 @@ async function openGitSourcePanel(page: Page) {
   const gitBtn = page.getByRole('button', { name: /Git Source/i });
   await expect(gitBtn).toBeVisible({ timeout: 10_000 });
   await gitBtn.click();
-  // Match the title heading specifically; the modal also has a mono kicker
-  // ("<STACK> · GIT SOURCE") that would satisfy a plain getByText match.
+  // Sheet chrome: heading plus crumb. The old centered modal used a kicker
+  // ("<STACK> · GIT SOURCE") that a plain getByText match would also hit.
   await expect(page.getByRole('dialog').getByRole('heading', { name: /git source/i })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByRole('navigation', { name: /sheet location/i })).toContainText('Git source');
 }
 
 test.describe('Git Sources', () => {
@@ -196,8 +197,61 @@ test.describe('Git Sources', () => {
     await expect(page.getByRole('alertdialog')).toBeVisible({ timeout: 5_000 });
     await page.getByRole('alertdialog').getByRole('button', { name: /^Detach$/ }).click();
 
-    // After detach, the "Detach" button is gone from the panel footer.
+    // After detach, the "Detach" button is gone from the confirm dialog.
     await expect(page.getByRole('dialog').getByRole('button', { name: /^Detach$/ })).not.toBeVisible({ timeout: 5_000 });
+  });
+
+  test('sheet chrome offers suspend and resume for a linked source', async ({ page }) => {
+    const putStatus = await page.evaluate(async (name) => {
+      const res = await fetch(`/api/stacks/${name}/git-source`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          repo_url: 'https://github.com/docker/awesome-compose.git',
+          branch: 'master',
+          compose_path: 'nginx-golang/compose.yaml',
+          sync_env: false,
+          auth_type: 'none',
+          auto_apply_on_webhook: false,
+          auto_deploy_on_apply: false,
+        }),
+      });
+      return res.status;
+    }, TEST_STACK);
+    if (putStatus >= 400) {
+      test.skip(true, `Upstream dry-run returned ${putStatus}; skipping suspend path`);
+      return;
+    }
+
+    await openGitSourcePanel(page);
+    await expect(page.getByRole('navigation', { name: /sheet location/i })).toContainText(TEST_STACK);
+    await expect(page.getByRole('button', { name: /^suspend$/i })).toBeVisible();
+
+    await page.getByRole('button', { name: /^suspend$/i }).click();
+    const suspendDialog = page.getByRole('alertdialog');
+    await expect(suspendDialog).toBeVisible({ timeout: 5_000 });
+    await suspendDialog.getByRole('button', { name: /^suspend$/i }).click();
+
+    await expect(page.getByRole('button', { name: /^resume$/i })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole('button', { name: /^suspend$/i })).toHaveCount(0);
+
+    await page.getByRole('button', { name: /^resume$/i }).click();
+    await expect(page.getByText(/reconciliation resumed/i)).toBeVisible({ timeout: 10_000 });
+    // Resume kicks evaluateNow, which is fetching for a while. availableActions
+    // is empty during that fetch, so wait for the source to leave checking
+    // before asserting Suspend is back.
+    await expect.poll(async () => {
+      const body = await page.evaluate(async (name) => {
+        const res = await fetch(`/api/stacks/${name}/git-source`, { credentials: 'include' });
+        return res.json();
+      }, TEST_STACK) as { gitopsRevision?: { facets?: { source?: { status?: string } } } };
+      const status = body.gitopsRevision?.facets?.source?.status;
+      return Boolean(status && status !== 'checking_fetching' && status !== 'applying');
+    }, { timeout: 30_000, intervals: [1_000] }).toBeTruthy();
+    await page.keyboard.press('Escape');
+    await openGitSourcePanel(page);
+    await expect(page.getByRole('button', { name: /^suspend$/i })).toBeVisible({ timeout: 10_000 });
   });
 });
 
@@ -645,6 +699,127 @@ test.describe('Git Sources complete-project materialization (local git server)',
 
     await page.setViewportSize({ width: 375, height: 812 });
     await expect(applyBtn).toBeVisible();
+  });
+});
+
+test.describe('Git source suspend and resume over the API (local git server)', () => {
+  test.skip(!gitAvailable(), 'system git binary is not available');
+
+  // The whole journey is one scenario with wall-clock steps (an unattended
+  // poll fires on a 60s floor), so it gets a longer timeout than the suite
+  // default rather than being split into state-leaking fragments.
+  test.setTimeout(180_000);
+
+  let server: { url: string; close: () => void };
+  let stackName: string;
+  let previousPollIntervalMins: number;
+
+  test.beforeAll(async () => {
+    server = await serveRepos({
+      sync: buildFixtureRepo({ 'compose.yaml': 'services:\n  web:\n    image: nginx\n' }),
+    });
+  });
+
+  test.afterAll(() => {
+    server?.close();
+  });
+
+  async function api(page: Page, path: string, init?: { method?: string; body?: unknown }) {
+    return page.evaluate(async ({ p, opts }) => {
+      const res = await fetch(p, {
+        method: opts?.method ?? 'GET',
+        headers: opts?.body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+        body: opts?.body !== undefined ? JSON.stringify(opts.body) : undefined,
+        credentials: 'include',
+      });
+      let json: unknown = null;
+      try { json = await res.json(); } catch { /* empty or non-JSON body */ }
+      return { status: res.status, json };
+    }, { p: path, opts: init });
+  }
+
+  /** History entries for this stack, newest page first, as { stage, trigger, outcome }. */
+  async function historyEntries(page: Page): Promise<Array<{ stage: string; trigger: string; outcome: string }>> {
+    const res = await api(page, `/api/stacks/${stackName}/git-source/history?limit=100`);
+    const items = (res.json as { items?: Array<Record<string, unknown>> } | null)?.items ?? [];
+    return items.map((i) => ({
+      stage: String(i.stage ?? ''),
+      trigger: String(i.trigger ?? ''),
+      outcome: String(i.outcome ?? ''),
+    }));
+  }
+
+  test('suspension stops reconciliation and resume re-evaluates the source immediately', async ({ page }) => {
+    await loginAs(page);
+    stackName = `e2e-susp-${Date.now()}`;
+
+    // Park the unattended cadence on the slowest floor the settings allow
+    // (60s effective) and restore whatever the instance had before, so the
+    // scenario never races a background poll and never changes the box.
+    previousPollIntervalMins = ((await api(page, '/api/git-sources/polling')).json as { poll_interval_mins?: number })?.poll_interval_mins ?? 0;
+    await api(page, '/api/git-sources/polling', { method: 'PATCH', body: { poll_interval_mins: 1 } });
+
+    try {
+      expect((await api(page, '/api/stacks', { method: 'POST', body: { stackName } })).status).toBe(200);
+
+      const saved = await api(page, `/api/stacks/${stackName}/git-source`, {
+        method: 'PUT',
+        body: {
+          repo_url: `${server.url}/sync.git`,
+          branch: 'main',
+          compose_paths: ['compose.yaml'],
+          context_dir: null,
+          sync_env: false,
+          auth_type: 'none',
+          auto_apply_on_webhook: false,
+          auto_deploy_on_apply: false,
+          source_policy: 'automatic',
+        },
+      });
+      expect(saved.status, JSON.stringify(saved.json)).toBe(200);
+
+      // A manual pull proves the source is live and records a manual-
+      // trigger attempt before the suspension journey starts.
+      const pulled = await api(page, `/api/stacks/${stackName}/git-source/pull`, { method: 'POST' });
+      expect(pulled.status, JSON.stringify(pulled.json)).toBe(200);
+
+      const suspended = await api(page, `/api/stacks/${stackName}/git-source/suspend`, {
+        method: 'POST',
+        body: { reason: 'e2e maintenance hold' },
+      });
+      expect(suspended.status).toBe(200);
+      expect((suspended.json as { outcome: string }).outcome).toBe('suspended');
+
+      // While suspended, a pull is refused outright, not silently skipped.
+      const refused = await api(page, `/api/stacks/${stackName}/git-source/pull`, { method: 'POST' });
+      expect(refused.status).toBe(409);
+      expect((refused.json as { code: string }).code).toBe('OPERATION_IN_FLIGHT');
+      // resume() itself stamps 'resume' on the suspension transition and
+      // the armed poll cursor, so only a reconcile-start row can prove the
+      // immediate re-evaluation actually fired.
+      const reconcileStarts = (rows: Array<{ stage: string; trigger: string }>) =>
+        rows.filter((e) => e.stage === 'source_reconcile_started' && e.trigger === 'resume').length;
+      expect(reconcileStarts(await historyEntries(page))).toBe(0);
+
+      const resumed = await api(page, `/api/stacks/${stackName}/git-source/resume`, { method: 'POST' });
+      expect(resumed.status, JSON.stringify(resumed.json)).toBe(200);
+      expect((resumed.json as { outcome: string }).outcome).not.toBe('suspended');
+
+      // The response returns before the reconcile it kicked off can finish,
+      // so poll the history until the resume-trigger reconcile lands: proof
+      // the resumed source was re-evaluated now rather than at its next
+      // scheduled cursor (which is a minute away).
+      await expect.poll(async () => {
+        return reconcileStarts(await historyEntries(page));
+      }, { timeout: 30_000, intervals: [1_000] }).toBeGreaterThan(0);
+    } finally {
+      await api(page, `/api/stacks/${stackName}/git-source`, { method: 'DELETE' }).catch(() => {});
+      await api(page, `/api/stacks/${stackName}`, { method: 'DELETE' }).catch(() => {});
+      await api(page, '/api/git-sources/polling', {
+        method: 'PATCH',
+        body: { poll_interval_mins: previousPollIntervalMins },
+      }).catch(() => {});
+    }
   });
 });
 

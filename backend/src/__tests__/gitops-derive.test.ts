@@ -628,7 +628,7 @@ describe('gitops derivation', () => {
     store.insertApplication(interruptedApp('app-int-ap-block', { candidate_plan_blocked: 1 }));
     projection = projectApplication('app-int-ap-block', false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
-    expect(projection.availableActions).toEqual(['dismiss']);
+    expect(projection.availableActions).toEqual(['dismiss', 'suspend']);
   });
 
   it('offers ordinary apply only when the candidate generation is present, owned, and current', () => {
@@ -679,6 +679,41 @@ describe('gitops derivation', () => {
     expect(projection.availableActions).not.toContain('apply');
   });
 
+  it('reports a scheduled poll before the accepted and never-reconciled fallbacks', () => {
+    const store = GitOpsStore.getInstance();
+    // A poll cursor with no failure, no retry cursor, and no candidate means
+    // the controller is waiting for the next poll, not that the source is idle.
+    store.insertApplication(rawApp('app-poll-due', { stack_name: 'poll-due-web', next_poll_at: 12345 }));
+    const projection = projectApplication('app-poll-due', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    if (projection.facets.source.status !== 'source_poll_scheduled') throw new Error('expected poll facet');
+    expect(projection.facets.source.nextPollAt).toBe(12345);
+    // An accepted generation is still the stronger evidence, so the poll
+    // cursor must not mask it.
+    store.insertApplication(rawApp('app-poll-accepted', {
+      stack_name: 'poll-accepted-web',
+      next_poll_at: 12345,
+      desired_commit_sha: 'abc123',
+      accepted_generation_id: 'gen-poll-accepted',
+    }));
+    store.insertGeneration(gen('gen-poll-accepted', 'app-poll-accepted'));
+    const acceptedProjection = projectApplication('app-poll-accepted', false);
+    if (acceptedProjection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(acceptedProjection.facets.source.status).toBe('application_generation_accepted');
+    // A failure beats the cursor the same way the cursor beats the fallbacks:
+    // a poll schedule is never an excuse to hide a fetch failure.
+    store.insertApplication(rawApp('app-poll-failed', {
+      stack_name: 'poll-failed-web',
+      next_poll_at: 12345,
+      failure_stage: 'fetch',
+      failure_class: 'NETWORK_TIMEOUT',
+      failure_at: 1,
+    }));
+    const failedProjection = projectApplication('app-poll-failed', false);
+    if (failedProjection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(failedProjection.facets.source.status).toBe('source_failed');
+  });
+
   it('reports an accepted generation only when its evidence is present, owned, and current', () => {
     const store = GitOpsStore.getInstance();
     const acceptedApp = (id: string, overrides: Partial<GitOpsApplicationRow> = {}) =>
@@ -697,7 +732,7 @@ describe('gitops derivation', () => {
     let projection = projectApplication('app-acc-valid', false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
     expect(projection.facets.source.status).toBe('application_generation_accepted');
-    expect(projection.availableActions).toEqual(['none']);
+    expect(projection.availableActions).toEqual(['suspend']);
 
     // Missing: the accepted pointer names a generation that is gone, so
     // neither the fingerprint nor the sha comparison can run and success
@@ -916,6 +951,83 @@ describe('gitops derivation', () => {
     expect(projection.drift).toHaveLength(1);
     expect(projection.drift[0].action).toBe('none');
   });
+
+  it('offers suspend on a live Direct source and never retry', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertGeneration(gen('gen-app-live-suspend', 'app-live-suspend'));
+    store.insertApplication(rawApp('app-live-suspend', {
+      stack_name: 'live-suspend-web',
+      accepted_generation_id: 'gen-app-live-suspend',
+      desired_commit_sha: 'abc123',
+    }));
+    const projection = projectApplication('app-live-suspend', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.availableActions).toContain('suspend');
+    expect(projection.availableActions).not.toContain('resume');
+    expect(projection.availableActions).not.toContain('retry');
+  });
+
+  it('offers resume on a suspended Direct source and never retry', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(rawApp('app-suspended', {
+      stack_name: 'suspended-web',
+      suspended_at: 10,
+      source_suspended_reason: 'paused',
+      retry_at: 99,
+      retry_count: 2,
+      failure_stage: 'fetch',
+      failure_class: 'NETWORK_TIMEOUT',
+      failure_at: 1,
+    }));
+    const projection = projectApplication('app-suspended', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('source_suspended');
+    expect(projection.availableActions).toContain('resume');
+    expect(projection.availableActions).not.toContain('suspend');
+    expect(projection.availableActions).not.toContain('retry');
+  });
+
+  it('offers retry only for retry-eligible failures that are not suspended', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(rawApp('app-failed-retry', {
+      stack_name: 'failed-retry-web',
+      failure_stage: 'fetch',
+      failure_class: 'NETWORK_TIMEOUT',
+      failure_at: 1,
+    }));
+    let projection = projectApplication('app-failed-retry', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('source_failed');
+    expect(projection.availableActions).toContain('retry');
+    expect(projection.availableActions).toContain('suspend');
+    expect(projection.availableActions).not.toContain('resume');
+
+    store.insertApplication(rawApp('app-retry-sched', {
+      stack_name: 'retry-sched-web',
+      retry_at: 50,
+      retry_count: 1,
+    }));
+    projection = projectApplication('app-retry-sched', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.facets.source.status).toBe('source_retry_scheduled');
+    expect(projection.availableActions).toContain('retry');
+    expect(projection.availableActions).toContain('suspend');
+  });
+
+  it('does not offer controller actions on Blueprint applications', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(rawApp('app-bp-ctrl', {
+      target_mode: 'blueprint',
+      blueprint_id: 31,
+      lifecycle_key: 'blueprint:31',
+      stack_name: null,
+    }));
+    const projection = projectApplication('app-bp-ctrl', false);
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    expect(projection.availableActions).not.toContain('suspend');
+    expect(projection.availableActions).not.toContain('resume');
+    expect(projection.availableActions).not.toContain('retry');
+  });
 });
 
 function env(operationId: string): EventEnvelope {
@@ -929,6 +1041,7 @@ function app(id: string, stackName: string): GitOpsApplicationRow {
     lifecycle_status: 'active',
     target_mode: 'direct',
     stack_name: stackName,
+    configured_source_stack_name: null,
     blueprint_id: null,
     configured_repo_url: 'https://github.com/org/repo.git',
     repo_identity_json: '{"host":"github.com","pathname":"/org/repo.git"}',

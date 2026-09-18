@@ -33,7 +33,11 @@ import { validateStackPatternForRedos } from '../helpers/stackPattern';
 
 export { validateStackPatternForRedos } from '../helpers/stackPattern';
 import { getErrorMessage } from '../utils/errors';
-import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
+import {
+  prepareOutboundRegistryDeliveryBody,
+  registryDeliveryRefusal,
+  throwRegistryDeliveryRefusal,
+} from '../helpers/registryDeliveryOutbound';
 import { parseIntParam } from '../utils/parseIntParam';
 import { parseRequestedTargetVersion, pickCompareTarget } from '../utils/targetVersion';
 import {
@@ -374,6 +378,11 @@ function offlineRemoteOverview(node: Node, status: 'online' | 'offline'): FleetN
   };
 }
 
+// Per-remote overview probe budget. A configured-but-dead proxy host must
+// degrade to offline inside this window so one unreachable node cannot hold
+// GET /api/fleet/overview (and the Fleet, Heartbeat, and Mobile loading states).
+const FLEET_OVERVIEW_PROBE_TIMEOUT_MS = 3000;
+
 async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise<FleetNodeOverview> {
   const target = NodeRegistry.getInstance().getProxyTarget(node.id);
   if (!target) {
@@ -391,10 +400,11 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
   const t0 = Date.now();
 
   try {
+    const signal = AbortSignal.timeout(FLEET_OVERVIEW_PROBE_TIMEOUT_MS);
     const [statsRes, systemStatsRes, stacksRes] = await Promise.allSettled([
-      safeRemoteFetch(`${baseUrl}/api/stats`, { headers, signal: AbortSignal.timeout(10000) }, target.trustedLoopback),
-      safeRemoteFetch(`${baseUrl}/api/system/stats`, { headers, signal: AbortSignal.timeout(10000) }, target.trustedLoopback),
-      safeRemoteFetch(`${baseUrl}/api/stacks`, { headers, signal: AbortSignal.timeout(10000) }, target.trustedLoopback),
+      safeRemoteFetch(`${baseUrl}/api/stats`, { headers, signal }, target.trustedLoopback),
+      safeRemoteFetch(`${baseUrl}/api/system/stats`, { headers, signal }, target.trustedLoopback),
+      safeRemoteFetch(`${baseUrl}/api/stacks`, { headers, signal }, target.trustedLoopback),
     ]);
 
     interface RemoteSystemStats {
@@ -625,18 +635,7 @@ fleetRouter.get('/overview', authMiddleware, async (req: Request, res: Response)
     const overview: FleetNodeOverview[] = results.map((result, i) => {
       if (result.status === 'fulfilled') return result.value;
       console.error(`[Fleet] Failed to fetch node ${nodes[i].name}:`, result.reason);
-      return {
-        id: nodes[i].id,
-        name: nodes[i].name,
-        type: nodes[i].type,
-        status: 'offline' as const,
-        stats: null,
-        systemStats: null,
-        stacks: null,
-        cordoned: nodes[i].cordoned,
-        cordoned_at: nodes[i].cordoned_at,
-        cordoned_reason: nodes[i].cordoned_reason,
-      };
+      return offlineRemoteOverview(nodes[i], 'offline');
     });
 
     if (debug) {
@@ -2866,7 +2865,7 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
     body: {},
   });
   if (!augmented.ok) {
-    throw new Error(augmented.error);
+    throwRegistryDeliveryRefusal(augmented);
   }
   const deployRes = await safeRemoteFetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/deploy`, {
     method: 'POST',
@@ -3016,6 +3015,13 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       res.status(409).json({ error: getErrorMessage(error, 'Restore conflict'), code: conflict });
       return;
     }
+    // A registry delivery refusal answers with its own status and code so
+    // callers can distinguish it from a generic restore failure.
+    const refusal = registryDeliveryRefusal(error);
+    if (refusal) {
+      res.status(refusal.status).json({ error: getErrorMessage(error, 'Registry delivery refused'), code: refusal.code });
+      return;
+    }
     console.error('[Fleet Snapshot] Restore error:', error);
     res.status(500).json({ error: 'Failed to restore stack from snapshot' });
   }
@@ -3033,6 +3039,8 @@ interface SnapshotRestoreResult {
   error?: string;
   /** A non-fatal documentation-notes restore failure; files still restored. */
   notesError?: string;
+  /** Machine-readable registry delivery refusal code, when the redeploy failed on one. */
+  code?: string;
 }
 
 fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Request, res: Response): Promise<void> => {
@@ -3128,7 +3136,7 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
         }
         results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored, notesError });
       } catch (e) {
-        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed') });
+        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed'), code: registryDeliveryRefusal(e)?.code });
       }
     }
 

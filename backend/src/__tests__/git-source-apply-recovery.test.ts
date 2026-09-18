@@ -21,6 +21,8 @@ const mockGitOpsApplication = {
 };
 const mockGitOpsStore = {
   getLiveDirectApplication: vi.fn().mockReturnValue(mockGitOpsApplication),
+  getLiveBlueprintApplicationBySourceStack: vi.fn().mockReturnValue(undefined),
+  getLiveSourceApplication: vi.fn().mockReturnValue(mockGitOpsApplication),
   getApplication: vi.fn().mockReturnValue(mockGitOpsApplication),
   getGeneration: vi.fn().mockReturnValue(undefined),
   getSettledAttempt: vi.fn().mockReturnValue(undefined),
@@ -313,7 +315,7 @@ describe('git-source apply recovery (R1)', () => {
 
   it('refuses to promote when recovery capture fails', async () => {
     mockCaptureCandidate.mockRejectedValue(new Error('Exact authored-project rollback coverage is unavailable'));
-    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
 
     const { GitSourceService, GitSourceError } = await import('../services/GitSourceService');
     const svc = GitSourceService.getInstance();

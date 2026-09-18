@@ -84,6 +84,8 @@ export const GITOPS_LIMITATION_COPY: Record<string, string | undefined> = {
     'A pending commit was recorded before Sencho tracked this stack and carries no proof of which repository or branch it came from. Fetch again to rebuild it.',
   blueprint_reapproval_required:
     'The stored approval does not cover what this Blueprint currently asks for, so it needs approving again before it can roll out.',
+  git_managed_rollout_not_enabled:
+    'This Blueprint\'s content is Git-managed, so it cannot deploy from the stored snapshot.',
 };
 
 /**

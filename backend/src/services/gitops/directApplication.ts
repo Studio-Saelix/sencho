@@ -5,6 +5,7 @@ import { MANAGED_ROOT_NAME } from './managedPaths';
 import { encodeGitOpsJson } from './json';
 import { materializationFingerprint } from './fingerprint';
 import { parseLegacyRepoUrl, parseStorableRepoUrl, secretFreeRepoUrl, secretFreeRepoUrlFromStorable, serializeRepoIdentity, serializeRepoIdentityFromStorable, type RepoIdentity } from './repoIdentity';
+import type { SourcePolicy } from './types';
 import type { RefKind } from '../git/types';
 import type {
   GitOpsApplicationRow,
@@ -116,13 +117,14 @@ export function buildDirectApplicationRow(args: {
   identity: DirectSourceIdentity;
   lifecycleStatus: 'creating' | 'active';
   at: number;
-}): GitOpsApplicationRow {
+}, policy: SourcePolicy): GitOpsApplicationRow {
   return {
     id: args.id,
     lifecycle_key: `direct:${args.stackName}`,
     lifecycle_status: args.lifecycleStatus,
     target_mode: 'direct',
     stack_name: args.stackName,
+    configured_source_stack_name: null,
     blueprint_id: null,
     configured_repo_url: args.identity.repoUrl,
     repo_identity_json: encodeGitOpsJson(args.identity.identity),
@@ -157,7 +159,7 @@ export function buildDirectApplicationRow(args: {
     pause_at: null,
     pause_reason: null,
     source_suspended_reason: null,
-    source_policy: 'manual',
+    source_policy: policy,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,
@@ -199,6 +201,9 @@ export function buildGenerationRow(args: {
   at: number;
   /** A blocked change plan is recorded, but such a generation can never apply. */
   planBlocked?: boolean;
+  composeInputs?: unknown;
+  sourcePolicyEvidence?: unknown;
+  securityPolicyEvidence?: unknown;
 }): GitOpsGenerationRow {
   return {
     id: args.id,
@@ -222,9 +227,15 @@ export function buildGenerationRow(args: {
     previous_generation_id: null,
     redacted_limitations_json: '[]',
     portable_manifest_json: null,
-    compose_inputs_json: null,
-    source_policy_evidence_json: null,
-    security_policy_evidence_json: null,
+    compose_inputs_json: args.composeInputs === undefined
+      ? null
+      : encodeGitOpsJson(args.composeInputs),
+    source_policy_evidence_json: args.sourcePolicyEvidence === undefined
+      ? null
+      : encodeGitOpsJson(args.sourcePolicyEvidence),
+    security_policy_evidence_json: args.securityPolicyEvidence === undefined
+      ? null
+      : encodeGitOpsJson(args.securityPolicyEvidence),
     support_requirements_json: null,
     compatibility_requirements_json: null,
     created_at: args.at,

@@ -9,7 +9,10 @@ import { render, screen, waitFor, fireEvent, within } from '@testing-library/rea
 
 // Mutable controls so a deploy-mode test can set the active node and capture the
 // runWithLog params, while the load tests keep the default (no active node).
-const nodeCtl = vi.hoisted(() => ({ activeNode: null as { id: number; type?: string } | null }));
+const nodeCtl = vi.hoisted(() => ({
+  activeNode: null as { id: number; type?: string } | null,
+  hasCapability: vi.fn(() => true),
+}));
 const dfCtl = vi.hoisted(() => ({ params: null as null | { stackName: string; action: string; nodeId: number | null } }));
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -27,7 +30,7 @@ vi.mock('@/context/DeployFeedbackContext', () => ({
   }),
 }));
 vi.mock('@/context/NodeContext', () => ({
-  useNodes: () => ({ activeNode: nodeCtl.activeNode }),
+  useNodes: () => ({ activeNode: nodeCtl.activeNode, hasCapability: nodeCtl.hasCapability }),
 }));
 // Drive applyPull(commitSha, deploy=true) directly without standing up the real
 // diff UI; the panel passes applyPull as onApply.
@@ -82,9 +85,12 @@ import {
   facets,
   liveRevision,
   missingApplicationLimitation,
+  plainSource,
+  sourceIdentity,
   sourceRevision,
 } from '@/__tests__/gitopsFixtures';
 import { SOURCE_STATE } from '@/lib/gitopsState';
+import type { GitOpsAvailableAction } from '@/types/gitops';
 
 function jsonRes(body: unknown, ok = true, status = 200) {
   return { ok, status, json: async () => body, text: async () => '' } as unknown as Response;
@@ -157,6 +163,7 @@ function panel() {
 beforeEach(() => {
   vi.mocked(apiFetch).mockReset();
   nodeCtl.activeNode = null;
+  nodeCtl.hasCapability.mockReturnValue(true);
   dfCtl.params = null;
   vi.mocked(toast.success).mockClear();
   vi.mocked(toast.warning).mockClear();
@@ -170,7 +177,7 @@ describe('GitSourcePanel load', () => {
     render(panel());
 
     // The repository field replaces the loading skeleton, so waiting on it is
-    // what proves the load settled. The footer buttons render in both states.
+    // what proves the load settled. Toolbar actions render in both states.
     expect(await screen.findByLabelText(/repository url/i)).toHaveValue('');
     // Save (not Update) and no Pull now / Remove affordances means the panel
     // did not mistake the { linked: false } sentinel for a configured source.
@@ -178,6 +185,10 @@ describe('GitSourcePanel load', () => {
     expect(screen.queryByRole('button', { name: /update/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /pull now/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
+    expect(screen.getByRole('navigation', { name: /sheet location/i })).toHaveTextContent(
+      'Stack›web›Git source',
+    );
+    expect(screen.queryByText(/GIT SOURCE/)).not.toBeInTheDocument();
   });
 
   it('renders the configured source when one is attached', async () => {
@@ -566,5 +577,251 @@ describe('GitSourcePanel GitOps state', () => {
     await waitFor(() => expect(
       vi.mocked(apiFetch).mock.calls.some(c => String(c[0]).includes('/git-source/pull')),
     ).toBe(true));
+  });
+});
+
+function controllerRevision(args: {
+  status: 'application_generation_accepted' | 'source_failed' | 'source_retry_scheduled' | 'source_suspended';
+  actions: GitOpsAvailableAction[];
+}) {
+  if (args.status === 'application_generation_accepted') {
+    return liveRevision({
+      availableActions: args.actions,
+      facets: facets({
+        source: plainSource('application_generation_accepted', { candidateGenerationId: null }),
+      }),
+    });
+  }
+  if (args.status === 'source_failed') {
+    return liveRevision({
+      availableActions: args.actions,
+      facets: facets({
+        source: {
+          ...sourceIdentity({ candidateGenerationId: null }),
+          status: 'source_failed',
+          failureStage: 'fetch',
+          failureClass: 'NETWORK_TIMEOUT',
+          failureAt: 1,
+          retryAt: Date.now() + 60_000,
+          retryCount: 1,
+        },
+      }),
+    });
+  }
+  if (args.status === 'source_retry_scheduled') {
+    return liveRevision({
+      availableActions: args.actions,
+      facets: facets({
+        source: {
+          ...sourceIdentity({ candidateGenerationId: null }),
+          status: 'source_retry_scheduled',
+          retryAt: Date.now() + 60_000,
+          retryCount: 1,
+        },
+      }),
+    });
+  }
+  return liveRevision({
+    availableActions: args.actions,
+    facets: facets({
+      source: {
+        ...sourceIdentity({ candidateGenerationId: null }),
+        status: 'source_suspended',
+        suspendedAt: 1,
+        suspendedReason: 'paused for maintenance',
+      },
+    }),
+  });
+}
+
+describe('GitSourcePanel controller controls', () => {
+  it('shows Suspend when availableActions, capability, and stack:edit all hold', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(controllerRevision({ status: 'application_generation_accepted', actions: ['suspend'] }))),
+    );
+    render(panel());
+    expect(await screen.findByRole('button', { name: /^suspend$/i })).toBeInTheDocument();
+  });
+
+  it('hides Suspend when the source-controller capability is missing', async () => {
+    nodeCtl.hasCapability.mockReturnValue(false);
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(controllerRevision({ status: 'application_generation_accepted', actions: ['suspend'] }))),
+    );
+    render(panel());
+    await screen.findByRole('button', { name: /pull now/i });
+    expect(screen.queryByRole('button', { name: /^suspend$/i })).not.toBeInTheDocument();
+  });
+
+  it('hides Suspend without stack:edit', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(controllerRevision({ status: 'application_generation_accepted', actions: ['suspend'] }))),
+    );
+    render(
+      <GitSourcePanel open onOpenChange={vi.fn()} stackName="web" canEdit={false} isDarkMode={false} />,
+    );
+    await screen.findByRole('button', { name: /pull now/i });
+    expect(screen.queryByRole('button', { name: /^suspend$/i })).not.toBeInTheDocument();
+  });
+
+  it('shows Resume when availableActions includes resume', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(controllerRevision({ status: 'source_suspended', actions: ['resume'] }))),
+    );
+    render(panel());
+    expect(await screen.findByRole('button', { name: /^resume$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^suspend$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^retry$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /pull now/i })).not.toBeInTheDocument();
+  });
+
+  it('hides Resume when the source-controller capability is missing', async () => {
+    nodeCtl.hasCapability.mockReturnValue(false);
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(controllerRevision({ status: 'source_suspended', actions: ['resume'] }))),
+    );
+    render(panel());
+    await screen.findByRole('button', { name: /^update$/i });
+    expect(screen.queryByRole('button', { name: /^resume$/i })).not.toBeInTheDocument();
+  });
+
+  it('hides Resume without stack:edit', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(controllerRevision({ status: 'source_suspended', actions: ['resume'] }))),
+    );
+    render(
+      <GitSourcePanel open onOpenChange={vi.fn()} stackName="web" canEdit={false} isDarkMode={false} />,
+    );
+    await screen.findByTestId('git-controller-state');
+    expect(screen.queryByRole('button', { name: /^resume$/i })).not.toBeInTheDocument();
+  });
+
+  it('shows Retry on a retry-eligible failure', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(controllerRevision({ status: 'source_failed', actions: ['retry', 'suspend'] }))),
+    );
+    render(panel());
+    expect(await screen.findByRole('button', { name: /^retry$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^suspend$/i })).toBeInTheDocument();
+  });
+
+  it('hides Retry when the source-controller capability is missing', async () => {
+    nodeCtl.hasCapability.mockReturnValue(false);
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(controllerRevision({ status: 'source_failed', actions: ['retry', 'suspend'] }))),
+    );
+    render(panel());
+    await screen.findByRole('button', { name: /pull now/i });
+    expect(screen.queryByRole('button', { name: /^retry$/i })).not.toBeInTheDocument();
+  });
+
+  it('hides Retry without stack:edit', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(controllerRevision({ status: 'source_failed', actions: ['retry', 'suspend'] }))),
+    );
+    render(
+      <GitSourcePanel open onOpenChange={vi.fn()} stackName="web" canEdit={false} isDarkMode={false} />,
+    );
+    await screen.findByRole('button', { name: /pull now/i });
+    expect(screen.queryByRole('button', { name: /^retry$/i })).not.toBeInTheDocument();
+  });
+
+  it('shows Retry when a retry is scheduled', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(controllerRevision({ status: 'source_retry_scheduled', actions: ['retry', 'suspend'] }))),
+    );
+    render(panel());
+    expect(await screen.findByRole('button', { name: /^retry$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^suspend$/i })).toBeInTheDocument();
+  });
+
+  it('POSTs suspend after confirm', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(controllerRevision({ status: 'application_generation_accepted', actions: ['suspend'] }))),
+    );
+    render(panel());
+    fireEvent.click(await screen.findByRole('button', { name: /^suspend$/i }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: /^suspend$/i }));
+    await waitFor(() => {
+      const post = vi.mocked(apiFetch).mock.calls.find(
+        (call) => String(call[0]).includes('/git-source/suspend') && call[1]?.method === 'POST',
+      );
+      expect(post?.[0]).toBe('/stacks/web/git-source/suspend');
+      expect(JSON.parse(String(post?.[1]?.body))).toEqual({});
+    });
+  });
+
+  it('POSTs resume', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(controllerRevision({ status: 'source_suspended', actions: ['resume'] }))),
+    );
+    render(panel());
+    fireEvent.click(await screen.findByRole('button', { name: /^resume$/i }));
+    await waitFor(() => {
+      const post = vi.mocked(apiFetch).mock.calls.find(
+        (call) => String(call[0]).includes('/git-source/resume') && call[1]?.method === 'POST',
+      );
+      expect(post?.[0]).toBe('/stacks/web/git-source/resume');
+      expect(JSON.parse(String(post?.[1]?.body))).toEqual({});
+    });
+  });
+
+  it('POSTs retry', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(controllerRevision({ status: 'source_failed', actions: ['retry', 'suspend'] }))),
+    );
+    render(panel());
+    fireEvent.click(await screen.findByRole('button', { name: /^retry$/i }));
+    await waitFor(() => {
+      const post = vi.mocked(apiFetch).mock.calls.find(
+        (call) => String(call[0]).includes('/git-source/retry') && call[1]?.method === 'POST',
+      );
+      expect(post?.[0]).toBe('/stacks/web/git-source/retry');
+      expect(JSON.parse(String(post?.[1]?.body))).toEqual({});
+    });
+  });
+
+  it('sends source_policy review on save for Review only', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(LINKED_SOURCE));
+    render(panel());
+    await screen.findByRole('button', { name: /update/i });
+
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes({ ...LINKED_SOURCE, gitopsRevision: undefined }));
+    fireEvent.click(screen.getByRole('button', { name: /update/i }));
+
+    await waitFor(() => {
+      const put = vi.mocked(apiFetch).mock.calls.find((call) => call[1]?.method === 'PUT');
+      expect(put).toBeTruthy();
+      const body = JSON.parse(String(put?.[1]?.body)) as { source_policy?: string };
+      expect(body.source_policy).toBe('review');
+    });
+  });
+});
+
+describe('GitSourcePanel Blueprint binding', () => {
+  it('shows a claimed source as read-only and hides save', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(liveRevision({
+        targetMode: 'blueprint',
+        stackName: null,
+        blueprintId: 9,
+        availableActions: ['none'],
+      }))),
+    );
+    render(panel());
+    expect(await screen.findByTestId('git-source-claimed')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /update/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /remove/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /pull now/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^review$/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/repository url/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /adopt onto blueprint/i })).not.toBeInTheDocument();
+  });
+
+  it('offers adopt on a live Direct source', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(LINKED_SOURCE));
+    render(panel());
+    expect(await screen.findByRole('button', { name: /adopt onto blueprint/i })).toBeInTheDocument();
   });
 });

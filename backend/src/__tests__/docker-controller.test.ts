@@ -2280,6 +2280,63 @@ describe('DockerController - getBulkStackStatuses partial status', () => {
   });
 });
 
+describe('DockerController - getBulkStackStatuses networks', () => {
+  beforeEach(() => {
+    CacheService.getInstance().flush();
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ State: { StartedAt: '2026-06-09T12:00:00.000Z' } }),
+    });
+  });
+
+  const withNets = (
+    id: string,
+    project: string,
+    networks: Record<string, { NetworkID?: string }> | undefined,
+    state = 'running',
+  ) => ({
+    Id: id,
+    Names: [`/${id}`],
+    State: state,
+    Status: state === 'running' ? 'Up' : 'Exited (0)',
+    Image: 'nginx',
+    Created: 1000,
+    Labels: { 'com.docker.compose.project': project },
+    NetworkSettings: networks === undefined ? undefined : { Networks: networks },
+  });
+
+  it('merges, dedupes, and sorts network names across a stack\'s containers', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      withNets('net-a', 'net-stack', { zebra: { NetworkID: '1' }, arr_default: { NetworkID: '2' } }),
+      withNets('net-b', 'net-stack', { arr_default: { NetworkID: '2' }, bridge: { NetworkID: '3' } }, 'exited'),
+    ]);
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['net-stack']);
+    expect(result['net-stack'].networks).toEqual(['arr_default', 'bridge', 'zebra']);
+    expect(mockDocker.listContainers).toHaveBeenCalledTimes(1);
+    expect(mockDocker.listNetworks).not.toHaveBeenCalled();
+    // Uptime inspect still runs for the running container.
+    expect(mockDocker.getContainer).toHaveBeenCalled();
+  });
+
+  it('omits networks when the stack has no containers', async () => {
+    mockDocker.listContainers.mockResolvedValue([]);
+    const empty = await DockerController.getInstance(1).getBulkStackStatuses(['ghost']);
+    expect(empty['ghost'].status).toBe('unknown');
+    expect(empty['ghost'].networks).toBeUndefined();
+    expect(mockDocker.listNetworks).not.toHaveBeenCalled();
+  });
+
+  it('omits networks when containers have no NetworkSettings', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      withNets('bare', 'bare-stack', undefined),
+    ]);
+    const bare = await DockerController.getInstance(1).getBulkStackStatuses(['bare-stack']);
+    expect(bare['bare-stack'].status).toBe('running');
+    expect(bare['bare-stack'].networks).toBeUndefined();
+    expect(mockDocker.listNetworks).not.toHaveBeenCalled();
+  });
+});
+
 // ── getLegacyOrphanContainersByStack (#1565) ───────────────────────────
 
 type OrphanDcSpies = {

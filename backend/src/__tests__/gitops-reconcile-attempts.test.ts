@@ -76,6 +76,26 @@ describe('reconcile attempt reservation and settlement', () => {
     expect(settled).toBeDefined();
   });
 
+  it('persists the deploy correlation on the settled row and reads it back', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-settle-corr', 'settle-corr-web'), nodeId: 1, envelope: env('op-act-corr') });
+    tx.reserveReconcileAttempt('app-settle-corr', env('op-corr-1'));
+
+    tx.settleReconcileAttempt('app-settle-corr', env('op-corr-1'), {
+      outcome: 'recovery_required',
+      reason: 'The deploy failed after the promotion committed.',
+      nextAction: 'view_target_results',
+      deployGitopsOperationId: 'deploy-op-persisted',
+    });
+
+    // Readers of a settled attempt (recovery and duplicate-delivery
+    // resolution) share one payload validator, so the correlation must
+    // survive the write-to-JSON-to-parse round trip unchanged.
+    const settled = store.getSettledAttempt('app-settle-corr', 'op-corr-1');
+    expect(JSON.parse(settled!.after_json!)).toMatchObject({ deployGitopsOperationId: 'deploy-op-persisted' });
+  });
+
   it('settling twice for the same operation is a no-op the second time', () => {
     const tx = GitOpsTransitions.getInstance();
     tx.activateDirect({ application: app('app-settle2', 'settle2-web'), nodeId: 1, envelope: env('op-act-settle2') });
@@ -94,6 +114,27 @@ describe('reconcile attempt reservation and settlement', () => {
 
     expect(first.settled).toBe(true);
     expect(second.settled).toBe(false);
+  });
+
+  it('scopes stage-row lookups to the exact operation, not the application', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: app('app-stage-scope', 'stage-scope-web'), nodeId: 1, envelope: env('op-act-scope') });
+    tx.reserveReconcileAttempt('app-stage-scope', env('op-scope-1'));
+    tx.settleReconcileAttempt('app-stage-scope', env('op-scope-1'), {
+      outcome: 'no_source_change',
+      reason: 'done',
+      nextAction: 'none',
+    });
+    tx.reserveReconcileAttempt('app-stage-scope', env('op-scope-2'));
+
+    // Interrupted-dispatch recovery asks "did *this* attempt reach stage X",
+    // so a sibling attempt's stage evidence must not answer for it: the
+    // settled row exists for its own operation only.
+    expect(store.hasStageRowForAttempt('app-stage-scope', 'op-scope-1', 'source_reconcile_settled')).toBe(true);
+    expect(store.hasStageRowForAttempt('app-stage-scope', 'op-scope-2', 'source_reconcile_settled')).toBe(false);
+    // A different stage of the same operation is likewise absent.
+    expect(store.hasStageRowForAttempt('app-stage-scope', 'op-scope-1', 'target_applied')).toBe(false);
   });
 
   it('has no settled attempt for a reservation that was never settled', () => {
@@ -281,18 +322,59 @@ describe('poll and retry eligibility queries', () => {
     expect(due.map((a) => a.id)).not.toContain('app-poll-busy');
   });
 
-  it('excludes a Blueprint-mode application from polling', () => {
+  it('excludes a source whose retry cursor is still in the future even when its poll time has arrived', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication({ ...app('app-poll-backoff', 'poll-backoff-web'), next_poll_at: 1_000, retry_at: 5_000 });
+    // The poll scan must not refetch during backoff: the retry cursor is
+    // the next wake, and the retry scan still owns the row once it fires.
+    expect(store.listSourcesDueForPoll(1_000).map((a) => a.id)).not.toContain('app-poll-backoff');
+    expect(store.listApplicationsDueForRetry(1_000).map((a) => a.id)).not.toContain('app-poll-backoff');
+  });
+
+  it('includes a Blueprint-mode application in polling', () => {
     const store = GitOpsStore.getInstance();
     store.insertApplication({
       ...app('app-poll-bp', 'unused-bp'),
       stack_name: null,
       blueprint_id: 42,
       target_mode: 'blueprint',
+      configured_source_stack_name: 'unused-bp',
       configured_repo_url: 'https://github.com/org/repo.git',
       next_poll_at: 1_000,
     });
     const due = store.listSourcesDueForPoll(1_000);
-    expect(due.map((a) => a.id)).not.toContain('app-poll-bp');
+    expect(due.map((a) => a.id)).toContain('app-poll-bp');
+  });
+
+  it('excludes a Blueprint-mode application with no stack identity from polling', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication({
+      ...app('app-poll-bp-native', 'unused-bp-native'),
+      stack_name: null,
+      blueprint_id: 45,
+      target_mode: 'blueprint',
+      configured_source_stack_name: null,
+      configured_repo_url: 'https://github.com/org/repo.git',
+      next_poll_at: 1_000,
+    });
+    const due = store.listSourcesDueForPoll(1_000);
+    expect(due.map((a) => a.id)).not.toContain('app-poll-bp-native');
+  });
+
+  it('excludes an inline Blueprint application from polling', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication({
+      ...app('app-poll-inline', 'unused-inline'),
+      stack_name: null,
+      blueprint_id: 44,
+      target_mode: 'inline_blueprint',
+      configured_repo_url: null,
+      repo_identity_json: null,
+      configured_ref: null,
+      next_poll_at: 1_000,
+    });
+    const due = store.listSourcesDueForPoll(1_000);
+    expect(due.map((a) => a.id)).not.toContain('app-poll-inline');
   });
 
   it('lists an application whose retry_at has arrived', () => {
@@ -315,6 +397,47 @@ describe('poll and retry eligibility queries', () => {
     const due = store.listApplicationsDueForRetry(1_000);
     expect(due.map((a) => a.id)).not.toContain('app-retry-susp');
   });
+
+  it('lists an application once its retry cursor fires even while a stale poll cursor remains', () => {
+    const store = GitOpsStore.getInstance();
+    // Only the poll scan defers to the retry cursor; the retry query must
+    // not filter on the poll cursor at all. The fixture hand-builds a row
+    // holding both cursors because the transition graph clears next_poll_at
+    // when the backoff begins, but the SQL property should hold regardless.
+    store.insertApplication({ ...app('app-retry-fires', 'retry-fires-web'), next_poll_at: 1_000, retry_at: 1_000 });
+    const due = store.listApplicationsDueForRetry(1_000);
+    expect(due.map((a) => a.id)).toContain('app-retry-fires');
+  });
+
+  it('excludes a detached application even when its retry time has arrived', () => {
+    const store = GitOpsStore.getInstance();
+    // Detachment does not clear cursors (applicationTombstoned leaves
+    // retry_at alone), so a detached row can still carry a due retry
+    // cursor. The scan must exclude it on its own terms rather than
+    // assume the transition graph cleaned up first.
+    store.insertApplication({
+      ...app('app-retry-detached', 'retry-detached-web'),
+      lifecycle_status: 'detached',
+      retry_at: 1_000,
+    });
+    const due = store.listApplicationsDueForRetry(1_000);
+    expect(due.map((a) => a.id)).not.toContain('app-retry-detached');
+  });
+
+  it('includes a Blueprint-mode application once its retry time has arrived', () => {
+    const store = GitOpsStore.getInstance();
+    store.insertApplication({
+      ...app('app-retry-bp', 'unused-bp-retry'),
+      stack_name: null,
+      blueprint_id: 43,
+      target_mode: 'blueprint',
+      configured_source_stack_name: 'unused-bp-retry',
+      configured_repo_url: 'https://github.com/org/repo.git',
+      retry_at: 1_000,
+    });
+    const due = store.listApplicationsDueForRetry(1_000);
+    expect(due.map((a) => a.id)).toContain('app-retry-bp');
+  });
 });
 
 function env(operationId: string): EventEnvelope {
@@ -328,6 +451,7 @@ function app(id: string, stackName: string): GitOpsApplicationRow {
     lifecycle_status: 'active',
     target_mode: 'direct',
     stack_name: stackName,
+    configured_source_stack_name: null,
     blueprint_id: null,
     configured_repo_url: 'https://github.com/org/repo.git',
     repo_identity_json: '{"host":"github.com","pathname":"/org/repo.git"}',

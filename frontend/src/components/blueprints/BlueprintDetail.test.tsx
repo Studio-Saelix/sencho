@@ -29,6 +29,24 @@ vi.mock('./RolloutPreviewDialog', () => ({
     ),
 }));
 
+vi.mock('./ConvertBlueprintDialog', () => ({
+    ConvertBlueprintDialog: ({ open }: { open: boolean }) => (
+        open ? <div data-testid="convert-dialog">convert</div> : null
+    ),
+}));
+
+vi.mock('./DetachBlueprintDialog', () => ({
+    DetachBlueprintDialog: ({ open }: { open: boolean }) => (
+        open ? <div data-testid="detach-dialog">detach</div> : null
+    ),
+}));
+
+vi.mock('./RetireBlueprintDialog', () => ({
+    RetireBlueprintDialog: ({ open }: { open: boolean }) => (
+        open ? <div data-testid="retire-dialog">retire</div> : null
+    ),
+}));
+
 import { getBlueprint } from '@/lib/blueprintsApi';
 import { BlueprintDetail } from './BlueprintDetail';
 import { absentRevision, missingApplicationLimitation } from '@/__tests__/gitopsFixtures';
@@ -50,6 +68,8 @@ function summary(overrides: Partial<BlueprintSummary> = {}): BlueprintSummary {
             updated_at: 0,
             created_by: 'admin',
             pinned_node_id: null,
+            content_origin: 'inline',
+            application_id: null,
         },
         deployments: [],
         statusCounts: {},
@@ -147,6 +167,8 @@ describe('BlueprintDetail action gating', () => {
         expect(screen.queryByRole('button', { name: /apply now/i })).not.toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /^edit$/i })).not.toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /^delete$/i })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /convert to git/i })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /detach git/i })).not.toBeInTheDocument();
         // The detail is still viewable: the compose source and deployment table render.
         expect(screen.getByTestId('deployment-table')).toBeInTheDocument();
     });
@@ -199,5 +221,92 @@ describe('BlueprintDetail GitOps state', () => {
         render(detail());
         await screen.findByText('Show compose source');
         expect(screen.queryByTestId('gitops-fault')).not.toBeInTheDocument();
+    });
+});
+
+describe('BlueprintDetail Git-managed content', () => {
+    it('hides Apply now and offers Detach Git when content is Git-managed', async () => {
+        vi.mocked(getBlueprint).mockResolvedValue(summary({
+            blueprint: {
+                ...summary().blueprint,
+                content_origin: 'git',
+                application_id: 'app-web',
+            },
+        }));
+        render(
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit distinctLabels={[]} />,
+        );
+        expect(await screen.findByText('Git-managed')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /apply now/i })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /convert to git/i })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /^delete$/i })).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /retire to direct/i })).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: /detach git/i }));
+        expect(screen.getByTestId('detach-dialog')).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: /retire to direct/i }));
+        expect(screen.getByTestId('retire-dialog')).toBeInTheDocument();
+    });
+
+    it('hides Retire to Direct when non-withdrawn deployments exist', async () => {
+        vi.mocked(getBlueprint).mockResolvedValue(summary({
+            blueprint: {
+                ...summary().blueprint,
+                content_origin: 'git',
+                application_id: 'app-web',
+            },
+            deployments: [{
+                id: 1,
+                blueprint_id: 1,
+                node_id: 1,
+                status: 'active',
+                applied_revision: 1,
+                last_deployed_at: 1,
+                last_checked_at: null,
+                last_drift_at: null,
+                drift_summary: null,
+                last_error: null,
+            }],
+        }));
+        render(
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit distinctLabels={[]} />,
+        );
+        await screen.findByText('Git-managed');
+        expect(screen.queryByRole('button', { name: /retire to direct/i })).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /detach git/i })).toBeInTheDocument();
+    });
+
+    it('hides Apply now for a deployer when content is Git-managed', async () => {
+        vi.mocked(getBlueprint).mockResolvedValue(summary({
+            blueprint: {
+                ...summary().blueprint,
+                content_origin: 'git',
+                application_id: 'app-web',
+            },
+        }));
+        const can = vi.fn((action: string) => action === 'stack:create' || action === 'stack:deploy');
+        render(
+            <BlueprintDetail
+                blueprintId={1}
+                open
+                onOpenChange={noop}
+                onChanged={noop}
+                canEdit={false}
+                can={can}
+                distinctLabels={[]}
+            />,
+        );
+        expect(await screen.findByText('Git-managed')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /apply now/i })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /detach git/i })).not.toBeInTheDocument();
+    });
+
+    it('offers Convert to Git for Inline content', async () => {
+        render(
+            <BlueprintDetail blueprintId={1} open onOpenChange={noop} onChanged={noop} canEdit distinctLabels={[]} />,
+        );
+        expect(await screen.findByRole('button', { name: /convert to git/i })).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /detach git/i })).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: /convert to git/i }));
+        expect(screen.getByTestId('convert-dialog')).toBeInTheDocument();
     });
 });

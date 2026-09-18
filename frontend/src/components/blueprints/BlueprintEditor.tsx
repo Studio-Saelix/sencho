@@ -11,12 +11,16 @@ import {
     type AnalyzerResult,
     type Blueprint,
     type BlueprintSelector,
+    type ContentBindingView,
     type DriftMode,
     type CreateBlueprintInput,
     type UpdateBlueprintInput,
     analyzeCompose,
+    getContentBinding,
 } from '@/lib/blueprintsApi';
+import { GITOPS_LIMITATION_COPY } from '@/lib/gitopsLimitations';
 import { BlueprintClassificationBanner } from './BlueprintClassificationBanner';
+import { ContentOriginBadge } from './ContentOriginBadge';
 
 interface BlueprintEditorProps {
     initial?: Blueprint;
@@ -59,6 +63,9 @@ export function BlueprintEditor({ initial, distinctLabels, onCancel, onSubmit, s
 
     const [analysis, setAnalysis] = useState<AnalyzerResult | null>(null);
     const [analyzing, setAnalyzing] = useState(false);
+    const [binding, setBinding] = useState<ContentBindingView | null>(null);
+    const [bindingError, setBindingError] = useState(false);
+    const gitManaged = initial?.content_origin === 'git';
 
     // Debounced classification on compose change. Use a generation counter so
     // out-of-order responses can't stamp a stale classification when the user
@@ -84,6 +91,24 @@ export function BlueprintEditor({ initial, distinctLabels, onCancel, onSubmit, s
         }, 600);
         return () => clearTimeout(t);
     }, [composeContent]);
+
+    useEffect(() => {
+        if (!gitManaged || initial?.id == null) return;
+        let cancelled = false;
+        setBinding(null);
+        setBindingError(false);
+        void getContentBinding(initial.id)
+            .then((next) => {
+                if (cancelled) return;
+                setBinding(next);
+            })
+            .catch((err: unknown) => {
+                if (cancelled) return;
+                setBindingError(true);
+                toast.error(err instanceof Error ? err.message : 'Failed to load the Git-managed source');
+            });
+        return () => { cancelled = true; };
+    }, [gitManaged, initial?.id]);
 
     const selector: BlueprintSelector = useMemo(() => {
         if (selectorType === 'nodes') return { type: 'nodes', ids: nodeIds };
@@ -119,24 +144,18 @@ export function BlueprintEditor({ initial, distinctLabels, onCancel, onSubmit, s
     async function handleSubmit() {
         const err = validate();
         if (err) { toast.error(err); return; }
-        const input = mode === 'create'
-            ? {
-                name: name.trim(),
-                description: description.trim() || null,
-                compose_content: composeContent,
-                selector,
-                drift_mode: driftMode,
-                enabled,
-            } satisfies CreateBlueprintInput
-            : {
-                name: name.trim(),
-                description: description.trim() || null,
-                compose_content: composeContent,
-                selector,
-                drift_mode: driftMode,
-                enabled,
-            } satisfies UpdateBlueprintInput;
-        await onSubmit(input);
+        const fields = {
+            name: name.trim(),
+            description: description.trim() || null,
+            selector,
+            drift_mode: driftMode,
+            enabled,
+        };
+        if (mode === 'edit' && gitManaged) {
+            await onSubmit(fields);
+            return;
+        }
+        await onSubmit({ ...fields, compose_content: composeContent });
     }
 
     return (
@@ -170,12 +189,33 @@ export function BlueprintEditor({ initial, distinctLabels, onCancel, onSubmit, s
                     <Label className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">
                         Compose
                     </Label>
-                    {analyzing && (
-                        <span className="font-mono text-[10px] text-muted-foreground uppercase tracking-[0.18em]">
-                            Analyzing…
-                        </span>
-                    )}
+                    <div className="flex items-center gap-2">
+                        <ContentOriginBadge origin={initial?.content_origin ?? 'inline'} />
+                        {analyzing && (
+                            <span className="font-mono text-[10px] text-muted-foreground uppercase tracking-[0.18em]">
+                                Analyzing…
+                            </span>
+                        )}
+                    </div>
                 </div>
+                {gitManaged && (
+                    <div className="space-y-2 rounded-lg border border-card-border bg-card p-3">
+                        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Git-managed source</p>
+                        <p className="text-xs text-stat-subtitle leading-relaxed">
+                            {bindingError
+                                ? 'Could not load the Git-managed source.'
+                                : `${binding?.repoUrl ?? 'repository unknown'} · ${binding?.ref ?? 'ref unknown'}`}
+                        </p>
+                        {binding?.composePaths && binding.composePaths.length > 0 && (
+                            <p className="font-mono text-[10px] text-stat-icon">{binding.composePaths.join(', ')}</p>
+                        )}
+                        {binding?.blockedRollout && (
+                            <p className="text-xs text-warning leading-relaxed">
+                                {GITOPS_LIMITATION_COPY.git_managed_rollout_not_enabled}
+                            </p>
+                        )}
+                    </div>
+                )}
                 <BlueprintClassificationBanner analysis={analysis} />
                 <div className="rounded-lg border border-card-border overflow-hidden">
                     <Suspense fallback={<Skeleton className="h-[320px] w-full" />}>
@@ -183,12 +223,13 @@ export function BlueprintEditor({ initial, distinctLabels, onCancel, onSubmit, s
                             height="320px"
                             language="yaml"
                             value={composeContent}
-                            onChange={(v) => setComposeContent(v ?? '')}
+                            onChange={(v) => { if (!gitManaged) setComposeContent(v ?? ''); }}
                             options={{
                                 minimap: { enabled: false },
                                 scrollBeyondLastLine: false,
                                 fontSize: 12,
                                 fontFamily: 'var(--font-mono)',
+                                readOnly: gitManaged,
                             }}
                             theme="vs-dark"
                         />

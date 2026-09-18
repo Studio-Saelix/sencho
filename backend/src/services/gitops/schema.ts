@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   )),
   target_mode TEXT NOT NULL CHECK (target_mode IN ('direct','inline_blueprint','blueprint')),
   stack_name TEXT NULL,
+  configured_source_stack_name TEXT NULL,
   blueprint_id INTEGER NULL,
   configured_repo_url TEXT NULL,
   repo_identity_json TEXT NULL,
@@ -487,4 +488,43 @@ CREATE INDEX IF NOT EXISTS idx_gitops_history_stack_created
 -- different column, so without this one that route sorts the whole table.
 CREATE INDEX IF NOT EXISTS idx_gitops_history_created
   ON gitops_history(created_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS gitops_settled_outbox (
+  settled_history_id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL,
+  payload_version INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  drained_at INTEGER NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gitops_settled_outbox_undrained
+  ON gitops_settled_outbox(created_at)
+  WHERE drained_at IS NULL;
+`;
+
+/**
+ * Due-scan indexes that mention `configured_source_stack_name`. They cannot
+ * live in GITOPS_SCHEMA_SQL: CREATE TABLE IF NOT EXISTS is a no-op on an
+ * existing applications table, so a CREATE INDEX in that same blob would
+ * run before the additive column exists. DatabaseService execs this after
+ * maybeAddCol. Both DROPs precede their CREATEs because CREATE INDEX IF
+ * NOT EXISTS never updates an index that already exists under the same name.
+ */
+const GITOPS_DUE_INDEX_WHERE = `(target_mode = 'direct' OR (target_mode = 'blueprint' AND configured_source_stack_name IS NOT NULL))
+    AND lifecycle_status = 'active'
+    AND suspended_at IS NULL
+    AND active_operation_stage IS NULL`;
+
+export const GITOPS_DUE_INDEX_SQL = `
+DROP INDEX IF EXISTS idx_gitops_app_poll_due;
+CREATE INDEX IF NOT EXISTS idx_gitops_app_poll_due
+  ON gitops_applications(next_poll_at)
+  WHERE ${GITOPS_DUE_INDEX_WHERE}
+    AND next_poll_at IS NOT NULL
+    AND retry_at IS NULL;
+DROP INDEX IF EXISTS idx_gitops_app_retry_due;
+CREATE INDEX IF NOT EXISTS idx_gitops_app_retry_due
+  ON gitops_applications(retry_at)
+  WHERE ${GITOPS_DUE_INDEX_WHERE}
+    AND retry_at IS NOT NULL;
 `;

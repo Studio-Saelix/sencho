@@ -303,6 +303,13 @@ function deriveSource(app: GitOpsApplicationRow, limitations: GitOpsLimitation[]
     }
     return { ...identity, status: 'application_generation_accepted' };
   }
+  // A scheduled poll means the source settled without any stronger evidence
+  // to report (no candidate, no accepted generation): the controller is
+  // waiting for the next poll. The failure and retry branches above win over
+  // this cursor, so a poll schedule is never an excuse to hide a failure.
+  if (app.next_poll_at) {
+    return { ...identity, status: 'source_poll_scheduled', nextPollAt: app.next_poll_at };
+  }
   return { ...identity, status: 'never_reconciled' };
 }
 
@@ -807,6 +814,18 @@ function deriveActions(
   if (app.candidate_generation_id && !app.active_operation_stage) actions.add('dismiss');
   if (targets.some((target) => targetDeployLegal(app, target))) actions.add('deploy');
   if (placement.status === 'placement_review_pending') actions.add('approve_legacy');
+  // Controller controls are Direct-only. In-flight and recovery statuses
+  // already returned ['none'] above, so those never offer suspend/resume/retry.
+  if (app.target_mode === 'direct') {
+    if (app.suspended_at) {
+      actions.add('resume');
+    } else {
+      actions.add('suspend');
+      if (source.status === 'source_failed' || source.status === 'source_retry_scheduled') {
+        actions.add('retry');
+      }
+    }
+  }
   if (actions.size === 0) return ['none'];
   return Array.from(actions);
 }

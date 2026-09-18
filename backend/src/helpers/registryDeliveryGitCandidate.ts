@@ -14,6 +14,10 @@ export interface GitCandidatePreparedMeta {
   candidateRelPath: string;
   composeFiles: ComposeFile[];
   envContent: string | null;
+  /** Candidate context dir and env-sync flags, captured so the delivery
+   *  selection can rebuild the exact compose invocation for the new generation. */
+  contextDir?: string | null;
+  syncEnv?: boolean;
   materialization: MaterializationResult;
   warnings: string[];
 }

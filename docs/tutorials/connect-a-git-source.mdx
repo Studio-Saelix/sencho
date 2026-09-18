@@ -6,7 +6,7 @@ description: Link a running stack to a Git repository, pull a real commit, revie
 
 Say `marketing-site` is a small nginx stack you created directly in Sencho, and your team has decided the compose file should live in a Git repository instead, so changes go through a commit and a pull request before they reach the stack. This walks through connecting that already-running stack to a repository, pulling a real commit a teammate pushed, reviewing the classified change plan Sencho builds against what is on disk, and applying it, which both writes the new files and redeploys the container.
 
-This tutorial covers linking an existing stack to a Git source and running one manual pull-review-apply cycle. It doesn't cover creating a brand-new stack directly from a repository, the three webhook-driven apply modes, or multi-file compose sources; see the [Git Sources](/features/git-sources) feature page for all of that.
+This tutorial covers linking an existing stack to a Git source and running one manual pull-review-apply cycle. It doesn't cover creating a brand-new stack directly from a repository, the three webhook-driven apply modes, polling, suspend, multi-file compose sources, or converting the source onto a Git-managed Blueprint; see the [Git Sources](/features/git-sources) and [Blueprints](/features/blueprint-model) feature pages for those.
 
 ## Prerequisites
 
@@ -27,11 +27,11 @@ This tutorial covers linking an existing stack to a Git source and running one m
 - Available on every tier, including Community; no Admiral requirement.
 
 <Steps>
-  <Step title="Open the Git Source panel">
-    Open the `marketing-site` stack and select **Git Source** in the editor toolbar. The panel opens empty, since nothing is linked yet.
+  <Step title="Open the Git Source sheet">
+    Open the `marketing-site` stack and select **Git Source** in the editor toolbar. The sheet opens from the right, empty, since nothing is linked yet.
 
     <Frame>
-      <img src="/images/tutorials/connect-a-git-source/git-source-panel-empty.png" alt="Empty Git source panel for the marketing-site stack, showing blank Repository URL and Ref fields defaulted to main, a compose.yaml entry marked primary in Compose files, Public (no auth) selected under Authentication, and Review only selected under Apply behavior." />
+      <img src="/images/tutorials/connect-a-git-source/git-source-panel-empty.png" alt="Empty Git Source sheet for the marketing-site stack, with crumb Stack, marketing-site, Git source, heading Git source, meta Not linked, a Save toolbar button, and Repository fields for URL, Ref, compose.yaml, Public (no auth), and Review only." />
     </Frame>
   </Step>
   <Step title="Point it at your repository">
@@ -40,15 +40,15 @@ This tutorial covers linking an existing stack to a Git source and running one m
     Select **Browse** to confirm Sencho can actually reach the repository and see its files, rather than trusting the URL is correct. The browser lists every file in the repository; `compose.yaml` is already ticked as the primary compose file, since that name matches the picker's default.
 
     <Frame>
-      <img src="/images/tutorials/connect-a-git-source/browse-picker.png" alt="Git source panel with a Repository URL filled in and the Browse file picker open below the Compose files list, showing a checked compose.yaml and an unchecked README.md fetched live from the repository." />
+      <img src="/images/tutorials/connect-a-git-source/browse-picker.png" alt="Git Source sheet with a Repository URL filled in and the Browse file picker open below the Compose files list, showing a checked compose.yaml and an unchecked README.md fetched live from the repository." />
     </Frame>
 
-    Leave **Authentication** on **Public (no auth)** for a public repository, and **Apply behavior** on **Review only**, the safest default: a pull only stages a change plan for you to review, it never writes or deploys on its own. Select **Save**. Sencho runs a reachability check against the repository before persisting anything; if that check fails, nothing is saved and the panel reports why.
+    Leave **Authentication** on **Public (no auth)** for a public repository, and **Apply behavior** on **Review only**, the safest default: a pull only stages a change plan for you to review, it never writes or deploys on its own. Select **Save**. Sencho runs a reachability check against the repository before persisting anything; if that check fails, nothing is saved and the sheet reports why.
   </Step>
   <Step title="Pull the latest commit">
     Now make a change the way your team actually would: edit the compose file in your repository (not in Sencho) and push a commit. For this tutorial, bump the pinned tag from `nginx:1.27-alpine` to `nginx:1.28-alpine` and push it to the ref you configured.
 
-    Back in the Git Source panel, select **Pull now**. Sencho fetches the ref's current commit and opens a classified change plan against what's on disk.
+    Back in the Git Source sheet, select **Pull now**. Sencho fetches the ref's current commit and opens a classified change plan against what's on disk.
 
     <Frame>
       <img src="/images/tutorials/connect-a-git-source/pull-preview-diff.png" alt="GIT · CHANGE PLAN dialog for marketing-site, listing a Modify row for compose.yaml (image tag change) with Deploy after apply and Apply in the footer." />
@@ -67,10 +67,10 @@ This tutorial covers linking an existing stack to a Git source and running one m
 
 Check from two places, since neither alone proves the pull was actually applied and deployed.
 
-**The Git Source panel.** Reopen it. The stat strip at the bottom now shows the short SHA of the commit you just pulled, with an updated timestamp, and a **Source state** of `accepted`, meaning Sencho took that commit as the current generation rather than merely writing its files. Nothing is listed at the top of the panel, which is what a stack with complete evidence looks like.
+**The Git Source sheet.** Reopen it. The Status section now shows the short SHA of the commit you just pulled, a **Source state** of `accepted`, meaning Sencho took that commit as the current generation rather than merely writing its files, and the footer shows when the source was last updated. Nothing is listed as pending at the top of Status, which is what a stack with complete evidence looks like.
 
 <Frame>
-  <img src="/images/tutorials/connect-a-git-source/last-applied-commit.png" alt="Git source panel for marketing-site with Apply behavior still on Review only, and a stat strip at the bottom showing a short commit SHA, a Source state of accepted, and a just-now timestamp." />
+  <img src="/images/tutorials/connect-a-git-source/last-applied-commit.png" alt="Git Source sheet for marketing-site with Apply behavior still on Review only, Status showing a short commit SHA and Source state accepted, and a freshness line in the footer." />
 </Frame>
 
 **The stack itself.** Reopen `marketing-site`. The container recreated on the new image: a fresh uptime, and its logs now start with `nginx/1.28.3` instead of `1.27.5`. The compose editor tab reflects the same change; if it still shows the old tag, reload the page, since the editor buffer doesn't refresh itself after a Git-driven write.
@@ -84,7 +84,7 @@ Check from two places, since neither alone proves the pull was actually applied 
 **Saving the source fails with "The configured branch, tag, or commit was not found," even though the URL is right.** Ref names are case-sensitive, and a typo there (`Main` instead of `main`, for example) surfaces as a distinct not-found error rather than a repository error, because Sencho resolves the ref on the remote before fetching. Double-check the ref against what your Git host actually shows before assuming the URL itself is wrong.
 
 <Frame>
-  <img src="/images/tutorials/connect-a-git-source/branch-error.png" alt="Git source panel with Ref set to the incorrect value Main, and a red error toast in the corner reading The configured branch, tag, or commit was not found." />
+  <img src="/images/tutorials/connect-a-git-source/branch-error.png" alt="Git Source sheet with Ref set to the incorrect value Main, and a red error toast in the corner reading The configured branch, tag, or commit was not found." />
 </Frame>
 
 ## Related
@@ -94,6 +94,6 @@ Check from two places, since neither alone proves the pull was actually applied 
     Multi-file sources, the three webhook apply modes, private-repo authentication, and the full troubleshooting table.
   </Card>
   <Card title="Deploy a Stack Automatically From Your CI Pipeline" icon="satellite-dish" href="/tutorials/set-up-a-webhook">
-    Trigger a Git source pull and deploy from CI instead of pulling by hand from the panel.
+    Trigger a Git source pull and deploy from CI instead of pulling by hand from the sheet.
   </Card>
 </CardGroup>

@@ -77,11 +77,17 @@ describe('buildAcceptedGeneration', () => {
     const gen = buildAcceptedGeneration(baseRow({
       portable_manifest_json: '{"files":[]}',
       compose_inputs_json: '{"composeFileOrder":["compose.yaml"]}',
+      security_policy_evidence_json: '{"policy":{"id":3,"name":"prod"},"evaluatedAt":100}',
     }));
     expect(gen.portableManifest).toEqual({ files: [] });
     expect(gen.composeInputs).toEqual({ composeFileOrder: ['compose.yaml'] });
+    expect(gen.securityPolicyEvidence).toEqual({
+      policy: { id: 3, name: 'prod' },
+      evaluatedAt: 100,
+    });
     expect(gen.limitations).not.toContain('portable_manifest_missing');
     expect(gen.limitations).not.toContain('compose_inputs_missing');
+    expect(gen.limitations).not.toContain('security_policy_evidence_missing');
   });
 
   it('refuses to build a contract from an unparseable repo identity', () => {

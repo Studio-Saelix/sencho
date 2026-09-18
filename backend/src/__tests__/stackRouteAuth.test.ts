@@ -143,6 +143,15 @@ describe('classifyStackApiPath', () => {
   });
 
   describe('fail-closed unknown-named', () => {
+    it('returns unknown-named for git-source/adopt-blueprint, which stays hub-local', () => {
+      expect(classifyStackApiPath('POST', '/stacks/web/git-source/adopt-blueprint')).toEqual({
+        kind: 'unknown-named',
+      });
+      expect(classifyStackApiPath('POST', '/stacks/web/git-source/adopt-blueprint/preview')).toEqual({
+        kind: 'unknown-named',
+      });
+    });
+
     it('returns unknown-named for unrecognized /stacks/<name>/... suffixes', () => {
       expect(classifyStackApiPath('GET', '/stacks/web/weird')).toEqual({ kind: 'unknown-named' });
       expect(classifyStackApiPath('POST', '/stacks/web/not-a-real-action')).toEqual({

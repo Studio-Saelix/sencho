@@ -1159,6 +1159,19 @@ export class RollbackGenerationStore {
     return Buffer.from(b64, 'base64');
   }
 
+  /** Read and verify a generation manifest by node/stack/id, the safe public reader. */
+  static async readVerifiedGeneration(
+    nodeId: number,
+    stackName: string,
+    generationId: string,
+  ): Promise<RollbackGenerationManifest> {
+    assertSafeStackName(stackName);
+    assertSafeGenerationId(generationId);
+    const genDir = this.getGenerationDir(nodeId, stackName, generationId);
+    const genResolved = path.resolve(genDir);
+    return this.readAndVerifyGeneration(genResolved);
+  }
+
   /**
    * Copy present generation compose/project files into destDir for registry-delivery
    * preparation. Preserves stack-relative paths under destDir.

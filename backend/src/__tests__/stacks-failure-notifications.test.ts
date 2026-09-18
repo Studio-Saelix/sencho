@@ -142,10 +142,10 @@ afterAll(() => {
 });
 
 beforeEach(() => {
-  mockDeployStack.mockReset().mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+  mockDeployStack.mockReset().mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
   mockRunCommand.mockReset();
   mockRunDown.mockReset();
-  mockUpdateStack.mockReset().mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+  mockUpdateStack.mockReset().mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
   mockGetContainersByStack.mockReset();
   mockRestartContainer.mockReset();
   mockStopContainer.mockReset();
@@ -234,7 +234,7 @@ describe('deploy_failure notification on /deploy error', () => {
   });
 
   it('uses trusted proxy tier headers for remote atomic deploys', async () => {
-    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
     const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
 
     const res = await request(app)
@@ -260,7 +260,7 @@ describe('health gate begin call sites', () => {
   });
 
   it('begins a gate after a manual deploy and returns its id', async () => {
-    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
     const res = await request(app)
       .post('/api/stacks/myapp/deploy')
       .set('Cookie', authCookie)
@@ -284,7 +284,7 @@ describe('health gate begin call sites', () => {
   });
 
   it('begins a gate after a manual update and returns its id', async () => {
-    mockUpdateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+    mockUpdateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
     const res = await request(app)
       .post('/api/stacks/myapp/update')
       .set('Cookie', authCookie)
@@ -295,7 +295,7 @@ describe('health gate begin call sites', () => {
   });
 
   it('begins a gate per stack in a bulk update and carries ids in the results', async () => {
-    mockUpdateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+    mockUpdateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
     const res = await request(app)
       .post('/api/stacks/bulk')
       .set('Cookie', authCookie)
@@ -318,7 +318,7 @@ describe('health gate begin call sites', () => {
   });
 
   it('never begins a gate for the rollback recovery path', async () => {
-    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
     const res = await request(app)
       .post('/api/stacks/myapp/rollback')
       .set('Cookie', authCookie);
@@ -416,7 +416,7 @@ describe('failure classification on deploy/update error responses', () => {
 
 describe('post-deploy scan opt-out', () => {
   it('does not trigger a post-deploy scan when skip_scan is true', async () => {
-    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+    mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
 
     const res = await request(app)
       .post('/api/stacks/myapp/deploy')
@@ -530,7 +530,7 @@ describe('deploy_failure notification on /update error', () => {
   });
 
   it('uses trusted proxy tier headers for remote atomic updates', async () => {
-    mockUpdateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+    mockUpdateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
     const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
 
     const res = await request(app)

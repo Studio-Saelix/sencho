@@ -2,6 +2,19 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+
+// Pass-through spy: lets a test queue a one-time refusal without
+// changing any other behavior.
+vi.mock('../helpers/registryDeliveryOutbound', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('../helpers/registryDeliveryOutbound')>();
+    return {
+        ...actual,
+        prepareOutboundRegistryDeliveryBody: vi.fn(
+            (...args: Parameters<typeof actual.prepareOutboundRegistryDeliveryBody>) =>
+                actual.prepareOutboundRegistryDeliveryBody(...args),
+        ),
+    };
+});
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 
 let tmpDir: string;
@@ -375,5 +388,98 @@ describe('node-aware Git source webhooks', () => {
             stacksSpy.mockRestore();
             pullSpy.mockRestore();
         }
+    });
+
+    it('keeps the registry delivery refusal code on a failed remote update', async () => {
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'remote-refusal-webhook-node',
+            type: 'remote',
+            compose_dir: '/tmp',
+            is_default: false,
+            api_url: 'http://remote.example',
+            api_token: 'remote-token',
+        });
+        const webhookId = db.addWebhook({
+            node_id: remoteNodeId,
+            name: 'remote-refusal-webhook',
+            stack_name: 'remote-stack',
+            action: 'pull',
+            secret: WebhookService.getInstance().generateSecret(),
+            enabled: true,
+        });
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+
+        const outbound = await import('../helpers/registryDeliveryOutbound');
+        vi.mocked(outbound.prepareOutboundRegistryDeliveryBody).mockResolvedValueOnce({
+            ok: false as const,
+            status: 409,
+            code: 'REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE',
+            error: 'Registry credentials unavailable for challenged image hosts',
+        });
+
+        // atomic=true is what makes the update carry a JSON body, which is
+        // the shape the registry delivery gate inspects before any fetch.
+        const result = await WebhookService.getInstance().execute(
+            db.getWebhook(webhookId)!,
+            'pull',
+            'test',
+            true,
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.code).toBe('REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE');
+        expect(result.error).toContain('[REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE]');
+        expect(fetchSpy).not.toHaveBeenCalled();
+
+        const history = db.getWebhookExecutions(webhookId);
+        expect(history[0].status).toBe('failure');
+        expect(history[0].error).toContain('[REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE]');
+    });
+
+    it('keeps the registry delivery refusal code when the update sends no JSON body', async () => {
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'remote-refusal-webhook-node-bodyless',
+            type: 'remote',
+            compose_dir: '/tmp',
+            is_default: false,
+            api_url: 'http://remote.example',
+            api_token: 'remote-token',
+        });
+        const webhookId = db.addWebhook({
+            node_id: remoteNodeId,
+            name: 'remote-refusal-webhook-bodyless',
+            stack_name: 'remote-stack',
+            action: 'pull',
+            secret: WebhookService.getInstance().generateSecret(),
+            enabled: true,
+        });
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+
+        const outbound = await import('../helpers/registryDeliveryOutbound');
+        vi.mocked(outbound.prepareOutboundRegistryDeliveryBody).mockResolvedValueOnce({
+            ok: false as const,
+            status: 409,
+            code: 'REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE',
+            error: 'Registry credentials unavailable for challenged image hosts',
+        });
+
+        // No atomic flag: the update carries no JSON body of its own, so the
+        // delivery gate synthesizes an empty body to inspect before any fetch.
+        const result = await WebhookService.getInstance().execute(
+            db.getWebhook(webhookId)!,
+            'pull',
+            'test',
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.code).toBe('REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE');
+        expect(result.error).toContain('[REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE]');
+        expect(fetchSpy).not.toHaveBeenCalled();
+
+        const history = db.getWebhookExecutions(webhookId);
+        expect(history[0].status).toBe('failure');
+        expect(history[0].error).toContain('[REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE]');
     });
 });

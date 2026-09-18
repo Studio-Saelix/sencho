@@ -1,5 +1,12 @@
 [
   {
+    "id": "stack-health-all-nodes",
+    "title": "Stack Health across every node",
+    "blurb": "Keep Stack Health on This node by default, or switch to All nodes for a progressive multi-node inventory with State, Networks, coverage, and editor jumps that land on the owning node.",
+    "docUrl": "https://docs.sencho.io/features/dashboard#stack-health",
+    "screenshot": "stack-health-all-nodes.png"
+  },
+  {
     "id": "sso-only-authentication",
     "title": "SSO-only authentication mode",
     "blurb": "Require every sign-in on this node to go through your SSO provider instead of a local password. Turn it on once your provider is configured and tested.",
@@ -47,5 +54,11 @@
     "blurb": "Every instance ships with five built-in roles, Admin, Viewer, Deployer, Node Admin, and Auditor, plus scoped permissions to grant access to one stack or node without elevating anywhere else.",
     "docUrl": "https://docs.sencho.io/features/rbac",
     "screenshot": "rbac.png"
+  },
+  {
+    "id": "git-managed-blueprints",
+    "title": "Git-managed Blueprint content",
+    "blurb": "Move a live Git source onto a Blueprint so that Blueprint's compose comes from Git instead of the editor. Git-managed Blueprints bind and show a blocked rollout state; they do not deploy from the stored snapshot. Detach restores Inline editing.",
+    "docUrl": "https://docs.sencho.io/features/blueprint-model"
   }
 ]

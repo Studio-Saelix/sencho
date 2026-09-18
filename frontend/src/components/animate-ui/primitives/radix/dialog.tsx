@@ -89,30 +89,21 @@ function DialogOverlay({
   );
 }
 
-type DialogFlipDirection = 'top' | 'bottom' | 'left' | 'right';
-
 type DialogContentProps = Omit<
   React.ComponentProps<typeof DialogPrimitive.Content>,
   'forceMount' | 'asChild'
 > &
-  HTMLMotionProps<'div'> & {
-    from?: DialogFlipDirection;
-  };
+  HTMLMotionProps<'div'>;
 
 function DialogContent({
-  from = 'top',
   onOpenAutoFocus,
   onCloseAutoFocus,
   onEscapeKeyDown,
   onPointerDownOutside,
   onInteractOutside,
-  transition = { type: 'spring', stiffness: 150, damping: 25 },
+  transition = { duration: 0.15, ease: 'easeOut' },
   ...props
 }: DialogContentProps) {
-  const initialRotation =
-    from === 'bottom' || from === 'left' ? '20deg' : '-20deg';
-  const isVertical = from === 'top' || from === 'bottom';
-  const rotateAxis = isVertical ? 'rotateX' : 'rotateY';
   const resolvedTransition = useReducedTransition(transition);
 
   return (
@@ -128,21 +119,9 @@ function DialogContent({
       <motion.div
         key="dialog-content"
         data-slot="dialog-content"
-        initial={{
-          opacity: 0,
-          filter: 'blur(4px)',
-          transform: `perspective(500px) ${rotateAxis}(${initialRotation}) scale(0.8)`,
-        }}
-        animate={{
-          opacity: 1,
-          filter: 'blur(0px)',
-          transform: `perspective(500px) ${rotateAxis}(0deg) scale(1)`,
-        }}
-        exit={{
-          opacity: 0,
-          filter: 'blur(4px)',
-          transform: `perspective(500px) ${rotateAxis}(${initialRotation}) scale(0.8)`,
-        }}
+        initial={{ opacity: 0, y: 6, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 6, scale: 0.98 }}
         transition={resolvedTransition}
         {...props}
       />
@@ -207,5 +186,4 @@ export {
   type DialogTitleProps,
   type DialogDescriptionProps,
   type DialogContextType,
-  type DialogFlipDirection,
 };

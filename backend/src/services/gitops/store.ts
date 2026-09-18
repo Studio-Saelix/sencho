@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import { DatabaseService } from '../DatabaseService';
-import type { GitOpsHistoryCursor } from './history';
+import type { GitOpsHistoryCursor, GitOpsHistoryStage } from './history';
 import {
   decodeArtifactEvidenceJson,
   decodeGitOpsApprovedTargetEffectJson,
@@ -33,6 +33,45 @@ export type LiveBlueprintApplication = {
 export type AssertNoLiveBlueprintResult =
   | { ok: true }
   | { ok: false; existing: LiveBlueprintApplication };
+
+/**
+ * The two controller due scans, exported so tests assert against the real
+ * SQL instead of a copy. Each is served by a partial index whose WHERE
+ * clause mirrors the query's static terms (see idx_gitops_app_poll_due /
+ * idx_gitops_app_retry_due in schema.ts); changing a term here must change
+ * it there in the same commit. Both scans cover live Direct sources and
+ * converted Blueprint sources that still hold a stack identity. Native
+ * Blueprint rows with no `configured_source_stack_name` stay out, matching
+ * listActiveSourceApplications, so evaluate() is never woken without a
+ * stack to fetch against. Detached rows stay out via lifecycle_status.
+ * The poll scan additionally excludes rows with any retry cursor (past or
+ * future): retry-due rows arrive via the retry scan, and a row still
+ * inside its backoff window must not be refetched by a due poll cursor, so
+ * the retry cursor stays the next wake.
+ */
+export const SOURCE_APPLICATION_MODE_SQL =
+  `(target_mode = 'direct' OR (target_mode = 'blueprint' AND configured_source_stack_name IS NOT NULL))`;
+
+export const SOURCES_DUE_FOR_POLL_SQL = `SELECT * FROM gitops_applications
+       WHERE ${SOURCE_APPLICATION_MODE_SQL}
+         AND lifecycle_status = 'active'
+         AND suspended_at IS NULL
+         AND active_operation_stage IS NULL
+         AND next_poll_at IS NOT NULL
+         AND next_poll_at <= ?
+         AND retry_at IS NULL
+       ORDER BY next_poll_at ASC
+       LIMIT ?`;
+
+export const APPLICATIONS_DUE_FOR_RETRY_SQL = `SELECT * FROM gitops_applications
+       WHERE retry_at IS NOT NULL
+         AND retry_at <= ?
+         AND ${SOURCE_APPLICATION_MODE_SQL}
+         AND lifecycle_status = 'active'
+         AND suspended_at IS NULL
+         AND active_operation_stage IS NULL
+       ORDER BY retry_at ASC
+       LIMIT ?`;
 
 export class GitOpsStore {
   private static instance: GitOpsStore | undefined;
@@ -104,6 +143,65 @@ export class GitOpsStore {
   }
 
   /**
+   * The live Blueprint-mode (or demoted inline) application that still holds
+   * the original Direct stack as its credential carrier.
+   */
+  getLiveBlueprintApplicationBySourceStack(stackName: string): GitOpsApplicationRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE configured_source_stack_name = ?
+         AND target_mode IN ('inline_blueprint','blueprint')
+         AND lifecycle_status IN ('active','creating')`,
+    ).get(stackName) as GitOpsApplicationRow | undefined;
+  }
+
+  /** Live Direct application, or the converted Blueprint source that still holds this stack. */
+  getLiveSourceApplication(stackName: string): GitOpsApplicationRow | undefined {
+    return this.getLiveDirectApplication(stackName)
+      ?? this.getLiveBlueprintApplicationBySourceStack(stackName);
+  }
+
+  getLiveBlueprintModeApplicationByRepoUrl(repoUrl: string): GitOpsApplicationRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE configured_repo_url = ?
+         AND target_mode = 'blueprint'
+         AND lifecycle_status IN ('active','creating')`,
+    ).get(repoUrl) as GitOpsApplicationRow | undefined;
+  }
+
+  /**
+   * The only writer allowed to change target_mode. Returns 1 when the
+   * expected current mode matched; 0 means the row was gone or already moved.
+   */
+  updateApplicationTargetBinding(args: {
+    id: string;
+    expectedMode: GitOpsApplicationRow['target_mode'];
+    targetMode: GitOpsApplicationRow['target_mode'];
+    stackName: string | null;
+    blueprintId: number | null;
+    configuredSourceStackName: string | null;
+    configuredRepoUrl: string | null;
+    updatedAt: number;
+  }): number {
+    return this.db().prepare(
+      `UPDATE gitops_applications
+       SET target_mode = ?, stack_name = ?, blueprint_id = ?,
+           configured_source_stack_name = ?, configured_repo_url = ?, updated_at = ?
+       WHERE id = ? AND target_mode = ?`,
+    ).run(
+      args.targetMode,
+      args.stackName,
+      args.blueprintId,
+      args.configuredSourceStackName,
+      args.configuredRepoUrl,
+      args.updatedAt,
+      args.id,
+      args.expectedMode,
+    ).changes;
+  }
+
+  /**
    * The most recently detached Direct application for a stack, if any.
    *
    * Consulted only after the live lookup misses. `applicationTombstoned` keeps
@@ -165,8 +263,36 @@ export class GitOpsStore {
     ).all() as GitOpsApplicationRow[];
   }
 
+  /** Every live Direct application, for Direct-only configuration scans. */
+  listActiveDirectApplications(): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE target_mode = 'direct' AND lifecycle_status = 'active'
+       ORDER BY stack_name ASC`,
+    ).all() as GitOpsApplicationRow[];
+  }
+
+  /**
+   * Live sources the controller may reschedule: Direct applications, plus
+   * Blueprint-mode applications that still hold a converted stack identity.
+   */
+  listActiveSourceApplications(): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE lifecycle_status = 'active'
+         AND ${SOURCE_APPLICATION_MODE_SQL}
+       ORDER BY COALESCE(stack_name, configured_source_stack_name) ASC`,
+    ).all() as GitOpsApplicationRow[];
+  }
+
   getGeneration(id: string): GitOpsGenerationRow | undefined {
     return this.db().prepare('SELECT * FROM gitops_generations WHERE id = ?').get(id) as GitOpsGenerationRow | undefined;
+  }
+
+  listGenerationsForApplication(applicationId: string): GitOpsGenerationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_generations WHERE application_id = ? ORDER BY created_at ASC, id ASC`,
+    ).all(applicationId) as GitOpsGenerationRow[];
   }
 
   /** Generations whose creating reconcile attempt has not durably settled. */
@@ -267,6 +393,35 @@ export class GitOpsStore {
   }
 
   /**
+   * Whether one stage row exists under an exact operation id. Startup
+   * recovery of an interrupted dispatch reads the bind this attempt
+   * recorded (or failed to record) under its own id, so a bind from some
+   * earlier operation can never be mistaken for this one's.
+   */
+  hasStageRowForAttempt(applicationId: string, operationId: string, stage: GitOpsHistoryStage): boolean {
+    return this.db().prepare(
+      `SELECT 1 FROM gitops_history
+       WHERE application_id = ? AND operation_id = ? AND stage = ?
+       LIMIT 1`,
+    ).get(applicationId, operationId, stage) !== undefined;
+  }
+
+  /**
+   * The row for one exact stage under an exact operation id, or undefined
+   * when it was never written. The read companion to
+   * `hasStageRowForAttempt`, for recovery passes that need the row's own
+   * recorded payload (for example the deploy intent's operation id) rather
+   * than just its existence.
+   */
+  getStageRowForAttempt(applicationId: string, operationId: string, stage: GitOpsHistoryStage): GitOpsHistoryRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_history
+       WHERE application_id = ? AND operation_id = ? AND stage = ?
+       LIMIT 1`,
+    ).get(applicationId, operationId, stage) as GitOpsHistoryRow | undefined;
+  }
+
+  /**
    * Every reservation with no matching settled row, oldest first: an
    * attempt that started but never recorded a result, most likely because
    * the process crashed between reservation and settlement. Startup
@@ -306,13 +461,13 @@ export class GitOpsStore {
   /**
    * The most recently settled attempt for an application, for API and UI
    * projection. Distinct from getSettledAttempt, which looks up one exact
-   * operation rather than the newest one.
+   * operation rather than the newest one. Readers authorize the returned
+   * row through classifyHistoryRow before exposing it.
+   *
+   * Ordered by created_at then rowid (SQLite's implicit insertion-order key),
+   * not the id column: id is a random UUID and does not sort by recency.
    */
   latestSettledAttempt(applicationId: string): GitOpsHistoryRow | undefined {
-    // rowid (SQLite's implicit insertion-order key), not the id column: id
-    // is a random UUID and does not sort by recency the way rowid does, so
-    // it cannot break a created_at tie between two attempts settled within
-    // the same millisecond.
     return this.db().prepare(
       `SELECT * FROM gitops_history
        WHERE application_id = ? AND stage = 'source_reconcile_settled'
@@ -322,41 +477,23 @@ export class GitOpsStore {
   }
 
   /**
-   * Direct sources whose poll time has arrived: active, not suspended, no
-   * operation in flight. Blueprint-mode applications are never polled here
-   * -- source evaluation for them is blocked at the evaluation boundary
-   * until an application-keyed source engine exists for that mode.
+   * Direct and Blueprint-mode sources whose poll time has arrived: active,
+   * not suspended, no operation in flight, and no retry cursor (the retry
+   * scan owns a row in backoff).
    */
   listSourcesDueForPoll(now: number, limit = 200): GitOpsApplicationRow[] {
-    return this.db().prepare(
-      `SELECT * FROM gitops_applications
-       WHERE target_mode = 'direct'
-         AND lifecycle_status = 'active'
-         AND suspended_at IS NULL
-         AND active_operation_stage IS NULL
-         AND next_poll_at IS NOT NULL
-         AND next_poll_at <= ?
-       ORDER BY next_poll_at ASC
-       LIMIT ?`,
-    ).all(now, limit) as GitOpsApplicationRow[];
+    return this.db().prepare(SOURCES_DUE_FOR_POLL_SQL).all(now, limit) as GitOpsApplicationRow[];
   }
 
   /**
-   * Applications with a scheduled retry that has come due: not suspended,
-   * no operation in flight. Poll eligibility and retry eligibility are
-   * deliberately separate queries, since a retry can be due on an
-   * application whose poll cadence would not otherwise select it yet.
+   * Active Direct or Blueprint-mode applications with a scheduled retry that
+   * has come due: not suspended, no operation in flight. Poll eligibility
+   * and retry eligibility are deliberately separate queries, since a retry
+   * can be due on an application whose poll cadence would not otherwise
+   * select it yet.
    */
   listApplicationsDueForRetry(now: number, limit = 200): GitOpsApplicationRow[] {
-    return this.db().prepare(
-      `SELECT * FROM gitops_applications
-       WHERE retry_at IS NOT NULL
-         AND retry_at <= ?
-         AND suspended_at IS NULL
-         AND active_operation_stage IS NULL
-       ORDER BY retry_at ASC
-       LIMIT ?`,
-    ).all(now, limit) as GitOpsApplicationRow[];
+    return this.db().prepare(APPLICATIONS_DUE_FOR_RETRY_SQL).all(now, limit) as GitOpsApplicationRow[];
   }
 
   /** Every live target on one node, across all applications. */
@@ -400,6 +537,16 @@ export class GitOpsStore {
          fingerprint=excluded.fingerprint,
          migrated_at=excluded.migrated_at`,
     ).run(scope, schemaVersion, fingerprint, at);
+  }
+
+  replaceApplicationEvidenceLimitations(
+    applicationId: string,
+    evidenceLimitationsJson: string | null,
+    updatedAt: number,
+  ): void {
+    this.db().prepare(
+      `UPDATE gitops_applications SET evidence_limitations_json=?, updated_at=? WHERE id=?`,
+    ).run(evidenceLimitationsJson, updatedAt, applicationId);
   }
 
   /**
@@ -521,7 +668,7 @@ export class GitOpsStore {
   insertApplication(row: GitOpsApplicationRow): void {
     this.db().prepare(
       `INSERT INTO gitops_applications (
-        id, lifecycle_key, lifecycle_status, target_mode, stack_name, blueprint_id,
+        id, lifecycle_key, lifecycle_status, target_mode, stack_name, configured_source_stack_name, blueprint_id,
         configured_repo_url, repo_identity_json, configured_ref, compose_paths_json,
         context_dir, sync_env, env_path, materialization_fingerprint, desired_commit_sha,
         fetched_commit_sha, fetched_resolved_ref_kind, candidate_generation_id, accepted_generation_id,
@@ -535,9 +682,10 @@ export class GitOpsStore {
         recovery_ref, recovery_phase, interruption_stage, interruption_at,
         interruption_operation_id, interruption_generation_id, evidence_fresh_at,
         evidence_limitations_json, created_at, updated_at
-      ) VALUES (${Array(60).fill('?').join(', ')})`,
+      ) VALUES (${Array(61).fill('?').join(', ')})`,
     ).run(
-      row.id, row.lifecycle_key, row.lifecycle_status, row.target_mode, row.stack_name, row.blueprint_id,
+      row.id, row.lifecycle_key, row.lifecycle_status, row.target_mode, row.stack_name,
+      row.configured_source_stack_name, row.blueprint_id,
       row.configured_repo_url, row.repo_identity_json, row.configured_ref, row.compose_paths_json,
       row.context_dir, row.sync_env, row.env_path, row.materialization_fingerprint, row.desired_commit_sha,
       row.fetched_commit_sha, row.fetched_resolved_ref_kind, row.candidate_generation_id, row.accepted_generation_id,

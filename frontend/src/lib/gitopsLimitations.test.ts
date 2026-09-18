@@ -42,6 +42,7 @@ const LIVE_ARM_CODES = [
   'manifest_commit_mismatch',
   'legacy_pending',
   'blueprint_reapproval_required',
+  'git_managed_rollout_not_enabled',
 ] as const;
 
 describe('gitops limitation copy', () => {

@@ -20,22 +20,29 @@ For exactly which transports, ref types, authentication methods, and Git hosts a
 
 Writes land in the stack's existing directory using the same storage Sencho uses for the in-browser editor.
 
-## Anatomy of the panel
+## Anatomy of the sheet
 
 <Frame>
-  <img src="/images/git-sources/panel.png" alt="Git Source panel for a stack already linked to a repository, showing populated Repository URL, Ref, Compose file path, the Authentication toggle, the Apply behavior radio group, and a Last applied commit row at the bottom" />
+  <img src="/images/git-sources/panel.png" alt="Git Source sheet opened from the stack editor, with crumb Stack, stack name, Git source, heading Git source, a toolbar of Update, Pull now, and Remove, and Status, Repository, and Manifest sections" />
 </Frame>
 
-The panel groups four regions:
+Git Source opens as a right-side sheet from the stack editor toolbar. It is not a centered dialog. The chrome is the same sheet used elsewhere in Sencho: a crumb (`Stack › {name} › Git source`), the heading **Git source**, a one-line summary of the linked ref, a toolbar, body sections, and a freshness line in the footer.
 
-- **Pending update banner.** Appears at the top whenever a fetched commit is staged, however it was fetched. Its heading is the source state, so it says whether the commit is ready to apply, waiting on review, or blocked by local conflicts. Click **Review** to re-fetch the incoming commit and open the change plan.
-- **Form fields.** Repository URL, ref, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication toggle, and the apply behavior radio group.
-- **Last applied stat strip.** Shows the short SHA of the last commit Sencho applied to disk, the source state (see below), and the timestamp of the most recent successful save or pull.
-- **Footer actions.** **Remove** disconnects the source by exporting the effective compose model into a single `compose.yaml` and removing auto-discovered override files; the remaining materialized files are kept. **Pull now** fetches the configured branch, tag, or commit's current revision; **Save** or **Update** persists form changes after a reachability check passes, except removing a stored custom CA certificate, which always saves immediately so a certificate you no longer trust can always be taken out.
+The toolbar carries **Save** or **Update**, **Pull now** when a source is linked and not suspended, **Suspend** or **Resume** when that action is offered, and **Remove** when a source is linked. Nested pull/apply and detach confirmations stay as separate dialogs on top of the sheet.
+
+When this Git source belongs to a Git-managed Blueprint, the sheet is read-only. **Save**, **Remove**, and **Pull now** are withheld here. Use **Detach Git** or **Retire to Direct** on that Blueprint to restore stack-owned editing. A live Direct source can **Adopt onto Blueprint**, which moves this source onto an Inline Blueprint with the same move semantics as Convert.
+
+The body groups three sections:
+
+- **Status.** Faults, a pending-update card with **Review**, retry or suspended state with **Retry** when that action is offered, qualifications the projection could not prove, and the last-applied commit with the source state.
+- **Repository.** Repository URL, ref, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication, and the apply behavior radio group.
+- **Manifest.** The managed-project summary when a source is linked.
+
+Polling interval lives in **Settings → Stacks**, not on this sheet. There is no per-source interval control; a source with no override inherits the node default.
 
 ## Source state
 
-A commit SHA tells you which files Sencho wrote. It does not tell you whether that commit was accepted, whether something newer is waiting, or whether an operation was interrupted halfway. The **source state** answers those, in one short phrase that means the same thing everywhere it appears: the Git Source panel, the Drift tab, the stack list, and the stack rows on the dashboard.
+A commit SHA tells you which files Sencho wrote. It does not tell you whether that commit was accepted, whether something newer is waiting, or whether an operation was interrupted halfway. The **source state** answers those, in one short phrase that means the same thing everywhere it appears: the Git Source sheet, the Drift tab, the stack list, and the stack rows on the dashboard.
 
 These are the states you will see most often.
 
@@ -50,6 +57,7 @@ These are the states you will see most often.
 | **Reconcile required** | What was reconciled no longer matches the configuration in force. Pull again to rebuild the plan. |
 | **Applying** | A commit is being written to the stack directory. |
 | **Retry scheduled** | The last attempt failed and another is queued. |
+| **Suspended** | Reconciliation is paused until you resume. Polling, webhooks, automatic apply, and Pull now stay off for this source. |
 | **Source failed** | The last operation on this source failed. |
 | **Outcome unknown** | An operation was interrupted, so Sencho cannot confirm how it ended. |
 | **Recovering** | A recovery is running on this stack. |
@@ -62,13 +70,13 @@ The last two matter most. Sencho reports an interrupted operation as unknown rat
 
 ### When part of the state could not be proven
 
-The panel sometimes lists one or more things it could not prove, at the top above the form fields. A managed manifest that does not identify this stack on this node from the repository configured now, an approval that could not be restored after a recovery, a record that has gone: each is reported as its own line.
+The sheet sometimes lists one or more things it could not prove, at the top of the Status section. A managed manifest that does not identify this stack on this node from the repository configured now, an approval that could not be restored after a recovery, a record that has gone: each is reported as its own line.
 
 These are qualifications, not failures. The state above them is real, and the lines tell you which part of it to treat with less confidence. That is deliberate: a stack whose evidence is partly missing looks identical to one with complete evidence unless Sencho says otherwise, and the safer wrong answer is never the quiet one.
 
 ## Create a stack from a Git repository
 
-Skip the "empty stack then link later" detour and point at a repo from the start. Click **Create Stack** in the sidebar, switch to the **From Git** tab, and fill in the same fields you would on the Git Source panel.
+Skip the "empty stack then link later" detour and point at a repo from the start. Click **Create Stack** in the sidebar, switch to the **From Git** tab, and fill in the same fields you would on the Git Source sheet.
 
 <Frame>
   <img src="/images/git-sources/create-from-git-tab.png" alt="New stack dialog with the From Git tab selected, showing stack name, repository URL, branch, compose path, sibling .env toggle, authentication options, apply behavior radio group, and a Deploy after create checkbox" />
@@ -121,9 +129,29 @@ Auto-deploy implies Auto-write: you cannot deploy automatically without also wri
 
 You can always override on the spot: when you click **Apply** in the change plan, a **Deploy after apply** checkbox lets you deploy regardless of the configured mode.
 
+**Review only** maps to review policy. **Auto-write files** and **Auto-deploy** map to automatic policy. Suspend is the operator stop; there is no fourth Manual radio on the sheet.
+
+Git Sources apply to stacks you link from the editor. Blueprint deployments do not evaluate a Git source.
+
+## Polling
+
+Unattended fetches use a node-wide interval under **Settings → Stacks**. The control is **Poll Git sources**. The default is off (interval `0`). Turn it on to fetch linked sources on a schedule; sources still pull on demand, on webhook, and on retry when polling is off.
+
+Linked sources with no override inherit this interval. There is no per-source interval knob on the Git Source sheet.
+
+Review-only sources still fetch on the schedule and stage a plan for review. Automatic sources (Auto-write or Auto-deploy) fetch and then follow the configured apply behavior.
+
+## Suspend, resume, and retry
+
+**Suspend** pauses reconciliation for one source: polling, webhooks, and automatic apply stop until you resume. Save stays available; resume before pulling again. An optional reason is stored with the suspension.
+
+**Resume** clears the pause and re-evaluates the source immediately rather than waiting for the next poll.
+
+**Retry** is offered when the last attempt failed or a retry is already scheduled, and not while the source is suspended. Retry is stage-aware: a failed fetch refetches, and a failed apply or deploy continues from the evidence already on disk. Permanent failures (for example a missing ref) do not schedule an automatic retry; use **Retry** after you fix the cause.
+
 ## Pulling and reviewing changes
 
-Click **Pull now** on the Git Source panel to fetch the latest commit on the configured branch, tag, or commit.
+Click **Pull now** on the Git Source sheet to fetch the latest commit on the configured branch, tag, or commit.
 
 <Frame>
   <img src="/images/git-sources/diff-dialog.png" alt="GIT · CHANGE PLAN dialog for the demo-app stack, listing classified file operations (add, modify, remove) with a Deploy after apply checkbox and an Apply button in the footer" />
@@ -141,7 +169,7 @@ High-sensitivity paths (secret-bearing files) appear as "secret-bearing managed 
 
 ### Pending updates
 
-When a webhook fires in **Review only** mode, the stack gets a pending GitBranch icon next to its row in the sidebar and a pulsing dot on the **Git Source** button in the editor. Clicking either re-fetches the commit and opens the change plan; the panel also shows a **Pending update** banner with a **Review** button.
+When a webhook fires in **Review only** mode, the stack gets a pending GitBranch icon next to its row in the sidebar and a pulsing dot on the **Git Source** button in the editor. Clicking either re-fetches the commit and opens the change plan; the sheet also shows a pending-update card with a **Review** button.
 
 If the same stack also has an image update available, the image-update dot in the sidebar takes priority over the Git source icon, so only the update dot renders. The pending Git source is still surfaced inside the editor on the **Git Source** button.
 
@@ -236,7 +264,7 @@ Sencho classifies every managed path against the last applied generation and the
 - A local edit still blocks even when the live bytes already match the incoming commit. Classification compares disk to the last applied generation, not to the incoming files, so an uncommitted local edit is never treated as a clean Git apply.
 - Compose invocation drift (for example adding or removing a root `.env` outside Git): the plan shows the invocation change and stays applicable. Applying records the incoming invocation as the new baseline. Unmanaged files stay on disk. Webhook auto-apply still refuses until you review that plan.
 
-The in-browser editor and the Git Source panel both write to the same files, so you can always fall back to editing locally. The next pull will flag the divergence rather than silently clobbering your edits.
+The in-browser editor and the Git Source sheet both write to the same files, so you can always fall back to editing locally. The next pull will flag the divergence rather than silently clobbering your edits.
 
 Pulls, applies, and create-from-git operations on the same stack are serialized by a per-stack lock, so a webhook that fires in the middle of a manual apply waits for the apply to finish rather than racing it.
 
@@ -267,7 +295,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
   </Accordion>
 
   <Accordion title="File not found">
-    Each compose path is relative to the repository root and must point at the file, not its parent directory. Every file in the list must exist on the tracked branch; if any is missing, the save or pull fails and names the path. If a file was moved, update its path on the panel and save.
+    Each compose path is relative to the repository root and must point at the file, not its parent directory. Every file in the list must exist on the tracked branch; if any is missing, the save or pull fails and names the path. If a file was moved, update its path on the sheet and save.
   </Accordion>
 
   <Accordion title="Compose validation failed">
@@ -287,7 +315,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
   </Accordion>
 
   <Accordion title="Network timeout">
-    The clone did not finish in time. Fetches run with a 30-second timeout to keep a slow or unreachable host from hanging the stack panel. Check that the Sencho host can reach the repository host (proxies, firewalls, DNS) and try again. If the repository is genuinely large, pin a smaller compose subpath or mirror it somewhere closer to the Sencho host.
+    The clone did not finish in time. Fetches run with a 30-second timeout to keep a slow or unreachable host from hanging the Git Source sheet. Check that the Sencho host can reach the repository host (proxies, firewalls, DNS) and try again. If the repository is genuinely large, pin a smaller compose subpath or mirror it somewhere closer to the Sencho host.
   </Accordion>
 
   <Accordion title="Repository too large">
@@ -295,7 +323,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
   </Accordion>
 
   <Accordion title="Pending commit has changed since this pull was fetched">
-    You opened a change plan, then a webhook fired and replaced the pending commit before you clicked **Apply**. Close the dialog and reopen the panel to load the latest pending commit; the **Review** button will fetch the newer one.
+    You opened a change plan, then a webhook fired and replaced the pending commit before you clicked **Apply**. Close the dialog and reopen the sheet to load the latest pending commit; the **Review** button will fetch the newer one.
   </Accordion>
 
   <Accordion title="Applied but deploy failed">
@@ -329,6 +357,7 @@ Pulls, applies, and create-from-git operations on the same stack are serialized 
 
 ## Known limitations
 
+- **Git-managed Blueprint binding.** Convert or Adopt moves a live Direct source onto a Blueprint. That stack's Git Source sheet is then read-only until you Detach Git or Retire to Direct on the Blueprint. Git-managed Blueprints bind and show a blocked rollout state; they do not deploy from the stored snapshot. See [Blueprints](/features/blueprint-model).
 - **HTTPS and SSH.** HTTPS uses tokens; SSH uses deploy keys with strict host-key verification. Custom URL schemes are not supported.
 - **No Git LFS.** Compose and env files stored via LFS are rejected. Commit plain files instead.
 - **No submodules.** Submodule contents are not fetched. Inputs and build contexts that reference submodule contents are refused with an actionable message; a warning is shown when `.gitmodules` is present.

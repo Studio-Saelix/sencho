@@ -1,6 +1,7 @@
 import express, { type Request, type Response, type NextFunction, type RequestHandler } from 'express';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
+import { resolveNodeId } from '../helpers/resolveNodeId';
 import { SYNC_BODY_LIMIT, SYNC_ERROR_CODES, SYNC_PATH_PREFIX } from '../services/fleetSyncConstants';
 import { FLEET_SNAPSHOT_APPLY_BODY_LIMIT } from '../utils/snapshot-capture';
 
@@ -38,16 +39,17 @@ const FLEET_SNAPSHOT_APPLY_PATH = /^\/api\/stacks\/[^/]+\/fleet-snapshot-apply$/
  * the `proxyReq` socket event, so any attempt to write the body later errors
  * with "write after end" and the request hangs. Skipping JSON parsing for
  * remote-targeted `/api/` paths keeps the stream intact.
+ *
+ * The target node is resolved via `resolveNodeId` (header, then `?nodeId=`,
+ * then the default node) rather than only the header, so this bypass agrees
+ * with `nodeContextMiddleware` on every request, not just header-targeted
+ * ones.
  */
 export const conditionalJsonParser: RequestHandler = (req: Request, res: Response, next: NextFunction): void => {
-  const nodeIdHeader = req.headers['x-node-id'];
-  if (nodeIdHeader) {
-    const nodeId = parseInt(nodeIdHeader as string, 10);
-    const node = NodeRegistry.getInstance().getNode(nodeId);
-    if (node?.type === 'remote' && req.path.startsWith('/api/') && !isProxyExemptPath(req.path)) {
-      next();
-      return;
-    }
+  const node = NodeRegistry.getInstance().getNode(resolveNodeId(req));
+  if (node?.type === 'remote' && req.path.startsWith('/api/') && !isProxyExemptPath(req.path)) {
+    next();
+    return;
   }
   // Fleet sync receive endpoint accepts larger payloads (up to MAX_SYNC_ROWS).
   // The 100 KB default would 413 long before the row-count check runs. Translate

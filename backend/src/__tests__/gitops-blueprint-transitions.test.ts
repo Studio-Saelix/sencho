@@ -575,6 +575,7 @@ function inlineApp(id: string, blueprintId: number): GitOpsApplicationRow {
     lifecycle_status: 'active',
     target_mode: 'inline_blueprint',
     stack_name: null,
+    configured_source_stack_name: null,
     blueprint_id: blueprintId,
     configured_repo_url: null,
     repo_identity_json: null,

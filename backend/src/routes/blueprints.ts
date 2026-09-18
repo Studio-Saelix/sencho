@@ -36,9 +36,17 @@ import {
 import { projectBlueprintRevision, projectCommittedRevision } from '../helpers/gitopsResponse';
 import { isValidStackName } from '../utils/validation';
 import { parseIntParam } from '../utils/parseIntParam';
+import { auditActorUsername } from '../helpers/auditActor';
+import { GitOpsStore } from '../services/gitops/store';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isSqliteUniqueViolation, getErrorMessage } from '../utils/errors';
+import {
+    GitManagedContentError,
+    GitOpsBindingError,
+    GitOpsBindingService,
+    isGitManagedBlueprint,
+} from '../services/gitops/binding';
 
 export const blueprintsRouter = Router();
 
@@ -69,6 +77,86 @@ function desiredNodeIdsFor(blueprint: Blueprint): number[] {
     return BlueprintReconciler.getInstance()
         .listDesiredNodes(blueprint, DatabaseService.getInstance().getNodes())
         .map(node => node.id);
+}
+
+const GIT_MANAGED_INLINE_ERROR = 'Blueprint content is Git-managed and cannot be applied inline';
+
+function refuseGitManagedContent(res: Response, blueprint: Blueprint, error: string): boolean {
+    if (!isGitManagedBlueprint(blueprint)) return false;
+    res.status(409).json({ error, code: 'git_managed_content' });
+    return true;
+}
+
+function refuseGitManagedConflict(res: Response, error: unknown): boolean {
+    if (
+        !(error instanceof GitManagedContentError)
+        && !(error instanceof GitOpsBindingError && error.code === 'git_managed_content')
+    ) {
+        return false;
+    }
+    res.status(409).json({ error: error.message, code: error.code });
+    return true;
+}
+
+function respondBindingFailure(res: Response, error: unknown, context: string, clientMessage: string): void {
+    if (error instanceof GitOpsBindingError) {
+        const status = error.code === 'blueprint_not_found' || error.code === 'application_not_found' ? 404 : 409;
+        res.status(status).json({ error: error.message, code: error.code });
+        return;
+    }
+    console.error(`[Blueprints] ${context}:`, error);
+    res.status(500).json({ error: clientMessage });
+}
+
+async function respondBindingPreview(
+    req: Request,
+    res: Response,
+    loadPreview: (blueprintId: number) => Promise<unknown>,
+    context: string,
+    clientMessage: string,
+): Promise<void> {
+    const blueprint = loadBlueprintForBindingEdit(req, res);
+    if (!blueprint) return;
+    try {
+        res.json(await loadPreview(blueprint.id));
+    } catch (error) {
+        respondBindingFailure(res, error, context, clientMessage);
+    }
+}
+
+function loadBlueprintForBindingEdit(req: Request, res: Response): Blueprint | null {
+    if (!requirePermission(req, res, 'stack:edit')) return null;
+    const id = parseIntParam(req, res, 'id');
+    if (id === null) return null;
+    const blueprint = DatabaseService.getInstance().getBlueprint(id);
+    if (!blueprint) {
+        res.status(404).json({ error: 'Blueprint not found' });
+        return null;
+    }
+    if (!requirePermission(req, res, 'stack:edit', 'stack', blueprint.name)) return null;
+    return blueprint;
+}
+
+function loadConvertBinding(req: Request, res: Response): { blueprint: Blueprint; applicationId: string } | null {
+    const blueprint = loadBlueprintForBindingEdit(req, res);
+    if (!blueprint) return null;
+    if (!requireBody(req, res)) return null;
+    const rawId = (req.body as { applicationId?: unknown } | null)?.applicationId;
+    if (typeof rawId !== 'string' || rawId.trim().length === 0) {
+        res.status(400).json({ error: 'applicationId is required' });
+        return null;
+    }
+    const applicationId = rawId.trim();
+    const application = GitOpsStore.getInstance().getApplication(applicationId);
+    if (!application || application.target_mode !== 'direct' || application.lifecycle_status !== 'active' || !application.stack_name) {
+        res.status(409).json({
+            error: 'Select a live Direct GitOps application',
+            code: 'application_not_direct',
+        });
+        return null;
+    }
+    if (!requirePermission(req, res, 'stack:edit', 'stack', application.stack_name)) return null;
+    return { blueprint, applicationId };
 }
 
 function parseSelector(raw: unknown): { ok: true; selector: BlueprintSelector } | { ok: false; error: string } {
@@ -311,6 +399,7 @@ blueprintsRouter.put('/:id', (req: Request, res: Response): void => {
             res.status(409).json({ error: 'A blueprint with that name already exists' });
             return;
         }
+        if (refuseGitManagedConflict(res, error)) return;
         console.error('[Blueprints] Update error:', error);
         res.status(500).json({ error: 'Failed to update blueprint' });
     }
@@ -323,6 +412,11 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
     try {
         const blueprint = DatabaseService.getInstance().getBlueprint(id);
         if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
+        if (refuseGitManagedContent(
+            res,
+            blueprint,
+            'Retire or detach Git-managed content before deleting this Blueprint',
+        )) return;
         // Refuse delete on stateful blueprints that still have a stack Sencho deployed and
         // owns on a node; the operator must withdraw those explicitly so the snapshot-vs-destroy
         // choice is made. "Deployed by us" is last_deployed_at != null, which holds regardless of
@@ -376,6 +470,7 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
         commitBlueprintDelete(id, req.user?.username ?? null);
         res.status(204).end();
     } catch (error) {
+        if (refuseGitManagedConflict(res, error)) return;
         console.error('[Blueprints] Delete error:', error);
         res.status(500).json({ error: 'Failed to delete blueprint' });
     }
@@ -431,6 +526,7 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
             res.status(500).json({ error: error.message });
             return;
         }
+        if (refuseGitManagedConflict(res, error)) return;
         console.error('[Blueprints] apply-local error:', sanitizeForLog(getErrorMessage(error, 'apply failed')));
         res.status(500).json({ error: getErrorMessage(error, 'Blueprint apply failed') });
     }
@@ -492,6 +588,7 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
     try {
         const blueprint = DatabaseService.getInstance().getBlueprint(id);
         if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
+        if (refuseGitManagedContent(res, blueprint, GIT_MANAGED_INLINE_ERROR)) return;
         if (!blueprint.enabled) {
             res.status(409).json({ error: 'Blueprint is disabled. Enable it before applying.', code: 'blueprint_disabled' });
             return;
@@ -673,6 +770,7 @@ blueprintsRouter.post('/:id/accept/:nodeId', async (req: Request, res: Response)
     try {
         const blueprint = DatabaseService.getInstance().getBlueprint(id);
         if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
+        if (refuseGitManagedContent(res, blueprint, GIT_MANAGED_INLINE_ERROR)) return;
         if (!requirePermission(req, res, 'stack:deploy', 'stack', blueprint.name, nodeId)) return;
         const guard = BlueprintReconciler.getInstance().validateGuardConfirmation(id, nodeId, 'accept');
         if (!guard.ok) {
@@ -700,6 +798,99 @@ blueprintsRouter.get('/:id/preview', async (req: Request, res: Response): Promis
     } catch (error) {
         console.error('[Blueprints] Preview error:', error);
         res.status(500).json({ error: 'Failed to preview blueprint' });
+    }
+});
+
+blueprintsRouter.get('/:id/content-binding', (req: Request, res: Response): void => {
+    if (!requirePermission(req, res, 'node:read')) return;
+    const id = parseIntParam(req, res, 'id');
+    if (id === null) return;
+    try {
+        const binding = GitOpsBindingService.getInstance().describeContentBinding(id);
+        if (!binding) {
+            res.status(404).json({ error: 'Blueprint not found' });
+            return;
+        }
+        res.json(binding);
+    } catch (error) {
+        console.error('[Blueprints] Content-binding get error:', error);
+        res.status(500).json({ error: 'Failed to read Blueprint content binding' });
+    }
+});
+
+blueprintsRouter.post('/:id/content-binding/preview', async (req: Request, res: Response): Promise<void> => {
+    const target = loadConvertBinding(req, res);
+    if (!target) return;
+    try {
+        const preview = await GitOpsBindingService.getInstance().previewConvertInlineToGit({
+            blueprintId: target.blueprint.id,
+            applicationId: target.applicationId,
+        });
+        res.json(preview);
+    } catch (error) {
+        respondBindingFailure(res, error, 'Content-binding preview error', 'Failed to preview Blueprint content binding');
+    }
+});
+
+blueprintsRouter.put('/:id/content-binding', (req: Request, res: Response): void => {
+    const target = loadConvertBinding(req, res);
+    if (!target) return;
+    try {
+        const service = GitOpsBindingService.getInstance();
+        service.convertInlineToGit({
+            blueprintId: target.blueprint.id,
+            applicationId: target.applicationId,
+            actor: auditActorUsername(req),
+        });
+        res.json(service.describeContentBinding(target.blueprint.id));
+    } catch (error) {
+        respondBindingFailure(res, error, 'Content-binding convert error', 'Failed to convert Blueprint content binding');
+    }
+});
+
+blueprintsRouter.post('/:id/content-binding/detach/preview', (req, res) => respondBindingPreview(
+    req,
+    res,
+    (blueprintId) => GitOpsBindingService.getInstance().previewDetachToInline(blueprintId),
+    'Content-binding detach preview error',
+    'Failed to preview Blueprint detach',
+));
+
+blueprintsRouter.post('/:id/content-binding/retire/preview', (req, res) => respondBindingPreview(
+    req,
+    res,
+    (blueprintId) => GitOpsBindingService.getInstance().previewRetireToDirect(blueprintId),
+    'Content-binding retire preview error',
+    'Failed to preview Blueprint retire',
+));
+
+blueprintsRouter.post('/:id/content-binding/retire', (req: Request, res: Response): void => {
+    const blueprint = loadBlueprintForBindingEdit(req, res);
+    if (!blueprint) return;
+    try {
+        const service = GitOpsBindingService.getInstance();
+        service.retireToDirect({
+            blueprintId: blueprint.id,
+            actor: auditActorUsername(req),
+        });
+        res.json(service.describeContentBinding(blueprint.id));
+    } catch (error) {
+        respondBindingFailure(res, error, 'Content-binding retire error', 'Failed to retire Blueprint content binding');
+    }
+});
+
+blueprintsRouter.delete('/:id/content-binding', (req: Request, res: Response): void => {
+    const blueprint = loadBlueprintForBindingEdit(req, res);
+    if (!blueprint) return;
+    try {
+        const service = GitOpsBindingService.getInstance();
+        service.detachToInline({
+            blueprintId: blueprint.id,
+            actor: auditActorUsername(req),
+        });
+        res.json(service.describeContentBinding(blueprint.id));
+    } catch (error) {
+        respondBindingFailure(res, error, 'Content-binding detach error', 'Failed to detach Blueprint content binding');
     }
 });
 

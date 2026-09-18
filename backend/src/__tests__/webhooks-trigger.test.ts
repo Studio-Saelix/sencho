@@ -510,7 +510,7 @@ describe('WebhookService.execute: health gate begin call sites', () => {
         const { HealthGateService } = await import('../services/HealthGateService');
         vi.spyOn(policyGate, 'assertPolicyGateAllows').mockResolvedValue(undefined);
         vi.spyOn(fs.FileSystemService.prototype, 'getStacks').mockResolvedValue([stack]);
-        vi.spyOn(compose.ComposeService.prototype, 'deployStack').mockResolvedValue({ deployedGenerationId: null, recoveryId: 'rec-hook' });
+        vi.spyOn(compose.ComposeService.prototype, 'deployStack').mockResolvedValue({ deployedGenerationId: null, recoveryId: 'rec-hook', gitopsOperationId: null });
         const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-hook');
         const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
         const linkSpy = vi.spyOn(StackUpdateRecoveryService.getInstance(), 'linkGateOrRetain');
@@ -533,7 +533,7 @@ describe('WebhookService.execute: health gate begin call sites', () => {
         const { HealthGateService } = await import('../services/HealthGateService');
         vi.spyOn(policyGate, 'assertPolicyGateAllows').mockResolvedValue(undefined);
         vi.spyOn(fs.FileSystemService.prototype, 'getStacks').mockResolvedValue([stack]);
-        vi.spyOn(compose.ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null });
+        vi.spyOn(compose.ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
         const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-hook');
 
         const result = await WebhookService.getInstance().execute(webhook, 'pull', 'test', true);

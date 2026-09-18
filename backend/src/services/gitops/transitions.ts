@@ -1,4 +1,6 @@
 import type { RefKind } from '../git/types';
+import type { GitSourceErrorCode } from '../GitSourceService';
+import type { ReconcileResult } from './outcomes';
 import { DatabaseService } from '../DatabaseService';
 import {
   decodeArtifactEvidenceJson,
@@ -7,7 +9,7 @@ import {
   encodeArtifactEvidenceJson,
   encodeGitOpsEvidenceLimitations,
 } from './json';
-import { insertHistory, type GitOpsHistoryStage, type HistoryOutcome } from './history';
+import { insertHistory, type DeployDispatchedPayload, type DeployIntentRefusedPayload, type GitOpsHistoryStage, type HistoryOutcome, type PromotionCommittedPayload } from './history';
 import { emptyTargetRow, GitOpsStore } from './store';
 import type {
   ArtifactQualification,
@@ -19,6 +21,7 @@ import type {
   GitOpsIntentRevisionRow,
   GitOpsRolloutCandidateRow,
   GitOpsTargetCurrentRow,
+  SourcePolicy,
 } from './types';
 
 export type EventEnvelope = {
@@ -150,6 +153,157 @@ export class GitOpsTransitions {
     })();
   }
 
+  convertDirectToBlueprint(args: {
+    applicationId: string;
+    blueprintId: number;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.commitTargetBinding({
+      applicationId: args.applicationId,
+      envelope: args.envelope,
+      expectedMode: 'direct',
+      next: (app) => {
+        if (!app.stack_name) {
+          throw new GitOpsTransitionError('direct application is missing a stack name');
+        }
+        if (!app.configured_repo_url) {
+          throw new GitOpsTransitionError('blueprint mode requires a configured repo url');
+        }
+        return {
+          targetMode: 'blueprint',
+          stackName: null,
+          blueprintId: args.blueprintId,
+          configuredSourceStackName: app.stack_name,
+          configuredRepoUrl: app.configured_repo_url,
+        };
+      },
+      matchesDestination: (app) => (
+        app.target_mode === 'blueprint' && app.blueprint_id === args.blueprintId
+      ),
+      assertReady: (app) => {
+        const live = this.store().getLiveBlueprintApplication(args.blueprintId);
+        if (live && live.id !== app.id) {
+          throw new GitOpsTransitionError('live blueprint application already exists');
+        }
+        if (app.configured_repo_url) {
+          const sameRepo = this.store().getLiveBlueprintModeApplicationByRepoUrl(app.configured_repo_url);
+          if (sameRepo && sameRepo.id !== app.id) {
+            throw new GitOpsTransitionError('live blueprint application already claims this repo');
+          }
+        }
+      },
+    });
+  }
+
+  convertBlueprintToDirect(args: {
+    applicationId: string;
+    stackName: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.commitTargetBinding({
+      applicationId: args.applicationId,
+      envelope: args.envelope,
+      expectedMode: 'blueprint',
+      next: (app) => ({
+        targetMode: 'direct',
+        stackName: args.stackName,
+        blueprintId: null,
+        configuredSourceStackName: null,
+        configuredRepoUrl: app.configured_repo_url,
+      }),
+      matchesDestination: (app) => (
+        app.target_mode === 'direct' && app.stack_name === args.stackName
+      ),
+      assertReady: (app) => {
+        const live = this.store().getLiveDirectApplication(args.stackName);
+        if (live && live.id !== app.id) {
+          throw new GitOpsTransitionError('live direct application already exists');
+        }
+      },
+    });
+  }
+
+  blueprintModeDemoted(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    return this.commitTargetBinding({
+      applicationId: args.applicationId,
+      envelope: args.envelope,
+      expectedMode: 'blueprint',
+      next: (app) => {
+        if (app.blueprint_id === null) {
+          throw new GitOpsTransitionError('an inline blueprint application needs a blueprint id');
+        }
+        return {
+          targetMode: 'inline_blueprint',
+          stackName: null,
+          blueprintId: app.blueprint_id,
+          configuredSourceStackName: null,
+          configuredRepoUrl: null,
+        };
+      },
+      matchesDestination: (app) => app.target_mode === 'inline_blueprint',
+      assertReady: () => undefined,
+    });
+  }
+
+  private commitTargetBinding(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+    expectedMode: GitOpsApplicationRow['target_mode'];
+    next: (app: GitOpsApplicationRow) => {
+      targetMode: GitOpsApplicationRow['target_mode'];
+      stackName: string | null;
+      blueprintId: number | null;
+      configuredSourceStackName: string | null;
+      configuredRepoUrl: string | null;
+    };
+    matchesDestination: (app: GitOpsApplicationRow) => boolean;
+    assertReady: (app: GitOpsApplicationRow) => void;
+  }): TransitionResult {
+    return this.raw().transaction(() => {
+      const app = this.store().getApplication(args.applicationId);
+      if (!app) throw new GitOpsTransitionError('application not found');
+      if (args.matchesDestination(app)) {
+        const historyId = this.history(app, args.envelope, {
+          stage: 'application_retargeted',
+          outcome: 'committed',
+          before: { targetMode: args.expectedMode },
+          after: { targetMode: app.target_mode },
+        });
+        return { historyIds: historyId ? [historyId] : [], replayed: !historyId };
+      }
+      if (app.target_mode !== args.expectedMode) {
+        throw new GitOpsTransitionError(`current mode must be ${args.expectedMode}`);
+      }
+      args.assertReady(app);
+      const next = args.next(app);
+      const changes = this.store().updateApplicationTargetBinding({
+        id: app.id,
+        expectedMode: args.expectedMode,
+        targetMode: next.targetMode,
+        stackName: next.stackName,
+        blueprintId: next.blueprintId,
+        configuredSourceStackName: next.configuredSourceStackName,
+        configuredRepoUrl: next.configuredRepoUrl,
+        updatedAt: args.envelope.at,
+      });
+      if (changes !== 1) {
+        throw new GitOpsTransitionError('application target binding changed concurrently');
+      }
+      const updated = this.store().getApplication(app.id);
+      if (!updated) throw new GitOpsTransitionError('application not found');
+      const historyId = this.history(updated, args.envelope, {
+        stage: 'application_retargeted',
+        outcome: 'committed',
+        before: { targetMode: args.expectedMode },
+        after: { targetMode: next.targetMode },
+      });
+      return { historyIds: historyId ? [historyId] : [], replayed: !historyId };
+    })();
+  }
+
   fetched(applicationId: string, commitSha: string, envelope: EventEnvelope, resolvedRefKind: RefKind | null = null): TransitionResult {
     return this.mutateApp(applicationId, envelope, 'fetched', 'committed', (app) => {
       this.requireMatchingFetch(app, envelope);
@@ -177,16 +331,28 @@ export class GitOpsTransitions {
       app.active_operation_at = envelope.at;
       app.active_generation_id = null;
       app.retry_at = null;
+      // The poll cursor is a schedule for one fetch, not a standing cadence:
+      // consuming it here (rather than only re-arming on success) is what
+      // keeps a stale cursor from re-firing every tick after the fetch
+      // fails, is declined for manual/off policies, or crashes the
+      // evaluation. A success re-arms through sourcePollScheduled.
+      app.next_poll_at = null;
       this.clearInterruption(app, 'fetch_started');
     });
   }
 
-  fetchFailed(applicationId: string, envelope: EventEnvelope): TransitionResult {
+  /**
+   * Record a fetch failure, with the classified error code when the caller has
+   * one. The code is what lets the controller classify the failure as
+   * transient or permanent; the legacy `'fetch'` class stays the fallback so
+   * callers without a classification still produce a readable failure.
+   */
+  fetchFailed(applicationId: string, envelope: EventEnvelope, code?: GitSourceErrorCode): TransitionResult {
     return this.mutateApp(applicationId, envelope, 'fetch_failed', 'failed', (app) => {
       this.requireMatchingFetch(app, envelope);
       this.clearActive(app);
       app.failure_stage = 'fetch';
-      app.failure_class = 'fetch';
+      app.failure_class = code ?? 'fetch';
       app.failure_at = envelope.at;
       this.clearInterruption(app, 'fetch_started');
     });
@@ -396,6 +562,9 @@ export class GitOpsTransitions {
    * promotion; `targetApplied` binds the target only after promotion commits.
    */
   sourceAccepted(args: AppliedArgs): TransitionResult {
+    // Application-row pointer move only. Generation content is written
+    // exclusively by insertGeneration; this transition must never UPDATE a
+    // generation row.
     return this.mutateApp(args.applicationId, args.envelope, 'source_accepted', 'committed', (app) => {
       // Unlike applied() (preserved byte-identical, predates suspension),
       // this new entry point is the one a suspended source must refuse: no
@@ -864,6 +1033,53 @@ export class GitOpsTransitions {
   }
 
   /**
+   * Schedule the next poll for a source that settled without needing a retry.
+   *
+   * Like the retry cursor, the poll cursor is a plan, not a resolution: it
+   * never hides a failure (the failure branches win in the derivation) and
+   * never overwrites a staged candidate or an accepted generation, which the
+   * derivation reports ahead of the waiting state.
+   */
+  sourcePollScheduled(applicationId: string, nextPollAt: number, envelope: EventEnvelope): TransitionResult {
+    return this.mutateApp(applicationId, envelope, 'source_poll_scheduled', 'committed', (app) => {
+      if (app.suspended_at) throw new GitOpsTransitionError('source is suspended');
+      if (app.active_operation_stage) {
+        throw new GitOpsTransitionError('cannot schedule a poll while an operation is in flight');
+      }
+      app.next_poll_at = nextPollAt;
+    });
+  }
+
+  /**
+   * Persist a resolved source policy onto an application. Callers resolve
+   * the live row (the upsert path reads it through gitopsApplicationFor, so
+   * detached rows never reach this transition); suspension and detachment
+   * are not checked here. Configuration, not work: a suspended source keeps
+   * taking policy edits (suspension gates fetching and applying, not
+   * configuration), but the policy cannot flip under an operation that is
+   * mid-flight, since the settle path reads the policy when deciding
+   * acceptance.
+   *
+   * Moving to manual consumes any armed cursor, poll or retry: manual
+   * sources never join the unattended cadence, so a cursor left armed would
+   * be picked up every tick, declined by the controller's manual guard, and
+   * left in place, projecting a scheduled wake that can never run. The
+   * failure evidence stays untouched, so the last failure remains visible.
+   */
+  sourcePolicyChanged(applicationId: string, sourcePolicy: SourcePolicy, envelope: EventEnvelope): TransitionResult {
+    return this.mutateApp(applicationId, envelope, 'source_policy_changed', 'committed', (app) => {
+      if (app.active_operation_stage) {
+        throw new GitOpsTransitionError('cannot change the source policy while an operation is in flight');
+      }
+      app.source_policy = sourcePolicy;
+      if (sourcePolicy === 'manual') {
+        app.next_poll_at = null;
+        app.retry_at = null;
+      }
+    });
+  }
+
+  /**
    * Stop acting on a source without forgetting anything about it.
    *
    * Suspension is a decision about future work, so every success pointer stays
@@ -929,6 +1145,24 @@ export class GitOpsTransitions {
    * thing here that is not a bare history insert, since a fresh id has to
    * come from somewhere durable. Only the allocated id's uniqueness is
    * load-bearing; its embedded sequence number is for traceability.
+   *
+   * `dispatchGenerationId` marks the reservation as an accepted-generation
+   * dispatch and names the generation it promotes. Recovery reads the
+   * marker to settle an interrupted dispatch against pipeline-stage
+   * evidence instead of the plain source-facet projection, which cannot
+   * tell "never promoted" from "promoted but never settled".
+   *
+   * `dispatchDeployRequested` records, on that same reservation row, that
+   * the dispatch asked the pipeline to deploy. It is the one durable fact
+   * about deploy intent written before any step that can fail for
+   * persistence reasons, so on rows that carry it an outage that spans the
+   * whole deploy branch (where the intent row, the refusal witness, and the
+   * settle all fail together) cannot be misread: recovery consults it when
+   * the later deploy-evidence rows are absent, and a deploy-requested
+   * attempt never settles through the apply-only source projection, which
+   * would report a requested-and-never-started deploy as quiet
+   * convergence. Reservations written before this fact existed carry no
+   * key and keep the conservative projection reading.
    */
   allocateReconcileAttempt(
     applicationId: string,
@@ -936,6 +1170,8 @@ export class GitOpsTransitions {
     trigger: string,
     at: number,
     followerOf?: string,
+    dispatchGenerationId?: string,
+    dispatchDeployRequested?: boolean,
   ): { operationId: string; reserved: boolean } {
     return this.raw().transaction(() => {
       const app = this.requireApp(applicationId);
@@ -943,7 +1179,10 @@ export class GitOpsTransitions {
       this.raw().prepare('UPDATE gitops_applications SET attempt_seq = ? WHERE id = ?').run(seq, applicationId);
       const operationId = `${applicationId}:attempt:${seq}`;
       const envelope: EventEnvelope = { operationId, actor, trigger, at };
-      return { operationId, reserved: this.insertReconcileReservation(app, envelope, followerOf) };
+      return {
+        operationId,
+        reserved: this.insertReconcileReservation(app, envelope, followerOf, undefined, dispatchGenerationId, dispatchDeployRequested),
+      };
     })();
   }
 
@@ -958,6 +1197,8 @@ export class GitOpsTransitions {
     envelope: EventEnvelope,
     followerOf: string | undefined,
     deliveryIntent?: ReconcileDeliveryIntent,
+    dispatchGenerationId?: string,
+    dispatchDeployRequested?: boolean,
   ): boolean {
     return this.history(app, envelope, {
       stage: 'source_reconcile_started',
@@ -966,6 +1207,10 @@ export class GitOpsTransitions {
       after: {
         ...(followerOf ? { followerOf } : {}),
         ...(deliveryIntent ? { deliveryIntent } : {}),
+        ...(dispatchGenerationId ? { dispatchGenerationId } : {}),
+        // Written only when true, so apply-only dispatches and legacy
+        // reservations keep the exact payload shape readers already handle.
+        ...(dispatchDeployRequested ? { dispatchDeployRequested: true } : {}),
       },
     }) !== null;
   }
@@ -979,7 +1224,7 @@ export class GitOpsTransitions {
   settleReconcileAttempt(
     applicationId: string,
     envelope: EventEnvelope,
-    result: { outcome: string; reason: string; nextAction: string; retryAt?: number; commitSha?: string },
+    result: ReconcileResult,
   ): { settled: boolean } {
     return this.raw().transaction(() => {
       const app = this.requireApp(applicationId);
@@ -990,6 +1235,128 @@ export class GitOpsTransitions {
         after: { ...result },
       });
       return { settled: historyId !== null };
+    })();
+  }
+
+  /**
+   * Witness that an accepted-generation promotion committed to the
+   * filesystem.
+   *
+   * Dispatch calls this at the promotion commit boundary, before any source
+   * bookkeeping runs, so the evidence exists in exactly the crash window
+   * where the rewritten files do but the source rows do not. Recovery reads
+   * it scoped to the dispatch's own
+   * operation id: a later generation that happens to share an earlier one's
+   * commit SHA or plan fingerprint cannot inherit its promotion evidence, and
+   * a crash between the file rewrite and the source-row update still reports
+   * that the promotion ran. A bare history insert, replay-safe like the
+   * reservation.
+   */
+  promotionCommitted(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+    generationId: string;
+    commitSha: string;
+    planFingerprint: string;
+  }): { recorded: boolean } {
+    const payload: PromotionCommittedPayload = {
+      generationId: args.generationId,
+      commitSha: args.commitSha,
+      planFingerprint: args.planFingerprint,
+    };
+    return this.raw().transaction(() => {
+      const app = this.requireApp(args.applicationId);
+      const historyId = this.history(app, args.envelope, {
+        stage: 'promotion_committed',
+        outcome: 'committed',
+        before: {},
+        after: { ...payload },
+        generationId: args.generationId,
+        commitSha: args.commitSha,
+      });
+      return { recorded: historyId !== null };
+    })();
+  }
+
+  /**
+   * Record that a bound dispatch entered its deploy branch, naming the
+   * deploy operation id the dispatch minted for the Compose run it intends
+   * to start.
+   *
+   * The intent is journaled before the branch's fallible preparation (the
+   * policy gate, the recovery handoff) so an attempt that reached the
+   * deploy branch can never be mistaken for an apply-only completion.
+   * Dispatch threads the id into the deploy invocation, so Compose's own
+   * deploy transitions land under it (see `beginGitOpsDeploy`). This row is
+   * the durable deploy intent: recovery of a dispatch that bound but never
+   * settled reads it to tell "Compose was never reached" from "the deploy ran
+   * and its settlement was lost", and to name the exact deploy operation
+   * either way. Bare history insert scoped to the dispatch's operation,
+   * replay-safe.
+   */
+  deployDispatched(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+    generationId: string;
+    commitSha: string;
+    deployOperationId: string;
+  }): { recorded: boolean } {
+    const payload: DeployDispatchedPayload = {
+      generationId: args.generationId,
+      commitSha: args.commitSha,
+      deployOperationId: args.deployOperationId,
+    };
+    return this.raw().transaction(() => {
+      const app = this.requireApp(args.applicationId);
+      const historyId = this.history(app, args.envelope, {
+        stage: 'deploy_dispatched',
+        outcome: 'committed',
+        before: {},
+        after: { ...payload },
+        generationId: args.generationId,
+        commitSha: args.commitSha,
+      });
+      return { recorded: historyId !== null };
+    })();
+  }
+
+  /**
+   * Record that a bound dispatch refused to start its deploy because the
+   * deploy intent could not be durably recorded and read back.
+   *
+   * The refusal witness exists so recovery's reconstruction of an
+   * unsettled attempt matches what the live pipeline would have settled:
+   * without it, a failed intent write leaves no `deploy_dispatched` row,
+   * and recovery falls back to the reservation's deploy-request fact
+   * (absent on reservations written before that fact existed, where the
+   * attempt then reads as the apply-only completion the projection
+   * describes). The witness names the refusal specifically, so the
+   * reconstruction states the refusal rather than the generic no-record
+   * outcome. The row names no deploy operation (there is none), so
+   * recovery acts on its presence alone. Bare history insert scoped to the
+   * dispatch's operation, replay-safe like the intent row.
+   */
+  deployIntentRefused(args: {
+    applicationId: string;
+    envelope: EventEnvelope;
+    generationId: string;
+    commitSha: string;
+  }): { recorded: boolean } {
+    const payload: DeployIntentRefusedPayload = {
+      generationId: args.generationId,
+      commitSha: args.commitSha,
+    };
+    return this.raw().transaction(() => {
+      const app = this.requireApp(args.applicationId);
+      const historyId = this.history(app, args.envelope, {
+        stage: 'deploy_intent_refused',
+        outcome: 'committed',
+        before: {},
+        after: { ...payload },
+        generationId: args.generationId,
+        commitSha: args.commitSha,
+      });
+      return { recorded: historyId !== null };
     })();
   }
 
@@ -2037,6 +2404,22 @@ export class GitOpsTransitions {
     if (app.candidate_generation_id !== args.generationId) {
       throw new GitOpsTransitionError('applied generation is not the current candidate');
     }
+    // A conflict-blocked candidate can never be accepted, whatever the
+    // caller claims. This runs on the row re-read inside the mutation
+    // transaction, so it acts on durable state, not on the caller's
+    // snapshot, and it backs applyStarted's own blocked refusal.
+    if (app.candidate_plan_blocked === 1) {
+      throw new GitOpsTransitionError('candidate is blocked');
+    }
+    // Configured-policy acceptance acts on the source policy's behalf, so it
+    // is only valid while the durable policy still says automatic. The
+    // caller's snapshot can predate a policy change that completed while the
+    // acceptance (or the evaluation feeding it) was in flight; the
+    // transaction-fresh row above is what decides. Operator authority is not
+    // constrained here: an operator accepts whatever is on the row.
+    if (args.authority === 'configured_policy' && app.source_policy !== 'automatic') {
+      throw new GitOpsTransitionError('source policy is no longer automatic');
+    }
     // The seed artifact row is always evidence_version 1, so re-accepting a
     // generation that is already accepted would collide on the version
     // uniqueness constraint. Reject it here as a domain error instead of
@@ -2286,6 +2669,7 @@ export class GitOpsTransitions {
       generationId?: string | null;
       artifactSetId?: string | null;
       sourceAcceptanceRef?: string | null;
+      commitSha?: string | null;
     },
   ): string | null {
     const nodeId = fields.nodeId ?? null;
@@ -2303,6 +2687,7 @@ export class GitOpsTransitions {
       generationId: fields.generationId,
       artifactSetId: fields.artifactSetId,
       sourceAcceptanceRef: fields.sourceAcceptanceRef,
+      commitSha: fields.commitSha,
       at: envelope.at,
     });
   }
@@ -2404,7 +2789,10 @@ export class GitOpsTransitions {
    * compile, appear in the history snapshot, and then be silently dropped at
    * commit. Only identity and provenance are excluded, because they are fixed
    * at insert: id, lifecycle_key, target_mode, stack_name, blueprint_id,
-   * created_at.
+   * created_at. Binding transitions change target_mode, stack_name,
+   * blueprint_id, and configured_source_stack_name only through the guarded
+   * store UPDATE. Ordinary pointer writes must not become a second
+   * target-mode mutation path.
    */
   private writeApplication(app: GitOpsApplicationRow): void {
     this.raw().prepare(

@@ -59,12 +59,16 @@ describe('gitSourceStatus', () => {
         expect(gitSourceStatus('OPERATION_IN_FLIGHT')).toBe(409);
     });
 
+    it('maps SOURCE_CLAIMED_BY_BLUEPRINT to 409', () => {
+        expect(gitSourceStatus('SOURCE_CLAIMED_BY_BLUEPRINT')).toBe(409);
+    });
+
     it('has exactly one explicit mapping for every GitSourceErrorCode', () => {
         const codes: GitSourceErrorCode[] = [
             'REPO_NOT_FOUND', 'AUTH_FAILED', 'REF_NOT_FOUND', 'REF_DELETED', 'UNSUPPORTED_REF',
             'SSH_HOST_KEY_FAILED', 'FILE_NOT_FOUND', 'RATE_LIMITED', 'NETWORK_TIMEOUT', 'GIT_ERROR', 'STALE_PLAN',
             'PLAN_FINGERPRINT_REQUIRED', 'PLAN_BLOCKED', 'LEGACY_PENDING', 'PLAN_UNAVAILABLE',
-            'OPERATION_IN_FLIGHT',
+            'OPERATION_IN_FLIGHT', 'SOURCE_CLAIMED_BY_BLUEPRINT',
         ];
         for (const code of codes) {
             expect(typeof gitSourceStatus(code)).toBe('number');

@@ -1,5 +1,8 @@
 import { Router, type Request, type Response } from 'express';
-import { GitSourceService, type PublicGitSource } from '../services/GitSourceService';
+import { GitSourceService, type PublicGitSource, type SourcePolicy } from '../services/GitSourceService';
+import { GitOpsStore } from '../services/gitops/store';
+import { GitOpsBindingError, GitOpsBindingService } from '../services/gitops/binding';
+import { SourceController } from '../services/gitops/SourceController';
 import type { GitOpsRevisionProjection } from '../services/gitops/types';
 import { GitProjectManifestService } from '../services/GitProjectManifestService';
 import { FileSystemService } from '../services/FileSystemService';
@@ -245,6 +248,86 @@ gitSourcesRouter.post('/browse', async (req: Request, res: Response): Promise<vo
 });
 
 /**
+ * Strict parser for the global poll interval (minutes, 0..10080). Accepts
+ * integer numbers or digit strings only; rejects null, booleans, decimals,
+ * whitespace, and out-of-range values without coercion, so a malformed value
+ * cannot silently disable polling the operator meant to arm.
+ */
+export function parsePollIntervalMins(raw: unknown): number | null {
+  if (typeof raw === 'number') {
+    if (!Number.isInteger(raw) || raw < 0 || raw > 10080) return null;
+    return raw;
+  }
+  if (typeof raw === 'string') {
+    if (!/^\d{1,5}$/.test(raw)) return null;
+    const value = Number(raw);
+    return value <= 10080 ? value : null;
+  }
+  return null;
+}
+
+function requireNodeManage(req: Request, res: Response): boolean {
+  if (typeof req.nodeId === 'number') {
+    return requirePermission(req, res, 'node:manage', 'node', String(req.nodeId));
+  }
+  return requirePermission(req, res, 'node:manage');
+}
+
+function pollingSettingsPayload(): {
+  poll_interval_mins: number;
+  per_source: Array<{
+    stack_name: string;
+    poll_interval_secs: number | null;
+    next_poll_at: number | null;
+    source_policy: string;
+  }>;
+} {
+  return {
+    poll_interval_mins: DatabaseService.getInstance().getGitOpsPollIntervalMins(),
+    per_source: GitOpsStore.getInstance().listActiveSourceApplications().map((app) => ({
+      stack_name: app.stack_name ?? app.configured_source_stack_name ?? '',
+      poll_interval_secs: app.poll_interval_secs,
+      next_poll_at: app.next_poll_at,
+      source_policy: app.source_policy,
+    })),
+  };
+}
+
+/**
+ * Node-scoped polling configuration. The GET projects the global interval and
+ * each live source's own cadence; the PATCH stores the interval and
+ * reschedules every non-manual source, both gated by node:manage because the
+ * cadence governs unattended fetches against the node.
+ */
+gitSourcesRouter.get('/polling', async (req: Request, res: Response): Promise<void> => {
+  if (!requireNodeManage(req, res)) return;
+  try {
+    res.json(pollingSettingsPayload());
+  } catch (error) {
+    console.error('[GitSources] polling settings read failed:', error instanceof Error ? error.message : String(error));
+    res.status(500).json({ error: 'Could not read polling settings.' });
+  }
+});
+
+gitSourcesRouter.patch('/polling', async (req: Request, res: Response): Promise<void> => {
+  if (!requireNodeManage(req, res)) return;
+  const value = parsePollIntervalMins((req.body ?? {}).poll_interval_mins);
+  if (value === null) {
+    res.status(400).json({ error: 'poll_interval_mins must be an integer between 0 and 10080' });
+    return;
+  }
+  try {
+    DatabaseService.getInstance().updateGlobalSetting('gitops_poll_interval_mins', String(value));
+    SourceController.getInstance().rescheduleAll('system:git-source');
+    SourceController.getInstance().restartPolling();
+    res.json(pollingSettingsPayload());
+  } catch (error) {
+    console.error('[GitSources] polling settings write failed:', error instanceof Error ? error.message : String(error));
+    res.status(500).json({ error: 'Could not save polling settings.' });
+  }
+});
+
+/**
  * Router for per-stack git-source endpoints. Mount at `/api/stacks` so the
  * `/:stackName/git-source*` paths work alongside other stack-scoped routes
  * (such as the label-assignments router extracted in Phase 4A-1).
@@ -342,6 +425,7 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       remove_ca_bundle,
       auto_apply_on_webhook,
       auto_deploy_on_apply,
+      source_policy,
     } = req.body ?? {};
 
     if (typeof repo_url !== 'string' || !repo_url.trim()) {
@@ -363,6 +447,15 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
     }
     if (auto_apply_on_webhook !== undefined && typeof auto_apply_on_webhook !== 'boolean') {
       res.status(400).json({ error: 'auto_apply_on_webhook must be a boolean' });
+      return;
+    }
+    if (
+      source_policy !== undefined &&
+      source_policy !== 'manual' &&
+      source_policy !== 'review' &&
+      source_policy !== 'automatic'
+    ) {
+      res.status(400).json({ error: 'source_policy must be "manual", "review", or "automatic"' });
       return;
     }
     if (auto_deploy_on_apply !== undefined && typeof auto_deploy_on_apply !== 'boolean') {
@@ -408,6 +501,10 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
     }
     const autoApplyOnWebhook = auto_apply_on_webhook === true;
     const autoDeployOnApply = auto_deploy_on_apply === true;
+    // The permission gate is unconditional: arming auto-deploy always demands
+    // stack:deploy. Whether the policy matrix lets the arming through is a
+    // separate service-side decision (only an automatic policy qualifies), so
+    // no authorization decision depends on policy state read from the DB here.
     if (autoDeployOnApply && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
 
     // Confirm the stack actually exists on the active node. Without this guard
@@ -441,6 +538,9 @@ stackGitSourceRouter.put('/:stackName/git-source', async (req: Request, res: Res
       removeCaBundle: remove_ca_bundle === true,
       autoApplyOnWebhook,
       autoDeployOnApply,
+      // Type-safe only because the validation above 400s on anything outside
+      // the three-value union before this point.
+      sourcePolicy: source_policy as SourcePolicy | undefined,
       auditContext: {
         username: auditActorUsername(req),
         method: req.method,
@@ -667,6 +767,32 @@ stackGitSourceRouter.post('/:stackName/git-source/resume', async (req: Request, 
     const result = await GitSourceService.getInstance().resume(stackName, {
       actor: req.user?.username ?? 'unknown',
     });
+    // A resumed source is re-evaluated immediately rather than idling
+    // until its next poll or retry cursor: the controller's resume trigger
+    // re-resolves source state and, for an automatic source, target
+    // binding through the shared acceptance/dispatch arm. Fire-and-forget
+    // by design: this response reports that suspension was cleared, not
+    // the outcome of a reconcile that has not finished yet, and the
+    // durable row plus the next tick are the authority on the latter.
+    // The wake has its own guard: a failure starting it must not
+    // retroactively fail a resume that already committed, so it is
+    // logged, never sent to sendGitSourceError. evaluateNow absorbs its
+    // evaluation failures itself; the rejection arm catches anything
+    // before its own try exists (evaluateNow is async, so even its
+    // synchronous prologue, a store error before any evaluation could
+    // run, surfaces as a rejection) and any future escape, and the
+    // try/catch covers a getInstance()-level failure only.
+    const logWakeFailure = (error: unknown): void => {
+      console.error(
+        `[GitSources] Resume re-evaluation could not start for ${sanitizeForLog(stackName)}:`,
+        error instanceof Error ? error.message : String(error),
+      );
+    };
+    try {
+      SourceController.getInstance().evaluateNow(stackName).catch(logWakeFailure);
+    } catch (error) {
+      logWakeFailure(error);
+    }
     res.json(result);
   } catch (error) {
     sendGitSourceError(res, error);
@@ -687,6 +813,69 @@ stackGitSourceRouter.post('/:stackName/git-source/retry', async (req: Request, r
     res.json(result);
   } catch (error) {
     sendGitSourceError(res, error);
+  }
+});
+
+function respondBindingFailure(res: Response, error: unknown, context: string, clientMessage: string): void {
+  if (error instanceof GitOpsBindingError) {
+    const status = error.code === 'blueprint_not_found' || error.code === 'application_not_found' ? 404 : 409;
+    res.status(status).json({ error: error.message, code: error.code });
+    return;
+  }
+  console.error(`[GitSources] ${context}:`, error);
+  res.status(500).json({ error: clientMessage });
+}
+
+function loadAdoptTarget(req: Request, res: Response): { blueprintId: number; applicationId: string } | null {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return null;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return null;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return null;
+  const raw = (req.body ?? {}).blueprintId;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) {
+    res.status(400).json({ error: 'blueprintId must be a positive integer' });
+    return null;
+  }
+  const blueprint = DatabaseService.getInstance().getBlueprint(raw);
+  if (!blueprint) {
+    res.status(404).json({ error: 'Blueprint not found' });
+    return null;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', blueprint.name)) return null;
+  const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+  if (!application) {
+    res.status(409).json({
+      error: 'No live Direct GitOps application for this stack',
+      code: 'application_not_direct',
+    });
+    return null;
+  }
+  return { blueprintId: raw, applicationId: application.id };
+}
+
+stackGitSourceRouter.post('/:stackName/git-source/adopt-blueprint/preview', async (req: Request, res: Response): Promise<void> => {
+  const target = loadAdoptTarget(req, res);
+  if (!target) return;
+  try {
+    const preview = await GitOpsBindingService.getInstance().previewAdoptDirectToBlueprint(target);
+    res.json(preview);
+  } catch (error) {
+    respondBindingFailure(res, error, 'Adopt-blueprint preview error', 'Failed to preview Blueprint adoption');
+  }
+});
+
+stackGitSourceRouter.post('/:stackName/git-source/adopt-blueprint', (req: Request, res: Response): void => {
+  const target = loadAdoptTarget(req, res);
+  if (!target) return;
+  try {
+    const service = GitOpsBindingService.getInstance();
+    service.adoptDirectToBlueprint({ ...target, actor: auditActorUsername(req) });
+    res.json(service.describeContentBinding(target.blueprintId));
+  } catch (error) {
+    respondBindingFailure(res, error, 'Adopt-blueprint error', 'Failed to adopt Blueprint from Git source');
   }
 });
 

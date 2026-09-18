@@ -17,7 +17,7 @@ import request from 'supertest';
 import http from 'http';
 import type { AddressInfo } from 'net';
 import jwt from 'jsonwebtoken';
-import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 
 describe('conditionalJsonParser remote-proxy bypass', () => {
   let tmpDir: string;
@@ -65,7 +65,10 @@ describe('conditionalJsonParser remote-proxy bypass', () => {
       api_token: 'bypass-test-token',
     });
 
-    const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    // Longer-lived than the default. If the fix ever regresses, the cases below
+    // wait out the hang up to the 30s test timeout; a 1-minute token was seen
+    // to expire mid-run across multiple such cases in a single run.
+    const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '10m' });
     authHeader = `Bearer ${token}`;
   });
 
@@ -132,5 +135,71 @@ describe('conditionalJsonParser remote-proxy bypass', () => {
     expect(JSON.parse(lastUpstreamBody!.toString('utf-8'))).toEqual(payload);
     expect(lastUpstreamAuth).toBe('Bearer bypass-test-token');
     expect(JSON.stringify(res.body)).not.toContain('query-secret');
+  });
+
+  // Regression for the remote-proxy hang: conditionalJsonParser used to check
+  // only the x-node-id header to decide whether to preserve the raw stream.
+  // nodeContextMiddleware (the actual authoritative resolver) also accepts
+  // ?nodeId=, so a request targeting a remote node that way, with no header,
+  // got fully parsed and then hung at the proxy ("write after end") instead
+  // of forwarding. These two cases target a registry-delivery-eligible route
+  // (deploy) via ?nodeId= alone so they also exercise the delivery gate's
+  // 'skip'/'continue' outcome, which is the path the hang was hit from.
+  it('forwards the raw request body to the remote for a registry-delivery-eligible path targeted via ?nodeId= with no x-node-id header (bearer auth)', async () => {
+    lastUpstreamBody = null;
+    lastUpstreamAuth = null;
+
+    const payload = { trigger: 'deploy-test', force: false };
+
+    const res = await request(app)
+      .post(`/api/stacks/parser-bypass-deploy-stack/deploy?nodeId=${remoteNodeId}`)
+      .set('Authorization', authHeader)
+      .set('Content-Type', 'application/json')
+      .send(payload);
+
+    expect(res.status).toBe(200);
+    expect(lastUpstreamBody).not.toBeNull();
+    expect(JSON.parse(lastUpstreamBody!.toString('utf-8'))).toEqual(payload);
+    expect(lastUpstreamAuth).toBe('Bearer bypass-test-token');
+  });
+
+  it('forwards the raw request body to the remote for a registry-delivery-eligible path targeted via ?nodeId= with no x-node-id header (cookie auth)', async () => {
+    lastUpstreamBody = null;
+    lastUpstreamAuth = null;
+
+    const cookie = await loginAsTestAdmin(app);
+    const payload = { trigger: 'deploy-test-cookie', force: false };
+
+    const res = await request(app)
+      .post(`/api/stacks/parser-bypass-deploy-stack/deploy?nodeId=${remoteNodeId}`)
+      .set('Cookie', cookie)
+      .set('Content-Type', 'application/json')
+      .send(payload);
+
+    expect(res.status).toBe(200);
+    expect(lastUpstreamBody).not.toBeNull();
+    expect(JSON.parse(lastUpstreamBody!.toString('utf-8'))).toEqual(payload);
+    expect(lastUpstreamAuth).toBe('Bearer bypass-test-token');
+  });
+
+  // Not itself a hang reproduction: this route is not registry-delivery-
+  // eligible, so it never took the buggy path even before the fix. Kept as
+  // additional coverage that plain ?nodeId= targeting works end to end.
+  it('forwards the raw request body to the remote for a non-eligible path targeted via ?nodeId= with no x-node-id header', async () => {
+    lastUpstreamBody = null;
+    lastUpstreamAuth = null;
+
+    const payload = { name: 'parser-bypass-query-stack', content: 'services:\n  web:\n    image: nginx' };
+
+    const res = await request(app)
+      .post(`/api/stacks?nodeId=${remoteNodeId}`)
+      .set('Authorization', authHeader)
+      .set('Content-Type', 'application/json')
+      .send(payload);
+
+    expect(res.status).toBe(200);
+    expect(lastUpstreamBody).not.toBeNull();
+    expect(JSON.parse(lastUpstreamBody!.toString('utf-8'))).toEqual(payload);
+    expect(lastUpstreamAuth).toBe('Bearer bypass-test-token');
   });
 });

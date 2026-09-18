@@ -15,6 +15,7 @@ import { DatabaseService, type Blueprint, type BlueprintSelector } from '../Data
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import type { GitOpsApplicationRow, GitOpsIntentRevisionRow, GitOpsRolloutCandidateRow } from './types';
+import { GitManagedContentError, GitOpsBindingError, isGitManagedBlueprint } from './binding';
 
 /** What an operator changed, which decides whether a new intent is minted. */
 export type BlueprintChangeKind = 'operational' | 'metadata_only' | 'none';
@@ -243,6 +244,9 @@ export function commitBlueprintUpdate(
   return db.getDb().transaction(() => {
     const before = db.getBlueprint(blueprintId);
     if (!before) return { blueprint: undefined, change: 'none' as BlueprintChangeKind };
+    if (isGitManagedBlueprint(before) && updates.compose_content !== undefined) {
+      throw new GitManagedContentError();
+    }
 
     const change = classifyBlueprintChange(before, updates);
     if (change === 'none') return { blueprint: before, change };
@@ -326,6 +330,13 @@ export function commitBlueprintDelete(blueprintId: number, actor: string | null)
   const tx = GitOpsTransitions.getInstance();
 
   return db.getDb().transaction(() => {
+    const existing = db.getBlueprint(blueprintId);
+    if (existing && isGitManagedBlueprint(existing)) {
+      throw new GitOpsBindingError(
+        'git_managed_content',
+        'Retire or detach Git-managed content before deleting this Blueprint',
+      );
+    }
     const app = store.getLiveBlueprintApplication(blueprintId);
     const removed = db.deleteBlueprint(blueprintId);
     if (!removed || !app) return removed;
@@ -348,6 +359,7 @@ export function blankInlineApplication(id: string, blueprintId: number, at: numb
     lifecycle_status: 'active' as const,
     target_mode: 'inline_blueprint' as const,
     stack_name: null,
+    configured_source_stack_name: null,
     blueprint_id: blueprintId,
     configured_repo_url: null,
     repo_identity_json: null,

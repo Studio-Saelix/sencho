@@ -27,7 +27,16 @@ export type Connectivity = 'unknown' | 'reachable' | 'unreachable' | 'stale';
 
 export type LkgUnavailableReason = 'generation_missing' | 'recovery_unretainable';
 
-export type GitOpsAvailableAction = 'fetch' | 'apply' | 'dismiss' | 'deploy' | 'approve_legacy' | 'none';
+export type GitOpsAvailableAction =
+  | 'fetch'
+  | 'apply'
+  | 'dismiss'
+  | 'deploy'
+  | 'approve_legacy'
+  | 'suspend'
+  | 'resume'
+  | 'retry'
+  | 'none';
 
 // --- limitations ------------------------------------------------------------
 
@@ -121,6 +130,7 @@ export type SourceFacet =
     })
   | (SourceIdentityFields & { status: 'source_superseded'; supersededGenerationId: string })
   | (SourceIdentityFields & { status: 'applying'; activeOperationId: string; activeGenerationId: string })
+  | (SourceIdentityFields & { status: 'source_poll_scheduled'; nextPollAt: number })
   | (SourceIdentityFields & { status: 'source_retry_scheduled'; retryAt: number; retryCount: number })
   | (SourceIdentityFields & { status: 'source_suspended'; suspendedAt: number; suspendedReason: string | null })
   | (SourceIdentityFields & {

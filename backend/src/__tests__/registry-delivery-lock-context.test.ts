@@ -4,7 +4,7 @@ import { StackOpLockService } from '../services/StackOpLockService';
 import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { resolveRegistryAuthAtSeam } from '../helpers/registryDeliverySeam';
-import { hashActionSet, hashProjectSource } from '../helpers/registryDeliveryHashes';
+import { hashActionSet, hashProjectSource, hashPullRefList } from '../helpers/registryDeliveryHashes';
 import fs from 'fs';
 import path from 'path';
 
@@ -45,8 +45,10 @@ describe('registry delivery stack lock context', () => {
       op: 'stack-deploy',
       sourceHash,
       referencedHostsHash: delivery.hashHostList([]),
+      referencedPullRefsHash: hashPullRefList([]),
       coveredHostsHash: delivery.hashHostList([]),
       actionSetHash: hashActionSet(['stack:deploy']),
+      deliveryContractVersion: 1,
     });
 
     StackOpLockService.getInstance().tryAcquire(nodeId, stackName, 'deploy', 'admin', {

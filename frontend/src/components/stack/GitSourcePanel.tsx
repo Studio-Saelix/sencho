@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { GitBranch, Loader2, Trash2, RefreshCw, Save } from 'lucide-react';
-import { Modal, ModalHeader, ConfirmModal } from '@/components/ui/modal';
+import { Loader2, Trash2, RefreshCw, Save, Pause, Play, GitBranch } from 'lucide-react';
+import { ConfirmModal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ScrollArea } from '@/components/ui/scroll-area';
+import { SystemSheet, SheetSection, type SystemSheetAction } from '@/components/ui/system-sheet';
 import { apiFetch } from '@/lib/api';
 import { isSupportedGitRepoUrl, UNSUPPORTED_GIT_REPO_URL_MESSAGE } from '@/lib/gitRepoUrl';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
@@ -13,10 +13,17 @@ import { GitSourceDiffDialog, type PullResult, type PublicPendingPlan } from './
 import { GitSourceFields, type ApplyMode } from './GitSourceFields';
 import { GitManifestSummary, type ManifestSummary } from './GitManifestSummary';
 import type { GitBrowseResult } from './GitComposeFilePicker';
+import { AdoptBlueprintDialog } from '@/components/blueprints/AdoptBlueprintDialog';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
 import { SOURCE_STATE_LOOKUP, absentFault, liveSourceFacet, type LiveSourceFacet } from '@/lib/gitopsState';
-import type { GitOpsRevisionCarrier, GitOpsRevisionProjection, GitOpsSourceStatus } from '@/types/gitops';
+import { GITOPS_SOURCE_CONTROLLER_CAPABILITY } from '@/lib/capabilities';
+import type {
+  GitOpsAvailableAction,
+  GitOpsRevisionCarrier,
+  GitOpsRevisionProjection,
+  GitOpsSourceStatus,
+} from '@/types/gitops';
 
 export interface GitSource {
   id: number;
@@ -60,6 +67,7 @@ interface GitSourcePanelProps {
   isDarkMode: boolean;
   /** Called after any change that may affect the sidebar pending-badge. */
   onSourceChanged?: () => void;
+  canDeploy?: boolean;
 }
 
 function deriveApplyMode(source: GitSource | null, pendingMode: ApplyMode | null): ApplyMode {
@@ -99,11 +107,20 @@ function derivePendingCommit(
   return { status: 'candidate_ready', sha: flatPendingSha };
 }
 
+function formatRetryWait(retryAt: number): string {
+  const ms = retryAt - Date.now();
+  if (ms <= 0) return 'Retry due';
+  const secs = Math.ceil(ms / 1000);
+  if (secs < 60) return `Retry in ${secs}s`;
+  return `Retry in ${Math.ceil(secs / 60)}m`;
+}
+
 export function GitSourcePanel({
   open,
   onOpenChange,
   stackName,
   canEdit,
+  canDeploy = canEdit,
   onSourceChanged,
 }: GitSourcePanelProps) {
   const [loading, setLoading] = useState(true);
@@ -137,9 +154,15 @@ export function GitSourcePanel({
   const [pull, setPull] = useState<PullResult | null>(null);
   const [diffOpen, setDiffOpen] = useState(false);
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
+  const [suspendConfirmOpen, setSuspendConfirmOpen] = useState(false);
+  const [suspendReason, setSuspendReason] = useState('');
+  const [suspending, setSuspending] = useState(false);
+  const [resuming, setResuming] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [adoptOpen, setAdoptOpen] = useState(false);
 
   const { runWithLog } = useDeployFeedback();
-  const { activeNode } = useNodes();
+  const { activeNode, hasCapability } = useNodes();
   const applyMode = deriveApplyMode(source, applyModeOverride);
 
   const sourceFacet = liveSourceFacet(revision);
@@ -242,6 +265,7 @@ export function GitSourcePanel({
         auth_type: authType,
         auto_apply_on_webhook: autoApply,
         auto_deploy_on_apply: autoDeploy,
+        source_policy: applyMode === 'review' ? 'review' : 'automatic',
       };
       if (authType === 'token' && token !== '') {
         body.token = token;
@@ -457,193 +481,331 @@ export function GitSourcePanel({
     }
   };
 
+  const postControllerAction = async (
+    action: 'suspend' | 'resume' | 'retry',
+    body?: Record<string, unknown>,
+  ): Promise<boolean> => {
+    try {
+      const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/${action}`, {
+        method: 'POST',
+        body: JSON.stringify(body ?? {}),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        toast.error(err.error || `Could not ${action} this Git source.`);
+        return false;
+      }
+      toast.success(
+        action === 'suspend'
+          ? 'Reconciliation suspended.'
+          : action === 'resume'
+            ? 'Reconciliation resumed.'
+            : 'Retry started.',
+      );
+      onSourceChanged?.();
+      await load();
+      return true;
+    } catch (e) {
+      toast.error((e as Error)?.message || 'Network error.');
+      return false;
+    }
+  };
+
+  const suspendSource = async () => {
+    setSuspending(true);
+    try {
+      const reason = suspendReason.trim();
+      const ok = await postControllerAction('suspend', reason ? { reason } : {});
+      if (ok) {
+        setSuspendConfirmOpen(false);
+        setSuspendReason('');
+      }
+    } finally {
+      setSuspending(false);
+    }
+  };
+
+  const resumeSource = async () => {
+    setResuming(true);
+    try {
+      await postControllerAction('resume');
+    } finally {
+      setResuming(false);
+    }
+  };
+
+  const retrySource = async () => {
+    setRetrying(true);
+    try {
+      await postControllerAction('retry');
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  const sha7 = source?.last_applied_commit_sha?.slice(0, 7)
+    ?? source?.pending_commit_sha?.slice(0, 7)
+    ?? null;
+  const stateLabel = sourceFacet
+    ? (SOURCE_STATE_LOOKUP[sourceFacet.status]?.label ?? sourceFacet.status)
+    : null;
+  const sheetMeta = source
+    ? [sha7, stateLabel, source.branch || branch].filter(Boolean).join(' · ')
+    : 'Not linked';
+  const footerContext = source && source.updated_at
+    ? `Updated ${new Date(source.updated_at).toLocaleString()}`
+    : undefined;
+
+  const claimedByBlueprint = revision?.targetMode === 'blueprint';
+  const canMutateSource = canEdit && !claimedByBlueprint;
+  const availableActions: readonly GitOpsAvailableAction[] =
+    revision && revision.targetMode !== 'not_applicable' ? revision.availableActions : [];
+  const offersController = (action: GitOpsAvailableAction): boolean => (
+    canEdit
+    && hasCapability(GITOPS_SOURCE_CONTROLLER_CAPABILITY)
+    && availableActions.includes(action)
+  );
+  const offerSuspend = offersController('suspend');
+  const offerResume = offersController('resume');
+  const offerRetry = offersController('retry');
+  const showControllerCard = Boolean(
+    sourceFacet
+    && (
+      sourceFacet.status === 'source_failed'
+      || sourceFacet.status === 'source_retry_scheduled'
+      || sourceFacet.status === 'source_suspended'
+    ),
+  );
+  const showPendingReview = Boolean(pending && !showControllerCard && !claimedByBlueprint);
+
+  const secondaryActions: SystemSheetAction[] = [];
+  if (!claimedByBlueprint) {
+    if (source && sourceFacet?.status !== 'source_suspended') {
+      secondaryActions.push({
+        label: pulling ? 'Pulling' : 'Pull now',
+        onClick: () => { void pullNow(); },
+        disabled: pulling || saving,
+        icon: pulling ? Loader2 : RefreshCw,
+      });
+    }
+    if (offerSuspend) {
+      secondaryActions.push({
+        label: suspending ? 'Suspending' : 'Suspend',
+        onClick: () => setSuspendConfirmOpen(true),
+        disabled: suspending || saving,
+        icon: Pause,
+      });
+    } else if (offerResume) {
+      secondaryActions.push({
+        label: resuming ? 'Resuming' : 'Resume',
+        onClick: () => { void resumeSource(); },
+        disabled: resuming || saving,
+        icon: Play,
+      });
+    }
+  }
+  if (canEdit && canDeploy && source && revision?.targetMode === 'direct') {
+    secondaryActions.push({
+      label: 'Adopt onto Blueprint',
+      onClick: () => setAdoptOpen(true),
+      disabled: saving,
+      icon: GitBranch,
+    });
+  }
+
   return (
     <>
-      <Modal open={open} onOpenChange={onOpenChange} size="xl">
-        <ModalHeader
-          kicker={`${stackName.toUpperCase()} · GIT SOURCE`}
-          title={
-            <span className="flex items-center gap-2">
-              <GitBranch className="w-5 h-5" strokeWidth={1.5} />
-              Git source
-            </span>
-          }
-          description="Link this stack to a Git repository so compose updates can be pulled on demand or via webhook."
-        />
+      <SystemSheet
+        open={open}
+        onOpenChange={onOpenChange}
+        crumb={['Stack', stackName, 'Git source']}
+        name="Git source"
+        meta={sheetMeta}
+        size="lg"
+        primaryAction={canMutateSource ? {
+          label: saving ? (source ? 'Updating' : 'Saving') : (source ? 'Update' : 'Save'),
+          onClick: () => { void save(); },
+          disabled: saving,
+          icon: saving ? Loader2 : Save,
+        } : undefined}
+        secondaryActions={secondaryActions.length > 0 ? secondaryActions : undefined}
+        destructiveAction={canMutateSource && source ? {
+          label: 'Remove',
+          onClick: () => setRemoveConfirmOpen(true),
+          disabled: deleting || saving,
+          icon: Trash2,
+        } : undefined}
+        footerContext={footerContext}
+      >
+        {loading ? (
+          <div className="space-y-3">
+            <Skeleton className="h-9 w-full" />
+            <Skeleton className="h-9 w-full" />
+            <Skeleton className="h-9 w-full" />
+          </div>
+        ) : (
+          <>
+            <SheetSection title="Status">
+              {faults.length > 0 && <GitOpsFaultCard message={faults[0].message} />}
 
-          <ScrollArea className="h-[70vh] max-md:h-auto">
-            <div className="px-6 py-5 space-y-5">
-              {loading ? (
-                <div className="space-y-3">
-                  <Skeleton className="h-9 w-full" />
-                  <Skeleton className="h-9 w-full" />
-                  <Skeleton className="h-9 w-full" />
-                </div>
-              ) : (
-                <>
-                  {faults.length > 0 && <GitOpsFaultCard message={faults[0].message} />}
-
-                  {pending && (
-                    <GitOpsStateCard
-                      data-testid="git-pending"
-                      stateKey={pending.status}
-                      state={SOURCE_STATE_LOOKUP[pending.status]}
-                      action={(
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-7"
-                          onClick={() => pullNow()}
-                          disabled={pulling}
-                        >
-                          Review
-                        </Button>
-                      )}
+              {showPendingReview && pending && (
+                <GitOpsStateCard
+                  data-testid="git-pending"
+                  stateKey={pending.status}
+                  state={SOURCE_STATE_LOOKUP[pending.status]}
+                  action={(
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7"
+                      onClick={() => pullNow()}
+                      disabled={pulling}
                     >
-                      {pending.sha && (
-                        <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
-                          Commit <span className="tabular-nums text-foreground/80">{pending.sha.slice(0, 7)}</span>
-                        </div>
-                      )}
-                    </GitOpsStateCard>
+                      Review
+                    </Button>
                   )}
-
-                  <GitOpsCaveats revision={revision} />
-
-                  <GitSourceFields
-                    variant="edit"
-                    stackName={stackName}
-                    disabled={!canEdit || saving}
-                    repoUrl={repoUrl}
-                    branch={branch}
-                    composePaths={composePaths}
-                    contextDir={contextDir}
-                    syncEnv={syncEnv}
-                    authType={authType}
-                    token={token}
-                    deployKey={deployKey}
-                    caBundle={caBundle}
-                    removeCaBundle={removeCaBundle}
-                    sshKnownHostsEntry={sshKnownHostsEntry}
-                    sshHostKeyFingerprint={sshHostKeyFingerprint}
-                    hasStoredToken={source?.has_token ?? false}
-                    hasStoredDeployKey={source?.has_deploy_key ?? false}
-                    hasStoredCaBundle={source?.has_ca_bundle ?? false}
-                    storedHostKeyFingerprint={source?.ssh_host_key_fingerprint ?? null}
-                    applyMode={applyMode}
-                    onRepoUrlChange={setRepoUrl}
-                    onBranchChange={setBranch}
-                    onComposePathsChange={setComposePaths}
-                    onContextDirChange={setContextDir}
-                    onSyncEnvChange={setSyncEnv}
-                    onAuthTypeChange={setAuthType}
-                    onTokenChange={setToken}
-                    onDeployKeyChange={setDeployKey}
-                    onCaBundleChange={(value) => {
-                        setCaBundle(value);
-                        // Typing a new PEM should not also send the explicit
-                        // revocation flag from a prior Remove click; the new
-                        // value is what the operator wants to keep.
-                        if (removeCaBundle) setRemoveCaBundle(false);
-                    }}
-                    onRemoveCaBundle={() => setRemoveCaBundle(true)}
-                    onSshKnownHostsEntryChange={setSshKnownHostsEntry}
-                    onSshHostKeyFingerprintChange={setSshHostKeyFingerprint}
-                    onApplyModeChange={setApplyModeOverride}
-                    onBrowse={browseRepo}
-                  />
-
-                  {source && (
-                    <div className="rounded-md border border-glass-border bg-muted/30 px-3 py-2 text-[11px] text-stat-subtitle space-y-0.5 shadow-card-bevel">
-                      <div className="flex justify-between gap-2">
-                        <span>Last applied commit</span>
-                        <span className="font-mono tabular-nums">
-                          {source.last_applied_commit_sha ? source.last_applied_commit_sha.slice(0, 7) : 'never'}
-                        </span>
-                      </div>
-                      {sourceFacet && (
-                        <div className="flex justify-between gap-2">
-                          <span>Source state</span>
-                          <span data-testid="git-source-state">{SOURCE_STATE_LOOKUP[sourceFacet.status]?.label ?? sourceFacet.status}</span>
-                        </div>
-                      )}
-                      <div className="flex justify-between gap-2">
-                        <span>Updated</span>
-                        <span className="font-mono tabular-nums">
-                          {new Date(source.updated_at).toLocaleString()}
-                        </span>
-                      </div>
+                >
+                  {pending.sha && (
+                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
+                      Commit <span className="tabular-nums text-foreground/80">{pending.sha.slice(0, 7)}</span>
                     </div>
                   )}
-
-                  {source && (
-                    <GitManifestSummary
-                      stackName={stackName}
-                      summary={
-                        source.manifest ??
-                        (source.manifest_state
-                          ? {
-                              state: source.manifest_state,
-                              manifestVersion: 0,
-                              resolvedCommitSha: null,
-                              managedCount: 0,
-                              unmanagedCount: 0,
-                              refusedCount: 0,
-                              refused: [],
-                              hasBuildContexts: false,
-                              generatedAt: null,
-                            }
-                          : null)
-                      }
-                    />
-                  )}
-                </>
+                </GitOpsStateCard>
               )}
-            </div>
-          </ScrollArea>
 
-          <div className="px-6 py-4 border-t border-glass-border flex items-center justify-between gap-2">
-            <div>
-              {source && canEdit && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setRemoveConfirmOpen(true)}
-                  disabled={deleting || saving}
-                  className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
+              {showControllerCard && sourceFacet && (
+                <GitOpsStateCard
+                  data-testid="git-controller-state"
+                  stateKey={sourceFacet.status}
+                  state={SOURCE_STATE_LOOKUP[sourceFacet.status]}
+                  action={offerRetry ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7"
+                      onClick={() => { void retrySource(); }}
+                      disabled={retrying}
+                    >
+                      {retrying ? 'Retrying' : 'Retry'}
+                    </Button>
+                  ) : undefined}
                 >
-                  <Trash2 className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
-                  Remove
-                </Button>
+                  {sourceFacet.status === 'source_failed' && (
+                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
+                      {sourceFacet.failureClass}
+                      {sourceFacet.retryAt ? ` · ${formatRetryWait(sourceFacet.retryAt)}` : ''}
+                    </div>
+                  )}
+                  {sourceFacet.status === 'source_retry_scheduled' && (
+                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
+                      {formatRetryWait(sourceFacet.retryAt)}
+                    </div>
+                  )}
+                  {sourceFacet.status === 'source_suspended' && sourceFacet.suspendedReason && (
+                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
+                      {sourceFacet.suspendedReason}
+                    </div>
+                  )}
+                </GitOpsStateCard>
               )}
-            </div>
-            <div className="flex items-center gap-2">
+
+              <GitOpsCaveats revision={revision} />
+
               {source && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={pullNow}
-                  disabled={pulling || saving}
-                >
-                  {pulling ? (
-                    <><Loader2 className="w-4 h-4 mr-1.5 animate-spin" strokeWidth={1.5} />Pulling</>
-                  ) : (
-                    <><RefreshCw className="w-4 h-4 mr-1.5" strokeWidth={1.5} />Pull now</>
+                <div className="text-[11px] text-stat-subtitle space-y-0.5">
+                  <div className="flex justify-between gap-2">
+                    <span>Last applied commit</span>
+                    <span className="font-mono tabular-nums">
+                      {source.last_applied_commit_sha ? source.last_applied_commit_sha.slice(0, 7) : 'never'}
+                    </span>
+                  </div>
+                  {sourceFacet && (
+                    <div className="flex justify-between gap-2">
+                      <span>Source state</span>
+                      <span data-testid="git-source-state">{SOURCE_STATE_LOOKUP[sourceFacet.status]?.label ?? sourceFacet.status}</span>
+                    </div>
                   )}
-                </Button>
+                </div>
               )}
-              {canEdit && (
-                <Button size="sm" onClick={save} disabled={saving}>
-                  {saving ? (
-                    <><Loader2 className="w-4 h-4 mr-1.5 animate-spin" strokeWidth={1.5} />Saving</>
-                  ) : (
-                    <><Save className="w-4 h-4 mr-1.5" strokeWidth={1.5} />{source ? 'Update' : 'Save'}</>
-                  )}
-                </Button>
+            </SheetSection>
+
+            <SheetSection title="Repository">
+              {claimedByBlueprint ? (
+                <div className="space-y-2 rounded-lg border border-card-border bg-card p-3" data-testid="git-source-claimed">
+                  <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Bound to a Blueprint</p>
+                  <p className="text-xs text-stat-subtitle leading-relaxed">
+                    This Git source belongs to a Git-managed Blueprint. Save, Remove, and Pull now are blocked here. Use Detach Git on that Blueprint to restore stack-owned editing.
+                  </p>
+                </div>
+              ) : (
+              <GitSourceFields
+                variant="edit"
+                stackName={stackName}
+                disabled={!canEdit || saving}
+                repoUrl={repoUrl}
+                branch={branch}
+                composePaths={composePaths}
+                contextDir={contextDir}
+                syncEnv={syncEnv}
+                authType={authType}
+                token={token}
+                deployKey={deployKey}
+                caBundle={caBundle}
+                removeCaBundle={removeCaBundle}
+                sshKnownHostsEntry={sshKnownHostsEntry}
+                sshHostKeyFingerprint={sshHostKeyFingerprint}
+                hasStoredToken={source?.has_token ?? false}
+                hasStoredDeployKey={source?.has_deploy_key ?? false}
+                hasStoredCaBundle={source?.has_ca_bundle ?? false}
+                storedHostKeyFingerprint={source?.ssh_host_key_fingerprint ?? null}
+                applyMode={applyMode}
+                onRepoUrlChange={setRepoUrl}
+                onBranchChange={setBranch}
+                onComposePathsChange={setComposePaths}
+                onContextDirChange={setContextDir}
+                onSyncEnvChange={setSyncEnv}
+                onAuthTypeChange={setAuthType}
+                onTokenChange={setToken}
+                onDeployKeyChange={setDeployKey}
+                onCaBundleChange={(value) => {
+                    setCaBundle(value);
+                    if (removeCaBundle) setRemoveCaBundle(false);
+                }}
+                onRemoveCaBundle={() => setRemoveCaBundle(true)}
+                onSshKnownHostsEntryChange={setSshKnownHostsEntry}
+                onSshHostKeyFingerprintChange={setSshHostKeyFingerprint}
+                onApplyModeChange={setApplyModeOverride}
+                onBrowse={browseRepo}
+              />
               )}
-            </div>
-          </div>
-      </Modal>
+            </SheetSection>
+
+            {source && (
+              <SheetSection title="Manifest">
+                <GitManifestSummary
+                  stackName={stackName}
+                  summary={
+                    source.manifest ??
+                    (source.manifest_state
+                      ? {
+                          state: source.manifest_state,
+                          manifestVersion: 0,
+                          resolvedCommitSha: null,
+                          managedCount: 0,
+                          unmanagedCount: 0,
+                          refusedCount: 0,
+                          refused: [],
+                          hasBuildContexts: false,
+                          generatedAt: null,
+                        }
+                      : null)
+                  }
+                />
+              </SheetSection>
+            )}
+          </>
+        )}
+      </SystemSheet>
 
       <GitSourceDiffDialog
         open={diffOpen}
@@ -673,6 +835,40 @@ export function GitSourcePanel({
           readable in compose.yaml. Reconfiguring the source later is always possible.
         </p>
       </ConfirmModal>
+
+      <ConfirmModal
+        open={suspendConfirmOpen}
+        onOpenChange={(open) => {
+          setSuspendConfirmOpen(open);
+          if (!open) setSuspendReason('');
+        }}
+        kicker={`${stackName.toUpperCase()} · GIT · SUSPEND`}
+        title="Suspend reconciliation"
+        confirmLabel={suspending ? 'Suspending...' : 'Suspend'}
+        confirming={suspending}
+        onConfirm={suspendSource}
+      >
+        <p className="text-sm text-stat-subtitle">
+          Stops polling, webhooks, and automatic apply for this source until you resume. Save stays available; resume before pulling again.
+        </p>
+        <label className="mt-3 block text-sm font-medium text-stat-value" htmlFor="git-suspend-reason">
+          Reason (optional)
+        </label>
+        <textarea
+          id="git-suspend-reason"
+          value={suspendReason}
+          onChange={(event) => setSuspendReason(event.target.value)}
+          rows={3}
+          className="mt-1 w-full rounded-md border border-card-border bg-card px-3 py-2 font-mono text-sm text-stat-value"
+        />
+      </ConfirmModal>
+
+      <AdoptBlueprintDialog
+        open={adoptOpen}
+        onOpenChange={setAdoptOpen}
+        stackName={stackName}
+        onAdopted={() => { void load(); onSourceChanged?.(); }}
+      />
     </>
   );
 }

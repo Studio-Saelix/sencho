@@ -6,7 +6,7 @@ description: Real-time system health, stack load, configuration overview, fleet 
 The **Home** tab is the first thing you see after logging in. It surfaces the active node's overall health, live system metrics, the load on every stack, the on/off state of every automation and security feature, a fleet- or restart-activity panel, and the running alert tape, all on a single scrollable page.
 
 <Frame>
-  <img src="/images/dashboard/dashboard-overview.png" alt="Sencho Home dashboard showing the Healthy state masthead with its left-edge accent rail, four-tile resource gauge strip, paginated stack health table with Source and Port columns, Configuration Status card paired with Fleet Heartbeat, and the Recent Alerts feed." />
+  <img src="/images/dashboard/dashboard-overview.png" alt="Sencho Home dashboard showing the Healthy state masthead with its left-edge accent rail, four-tile resource gauge strip, Stack health table with State, Source, Networks, and Port columns, Configuration Status card paired with Fleet Heartbeat, and the Recent Alerts feed." />
 </Frame>
 
 ## Status masthead
@@ -55,27 +55,32 @@ While the dashboard is loading the CPU tile reads `--` and the caption shows `co
 
 ## Stack health
 
-A mono table of every stack discovered in the active node's `COMPOSE_DIR`, sorted so the stacks demanding attention sit at the top.
+A mono table of every stack discovered on the active node by default, sorted so the stacks demanding attention sit at the top. When your inventory has more than one node, a **This node | All nodes** control appears in the card header. The last choice is remembered when you leave Home, switch nodes, or come back from another view. **All nodes** fans out the same status, metrics, and GitOps lookups to every other reachable node and merges the results as each node answers, so a slow or denied node never blocks the rest.
 
 <Frame>
-  <img src="/images/dashboard/stack-health.png" alt="Stack health table titled 'Stack health · 15 STACKS · SORTED BY LOAD' with pagination chevrons reading 1 / 2 and STACK / SOURCE / PORT / UP / CPU / MEM / CPU · 10m column headers, listing eight stacks (cloudflared, swag, plex, bazarr, radarr, sonarr, prowlarr, tautulli) each with a row tint, Local source, published port, uptime, current CPU and MEM, and a 10-minute CPU sparkline." />
+  <img src="/images/dashboard/stack-health.png" alt="Stack health table titled 'Stack health' with a This node / All nodes control, coverage subtitle, and STACK / STATE / SOURCE / NETWORKS / PORT / UP / CPU / MEM / CPU · 10m columns listing stacks with row tints and sparklines." />
 </Frame>
 
 The row itself carries the health tint (see below); there is no separate status-dot column. The columns are:
 
 | Column | Description |
 |--------|-------------|
-| **STACK** | Stack name with an orange "Update available" badge when a newer image has been detected. When per-service status is known, the badge narrows to the outdated service name or a count (for example `2 updates`); hover for the full breakdown. The badge appears regardless of the sidebar indicator setting. Also carries the GitOps source-state chip when Sencho has state for the stack (see below). Sortable. |
+| **STACK** | Stack name with an orange "Update available" badge when a newer image has been detected on the active node. When per-service status is known, the badge narrows to the outdated service name or a count (for example `2 updates`); hover for the full breakdown. The badge appears regardless of the sidebar indicator setting. Also carries the GitOps source-state chip when Sencho has state for the stack (see below). Sortable. |
+| **NODE** | Node name. Shown only in **All nodes** so identical stack names on different nodes stay distinct. |
+| **STATE** | Canonical container state: `running`, `partial`, `exited`, or `unknown`. |
 | **SOURCE** | `Git` when the stack is linked to a [Git source](/features/git-sources), `Local` otherwise |
+| **NETWORKS** | Runtime Docker networks attached to the stack's containers. Multiple names collapse to the first plus `+N`; hover for the full list. Reads `--` when no network membership was observed. |
 | **PORT** | The stack's main published port, or `--` when it does not publish one |
 | **UP** | How long the oldest running container has been up, in compact units (`s` / `m` / `h` / `d`); a stopped or never-started stack reads `--`. Sortable. |
-| **CPU** | Latest aggregate CPU across the stack's containers. Sortable. |
-| **MEM** | Latest aggregate memory across the stack's containers, formatted in MB or GB. Sortable. |
+| **CPU** | Latest aggregate CPU across the stack's containers. Sortable. Missing samples read `--`. |
+| **MEM** | Latest aggregate memory across the stack's containers, formatted in MB or GB. Sortable. Missing samples read `--`. |
 | **CPU · 10m** | Per-stack 10-minute sparkline tinted to match the row state; warn and error rows mark the peak with a contrasting accent color |
 
-By default, rows sort by state (errors → warnings → healthy) and then by 10-minute peak CPU descending, so an exited stack always rises to the top and the noisiest healthy stacks float above the quiet ones (the header reads `sorted by load`). Click the **STACK**, **UP**, **CPU**, or **MEM** column header to sort by that column instead; the `sorted by load` label disappears once you do. Click the same header again to flip between ascending and descending. A row is tinted amber when its 10-minute peak CPU is at or above 80% or the stack is partially down (some but not all containers exited), or rose when the stack is fully exited or its peak CPU is at or above 90%. Click any row, or focus it and press <kbd>Enter</kbd> or <kbd>Space</kbd>, to jump to that stack's editor.
+By default, rows sort by state (errors → warnings → healthy) and then by 10-minute peak CPU descending, so an exited stack always rises to the top and the noisiest healthy stacks float above the quiet ones (the header reads `sorted by load`). Click the **STACK**, **UP**, **CPU**, or **MEM** column header to sort by that column instead; the `sorted by load` label disappears once you do. Click the same header again to flip between ascending and descending. A row is tinted amber when its 10-minute peak CPU is at or above 80% or the stack is partially down (some but not all containers exited), or rose when the stack is fully exited or its peak CPU is at or above 90%. Click any row, or focus it and press <kbd>Enter</kbd> or <kbd>Space</kbd>, to open that stack's editor on the node that owns it. Same-name stacks on different nodes keep their identity through that jump.
 
-The table paginates at eight rows; chevrons appear in the header along with an `N / M` indicator when there is more than one page. When the active node has no stacks at all the card renders an empty state with a layered-disks glyph and the message `No stacks found. Create one from the sidebar.`
+The table shows the first eight rows and a **Show all N stacks** footer when there are more; **Show less** collapses again. In **All nodes**, the subtitle reports full coverage as `N stacks · M nodes`, or `N stacks · K/M nodes reporting` while some nodes are still pending, stale, denied, or offline. Retry refreshes only the nodes that need it. When every node fails to report, the card shows an unavailable state with Retry rather than an empty fleet. When the active node (or every confirmed reporter) has no stacks, the card renders an empty state with a layered-disks glyph and the message `No stacks found. Create one from the sidebar.` On narrow widths the table scrolls horizontally so columns stay readable.
+
+The phone dashboard uses the same eight-row collapse, shared state classifier, and composite navigation. When more than one node is available it shows the same **This node | All nodes** control; **Show all** / **Show less** replace the older jump away from Stack health.
 
 ### GitOps state chip
 

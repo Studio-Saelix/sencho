@@ -2,6 +2,8 @@ import { Router, type Request, type Response } from 'express';
 import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
 import { listRegistryDeliveryEvidencePage } from '../helpers/registryDeliveryEvidence';
+import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
 
 export const registryDeliveryRouter = Router();
 
@@ -16,8 +18,13 @@ registryDeliveryRouter.post('/discover', async (req: Request, res: Response) => 
     const result = await service.discoverOnTarget(req.body);
     res.json(result);
   } catch (error) {
-    console.error('[registry-delivery] discover failed');
-    res.status(500).json({ error: 'Registry delivery discovery failed' });
+    const status = Number((error as { status?: number }).status) || 500;
+    console.error('[registry-delivery] discover failed:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(status).json({
+      error: status === 413
+        ? 'Discovery exceeded the registry pull reference limit'
+        : 'Registry delivery discovery failed',
+    });
   }
 });
 

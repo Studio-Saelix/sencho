@@ -1,51 +1,40 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Sparkline } from '@/components/ui/sparkline';
-import { AlertCircle, ArrowUp, ArrowDown, ChevronLeft, ChevronRight, CircleArrowUp, Layers, RefreshCw } from 'lucide-react';
+import { AlertCircle, ArrowUp, ArrowDown, ChevronRight, CircleArrowUp, Layers, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Skeleton } from '@/components/ui/skeleton';
-import type { StackStatusEntry, MetricPoint, StackCpuSeries, StackStatusesLoadStatus } from './types';
-import type { StackUpdateInfo } from '@/types/imageUpdates';
-import { isConfirmedImageUpdate, isConfirmedServiceUpdate } from '@/types/imageUpdates';
-import { aggregateCurrentUsage } from './aggregateCurrentUsage';
-import { classifyRow, type RowState } from './classifyRow';
+import { SegmentedControl } from '@/components/ui/segmented-control';
+import type { RowState } from './classifyRow';
 import { updateAvailableLabel } from '@/lib/updateAvailableLabel';
 import GitOpsBadge from '@/components/gitops/GitOpsBadge';
-import type { GitOpsSourceStateMap } from './useGitOpsSourceStates';
+import type { StackHealthCoverage, StackHealthNavTarget, StackHealthRow, StackHealthScopeMode, StackHealthViewKind } from './stackHealthTypes';
+import { STACK_HEALTH_COLLAPSE_SIZE } from './useStackHealthScope';
 
 interface StackHealthTableProps {
-  stackStatuses: Record<string, StackStatusEntry>;
-  stackStatusesLoadStatus: StackStatusesLoadStatus;
-  stackStatusesLoadError: string | null;
-  onRetryStackStatuses?: () => void;
-  metrics: MetricPoint[];
-  stackCpuSeries: Record<string, StackCpuSeries>;
-  onNavigateToStack: (stackFile: string) => void;
-  stackUpdates?: Record<string, StackUpdateInfo>;
-  /**
-   * GitOps source state per stack name. A stack the model says nothing about
-   * is absent, and its SOURCE cell keeps the plain Git or Local label.
-   */
-  gitopsSourceStates?: GitOpsSourceStateMap;
+  scope: StackHealthScopeMode;
+  onScopeChange: (scope: StackHealthScopeMode) => void;
+  showScopeControl: boolean;
+  view: StackHealthViewKind;
+  viewError: string | null;
+  rows: StackHealthRow[];
+  coverage: StackHealthCoverage;
+  incomplete: boolean;
+  onRetry: () => void;
+  onRetryFailedOrStale?: () => void;
+  onNavigateToStack: (target: StackHealthNavTarget) => void;
 }
 
 type SortKey = 'stack' | 'up' | 'cpu' | 'mem';
 
-const PAGE_SIZE = 8;
-// Shared by the header and data rows so their columns stay aligned. The
-// `max-md:min-w` keeps both at the same width below md, where the card scrolls
-// horizontally; desktop is unaffected by the `max-md:` prefix. Columns:
-// STACK · SOURCE · PORT · UP · CPU · MEM · CPU·10m · chevron.
-const GRID_TEMPLATE = 'grid-cols-[minmax(0,1fr)_64px_56px_52px_52px_72px_110px_16px] max-md:min-w-[620px]';
+const THIS_NODE_GRID = 'grid-cols-[minmax(0,1fr)_64px_64px_168px_56px_52px_52px_72px_110px_16px] min-w-[840px]';
+const ALL_NODES_GRID = 'grid-cols-[minmax(0,1fr)_88px_64px_64px_168px_56px_52px_52px_72px_110px_16px] min-w-[940px]';
 
-const formatMemory = (mb: number): string => {
+function formatMemory(mb: number): string {
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
   return `${mb.toFixed(0)} MB`;
-};
+}
 
-// Grid-compatible sortable header cell. Renders a <button> inside the grid
-// <span> (the security ImagesTab pattern uses <TableHead>, which is invalid
-// inside this CSS-grid layout, so only the sort logic is shared here).
 function SortHeader({ label, k, sortKey, sortDir, onSort, align = 'left' }: {
   label: string;
   k: SortKey;
@@ -94,64 +83,65 @@ const sparkStroke: Record<RowState, string> = {
   error: 'var(--destructive)',
 };
 
+function NetworksCell({ networks }: { networks?: string[] }) {
+  if (!networks || networks.length === 0) return <>--</>;
+  const [first, ...rest] = networks;
+  return (
+    <span className="block min-w-0 truncate" title={rest.length > 0 ? networks.join(', ') : undefined}>
+      {first}
+      {rest.length > 0 ? <span className="text-stat-subtitle">{` +${rest.length}`}</span> : null}
+    </span>
+  );
+}
+
+function coverageLabel(scope: StackHealthScopeMode, coverage: StackHealthCoverage): string {
+  const stackWord = coverage.n === 1 ? 'stack' : 'stacks';
+  if (scope === 'this-node') {
+    return `${coverage.n} ${stackWord}`;
+  }
+  if (coverage.k === coverage.m) {
+    return `${coverage.n} ${stackWord} · ${coverage.m} nodes`;
+  }
+  return `${coverage.n} ${stackWord} · ${coverage.k}/${coverage.m} nodes reporting`;
+}
+
+function CardShell({ children }: { children: ReactNode }) {
+  return (
+    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
+      {children}
+    </div>
+  );
+}
+
 export function StackHealthTable({
-  stackStatuses,
-  stackStatusesLoadStatus,
-  stackStatusesLoadError,
-  onRetryStackStatuses,
-  metrics,
-  stackCpuSeries,
+  scope,
+  onScopeChange,
+  showScopeControl,
+  view,
+  viewError,
+  rows,
+  coverage,
+  incomplete,
+  onRetry,
+  onRetryFailedOrStale,
   onNavigateToStack,
-  stackUpdates = {},
-  gitopsSourceStates = {},
 }: StackHealthTableProps) {
-  const [page, setPage] = useState(0);
-  // null = the default health-state ordering (worst first); a SortKey switches
-  // to user-driven column sort.
+  const [expanded, setExpanded] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  // Live-tick the current second so uptime labels advance without a parent
-  // refetch. Thirty-second cadence keeps the DOM calm while still refreshing
-  // every "Nm" bucket change.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 30000);
     return () => clearInterval(id);
   }, []);
+  useEffect(() => {
+    setExpanded(false);
+  }, [scope]);
 
-  const stackAggregates = useMemo(() => aggregateCurrentUsage(metrics), [metrics]);
+  const grid = scope === 'all-nodes' ? ALL_NODES_GRID : THIS_NODE_GRID;
 
-  const baseRows = useMemo(() => {
-    return Object.entries(stackStatuses).map(([file, entry]) => {
-      const name = file.replace(/\.(yml|yaml)$/, '');
-      const agg = stackAggregates[name];
-      const series = stackCpuSeries[name];
-      const peakCpu = series?.peakValue ?? agg?.cpu ?? 0;
-      const state = classifyRow(entry.status, peakCpu);
-      const updateInfo = stackUpdates[file];
-      return {
-        file,
-        name,
-        status: entry.status,
-        memory: agg?.mem ?? null,
-        cpu: agg?.cpu ?? null,
-        peakCpu,
-        series: series?.points ?? [],
-        peakIndex: series?.peakIndex ?? -1,
-        state,
-        runningSince: entry.runningSince ?? null,
-        source: entry.source ?? 'local',
-        mainPort: entry.mainPort ?? null,
-        hasUpdate: updateInfo != null && isConfirmedImageUpdate(updateInfo),
-        outdatedServices: (updateInfo?.services ?? [])
-          .filter((s) => isConfirmedServiceUpdate(s))
-          .map((s) => s.service),
-      };
-    });
-  }, [stackStatuses, stackAggregates, stackCpuSeries, stackUpdates]);
-
-  const rows = useMemo(() => {
-    const list = [...baseRows];
+  const sortedRows = useMemo(() => {
+    const list = [...rows];
     if (sortKey === null) {
       const stateOrder: Record<RowState, number> = { error: 0, warn: 1, healthy: 2 };
       list.sort((a, b) => {
@@ -170,186 +160,212 @@ export function StackHealthTable({
         case 'up': return (uptime(a.runningSince) - uptime(b.runningSince)) * dir;
         case 'cpu': return ((a.cpu ?? -1) - (b.cpu ?? -1)) * dir;
         case 'mem': return ((a.memory ?? -1) - (b.memory ?? -1)) * dir;
-        // Exhaustive: a new SortKey must add a case or this fails to compile.
         default: { const _exhaustive: never = sortKey; return _exhaustive; }
       }
     });
     return list;
-  }, [baseRows, sortKey, sortDir, now]);
+  }, [rows, sortKey, sortDir, now]);
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
     else { setSortKey(key); setSortDir(key === 'stack' ? 'asc' : 'desc'); }
-    setPage(0);
   };
 
-  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
-  const safePage = Math.min(page, totalPages - 1);
-  const pagedRows = rows.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
-  const needsPagination = rows.length > PAGE_SIZE;
+  const visibleRows = expanded ? sortedRows : sortedRows.slice(0, STACK_HEALTH_COLLAPSE_SIZE);
+  const needsExpansion = sortedRows.length > STACK_HEALTH_COLLAPSE_SIZE;
 
-  const stackCount = Object.keys(stackStatuses).length;
-
-  if (stackStatusesLoadStatus === 'idle' || stackStatusesLoadStatus === 'loading') {
-    return (
-      <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-5 space-y-3">
-        <Skeleton className="h-6 w-40" />
-        <Skeleton className="h-10 w-full" />
-        <Skeleton className="h-10 w-full" />
-        <Skeleton className="h-10 w-full" />
+  const header = (
+    <div className="flex items-center justify-between gap-4 px-5 py-4">
+      <div className="flex min-w-0 flex-wrap items-baseline gap-3">
+        <h2 className="font-heading text-xl leading-none tracking-tight text-stat-value">
+          Stack health
+        </h2>
+        {view === 'ready' || view === 'empty' ? (
+          <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-stat-subtitle">
+            {coverageLabel(scope, coverage)}{sortKey === null && view === 'ready' ? ' · sorted by load' : ''}
+          </span>
+        ) : null}
+        {incomplete && onRetryFailedOrStale ? (
+          <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-[11px]" onClick={onRetryFailedOrStale}>
+            Retry
+          </Button>
+        ) : null}
       </div>
-    );
-  }
+      {showScopeControl ? (
+        <SegmentedControl
+          ariaLabel="Stack health node scope"
+          className="max-md:[&_button]:min-h-11"
+          value={scope}
+          onChange={onScopeChange}
+          options={[
+            { value: 'this-node', label: 'This node' },
+            { value: 'all-nodes', label: 'All nodes' },
+          ]}
+        />
+      ) : null}
+    </div>
+  );
 
-  if (stackStatusesLoadStatus === 'error') {
+  if (view === 'loading') {
     return (
-      <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel py-10">
-        <div className="flex flex-col items-center justify-center gap-3 text-stat-subtitle">
-          <AlertCircle className="h-8 w-8 text-stat-icon" strokeWidth={1.5} aria-hidden />
-          <p className="text-sm text-center px-4">
-            {stackStatusesLoadError ?? 'Could not load stack health.'}
-          </p>
-          {onRetryStackStatuses && (
-            <Button type="button" variant="outline" size="sm" onClick={onRetryStackStatuses}>
-              <RefreshCw className="w-4 h-4" />
-              Retry
-            </Button>
-          )}
+      <CardShell>
+        {header}
+        <div className="space-y-3 px-5 pb-5">
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
         </div>
-      </div>
+      </CardShell>
     );
   }
 
-  if (stackCount === 0) {
+  if (view === 'unavailable') {
     return (
-      <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel py-10">
-        <div className="flex flex-col items-center justify-center gap-2 text-stat-subtitle">
+      <CardShell>
+        {header}
+        <div className="flex flex-col items-center justify-center gap-3 py-10 text-stat-subtitle">
+          <AlertCircle className="h-8 w-8 text-stat-icon" strokeWidth={1.5} aria-hidden />
+          <p className="px-4 text-center text-sm">
+            {viewError ?? 'Could not load stack health.'}
+          </p>
+          <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+            <RefreshCw className="h-4 w-4" />
+            Retry
+          </Button>
+        </div>
+      </CardShell>
+    );
+  }
+
+  if (view === 'empty') {
+    return (
+      <CardShell>
+        {header}
+        <div className="flex flex-col items-center justify-center gap-2 py-10 text-stat-subtitle">
           <Layers className="h-8 w-8 text-stat-icon" strokeWidth={1.5} />
           <p className="text-sm">No stacks found. Create one from the sidebar.</p>
         </div>
-      </div>
+      </CardShell>
     );
   }
 
   return (
-    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel max-md:overflow-x-auto">
-      <div className="flex items-center justify-between gap-4 px-5 py-4">
-        <div className="flex items-baseline gap-3">
-          <h2 className="font-heading text-xl leading-none tracking-tight text-stat-value">
-            Stack health
-          </h2>
-          <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-stat-subtitle">
-            {stackCount} {stackCount === 1 ? 'stack' : 'stacks'}{sortKey === null ? ' · sorted by load' : ''}
-          </span>
+    <CardShell>
+      {header}
+      <div className="overflow-x-auto">
+        <div className={`grid ${grid} items-center gap-4 border-t border-border/60 px-[var(--density-row-x)] py-[var(--density-cell-y)] font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle`}>
+          <SortHeader label="STACK" k="stack" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
+          {scope === 'all-nodes' ? <span>NODE</span> : null}
+          <span>STATE</span>
+          <span>SOURCE</span>
+          <span>NETWORKS</span>
+          <span>PORT</span>
+          <SortHeader label="UP" k="up" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} align="right" />
+          <SortHeader label="CPU" k="cpu" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} align="right" />
+          <SortHeader label="MEM" k="mem" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} align="right" />
+          <span className="text-right">CPU · 10m</span>
+          <span />
         </div>
-        {needsPagination ? (
-          <div className="flex items-center gap-1.5">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6"
-              disabled={safePage === 0}
-              onClick={() => setPage(safePage - 1)}
-            >
-              <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} />
-            </Button>
-            <span className="text-xs font-mono tabular-nums text-stat-subtitle min-w-[3rem] text-center">
-              {safePage + 1} / {totalPages}
-            </span>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6"
-              disabled={safePage >= totalPages - 1}
-              onClick={() => setPage(safePage + 1)}
-            >
-              <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.5} />
-            </Button>
-          </div>
-        ) : null}
-      </div>
-      <div className={`grid ${GRID_TEMPLATE} items-center gap-4 border-t border-border/60 px-[var(--density-row-x)] py-[var(--density-cell-y)] font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle`}>
-        <SortHeader label="STACK" k="stack" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
-        <span>SOURCE</span>
-        <span>PORT</span>
-        <SortHeader label="UP" k="up" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} align="right" />
-        <SortHeader label="CPU" k="cpu" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} align="right" />
-        <SortHeader label="MEM" k="mem" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} align="right" />
-        <span className="text-right">CPU · 10m</span>
-        <span />
-      </div>
-      <ul className="divide-y divide-border/40">
-        {pagedRows.map((row) => {
-          const updateLabel = row.hasUpdate ? updateAvailableLabel(row.outdatedServices) : null;
-          // Looked up here rather than folded into the memoized rows: it is
-          // presentation, and threading it through would make the row memo
-          // recompute on every parent render for no benefit.
-          const gitopsSourceState = gitopsSourceStates[row.name];
-          return (
-          <li
-            key={row.file}
-            role="button"
-            tabIndex={0}
-            onClick={() => onNavigateToStack(row.file)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                onNavigateToStack(row.file);
-              }
-            }}
-            className={`grid ${GRID_TEMPLATE} cursor-pointer items-center gap-4 px-[var(--density-row-x)] py-[var(--density-row-y)] transition-colors hover:bg-accent/5 ${rowTint[row.state]}`}
-          >
-            <span className="flex items-center gap-1.5 min-w-0">
-              <span className="min-w-0 truncate font-mono text-sm text-stat-value">{row.name}</span>
-              {updateLabel && (
-                <span className="shrink-0" title={updateLabel}>
-                  <CircleArrowUp
-                    className="h-3.5 w-3.5 text-brand"
-                    strokeWidth={2}
-                    aria-label={updateLabel}
-                  />
+        <ul className="divide-y divide-border/40">
+          {visibleRows.map((row) => {
+            const updateLabel = row.hasUpdate ? updateAvailableLabel(row.outdatedServices) : null;
+            const openStack = () => onNavigateToStack({ node: row.node, file: row.file });
+            return (
+              <li
+                key={row.key}
+                role="button"
+                tabIndex={0}
+                data-node-id={row.node.id}
+                onClick={openStack}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    openStack();
+                  }
+                }}
+                title={row.freshness === 'stale' ? 'Status data is stale' : undefined}
+                className={cn(
+                  `grid ${grid} cursor-pointer items-center gap-4 px-[var(--density-row-x)] py-[var(--density-row-y)] transition-colors hover:bg-accent/5`,
+                  rowTint[row.state],
+                  row.freshness === 'stale' && 'opacity-50',
+                )}
+              >
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span className="min-w-0 truncate font-mono text-sm text-stat-value">{row.name}</span>
+                  {updateLabel && (
+                    <span className="shrink-0" title={updateLabel}>
+                      <CircleArrowUp
+                        className="h-3.5 w-3.5 text-brand"
+                        strokeWidth={2}
+                        aria-label={updateLabel}
+                      />
+                    </span>
+                  )}
+                  {row.gitopsSourceState && (
+                    <GitOpsBadge facet="source" status={row.gitopsSourceState} className="shrink-0" />
+                  )}
                 </span>
-              )}
-              {gitopsSourceState && (
-                <GitOpsBadge facet="source" status={gitopsSourceState} className="shrink-0" />
-              )}
-            </span>
-            <span className="truncate font-mono text-[11px] uppercase tracking-wide text-stat-subtitle">
-              {row.source === 'git' ? 'Git' : 'Local'}
-            </span>
-            <span className="truncate font-mono text-xs tabular-nums text-stat-subtitle">
-              {row.mainPort !== null ? row.mainPort : '--'}
-            </span>
-            <span className="text-right font-mono text-xs tabular-nums text-stat-subtitle">
-              {row.runningSince !== null
-                ? formatUptime(Math.max(0, Math.floor(now / 1000 - row.runningSince)))
-                : '--'}
-            </span>
-            <span className="text-right font-mono text-xs tabular-nums text-stat-subtitle">
-              {row.cpu !== null ? `${row.cpu.toFixed(0)}%` : '--'}
-            </span>
-            <span className="text-right font-mono text-xs tabular-nums text-stat-subtitle">
-              {row.memory !== null ? formatMemory(row.memory) : '--'}
-            </span>
-            <span className="ml-auto block h-5 w-[110px]">
-              {row.series.length > 1 ? (
-                <Sparkline
-                  points={row.series}
-                  stroke={sparkStroke[row.state]}
-                  fill={sparkStroke[row.state]}
-                  peakColor="var(--chart-2)"
-                  peakIndex={row.peakIndex >= 0 ? row.peakIndex : undefined}
-                  showPeak={row.state !== 'healthy'}
-                />
-              ) : (
-                <span className="block h-full w-full border-b border-dashed border-border/60" />
-              )}
-            </span>
-            <ChevronRight className="h-3.5 w-3.5 text-stat-icon" strokeWidth={1.5} />
-          </li>
-          );
-        })}
-      </ul>
-    </div>
+                {scope === 'all-nodes' ? (
+                  <span className="truncate font-mono text-[11px] text-stat-subtitle">{row.node.name}</span>
+                ) : null}
+                <span className="truncate font-mono text-[11px] uppercase tracking-wide text-stat-subtitle">
+                  {row.status}
+                </span>
+                <span className="truncate font-mono text-[11px] uppercase tracking-wide text-stat-subtitle">
+                  {row.source === 'git' ? 'Git' : 'Local'}
+                </span>
+                <span className="min-w-0 overflow-hidden font-mono text-xs text-stat-subtitle">
+                  <NetworksCell networks={row.networks} />
+                </span>
+                <span className="truncate font-mono text-xs tabular-nums text-stat-subtitle">
+                  {row.mainPort !== null ? row.mainPort : '--'}
+                </span>
+                <span className="text-right font-mono text-xs tabular-nums text-stat-subtitle">
+                  {row.runningSince !== null
+                    ? formatUptime(Math.max(0, Math.floor(now / 1000 - row.runningSince)))
+                    : '--'}
+                </span>
+                <span className="text-right font-mono text-xs tabular-nums text-stat-subtitle">
+                  {row.cpu !== null ? `${row.cpu.toFixed(0)}%` : '--'}
+                </span>
+                <span className="text-right font-mono text-xs tabular-nums text-stat-subtitle">
+                  {row.memory !== null ? formatMemory(row.memory) : '--'}
+                </span>
+                <span className="ml-auto block h-5 w-[110px]">
+                  {row.series.length > 1 ? (
+                    <Sparkline
+                      points={row.series}
+                      stroke={sparkStroke[row.state]}
+                      fill={sparkStroke[row.state]}
+                      peakColor="var(--chart-2)"
+                      peakIndex={row.peakIndex >= 0 ? row.peakIndex : undefined}
+                      showPeak={row.state !== 'healthy'}
+                    />
+                  ) : (
+                    <span className="block h-full w-full border-b border-dashed border-border/60" />
+                  )}
+                </span>
+                <span title="Open in Editor">
+                  <ChevronRight className="h-3.5 w-3.5 text-stat-icon" strokeWidth={1.5} aria-label="Open in Editor" />
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+      {needsExpansion ? (
+        <div className="border-t border-border/60 px-5 py-3">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setExpanded((value) => !value)}
+          >
+            {expanded ? 'Show less' : `Show all ${sortedRows.length} stacks`}
+          </Button>
+        </div>
+      ) : null}
+    </CardShell>
   );
 }
+
