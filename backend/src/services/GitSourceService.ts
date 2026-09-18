@@ -63,6 +63,11 @@ import type { GitOpsApplicationRow, GitOpsGenerationRow, GitOpsHistoryRow, Sourc
 // type in gitops/types.ts so the storage and service layers cannot drift.
 export type { SourcePolicy } from './gitops/types';
 import { appliedRelPathFor, candidateRelPathForSha, deleteStagingMarker, readStagingMarker, validateCandidateRelPath, writeStagingMarker } from './gitops/createStagingMarker';
+import {
+    probeStaleArtifactEvidence,
+    recordObservedRuntimeArtifactForDeploy,
+    resolveAndRecordArtifactSet,
+} from './gitops/artifactResolve';
 import { cleanupUnclaimedManagedRoot, removeOperationOwnedPaths } from './gitops/createCleanup';
 import { managedAreaBase } from './gitops/managedPaths';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
@@ -4778,6 +4783,14 @@ export class GitSourceService {
                     ? settleTransient(revalidation.reason)
                     : settleBlocked(revalidation.reason);
             }
+            await probeStaleArtifactEvidence({
+                stackName,
+                nodeId,
+                applicationId: app.id,
+                generationId: generation.generationId,
+                buildContexts: revalidation.manifest.buildContexts,
+                envelope,
+            });
             // The Direct target binds inside the pipeline via postPromote,
             // once the promotion has committed, at manual apply's applied()
             // position: the deploy branch opens its GitOps operation against
@@ -5517,6 +5530,16 @@ export class GitSourceService {
             // The files are on disk either way. What we can still control is
             // not leaving the operation open when the acceptance was rejected.
             if (!recorded) this.abandonGitOpsOperation(stackName, gitopsApp.id, gitopsEnv);
+            else {
+                await resolveAndRecordArtifactSet({
+                    stackName,
+                    nodeId,
+                    applicationId: gitopsApp.id,
+                    generationId: gitopsGenerationId,
+                    buildContexts: args.manifest.buildContexts,
+                    envelope: gitopsEnv,
+                });
+            }
         }
 
         // The caller's post-commit bind (Direct dispatch's targetApplied)
@@ -5624,6 +5647,15 @@ export class GitSourceService {
                 triggerPostDeployScan(stackName, nodeId).catch((err) =>
                     console.error(`[Security] Post-deploy scan failed for ${sanitizeForLog(stackName)}:`, err),
                 );
+                const artifactApp = gitopsApp ?? GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+                if (artifactApp) {
+                    await recordObservedRuntimeArtifactForDeploy({
+                        stackName,
+                        nodeId,
+                        applicationId: artifactApp.id,
+                        envelope: gitopsEnv,
+                    });
+                }
                 return { applied: true, deployed: true, recoveryId, gitopsOperationId: autoDeploy.gitopsOperationId };
             } catch (e) {
                 // R1: do not auto-compensate. Keep applied files and leave the
@@ -6477,11 +6509,28 @@ export class GitSourceService {
                 // The checkpoint has done its job. Dropping it here keeps the
                 // boot sweep reporting only genuine interruptions, and stops a
                 // copy of the encrypted token living past the create.
+                let acceptedGenerationId: string | null = null;
                 if (gitopsApplicationId) {
+                    acceptedGenerationId = GitOpsStore.getInstance().getCreateCheckpoint(gitopsApplicationId)?.generation_id ?? null;
                     GitOpsStore.getInstance().deleteCreateCheckpoint(gitopsApplicationId);
                 }
 
                 rowInserted = true;
+                if (gitopsApplicationId && acceptedGenerationId && completeProjectManifest) {
+                    await resolveAndRecordArtifactSet({
+                        stackName: input.stackName,
+                        nodeId: NodeRegistry.getInstance().getDefaultNodeId(),
+                        applicationId: gitopsApplicationId,
+                        generationId: acceptedGenerationId,
+                        buildContexts: completeProjectManifest.buildContexts,
+                        envelope: {
+                            operationId: gitopsOperationId,
+                            actor: 'system:git-source',
+                            trigger: 'create',
+                            at: Date.now(),
+                        },
+                    });
+                }
                 if (completeProjectManifest && materialization.value && recordedCreatePlan) {
                     db.setGitSourceLastPlan(input.stackName, recordedCreatePlan.fingerprint, 'applied');
                     this.recordGitActivity(

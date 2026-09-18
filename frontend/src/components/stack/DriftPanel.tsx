@@ -10,7 +10,7 @@ import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
-import { RUNTIME_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, identityRefLabel, liveSourceFacet } from '@/lib/gitopsState';
+import { ARTIFACT_STATE_LOOKUP, RUNTIME_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, identityRefLabel, liveArtifactFacet, liveSourceFacet } from '@/lib/gitopsState';
 import type { GitOpsDriftItem, GitOpsRevisionProjection } from '@/types/gitops';
 
 // Mirrors the backend payload shape (the frontend never imports backend).
@@ -282,6 +282,7 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
   // Null for a Blueprint-owned stack: this route resolves through whatever
   // manages the directory, and a Blueprint application has no Git source facet.
   const gitopsSource = liveSourceFacet(revision);
+  const gitopsArtifact = liveArtifactFacet(revision);
   const gitopsTargets = gitopsLive?.targets ?? [];
   const gitopsDrift = gitopsLive?.drift ?? [];
   // A target can name a node this client has no record of, so fall back to the
@@ -346,7 +347,7 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
 
           {gitopsFaults.length > 0 && <GitOpsFaultCard message={gitopsFaults[0].message} />}
 
-          {(gitopsSource || gitopsTargets.length > 0) && (
+          {(gitopsSource || gitopsArtifact || gitopsTargets.length > 0) && (
             <section>
               <div className={cn(LABEL_CLASS, 'mb-1.5')}>gitops</div>
               <div className="flex flex-col gap-2">
@@ -355,6 +356,13 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
                     data-testid="gitops-source"
                     stateKey={gitopsSource.status}
                     state={SOURCE_STATE_LOOKUP[gitopsSource.status]}
+                  />
+                )}
+                {gitopsArtifact && (
+                  <GitOpsStateCard
+                    data-testid="gitops-artifact"
+                    stateKey={gitopsArtifact.status}
+                    state={ARTIFACT_STATE_LOOKUP[gitopsArtifact.status]}
                   />
                 )}
                 {gitopsTargets.map(t => (

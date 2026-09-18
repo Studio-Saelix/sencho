@@ -8,6 +8,7 @@ import {
   decodeGitOpsJson,
   encodeArtifactEvidenceJson,
   encodeGitOpsEvidenceLimitations,
+  encodeObservedArtifactIdentity,
 } from './json';
 import { insertHistory, type DeployDispatchedPayload, type DeployIntentRefusedPayload, type GitOpsHistoryStage, type HistoryOutcome, type PromotionCommittedPayload } from './history';
 import { emptyTargetRow, GitOpsStore } from './store';
@@ -751,6 +752,27 @@ export class GitOpsTransitions {
       });
       return { historyIds: id ? [id] : [], replayed: !id };
     })();
+  }
+
+  recordObservedRuntimeArtifact(args: {
+    applicationId: string;
+    nodeId: number;
+    observed: import('./json').ObservedArtifactIdentity;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    const observedJson = encodeObservedArtifactIdentity(args.observed);
+    return this.mutateTarget(
+      args.applicationId,
+      args.nodeId,
+      args.envelope,
+      'runtime_artifact_observed',
+      null,
+      (target) => {
+        const before = { observedArtifactIdentityJson: target.observed_artifact_identity_json };
+        target.observed_artifact_identity_json = observedJson;
+        return { before, after: { observedArtifactIdentityJson: observedJson } };
+      },
+    );
   }
 
   recordArtifactEvidence(args: {

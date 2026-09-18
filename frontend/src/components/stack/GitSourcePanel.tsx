@@ -16,7 +16,7 @@ import type { GitBrowseResult } from './GitComposeFilePicker';
 import { AdoptBlueprintDialog } from '@/components/blueprints/AdoptBlueprintDialog';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
-import { SOURCE_STATE_LOOKUP, absentFault, liveSourceFacet, type LiveSourceFacet } from '@/lib/gitopsState';
+import { ARTIFACT_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, liveArtifactFacet, liveSourceFacet, type LiveSourceFacet } from '@/lib/gitopsState';
 import { GITOPS_SOURCE_CONTROLLER_CAPABILITY } from '@/lib/capabilities';
 import type {
   GitOpsAvailableAction,
@@ -166,6 +166,7 @@ export function GitSourcePanel({
   const applyMode = deriveApplyMode(source, applyModeOverride);
 
   const sourceFacet = liveSourceFacet(revision);
+  const artifactFacet = liveArtifactFacet(revision);
   const faults = revision ? absentFault(revision) : [];
   const pending = derivePendingCommit(sourceFacet, faults.length, source?.pending_commit_sha ?? null);
 
@@ -668,6 +669,20 @@ export function GitSourcePanel({
                   {pending.sha && (
                     <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
                       Commit <span className="tabular-nums text-foreground/80">{pending.sha.slice(0, 7)}</span>
+                    </div>
+                  )}
+                </GitOpsStateCard>
+              )}
+
+              {artifactFacet && (
+                <GitOpsStateCard
+                  data-testid="git-artifact-state"
+                  stateKey={artifactFacet.status}
+                  state={ARTIFACT_STATE_LOOKUP[artifactFacet.status]}
+                >
+                  {'latestEvidence' in artifactFacet && artifactFacet.latestEvidence.identity && (
+                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle break-all max-md:text-[10px]">
+                      {artifactFacet.latestEvidence.identity.slice(0, 19)}
                     </div>
                   )}
                 </GitOpsStateCard>

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
-import { encodeArtifactEvidenceJson } from '../services/gitops/json';
+import { decodeObservedArtifactIdentity, encodeArtifactEvidenceJson } from '../services/gitops/json';
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { projectApplication } from '../services/gitops/derive';
@@ -115,6 +115,71 @@ describe('gitops transitions', () => {
     expect(store.getApplication('app-art')?.latest_artifact_set_id).toBe('art-v5');
     expect(store.getTarget('app-art', 1)?.expected_artifact_set_id).toBe('art-v3');
     expect(store.getTarget('app-art', 1)?.latest_artifact_set_id).toBe('art-v5');
+  });
+
+  it('keeps expected artifact pointer byte-identical after stale evidence', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-stale', 'stale-web', 'gen-stale', 'art-stale-v1', 'acc-stale');
+    tx.recordArtifactEvidence({
+      applicationId: 'app-stale',
+      generationId: 'gen-stale',
+      artifactSetId: 'art-stale-v2',
+      evidenceVersion: 2,
+      qualification: 'exact',
+      evidenceJson: encodeArtifactEvidenceJson({ kind: 'exact', identity: 'sha256:aaa' }),
+      authoritative: 0,
+      envelope: envelope('op-stale-2'),
+    });
+    const expectedBefore = store.getApplication('app-stale')?.artifact_set_id;
+    tx.recordArtifactEvidence({
+      applicationId: 'app-stale',
+      generationId: 'gen-stale',
+      artifactSetId: 'art-stale-v3',
+      evidenceVersion: 3,
+      qualification: 'stale',
+      evidenceJson: encodeArtifactEvidenceJson({ kind: 'stale', identity: 'sha256:bbb' }),
+      authoritative: 0,
+      envelope: envelope('op-stale-3'),
+    });
+    const application = store.getApplication('app-stale')!;
+    expect(application.artifact_set_id).toBe(expectedBefore);
+    expect(application.latest_artifact_set_id).toBe('art-stale-v3');
+    const projection = projectApplication(application.id, false);
+    expect(projection.facets?.artifact.status).toBe('artifact_stale');
+    expect(projection.facets?.source.status).toBe('application_generation_accepted');
+  });
+
+  it('recordObservedRuntimeArtifact writes observation without raw SQL', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedApplied('app-observe', 'observe-web', 'gen-observe', 'art-observe', 'acc-observe');
+    tx.recordArtifactEvidence({
+      applicationId: 'app-observe',
+      generationId: 'gen-observe',
+      artifactSetId: 'art-observe-v2',
+      evidenceVersion: 2,
+      qualification: 'exact',
+      evidenceJson: encodeArtifactEvidenceJson({ kind: 'exact', identity: 'sha256:expected' }),
+      authoritative: 0,
+      envelope: envelope('op-observe-ev'),
+    });
+    tx.deployStarted('app-observe', 1, 'gen-observe', envelope('op-dep-start'));
+    tx.deployBound('app-observe', 1, 'gen-observe', envelope('op-dep-start'));
+    tx.recordObservedRuntimeArtifact({
+      applicationId: 'app-observe',
+      nodeId: 1,
+      observed: { kind: 'exact', identity: 'sha256:runtime', observedAt: 1234 },
+      envelope: envelope('op-observe'),
+    });
+    const target = store.getTarget('app-observe', 1)!;
+    expect(decodeObservedArtifactIdentity(target.observed_artifact_identity_json)).toEqual({
+      kind: 'exact',
+      identity: 'sha256:runtime',
+      observedAt: 1234,
+    });
+    const projection = projectApplication('app-observe', false);
+    expect(projection.targets[0]?.runtime.status).toBe('runtime_artifact_drift');
   });
 
   it('clears fetch failure on successful fetch and keeps accepted pointers', () => {

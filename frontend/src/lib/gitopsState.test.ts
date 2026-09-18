@@ -9,6 +9,8 @@ import {
   sourceIdentity,
 } from '@/__tests__/gitopsFixtures';
 import {
+  ARTIFACT_STATE,
+  ARTIFACT_STATE_LOOKUP,
   GITOPS_TONE_CLASS,
   RUNTIME_STATE,
   SOURCE_STATE,
@@ -18,7 +20,7 @@ import {
   pendingSourceStatus,
   type GitOpsTone,
 } from '@/lib/gitopsState';
-import type { GitOpsIdentityRef, GitOpsRuntimeStatus, GitOpsSourceStatus } from '@/types/gitops';
+import type { GitOpsArtifactStatus, GitOpsIdentityRef, GitOpsRuntimeStatus, GitOpsSourceStatus } from '@/types/gitops';
 
 // Listed rather than derived from the map: this is the copy of the contract the
 // test owns, so a status silently dropped from SOURCE_STATE fails here instead
@@ -42,6 +44,18 @@ const SOURCE_STATUSES: GitOpsSourceStatus[] = [
   'recovery_required',
   'recovery_failed',
   'not_live',
+];
+
+const ARTIFACT_STATUSES: GitOpsArtifactStatus[] = [
+  'not_applicable',
+  'artifact_unresolved',
+  'artifact_resolution_pending',
+  'artifact_exact',
+  'artifact_qualified',
+  'artifact_stale',
+  'artifact_unavailable',
+  'artifact_local_build_unverified',
+  'artifact_identity_changed',
 ];
 
 const RUNTIME_STATUSES: GitOpsRuntimeStatus[] = [
@@ -77,6 +91,17 @@ const RUNTIME_STATUSES: GitOpsRuntimeStatus[] = [
 const TONES: GitOpsTone[] = ['brand', 'success', 'warning', 'destructive', 'neutral'];
 
 describe('the state vocabulary', () => {
+  it('names every artifact status', () => {
+    for (const status of ARTIFACT_STATUSES) {
+      expect(ARTIFACT_STATE[status].label.length).toBeGreaterThan(0);
+      expect(ARTIFACT_STATE[status].line.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('returns nothing for unknown artifact statuses through the lookup view', () => {
+    expect(ARTIFACT_STATE_LOOKUP.forward_artifact_status).toBeUndefined();
+  });
+
   it('names every source status', () => {
     expect(Object.keys(SOURCE_STATE).sort()).toEqual([...SOURCE_STATUSES].sort());
   });

@@ -31,10 +31,13 @@ import {
   TriangleAlert,
   Undo2,
   Upload,
+  Fingerprint,
   type LucideIcon,
 } from 'lucide-react';
 
 import type {
+  ArtifactFacet,
+  GitOpsArtifactStatus,
   GitOpsIdentityRef,
   GitOpsLimitation,
   GitOpsRevisionProjection,
@@ -62,6 +65,63 @@ export const GITOPS_TONE_CLASS: Record<GitOpsTone, string> = {
   warning: 'border-warning/40 bg-warning/[0.06] text-warning',
   destructive: 'border-destructive/40 bg-destructive/[0.06] text-destructive',
   neutral: 'border-muted bg-card/40 text-stat-subtitle',
+};
+
+export const ARTIFACT_STATE: Record<GitOpsArtifactStatus, GitOpsStateMeta> = {
+  not_applicable: {
+    label: 'no artifact proof',
+    tone: 'neutral',
+    line: 'Executable artifact identity does not apply to this application.',
+    icon: CircleSlash,
+  },
+  artifact_unresolved: {
+    label: 'artifact unresolved',
+    tone: 'neutral',
+    line: 'Sencho has not recorded executable artifact evidence for this generation yet.',
+    icon: CircleDashed,
+  },
+  artifact_resolution_pending: {
+    label: 'artifact pending',
+    tone: 'brand',
+    line: 'The accepted generation is waiting for executable artifact resolution to finish.',
+    icon: Hourglass,
+  },
+  artifact_exact: {
+    label: 'artifact exact',
+    tone: 'success',
+    line: 'Sencho proved the exact executable digest for every required registry service.',
+    icon: Fingerprint,
+  },
+  artifact_qualified: {
+    label: 'artifact qualified',
+    tone: 'success',
+    line: 'Sencho proved the platform-specific digest for this node on a multi-arch image.',
+    icon: Fingerprint,
+  },
+  artifact_stale: {
+    label: 'artifact stale',
+    tone: 'warning',
+    line: 'A registry tag moved after acceptance. The frozen expected artifact set did not change.',
+    icon: RefreshCw,
+  },
+  artifact_unavailable: {
+    label: 'artifact unavailable',
+    tone: 'warning',
+    line: 'Sencho could not reach a registry or classify an image reference for this generation.',
+    icon: CircleHelp,
+  },
+  artifact_local_build_unverified: {
+    label: 'local build unverified',
+    tone: 'warning',
+    line: 'This generation includes a local build service, so Sencho cannot claim an exact cross-node digest.',
+    icon: CircleHelp,
+  },
+  artifact_identity_changed: {
+    label: 'artifact changed',
+    tone: 'warning',
+    line: 'Newer artifact evidence disagrees with the frozen expected executable identity.',
+    icon: TriangleAlert,
+  },
 };
 
 export const SOURCE_STATE: Record<GitOpsSourceStatus, GitOpsStateMeta> = {
@@ -372,6 +432,7 @@ export const RUNTIME_STATE: Record<GitOpsRuntimeStatus, GitOpsStateMeta> = {
  * assignable to a partial record over `string`.
  */
 export const SOURCE_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = SOURCE_STATE;
+export const ARTIFACT_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = ARTIFACT_STATE;
 export const RUNTIME_STATE_LOOKUP: Partial<Record<string, GitOpsStateMeta>> = RUNTIME_STATE;
 
 /**
@@ -396,6 +457,15 @@ export function liveSourceFacet(revision: GitOpsRevisionProjection | null): Live
   if (!revision || revision.targetMode === 'not_applicable') return null;
   const source = revision.facets.source;
   return source.status === 'not_applicable' ? null : source;
+}
+
+/** Artifact facet for a live Direct application, or null when there is none to show. */
+export type LiveArtifactFacet = Exclude<ArtifactFacet, { status: 'not_applicable' }>;
+
+export function liveArtifactFacet(revision: GitOpsRevisionProjection | null): LiveArtifactFacet | null {
+  if (!revision || revision.targetMode === 'not_applicable' || !revision.facets) return null;
+  const artifact = revision.facets.artifact;
+  return artifact.status === 'not_applicable' ? null : artifact;
 }
 
 /**

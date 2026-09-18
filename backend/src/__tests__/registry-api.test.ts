@@ -65,6 +65,7 @@ import {
   selectLocalRepoDigests,
   compareLocalToRemoteTag,
   compareLocalToRemoteTagDetailed,
+  resolveRegistryImageDigestForPlatform,
   MANIFEST_CLASSIFICATION_CACHE_TTL_MS,
   MANIFEST_INDEX_DESCRIPTOR_CAP,
   MANIFEST_INDEX_MAX_DEPTH,
@@ -1590,5 +1591,67 @@ describe('compareLocalToRemoteTag', () => {
       expect(result.kind).toBe('error');
       expect(Object.keys(result).sort()).toEqual(['kind', 'reason']);
     });
+  });
+});
+
+describe('resolveRegistryImageDigestForPlatform', () => {
+  const REGISTRY = 'registry-1.docker.io';
+  const REPO = 'someorg/someapp';
+  const TAG = 'latest';
+  const MANIFEST_URL_TAG = `https://${REGISTRY}/v2/${REPO}/manifests/${TAG}`;
+  const AMD64 = { os: 'linux', architecture: 'amd64' };
+  const CHILD_AMD64 = `sha256:${'c'.repeat(64)}`;
+  const INDEX_CONTENT_TYPE = 'application/vnd.oci.image.index.v1+json';
+
+  beforeEach(() => {
+    calls.length = 0;
+  });
+
+  it('returns a single digest for a single-platform manifest', async () => {
+    const digest = `sha256:${'d'.repeat(64)}`;
+    route = (url, method) => tokenOk(url) ?? (
+      url === MANIFEST_URL_TAG && method === 'HEAD'
+        ? { statusCode: 200, headers: { 'docker-content-digest': digest, 'content-type': 'application/vnd.oci.image.manifest.v1+json' } }
+        : { statusCode: 500, headers: {} }
+    );
+    const result = await resolveRegistryImageDigestForPlatform(REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({
+      ok: true,
+      indexDigest: digest,
+      platformDigest: digest,
+      platformLabel: 'linux/amd64',
+      qualification: 'exact',
+    });
+  });
+
+  it('returns index and platform digests when the index matches the node platform', async () => {
+    const body = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [{
+        digest: CHILD_AMD64,
+        mediaType: 'application/vnd.oci.image.manifest.v1+json',
+        platform: { os: 'linux', architecture: 'amd64' },
+      }],
+    });
+    const indexDigest = `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}`;
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': indexDigest, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === `https://${REGISTRY}/v2/${REPO}/manifests/${indexDigest}` && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': indexDigest }, body };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await resolveRegistryImageDigestForPlatform(REGISTRY, REPO, TAG, AMD64);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.indexDigest).toBe(indexDigest);
+      expect(result.platformDigest).toBe(CHILD_AMD64);
+      expect(result.qualification).toBe('qualified');
+    }
   });
 });
