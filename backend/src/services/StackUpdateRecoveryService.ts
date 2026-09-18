@@ -1164,7 +1164,7 @@ export class StackUpdateRecoveryService {
 
       let recoveryOverlay: { overlayDir: string; binding: import('./gitops/sops/types').OverlayBinding } | null = null;
       if (row.gitops_generation_id) {
-        const { prepareRecoveryComposeOverlay, destroyGitOpsOverlay } = await import('./gitops/sops/prepareOverlay');
+        const { prepareRecoveryComposeOverlay } = await import('./gitops/sops/prepareOverlay');
         const overlayPrep = await prepareRecoveryComposeOverlay({
           stackName: row.stack_name,
           nodeId: row.node_id,

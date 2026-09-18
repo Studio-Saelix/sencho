@@ -2,7 +2,6 @@ import crypto from 'crypto';
 import { DatabaseService } from '../../DatabaseService';
 import { CryptoService } from '../../CryptoService';
 import type { EncryptedSourcePolicy, PublicSopsIdentity, SopsIdentityImpact, SopsIdentityReadiness } from './types';
-import type { SecretCapability } from './types';
 import { parseSecretCapabilityFromJson } from './capability';
 
 export type SopsIdentityRow = {
