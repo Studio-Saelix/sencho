@@ -3,6 +3,8 @@ import { MAX_PROVIDER_DELIVERY_ID_LENGTH } from './types';
 
 const DELIVERY_ID_HEADERS = [
   'x-github-delivery',
+  'x-gitea-delivery',
+  'x-forgejo-delivery',
   'webhook-id',
   'idempotency-key',
   'x-request-uuid',

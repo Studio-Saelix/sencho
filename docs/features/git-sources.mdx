@@ -238,7 +238,7 @@ Recent deliveries for each endpoint appear inline on the Git Source sheet (event
 | **Forgejo** | `X-Forgejo-Signature`, or `X-Gitea-Signature` when Forgejo omits its own header |
 | **Bitbucket Cloud** | `X-Hub-Signature` (`sha256=` HMAC of the raw body) |
 
-Delivery ids are taken from the host's idempotency headers when present (`X-GitHub-Delivery`, `X-Request-UUID`, and others) so retries dedupe cleanly.
+Delivery ids are taken from the host's idempotency headers when present (`X-GitHub-Delivery`, `X-Gitea-Delivery`, `X-Forgejo-Delivery`, `Idempotency-Key`, `X-Request-UUID`, and others) so retries dedupe cleanly.
 
 Ingest is rate limited to 120 requests per minute per endpoint in production. Bursts above that return **429 Too many provider hook deliveries**.
 

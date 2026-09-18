@@ -13,7 +13,6 @@ export type GitProviderDeliveryState =
   | 'duplicate'
   | 'ignored_by_policy'
   | 'queued'
-  | 'rate_limited'
   | 'processing_failed';
 
 export type GitProviderEndpointRow = {

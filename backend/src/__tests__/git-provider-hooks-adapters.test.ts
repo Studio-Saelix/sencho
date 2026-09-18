@@ -52,7 +52,7 @@ const PROVIDER_FIXTURES: ProviderFixture[] = [
     repoUrl: 'https://gitlab.com/example/repo.git',
     eventHeader: 'x-gitlab-event',
     eventValue: 'push',
-    deliveryHeader: 'webhook-id',
+    deliveryHeader: 'idempotency-key',
     sign: (_rawBody, secret) => ({ 'x-gitlab-token': secret }),
     pushBody: (ref = 'refs/heads/main') => ({
       object_kind: 'push',
@@ -68,7 +68,7 @@ const PROVIDER_FIXTURES: ProviderFixture[] = [
     repoUrl: 'https://gitea.example/example/repo.git',
     eventHeader: 'x-gitea-event',
     eventValue: 'push',
-    deliveryHeader: 'x-github-delivery',
+    deliveryHeader: 'x-gitea-delivery',
     sign: (rawBody, secret) => rawHex(rawBody, secret, 'x-gitea-signature'),
     pushBody: (ref = 'refs/heads/main') => ({
       ref,
@@ -83,7 +83,7 @@ const PROVIDER_FIXTURES: ProviderFixture[] = [
     repoUrl: 'https://forgejo.example/example/repo.git',
     eventHeader: 'x-forgejo-event',
     eventValue: 'push',
-    deliveryHeader: 'x-github-delivery',
+    deliveryHeader: 'x-forgejo-delivery',
     sign: (rawBody, secret) => rawHex(rawBody, secret, 'x-forgejo-signature'),
     pushBody: (ref = 'refs/heads/main') => ({
       ref,
@@ -198,10 +198,11 @@ describe.each(PROVIDER_FIXTURES)('$provider adapter signatures', (fixture) => {
       stackName,
       provider: fixture.provider,
     });
+    const deliveryId = crypto.randomUUID();
     const rawBody = Buffer.from(JSON.stringify(fixture.pingBody()), 'utf-8');
     const headers: Record<string, string> = {
       ...fixture.sign(rawBody, secret),
-      [fixture.deliveryHeader]: crypto.randomUUID(),
+      [fixture.deliveryHeader]: deliveryId,
     };
     if (fixture.pingEventValue) {
       headers[fixture.eventHeader] = fixture.pingEventValue;
@@ -215,7 +216,9 @@ describe.each(PROVIDER_FIXTURES)('$provider adapter signatures', (fixture) => {
 
     expect(outcome.httpStatus).toBe(202);
     expect(outcome.state).toBe('ignored_by_policy');
-    expect(GitProviderWebhookStore.getInstance().listDeliveries(id)[0]?.outcome_class).toBe('ping');
+    const delivery = GitProviderWebhookStore.getInstance().listDeliveries(id)[0];
+    expect(delivery?.outcome_class).toBe('ping');
+    expect(delivery?.delivery_id).toBe(deliveryId);
   });
 
   it('ignores push events for a non-configured ref', async () => {
@@ -225,11 +228,12 @@ describe.each(PROVIDER_FIXTURES)('$provider adapter signatures', (fixture) => {
       stackName,
       provider: fixture.provider,
     });
+    const deliveryId = crypto.randomUUID();
     const rawBody = Buffer.from(JSON.stringify(fixture.pushBody('refs/heads/develop')), 'utf-8');
     const headers = {
       ...fixture.sign(rawBody, secret),
       [fixture.eventHeader]: fixture.eventValue,
-      [fixture.deliveryHeader]: crypto.randomUUID(),
+      [fixture.deliveryHeader]: deliveryId,
     };
 
     const outcome = await ProviderWebhookService.getInstance().ingestLocal({
@@ -240,6 +244,8 @@ describe.each(PROVIDER_FIXTURES)('$provider adapter signatures', (fixture) => {
 
     expect(outcome.httpStatus).toBe(202);
     expect(outcome.state).toBe('ignored_by_policy');
-    expect(GitProviderWebhookStore.getInstance().listDeliveries(id)[0]?.outcome_class).toBe('ref_policy');
+    const delivery = GitProviderWebhookStore.getInstance().listDeliveries(id)[0];
+    expect(delivery?.outcome_class).toBe('ref_policy');
+    expect(delivery?.delivery_id).toBe(deliveryId);
   });
 });

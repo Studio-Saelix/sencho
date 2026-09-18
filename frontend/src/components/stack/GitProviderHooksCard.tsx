@@ -33,7 +33,6 @@ type GitProviderDeliveryState =
   | 'duplicate'
   | 'ignored_by_policy'
   | 'queued'
-  | 'rate_limited'
   | 'processing_failed';
 
 interface ProviderHookDelivery {
@@ -112,7 +111,6 @@ const NEGATIVE_DELIVERY_STATES = new Set<GitProviderDeliveryState>([
   'malformed',
   'unsupported',
   'processing_failed',
-  'rate_limited',
 ]);
 
 function deliveryStateTone(state: GitProviderDeliveryState): 'success' | 'destructive' | 'subtitle' {
