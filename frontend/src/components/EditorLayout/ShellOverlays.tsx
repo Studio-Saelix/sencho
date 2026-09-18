@@ -255,6 +255,7 @@ export function ShellOverlays({
           onOpenChange={setGitSourceOpen}
           stackName={stackName}
           canEdit={can('stack:edit', 'stack', stackName, activeNodeId)}
+          canDeploy={can('stack:deploy', 'stack', stackName, activeNodeId)}
           isDarkMode={isDarkMode}
           onSourceChanged={stackActions.refreshGitSourcePending}
         />

@@ -137,13 +137,16 @@ export interface TargetAdapter {
 }
 
 /**
- * Fails closed until Blueprint rollout orchestration exists. Never
- * inspects selectors, target sets, or placement: an accepted generation
- * for a Blueprint-mode application is evaluated the same as Direct, but
- * dispatch stops here.
+ * Fails closed for every Blueprint-mode dispatch. Never inspects selectors,
+ * target sets, placement, or binding: an accepted generation is evaluated
+ * the same as Direct until this adapter, then dispatch stops because
+ * Git-managed Blueprint content cannot deploy from the stored snapshot.
  */
 export class BlueprintTargetAdapter implements TargetAdapter {
   async dispatch(_generation: AcceptedGeneration, _context: DispatchContext): Promise<DispatchResult> {
-    return { status: 'blocked', reason: 'Blueprint rollout orchestration is not yet implemented.' };
+    return {
+      status: 'blocked',
+      reason: "This Blueprint's content is Git-managed, so it cannot deploy from the stored snapshot.",
+    };
   }
 }

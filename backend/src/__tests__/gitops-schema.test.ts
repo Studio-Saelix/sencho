@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { isHubOnlyPath } from '../helpers/proxyExemptPaths';
-import { APPLICATIONS_DUE_FOR_RETRY_SQL, GitOpsStore, emptyTargetRow, SOURCES_DUE_FOR_POLL_SQL } from '../services/gitops/store';
+import { APPLICATIONS_DUE_FOR_RETRY_SQL, GitOpsStore, emptyTargetRow, SOURCES_DUE_FOR_POLL_SQL, SOURCE_APPLICATION_MODE_SQL } from '../services/gitops/store';
 import { encodeArtifactEvidenceJson } from '../services/gitops/json';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
 
@@ -66,6 +66,21 @@ describe('gitops schema', () => {
     expect(candidateCols.has('source_acceptance_ref')).toBe(false);
     expect(candidateCols.has('placement_approval_ref')).toBe(false);
     expect(candidateCols.has('preflight_fingerprint')).toBe(false);
+  });
+
+  it('retains a source stack reference when an application targets a Blueprint', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance().getDb();
+    const columns = db.pragma('table_info(gitops_applications)') as Array<{ name: string }>;
+    expect(columns.map(column => column.name)).toContain('configured_source_stack_name');
+    const store = GitOpsStore.getInstance();
+    store.insertApplication(directApp('source-reference', 'source-web'));
+    expect(db.prepare('SELECT configured_source_stack_name FROM gitops_applications WHERE id = ?')
+      .get('source-reference')).toEqual({ configured_source_stack_name: null });
+    db.prepare(`UPDATE gitops_applications SET target_mode = 'blueprint', blueprint_id = 90,
+      configured_source_stack_name = stack_name, stack_name = NULL WHERE id = ?`).run('source-reference');
+    expect(db.prepare('SELECT stack_name, configured_source_stack_name FROM gitops_applications WHERE id = ?')
+      .get('source-reference')).toEqual({ stack_name: null, configured_source_stack_name: 'source-web' });
   });
 
   it('accepts recovery health triggers and keeps deployed_generation_id', async () => {
@@ -218,12 +233,12 @@ describe('gitops schema', () => {
       sql.split('\n').map((line) => line.trim().replace(/^(WHERE|AND)\s+/i, '').trim()).filter((line) => line.length > 0);
 
     const pollTerms = staticTerms(SOURCES_DUE_FOR_POLL_SQL).filter((t) =>
-      t.startsWith("target_mode = 'direct'") || t.startsWith("lifecycle_status = 'active'") || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL') || t.startsWith('next_poll_at IS NOT NULL') || t.startsWith('retry_at IS NULL'));
+      t.startsWith(SOURCE_APPLICATION_MODE_SQL) || t.startsWith("lifecycle_status = 'active'") || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL') || t.startsWith('next_poll_at IS NOT NULL') || t.startsWith('retry_at IS NULL'));
     for (const term of pollTerms) {
       expect(sqlOf('idx_gitops_app_poll_due')).toContain(term);
     }
     expect(pollTerms).toEqual([
-      "target_mode = 'direct'",
+      SOURCE_APPLICATION_MODE_SQL,
       "lifecycle_status = 'active'",
       'suspended_at IS NULL',
       'active_operation_stage IS NULL',
@@ -232,13 +247,13 @@ describe('gitops schema', () => {
     ]);
 
     const retryTerms = staticTerms(APPLICATIONS_DUE_FOR_RETRY_SQL).filter((t) =>
-      t.startsWith('retry_at IS NOT NULL') || t.startsWith("target_mode = 'direct'") || t.startsWith("lifecycle_status = 'active'") || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL'));
+      t.startsWith('retry_at IS NOT NULL') || t.startsWith(SOURCE_APPLICATION_MODE_SQL) || t.startsWith("lifecycle_status = 'active'") || t.startsWith('suspended_at IS NULL') || t.startsWith('active_operation_stage IS NULL'));
     for (const term of retryTerms) {
       expect(sqlOf('idx_gitops_app_retry_due')).toContain(term);
     }
     expect(retryTerms).toEqual([
       'retry_at IS NOT NULL',
-      "target_mode = 'direct'",
+      SOURCE_APPLICATION_MODE_SQL,
       "lifecycle_status = 'active'",
       'suspended_at IS NULL',
       'active_operation_stage IS NULL',
@@ -486,6 +501,7 @@ function directApp(id: string, stackName: string): GitOpsApplicationRow {
     lifecycle_status: 'active',
     target_mode: 'direct',
     stack_name: stackName,
+    configured_source_stack_name: null,
     blueprint_id: null,
     configured_repo_url: 'https://github.com/org/repo.git',
     repo_identity_json: '{"host":"github.com","pathname":"/org/repo.git"}',

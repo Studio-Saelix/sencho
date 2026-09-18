@@ -6,6 +6,7 @@ import {
     type BlueprintDeploymentStatus,
     describeSelector,
 } from '@/lib/blueprintsApi';
+import { ContentOriginBadge } from './ContentOriginBadge';
 
 interface BlueprintCatalogProps {
     blueprints: BlueprintListItem[];
@@ -134,7 +135,10 @@ function BlueprintTile({ blueprint, onClick }: { blueprint: BlueprintListItem; o
                         {blueprint.name}
                     </span>
                 </div>
-                <ClassificationChip classification={blueprint.classification} />
+                <div className="flex items-center gap-1.5 shrink-0">
+                    <ClassificationChip classification={blueprint.classification} />
+                    <ContentOriginBadge origin={blueprint.content_origin} />
+                </div>
             </div>
             {blueprint.description && (
                 <p className="text-xs text-stat-subtitle line-clamp-2 leading-relaxed">{blueprint.description}</p>

@@ -96,15 +96,18 @@ function lifecycleAllowsStackRead(lifecycleStatus: unknown): boolean {
  * one passes a locally derived projection.
  *
  * Only `active` is reachable here in practice, and deliberately so. The
- * projection comes from `projectStackRevision`, which resolves live Direct
- * applications only. Detach deletes the Git-source row in the same transaction
- * that tombstones the application, so a source row beside a detached
- * application is not a producible state anyway. The detached case is reported
- * through the stack-state surface, which never runs this classifier.
+ * projection comes from `projectStackRevision`, which resolves a live Direct
+ * application or a Blueprint-mode application that still holds this stack as
+ * its retained credential carrier. Detach deletes the Git-source row in the
+ * same transaction that demotes or retires the claim, so a source row beside a
+ * detached application is not a producible state anyway. The detached case is
+ * reported through the stack-state surface, which never runs this classifier.
  *
  * Keep it that way. This function takes `stackName` from the Git-source row but
  * lifecycle from whatever the projection resolved, so widening that resolution
- * to reach another application silently changes who may read this row.
+ * to an unrelated application silently changes who may read this row. The
+ * claimed-source fallback stays on the same retained stack identity, so the
+ * stack-scoped read grant matches pre-claim semantics.
  */
 export function classifySourceRow(input: {
   stackName: unknown;

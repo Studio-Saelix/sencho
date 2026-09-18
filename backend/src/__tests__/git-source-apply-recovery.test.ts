@@ -21,6 +21,8 @@ const mockGitOpsApplication = {
 };
 const mockGitOpsStore = {
   getLiveDirectApplication: vi.fn().mockReturnValue(mockGitOpsApplication),
+  getLiveBlueprintApplicationBySourceStack: vi.fn().mockReturnValue(undefined),
+  getLiveSourceApplication: vi.fn().mockReturnValue(mockGitOpsApplication),
   getApplication: vi.fn().mockReturnValue(mockGitOpsApplication),
   getGeneration: vi.fn().mockReturnValue(undefined),
   getSettledAttempt: vi.fn().mockReturnValue(undefined),

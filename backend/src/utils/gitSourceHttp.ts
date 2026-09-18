@@ -33,6 +33,7 @@ export function gitSourceStatus(code: GitSourceErrorCode): number {
     case 'LEGACY_PENDING':
     case 'PLAN_UNAVAILABLE':
     case 'OPERATION_IN_FLIGHT':
+    case 'SOURCE_CLAIMED_BY_BLUEPRINT':
       return 409;
     case 'RATE_LIMITED':
       return 429;

@@ -33,11 +33,13 @@ import {
     parseBlueprintMarker,
     type BlueprintMarker,
 } from '../helpers/blueprintMarker';
+import { throwIfGitManagedDeploy } from './gitops/gitManaged';
 import {
     commitBlueprintDeploymentCause,
     commitBlueprintDeploymentRemoved,
     type BlueprintDeploymentCause,
 } from './gitops/blueprintDeploymentProducers';
+
 /** On-disk compose name for Blueprint applies. Must match createStack scaffold and Sencho discovery priority. */
 const COMPOSE_FILENAME = 'compose.yaml';
 const REMOTE_HTTP_TIMEOUT_MS = 30_000;
@@ -287,6 +289,7 @@ export class BlueprintService {
      * name-conflict guard and the local/remote dispatch.
      */
     async deployToNode(blueprint: Blueprint, node: Node): Promise<DeployOutcome> {
+        throwIfGitManagedDeploy(blueprint);
         if (!this.acquireLock(blueprint.id, node.id)) {
             return { status: 'pending' };
         }
@@ -543,6 +546,7 @@ export class BlueprintService {
         if (!expected) {
             throw new Error('Invalid blueprint marker');
         }
+        throwIfGitManagedDeploy(DatabaseService.getInstance().getBlueprint(expected.blueprintId));
         const fs = FileSystemService.getInstance(nodeId);
         const lock = await StackOpLockService.getInstance().runExclusive(
             nodeId, stackName, 'deploy', 'system',

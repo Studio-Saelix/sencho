@@ -35,6 +35,8 @@ function baseBlueprint(overrides: Partial<Blueprint> = {}): Blueprint {
         approved_blast_json: null,
         approved_at: null,
         approved_by: null,
+        content_origin: 'inline',
+        application_id: null,
         ...overrides,
     };
 }

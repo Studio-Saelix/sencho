@@ -124,6 +124,7 @@ export function buildDirectApplicationRow(args: {
     lifecycle_status: args.lifecycleStatus,
     target_mode: 'direct',
     stack_name: args.stackName,
+    configured_source_stack_name: null,
     blueprint_id: null,
     configured_repo_url: args.identity.repoUrl,
     repo_identity_json: encodeGitOpsJson(args.identity.identity),

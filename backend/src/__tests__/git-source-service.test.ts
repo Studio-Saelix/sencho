@@ -4799,19 +4799,29 @@ describe('GitSourceService.apply', () => {
             const svc = await seedPending('dispatch-blueprint', 'services:\n  x:\n    image: alpine\n', sha);
             const generationId = acceptCandidate('dispatch-blueprint');
             const generation = await acceptedGenerationById(generationId);
+            const app = liveApp('dispatch-blueprint')!;
+            GitOpsStore.getInstance().updateApplicationTargetBinding({
+                id: app.id,
+                expectedMode: 'direct',
+                targetMode: 'blueprint',
+                stackName: null,
+                blueprintId: 1,
+                configuredSourceStackName: 'dispatch-blueprint',
+                configuredRepoUrl: app.configured_repo_url,
+                updatedAt: Date.now(),
+            });
 
             const result = await svc.dispatchAcceptedGeneration(
                 generation,
-                { targetMode: 'blueprint', nodeId: 1, bindingRevision: 'rev-1' },
+                { targetMode: 'direct', nodeId: 1, bindingRevision: 'rev-1' },
                 manualDispatch,
             );
 
             expect(result).toEqual({
                 status: 'blocked',
-                reason: 'Blueprint rollout orchestration is not yet implemented.',
+                reason: "This Blueprint's content is Git-managed, so it cannot deploy from the stored snapshot.",
             });
-            // Routing decided from the context alone; the acceptance stands untouched.
-            expect(liveApp('dispatch-blueprint')!.accepted_generation_id).toBe(generationId);
+            expect(GitOpsStore.getInstance().getApplication(app.id)?.accepted_generation_id).toBe(generationId);
         });
 
         it('blocks when the dispatch contract disagrees with the stored accepted generation', async () => {
@@ -6887,7 +6897,7 @@ describe('GitSourceService.apply', () => {
 
             expect(result).toEqual({
                 status: 'blocked',
-                reason: expect.stringMatching(/no direct stack is bound/i),
+                reason: expect.stringMatching(/application could not be read/i),
             });
         });
 

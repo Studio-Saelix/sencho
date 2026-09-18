@@ -133,19 +133,19 @@ export class SourceController {
     }
 
     /**
-     * Recompute the poll cursor for every active direct application after a
-     * configuration change (the global interval was edited). Automatic and
-     * review sources get a fresh cursor; manual sources never join the
-     * unattended schedule, a source with an unconsumed retry cursor (inside
-     * its backoff window or already past due) keeps that cursor as the next
-     * wake, and turning polling off leaves existing cursors alone: they
-     * fire, the fetch consumes them, and the controller declines to re-arm,
-     * so the source drops out of the due set.
+     * Recompute the poll cursor for every live Direct or converted Blueprint
+     * source after a configuration change (the global interval was edited).
+     * Automatic and review sources get a fresh cursor; manual sources never
+     * join the unattended schedule, a source with an unconsumed retry cursor
+     * (inside its backoff window or already past due) keeps that cursor as
+     * the next wake, and turning polling off leaves existing cursors alone:
+     * they fire, the fetch consumes them, and the controller declines to
+     * re-arm, so the source drops out of the due set.
      */
     rescheduleAll(actor: string): void {
         const now = Date.now();
         const store = GitOpsStore.getInstance();
-        for (const app of store.listActiveDirectApplications()) {
+        for (const app of store.listActiveSourceApplications()) {
             if (app.source_policy === 'manual') continue;
             // A source with an unconsumed retry cursor keeps that cursor as
             // its next wake: the poll scan defers to any retry cursor, so a
@@ -273,12 +273,12 @@ export class SourceController {
      * instead of idling until the next poll or retry cursor lands.
      * Eligibility is re-decided here rather than inherited from the
      * due-scan, because this path bypasses the scan: only a live (active or
-     * creating), direct, non-manual, unsuspended source with a stack name is
-     * evaluated. A row that is due for neither poll nor retry is still
-     * evaluated: the operator's resume is the wake. Nothing is thrown at the
-     * caller when the row simply is not eligible; whether the source runs on
-     * a cursor or on demand is the scheduling code's business, and an
-     * ineligible row is not an error.
+     * creating), unsuspended, non-manual source with a Direct stack name or
+     * a converted Blueprint source identity is evaluated. A row that is due
+     * for neither poll nor retry is still evaluated: the operator's resume
+     * is the wake. Nothing is thrown at the caller when the row simply is
+     * not eligible; whether the source runs on a cursor or on demand is the
+     * scheduling code's business, and an ineligible row is not an error.
      *
      * An application already being evaluated is never queued behind itself:
      * the wake is parked instead of discarded, and the in-flight owner's
@@ -293,7 +293,7 @@ export class SourceController {
      * evaluation landing seconds before a timer tick cannot double-fetch.
      */
     public async evaluateNow(stackName: string): Promise<void> {
-        const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+        const app = GitOpsStore.getInstance().getLiveSourceApplication(stackName);
         if (!app) return;
         if (app.source_policy === 'manual' || app.suspended_at) return;
         if (this.inFlight.has(app.id)) {
@@ -325,8 +325,9 @@ export class SourceController {
     }
 
     private async evaluate(app: GitOpsApplicationRow, triggerOverride?: ReconcileTrigger): Promise<void> {
-        if (!app.stack_name) {
-            console.warn(`[SourceController] Skipping ${sanitizeForLog(app.id)}: direct-mode application has no stack_name.`);
+        const stackName = app.stack_name ?? app.configured_source_stack_name;
+        if (!stackName) {
+            console.warn(`[SourceController] Skipping ${sanitizeForLog(app.id)}: source application has no stack identity.`);
             return;
         }
         if (app.source_policy === 'manual') {
@@ -336,7 +337,6 @@ export class SourceController {
             // never fetched here).
             return;
         }
-        const stackName = app.stack_name;
         const isRetry = app.retry_at !== null && app.retry_at <= Date.now();
         // An out-of-band caller (the resume path) names its own trigger; a
         // timer tick derives it from the row's cursors as before.
@@ -514,7 +514,7 @@ export class SourceController {
         try {
             const dispatch = await GitSourceService.getInstance().dispatchAcceptedGeneration(
                 buildAcceptedGeneration(acceptGeneration),
-                GitSourceService.directDispatchContext(),
+                GitSourceService.dispatchContextFor(app),
                 { trigger, actor: 'system:source-controller' },
             );
             if (dispatch.status === 'blocked') {

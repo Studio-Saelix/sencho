@@ -22,7 +22,7 @@ import { sanitizeForLog } from '../utils/safeLog';
 import type { GitSourceManifestState } from '../types/gitProjectManifest';
 import type { RollbackOperationKind } from '../types/rollbackGeneration';
 import { collectImageIds, parseServicesJsonStrict } from './recoveryServicesJson';
-import { GITOPS_SCHEMA_SQL } from './gitops/schema';
+import { GITOPS_DUE_INDEX_SQL, GITOPS_SCHEMA_SQL } from './gitops/schema';
 
 export type { SnapshotFileReadResult } from '../helpers/snapshotFileDecrypt';
 export type { RollbackOperationKind } from '../types/rollbackGeneration';
@@ -658,6 +658,8 @@ export interface Blueprint {
     approved_blast_json: string | null;
     approved_at: number | null;
     approved_by: string | null;
+    content_origin: 'inline' | 'git';
+    application_id: string | null;
 }
 
 export interface BlueprintDeployment {
@@ -1184,6 +1186,7 @@ export class DatabaseService {
         this.migrateAddNodeCordonFields();
         this.migrateAddBlueprintPinnedNode();
         this.migrateAddBlueprintApproval();
+        this.migrateBlueprintContentBinding();
         this.migrateAutoHealNodeId();
         this.migrateFleetSyncStickyError();
         this.migrateStackDossierHashes();
@@ -1999,6 +2002,8 @@ export class DatabaseService {
         maybeAddCol('gitops_applications', 'poll_interval_secs', 'INTEGER NULL');
         maybeAddCol('gitops_applications', 'next_poll_at', 'INTEGER NULL');
         maybeAddCol('gitops_applications', 'attempt_seq', 'INTEGER NOT NULL DEFAULT 0');
+        maybeAddCol('gitops_applications', 'configured_source_stack_name', 'TEXT NULL');
+        this.db.exec(GITOPS_DUE_INDEX_SQL);
 
         // Distributed API model columns
         maybeAddCol('nodes', 'api_url', "TEXT DEFAULT ''");
@@ -2961,10 +2966,8 @@ stmt.run('gitops_schema_version', '1');
         }
     }
 
-    private migrateBlueprints(): void {
-        try {
-            this.db.prepare(`
-                CREATE TABLE IF NOT EXISTS blueprints (
+    private blueprintsTableBodySql(): string {
+        return `
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL UNIQUE,
                     description TEXT,
@@ -2977,10 +2980,34 @@ stmt.run('gitops_schema_version', '1');
                     revision INTEGER NOT NULL DEFAULT 1,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
-                    created_by TEXT
-                )
-            `).run();
-            this.db.prepare('CREATE INDEX IF NOT EXISTS idx_blueprints_enabled ON blueprints(enabled)').run();
+                    created_by TEXT,
+                    pinned_node_id INTEGER,
+                    approval_status TEXT NOT NULL DEFAULT 'pending',
+                    approved_intent_fingerprint TEXT,
+                    approved_blast_json TEXT,
+                    approved_at INTEGER,
+                    approved_by TEXT,
+                    content_origin TEXT NOT NULL DEFAULT 'inline' CHECK (content_origin IN ('inline','git')),
+                    application_id TEXT NULL,
+                    CHECK (
+                        (content_origin = 'inline' AND application_id IS NULL)
+                        OR (content_origin = 'git' AND application_id IS NOT NULL)
+                    )
+        `;
+    }
+
+    private ensureBlueprintsApplicationIndex(): void {
+        this.db.exec(`
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_blueprints_active_application
+              ON blueprints(application_id) WHERE application_id IS NOT NULL
+        `);
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_blueprints_enabled ON blueprints(enabled)');
+    }
+
+    private migrateBlueprints(): void {
+        try {
+            this.db.exec(`CREATE TABLE IF NOT EXISTS blueprints (${this.blueprintsTableBodySql()})`);
+            this.ensureBlueprintsApplicationIndex();
         } catch (e) {
             console.warn('[DatabaseService] Could not create blueprints:', (e as Error).message);
         }
@@ -3043,6 +3070,60 @@ stmt.run('gitops_schema_version', '1');
         } catch (e) {
             console.warn('[DatabaseService] blueprint approval backfill:', (e as Error).message);
         }
+    }
+
+    /**
+     * Rebuild blueprints when the content-origin pairing CHECK is missing.
+     * Additive ALTER TABLE cannot install a two-column CHECK, so older DBs
+     * follow the health_gate_runs rebuild: drop a stale temp table, copy in
+     * one transaction, then recreate indexes. Existing Inline rows stay
+     * inline with a null application_id; compose_content stays NOT NULL.
+     */
+    private migrateBlueprintContentBinding(): void {
+        const tableSql = (this.db.prepare(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'blueprints'"
+        ).get() as { sql: string } | undefined)?.sql ?? '';
+        if (tableSql.includes("content_origin = 'git' AND application_id IS NOT NULL")) {
+            this.ensureBlueprintsApplicationIndex();
+            return;
+        }
+
+        const cols = this.db.pragma('table_info(blueprints)') as Array<{ name: string }>;
+        const colNames = new Set(cols.map(c => c.name));
+        const pinnedExpr = colNames.has('pinned_node_id') ? 'pinned_node_id' : 'NULL';
+        const approvalStatusExpr = colNames.has('approval_status')
+            ? "CASE WHEN approval_status IN ('pending','approved') THEN approval_status ELSE 'pending' END"
+            : "'pending'";
+        const approvalFingerprintExpr = colNames.has('approved_intent_fingerprint') ? 'approved_intent_fingerprint' : 'NULL';
+        const approvalBlastExpr = colNames.has('approved_blast_json') ? 'approved_blast_json' : 'NULL';
+        const approvedAtExpr = colNames.has('approved_at') ? 'approved_at' : 'NULL';
+        const approvedByExpr = colNames.has('approved_by') ? 'approved_by' : 'NULL';
+        const originExpr = colNames.has('content_origin') ? 'content_origin' : "'inline'";
+        const applicationExpr = colNames.has('application_id') ? 'application_id' : 'NULL';
+
+        this.db.exec('DROP TABLE IF EXISTS blueprints_new');
+        this.db.transaction(() => {
+            this.db.exec(`
+                CREATE TABLE blueprints_new (${this.blueprintsTableBodySql()});
+                INSERT INTO blueprints_new (
+                    id, name, description, compose_content, selector_json, drift_mode,
+                    classification, classification_reasons, enabled, revision,
+                    created_at, updated_at, created_by, pinned_node_id,
+                    approval_status, approved_intent_fingerprint, approved_blast_json,
+                    approved_at, approved_by, content_origin, application_id
+                )
+                SELECT
+                    id, name, description, compose_content, selector_json, drift_mode,
+                    classification, classification_reasons, enabled, revision,
+                    created_at, updated_at, created_by, ${pinnedExpr},
+                    ${approvalStatusExpr}, ${approvalFingerprintExpr}, ${approvalBlastExpr},
+                    ${approvedAtExpr}, ${approvedByExpr}, ${originExpr}, ${applicationExpr}
+                FROM blueprints;
+                DROP TABLE blueprints;
+                ALTER TABLE blueprints_new RENAME TO blueprints;
+            `);
+            this.ensureBlueprintsApplicationIndex();
+        })();
     }
 
     private migrateFleetSyncStickyError(): void {
@@ -8846,6 +8927,8 @@ stmt.run('gitops_schema_version', '1');
             approved_blast_json: (row.approved_blast_json as string | null) ?? null,
             approved_at: (row.approved_at as number | null) ?? null,
             approved_by: (row.approved_by as string | null) ?? null,
+            content_origin: row.content_origin === 'git' ? 'git' : 'inline',
+            application_id: (row.application_id as string | null) ?? null,
         };
     }
 
@@ -8944,6 +9027,25 @@ stmt.run('gitops_schema_version', '1');
         values.push(Date.now());
         values.push(id);
         this.db.prepare(`UPDATE blueprints SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+        return this.getBlueprint(id);
+    }
+
+    public updateBlueprintContentOrigin(
+        id: number,
+        contentOrigin: 'inline' | 'git',
+        applicationId: string | null,
+    ): Blueprint | undefined {
+        if (contentOrigin === 'git' && !applicationId) {
+            throw new Error('git content origin requires application_id');
+        }
+        if (contentOrigin === 'inline' && applicationId !== null) {
+            throw new Error('inline content origin requires application_id to be null');
+        }
+        const existing = this.getBlueprint(id);
+        if (!existing) return undefined;
+        this.db.prepare(
+            'UPDATE blueprints SET content_origin = ?, application_id = ?, updated_at = ? WHERE id = ?',
+        ).run(contentOrigin, applicationId, Date.now(), id);
         return this.getBlueprint(id);
     }
 

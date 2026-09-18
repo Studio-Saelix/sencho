@@ -23,6 +23,7 @@ export function directApplicationFixture(id: string, stackName: string): GitOpsA
         lifecycle_status: 'active',
         target_mode: 'direct',
         stack_name: stackName,
+        configured_source_stack_name: null,
         blueprint_id: null,
         configured_repo_url: 'https://github.com/example/repo.git',
         repo_identity_json: '{"host":"github.com","pathname":"/example/repo.git"}',

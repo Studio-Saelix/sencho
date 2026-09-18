@@ -39,18 +39,21 @@ export type AssertNoLiveBlueprintResult =
  * SQL instead of a copy. Each is served by a partial index whose WHERE
  * clause mirrors the query's static terms (see idx_gitops_app_poll_due /
  * idx_gitops_app_retry_due in schema.ts); changing a term here must change
- * it there in the same commit. Both scans are Direct-only and Active-only,
- * and these terms are load-bearing: a detached row must not be fetched at
- * all, and a Blueprint-mode row would reach the controller's evaluate()
- * with no stack name, which returns early, so selecting it would only
- * re-wake it every tick with a misleading warning. The poll scan
- * additionally excludes rows with any retry cursor (past or future):
- * retry-due rows arrive via the retry scan, and a row still inside its
- * backoff window must not be refetched by a due poll cursor, so the
- * retry cursor stays the next wake.
+ * it there in the same commit. Both scans cover live Direct sources and
+ * converted Blueprint sources that still hold a stack identity. Native
+ * Blueprint rows with no `configured_source_stack_name` stay out, matching
+ * listActiveSourceApplications, so evaluate() is never woken without a
+ * stack to fetch against. Detached rows stay out via lifecycle_status.
+ * The poll scan additionally excludes rows with any retry cursor (past or
+ * future): retry-due rows arrive via the retry scan, and a row still
+ * inside its backoff window must not be refetched by a due poll cursor, so
+ * the retry cursor stays the next wake.
  */
+export const SOURCE_APPLICATION_MODE_SQL =
+  `(target_mode = 'direct' OR (target_mode = 'blueprint' AND configured_source_stack_name IS NOT NULL))`;
+
 export const SOURCES_DUE_FOR_POLL_SQL = `SELECT * FROM gitops_applications
-       WHERE target_mode = 'direct'
+       WHERE ${SOURCE_APPLICATION_MODE_SQL}
          AND lifecycle_status = 'active'
          AND suspended_at IS NULL
          AND active_operation_stage IS NULL
@@ -63,7 +66,7 @@ export const SOURCES_DUE_FOR_POLL_SQL = `SELECT * FROM gitops_applications
 export const APPLICATIONS_DUE_FOR_RETRY_SQL = `SELECT * FROM gitops_applications
        WHERE retry_at IS NOT NULL
          AND retry_at <= ?
-         AND target_mode = 'direct'
+         AND ${SOURCE_APPLICATION_MODE_SQL}
          AND lifecycle_status = 'active'
          AND suspended_at IS NULL
          AND active_operation_stage IS NULL
@@ -140,6 +143,65 @@ export class GitOpsStore {
   }
 
   /**
+   * The live Blueprint-mode (or demoted inline) application that still holds
+   * the original Direct stack as its credential carrier.
+   */
+  getLiveBlueprintApplicationBySourceStack(stackName: string): GitOpsApplicationRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE configured_source_stack_name = ?
+         AND target_mode IN ('inline_blueprint','blueprint')
+         AND lifecycle_status IN ('active','creating')`,
+    ).get(stackName) as GitOpsApplicationRow | undefined;
+  }
+
+  /** Live Direct application, or the converted Blueprint source that still holds this stack. */
+  getLiveSourceApplication(stackName: string): GitOpsApplicationRow | undefined {
+    return this.getLiveDirectApplication(stackName)
+      ?? this.getLiveBlueprintApplicationBySourceStack(stackName);
+  }
+
+  getLiveBlueprintModeApplicationByRepoUrl(repoUrl: string): GitOpsApplicationRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE configured_repo_url = ?
+         AND target_mode = 'blueprint'
+         AND lifecycle_status IN ('active','creating')`,
+    ).get(repoUrl) as GitOpsApplicationRow | undefined;
+  }
+
+  /**
+   * The only writer allowed to change target_mode. Returns 1 when the
+   * expected current mode matched; 0 means the row was gone or already moved.
+   */
+  updateApplicationTargetBinding(args: {
+    id: string;
+    expectedMode: GitOpsApplicationRow['target_mode'];
+    targetMode: GitOpsApplicationRow['target_mode'];
+    stackName: string | null;
+    blueprintId: number | null;
+    configuredSourceStackName: string | null;
+    configuredRepoUrl: string | null;
+    updatedAt: number;
+  }): number {
+    return this.db().prepare(
+      `UPDATE gitops_applications
+       SET target_mode = ?, stack_name = ?, blueprint_id = ?,
+           configured_source_stack_name = ?, configured_repo_url = ?, updated_at = ?
+       WHERE id = ? AND target_mode = ?`,
+    ).run(
+      args.targetMode,
+      args.stackName,
+      args.blueprintId,
+      args.configuredSourceStackName,
+      args.configuredRepoUrl,
+      args.updatedAt,
+      args.id,
+      args.expectedMode,
+    ).changes;
+  }
+
+  /**
    * The most recently detached Direct application for a stack, if any.
    *
    * Consulted only after the live lookup misses. `applicationTombstoned` keeps
@@ -201,12 +263,25 @@ export class GitOpsStore {
     ).all() as GitOpsApplicationRow[];
   }
 
-  /** Every live Direct application, for configuration-wide rescheduling. */
+  /** Every live Direct application, for Direct-only configuration scans. */
   listActiveDirectApplications(): GitOpsApplicationRow[] {
     return this.db().prepare(
       `SELECT * FROM gitops_applications
        WHERE target_mode = 'direct' AND lifecycle_status = 'active'
        ORDER BY stack_name ASC`,
+    ).all() as GitOpsApplicationRow[];
+  }
+
+  /**
+   * Live sources the controller may reschedule: Direct applications, plus
+   * Blueprint-mode applications that still hold a converted stack identity.
+   */
+  listActiveSourceApplications(): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE lifecycle_status = 'active'
+         AND ${SOURCE_APPLICATION_MODE_SQL}
+       ORDER BY COALESCE(stack_name, configured_source_stack_name) ASC`,
     ).all() as GitOpsApplicationRow[];
   }
 
@@ -402,22 +477,20 @@ export class GitOpsStore {
   }
 
   /**
-   * Direct sources whose poll time has arrived: active, not suspended, no
-   * operation in flight, and no retry cursor (the retry scan owns a row in
-   * backoff). Blueprint-mode applications are never polled here
-   * -- source evaluation for them is blocked at the evaluation boundary
-   * until an application-keyed source engine exists for that mode.
+   * Direct and Blueprint-mode sources whose poll time has arrived: active,
+   * not suspended, no operation in flight, and no retry cursor (the retry
+   * scan owns a row in backoff).
    */
   listSourcesDueForPoll(now: number, limit = 200): GitOpsApplicationRow[] {
     return this.db().prepare(SOURCES_DUE_FOR_POLL_SQL).all(now, limit) as GitOpsApplicationRow[];
   }
 
   /**
-   * Active Direct applications with a scheduled retry that has come due:
-   * not suspended, no operation in flight. Poll eligibility and retry
-   * eligibility are deliberately separate queries, since a retry can be
-   * due on an application whose poll cadence would not otherwise select
-   * it yet.
+   * Active Direct or Blueprint-mode applications with a scheduled retry that
+   * has come due: not suspended, no operation in flight. Poll eligibility
+   * and retry eligibility are deliberately separate queries, since a retry
+   * can be due on an application whose poll cadence would not otherwise
+   * select it yet.
    */
   listApplicationsDueForRetry(now: number, limit = 200): GitOpsApplicationRow[] {
     return this.db().prepare(APPLICATIONS_DUE_FOR_RETRY_SQL).all(now, limit) as GitOpsApplicationRow[];
@@ -464,6 +537,16 @@ export class GitOpsStore {
          fingerprint=excluded.fingerprint,
          migrated_at=excluded.migrated_at`,
     ).run(scope, schemaVersion, fingerprint, at);
+  }
+
+  replaceApplicationEvidenceLimitations(
+    applicationId: string,
+    evidenceLimitationsJson: string | null,
+    updatedAt: number,
+  ): void {
+    this.db().prepare(
+      `UPDATE gitops_applications SET evidence_limitations_json=?, updated_at=? WHERE id=?`,
+    ).run(evidenceLimitationsJson, updatedAt, applicationId);
   }
 
   /**
@@ -585,7 +668,7 @@ export class GitOpsStore {
   insertApplication(row: GitOpsApplicationRow): void {
     this.db().prepare(
       `INSERT INTO gitops_applications (
-        id, lifecycle_key, lifecycle_status, target_mode, stack_name, blueprint_id,
+        id, lifecycle_key, lifecycle_status, target_mode, stack_name, configured_source_stack_name, blueprint_id,
         configured_repo_url, repo_identity_json, configured_ref, compose_paths_json,
         context_dir, sync_env, env_path, materialization_fingerprint, desired_commit_sha,
         fetched_commit_sha, fetched_resolved_ref_kind, candidate_generation_id, accepted_generation_id,
@@ -599,9 +682,10 @@ export class GitOpsStore {
         recovery_ref, recovery_phase, interruption_stage, interruption_at,
         interruption_operation_id, interruption_generation_id, evidence_fresh_at,
         evidence_limitations_json, created_at, updated_at
-      ) VALUES (${Array(60).fill('?').join(', ')})`,
+      ) VALUES (${Array(61).fill('?').join(', ')})`,
     ).run(
-      row.id, row.lifecycle_key, row.lifecycle_status, row.target_mode, row.stack_name, row.blueprint_id,
+      row.id, row.lifecycle_key, row.lifecycle_status, row.target_mode, row.stack_name,
+      row.configured_source_stack_name, row.blueprint_id,
       row.configured_repo_url, row.repo_identity_json, row.configured_ref, row.compose_paths_json,
       row.context_dir, row.sync_env, row.env_path, row.materialization_fingerprint, row.desired_commit_sha,
       row.fetched_commit_sha, row.fetched_resolved_ref_kind, row.candidate_generation_id, row.accepted_generation_id,

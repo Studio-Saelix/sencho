@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { GitSourceService, type PublicGitSource, type SourcePolicy } from '../services/GitSourceService';
 import { GitOpsStore } from '../services/gitops/store';
+import { GitOpsBindingError, GitOpsBindingService } from '../services/gitops/binding';
 import { SourceController } from '../services/gitops/SourceController';
 import type { GitOpsRevisionProjection } from '../services/gitops/types';
 import { GitProjectManifestService } from '../services/GitProjectManifestService';
@@ -283,8 +284,8 @@ function pollingSettingsPayload(): {
 } {
   return {
     poll_interval_mins: DatabaseService.getInstance().getGitOpsPollIntervalMins(),
-    per_source: GitOpsStore.getInstance().listActiveDirectApplications().map((app) => ({
-      stack_name: app.stack_name ?? '',
+    per_source: GitOpsStore.getInstance().listActiveSourceApplications().map((app) => ({
+      stack_name: app.stack_name ?? app.configured_source_stack_name ?? '',
       poll_interval_secs: app.poll_interval_secs,
       next_poll_at: app.next_poll_at,
       source_policy: app.source_policy,
@@ -812,6 +813,69 @@ stackGitSourceRouter.post('/:stackName/git-source/retry', async (req: Request, r
     res.json(result);
   } catch (error) {
     sendGitSourceError(res, error);
+  }
+});
+
+function respondBindingFailure(res: Response, error: unknown, context: string, clientMessage: string): void {
+  if (error instanceof GitOpsBindingError) {
+    const status = error.code === 'blueprint_not_found' || error.code === 'application_not_found' ? 404 : 409;
+    res.status(status).json({ error: error.message, code: error.code });
+    return;
+  }
+  console.error(`[GitSources] ${context}:`, error);
+  res.status(500).json({ error: clientMessage });
+}
+
+function loadAdoptTarget(req: Request, res: Response): { blueprintId: number; applicationId: string } | null {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return null;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return null;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return null;
+  const raw = (req.body ?? {}).blueprintId;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) {
+    res.status(400).json({ error: 'blueprintId must be a positive integer' });
+    return null;
+  }
+  const blueprint = DatabaseService.getInstance().getBlueprint(raw);
+  if (!blueprint) {
+    res.status(404).json({ error: 'Blueprint not found' });
+    return null;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', blueprint.name)) return null;
+  const application = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
+  if (!application) {
+    res.status(409).json({
+      error: 'No live Direct GitOps application for this stack',
+      code: 'application_not_direct',
+    });
+    return null;
+  }
+  return { blueprintId: raw, applicationId: application.id };
+}
+
+stackGitSourceRouter.post('/:stackName/git-source/adopt-blueprint/preview', async (req: Request, res: Response): Promise<void> => {
+  const target = loadAdoptTarget(req, res);
+  if (!target) return;
+  try {
+    const preview = await GitOpsBindingService.getInstance().previewAdoptDirectToBlueprint(target);
+    res.json(preview);
+  } catch (error) {
+    respondBindingFailure(res, error, 'Adopt-blueprint preview error', 'Failed to preview Blueprint adoption');
+  }
+});
+
+stackGitSourceRouter.post('/:stackName/git-source/adopt-blueprint', (req: Request, res: Response): void => {
+  const target = loadAdoptTarget(req, res);
+  if (!target) return;
+  try {
+    const service = GitOpsBindingService.getInstance();
+    service.adoptDirectToBlueprint({ ...target, actor: auditActorUsername(req) });
+    res.json(service.describeContentBinding(target.blueprintId));
+  } catch (error) {
+    respondBindingFailure(res, error, 'Adopt-blueprint error', 'Failed to adopt Blueprint from Git source');
   }
 });
 

@@ -6,7 +6,7 @@ description: Link a running stack to a Git repository, pull a real commit, revie
 
 Say `marketing-site` is a small nginx stack you created directly in Sencho, and your team has decided the compose file should live in a Git repository instead, so changes go through a commit and a pull request before they reach the stack. This walks through connecting that already-running stack to a repository, pulling a real commit a teammate pushed, reviewing the classified change plan Sencho builds against what is on disk, and applying it, which both writes the new files and redeploys the container.
 
-This tutorial covers linking an existing stack to a Git source and running one manual pull-review-apply cycle. It doesn't cover creating a brand-new stack directly from a repository, the three webhook-driven apply modes, polling, suspend, or multi-file compose sources; see the [Git Sources](/features/git-sources) feature page for all of that.
+This tutorial covers linking an existing stack to a Git source and running one manual pull-review-apply cycle. It doesn't cover creating a brand-new stack directly from a repository, the three webhook-driven apply modes, polling, suspend, multi-file compose sources, or converting the source onto a Git-managed Blueprint; see the [Git Sources](/features/git-sources) and [Blueprints](/features/blueprint-model) feature pages for those.
 
 ## Prerequisites
 
