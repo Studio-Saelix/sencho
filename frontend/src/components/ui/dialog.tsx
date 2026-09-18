@@ -17,7 +17,7 @@ import {
 } from '@/components/animate-ui/primitives/radix/dialog';
 
 // Drop-in DialogContent that bundles portal + overlay + close button
-// while delegating animation to animate-ui's spring-based dialog
+// while delegating animation to animate-ui's shared dialog
 const DialogContent = React.forwardRef<
   HTMLDivElement,
   React.ComponentProps<typeof AnimateDialogContent> & { showClose?: boolean; panelGlow?: boolean }
