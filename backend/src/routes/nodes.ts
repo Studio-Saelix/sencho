@@ -229,7 +229,7 @@ nodesRouter.post('/', enrollmentLimiter, async (req: Request, res: Response) => 
   try {
     const { name, type, compose_dir, is_default, api_url, api_token, mode } = req.body;
 
-    if (!name || typeof name !== 'string') {
+    if (!name || typeof name !== 'string' || name.trim() === '') {
       return res.status(400).json({ error: 'Node name is required' });
     }
     if (!type || !['local', 'remote'].includes(type)) {
@@ -359,11 +359,9 @@ nodesRouter.put('/:id', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Node not found' });
     }
 
-    // updateNode writes any non-undefined name verbatim against a NOT NULL
-    // UNIQUE column, so validate shape here with the same message as POST /
-    // (stricter on blank names; the stored value is not trimmed, matching
-    // create). An unchanged name is exempt so a node whose stored name
-    // predates this validation can still be saved as-is.
+    // POST and PUT both reject blank or whitespace-only names with the same
+    // message. Stored names are not trimmed. An unchanged name is exempt so a
+    // legacy row created before POST gained this check can still be saved as-is.
     const nameChanged = updates.name !== undefined && updates.name !== existingNode.name;
     if (nameChanged && (typeof updates.name !== 'string' || updates.name.trim() === '')) {
       return res.status(400).json({ error: 'Node name is required' });
