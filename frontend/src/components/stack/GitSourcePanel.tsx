@@ -167,6 +167,7 @@ export function GitSourcePanel({
 
   const sourceFacet = liveSourceFacet(revision);
   const artifactFacet = liveArtifactFacet(revision);
+  const artifactIdentity = artifactFacet?.latestEvidence?.identity ?? null;
   const faults = revision ? absentFault(revision) : [];
   const pending = derivePendingCommit(sourceFacet, faults.length, source?.pending_commit_sha ?? null);
 
@@ -680,9 +681,9 @@ export function GitSourcePanel({
                   stateKey={artifactFacet.status}
                   state={ARTIFACT_STATE_LOOKUP[artifactFacet.status]}
                 >
-                  {'latestEvidence' in artifactFacet && artifactFacet.latestEvidence.identity && (
+                  {artifactIdentity && (
                     <div className="mt-1 font-mono text-[11px] text-stat-subtitle break-all max-md:text-[10px]">
-                      {artifactFacet.latestEvidence.identity.slice(0, 19)}
+                      {artifactIdentity.slice(0, 19)}
                     </div>
                   )}
                 </GitOpsStateCard>

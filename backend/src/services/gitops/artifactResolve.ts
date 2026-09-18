@@ -15,7 +15,6 @@ import type { ArtifactQualification } from './types';
 import {
   computeArtifactSetFingerprint,
   encodeArtifactEvidenceJson,
-  encodeObservedArtifactIdentity,
   type ArtifactEvidenceJson,
   type ArtifactServiceFailureClass,
   type ObservedArtifactIdentity,
