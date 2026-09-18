@@ -1,5 +1,5 @@
-import { GITOPS_TONE_CLASS, SOURCE_STATE_LOOKUP, RUNTIME_STATE_LOOKUP } from '@/lib/gitopsState';
-import type { GitOpsRuntimeStatus, GitOpsSourceStatus } from '@/types/gitops';
+import { ARTIFACT_STATE_LOOKUP, GITOPS_TONE_CLASS, RUNTIME_STATE_LOOKUP, SOURCE_STATE_LOOKUP } from '@/lib/gitopsState';
+import type { GitOpsArtifactStatus, GitOpsRuntimeStatus, GitOpsSourceStatus } from '@/types/gitops';
 import { cn } from '@/lib/utils';
 
 /**
@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils';
  */
 type GitOpsBadgeFacet =
   | { facet: 'source'; status: GitOpsSourceStatus }
+  | { facet: 'artifact'; status: GitOpsArtifactStatus }
   | { facet: 'runtime'; status: GitOpsRuntimeStatus };
 
 type GitOpsBadgeProps = GitOpsBadgeFacet & {
@@ -47,7 +48,9 @@ export default function GitOpsBadge(props: GitOpsBadgeProps) {
   // what the join already does for a stack it has no state for.
   const state = props.facet === 'source'
     ? SOURCE_STATE_LOOKUP[props.status]
-    : RUNTIME_STATE_LOOKUP[props.status];
+    : props.facet === 'artifact'
+      ? ARTIFACT_STATE_LOOKUP[props.status]
+      : RUNTIME_STATE_LOOKUP[props.status];
   if (!state) return null;
   const Icon = state.icon;
 

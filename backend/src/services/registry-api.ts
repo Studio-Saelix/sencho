@@ -895,6 +895,107 @@ export async function compareLocalToRemoteTag(
     return result.kind === 'error' ? { kind: 'error', reason: result.reason ?? 'Unknown error' } : { kind: result.kind };
 }
 
+export type RegistryPlatformDigestResolution =
+    | {
+        ok: true;
+        indexDigest: string;
+        platformDigest: string;
+        platformLabel: string;
+        qualification: 'exact' | 'qualified';
+    }
+    | { ok: false; reason: string };
+
+/**
+ * Resolve the registry digest for a tag on a specific node platform.
+ *
+ * Single-platform manifests return the same digest for the index and platform
+ * slots. Multi-arch indexes return the index digest plus the child digest for
+ * the requested platform. Reuses {@link probeManifestForRef} and
+ * {@link classifyManifest}; does not duplicate index parsing.
+ */
+export async function resolveRegistryImageDigestForPlatform(
+    registry: string,
+    repo: string,
+    tag: string,
+    platform: { os: string; architecture: string },
+    credentials?: RegistryCredentials | null,
+): Promise<RegistryPlatformDigestResolution> {
+    if (!platform.os || !platform.architecture) {
+        return { ok: false, reason: `Local platform is unknown; cannot resolve ${registry}/${repo}:${tag}` };
+    }
+    const ref = `${registry}/${repo}:${tag}`;
+    const probe = await probeManifestForRef(registry, repo, tag, credentials, ref);
+    if (!probe.ok) return { ok: false, reason: probe.reason };
+
+    const { digest: primaryDigest, contentType, body, authHeaders } = probe.result;
+    if (!SHA256_DIGEST_RE.test(primaryDigest)) {
+        return { ok: false, reason: `Registry returned a malformed digest for ${ref}` };
+    }
+
+    let classification: ManifestClassification;
+    try {
+        classification = await classifyManifest(registry, repo, primaryDigest, contentType, body, authHeaders, ref);
+    } catch (e) {
+        return { ok: false, reason: getErrorMessage(e, `Failed to classify remote manifest for ${ref}`) };
+    }
+
+    const platformLabel = `${platform.os}/${platform.architecture}`;
+    if (classification.kind === 'single') {
+        return {
+            ok: true,
+            indexDigest: primaryDigest,
+            platformDigest: primaryDigest,
+            platformLabel,
+            qualification: 'exact',
+        };
+    }
+
+    const platformDescriptors = classification.descriptors.filter(
+        (descriptor) => descriptor.os === platform.os && descriptor.architecture === platform.architecture,
+    );
+    if (platformDescriptors.length === 0) {
+        if (classification.exactDigests.length === 0) {
+            return {
+                ok: false,
+                reason: `Remote image index has no ${platformLabel} variant for ${ref}`,
+            };
+        }
+        if (classification.descriptors.length > 0) {
+            return {
+                ok: false,
+                reason: `Remote image index has no confirmed ${platformLabel} variant for ${ref}`,
+            };
+        }
+        if (classification.exactDigests.length === 1) {
+            const platformDigest = classification.exactDigests[0];
+            return {
+                ok: true,
+                indexDigest: primaryDigest,
+                platformDigest,
+                platformLabel,
+                qualification: 'qualified',
+            };
+        }
+        return {
+            ok: false,
+            reason: `Remote image index has ambiguous platform-less descriptors for ${ref}`,
+        };
+    }
+    if (platformDescriptors.length > 1) {
+        return {
+            ok: false,
+            reason: `Remote image index has multiple ${platformLabel} variants for ${ref}`,
+        };
+    }
+    return {
+        ok: true,
+        indexDigest: primaryDigest,
+        platformDigest: platformDescriptors[0].digest,
+        platformLabel,
+        qualification: 'qualified',
+    };
+}
+
 export type TagListCode =
     | 'REGISTRY_UNAUTHORIZED'
     | 'REGISTRY_FORBIDDEN'

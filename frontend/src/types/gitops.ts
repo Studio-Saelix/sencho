@@ -213,6 +213,8 @@ export type ArtifactFacet =
       latestEvidence: ArtifactLatestEvidence;
     };
 
+export type GitOpsArtifactStatus = ArtifactFacet['status'];
+
 // --- placement and rollout facets -------------------------------------------
 
 export interface FutureRolloutAuthorizationBinding {

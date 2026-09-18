@@ -5,6 +5,7 @@
 // itself: vitest collects only *.test.* / *.spec.*.
 
 import type {
+  ArtifactFacet,
   GitOpsApprovalRefs,
   GitOpsDriftItem,
   GitOpsFacets,
@@ -116,6 +117,34 @@ export function facets(overrides: Partial<GitOpsFacets> = {}): GitOpsFacets {
     artifact: { status: 'not_applicable' },
     placement: { status: 'unbound_direct' },
     rollout: { status: 'not_applicable' },
+    ...overrides,
+  };
+}
+
+type LiveArtifactFacet = Extract<ArtifactFacet, { artifactSetId: string }>;
+
+/** A live exact artifact facet. Expected and latest evidence share one identity unless overridden. */
+export function liveArtifact(overrides: Partial<LiveArtifactFacet> = {}): LiveArtifactFacet {
+  const identity = 'sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+  return {
+    status: 'artifact_exact',
+    artifactSetId: 'art-1',
+    generationId: 'gen-accepted',
+    evidenceVersion: 1,
+    qualification: 'exact',
+    freshnessAt: 1,
+    expected: {
+      artifactSetId: 'art-1',
+      evidenceVersion: 1,
+      qualification: 'exact',
+      identity,
+    },
+    latestEvidence: {
+      artifactSetId: 'art-1',
+      evidenceVersion: 1,
+      qualification: 'exact',
+      identity,
+    },
     ...overrides,
   };
 }

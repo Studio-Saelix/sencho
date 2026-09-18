@@ -75,6 +75,16 @@ The sheet sometimes lists one or more things it could not prove, at the top of t
 
 These are qualifications, not failures. The state above them is real, and the lines tell you which part of it to treat with less confidence. That is deliberate: a stack whose evidence is partly missing looks identical to one with complete evidence unless Sencho says otherwise, and the safer wrong answer is never the quiet one.
 
+## Executable identity
+
+**Source state** tells you whether a commit was accepted. **Executable identity** tells you whether Sencho can prove which container images that generation would run, without rewriting your Compose files.
+
+When a generation is accepted, Sencho resolves each service image reference against the target node platform. Registry tags become digest evidence. Multi-arch indexes record the platform-specific child digest for that node. Local `build:` services stay unverified across nodes because Sencho does not claim a portable exact digest for them.
+
+After deploy, Sencho inspects what is actually running on the node and compares that observation to the frozen expected artifact set. If a registry tag moved after acceptance, Sencho records stale artifact evidence without changing the expected set. If the running digest disagrees with the expected fingerprint, runtime state reports artifact drift while source state can still read as accepted.
+
+The Git Source sheet and the Drift tab show executable identity beside source and runtime so you can see configuration convergence separately from digest proof.
+
 ## Create a stack from a Git repository
 
 Skip the "empty stack then link later" detour and point at a repo from the start. Click **Create Stack** in the sidebar, switch to the **From Git** tab, and fill in the same fields you would on the Git Source sheet.

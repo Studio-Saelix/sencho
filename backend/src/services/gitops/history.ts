@@ -34,6 +34,7 @@ export type GitOpsHistoryStage =
   | 'apply_started'
   | 'artifact_evidence_recorded'
   | 'artifact_expectation_accepted'
+  | 'runtime_artifact_observed'
   | 'blueprint_ack_recorded'
   | 'blueprint_correcting'
   | 'blueprint_deploy_failed'

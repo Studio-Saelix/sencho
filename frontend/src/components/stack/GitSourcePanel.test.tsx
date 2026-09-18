@@ -83,13 +83,14 @@ import type { PullResult } from './GitSourceDiffDialog';
 import {
   absentRevision,
   facets,
+  liveArtifact,
   liveRevision,
   missingApplicationLimitation,
   plainSource,
   sourceIdentity,
   sourceRevision,
 } from '@/__tests__/gitopsFixtures';
-import { SOURCE_STATE } from '@/lib/gitopsState';
+import { ARTIFACT_STATE, SOURCE_STATE } from '@/lib/gitopsState';
 import type { GitOpsAvailableAction } from '@/types/gitops';
 
 function jsonRes(body: unknown, ok = true, status = 200) {
@@ -539,6 +540,45 @@ describe('GitSourcePanel GitOps state', () => {
     await screen.findByRole('button', { name: /pull now/i });
     expect(screen.queryByTestId('git-pending')).not.toBeInTheDocument();
     expect(screen.queryByTestId('git-source-state')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('git-artifact-state')).not.toBeInTheDocument();
+  });
+
+  it('renders the artifact card with the frozen expected identity', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(liveRevision({
+      facets: facets({
+        source: plainSource('application_generation_accepted', { candidateGenerationId: null }),
+        artifact: liveArtifact({
+          status: 'artifact_identity_changed',
+          expected: {
+            artifactSetId: 'art-1',
+            evidenceVersion: 1,
+            qualification: 'exact',
+            identity: 'sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+          },
+          latestEvidence: {
+            artifactSetId: 'art-2',
+            evidenceVersion: 2,
+            qualification: 'exact',
+            identity: 'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+          },
+        }),
+      }),
+    }))));
+    render(panel());
+
+    const card = await screen.findByTestId('git-artifact-state');
+    expect(card).toHaveAttribute('data-state', 'artifact_identity_changed');
+    expect(card).toHaveTextContent(ARTIFACT_STATE.artifact_identity_changed.label);
+    expect(card).toHaveTextContent('sha256:eeeeeeeeeee');
+    expect(card).not.toHaveTextContent('sha256:fffffffffff');
+  });
+
+  it('hides the artifact card when executable identity does not apply', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(LINKED_SOURCE));
+    render(panel());
+
+    await screen.findByTestId('git-source-state');
+    expect(screen.queryByTestId('git-artifact-state')).not.toBeInTheDocument();
   });
 
   it('still reports a waiting commit when no projection answered', async () => {

@@ -19,6 +19,7 @@ import {
   absentRevision,
   driftItem,
   facets,
+  liveArtifact,
   liveRevision,
   missingApplicationLimitation,
   plainSource,
@@ -271,6 +272,34 @@ describe('DriftPanel GitOps state', () => {
     expect(targets).toHaveLength(1);
     expect(targets[0]).toHaveAttribute('data-state', 'applied_not_deployed');
     expect(targets[0]).toHaveTextContent('local');
+    expect(screen.queryByTestId('gitops-artifact')).not.toBeInTheDocument();
+  });
+
+  it('renders an artifact card for a live artifact facet', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      gitopsRevision: liveRevision({
+        facets: facets({
+          source: plainSource('application_generation_accepted', { candidateGenerationId: null }),
+          artifact: liveArtifact(),
+        }),
+      }),
+    })));
+    render(<DriftPanel stackName="web" />);
+
+    const card = await screen.findByTestId('gitops-artifact');
+    expect(card).toHaveAttribute('data-state', 'artifact_exact');
+  });
+
+  it('omits the artifact card when identity does not apply', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      gitopsRevision: liveRevision({
+        facets: facets({ source: plainSource('candidate_ready') }),
+      }),
+    })));
+    render(<DriftPanel stackName="web" />);
+
+    await screen.findByTestId('gitops-source');
+    expect(screen.queryByTestId('gitops-artifact')).not.toBeInTheDocument();
   });
 
   it('shows no source card for a Blueprint-owned stack, only its targets', async () => {
