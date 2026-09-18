@@ -5791,6 +5791,233 @@ stmt.run('gitops_schema_version', '1');
         return result.lastInsertRowid as number;
     }
 
+    // --- Git provider webhook endpoints (node-local) ---
+
+    public listGitProviderEndpoints(stackName: string): Array<{
+        id: string;
+        stack_name: string;
+        provider: string;
+        encrypted_secret: string;
+        encrypted_secret_previous: string | null;
+        previous_secret_expires_at: number | null;
+        enabled: number;
+        event_scope: string;
+        created_at: number;
+        updated_at: number;
+    }> {
+        return this.db.prepare(
+            'SELECT * FROM git_provider_endpoints WHERE stack_name = ? ORDER BY created_at ASC',
+        ).all(stackName) as Array<{
+            id: string;
+            stack_name: string;
+            provider: string;
+            encrypted_secret: string;
+            encrypted_secret_previous: string | null;
+            previous_secret_expires_at: number | null;
+            enabled: number;
+            event_scope: string;
+            created_at: number;
+            updated_at: number;
+        }>;
+    }
+
+    public getGitProviderEndpoint(id: string): {
+        id: string;
+        stack_name: string;
+        provider: string;
+        encrypted_secret: string;
+        encrypted_secret_previous: string | null;
+        previous_secret_expires_at: number | null;
+        enabled: number;
+        event_scope: string;
+        created_at: number;
+        updated_at: number;
+    } | undefined {
+        return this.db.prepare('SELECT * FROM git_provider_endpoints WHERE id = ?').get(id) as {
+            id: string;
+            stack_name: string;
+            provider: string;
+            encrypted_secret: string;
+            encrypted_secret_previous: string | null;
+            previous_secret_expires_at: number | null;
+            enabled: number;
+            event_scope: string;
+            created_at: number;
+            updated_at: number;
+        } | undefined;
+    }
+
+    public insertGitProviderEndpoint(row: {
+        id: string;
+        stack_name: string;
+        provider: string;
+        encrypted_secret: string;
+        event_scope: string;
+    }): void {
+        const now = Date.now();
+        this.db.prepare(
+            `INSERT INTO git_provider_endpoints (
+              id, stack_name, provider, encrypted_secret, enabled, event_scope, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
+        ).run(row.id, row.stack_name, row.provider, row.encrypted_secret, row.event_scope, now, now);
+    }
+
+    public updateGitProviderEndpoint(
+        id: string,
+        updates: Partial<{
+            enabled: number;
+            event_scope: string;
+            encrypted_secret: string;
+            encrypted_secret_previous: string | null;
+            previous_secret_expires_at: number | null;
+        }>,
+    ): void {
+        const fields: string[] = [];
+        const values: Array<string | number | null> = [];
+        if (updates.enabled !== undefined) { fields.push('enabled = ?'); values.push(updates.enabled); }
+        if (updates.event_scope !== undefined) { fields.push('event_scope = ?'); values.push(updates.event_scope); }
+        if (updates.encrypted_secret !== undefined) { fields.push('encrypted_secret = ?'); values.push(updates.encrypted_secret); }
+        if (updates.encrypted_secret_previous !== undefined) { fields.push('encrypted_secret_previous = ?'); values.push(updates.encrypted_secret_previous); }
+        if (updates.previous_secret_expires_at !== undefined) { fields.push('previous_secret_expires_at = ?'); values.push(updates.previous_secret_expires_at); }
+        if (fields.length === 0) return;
+        fields.push('updated_at = ?');
+        values.push(Date.now());
+        values.push(id);
+        this.db.prepare(`UPDATE git_provider_endpoints SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    }
+
+    public deleteGitProviderEndpoint(id: string): void {
+        this.db.prepare('DELETE FROM git_provider_endpoints WHERE id = ?').run(id);
+    }
+
+    public upsertGitProviderDelivery(args: {
+        endpointId: string;
+        deliveryId: string;
+        state: string;
+        eventType?: string | null;
+        eventAction?: string | null;
+        ref?: string | null;
+        candidateSha?: string | null;
+        outcomeClass?: string | null;
+    }): {
+        id: number;
+        endpoint_id: string;
+        delivery_id: string;
+        state: string;
+        event_type: string | null;
+        event_action: string | null;
+        ref: string | null;
+        candidate_sha: string | null;
+        outcome_class: string | null;
+        received_at: number;
+        updated_at: number;
+    } {
+        const now = Date.now();
+        const existing = this.db.prepare(
+            'SELECT id FROM git_provider_deliveries WHERE endpoint_id = ? AND delivery_id = ?',
+        ).get(args.endpointId, args.deliveryId) as { id: number } | undefined;
+        if (existing) {
+            this.db.prepare(
+                `UPDATE git_provider_deliveries SET
+                  state = ?, event_type = COALESCE(?, event_type), event_action = COALESCE(?, event_action),
+                  ref = COALESCE(?, ref), candidate_sha = COALESCE(?, candidate_sha),
+                  outcome_class = COALESCE(?, outcome_class), updated_at = ?
+                 WHERE id = ?`,
+            ).run(
+                args.state,
+                args.eventType ?? null,
+                args.eventAction ?? null,
+                args.ref ?? null,
+                args.candidateSha ?? null,
+                args.outcomeClass ?? null,
+                now,
+                existing.id,
+            );
+            const row = this.db.prepare('SELECT * FROM git_provider_deliveries WHERE id = ?').get(existing.id);
+            return row as {
+                id: number;
+                endpoint_id: string;
+                delivery_id: string;
+                state: string;
+                event_type: string | null;
+                event_action: string | null;
+                ref: string | null;
+                candidate_sha: string | null;
+                outcome_class: string | null;
+                received_at: number;
+                updated_at: number;
+            };
+        }
+        const result = this.db.prepare(
+            `INSERT INTO git_provider_deliveries (
+              endpoint_id, delivery_id, state, event_type, event_action, ref, candidate_sha, outcome_class, received_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+            args.endpointId,
+            args.deliveryId,
+            args.state,
+            args.eventType ?? null,
+            args.eventAction ?? null,
+            args.ref ?? null,
+            args.candidateSha ?? null,
+            args.outcomeClass ?? null,
+            now,
+            now,
+        );
+        const row = this.db.prepare('SELECT * FROM git_provider_deliveries WHERE id = ?').get(result.lastInsertRowid);
+        return row as {
+            id: number;
+            endpoint_id: string;
+            delivery_id: string;
+            state: string;
+            event_type: string | null;
+            event_action: string | null;
+            ref: string | null;
+            candidate_sha: string | null;
+            outcome_class: string | null;
+            received_at: number;
+            updated_at: number;
+        };
+    }
+
+    public listGitProviderDeliveries(endpointId: string, limit = 20): Array<{
+        id: number;
+        endpoint_id: string;
+        delivery_id: string;
+        state: string;
+        event_type: string | null;
+        event_action: string | null;
+        ref: string | null;
+        candidate_sha: string | null;
+        outcome_class: string | null;
+        received_at: number;
+        updated_at: number;
+    }> {
+        return this.db.prepare(
+            'SELECT * FROM git_provider_deliveries WHERE endpoint_id = ? ORDER BY received_at DESC LIMIT ?',
+        ).all(endpointId, limit) as Array<{
+            id: number;
+            endpoint_id: string;
+            delivery_id: string;
+            state: string;
+            event_type: string | null;
+            event_action: string | null;
+            ref: string | null;
+            candidate_sha: string | null;
+            outcome_class: string | null;
+            received_at: number;
+            updated_at: number;
+        }>;
+    }
+
+    public pruneGitProviderDeliveries(endpointId: string, keep: number): void {
+        this.db.prepare(
+            `DELETE FROM git_provider_deliveries WHERE endpoint_id = ? AND id NOT IN (
+              SELECT id FROM git_provider_deliveries WHERE endpoint_id = ? ORDER BY received_at DESC LIMIT ?
+            )`,
+        ).run(endpointId, endpointId, keep);
+    }
+
     // --- Users ---
 
     public getUsers(): Omit<User, 'password_hash'>[] {

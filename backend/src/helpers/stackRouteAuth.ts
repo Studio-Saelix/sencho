@@ -61,6 +61,7 @@ const EXACT_SUFFIX_RULES: readonly SuffixRule[] = [
   { method: 'GET', suffix: '/git-source', action: 'stack:read' },
   { method: 'GET', suffix: '/git-source/history', action: 'stack:read' },
   { method: 'GET', suffix: '/git-source/manifest', action: 'stack:read' },
+  { method: 'GET', suffix: '/git-source/provider-hooks', action: 'stack:read' },
 
   // Edit
   { method: 'PUT', suffix: '', action: 'stack:edit' },
@@ -92,6 +93,7 @@ const EXACT_SUFFIX_RULES: readonly SuffixRule[] = [
   { method: 'POST', suffix: '/git-source/suspend', action: 'stack:edit' },
   { method: 'POST', suffix: '/git-source/resume', action: 'stack:edit' },
   { method: 'POST', suffix: '/git-source/retry', action: 'stack:edit' },
+  { method: 'POST', suffix: '/git-source/provider-hooks', action: 'stack:edit' },
 
   // Deploy
   { method: 'POST', suffix: '/deploy', action: 'stack:deploy' },
@@ -118,6 +120,13 @@ const SERVICE_SUFFIX_RE =
 
 /** `/preflight/acknowledgements/:id` */
 const PREFLIGHT_ACK_DELETE_RE = /^\/preflight\/acknowledgements\/[^/]+$/;
+
+/** `/git-source/provider-hooks/:id` */
+const GIT_PROVIDER_HOOK_ID_RE = /^\/git-source\/provider-hooks\/[^/]+$/;
+/** `/git-source/provider-hooks/:id/rotate` */
+const GIT_PROVIDER_HOOK_ROTATE_RE = /^\/git-source\/provider-hooks\/[^/]+\/rotate$/;
+/** `/git-source/provider-hooks/:id/test-result` */
+const GIT_PROVIDER_HOOK_TEST_RE = /^\/git-source\/provider-hooks\/[^/]+\/test-result$/;
 
 function normalizePath(pathAfterApiStrip: string): string {
   const withoutQuery = pathAfterApiStrip.split('?')[0] ?? pathAfterApiStrip;
@@ -213,6 +222,16 @@ export function classifyStackApiPath(method: string, pathAfterApiStrip: string):
   }
 
   if (methodUpper === 'DELETE' && PREFLIGHT_ACK_DELETE_RE.test(suffix)) {
+    return { kind: 'named-stack', stackName, action: 'stack:edit' };
+  }
+
+  if (methodUpper === 'POST' && GIT_PROVIDER_HOOK_ROTATE_RE.test(suffix)) {
+    return { kind: 'named-stack', stackName, action: 'stack:edit' };
+  }
+  if (methodUpper === 'POST' && GIT_PROVIDER_HOOK_TEST_RE.test(suffix)) {
+    return { kind: 'named-stack', stackName, action: 'stack:edit' };
+  }
+  if ((methodUpper === 'PATCH' || methodUpper === 'DELETE') && GIT_PROVIDER_HOOK_ID_RE.test(suffix)) {
     return { kind: 'named-stack', stackName, action: 'stack:edit' };
   }
 

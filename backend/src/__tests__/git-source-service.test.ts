@@ -2280,6 +2280,123 @@ describe('GitSourceService.handleWebhookPull debounce', () => {
     });
 });
 
+describe('GitSourceService provider_event webhook authority (R2)', () => {
+    it('records configured_policy authority when provider_event auto-applies', async () => {
+        const sha = 'f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2';
+        mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+
+        try {
+            await svc.upsert({
+                stackName: 'provider-event-authority',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                autoApplyOnWebhook: true,
+                autoDeployOnApply: false,
+            });
+            const result = await svc.handleWebhookPull(
+                'provider-event-authority',
+                true,
+                'provider:endpoint-auth:delivery-auth',
+                { trigger: 'provider_event', actor: 'system:provider_event' },
+            );
+            expect(result.status).toBe('success');
+
+            const app = GitOpsStore.getInstance().getLiveDirectApplication('provider-event-authority')!;
+            const approval = GitOpsStore.getInstance().getApproval(app.source_acceptance_ref!);
+            expect(approval?.authority).toBe('configured_policy');
+        } finally {
+            validateSpy.mockRestore();
+            saveSpy.mockRestore();
+        }
+    });
+
+    it('records operator authority for a manual apply on the same stack', async () => {
+        const sha = 'f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3';
+        mockSuccessfulClone({ compose: 'services:\n  x:\n    image: alpine\n', sha });
+        const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+
+        try {
+            await svc.upsert({
+                stackName: 'provider-event-manual-authority',
+                repoUrl: 'https://github.com/example/repo.git',
+                branch: 'main',
+                composePaths: ['compose.yaml'],
+                contextDir: null,
+                syncEnv: false,
+                envPath: null,
+                authType: 'none',
+                autoApplyOnWebhook: false,
+                autoDeployOnApply: false,
+            });
+            await svc.pull('provider-event-manual-authority');
+            await svc.apply('provider-event-manual-authority', sha, SKIP_PLAN_FINGERPRINT);
+            const app = GitOpsStore.getInstance().getLiveDirectApplication('provider-event-manual-authority')!;
+            const approval = GitOpsStore.getInstance().getApproval(app.source_acceptance_ref!);
+            expect(approval?.authority).toBe('operator');
+        } finally {
+            validateSpy.mockRestore();
+            saveSpy.mockRestore();
+        }
+    });
+});
+
+describe('GitSourceService provider_event replay intent recovery (R3)', () => {
+    it('replays the recorded provider_event delivery intent instead of newer settings', async () => {
+        const sha = 'f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4';
+        mockSuccessfulClone({ sha });
+        const svc = GitSourceService.getInstance();
+        await configureGitSource('provider-event-redelivery-settings');
+        const deliveryId = 'provider:endpoint-redelivery:delivery-settings-change';
+        const pullOptions = { trigger: 'provider_event' as const, actor: 'system:provider_event' };
+
+        const first = await svc.handleWebhookPull(
+            'provider-event-redelivery-settings',
+            true,
+            deliveryId,
+            pullOptions,
+        );
+        expect(first.status).toBe('success');
+
+        const db = DatabaseService.getInstance().getDb();
+        db.prepare('UPDATE stack_git_sources SET auto_apply_on_webhook = 1, last_debounce_at = ? WHERE stack_name = ?')
+            .run(Date.now() - 999_999, 'provider-event-redelivery-settings');
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+        mockGitClone.mockClear();
+
+        try {
+            const redelivery = await svc.handleWebhookPull(
+                'provider-event-redelivery-settings',
+                true,
+                deliveryId,
+                pullOptions,
+            );
+            expect(redelivery.status).toBe('success');
+            expect(mockGitClone).not.toHaveBeenCalled();
+            expect(saveSpy).not.toHaveBeenCalled();
+            expect(svc.webhookDeliveryRequiresDeploy(
+                'provider-event-redelivery-settings',
+                deliveryId,
+                'provider_event',
+            )).toBe(false);
+        } finally {
+            saveSpy.mockRestore();
+        }
+    });
+});
+
 describe('GitSourceService per-stack mutex', () => {
     it('serializes concurrent apply calls on the same stack', async () => {
         mockSuccessfulClone();

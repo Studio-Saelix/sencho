@@ -75,6 +75,7 @@ const SYSTEM_ACTOR_LABEL: Record<string, string> = {
   'system:policy': 'Policy',
   'system:webhook': 'Webhook',
   'system:git-source': 'Git source',
+  'system:provider_event': 'Git provider',
 };
 
 function formatActor(actor: string): { label: string; isSystem: boolean } {

@@ -15,6 +15,7 @@ import { GitManifestSummary, type ManifestSummary } from './GitManifestSummary';
 import type { GitBrowseResult } from './GitComposeFilePicker';
 import { AdoptBlueprintDialog } from '@/components/blueprints/AdoptBlueprintDialog';
 import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
+import { GitProviderHooksCard } from './GitProviderHooksCard';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
 import { SOURCE_STATE_LOOKUP, absentFault, liveSourceFacet, type LiveSourceFacet } from '@/lib/gitopsState';
 import { GITOPS_SOURCE_CONTROLLER_CAPABILITY } from '@/lib/capabilities';
@@ -120,6 +121,7 @@ export function GitSourcePanel({
   onOpenChange,
   stackName,
   canEdit,
+  isDarkMode,
   canDeploy = canEdit,
   onSourceChanged,
 }: GitSourcePanelProps) {
@@ -779,6 +781,12 @@ export function GitSourcePanel({
               />
               )}
             </SheetSection>
+
+            {source && (
+              <SheetSection title="Provider hooks">
+                <GitProviderHooksCard stackName={stackName} canEdit={canEdit} isDarkMode={isDarkMode} />
+              </SheetSection>
+            )}
 
             {source && (
               <SheetSection title="Manifest">

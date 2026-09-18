@@ -500,6 +500,44 @@ CREATE TABLE IF NOT EXISTS gitops_settled_outbox (
 CREATE INDEX IF NOT EXISTS idx_gitops_settled_outbox_undrained
   ON gitops_settled_outbox(created_at)
   WHERE drained_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS git_provider_endpoints (
+  id TEXT PRIMARY KEY,
+  stack_name TEXT NOT NULL,
+  provider TEXT NOT NULL CHECK (provider IN (
+    'github', 'gitlab', 'gitea', 'forgejo', 'bitbucket_cloud'
+  )),
+  encrypted_secret TEXT NOT NULL,
+  encrypted_secret_previous TEXT NULL,
+  previous_secret_expires_at INTEGER NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  event_scope TEXT NOT NULL DEFAULT 'configured_ref' CHECK (event_scope IN (
+    'configured_ref', 'configured_ref_and_prs'
+  )),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(stack_name, provider)
+);
+CREATE INDEX IF NOT EXISTS idx_git_provider_endpoints_stack
+  ON git_provider_endpoints(stack_name);
+
+CREATE TABLE IF NOT EXISTS git_provider_deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  endpoint_id TEXT NOT NULL,
+  delivery_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  event_type TEXT NULL,
+  event_action TEXT NULL,
+  ref TEXT NULL,
+  candidate_sha TEXT NULL,
+  outcome_class TEXT NULL,
+  received_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY(endpoint_id) REFERENCES git_provider_endpoints(id) ON DELETE CASCADE,
+  UNIQUE(endpoint_id, delivery_id)
+);
+CREATE INDEX IF NOT EXISTS idx_git_provider_deliveries_endpoint
+  ON git_provider_deliveries(endpoint_id, received_at DESC);
 `;
 
 /**

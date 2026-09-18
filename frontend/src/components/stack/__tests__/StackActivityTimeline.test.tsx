@@ -255,8 +255,14 @@ describe('StackActivityTimeline - actor rendering', () => {
     mockFetch.mockReturnValueOnce(jsonResponse([
       evt({ id: 2, message: 'applied', actor_username: 'system:git-source' }),
     ]));
-    render(<StackActivityTimeline stackName="web" />);
+    const { unmount: unmountGit } = render(<StackActivityTimeline stackName="web" />);
     await waitFor(() => expect(screen.getByText(/via Git source/)).toBeTruthy());
+    unmountGit();
+    mockFetch.mockReturnValueOnce(jsonResponse([
+      evt({ id: 3, message: 'push received', actor_username: 'system:provider_event' }),
+    ]));
+    render(<StackActivityTimeline stackName="web" />);
+    await waitFor(() => expect(screen.getByText(/via Git provider/)).toBeTruthy());
   });
 });
 

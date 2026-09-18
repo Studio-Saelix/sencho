@@ -36,6 +36,7 @@ The body groups three sections:
 
 - **Status.** Faults, a pending-update card with **Review**, retry or suspended state with **Retry** when that action is offered, qualifications the projection could not prove, and the last-applied commit with the source state.
 - **Repository.** Repository URL, ref, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication, and the apply behavior radio group.
+- **Provider hooks.** One endpoint per supported Git host (GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud). Shown when the stack owns a direct Git source; hidden while the source is read-only on a Git-managed Blueprint.
 - **Manifest.** The managed-project summary when a source is linked.
 
 Polling interval lives in **Settings → Stacks**, not on this sheet. There is no per-source interval control; a source with no override inherits the node default.
@@ -179,9 +180,71 @@ If the same stack also has an image update available, the image-update dot in th
 
 Click **Dismiss** in the change plan to discard a pending update without applying.
 
+## Provider webhooks (native)
+
+When your Git host can deliver push (and optionally pull request) events directly, register a **provider hook** on the Git Source sheet instead of calling Sencho from CI. Sencho exposes one ingest URL per stack and provider kind, verifies the host's signature or shared secret, and queues reconciliation through the same Git source pipeline as **Pull now** or a generic webhook.
+
+Provider hooks apply only to **direct** stack-owned sources. A source that is read-only because it lives on a Git-managed Blueprint cannot register an endpoint; detach or retire the Blueprint binding first.
+
+### Create an endpoint
+
+1. Open the stack's **Git Source** sheet and scroll to **Provider hooks**.
+2. Click **Add provider hook**, choose the Git host, and pick an **event scope**:
+   - **Configured ref only** (default): react to push events on the branch or tag named in **Ref**.
+   - **Configured ref and pull requests**: also accept pull request events from the same repository (useful when the ref tracks a long-lived branch and you want preview stacks from PR activity).
+3. Copy the **ingest URL** and **secret** from the one-time reveal. Sencho never shows the full secret again; use **Rotate secret** to issue a new one (the previous secret stays valid for 24 hours so you can update the Git host without a gap).
+4. In your Git host's repository settings, add a webhook pointing at the ingest URL and paste the secret using that host's expected field (GitHub: **Secret**; GitLab: **Secret token**; Gitea/Forgejo: **Secret**; Bitbucket Cloud: **Secret**).
+
+The ingest URL always includes the target node id and endpoint id:
+
+```
+POST /api/gitops/hooks/{nodeId}/{endpointId}
+```
+
+Use the public Sencho base URL your Git host can reach. On a fleet hub, the node id in the URL is the node that owns the stack (usually **Local** for the instance you manage stacks on). Ingest is served on the control instance even when the stack runs on a remote node; the hub forwards the payload to the owning instance over the node mesh.
+
+You can register at most one endpoint per provider per stack. A second create for the same provider returns **409**.
+
+### What happens on delivery
+
+Sencho authenticates every delivery with provider-specific headers, then applies policy before touching the repository:
+
+| Check | Outcome when it fails |
+| --- | --- |
+| Unknown endpoint, disabled endpoint, or bad signature | **404 Not found** (same response for every rejection so callers cannot probe ids) |
+| Malformed JSON or unsupported payload shape | **400 Bad request** |
+| Body larger than 1 MiB | **413 Payload too large** |
+| Repository in the event does not match the linked source URL | **202 Accepted**, delivery recorded as ignored (`source_mismatch`) |
+| Push ref does not match the configured ref | **202 Accepted**, ignored (`ref_policy`) |
+| Pull request event while scope is **Configured ref only** | **202 Accepted**, ignored (`ref_policy`) |
+| Ping or connectivity test from the host | **202 Accepted**, ignored (`ping`) |
+| Duplicate delivery id within the debounce window | **202 Accepted**, duplicate (same 10-second per-source debounce as generic webhooks) |
+
+When a delivery passes policy, Sencho queues `handleWebhookPull` for the stack. The configured **Apply behavior** then governs the outcome exactly as it does for **Pull now**, polling, or the generic **Git source sync** webhook action:
+
+- **Review only**: fetch, validate, diff, mark pending.
+- **Auto-write files**: fetch, validate, write to disk.
+- **Auto-deploy**: fetch, validate, write, deploy.
+
+Recent deliveries for each endpoint appear inline on the Git Source sheet (event type, ref, state, and outcome). Use **Test delivery** after saving the hook in your Git host to load the latest few results without waiting for a real push.
+
+### Provider signing reference
+
+| Provider | Header(s) Sencho verifies |
+| --- | --- |
+| **GitHub** | `X-Hub-Signature-256` (`sha256=` HMAC of the raw body) |
+| **GitLab** | `X-Gitlab-Token` (shared secret) or `X-Gitlab-Hook-Signature-256` when present |
+| **Gitea** | `X-Gitea-Signature` (hex HMAC-SHA256 of the raw body) |
+| **Forgejo** | `X-Forgejo-Signature`, or `X-Gitea-Signature` when Forgejo omits its own header |
+| **Bitbucket Cloud** | `X-Hub-Signature` (`sha256=` HMAC of the raw body) |
+
+Delivery ids are taken from the host's idempotency headers when present (`X-GitHub-Delivery`, `X-Request-UUID`, and others) so retries dedupe cleanly.
+
+Ingest is rate limited to 120 requests per minute per endpoint in production. Bursts above that return **429 Too many provider hook deliveries**.
+
 ## Trigger from CI with a webhook
 
-Git sources integrate with Sencho's existing webhook system. Create a webhook targeting the stack with the **Git source sync** action.
+When CI already orchestrates your pipeline, or your Git host cannot call Sencho directly, use Sencho's generic webhook system instead. Create a webhook under **Settings → Automation → Webhooks** targeting the stack with the **Git source sync** action. See [Webhooks](/features/webhooks) for signing and execution details.
 
 <Frame>
   <img src="/images/git-sources/webhook-action.png" alt="New webhook form with Name, Stack and Action fields. The Action select is open, showing Deploy, Restart, Stop, Start, Pull and Update, and Git source sync as options, with Git source sync highlighted at the bottom" />
