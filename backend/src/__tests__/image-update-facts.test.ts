@@ -2,8 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_JWT_SECRET, TEST_USERNAME } from './helpers/setupTestDb';
-import { createHash } from 'crypto';
-import { generateApiToken } from '../utils/apiTokenFormat';
+import { createTestApiToken } from './helpers/apiTokenTestHelper';
 import { COOKIE_NAME } from '../helpers/constants';
 import type { ImageUpdateStackFacts } from '../services/imageUpdateFacts';
 
@@ -63,12 +62,12 @@ describe('image update facts roster', () => {
     const { collect, roster } = await mockFacts();
     const { DatabaseService } = await import('../services/DatabaseService');
     const db = DatabaseService.getInstance();
-    const rawToken = generateApiToken();
-    db.addApiToken({
-      token_hash: createHash('sha256').update(rawToken).digest('hex'),
-      name: 'facts-boundary', scope: 'full-admin',
-      user_id: db.getUserByUsername(TEST_USERNAME)!.id,
-      created_at: Date.now(), expires_at: null,
+    const rawToken = createTestApiToken({
+      db: DatabaseService,
+      scope: 'full-admin',
+      userId: db.getUserByUsername(TEST_USERNAME)!.id,
+      name: 'facts-boundary',
+      expiresAt: null,
     });
     const response = await request(app).post('/api/image-updates/inspect-facts')
       .set('Authorization', `Bearer ${rawToken}`).send({ ...envelope, stack: 'web' });
