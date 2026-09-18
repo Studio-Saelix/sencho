@@ -1,5 +1,6 @@
 data_extensions:
   - .github/codeql/extensions/safeLog.model.yml
+  - .github/codeql/extensions/validation.model.yml
 
 # End-to-end Playwright specs are test-harness code, not shipped product code.
 # They seed fixture files directly into the backend's COMPOSE_DIR (a fixed path

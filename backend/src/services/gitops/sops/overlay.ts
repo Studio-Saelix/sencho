@@ -5,9 +5,34 @@ import path from 'path';
 import type { ComposeInputEntry } from '../../../types/gitProjectManifest';
 import type { OverlayBinding } from './types';
 import { decryptSopsAgeDocument, SopsDecryptError } from './decode';
-import { isPathWithinBase } from '../../../utils/validation';
+import { isPathWithinBase, isValidStackName } from '../../../utils/validation';
 
 const OVERLAY_ROOT = 'git-secrets';
+const OVERLAY_OPERATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function assertSafeNodeId(nodeId: number): void {
+  if (!Number.isInteger(nodeId) || nodeId <= 0) {
+    throw new Error('Invalid overlay node id');
+  }
+}
+
+function assertSafeOverlayOperationId(operationId: string): void {
+  if (!OVERLAY_OPERATION_ID_RE.test(operationId)) {
+    throw new Error('Invalid overlay operation id');
+  }
+}
+
+function assertSafeOverlayStackName(stackName: string): void {
+  if (!isValidStackName(stackName)) {
+    throw new Error('Invalid overlay stack name');
+  }
+}
+
+function assertBindingFields(binding: OverlayBinding): void {
+  assertSafeNodeId(binding.nodeId);
+  assertSafeOverlayStackName(binding.stackName);
+  assertSafeOverlayOperationId(binding.operationId);
+}
 
 export class GitOpsDecryptOverlay {
   private static instance: GitOpsDecryptOverlay | null = null;
@@ -25,14 +50,31 @@ export class GitOpsDecryptOverlay {
     return path.join(process.env.DATA_DIR || path.join(process.cwd(), 'data'), OVERLAY_ROOT);
   }
 
+  private resolveOverlayDir(nodeId: number, stackName: string, operationId: string): string {
+    assertSafeNodeId(nodeId);
+    assertSafeOverlayStackName(stackName);
+    assertSafeOverlayOperationId(operationId);
+    const root = path.resolve(this.rootDir());
+    const overlayDir = path.resolve(root, String(nodeId), stackName, operationId);
+    if (!isPathWithinBase(overlayDir, root)) {
+      throw new Error('Overlay path escapes the git-secrets root');
+    }
+    return overlayDir;
+  }
+
   overlayPath(nodeId: number, stackName: string, operationId: string): string {
-    return path.join(this.rootDir(), String(nodeId), stackName, operationId);
+    return this.resolveOverlayDir(nodeId, stackName, operationId);
   }
 
   assertBinding(overlayDir: string, binding: OverlayBinding): void {
-    const expected = this.overlayPath(binding.nodeId, binding.stackName, binding.operationId);
+    assertBindingFields(binding);
+    const expected = this.resolveOverlayDir(binding.nodeId, binding.stackName, binding.operationId);
     const resolved = path.resolve(overlayDir);
-    if (resolved !== path.resolve(expected)) {
+    const root = path.resolve(this.rootDir());
+    if (!isPathWithinBase(resolved, root)) {
+      throw new Error('Overlay directory escapes the git-secrets root');
+    }
+    if (resolved !== expected) {
       throw new Error('Overlay directory does not match the bound operation');
     }
     const metaPath = path.join(resolved, '.sencho-overlay.json');
@@ -58,12 +100,22 @@ export class GitOpsDecryptOverlay {
     inputs: ComposeInputEntry[];
     identityByRecipient: Map<string, string>;
   }): Promise<string> {
-    const overlayDir = this.overlayPath(args.binding.nodeId, args.binding.stackName, args.binding.operationId);
+    assertBindingFields(args.binding);
+    const overlayDir = this.resolveOverlayDir(
+      args.binding.nodeId,
+      args.binding.stackName,
+      args.binding.operationId,
+    );
+    const sourceRoot = path.resolve(args.sourceRoot);
+    if (!fs.existsSync(sourceRoot) || !fs.statSync(sourceRoot).isDirectory()) {
+      throw new Error('Overlay source root is missing');
+    }
+
     await this.destroy(args.binding.nodeId, args.binding.stackName, args.binding.operationId);
     await fsPromises.mkdir(overlayDir, { recursive: true, mode: 0o700 });
     await fsPromises.chmod(overlayDir, 0o700);
 
-    await this.copyTree(args.sourceRoot, overlayDir);
+    await this.copyTree(sourceRoot, overlayDir);
 
     const metaPath = path.join(overlayDir, '.sencho-overlay.json');
     await fsPromises.writeFile(metaPath, JSON.stringify(args.binding), { mode: 0o600 });
@@ -72,6 +124,9 @@ export class GitOpsDecryptOverlay {
       for (const input of args.inputs) {
         if (input.encryption !== 'sops-age' || !input.materializedPath || !input.sourcePath) continue;
         const rel = input.materializedPath.replace(/\\/g, '/');
+        if (!rel || rel.includes('\0') || rel.startsWith('/') || rel.includes('..')) {
+          throw new Error('Invalid overlay materialized path');
+        }
         const target = path.resolve(overlayDir, rel);
         if (!isPathWithinBase(target, overlayDir)) {
           throw new Error('Invalid overlay materialized path');
@@ -105,19 +160,22 @@ export class GitOpsDecryptOverlay {
   }
 
   async destroy(nodeId: number, stackName: string, operationId: string): Promise<void> {
-    const overlayDir = this.overlayPath(nodeId, stackName, operationId);
+    const overlayDir = this.resolveOverlayDir(nodeId, stackName, operationId);
     await fsPromises.rm(overlayDir, { recursive: true, force: true });
   }
 
   async sweepStale(maxAgeMs = 24 * 60 * 60 * 1000): Promise<number> {
-    const root = this.rootDir();
+    const root = path.resolve(this.rootDir());
     if (!fs.existsSync(root)) return 0;
     const cutoff = Date.now() - maxAgeMs;
     let removed = 0;
     const walk = async (dir: string): Promise<void> => {
-      const entries = await fsPromises.readdir(dir, { withFileTypes: true });
+      const resolvedDir = path.resolve(dir);
+      if (!isPathWithinBase(resolvedDir, root)) return;
+      const entries = await fsPromises.readdir(resolvedDir, { withFileTypes: true });
       for (const entry of entries) {
-        const full = path.join(dir, entry.name);
+        const full = path.join(resolvedDir, entry.name);
+        if (!isPathWithinBase(full, root)) continue;
         if (entry.isDirectory()) {
           const metaPath = path.join(full, '.sencho-overlay.json');
           if (fs.existsSync(metaPath)) {
@@ -136,19 +194,37 @@ export class GitOpsDecryptOverlay {
     return removed;
   }
 
-  private async copyTree(src: string, dest: string): Promise<void> {
-    const entries = await fsPromises.readdir(src, { withFileTypes: true });
-    await fsPromises.mkdir(dest, { recursive: true });
-    for (const entry of entries) {
-      const srcPath = path.join(src, entry.name);
-      const destPath = path.join(dest, entry.name);
-      if (entry.isDirectory()) {
-        await this.copyTree(srcPath, destPath);
-      } else if (entry.isFile()) {
-        await fsPromises.copyFile(srcPath, destPath);
-        await fsPromises.chmod(destPath, 0o600);
-      }
+  private async copyTree(srcRoot: string, destRoot: string): Promise<void> {
+    const srcBase = path.resolve(srcRoot);
+    const destBase = path.resolve(destRoot);
+    if (!isPathWithinBase(destBase, path.resolve(this.rootDir()))) {
+      throw new Error('Overlay destination escapes the git-secrets root');
     }
+
+    const copyRecursive = async (src: string, dest: string): Promise<void> => {
+      const resolvedSrc = path.resolve(src);
+      const resolvedDest = path.resolve(dest);
+      if (!isPathWithinBase(resolvedSrc, srcBase)) {
+        throw new Error('Overlay source path escapes the source root');
+      }
+      if (!isPathWithinBase(resolvedDest, destBase)) {
+        throw new Error('Overlay destination path escapes the overlay directory');
+      }
+      const entries = await fsPromises.readdir(resolvedSrc, { withFileTypes: true });
+      await fsPromises.mkdir(resolvedDest, { recursive: true });
+      for (const entry of entries) {
+        const srcPath = path.join(resolvedSrc, entry.name);
+        const destPath = path.join(resolvedDest, entry.name);
+        if (entry.isDirectory()) {
+          await copyRecursive(srcPath, destPath);
+        } else if (entry.isFile()) {
+          await fsPromises.copyFile(srcPath, destPath);
+          await fsPromises.chmod(destPath, 0o600);
+        }
+      }
+    };
+
+    await copyRecursive(srcBase, destBase);
   }
 }
 
