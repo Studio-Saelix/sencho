@@ -57,3 +57,46 @@ test('git source panel renders at phone width', async ({ page }) => {
     await fetch(`/api/stacks/${name}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
   }, STACK);
 });
+
+test('delete confirm modal keeps actions inside the panel at phone width', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await loginAs(page);
+  // Long unbroken stack name: exercises the shared confirm-modal containment
+  // through the mobile-reachable delete flow (the Files view is replaced on
+  // mobile, so New file cannot host a phone-width dialog).
+  const LONG_STACK = `footer-delete-${'x'.repeat(80)}`;
+  // Pre-clean any stack left by an interrupted run.
+  await page.evaluate(async (name) => {
+    await fetch(`/api/stacks/${name}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
+  }, LONG_STACK);
+  const seed = await page.evaluate(async (name) => {
+    const res = await fetch('/api/stacks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ stackName: name }) });
+    return res.ok;
+  }, LONG_STACK);
+  expect(seed).toBe(true);
+  await page.reload();
+  await waitForStacksLoaded(page);
+  await page.getByText(LONG_STACK, { exact: true }).first().click();
+  await page.getByRole('button', { name: 'More actions' }).click();
+  await page.getByRole('menuitem', { name: 'Delete' }).click();
+  const dialog = page.getByRole('alertdialog');
+  await expect(dialog).toBeVisible();
+  const panel = await dialog.boundingBox();
+  expect(panel).not.toBeNull();
+  if (!panel) throw new Error('Dialog has no bounding box');
+  expect(panel.x).toBeGreaterThanOrEqual(8);
+  expect(panel.x + panel.width).toBeLessThanOrEqual(390 - 8);
+  for (const name of ['Cancel', 'Delete']) {
+    const action = await dialog.getByRole('button', { name, exact: true }).boundingBox();
+    expect(action).not.toBeNull();
+    if (!action) throw new Error(`${name} has no bounding box`);
+    expect(action.x).toBeGreaterThanOrEqual(panel.x);
+    expect(action.x + action.width).toBeLessThanOrEqual(panel.x + panel.width);
+    expect(action.y + action.height).toBeLessThanOrEqual(panel.y + panel.height);
+  }
+  expect(await dialog.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+  await page.screenshot({ path: 'e2e/report/mobile-delete-confirm.png' });
+  // Confirming the delete removes the stack; that is also the cleanup.
+  await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(dialog).toBeHidden();
+});

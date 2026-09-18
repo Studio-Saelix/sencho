@@ -426,6 +426,48 @@ test.describe('Stack file explorer: UI lifecycle', () => {
     ).toBeVisible({ timeout: 8_000 });
   });
 
+  for (const width of [1280]) {
+    for (const kind of ['file', 'folder'] as const) {
+      test(`modal footer contains New ${kind} actions with a long parent at ${width}px`, async ({ page }, testInfo) => {
+        const segments = ['footer-layout', 'nested-parent', 'x'.repeat(100)];
+        const parent = segments.join('/');
+        await fs.mkdir(nodePath.join(stackDir(), parent), { recursive: true });
+        await openFilesTab(page);
+        for (const segment of segments.slice(0, -1)) {
+          await page.getByRole('treeitem').filter({ has: page.getByText(segment, { exact: true }) }).click();
+        }
+        const row = page.getByRole('treeitem').filter({ has: page.getByText(segments[2], { exact: true }) });
+        await row.click({ button: 'right' });
+        await page.getByRole('menuitem', { name: new RegExp(`^New ${kind}$`, 'i') }).click();
+        await page.setViewportSize({ width, height: 844 });
+        const dialog = page.getByRole('dialog', { name: `New ${kind}`, exact: true });
+        await expect(dialog).toBeVisible();
+        await dialog.getByLabel(kind === 'file' ? 'File name' : 'Folder name').fill(`footer-${kind}-${width}`);
+        await expect(async () => {
+          const panel = await dialog.boundingBox();
+          expect(panel).not.toBeNull();
+          if (!panel) throw new Error('Dialog has no bounding box');
+          expect(panel.x).toBeGreaterThanOrEqual(8);
+          expect(panel.x + panel.width).toBeLessThanOrEqual(width - 8);
+          for (const name of ['Cancel', 'Create']) {
+            const action = await dialog.getByRole('button', { name, exact: true }).boundingBox();
+            expect(action).not.toBeNull();
+            if (!action) throw new Error(`${name} has no bounding box`);
+            expect(action.x).toBeGreaterThanOrEqual(panel.x);
+            expect(action.x + action.width).toBeLessThanOrEqual(panel.x + panel.width);
+            expect(action.y + action.height).toBeLessThanOrEqual(panel.y + panel.height);
+          }
+          expect(await dialog.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+        }).toPass();
+        await testInfo.attach(`new-${kind}-${width}`, { body: await page.screenshot(), contentType: 'image/png' });
+        await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+        await expect(dialog).toBeHidden();
+        const created = await fs.stat(nodePath.join(stackDir(), parent, `footer-${kind}-${width}`));
+        expect(kind === 'file' ? created.isFile() : created.isDirectory()).toBe(true);
+      });
+    }
+  }
+
   test('the New file toolbar button creates a root-level file', async ({ page }) => {
     await page.getByRole('button', { name: 'New file' }).click();
     await page.getByLabel('File name').fill('ui-new-file.txt');

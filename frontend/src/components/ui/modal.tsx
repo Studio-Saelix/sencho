@@ -178,16 +178,16 @@ interface ModalFooterProps {
 
 export function ModalFooter({ primary, secondary, hint, hintAccent }: ModalFooterProps) {
   return (
-    <div className="flex shrink-0 items-center justify-between gap-4 border-t border-card-border/60 px-6 py-4">
-      <div className={cn(KICKER_CLASS, 'text-stat-subtitle')}>
+    <div className="flex shrink-0 flex-wrap items-center justify-between gap-4 border-t border-card-border/60 px-6 py-4">
+      <div className={cn(KICKER_CLASS, 'min-w-0 wrap-anywhere text-stat-subtitle')}>
         {hint}
         {hintAccent !== undefined && (
-          <span className="ml-1.5 rounded-sm border border-card-border bg-card px-1.5 py-0.5 text-stat-value">
+          <span className="ml-1.5 inline-block max-w-full rounded-sm border border-card-border bg-card px-1.5 py-0.5 align-middle text-stat-value wrap-anywhere">
             {hintAccent}
           </span>
         )}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2">
         {secondary}
         {primary}
       </div>
