@@ -3146,6 +3146,24 @@ describe('git-source polling settings', () => {
 });
 
 describe('Git source SOPS identities', () => {
+    let sopsViewerToken: string;
+
+    beforeAll(async () => {
+        const bcrypt = (await import('bcrypt')).default;
+        const hash = await bcrypt.hash('sops-viewer-pass', 1);
+        DatabaseService.getInstance().addUser({
+            username: 'sops-viewer',
+            password_hash: hash,
+            role: 'viewer',
+        });
+        const user = DatabaseService.getInstance().getUserByUsername('sops-viewer')!;
+        sopsViewerToken = jwt.sign(
+            { username: 'sops-viewer', role: 'viewer', tv: user.token_version },
+            TEST_JWT_SECRET,
+            { expiresIn: '1m' },
+        );
+    });
+
     beforeEach(() => {
         seedGitSource('existing-stack');
         DatabaseService.getInstance().getDb()
@@ -3182,11 +3200,13 @@ describe('Git source SOPS identities', () => {
     it('allows GET with stack:read for viewers', async () => {
         const res = await request(app)
             .get('/api/stacks/existing-stack/git-source/sops-identities')
-            .set('Authorization', `Bearer ${viewerToken()}`);
+            .set('Authorization', `Bearer ${sopsViewerToken}`);
         expect(res.status).toBe(200);
     });
 
     it('persists encrypted_source_policy and leaves it unchanged when omitted on PUT', async () => {
+        const upsertSpy = vi.spyOn(GitSourceService.getInstance(), 'upsert')
+            .mockResolvedValue({} as Awaited<ReturnType<typeof GitSourceService.prototype.upsert>>);
         const policyBody = {
             repo_url: 'https://github.com/example/repo.git',
             branch: 'main',
@@ -3194,35 +3214,39 @@ describe('Git source SOPS identities', () => {
             auth_type: 'none',
             encrypted_source_policy: 'require_encrypted',
         };
-        const first = await request(app)
-            .put('/api/stacks/existing-stack/git-source')
-            .set('Authorization', `Bearer ${adminToken()}`)
-            .send(policyBody);
-        expect(first.status).toBe(200);
+        try {
+            const first = await request(app)
+                .put('/api/stacks/existing-stack/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(policyBody);
+            expect(first.status).toBe(200);
 
-        const { encrypted_source_policy: _drop, ...withoutPolicy } = policyBody;
-        const second = await request(app)
-            .put('/api/stacks/existing-stack/git-source')
-            .set('Authorization', `Bearer ${adminToken()}`)
-            .send(withoutPolicy);
-        expect(second.status).toBe(200);
+            const { encrypted_source_policy: _drop, ...withoutPolicy } = policyBody;
+            const second = await request(app)
+                .put('/api/stacks/existing-stack/git-source')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(withoutPolicy);
+            expect(second.status).toBe(200);
 
-        const read = await request(app)
-            .get('/api/stacks/existing-stack/git-source/sops-identities')
-            .set('Authorization', `Bearer ${adminToken()}`);
-        expect(read.status).toBe(200);
-        expect(read.body.encrypted_source_policy).toBe('require_encrypted');
+            const read = await request(app)
+                .get('/api/stacks/existing-stack/git-source/sops-identities')
+                .set('Authorization', `Bearer ${adminToken()}`);
+            expect(read.status).toBe(200);
+            expect(read.body.encrypted_source_policy).toBe('require_encrypted');
+        } finally {
+            upsertSpy.mockRestore();
+        }
     });
 
     it('blocks delete without acknowledgement when generations require the recipient', async () => {
+        const appRow = directApplicationFixture('app-sops-impact', 'existing-stack');
+        GitOpsStore.getInstance().insertApplication(appRow);
         const genRes = await request(app)
             .post('/api/stacks/existing-stack/git-source/sops-identities')
             .set('Authorization', `Bearer ${adminToken()}`)
             .send({});
         expect(genRes.status).toBe(201);
         const recipient = genRes.body.recipient as string;
-        const appRow = directApplicationFixture('app-sops-impact', 'existing-stack');
-        GitOpsStore.getInstance().insertApplication(appRow);
         const genId = 'gen-sops-impact';
         GitOpsStore.getInstance().insertGeneration({
             id: genId,
