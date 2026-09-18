@@ -2569,11 +2569,12 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
           currentGen.id,
           // Returns the Compose result rather than swallowing it, so a proven
           // restore can bind its deployed pointer and open a health run.
-          (overridePath, invocation) => ComposeService.getInstance(req.nodeId).composeUpWithRecoveryOverride(
+          (overridePath, invocation, overlay) => ComposeService.getInstance(req.nodeId).composeUpWithRecoveryOverride(
             stackName,
             overridePath,
             getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
             invocation,
+            overlay,
           ),
           buildPolicyGateOptions(req, { actor: req.user?.username ?? 'system' }),
         );

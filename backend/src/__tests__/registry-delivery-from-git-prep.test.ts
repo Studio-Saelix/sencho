@@ -49,6 +49,7 @@ describe('createStackFromGit prepared git candidate consumption', () => {
       contextCopyPlans: [],
       candidateRelPath,
       validation: { ok: true },
+      secretCapability: { policy: "allow_plaintext", inputs: [], ready: true, requiredRecipients: [] },
     };
 
     await writeGitCandidatePreparedMeta(stagingDir, {

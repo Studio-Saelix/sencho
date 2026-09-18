@@ -45,6 +45,7 @@ function materialization(commitSha: string): MaterializationResult {
     contextCopyPlans: [],
     candidateRelPath: candidateRelPathForSha(commitSha),
     validation: { ok: true },
+      secretCapability: { policy: "allow_plaintext", inputs: [], ready: true, requiredRecipients: [] },
   };
 }
 

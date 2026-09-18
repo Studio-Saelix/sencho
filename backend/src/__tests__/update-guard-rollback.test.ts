@@ -39,6 +39,7 @@ const baseInputs = (over: Partial<RollbackInputs> = {}): RollbackInputs => ({
   recoveryGeneration: { exists: false },
   policyEligibility: null,
   managedInputs: { covered: true, detail: 'Exact authored-project coverage includes 1 managed path(s).' },
+  sopsKeys: null,
   ...over,
 });
 
@@ -202,6 +203,26 @@ describe('aggregateRollbackOverall', () => {
       policyEligibility: 'unknown',
     }), NOW);
     expect(aggregateRollbackOverall(unk)).toBe('partial');
+  });
+
+  it('surfaces blocked repository secrets and gates overall readiness', () => {
+    const item = itemById(baseInputs({
+      sopsKeys: {
+        ready: false,
+        detail: 'Rollback restore needs age recipient(s) that are not on this node: age1example',
+      },
+    }), 'sops_keys');
+    expect(item.state).toBe('blocked');
+    expect(item.detail).toContain('age1example');
+    expect(item.detail).not.toMatch(/AGE-SECRET-KEY/);
+    expect(aggregateRollbackOverall(buildRollbackItems(baseInputs({
+      sopsKeys: { ready: false, detail: 'missing key' },
+    }), NOW))).toBe('not_ready');
+  });
+
+  it('omits the repository secrets row when not Git-managed', () => {
+    const items = buildRollbackItems(baseInputs({ sopsKeys: null }), NOW);
+    expect(items.some((item) => item.id === 'sops_keys')).toBe(false);
   });
 
 });

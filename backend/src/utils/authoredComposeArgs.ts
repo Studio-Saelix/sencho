@@ -22,13 +22,13 @@ import { isPathWithinBase, isValidRelativeStackPath } from './validation';
  * `com.docker.compose.project=<stackName>` even when `--project-directory`
  * changes the directory basename Compose would otherwise derive the name from.
  */
-export function authoredComposeFileArgs(stackName: string, nodeId?: number): string[] {
+export function authoredComposeFileArgs(stackName: string, nodeId?: number, stackDirOverride?: string): string[] {
   const resolvedNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
   const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
   if (!spec || spec.files.length === 0) return [];
 
   const baseDir = NodeRegistry.getInstance().getComposeDir(resolvedNodeId);
-  const stackDir = path.resolve(baseDir, stackName);
+  const stackDir = stackDirOverride ? path.resolve(stackDirOverride) : path.resolve(baseDir, stackName);
 
   const args: string[] = [];
   for (const file of spec.files) {
@@ -71,15 +71,19 @@ export function authoredComposeFileArgs(stackName: string, nodeId?: number): str
  * deploy spec sets a contextDir and whose root `.env` actually exists. This
  * preserves byte-identical behavior for existing stacks.
  */
-export async function authoredComposeEnvFileArgs(stackName: string, nodeId?: number): Promise<string[]> {
+export async function authoredComposeEnvFileArgs(
+  stackName: string,
+  nodeId?: number,
+  stackDirOverride?: string,
+): Promise<string[]> {
   const resolvedNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
   const db = DatabaseService.getInstance();
   const configuredFiles = db.getStackProjectEnvFiles(resolvedNodeId, stackName);
 
   if (configuredFiles.length > 0) {
     const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(resolvedNodeId));
-    const stackDir = path.resolve(baseResolved, stackName);
-    if (!stackDir.startsWith(baseResolved + path.sep)) return [];
+    const stackDir = stackDirOverride ? path.resolve(stackDirOverride) : path.resolve(baseResolved, stackName);
+    if (!stackDirOverride && !stackDir.startsWith(baseResolved + path.sep)) return [];
 
     const args: string[] = [];
     for (const file of configuredFiles) {
@@ -139,8 +143,8 @@ export async function authoredComposeEnvFileArgs(stackName: string, nodeId?: num
   // the wrapped isPathWithinBase helper or a check separated from the sink, matching
   // the inline guards in renderConfig and validateCompose.
   const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(resolvedNodeId));
-  const stackDir = path.resolve(baseResolved, stackName);
-  if (!stackDir.startsWith(baseResolved + path.sep)) return [];
+  const stackDir = stackDirOverride ? path.resolve(stackDirOverride) : path.resolve(baseResolved, stackName);
+  if (!stackDirOverride && !stackDir.startsWith(baseResolved + path.sep)) return [];
   const envPath = path.resolve(stackDir, '.env');
   try {
     await fsPromises.access(envPath);

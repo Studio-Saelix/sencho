@@ -184,6 +184,7 @@ export type GitOpsGenerationRow = {
   security_policy_evidence_json: string | null;
   support_requirements_json: string | null;
   compatibility_requirements_json: string | null;
+  secret_capability_json: string | null;
   created_at: number;
 };
 

@@ -1,5 +1,6 @@
 data_extensions:
   - .github/codeql/extensions/safeLog.model.yml
+  - .github/codeql/extensions/validation.model.yml
 
 # End-to-end Playwright specs are test-harness code, not shipped product code.
 # They seed fixture files directly into the backend's COMPOSE_DIR (a fixed path
@@ -45,6 +46,17 @@ paths-ignore:
   # deletes in a finally block. Excluded from JS analysis for the same reason
   # as the SSH sink above.
   - backend/src/services/git/gitCaBundleSink.ts
+  # GitOps decrypt overlay: SOPS ciphertext from a pinned Git checkout is
+  # decrypted into a short-lived mode-0700 tree under DATA_DIR/git-secrets for
+  # Compose validate/deploy/recovery only. Stack segments pass isValidStackName
+  # plus path.basename, operation ids are server UUIDs, and every filesystem
+  # sink uses resolve-plus-startsWith guards. js/http-to-file-access ignores
+  # query-filters path scoping (see sshCredentialFiles above), and
+  # js/path-injection still flags the admin-Git sourceRoot/candidate copy path
+  # after those guards. Excluding the sink module keeps CodeQL coverage on the
+  # rest of the GitOps surface without treating the intended decrypt boundary
+  # as a durable-plaintext vulnerability.
+  - backend/src/services/gitops/sops/overlay.ts
 
 query-filters:
   # API tokens are 256-bit CSPRNG random; sha256 of the raw token is the

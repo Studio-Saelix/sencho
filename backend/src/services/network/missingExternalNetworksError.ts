@@ -63,4 +63,7 @@ export interface DeployInvocationContext {
    * which deploy ran under the attempt.
    */
   gitopsDeployOperationId?: string;
+  /** GitOps decrypt overlay directory; only valid for Git-sourced deploy/recovery arms. */
+  overlayDir?: string;
+  overlayBinding?: import('../gitops/sops/types').OverlayBinding;
 }

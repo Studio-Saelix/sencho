@@ -89,6 +89,7 @@ export function buildAcceptedGeneration(row: GitOpsGenerationRow): AcceptedGener
   const securityPolicyEvidence = parseOptionalJson<unknown>(row.security_policy_evidence_json, 'security_policy_evidence_missing', limitations);
   const supportRequirements = parseOptionalJson<unknown>(row.support_requirements_json, 'support_requirements_missing', limitations);
   const compatibilityRequirements = parseOptionalJson<unknown>(row.compatibility_requirements_json, 'compatibility_requirements_missing', limitations);
+  const secretCapability = parseOptionalJson<unknown>(row.secret_capability_json, 'secret_capability_missing', limitations);
 
   return {
     contractVersion: 1,
@@ -108,7 +109,7 @@ export function buildAcceptedGeneration(row: GitOpsGenerationRow): AcceptedGener
     securityPolicyEvidence,
     supportRequirements,
     compatibilityRequirements,
-    secretCapability: null,
+    secretCapability,
     trigger: row.trigger,
     actor: row.actor,
     operationId: row.operation_id,

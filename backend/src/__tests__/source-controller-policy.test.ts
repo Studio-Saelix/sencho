@@ -146,6 +146,7 @@ function stageCandidate(
             : opts.securityEvidence,
         support_requirements_json: null,
         compatibility_requirements_json: null,
+    secret_capability_json: null,
         created_at: Date.now(),
     });
     const env = { operationId: `fetch-${appId}`, actor: 'test', trigger: 'poll', at: Date.now() };

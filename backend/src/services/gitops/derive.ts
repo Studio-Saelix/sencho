@@ -5,6 +5,8 @@ import {
   GitOpsJsonError,
 } from './json';
 import { GitOpsStore } from './store';
+import { parseSecretCapabilityFromJson } from './sops/capability';
+import { SopsIdentityStore } from './sops/identityStore';
 import type { BlueprintObservationStage } from './transitions';
 import type {
   ArtifactExpectedIdentity,
@@ -689,6 +691,27 @@ function deriveLkg(target: GitOpsTargetCurrentRow, limitations: GitOpsLimitation
   if (target.lkg_generation_id && !generation) {
     limitations.push({ code: 'lkg_generation_missing', message: 'LKG generation row is gone', evidence: target.lkg_generation_id });
     return { status: 'unavailable' };
+  }
+  if (generation) {
+    const cap = parseSecretCapabilityFromJson(generation.secret_capability_json);
+    if (cap && cap.requiredRecipients.length > 0) {
+      const app = GitOpsStore.getInstance().getApplication(target.application_id);
+      const stackName = app?.stack_name;
+      if (stackName) {
+        const known = new Set(
+          SopsIdentityStore.getInstance().listPublic(target.application_id, stackName).map((i) => i.recipient),
+        );
+        const missing = cap.requiredRecipients.filter((recipient) => !known.has(recipient));
+        if (missing.length > 0) {
+          limitations.push({
+            code: 'lkg_missing_sops_key',
+            message: 'LKG generation requires age identities that are not available on this node',
+            evidence: missing.join(','),
+          });
+          return { status: 'unavailable' };
+        }
+      }
+    }
   }
   if (target.lkg_artifact_set_id) {
     const artifact = GitOpsStore.getInstance().getArtifactSet(target.lkg_artifact_set_id);

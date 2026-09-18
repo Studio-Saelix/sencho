@@ -356,6 +356,11 @@ export async function startServer(server: Server): Promise<void> {
   sweepStaleGitTempDirs().catch((err) => {
     console.warn('[GitSource] Temp dir sweep failed:', (err as Error).message);
   });
+  import('../services/gitops/sops/overlay').then(({ GitOpsDecryptOverlay }) =>
+    GitOpsDecryptOverlay.getInstance().sweepStale().catch((err) => {
+      console.warn('[GitOpsSops] Overlay sweep failed:', err instanceof Error ? err.message : String(err));
+    }),
+  );
   sweepStaleTrivyTempDirs().catch((err) => {
     console.warn('[Trivy] Temp dir sweep failed:', (err as Error).message);
   });

@@ -11,6 +11,7 @@ import { useNodes } from '@/context/NodeContext';
 import { toast } from '@/components/ui/toast-store';
 import { GitSourceDiffDialog, type PullResult, type PublicPendingPlan } from './GitSourceDiffDialog';
 import { GitSourceFields, type ApplyMode } from './GitSourceFields';
+import { GitSourceSecretsSection } from './GitSourceSecretsSection';
 import { GitManifestSummary, type ManifestSummary } from './GitManifestSummary';
 import type { GitBrowseResult } from './GitComposeFilePicker';
 import { AdoptBlueprintDialog } from '@/components/blueprints/AdoptBlueprintDialog';
@@ -244,6 +245,70 @@ export function GitSourcePanel({
     }
   }, [open, load]);
 
+  const buildSaveBody = useCallback(() => {
+    const autoApply = applyMode !== 'review';
+    const autoDeploy = applyMode === 'auto-deploy';
+    const body: Record<string, unknown> = {
+      repo_url: repoUrl.trim(),
+      branch: branch.trim(),
+      compose_paths: composePaths,
+      context_dir: contextDir.trim() || null,
+      sync_env: syncEnv,
+      auth_type: authType,
+      auto_apply_on_webhook: autoApply,
+      auto_deploy_on_apply: autoDeploy,
+      source_policy: applyMode === 'review' ? 'review' : 'automatic',
+    };
+    if (authType === 'token' && token !== '') {
+      body.token = token;
+    }
+    if (authType === 'deploy_key') {
+      if (deployKey !== '') body.deploy_key = deployKey;
+      if (sshKnownHostsEntry !== '') body.ssh_known_hosts_entry = sshKnownHostsEntry;
+      if (sshHostKeyFingerprint !== '') body.ssh_host_key_fingerprint = sshHostKeyFingerprint;
+    }
+    if (caBundle !== '') body.ca_bundle = caBundle;
+    if (removeCaBundle) body.remove_ca_bundle = true;
+    return body;
+  }, [
+    applyMode,
+    authType,
+    branch,
+    caBundle,
+    composePaths,
+    contextDir,
+    deployKey,
+    removeCaBundle,
+    repoUrl,
+    sshHostKeyFingerprint,
+    sshKnownHostsEntry,
+    syncEnv,
+    token,
+  ]);
+
+  const persistGitSource = useCallback(async (body: Record<string, unknown>, successMessage: string) => {
+    const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast.error(err?.error || 'Failed to save Git source.');
+      return false;
+    }
+    setToken('');
+    setDeployKey('');
+    setCaBundle('');
+    setRemoveCaBundle(false);
+    setSshKnownHostsEntry('');
+    setSshHostKeyFingerprint('');
+    setApplyModeOverride(null);
+    toast.success(successMessage);
+    onSourceChanged?.();
+    await load();
+    return true;
+  }, [load, onSourceChanged, stackName]);
+
   const save = async () => {
     if (!repoUrl.trim() || !branch.trim() || composePaths.length === 0) {
       toast.error('Repository URL, ref, and at least one compose file are required.');
@@ -257,54 +322,7 @@ export function GitSourcePanel({
     setSaving(true);
     const loadingId = toast.loading('Verifying repository access...');
     try {
-      const autoApply = applyMode !== 'review';
-      const autoDeploy = applyMode === 'auto-deploy';
-      const body: Record<string, unknown> = {
-        repo_url: repoUrl.trim(),
-        branch: branch.trim(),
-        compose_paths: composePaths,
-        context_dir: contextDir.trim() || null,
-        sync_env: syncEnv,
-        auth_type: authType,
-        auto_apply_on_webhook: autoApply,
-        auto_deploy_on_apply: autoDeploy,
-        source_policy: applyMode === 'review' ? 'review' : 'automatic',
-      };
-      if (authType === 'token' && token !== '') {
-        body.token = token;
-      }
-      if (authType === 'deploy_key') {
-        if (deployKey !== '') body.deploy_key = deployKey;
-        if (sshKnownHostsEntry !== '') body.ssh_known_hosts_entry = sshKnownHostsEntry;
-        if (sshHostKeyFingerprint !== '') body.ssh_host_key_fingerprint = sshHostKeyFingerprint;
-      }
-      if (caBundle !== '') body.ca_bundle = caBundle;
-      if (removeCaBundle) body.remove_ca_bundle = true;
-      const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`, {
-        method: 'PUT',
-        body: JSON.stringify(body),
-      });
-      if (res.ok) {
-        setToken('');
-        setDeployKey('');
-        setCaBundle('');
-        setRemoveCaBundle(false);
-        setSshKnownHostsEntry('');
-        setSshHostKeyFingerprint('');
-        setApplyModeOverride(null);
-        toast.success('Git source saved.');
-        onSourceChanged?.();
-        // Re-read rather than trust the save response, which carries the source
-        // row without a revision. A material configuration change clears the
-        // staged candidate server side, so the state held here has genuinely
-        // moved; dropping it left the panel blank until the next open, which
-        // reads as "this stack has no GitOps state" rather than as a state that
-        // was just invalidated.
-        await load();
-      } else {
-        const err = await res.json().catch(() => ({}));
-        toast.error(err?.error || 'Failed to save Git source.');
-      }
+      await persistGitSource(buildSaveBody(), 'Git source saved.');
     } catch (e) {
       toast.error((e as Error)?.message || 'Network error.');
     } finally {
@@ -800,6 +818,17 @@ export function GitSourcePanel({
             {source && (
               <SheetSection title="Provider hooks">
                 <GitProviderHooksCard stackName={stackName} canEdit={canEdit} />
+              </SheetSection>
+            )}
+
+            {source && (
+              <SheetSection title="Repository secrets">
+                <GitSourceSecretsSection
+                  stackName={stackName}
+                  canEdit={canMutateSource}
+                  linked
+                  disabled={saving || loading}
+                />
               </SheetSection>
             )}
 

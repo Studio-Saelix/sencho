@@ -75,6 +75,9 @@ vi.mock('@/components/ui/toast-store', () => ({
     dismiss: vi.fn(),
   },
 }));
+vi.mock('./GitSourceSecretsSection', () => ({
+  GitSourceSecretsSection: () => null,
+}));
 
 import { apiFetch } from '@/lib/api';
 import { GitSourcePanel } from './GitSourcePanel';

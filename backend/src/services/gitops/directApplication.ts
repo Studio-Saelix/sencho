@@ -204,6 +204,7 @@ export function buildGenerationRow(args: {
   composeInputs?: unknown;
   sourcePolicyEvidence?: unknown;
   securityPolicyEvidence?: unknown;
+  secretCapabilityJson?: string | null;
 }): GitOpsGenerationRow {
   return {
     id: args.id,
@@ -238,6 +239,7 @@ export function buildGenerationRow(args: {
       : encodeGitOpsJson(args.securityPolicyEvidence),
     support_requirements_json: null,
     compatibility_requirements_json: null,
+    secret_capability_json: args.secretCapabilityJson ?? null,
     created_at: args.at,
   };
 }

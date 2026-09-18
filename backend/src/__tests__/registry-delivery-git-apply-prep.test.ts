@@ -42,6 +42,7 @@ describe('restoreApplyFromPreparedGitCandidate', () => {
       contextCopyPlans: [],
       candidateRelPath,
       validation: { ok: true },
+      secretCapability: { policy: "allow_plaintext", inputs: [], ready: true, requiredRecipients: [] },
     };
 
     await writeGitCandidatePreparedMeta(stagingDir, {
@@ -103,6 +104,7 @@ describe('restoreApplyFromPreparedGitCandidate', () => {
       contextCopyPlans: [],
       candidateRelPath,
       validation: { ok: true },
+      secretCapability: { policy: "allow_plaintext", inputs: [], ready: true, requiredRecipients: [] },
     };
 
     await writeGitCandidatePreparedMeta(stagingDir, {

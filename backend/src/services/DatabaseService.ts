@@ -484,6 +484,7 @@ export interface StackGitSource {
     pending_plan_summary: string | null;
     last_plan_fingerprint: string | null;
     last_plan_outcome: string | null;
+    encrypted_source_policy?: 'allow_plaintext' | 'require_encrypted' | null;
     created_at: number;
     updated_at: number;
 }
@@ -2004,6 +2005,8 @@ export class DatabaseService {
         maybeAddCol('gitops_generations', 'security_policy_evidence_json', 'TEXT NULL');
         maybeAddCol('gitops_generations', 'support_requirements_json', 'TEXT NULL');
         maybeAddCol('gitops_generations', 'compatibility_requirements_json', 'TEXT NULL');
+        maybeAddCol('gitops_generations', 'secret_capability_json', 'TEXT NULL');
+        maybeAddCol('stack_git_sources', 'encrypted_source_policy', 'TEXT NULL');
         // Controller-owned bookkeeping (source policy, poll cadence, attempt
         // sequence). New installs get these from the CREATE TABLE; older DBs
         // need the additive columns here. Existing installations must not
@@ -7166,6 +7169,11 @@ stmt.run('gitops_schema_version', '1');
             pending_plan_summary: (row.pending_plan_summary as string | null) ?? null,
             last_plan_fingerprint: (row.last_plan_fingerprint as string | null) ?? null,
             last_plan_outcome: (row.last_plan_outcome as string | null) ?? null,
+            encrypted_source_policy: row.encrypted_source_policy === 'require_encrypted'
+                ? 'require_encrypted'
+                : row.encrypted_source_policy === 'allow_plaintext'
+                    ? 'allow_plaintext'
+                    : null,
             created_at: row.created_at as number,
             updated_at: row.updated_at as number,
         };
@@ -7181,7 +7189,7 @@ stmt.run('gitops_schema_version', '1');
         return rows.map(r => this.parseGitSource(r)!);
     }
 
-    public upsertGitSource(source: Omit<StackGitSource, 'id' | 'created_at' | 'updated_at' | 'applied_deploy_spec' | 'manifest_version' | 'manifest_state' | 'manifest_generation' | 'pending_plan_fingerprint' | 'pending_plan_blocked' | 'pending_plan_summary' | 'last_plan_fingerprint' | 'last_plan_outcome'>): number {
+    public upsertGitSource(source: Omit<StackGitSource, 'id' | 'created_at' | 'updated_at' | 'applied_deploy_spec' | 'manifest_version' | 'manifest_state' | 'manifest_generation' | 'pending_plan_fingerprint' | 'pending_plan_blocked' | 'pending_plan_summary' | 'last_plan_fingerprint' | 'last_plan_outcome' | 'encrypted_source_policy'>): number {
         const now = Date.now();
         const existing = this.getGitSource(source.stack_name);
         const composePathsJson = JSON.stringify(source.compose_paths ?? [source.compose_path]);

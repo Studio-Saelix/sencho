@@ -143,6 +143,7 @@ describe('converted GitOps source continuity', () => {
     const pullLocked = vi.spyOn(Object.getPrototypeOf(svc), 'pullLocked').mockResolvedValue({
       commitSha: 'a'.repeat(40),
       validation: { ok: true },
+      secretCapability: { policy: "allow_plaintext", inputs: [], ready: true, requiredRecipients: [] },
       refusals: [],
       manifestSummary: null,
       candidateReady: false,

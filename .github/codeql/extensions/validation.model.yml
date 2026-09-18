@@ -1,0 +1,7 @@
+extensions:
+  - addsTo:
+      pack: codeql/javascript-all
+      extensible: barrierModel
+    data:
+      - ["backend/src/utils/validation", "Member[isValidStackName].ReturnValue", "path-injection"]
+      - ["backend/src/utils/validation", "Member[isPathWithinBase].ReturnValue", "path-injection"]

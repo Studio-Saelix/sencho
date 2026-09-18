@@ -362,6 +362,7 @@ function generation(id: string, applicationId: string): GitOpsGenerationRow {
     security_policy_evidence_json: null,
     support_requirements_json: null,
     compatibility_requirements_json: null,
+    secret_capability_json: null,
     created_at: 1,
   };
 }
