@@ -167,7 +167,7 @@ export function GitSourcePanel({
 
   const sourceFacet = liveSourceFacet(revision);
   const artifactFacet = liveArtifactFacet(revision);
-  const artifactIdentity = artifactFacet?.latestEvidence?.identity ?? null;
+  const artifactIdentity = artifactFacet?.expected?.identity ?? null;
   const faults = revision ? absentFault(revision) : [];
   const pending = derivePendingCommit(sourceFacet, faults.length, source?.pending_commit_sha ?? null);
 

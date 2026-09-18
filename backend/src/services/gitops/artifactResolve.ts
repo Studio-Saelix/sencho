@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { classifyReferenceKind } from '../composeProjectContext';
-import { buildEffectiveServiceModel } from '../effectiveServiceModel';
+import { buildEffectiveServiceModel, type EffectiveServiceSpec } from '../effectiveServiceModel';
 import DockerController from '../DockerController';
 import type { ContainerInfo } from 'dockerode';
 import { RegistryService } from '../RegistryService';
@@ -32,6 +32,11 @@ function isComposeOneOff(labels: Record<string, string> | undefined): boolean {
 const DIGEST_PIN_RE = /@(sha256:[a-f0-9]{64})$/i;
 
 type ServiceQualification = 'unresolved' | 'unavailable' | 'local_build_unverified' | 'qualified' | 'exact';
+
+type ServiceResolveResult = {
+  evidence: ServiceArtifactEvidence;
+  qualification: ServiceQualification;
+};
 
 const SERVICE_QUAL_RANK: Record<ServiceQualification, number> = {
   unresolved: 0,
@@ -83,9 +88,7 @@ function mapRegistryFailure(reason: string): ArtifactServiceFailureClass {
 async function readNodePlatform(nodeId: number): Promise<{ os: string; architecture: string } | null> {
   try {
     const info = await DockerController.getInstance(nodeId).getDocker().info();
-    const os = typeof info.OperatingSystem === 'string' && info.OSType
-      ? info.OSType
-      : (typeof info.OSType === 'string' ? info.OSType : '');
+    const os = typeof info.OSType === 'string' ? info.OSType : '';
     const architecture = typeof info.Architecture === 'string' ? info.Architecture : '';
     if (!os || !architecture) return null;
     return { os, architecture };
@@ -99,7 +102,7 @@ async function resolveRegistryService(
   authoredRef: string,
   platform: { os: string; architecture: string } | null,
   resolvedAt: number,
-): Promise<{ evidence: ServiceArtifactEvidence; qualification: ServiceQualification }> {
+): Promise<ServiceResolveResult> {
   const referenceKind = classifyReferenceKind(authoredRef);
   if (referenceKind === 'digest_pinned') {
     const match = authoredRef.match(DIGEST_PIN_RE);
@@ -216,6 +219,71 @@ async function resolveRegistryService(
   };
 }
 
+async function resolveOneService(
+  spec: EffectiveServiceSpec,
+  platform: { os: string; architecture: string } | null,
+  buildContexts: readonly BuildContextPlan[],
+  resolvedAt: number,
+): Promise<ServiceResolveResult> {
+  if (spec.hasBuild) {
+    return {
+      qualification: 'local_build_unverified',
+      evidence: {
+        serviceName: spec.name,
+        authoredRef: spec.declaredImage,
+        source: 'build',
+        platform: platform ? `${platform.os}/${platform.architecture}` : null,
+        indexDigest: null,
+        platformDigest: null,
+        buildContextFingerprint: buildContextFingerprint(spec.name, buildContexts),
+        producedImageId: null,
+        failureClass: null,
+        resolvedAt,
+      },
+    };
+  }
+  if (!spec.declaredImage) {
+    return {
+      qualification: 'unresolved',
+      evidence: {
+        serviceName: spec.name,
+        authoredRef: null,
+        source: 'unsupported',
+        platform: null,
+        indexDigest: null,
+        platformDigest: null,
+        buildContextFingerprint: null,
+        producedImageId: null,
+        failureClass: 'unresolved',
+        resolvedAt,
+      },
+    };
+  }
+  try {
+    return await resolveRegistryService(spec.name, spec.declaredImage, platform, resolvedAt);
+  } catch (error) {
+    console.error(
+      `[GitOpsArtifactResolve] Registry resolve failed for ${spec.name}:`,
+      error instanceof Error ? error.message : String(error),
+    );
+    return {
+      qualification: 'unavailable',
+      evidence: {
+        serviceName: spec.name,
+        authoredRef: spec.declaredImage,
+        source: 'registry',
+        platform: platform ? `${platform.os}/${platform.architecture}` : null,
+        indexDigest: null,
+        platformDigest: null,
+        buildContextFingerprint: null,
+        producedImageId: null,
+        failureClass: 'registry_unavailable',
+        resolvedAt,
+      },
+    };
+  }
+}
+
 async function resolveServices(
   stackName: string,
   nodeId: number,
@@ -232,46 +300,11 @@ async function resolveServices(
   }
 
   const platform = await readNodePlatform(nodeId);
-  const serviceQuals: ServiceQualification[] = [];
-  const services: ServiceArtifactEvidence[] = [];
-
-  for (const spec of model.services) {
-    if (spec.hasBuild) {
-      serviceQuals.push('local_build_unverified');
-      services.push({
-        serviceName: spec.name,
-        authoredRef: spec.declaredImage,
-        source: 'build',
-        platform: platform ? `${platform.os}/${platform.architecture}` : null,
-        indexDigest: null,
-        platformDigest: null,
-        buildContextFingerprint: buildContextFingerprint(spec.name, buildContexts),
-        producedImageId: null,
-        failureClass: null,
-        resolvedAt,
-      });
-      continue;
-    }
-    if (!spec.declaredImage) {
-      serviceQuals.push('unresolved');
-      services.push({
-        serviceName: spec.name,
-        authoredRef: null,
-        source: 'unsupported',
-        platform: null,
-        indexDigest: null,
-        platformDigest: null,
-        buildContextFingerprint: null,
-        producedImageId: null,
-        failureClass: 'unresolved',
-        resolvedAt,
-      });
-      continue;
-    }
-    const resolved = await resolveRegistryService(spec.name, spec.declaredImage, platform, resolvedAt);
-    serviceQuals.push(resolved.qualification);
-    services.push(resolved.evidence);
-  }
+  const resolved = await Promise.all(
+    model.services.map((spec) => resolveOneService(spec, platform, buildContexts, resolvedAt)),
+  );
+  const serviceQuals = resolved.map((entry) => entry.qualification);
+  const services = resolved.map((entry) => entry.evidence);
 
   const qualification = weakestQualification(serviceQuals);
   const evidence = buildArtifactEvidence(qualification, services);
@@ -416,13 +449,35 @@ export async function probeStaleArtifactEvidence(args: {
   }
 }
 
+function unresolvedRuntimeEvidence(
+  serviceName: string,
+  declaredImage: string | null,
+  observedAt: number,
+): ServiceResolveResult {
+  return {
+    qualification: 'unresolved',
+    evidence: {
+      serviceName,
+      authoredRef: declaredImage,
+      source: declaredImage ? 'registry' : 'unsupported',
+      platform: null,
+      indexDigest: null,
+      platformDigest: null,
+      buildContextFingerprint: null,
+      producedImageId: null,
+      failureClass: 'unresolved',
+      resolvedAt: observedAt,
+    },
+  };
+}
+
 async function observeServiceRuntime(
   docker: ReturnType<DockerController['getDocker']>,
   stackName: string,
   serviceName: string,
   declaredImage: string | null,
   observedAt: number,
-): Promise<{ evidence: ServiceArtifactEvidence; qualification: ServiceQualification }> {
+): Promise<ServiceResolveResult> {
   const listed = await docker.listContainers({
     all: true,
     filters: {
@@ -436,44 +491,13 @@ async function observeServiceRuntime(
     const labels = (entry.Labels ?? {}) as Record<string, string>;
     return !isComposeOneOff(labels) && entry.State === 'running';
   });
-  if (!running) {
-    return {
-      qualification: 'unresolved',
-      evidence: {
-        serviceName,
-        authoredRef: declaredImage,
-        source: declaredImage ? 'registry' : 'unsupported',
-        platform: null,
-        indexDigest: null,
-        platformDigest: null,
-        buildContextFingerprint: null,
-        producedImageId: null,
-        failureClass: 'unresolved',
-        resolvedAt: observedAt,
-      },
-    };
-  }
+  if (!running) return unresolvedRuntimeEvidence(serviceName, declaredImage, observedAt);
 
   try {
     const inspect = await docker.getContainer(running.Id).inspect();
     const imageId = typeof inspect.Image === 'string' ? inspect.Image : null;
-    if (!imageId) {
-      return {
-        qualification: 'unresolved',
-        evidence: {
-          serviceName,
-          authoredRef: declaredImage,
-          source: 'registry',
-          platform: null,
-          indexDigest: null,
-          platformDigest: null,
-          buildContextFingerprint: null,
-          producedImageId: null,
-          failureClass: 'unresolved',
-          resolvedAt: observedAt,
-        },
-      };
-    }
+    if (!imageId) return unresolvedRuntimeEvidence(serviceName, declaredImage, observedAt);
+
     const image = await docker.getImage(imageId).inspect();
     const platform = image.Os && image.Architecture ? `${image.Os}/${image.Architecture}` : null;
     const parsed = declaredImage ? parseImageRef(declaredImage) : null;
@@ -501,22 +525,20 @@ async function observeServiceRuntime(
       },
     };
   } catch {
-    return {
-      qualification: 'unresolved',
-      evidence: {
-        serviceName,
-        authoredRef: declaredImage,
-        source: 'registry',
-        platform: null,
-        indexDigest: null,
-        platformDigest: null,
-        buildContextFingerprint: null,
-        producedImageId: null,
-        failureClass: 'unresolved',
-        resolvedAt: observedAt,
-      },
-    };
+    return unresolvedRuntimeEvidence(serviceName, declaredImage, observedAt);
   }
+}
+
+function recordRuntimeObservation(
+  args: { applicationId: string; nodeId: number; envelope: EventEnvelope },
+  observed: ObservedArtifactIdentity,
+): void {
+  GitOpsTransitions.getInstance().recordObservedRuntimeArtifact({
+    applicationId: args.applicationId,
+    nodeId: args.nodeId,
+    observed,
+    envelope: args.envelope,
+  });
 }
 
 export async function recordObservedRuntimeArtifactForDeploy(args: {
@@ -525,67 +547,56 @@ export async function recordObservedRuntimeArtifactForDeploy(args: {
   applicationId: string;
   envelope: EventEnvelope;
 }): Promise<void> {
-  const model = await buildEffectiveServiceModel(args.nodeId, args.stackName);
-  if (!model.renderable) {
-    GitOpsTransitions.getInstance().recordObservedRuntimeArtifact({
-      applicationId: args.applicationId,
-      nodeId: args.nodeId,
-      observed: { kind: 'unavailable' },
-      envelope: args.envelope,
-    });
-    return;
-  }
+  try {
+    const model = await buildEffectiveServiceModel(args.nodeId, args.stackName);
+    if (!model.renderable) {
+      recordRuntimeObservation(args, { kind: 'unavailable' });
+      return;
+    }
 
-  const docker = DockerController.getInstance(args.nodeId).getDocker();
-  const observedAt = args.envelope.at;
-  const serviceQuals: ServiceQualification[] = [];
-  const services: ServiceArtifactEvidence[] = [];
-
-  for (const spec of model.services) {
-    const observed = await observeServiceRuntime(
-      docker,
-      args.stackName,
-      spec.name,
-      spec.declaredImage,
-      observedAt,
+    const docker = DockerController.getInstance(args.nodeId).getDocker();
+    const observedAt = args.envelope.at;
+    const observed = await Promise.all(
+      model.services.map((spec) =>
+        observeServiceRuntime(docker, args.stackName, spec.name, spec.declaredImage, observedAt),
+      ),
     );
-    serviceQuals.push(observed.qualification);
-    services.push(observed.evidence);
-  }
+    const serviceQuals = observed.map((entry) => entry.qualification);
+    const services = observed.map((entry) => entry.evidence);
 
-  if (services.every((service) => service.failureClass === 'unresolved' && !service.platformDigest)) {
-    GitOpsTransitions.getInstance().recordObservedRuntimeArtifact({
-      applicationId: args.applicationId,
-      nodeId: args.nodeId,
-      observed: { kind: 'missing' },
-      envelope: args.envelope,
+    if (services.every((service) => service.failureClass === 'unresolved' && !service.platformDigest)) {
+      recordRuntimeObservation(args, { kind: 'missing' });
+      return;
+    }
+
+    const qualification = weakestQualification(serviceQuals);
+    if (
+      qualification !== 'exact' &&
+      qualification !== 'qualified' &&
+      qualification !== 'local_build_unverified'
+    ) {
+      recordRuntimeObservation(args, { kind: 'unavailable' });
+      return;
+    }
+
+    recordRuntimeObservation(args, {
+      kind: qualification,
+      identity: computeArtifactSetFingerprint(services),
+      observedAt,
+      services,
     });
-    return;
+  } catch (error) {
+    console.error(
+      `[GitOpsArtifactResolve] Runtime observation failed for ${args.applicationId}:`,
+      error instanceof Error ? error.message : String(error),
+    );
+    try {
+      recordRuntimeObservation(args, { kind: 'unavailable' });
+    } catch (recordError) {
+      console.error(
+        `[GitOpsArtifactResolve] Failed to record unavailable observation for ${args.applicationId}:`,
+        recordError instanceof Error ? recordError.message : String(recordError),
+      );
+    }
   }
-
-  const qualification = weakestQualification(serviceQuals);
-  const identity = computeArtifactSetFingerprint(services);
-  let observed: ObservedArtifactIdentity;
-  if (qualification === 'local_build_unverified') {
-    observed = { kind: 'local_build_unverified', identity, observedAt, services };
-  } else if (qualification === 'qualified') {
-    observed = { kind: 'qualified', identity, observedAt, services };
-  } else if (qualification === 'exact') {
-    observed = { kind: 'exact', identity, observedAt, services };
-  } else {
-    GitOpsTransitions.getInstance().recordObservedRuntimeArtifact({
-      applicationId: args.applicationId,
-      nodeId: args.nodeId,
-      observed: { kind: 'unavailable' },
-      envelope: args.envelope,
-    });
-    return;
-  }
-
-  GitOpsTransitions.getInstance().recordObservedRuntimeArtifact({
-    applicationId: args.applicationId,
-    nodeId: args.nodeId,
-    observed,
-    envelope: args.envelope,
-  });
 }

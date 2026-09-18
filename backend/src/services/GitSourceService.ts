@@ -5647,14 +5647,17 @@ export class GitSourceService {
                 triggerPostDeployScan(stackName, nodeId).catch((err) =>
                     console.error(`[Security] Post-deploy scan failed for ${sanitizeForLog(stackName)}:`, err),
                 );
+                // Fire-and-forget so observation cannot delay or fail a successful apply.
                 const artifactApp = gitopsApp ?? GitOpsStore.getInstance().getLiveDirectApplication(stackName);
                 if (artifactApp) {
-                    await recordObservedRuntimeArtifactForDeploy({
+                    recordObservedRuntimeArtifactForDeploy({
                         stackName,
                         nodeId,
                         applicationId: artifactApp.id,
                         envelope: gitopsEnv,
-                    });
+                    }).catch((err) =>
+                        console.error(`[GitSource] Runtime artifact observation failed for ${sanitizeForLog(stackName)}:`, err),
+                    );
                 }
                 return { applied: true, deployed: true, recoveryId, gitopsOperationId: autoDeploy.gitopsOperationId };
             } catch (e) {

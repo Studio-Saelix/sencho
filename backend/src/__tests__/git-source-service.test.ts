@@ -73,9 +73,10 @@ const {
   mockRecoveryLinkGateOrRetain: vi.fn(),
 }));
 
-const { mockInvalidateNodeCaches, mockTriggerPostDeployScan } = vi.hoisted(() => ({
+const { mockInvalidateNodeCaches, mockTriggerPostDeployScan, mockRecordObservedRuntimeArtifactForDeploy } = vi.hoisted(() => ({
   mockInvalidateNodeCaches: vi.fn(),
   mockTriggerPostDeployScan: vi.fn(async () => undefined),
+  mockRecordObservedRuntimeArtifactForDeploy: vi.fn(async () => undefined),
 }));
 
 vi.mock('../services/StackUpdateRecoveryService', () => ({
@@ -106,6 +107,16 @@ vi.mock('../helpers/policyGate', async () => {
     '../helpers/policyGate',
   );
   return { ...actual, triggerPostDeployScan: mockTriggerPostDeployScan };
+});
+
+vi.mock('../services/gitops/artifactResolve', async () => {
+  const actual = await vi.importActual<typeof import('../services/gitops/artifactResolve')>(
+    '../services/gitops/artifactResolve',
+  );
+  return {
+    ...actual,
+    recordObservedRuntimeArtifactForDeploy: mockRecordObservedRuntimeArtifactForDeploy,
+  };
 });
 
 
@@ -148,6 +159,8 @@ beforeEach(() => {
     mockRecoveryGet.mockReset();
     mockRecoveryLinkGateOrRetain.mockReset();
     mockRecoveryGet.mockReturnValue({ id: 'rec-test-1', is_current: 1 });
+    mockRecordObservedRuntimeArtifactForDeploy.mockReset();
+    mockRecordObservedRuntimeArtifactForDeploy.mockImplementation(async () => undefined);
 
     StackOpLockService.resetForTests();
 
@@ -9058,6 +9071,32 @@ describe('GitSourceService.apply', () => {
             });
             expect(beginSpy).toHaveBeenCalledWith(nodeId, 'apply-deploy-gate', 'deploy', 'system:git-source', { deployedGenerationId: null });
             expect(mockRecoveryLinkGateOrRetain).toHaveBeenCalledWith('rec-test-1', 'gate-git');
+        } finally {
+            validateSpy.mockRestore();
+            saveSpy.mockRestore();
+            deploySpy.mockRestore();
+            beginSpy.mockRestore();
+        }
+    });
+
+    it('does not treat a runtime-observation failure as a deploy failure', async () => {
+        const sha = 'eeee666eeee666eeee666eeee666eeee666eeee6';
+        const svc = await seedPending('apply-observe-fail', 'services:\n  x:\n    image: alpine\n', sha);
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const { ComposeService } = await import('../services/ComposeService');
+        const { HealthGateService } = await import('../services/HealthGateService');
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+        const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-observe');
+        mockRecordObservedRuntimeArtifactForDeploy.mockRejectedValue(new Error('docker list failed'));
+
+        try {
+            const result = await svc.apply('apply-observe-fail', sha, { deploy: true, ...skipFingerprint });
+            expect(result.applied).toBe(true);
+            expect(result.deployed).toBe(true);
+            expect(result.deployError).toBeUndefined();
+            expect(mockRecordObservedRuntimeArtifactForDeploy).toHaveBeenCalled();
         } finally {
             validateSpy.mockRestore();
             saveSpy.mockRestore();
