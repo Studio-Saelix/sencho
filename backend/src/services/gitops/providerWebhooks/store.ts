@@ -54,10 +54,6 @@ export class GitProviderWebhookStore {
     DatabaseService.getInstance().deleteGitProviderEndpoint(id);
   }
 
-  public getDelivery(endpointId: string, deliveryId: string): GitProviderDeliveryRow | undefined {
-    return DatabaseService.getInstance().getGitProviderDelivery(endpointId, deliveryId) as GitProviderDeliveryRow | undefined;
-  }
-
   public upsertDelivery(args: {
     endpointId: string;
     deliveryId: string;
@@ -73,6 +69,10 @@ export class GitProviderWebhookStore {
 
   public listDeliveries(endpointId: string, limit = 20): GitProviderDeliveryRow[] {
     return DatabaseService.getInstance().listGitProviderDeliveries(endpointId, limit) as GitProviderDeliveryRow[];
+  }
+
+  public getDelivery(endpointId: string, deliveryId: string): GitProviderDeliveryRow | undefined {
+    return DatabaseService.getInstance().getGitProviderDelivery(endpointId, deliveryId) as GitProviderDeliveryRow | undefined;
   }
 
   public pruneDeliveries(endpointId: string): void {

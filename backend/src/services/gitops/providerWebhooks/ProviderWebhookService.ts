@@ -38,9 +38,7 @@ const SETTLED_INGEST_STATES = new Set<GitProviderDeliveryState>([
   'queued',
   'duplicate',
   'ignored_by_policy',
-  'processing_failed',
   'unsupported',
-  'malformed',
 ]);
 
 export class ProviderWebhookService {

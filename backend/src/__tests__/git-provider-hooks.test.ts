@@ -348,14 +348,7 @@ describe('git provider hooks audit F4: pull request event action', () => {
     const handleSpy = vi.spyOn(GitSourceService.getInstance(), 'handleWebhookPull')
       .mockResolvedValue({ status: 'success', message: 'Queued for reconciliation.' });
 
-    const res = await request(app)
-      .post(`/api/gitops/internal/hooks/${id}`)
-      .set('Authorization', `Bearer ${nodeProxyToken()}`)
-      .set('Content-Type', 'application/json')
-      .set('x-github-event', 'pull_request')
-      .set('x-github-delivery', crypto.randomUUID())
-      .set('x-hub-signature-256', githubSign(body, secret))
-      .send(body);
+    const res = await postInternalHook(id, body, secret, { 'x-github-event': 'pull_request' });
 
     expect(res.status).toBe(202);
     expect(res.body.state).toBe('ignored_by_policy');

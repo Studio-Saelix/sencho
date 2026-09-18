@@ -167,6 +167,5 @@ const ACTIONABLE_PR_ACTIONS = new Set([
 
 /** PR sub-actions that can change the configured ref. Providers that omit an action still queue. */
 export function isActionablePullRequestAction(action: string | null): boolean {
-  if (!action) return true;
-  return ACTIONABLE_PR_ACTIONS.has(action.toLowerCase());
+  return !action || ACTIONABLE_PR_ACTIONS.has(action.toLowerCase());
 }

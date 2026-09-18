@@ -5913,21 +5913,7 @@ stmt.run('gitops_schema_version', '1');
         updated_at: number;
     } {
         const now = Date.now();
-        const existing = this.db.prepare(
-            'SELECT * FROM git_provider_deliveries WHERE endpoint_id = ? AND delivery_id = ?',
-        ).get(args.endpointId, args.deliveryId) as {
-            id: number;
-            endpoint_id: string;
-            delivery_id: string;
-            state: string;
-            event_type: string | null;
-            event_action: string | null;
-            ref: string | null;
-            candidate_sha: string | null;
-            outcome_class: string | null;
-            received_at: number;
-            updated_at: number;
-        } | undefined;
+        const existing = this.getGitProviderDelivery(args.endpointId, args.deliveryId);
         if (existing) {
             this.db.prepare(
                 `UPDATE git_provider_deliveries SET
