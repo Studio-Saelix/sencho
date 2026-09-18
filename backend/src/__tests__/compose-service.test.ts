@@ -181,6 +181,9 @@ vi.mock('../services/DatabaseService', () => ({
       getStackProjectEnvFiles: () => [],
       addNotificationHistory: mockAddNotificationHistory,
       isMeshStackEnabled: (...args: unknown[]) => mockIsMeshStackEnabled(...args),
+      getDb: () => ({
+        prepare: () => ({ get: () => undefined, all: () => [], run: () => undefined }),
+      }),
     }),
   },
 }));
