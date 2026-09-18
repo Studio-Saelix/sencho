@@ -34,6 +34,9 @@ export function isProxyExemptPath(path: string): boolean {
 // that holds the desired-state definitions and the label set its placement
 // selectors resolve against, so a proxied request would read or write a remote
 // node's unrelated copy instead of the fleet's actual intent.
+// Per-user interface preferences follow the same rule: they live in the hub's
+// SQLite database keyed by the hub's user ids, so a proxied request would read
+// or write a remote instance's unrelated per-user rows.
 // Routed to the local hub when nodeId resolves to local, but rejected when
 // nodeId resolves to a remote node so a script/curl call cannot trick the proxy
 // into forwarding the request across a node boundary. This matters for the logs
@@ -68,6 +71,7 @@ export const HUB_ONLY_PREFIXES: readonly string[] = [
   '/api/registry-delivery/',
   '/api/sso/',
   '/api/api-tokens/',
+  '/api/user-preferences/',
 ];
 
 /** Returns true when the path is hub-only and must not be proxied to a remote node. */

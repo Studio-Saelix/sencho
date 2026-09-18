@@ -140,7 +140,7 @@ export function ThemeQuickSwitch({ onOpenAppearance }: ThemeQuickSwitchProps) {
                 {/* Footer */}
                 <div className="border-t border-card-border/60 px-[var(--density-row-x)] py-[var(--density-row-y)]">
                     <p className="font-mono text-[10px] leading-4 uppercase tracking-[0.14em] text-stat-subtitle/70">
-                        Saved to this browser · fine-tune borders &amp; glow in{' '}
+                        Saved to your account · fine-tune borders &amp; glow in{' '}
                         <button
                             type="button"
                             onClick={openAppearance}

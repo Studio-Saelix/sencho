@@ -12,6 +12,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
+    "pretest": "node ../scripts/check-preference-parity.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

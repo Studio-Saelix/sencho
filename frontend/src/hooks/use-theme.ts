@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useSyncExternalStore } from 'react';
 import { Moon, Zap, Sun, Monitor } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import { notifyPreferenceWrite } from '@/lib/preferences/preferenceEvents';
 
 // Shared theme store. Two live consumers (the topbar quick switch and the
 // Settings → Appearance section) must reflect each other instantly, so the
@@ -176,6 +177,10 @@ function isChartStyle(v: unknown): v is ChartStyle {
 function isBool(v: unknown): v is boolean {
     return typeof v === 'boolean';
 }
+// Exported guards: the preference documents layer reuses these to sanitize
+// server documents per-field (the sync layer must accept exactly what the
+// local read accepts).
+export { isMode, isAccent, isUiFont, isMonoFont, isVisualStyle, isHeadingStyle, isChartStyle, isBool };
 // Numeric knobs: a persisted value must be finite and in range, otherwise fall
 // back to the default (a NaN/Infinity/out-of-range value would silently no-op
 // in CSS, which is harder to diagnose than a reset to default).
@@ -312,6 +317,19 @@ function setState(patch: Partial<ThemeState>) {
     emit();
 }
 
+// ── preference sync exports ────────────────────────────────────────────────
+/** Read the current appearance state without subscribing (sync layer use). */
+export function currentThemeState(): ThemeState {
+    return persisted;
+}
+
+/** Apply a (partial) appearance state through the same internal write path a
+ *  user commit uses: DOM, localStorage, and subscribers stay consistent. Used
+ *  by hydration; hydration-side writes do not notify the sync bus. */
+export function applyThemeState(patch: Partial<ThemeState>): void {
+    setState(patch);
+}
+
 function subscribe(listener: () => void): () => void {
     listeners.add(listener);
     return () => {
@@ -365,14 +383,18 @@ export function initializeTheme() {
 
 export function useTheme() {
     const s = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-    const setTheme = useCallback((theme: ThemeMode) => setState({ theme }), []);
-    const setAccent = useCallback((accent: AccentId) => setState({ accent }), []);
-    const setBorderBoost = useCallback((borderBoost: number) => setState({ borderBoost }), []);
-    const setGlow = useCallback((glow: number) => setState({ glow }), []);
-    const setContrast = useCallback((contrast: number) => setState({ contrast }), []);
-    const setUiFont = useCallback((uiFont: UiFont) => setState({ uiFont }), []);
-    const setMonoFont = useCallback((monoFont: MonoFont) => setState({ monoFont }), []);
-    const setTypeScale = useCallback((typeScale: number) => setState({ typeScale }), []);
+    // User-facing setters write through the module store, then notify the sync
+    // bus with the fields they touched; hydration and cross-tab paths use
+    // applyThemeState / the storage listener instead, so they never queue a
+    // server write.
+    const setTheme = useCallback((theme: ThemeMode) => { setState({ theme }); notifyPreferenceWrite('appearance', ['theme']); }, []);
+    const setAccent = useCallback((accent: AccentId) => { setState({ accent }); notifyPreferenceWrite('appearance', ['accent']); }, []);
+    const setBorderBoost = useCallback((borderBoost: number) => { setState({ borderBoost }); notifyPreferenceWrite('appearance', ['borderBoost']); }, []);
+    const setGlow = useCallback((glow: number) => { setState({ glow }); notifyPreferenceWrite('appearance', ['glow']); }, []);
+    const setContrast = useCallback((contrast: number) => { setState({ contrast }); notifyPreferenceWrite('appearance', ['contrast']); }, []);
+    const setUiFont = useCallback((uiFont: UiFont) => { setState({ uiFont }); notifyPreferenceWrite('appearance', ['uiFont']); }, []);
+    const setMonoFont = useCallback((monoFont: MonoFont) => { setState({ monoFont }); notifyPreferenceWrite('appearance', ['monoFont']); }, []);
+    const setTypeScale = useCallback((typeScale: number) => { setState({ typeScale }); notifyPreferenceWrite('appearance', ['typeScale']); }, []);
     // Macro: writes visualStyle + preset sub-axes including reducedMotion.
     // Does NOT touch readability (sticky master the user releases by hand).
     // Re-applying Signature clears Motion; re-applying Calm enables it.
@@ -385,12 +407,13 @@ export function useTheme() {
             reducedEffects: preset.reducedEffects,
             reducedMotion: preset.reducedMotion,
         });
+        notifyPreferenceWrite('appearance', ['visualStyle', 'headingStyle', 'chartStyle', 'reducedEffects', 'reducedMotion']);
     }, []);
-    const setHeadingStyle = useCallback((headingStyle: HeadingStyle) => setState({ headingStyle }), []);
-    const setChartStyle = useCallback((chartStyle: ChartStyle) => setState({ chartStyle }), []);
-    const setReducedEffects = useCallback((reducedEffects: boolean) => setState({ reducedEffects }), []);
-    const setReducedMotion = useCallback((reducedMotion: boolean) => setState({ reducedMotion }), []);
-    const setReadability = useCallback((readability: boolean) => setState({ readability }), []);
+    const setHeadingStyle = useCallback((headingStyle: HeadingStyle) => { setState({ headingStyle }); notifyPreferenceWrite('appearance', ['headingStyle']); }, []);
+    const setChartStyle = useCallback((chartStyle: ChartStyle) => { setState({ chartStyle }); notifyPreferenceWrite('appearance', ['chartStyle']); }, []);
+    const setReducedEffects = useCallback((reducedEffects: boolean) => { setState({ reducedEffects }); notifyPreferenceWrite('appearance', ['reducedEffects']); }, []);
+    const setReducedMotion = useCallback((reducedMotion: boolean) => { setState({ reducedMotion }); notifyPreferenceWrite('appearance', ['reducedMotion']); }, []);
+    const setReadability = useCallback((readability: boolean) => { setState({ readability }); notifyPreferenceWrite('appearance', ['readability']); }, []);
     const resolvedTheme = resolveWith(s.theme, s.systemDark);
     return {
         theme: s.theme,

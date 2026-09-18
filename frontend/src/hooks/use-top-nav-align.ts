@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
+import { notifyPreferenceWrite } from '@/lib/preferences/preferenceEvents';
 
 export const TOP_NAV_ALIGN_KEY = 'sencho.appearance.topNavAlign';
 
@@ -16,6 +17,26 @@ function readStored(): TopNavAlign {
     } catch {
         return 'left';
     }
+}
+
+export function isTopNavAlignExport(v: unknown): v is TopNavAlign {
+    return v === 'left' || v === 'center';
+}
+
+/** Read the current align without subscribing (sync layer use). */
+export function currentTopNavAlign(): TopNavAlign {
+    return readStored();
+}
+
+/** Apply an align value through the same path a user commit uses. Hydration
+ *  writes do not notify the sync bus. */
+export function applyTopNavAlign(next: TopNavAlign): void {
+    try {
+        window.localStorage.setItem(TOP_NAV_ALIGN_KEY, next);
+    } catch {
+        // ignore; localStorage may be unavailable (private mode, quota)
+    }
+    window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
 }
 
 export function useTopNavAlign(): [TopNavAlign, (next: TopNavAlign) => void] {
@@ -39,13 +60,9 @@ export function useTopNavAlign(): [TopNavAlign, (next: TopNavAlign) => void] {
     }, []);
 
     const setAlign = useCallback((next: TopNavAlign) => {
-        try {
-            window.localStorage.setItem(TOP_NAV_ALIGN_KEY, next);
-        } catch {
-            // ignore; localStorage may be unavailable (private mode, quota)
-        }
+        applyTopNavAlign(next);
         setAlignState(next);
-        window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
+        notifyPreferenceWrite('navigation', ['align']);
     }, []);
 
     return [align, setAlign];
