@@ -16,6 +16,17 @@ import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
 import { subscribeToPreferenceWrites } from '@/lib/preferences/preferenceEvents';
 import { PREFERENCE_CACHE_KEYS } from '@/lib/preferences/preferencesDocuments';
 
+/** CodeQL's StorageEvent extern only models the one-arg constructor, so tests
+ *  attach key/newValue on a generic Event instead of passing an init dict. */
+function dispatchStorageEvent(key: string, newValue: string): void {
+    const event = new Event('storage');
+    Object.defineProperties(event, {
+        key: { value: key },
+        newValue: { value: newValue },
+    });
+    window.dispatchEvent(event);
+}
+
 describe('sanitizeSidebarWidth', () => {
     it('keeps valid integers within bounds', () => {
         expect(sanitizeSidebarWidth(280)).toBe(280);
@@ -177,10 +188,7 @@ describe('useSidebarLayout', () => {
     it('re-reads localStorage on cross-tab storage events for its keys', () => {
         const { result } = renderHook(() => useSidebarLayout());
         act(() => {
-            window.dispatchEvent(new StorageEvent('storage', {
-                key: SIDEBAR_WIDTH_KEY,
-                newValue: '360',
-            }));
+            dispatchStorageEvent(SIDEBAR_WIDTH_KEY, '360');
         });
         expect(result.current.sidebarWidth).toBe(360);
     });
@@ -188,10 +196,7 @@ describe('useSidebarLayout', () => {
     it('ignores storage events for unrelated keys', () => {
         const { result } = renderHook(() => useSidebarLayout());
         act(() => {
-            window.dispatchEvent(new StorageEvent('storage', {
-                key: 'some-other-key',
-                newValue: '360',
-            }));
+            dispatchStorageEvent('some-other-key', '360');
         });
         expect(result.current.sidebarWidth).toBe(SIDEBAR_WIDTH.default);
     });
