@@ -10,7 +10,7 @@
  * The public projection contains only shipped/planned community|admiral entries
  * with public presentation fields. Internal entries are excluded.
  */
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
