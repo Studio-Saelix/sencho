@@ -4,6 +4,8 @@ import { WebhookService } from '../services/WebhookService';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permissions';
 import { webhookTriggerLimiter } from '../middleware/rateLimiters';
+import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
 
 const VALID_WEBHOOK_ACTIONS: readonly WebhookAction[] = ['deploy', 'restart', 'stop', 'start', 'pull', 'git-pull'];
 const MAX_WEBHOOK_NAME_LENGTH = 100;
@@ -93,7 +95,7 @@ webhooksRouter.post('/', authMiddleware, async (req: Request, res: Response): Pr
     // Return the full secret only on creation.
     res.status(201).json({ id, secret });
   } catch (error) {
-    console.error('[Webhooks] Create error:', error);
+    console.error('[Webhooks] Create error:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to create webhook' });
   }
 });
@@ -136,7 +138,7 @@ webhooksRouter.put('/:id', authMiddleware, async (req: Request, res: Response): 
     DatabaseService.getInstance().updateWebhook(id, { node_id, name, stack_name, action, enabled });
     res.json({ success: true });
   } catch (error) {
-    console.error('[Webhooks] Update error:', error);
+    console.error('[Webhooks] Update error:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to update webhook' });
   }
 });

@@ -477,11 +477,11 @@ export class SchedulerService {
             };
             if (cronInvalid) {
                 updates.enabled = 0;
-                console.warn(`[SchedulerService] Task "${task.name}" (id=${task.id}) auto-disabled: cron expression invalid`);
+                console.warn(`[SchedulerService] Task "${sanitizeForLog(task.name)}" (id=${task.id}) auto-disabled: cron expression invalid`);
             }
             if (error instanceof TaskAuthorizationError && triggeredBy === 'scheduler') {
                 updates.enabled = 0;
-                console.warn(`[SchedulerService] Task "${task.name}" (id=${task.id}) auto-disabled: creator authorization revoked`);
+                console.warn(`[SchedulerService] Task "${sanitizeForLog(task.name)}" (id=${task.id}) auto-disabled: creator authorization revoked`);
             }
             db.updateScheduledTask(task.id, updates);
             db.updateScheduledTaskRun(runId, {
@@ -489,7 +489,10 @@ export class SchedulerService {
                 status: 'failure',
                 error: errMsg,
             });
-            console.error(`[SchedulerService] Task "${task.name}" (id=${task.id}) failed:`, errMsg);
+            console.error(
+                `[SchedulerService] Task "${sanitizeForLog(task.name)}" (id=${task.id}) failed:`,
+                sanitizeForLog(errMsg),
+            );
             this.safeDispatch(
                 'error',
                 'system',

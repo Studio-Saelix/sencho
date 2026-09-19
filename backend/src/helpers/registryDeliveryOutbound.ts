@@ -24,6 +24,7 @@ import {
 import { classifyRegistryDeliveryOp } from './registryOpClassifier';
 import { buildRegistryDiscoverPayload } from './registryDeliveryDiscoverPayload';
 import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
 
 export const REGISTRY_DELIVERY_ABORTED = 'REGISTRY_DELIVERY_ABORTED';
 const REGISTRY_DELIVERY_TRANSPORT_NOT_CONFIDENTIAL = 'REGISTRY_DELIVERY_TRANSPORT_NOT_CONFIDENTIAL';
@@ -418,7 +419,7 @@ export async function augmentJsonBodyForRegistryDelivery(
     const status = Number((error as { status?: number }).status) || 500;
     console.error(
       '[registryDeliveryOutbound] hop-1 failed:',
-      getErrorMessage(error, 'unknown'),
+      sanitizeForLog(getErrorMessage(error, 'unknown')),
     );
     return {
       ok: false,

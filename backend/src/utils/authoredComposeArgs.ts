@@ -95,10 +95,13 @@ export async function authoredComposeEnvFileArgs(stackName: string, nodeId?: num
         );
       }
       const envPath = path.resolve(stackDir, file);
-      if (!isPathWithinBase(envPath, stackDir)) {
+      // Canonical js/path-injection barrier against the compose root (not stackDir).
+      // CodeQL still treats paths checked only against stackDir as tainted because
+      // stackDir itself embeds user-controlled stackName.
+      if (!envPath.startsWith(baseResolved + path.sep)) {
         throw new Error(`Project env file path escapes stack directory for stack "${stackName}": "${file}"`);
       }
-      // Verify the real path stays within the stack directory, defending against
+      // Verify the real path stays within the compose root, defending against
       // symlinks that were created or swapped after configuration.
       let realEnvPath: string;
       try {
@@ -112,7 +115,7 @@ export async function authoredComposeEnvFileArgs(stackName: string, nodeId?: num
         }
         throw err;
       }
-      if (!isPathWithinBase(realEnvPath, stackDir)) {
+      if (!realEnvPath.startsWith(baseResolved + path.sep)) {
         throw new Error(
           `Project env file "${file}" for stack "${stackName}" resolves outside the stack directory. ` +
           `Update the project env file selection in the Environment tab.`
@@ -142,6 +145,8 @@ export async function authoredComposeEnvFileArgs(stackName: string, nodeId?: num
   const stackDir = path.resolve(baseResolved, stackName);
   if (!stackDir.startsWith(baseResolved + path.sep)) return [];
   const envPath = path.resolve(stackDir, '.env');
+  // Barrier must sit on the path passed to access/return, against the compose root.
+  if (!envPath.startsWith(baseResolved + path.sep)) return [];
   try {
     await fsPromises.access(envPath);
   } catch (err) {

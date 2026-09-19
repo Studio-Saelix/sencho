@@ -3012,7 +3012,10 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
           notesRestored = true;
         } catch (e) {
           notesError = getErrorMessage(e, 'Failed to restore documentation notes');
-          console.error(`[Fleet Snapshot] Note restore failed for stack "${sanitizeForLog(stackName)}":`, notesError);
+          console.error(
+            `[Fleet Snapshot] Note restore failed for stack "${sanitizeForLog(stackName)}":`,
+            sanitizeForLog(notesError),
+          );
         }
       }
     }
@@ -3043,7 +3046,7 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       res.status(refusal.status).json({ error: getErrorMessage(error, 'Registry delivery refused'), code: refusal.code });
       return;
     }
-    console.error('[Fleet Snapshot] Restore error:', error);
+    console.error('[Fleet Snapshot] Restore error:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to restore stack from snapshot' });
   }
 });

@@ -5,6 +5,7 @@ import {
   UnsafeOutboundTargetError,
 } from '../utils/outboundTarget';
 import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
 import { canonicalRefHost } from './registryPullReference';
 
 /**
@@ -334,8 +335,8 @@ export async function probeManifestAnonymous(
       } catch (error) {
         // Unsafe realm or a transport failure: we cannot determine publicness.
         console.warn(
-          `[registrySafeProbe] anonymous token exchange failed for ${apiHost}/${input.repo}:`,
-          getErrorMessage(error, 'unknown'),
+          `[registrySafeProbe] anonymous token exchange failed for ${sanitizeForLog(apiHost)}/${sanitizeForLog(input.repo)}:`,
+          sanitizeForLog(getErrorMessage(error, 'unknown')),
         );
         return { classification: 'inconclusive' };
       }
@@ -366,8 +367,8 @@ export async function probeManifestAnonymous(
     }
     // Caller logs REGISTRY_DELIVERY_UNSAFE_REGISTRY_TARGET for unsafe hosts.
     console.warn(
-      `[registrySafeProbe] manifest probe failed for ${apiHost}/${input.repo}:`,
-      getErrorMessage(error, 'unknown'),
+      `[registrySafeProbe] manifest probe failed for ${sanitizeForLog(apiHost)}/${sanitizeForLog(input.repo)}:`,
+      sanitizeForLog(getErrorMessage(error, 'unknown')),
     );
     return { classification: 'inconclusive' };
   }
