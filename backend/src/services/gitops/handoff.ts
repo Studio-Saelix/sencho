@@ -19,6 +19,7 @@ import {
 } from './preflight';
 import {
   evaluateRegistryReadiness,
+  setRegistryReadinessDepsForTests,
   type RegistryReadinessDeps,
 } from './registryReadiness';
 import { stackManagedRoot } from './directApplication';
@@ -28,16 +29,9 @@ import { BlueprintService } from '../BlueprintService';
 import { buildBlueprintMarker } from '../../helpers/blueprintMarker';
 import { sanitizeForLog } from '../../utils/safeLog';
 
+export { setRegistryReadinessDepsForTests };
+
 const PREFLIGHT_EVAL_TIMEOUT_MS = 30_000;
-
-/** Test-only injectable readiness deps. Production always uses defaults. */
-let readinessDepsForTests: Partial<RegistryReadinessDeps> | null = null;
-
-export function setRegistryReadinessDepsForTests(
-  deps: Partial<RegistryReadinessDeps> | null,
-): void {
-  readinessDepsForTests = deps;
-}
 
 /** Serialize one evaluation per application so concurrent dispatch cannot double-probe. */
 const inflightEvaluations = new Map<string, Promise<unknown>>();
@@ -277,9 +271,8 @@ export async function ensureRolloutAuthorization(
     }
 
     const abortSignal = depsPartial?.abortSignal
-      ?? readinessDepsForTests?.abortSignal
       ?? AbortSignal.timeout(PREFLIGHT_EVAL_TIMEOUT_MS);
-    const deps = { ...readinessDepsForTests, ...depsPartial, abortSignal };
+    const deps = { ...depsPartial, abortSignal };
 
     const preflight = await evaluateRegistryReadiness(
       {

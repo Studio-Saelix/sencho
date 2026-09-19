@@ -52,6 +52,29 @@ import { GitOpsStore } from './store';
 const DISCOVER_TIMEOUT_MS = 30_000;
 const REGISTRY_DELIVERY_FIELD_LIMIT_BYTES = 256 * 1024;
 
+/** Test-only injectable readiness deps. Production always uses defaults. */
+let readinessDepsForTests: Partial<RegistryReadinessDeps> | null = null;
+
+type EvaluateRegistryReadinessFn = (
+  input: EvaluateRegistryReadinessInput,
+  depsPartial?: Partial<RegistryReadinessDeps>,
+) => Promise<PreflightEvidenceBody>;
+
+/** Test-only full evaluator override. Cleared after each suite. */
+let evaluateRegistryReadinessForTests: EvaluateRegistryReadinessFn | null = null;
+
+export function setRegistryReadinessDepsForTests(
+  deps: Partial<RegistryReadinessDeps> | null,
+): void {
+  readinessDepsForTests = deps;
+}
+
+export function setEvaluateRegistryReadinessForTests(
+  fn: EvaluateRegistryReadinessFn | null,
+): void {
+  evaluateRegistryReadinessForTests = fn;
+}
+
 export type RegistryReadinessDeps = {
   probeRemoteCapability: (
     nodeId: number,
@@ -480,8 +503,12 @@ export async function evaluateRegistryReadiness(
   input: EvaluateRegistryReadinessInput,
   depsPartial?: Partial<RegistryReadinessDeps>,
 ): Promise<PreflightEvidenceBody> {
-  const defaults = createDefaultRegistryReadinessDeps(depsPartial?.abortSignal);
-  const deps: RegistryReadinessDeps = { ...defaults, ...depsPartial };
+  if (evaluateRegistryReadinessForTests) {
+    return evaluateRegistryReadinessForTests(input, depsPartial);
+  }
+  const mergedPartial = { ...readinessDepsForTests, ...depsPartial };
+  const defaults = createDefaultRegistryReadinessDeps(mergedPartial.abortSignal);
+  const deps: RegistryReadinessDeps = { ...defaults, ...mergedPartial };
 
   const nodeIds = [...new Set(input.requiredNodeIds)].sort((a, b) => a - b);
   if (nodeIds.length === 0) {
