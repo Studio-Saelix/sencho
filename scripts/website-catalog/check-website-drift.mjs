@@ -9,7 +9,7 @@
  *   node scripts/website-catalog/check-website-drift.mjs --website-dir <path>
  *   node scripts/website-catalog/check-website-drift.mjs --website-ref <git-ref>
  */
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';

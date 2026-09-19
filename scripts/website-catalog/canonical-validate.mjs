@@ -5,7 +5,7 @@
  * the required cross-field invariant (tier: internal iff availability: internal).
  * Exits 0 on valid, exits 1 with diagnostic lines on invalid.
  */
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import fs from 'fs';
 import path from 'path';
 
