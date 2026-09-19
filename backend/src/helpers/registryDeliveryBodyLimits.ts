@@ -56,6 +56,7 @@ export function classifyRegistryDeliveryRouteClass(method: string, apiPath: stri
   if (matchesAny(apiPath, [
     /^\/api\/scheduled-tasks\/[^/]+\/execute/,
     /^\/api\/image-updates\/selector/,
+    /^\/api\/auto-update\/execute-checked$/,
   ])) {
     return 'scheduler-selector';
   }

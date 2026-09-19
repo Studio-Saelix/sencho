@@ -12,6 +12,12 @@ import { hashActionSet, hashProjectSource, hashPullRefList } from '../helpers/re
 import { discoverRegistryReferences } from '../services/registryReferenceDiscovery';
 import { normalizePullRefList } from '../helpers/registryPullReference';
 import { normalizeImageHost } from '../services/RegistryService';
+import {
+  buildSealedAuthsAad,
+  getOrCreateSealingKey,
+  resetSealingKeyCacheForTests,
+  sealAuths,
+} from '../helpers/registryEnvelopeSeal';
 
 // Service-scoped discovery spawns `docker compose config` for the effective
 // model; tests never depend on a docker binary. The default mock makes the
@@ -358,5 +364,115 @@ describe('registryDeliverySeam', () => {
       stage: 'service-update',
       service: 'app',
     })).rejects.toThrow(/referenced hosts hash mismatch/i);
+  });
+
+  it('opens sealedAuths and merges delivered credentials at the seam', async () => {
+    resetSealingKeyCacheForTests();
+    const sealing = getOrCreateSealingKey();
+
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const stackName = 'regcred-sealed';
+    const composeDir = NodeRegistry.getInstance().getComposeDir(nodeId);
+    const stackDir = path.join(composeDir, stackName);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stackDir, 'compose.yaml'),
+      'services:\n  app:\n    image: ghcr.io/example/private/app:latest\n',
+    );
+
+    const sourceHash = hashProjectSource(stackDir);
+    const discovery = await discoverRegistryReferences(stackDir);
+    const referencedHosts = discovery.referencedHosts;
+    const delivery = RegistryDeliveryService.getInstance();
+    const attestation = delivery.signAttestation({
+      nodeIdClaim: nodeId,
+      stack: stackName,
+      op: 'stack-deploy',
+      sourceHash,
+      referencedHostsHash: delivery.hashHostList(referencedHosts),
+      referencedPullRefsHash: hashPullRefList(normalizePullRefList(discovery.referencedPullRefs)),
+      coveredHostsHash: delivery.hashHostList([]),
+      actionSetHash: hashActionSet(['stack:deploy']),
+      deliveryContractVersion: 1,
+    });
+    const deliverySourceId = delivery.getDeliverySourceId();
+    const jti = String((jwt.decode(attestation) as jwt.JwtPayload).jti_t);
+    const sealedAuths = sealAuths(
+      sealing.publicKeyRaw,
+      [{ host: 'ghcr.io', username: 'hub-user', password: 'hub-pass' }],
+      buildSealedAuthsAad(deliverySourceId, jti, undefined),
+    );
+
+    acquireLockForAttestation(nodeId, stackName, attestation, 'stack-deploy');
+
+    const result = await resolveRegistryAuthAtSeam({
+      envelope: {
+        attestation,
+        sealedAuths,
+        notAfter: Date.now() + 60_000,
+        deliverySourceId,
+      },
+      nodeId,
+      stack: stackName,
+      stage: 'stack-deploy',
+    });
+
+    const ghcrKey = referencedHosts.map(normalizeImageHost).find(h => h.includes('ghcr')) ?? 'ghcr.io';
+    expect(result.auths[ghcrKey]).toBeDefined();
+  });
+
+  it('fails closed when sealedAuths cannot be decrypted', async () => {
+    resetSealingKeyCacheForTests();
+    const sealing = getOrCreateSealingKey();
+
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const stackName = 'regcred-sealed-bad';
+    const composeDir = NodeRegistry.getInstance().getComposeDir(nodeId);
+    const stackDir = path.join(composeDir, stackName);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stackDir, 'compose.yaml'),
+      'services:\n  app:\n    image: ghcr.io/example/private/app:latest\n',
+    );
+
+    const sourceHash = hashProjectSource(stackDir);
+    const discovery = await discoverRegistryReferences(stackDir);
+    const delivery = RegistryDeliveryService.getInstance();
+    const attestation = delivery.signAttestation({
+      nodeIdClaim: nodeId,
+      stack: stackName,
+      op: 'stack-deploy',
+      sourceHash,
+      referencedHostsHash: delivery.hashHostList(discovery.referencedHosts),
+      referencedPullRefsHash: hashPullRefList(normalizePullRefList(discovery.referencedPullRefs)),
+      coveredHostsHash: delivery.hashHostList([]),
+      actionSetHash: hashActionSet(['stack:deploy']),
+      deliveryContractVersion: 1,
+    });
+    const deliverySourceId = delivery.getDeliverySourceId();
+    const jti = String((jwt.decode(attestation) as jwt.JwtPayload).jti_t);
+    const sealedAuths = sealAuths(
+      sealing.publicKeyRaw,
+      [{ host: 'ghcr.io', username: 'hub-user', password: 'hub-pass' }],
+      buildSealedAuthsAad(deliverySourceId, jti, undefined),
+    );
+    const tamperedCt = Buffer.from(sealedAuths.ct, 'base64');
+    tamperedCt[0] ^= 0xff;
+    sealedAuths.ct = tamperedCt.toString('base64');
+
+    await expect(resolveRegistryAuthAtSeam({
+      envelope: {
+        attestation,
+        sealedAuths,
+        notAfter: Date.now() + 60_000,
+        deliverySourceId,
+      },
+      nodeId,
+      stack: stackName,
+      stage: 'stack-deploy',
+    })).rejects.toThrow('Registry delivery envelope failed to decrypt');
+
+    // Decrypt runs before jti burn so a failed open stays retryable.
+    expect(() => delivery.consumeAttestationJti(jti, Date.now() + 60_000)).not.toThrow();
   });
 });

@@ -1,4 +1,4 @@
-import type { Node } from '../services/DatabaseService';
+import { DatabaseService, type Node } from '../services/DatabaseService';
 
 /**
  * Node shape safe to send to a browser or API-token client. The stored
@@ -8,10 +8,19 @@ import type { Node } from '../services/DatabaseService';
  * `DatabaseService.getNode` by the components that genuinely need it (for
  * example the remote proxy, the connection test, and the mesh dialer).
  */
-export type PublicNode = Omit<Node, 'api_token'> & { has_token: boolean };
+export type PublicNode = Omit<Node, 'api_token'> & {
+  has_token: boolean;
+  /** Hub-pinned registry sealing-key fingerprint, or null when unset. */
+  sealingKeyFingerprint: string | null;
+};
 
 /** Project a stored Node into its client-safe form, dropping the api_token. */
 export function toPublicNode(node: Node): PublicNode {
   const { api_token, ...rest } = node;
-  return { ...rest, has_token: typeof api_token === 'string' && api_token.length > 0 };
+  const pin = DatabaseService.getInstance().getNodeSealingKey(node.id);
+  return {
+    ...rest,
+    has_token: typeof api_token === 'string' && api_token.length > 0,
+    sealingKeyFingerprint: pin?.fingerprint ?? null,
+  };
 }
