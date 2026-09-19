@@ -142,6 +142,69 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
         expect(stored.approval_status).toBe('approved');
         expect(stored.approved_intent_fingerprint).toBe(preview.body.planFingerprint);
         expect(stored.updated_at).toBe(created.body.updated_at);
+
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { decodeGitOpsRequiredTargetsJson } = await import('../services/gitops/json');
+        const store = GitOpsStore.getInstance();
+        const gitopsApp = store.getLiveBlueprintApplication(created.body.id)!;
+        expect(gitopsApp.placement_approval_ref).toBeTruthy();
+        expect(gitopsApp.rollout_generation_id).toBeTruthy();
+        expect(gitopsApp.legacy_combined_approval_ref).toBeNull();
+        const placement = store.getApproval(gitopsApp.placement_approval_ref!);
+        expect(placement?.kind).toBe('placement_approval');
+        expect(placement?.authoritative).toBe(1);
+        expect(placement?.intent_revision_id).toBe(gitopsApp.intent_revision_id);
+        const generation = store.getRolloutGeneration(gitopsApp.rollout_generation_id!)!;
+        expect(generation.provenance).toBe('legacy_inline');
+        expect(generation.placement_approval_ref).toBe(gitopsApp.placement_approval_ref);
+        expect(generation.accepted_generation_id).toBeNull();
+        expect(generation.artifact_set_id).toBeNull();
+        expect(generation.source_acceptance_ref).toBeNull();
+        expect(generation.rollout_authorization_ref).toBeNull();
+        const intent = store.getIntentRevision(gitopsApp.intent_revision_id!)!;
+        expect(generation.rollout_strategy_json).toBe(intent.rollout_strategy_json);
+        expect(decodeGitOpsRequiredTargetsJson(generation.required_targets_json).nodeIds).toEqual([node.id]);
+    });
+
+    it('returns GITOPS_PLACEMENT_FAILED when the live app lacks intent or candidate', async () => {
+        const node = seedNode();
+        counter += 1;
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send(validBlueprintBody(node.id));
+        expect(created.status).toBe(201);
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const store = GitOpsStore.getInstance();
+        const gitopsApp = store.getLiveBlueprintApplication(created.body.id)!;
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications SET intent_revision_id = ? WHERE id = ?`,
+        ).run('intent-missing', gitopsApp.id);
+
+        const reconcileSpy = vi.mocked(BlueprintReconciler.getInstance().reconcileConfirmedPlan);
+        const res = await request(app)
+            .post(`/api/blueprints/${created.body.id}/apply`)
+            .set('Cookie', adminCookie)
+            .send({
+                planFingerprint: preview.body.planFingerprint,
+                actions: preview.body.confirmableActions,
+            });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('GITOPS_PLACEMENT_FAILED');
+        expect(reconcileSpy).not.toHaveBeenCalled();
+
+        const stored = DatabaseService.getInstance().getBlueprint(created.body.id)!;
+        expect(stored.approval_status).toBe('pending');
+        expect(stored.approved_intent_fingerprint).toBeNull();
+        const after = store.getLiveBlueprintApplication(created.body.id)!;
+        expect(after.placement_approval_ref).toBeNull();
+        expect(after.rollout_generation_id).toBeNull();
     });
 
     it('returns PREVIEW_STALE when compose drifts between preview and approval persist', async () => {

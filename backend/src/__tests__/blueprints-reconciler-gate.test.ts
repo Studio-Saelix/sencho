@@ -590,6 +590,32 @@ describe('approval defaults and corrupt-approval fail-closed', () => {
         expect(deploySpy).not.toHaveBeenCalled();
     });
 
+    it('refuses remove of a node still required by a frozen GitOps placement set', async () => {
+        const nodeA = seedNode();
+        const bp = createBp({ nodeIds: [] });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: nodeA.id,
+            status: 'active',
+            last_deployed_at: Date.now(),
+        });
+        approveRemove(bp.id, [nodeA.id]);
+        await openGitOpsPlacement({
+            blueprintId: bp.id,
+            placeNodeIds: [nodeA.id],
+            requiredNodeIds: [nodeA.id],
+        });
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(withdrawSpy).not.toHaveBeenCalled();
+        const stored = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        expect(stored.approval_status).toBe('pending');
+        expect(stored.approved_intent_fingerprint).toBeNull();
+    });
+
     it('allows dual-write legacy approval when placement_approval_ref is still null', async () => {
         const node = seedNode();
         const bp = createBp({ nodeIds: [node.id] });

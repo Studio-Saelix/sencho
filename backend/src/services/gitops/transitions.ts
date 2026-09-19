@@ -1559,8 +1559,10 @@ export class GitOpsTransitions {
    * Operator placement approval opens a rollout generation for the current
    * intent and candidate.
    *
-   * History order is placement_approved, then rollout_generation_opened, so a
-   * reader can tell the approval happened before the generation pointer moved.
+   * This transition always opens a `legacy_inline` generation. History
+   * order is placement_approved, then rollout_generation_opened, so a
+   * reader can tell the approval happened before the generation pointer
+   * moved.
    */
   placementApproved(args: {
     applicationId: string;
@@ -1649,7 +1651,7 @@ export class GitOpsTransitions {
           preflight_fingerprint: null,
           preflight_evidence_json: null,
           rollout_strategy_json: args.strategyJson ?? '{}',
-          provenance: 'placement_approval',
+          provenance: 'legacy_inline',
           supersedes_generation_id: previousGenerationId,
           superseded_at: null,
           operation_id: args.envelope.operationId,

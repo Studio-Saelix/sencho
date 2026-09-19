@@ -298,6 +298,7 @@ export class BlueprintReconciler {
 
         const gitopsGate = this.authorizeAgainstGitOpsPlacement(blueprint, parsed.entries, preview.executorActions);
         if (!gitopsGate.ok) {
+            // Clear so the tick does not keep retrying a refused live placement.
             diagnosticLog('reconcile skipped: GitOps placement gate refused; clearing stale approval', {
                 blueprintId: blueprint.id,
             });

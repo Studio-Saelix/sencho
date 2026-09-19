@@ -635,11 +635,13 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
             approvedBy: req.user?.username ?? null,
         });
         // Dual-write: blueprints.approval_* above remains the legacy surface.
-        // When a live GitOps app exists, also open placement_approval + a
-        // rollout generation so the reconciler can fail closed on widen.
-        // Missing app (pre-migration edge) is logged and skipped; legacy
-        // columns still gate reconcileConfirmedPlan.
-        const gitopsApp = GitOpsStore.getInstance().getLiveBlueprintApplication(id);
+        // When a live GitOps app exists, also open placement_approval plus a
+        // legacy_inline generation so the reconciler can fail closed on
+        // place-outside-frozen or remove of a still-required node. Missing
+        // app (pre-migration edge) is logged and skipped; legacy columns
+        // still gate reconcileConfirmedPlan.
+        const store = GitOpsStore.getInstance();
+        const gitopsApp = store.getLiveBlueprintApplication(id);
         const clearDualWrite = (applicationId: string | null) => {
             DatabaseService.getInstance().clearBlueprintApproval(id);
             if (!applicationId) return;
@@ -669,17 +671,24 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
             console.warn(
                 `[Blueprints] Apply: no live GitOps application for blueprint ${id}; legacy approval only`,
             );
-        } else if (!gitopsApp.intent_revision_id || !gitopsApp.rollout_candidate_id) {
-            console.error(
-                `[Blueprints] Apply: live GitOps application for blueprint ${id} lacks intent or candidate; refusing`,
-            );
-            clearDualWrite(gitopsApp.id);
-            await refuseStale(
-                'GITOPS_PLACEMENT_FAILED',
-                'Blueprint placement is not ready; refresh and confirm again',
-            );
-            return;
         } else {
+            const intent = gitopsApp.intent_revision_id
+                ? store.getIntentRevision(gitopsApp.intent_revision_id)
+                : undefined;
+            const candidate = gitopsApp.rollout_candidate_id
+                ? store.getRolloutCandidate(gitopsApp.rollout_candidate_id)
+                : undefined;
+            if (!intent || !candidate) {
+                console.error(
+                    `[Blueprints] Apply: live GitOps application for blueprint ${id} lacks intent or candidate; refusing`,
+                );
+                clearDualWrite(gitopsApp.id);
+                await refuseStale(
+                    'GITOPS_PLACEMENT_FAILED',
+                    'Blueprint placement is not ready; refresh and confirm again',
+                );
+                return;
+            }
             const requiredNodeIds = canonicalizeNodeIds(
                 blast.filter((entry) => entry.outcome === 'place').map((entry) => entry.nodeId),
             );
@@ -688,7 +697,7 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
                 GitOpsTransitions.getInstance().placementApproved({
                     applicationId: gitopsApp.id,
                     approvalId: newGitOpsId(),
-                    intentRevisionId: gitopsApp.intent_revision_id,
+                    intentRevisionId: intent.id,
                     blastJson: encodeGitOpsApprovedTargetEffectJson(blast),
                     requiredNodeIds,
                     fingerprint: preview.planFingerprint,
@@ -700,7 +709,8 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
                         at,
                     },
                     rolloutGenerationId: newGitOpsId(),
-                    candidateId: gitopsApp.rollout_candidate_id,
+                    candidateId: candidate.id,
+                    strategyJson: intent.rollout_strategy_json,
                 });
             } catch (error) {
                 console.error(
