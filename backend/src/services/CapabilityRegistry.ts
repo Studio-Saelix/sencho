@@ -68,6 +68,7 @@ export const CAPABILITIES = [
   'scoped-stack-auth-evidence',
   'remote-registry-credentials',
   'remote-registry-exact-ref-proof-v1',
+  'remote-registry-sealed-envelope-v1',
   'remote-image-inspect-v1',
   'remote-auto-update-checked-v1',
   'gitops-source-controller',
@@ -136,13 +137,23 @@ export const REMOTE_REGISTRY_CREDENTIALS_CAPABILITY =
  * project uses and the hosts it already covers with its own credentials, the
  * hub probes the uncovered hosts and delivers credentials only for the
  * challenged ones it can cover, and the attestation carries a hash of the
- * exact reference list. Hubs refuse to deliver credentials
- * to a capable remote over a non-confidential transport (409), and refuse to
- * deliver when no side covers a challenged host. Absent this flag, the hub never
- * augments and never refuses (legacy silent passthrough).
+ * exact reference list. When the target also advertises a sealing public key
+ * (and the hub pins it), the hub delivers a sealed envelope over any transport.
+ * Otherwise the hub still refuses plaintext delivery over a non-confidential
+ * transport (409). Absent this flag, the hub never augments and never refuses
+ * (legacy silent passthrough).
  */
 export const REMOTE_REGISTRY_EXACT_REF_PROOF_V1_CAPABILITY =
   'remote-registry-exact-ref-proof-v1' as const satisfies Capability;
+
+/**
+ * Remotes that advertise an X25519 sealing public key on discover and can open
+ * sealedAuths envelopes. Operational sealed delivery is gated by a valid
+ * sealingKey on the discover response; this capability is the /api/meta flag
+ * for fleet visibility and mixed-version diagnostics.
+ */
+export const REMOTE_REGISTRY_SEALED_ENVELOPE_V1_CAPABILITY =
+  'remote-registry-sealed-envelope-v1' as const satisfies Capability;
 
 /** Direct GitOps source-controller routes and source-policy representation. Not Blueprint source evaluation. */
 export const GITOPS_SOURCE_CONTROLLER_CAPABILITY =

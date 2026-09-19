@@ -51,6 +51,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'DELETE /nodes': 'Deleted node',
   'POST /nodes/*/cordon': 'Cordoned node',
   'POST /nodes/*/uncordon': 'Uncordoned node',
+  'DELETE /nodes/*/sealing-key': 'Reset node registry sealing key pin',
 
   // User management
   'POST /users': 'Created user',

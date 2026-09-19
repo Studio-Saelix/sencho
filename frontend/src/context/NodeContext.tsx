@@ -18,6 +18,8 @@ export interface Node {
   /** True when a node_proxy token is stored server-side. The token value itself
    *  is never sent to the browser (see backend helpers/publicNode.ts). */
   has_token?: boolean;
+  /** Hub-pinned registry sealing-key fingerprint, when TOFU has completed. */
+  sealingKeyFingerprint?: string | null;
   pilot_last_seen?: number | null;
   pilot_agent_version?: string | null;
 }

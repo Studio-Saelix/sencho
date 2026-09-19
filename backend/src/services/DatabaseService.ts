@@ -1199,6 +1199,7 @@ export class DatabaseService {
         this.migrateGitOpsRecoveryColumns();
         this.migrateGitOpsCreateCheckpointSshDeployKey();
         this.migrateNodeUpdateSkips();
+        this.migrateNodeSealingKeys();
         this.migrateStackAlertServiceScope();
         this.migrateGitOpsSourcePolicy();
 
@@ -2766,6 +2767,23 @@ stmt.run('gitops_schema_version', '1');
         }
     }
 
+    private migrateNodeSealingKeys(): void {
+        try {
+            // FK is declarative only (foreign_keys pragma off); deleteNode removes children.
+            this.db.prepare(`
+                CREATE TABLE IF NOT EXISTS node_sealing_keys (
+                    node_id INTEGER PRIMARY KEY,
+                    pubkey TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    registered_at INTEGER NOT NULL,
+                    FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+                )
+            `).run();
+        } catch (e) {
+            console.warn('[DatabaseService] node_sealing_keys migration:', (e as Error).message);
+        }
+    }
+
     private migrateStackAlertServiceScope(): void {
         this.tryAddColumn('stack_alerts', 'service_name', 'TEXT');
         try {
@@ -3256,6 +3274,50 @@ stmt.run('gitops_schema_version', '1');
 
     public deleteNodeUpdateSkip(nodeId: number): void {
         this.db.prepare('DELETE FROM node_update_skips WHERE node_id = ?').run(nodeId);
+    }
+
+    // --- Node sealing keys (TOFU pins for registry sealed envelopes) ---
+
+    public getNodeSealingKey(nodeId: number): {
+        pubkey: string;
+        fingerprint: string;
+        registeredAt: number;
+    } | null {
+        const row = this.db.prepare(
+            'SELECT pubkey, fingerprint, registered_at FROM node_sealing_keys WHERE node_id = ?',
+        ).get(nodeId) as { pubkey: string; fingerprint: string; registered_at: number } | undefined;
+        if (!row) return null;
+        return {
+            pubkey: row.pubkey,
+            fingerprint: row.fingerprint,
+            registeredAt: row.registered_at,
+        };
+    }
+
+    /**
+     * TOFU pin: insert only when no row exists, then return the stored pin for
+     * the caller to compare against the presented key. Concurrent first pins
+     * both insert-or-nothing and read back the winner.
+     */
+    public pinNodeSealingKey(
+        nodeId: number,
+        pubkey: string,
+        fingerprint: string,
+    ): { pubkey: string; fingerprint: string; registeredAt: number } {
+        this.db.prepare(`
+            INSERT INTO node_sealing_keys (node_id, pubkey, fingerprint, registered_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(node_id) DO NOTHING
+        `).run(nodeId, pubkey, fingerprint, Date.now());
+        const pinned = this.getNodeSealingKey(nodeId);
+        if (!pinned) {
+            throw new Error('Failed to pin node sealing key');
+        }
+        return pinned;
+    }
+
+    public clearNodeSealingKey(nodeId: number): void {
+        this.db.prepare('DELETE FROM node_sealing_keys WHERE node_id = ?').run(nodeId);
     }
 
     // --- Agents ---
@@ -5364,6 +5426,7 @@ stmt.run('gitops_schema_version', '1');
             this.deleteRoleAssignmentsByStackNode(id);
             this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM node_update_skips WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM node_sealing_keys WHERE node_id = ?').run(id);
             this.db.prepare(
                 'DELETE FROM notification_suppression_pending_retractions WHERE node_id = ?',
             ).run(id);

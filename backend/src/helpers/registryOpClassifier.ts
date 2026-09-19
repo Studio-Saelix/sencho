@@ -80,6 +80,9 @@ export function classifyRegistryDeliveryOp(method: string, apiPath: string): Reg
   if (apiPath.match(/^\/api\/image-updates\/selector/)) {
     return { eligible: true, stage: 'scheduler-auto-update' };
   }
+  if (apiPath === '/api/auto-update/execute-checked') {
+    return { eligible: true, stage: 'scheduler-auto-update', stack };
+  }
   if (apiPath.match(/^\/api\/mesh\/[^/]+\/redeploy$/)) {
     return { eligible: true, stage: 'mesh-redeploy' };
   }

@@ -5,7 +5,7 @@ import type { RegistryDeliverySourceKind } from './registryDeliveryPrepare';
 
 function resolveStackName(body: Record<string, unknown>, classificationStack?: string): string | undefined {
   if (classificationStack) return classificationStack;
-  const stackName = body.stackName ?? body.stack_name;
+  const stackName = body.stackName ?? body.stack_name ?? body.stack;
   return typeof stackName === 'string' && stackName.length > 0 ? stackName : undefined;
 }
 

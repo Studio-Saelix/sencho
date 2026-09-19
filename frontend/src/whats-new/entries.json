@@ -66,5 +66,11 @@
     "title": "HTTPS on the Sencho instance",
     "blurb": "Terminate TLS on Sencho itself when you are not using a reverse proxy. Mount a certificate and key, set SENCHO_PUBLIC_URL to https, and Pilot agents enroll over a confidential tunnel so private-registry credentials can travel.",
     "docUrl": "https://docs.sencho.io/getting-started/configuration#native-tls-on-the-control-instance"
+  },
+  {
+    "id": "registry-sealed-envelope",
+    "title": "Sealed private-registry credentials",
+    "blurb": "Hub credentials for private images travel sealed to remote nodes, including over plain HTTP. Each node pins a sealing key on first use; reset the pin under Settings → Nodes after a rebuild.",
+    "docUrl": "https://docs.sencho.io/features/private-registries"
   }
 ]
