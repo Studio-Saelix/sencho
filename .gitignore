@@ -54,6 +54,7 @@ backend/src/generated/version.ts
 .claude/
 .codex/
 .agents/
+.opencode/
 .worktrees/
 plans/
 CLAUDE.md
@@ -67,6 +68,7 @@ docs/design/
 demo-video/
 trailer/
 website/
+research/
 
 # Internal engineering docs (not published)
 docs/internal/
