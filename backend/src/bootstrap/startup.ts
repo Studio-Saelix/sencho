@@ -242,6 +242,16 @@ export async function startServer(server: Server): Promise<void> {
     console.error('[GitOps] Interrupted-operation reclassification failed:', err instanceof Error ? err.stack ?? err.message : String(err));
   }
 
+  try {
+    const { reconstructBlueprintRolloutQueue } = await import('../services/gitops/handoff');
+    const resumed = await reconstructBlueprintRolloutQueue();
+    if (resumed > 0) {
+      console.log(`[GitOps] Resumed ${resumed} Blueprint rollout(s) after restart`);
+    }
+  } catch (err) {
+    console.error('[GitOps] Blueprint rollout reconstruction failed:', err instanceof Error ? err.stack ?? err.message : String(err));
+  }
+
   // Git stacks that predate the revision state model are brought into it here,
   // after interrupted work is settled so migration never races a half-finished
   // create, and before any mutation service can act on a stack the model does

@@ -4949,7 +4949,7 @@ describe('GitSourceService.apply', () => {
 
             expect(result).toEqual({
                 status: 'blocked',
-                reason: "This Blueprint's content is Git-managed, so it cannot deploy from the stored snapshot.",
+                reason: 'Placement approval is required before rollout authorization.',
             });
             expect(GitOpsStore.getInstance().getApplication(app.id)?.accepted_generation_id).toBe(generationId);
         });

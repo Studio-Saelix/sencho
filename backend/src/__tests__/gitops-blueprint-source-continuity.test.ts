@@ -225,7 +225,7 @@ describe('converted GitOps source continuity', () => {
     );
     expect(dispatch).toMatchObject({
       status: 'blocked',
-      reason: "This Blueprint's content is Git-managed, so it cannot deploy from the stored snapshot.",
+      reason: 'Placement approval is required before rollout authorization.',
     });
   });
 });

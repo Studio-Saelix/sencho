@@ -977,7 +977,58 @@ export class GitOpsStore {
     };
   }
 
-  currentAuthorizationBinding(app: GitOpsApplicationRow): FutureRolloutAuthorizationBinding | null {
+  /**
+   * Live Blueprint applications that hold a rollout authorization and may
+   * need sequential restart reconstruction.
+   */
+  listAuthorizedBlueprintApplications(): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE target_mode = 'blueprint'
+         AND lifecycle_status = 'active'
+         AND rollout_authorization_ref IS NOT NULL`,
+    ).all() as GitOpsApplicationRow[];
+  }
+
+  /**
+   * Stamp the accepted generation and artifact onto a candidate that was
+   * opened before source acceptance. Refuses to overwrite a different binding.
+   */
+  bindRolloutCandidateSource(
+    candidateId: string,
+    acceptedGenerationId: string,
+    artifactSetId: string,
+  ): void {
+    const candidate = this.getRolloutCandidate(candidateId);
+    if (!candidate) throw new Error('rollout candidate not found');
+    if (
+      candidate.accepted_generation_id !== null
+      && candidate.accepted_generation_id !== acceptedGenerationId
+    ) {
+      throw new Error('rollout candidate already bound to a different generation');
+    }
+    if (
+      candidate.artifact_set_id !== null
+      && candidate.artifact_set_id !== artifactSetId
+    ) {
+      throw new Error('rollout candidate already bound to a different artifact set');
+    }
+    this.db().prepare(
+      `UPDATE gitops_rollout_candidates
+       SET accepted_generation_id = ?, artifact_set_id = ?
+       WHERE id = ?`,
+    ).run(acceptedGenerationId, artifactSetId, candidateId);
+  }
+
+  /**
+   * Authorization ingredients excluding the preflight fingerprint, so a
+   * caller can decide whether minting authorization is possible before
+   * writing one.
+   */
+  authorizationIngredients(app: GitOpsApplicationRow): Omit<
+    FutureRolloutAuthorizationBinding,
+    'preflightFingerprint'
+  > | null {
     if (
       !app.rollout_candidate_id
       || !app.accepted_generation_id
@@ -985,15 +1036,23 @@ export class GitOpsStore {
       || !app.intent_revision_id
       || !app.source_acceptance_ref
       || !app.placement_approval_ref
-      || !app.preflight_fingerprint
     ) {
       return null;
     }
-    if (!isPreflightFingerprint(app.preflight_fingerprint)) return null;
     const candidate = this.getRolloutCandidate(app.rollout_candidate_id);
     if (!candidate || candidate.application_id !== app.id) return null;
-    if (candidate.accepted_generation_id !== app.accepted_generation_id) return null;
-    if (candidate.artifact_set_id !== app.artifact_set_id) return null;
+    if (
+      candidate.accepted_generation_id !== null
+      && candidate.accepted_generation_id !== app.accepted_generation_id
+    ) {
+      return null;
+    }
+    if (
+      candidate.artifact_set_id !== null
+      && candidate.artifact_set_id !== app.artifact_set_id
+    ) {
+      return null;
+    }
     if (candidate.intent_revision_id !== app.intent_revision_id) return null;
     const generation = this.getGeneration(app.accepted_generation_id);
     if (!generation || generation.application_id !== app.id) return null;
@@ -1026,6 +1085,17 @@ export class GitOpsStore {
       requiredNodeIds: required.nodeIds,
       sourceAcceptanceRef: app.source_acceptance_ref,
       placementApprovalRef: app.placement_approval_ref,
+    };
+  }
+
+  currentAuthorizationBinding(app: GitOpsApplicationRow): FutureRolloutAuthorizationBinding | null {
+    if (!app.preflight_fingerprint || !isPreflightFingerprint(app.preflight_fingerprint)) {
+      return null;
+    }
+    const ingredients = this.authorizationIngredients(app);
+    if (!ingredients) return null;
+    return {
+      ...ingredients,
       preflightFingerprint: app.preflight_fingerprint,
     };
   }
