@@ -29,7 +29,7 @@ AWS ECR requires a Sencho **Admiral** license; Docker Hub, GHCR, and custom regi
 
 ## Browse tags from Resources
 
-When you inspect an image on the Resources page, the detail sheet includes a **Registry tags** section for admins. Sencho lists tag names from the configured registry that matches the image host (credentials come from that registry row only). Tag browsing always runs on the hub instance; local image digests still come from the active node. Digest comparison for updates and scans happens separately on that node. For how tags and digests relate, see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
+When you inspect an image on the Resources page, the detail sheet includes a **Registry tags** section for admins. Sencho lists tag names from the configured registry that matches the image host (credentials come from that registry row only). Tag browsing always runs on the hub instance; installed image digests still come from the active node. On compatible remote nodes, the hub also checks registry digests for update detection using its stored credentials. Security rechecks use the node's own scanner. For how tags and digests relate, see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
 
 If credentials are wrong, Sencho reports a registry error without signing you out of the dashboard.
 
@@ -113,7 +113,13 @@ If a stored secret cannot be decrypted at deploy time (for example because the e
 
 ### Image update checks
 
-The background image-update checker uses the same stored credentials. When it polls a registry to compare local and remote digests for a private image, it authenticates with the registry-specific credentials configured here.
+The background image-update checker uses stored registry credentials to compare installed images with registry content. For local stacks, configure credentials on that instance. For compatible remote nodes, including Pilot-connected nodes, the hub obtains the installed-image facts from the target and checks the registry using credentials stored on the hub. Checking for updates does not copy those credentials to the target.
+
+Hub-mediated image update checks require the remote node to support the `remote-image-inspect-v1` capability. Automatic checked updates additionally require the `remote-image-update-execute-checked-v1` capability. When both capabilities are present, the hub runs the inspection and coordinates the update. Nodes without hub inspection support use their own scanner and credentials, and the hub falls back to target-local checks.
+
+Update detection and pulling an image are separate operations. A successful hub check does not prove that the target can pull the image. When an update runs, [remote fleet delivery](#remote-fleet-delivery) supplies credentials only when needed for that operation.
+
+Under **Settings > Automation > Image update checks**, a compatible remote shows independent **Hub scanner** and **Node scanner** controls. The hub scanner maintains fleet update evidence; the node scanner backs Security's **Check again** action. Hub scanner settings apply across the hub's remote checks, not just the selected node. Disabling hub checks retains recorded observations but stops new checks. Changing the node scanner does not disable hub checks. Nodes without hub inspection support use their own scanner and credentials.
 
 ## ECR setup
 
@@ -232,5 +238,37 @@ Two conditions stop an operation instead of letting it pull without the credenti
 
   <Accordion title="A remote operation references a registry the hub will not contact">
     Delivery checks only contact registries over HTTPS from addresses the hub's outbound safety rules permit. A host that is unresolvable or falls in a blocked address range is treated as unproven, and the operation forwards without hub credentials for it. Pulls keep working when the target has its own credential for that registry; otherwise configure the registry on the target directly.
+  </Accordion>
+
+  <Accordion title="A remote operation fails because the transport is not confidential after a challenged reference">
+    The operation requires a private image, the hub has credentials for the registry host, but the connection to the target does not guarantee confidentiality. Use an HTTPS URL for the node's API address, or reach the node through a Pilot tunnel terminated with TLS or a trusted reverse proxy. To keep operating over a plain HTTP connection, configure the registry on that node's own Sencho instance instead; credentials stored on the node itself never need to travel.
+  </Accordion>
+
+  <Accordion title="A remote operation fails because credentials are missing for a challenged image host">
+    The operation references a private image whose registry host is covered by a usable credential on neither the hub nor the target. Add the registry row on the hub, or sign into the target node's own Sencho instance and add it there. A row that exists but cannot be resolved, for example a revoked token or a failed ECR authorization, does not count as coverage; re-enter the secret and use **Test connection**. The same rule applies on the target during the operation: a stored credential that fails to resolve stops the pull instead of falling back silently, so fix or remove the broken row on that node.
+  </Accordion>
+
+  <Accordion title="A remote operation targets an unsafe registry address">
+    The registry host resolves to an address the hub's outbound safety rules block (for example a loopback, link-local, or private IP range). The hub will not contact it and the operation forwards without hub credentials for that host. Configure the registry on the target node directly if it can reach the registry, or ensure the registry is accessible from a safe public address.
+  </Accordion>
+
+  <Accordion title="A remote node is unreachable when credentials are needed">
+    The hub proved the operation references a private image, but it cannot reach the target's status endpoint to confirm capabilities or deliver the credential envelope. The operation forwards unchanged and the target pulls with its own registries. Ensure the target node is online and reachable, or configure the registry on the target directly.
+  </Accordion>
+
+  <Accordion title="A remote node does not support the exact-reference proof capability">
+    Hub credential delivery requires the remote to run a Sencho version that supports exact-reference proof. When the target does not, the operation forwards without hub credentials. Upgrade the target node to a version that supports the capability, or configure the registry on the target's own Sencho instance.
+  </Accordion>
+
+  <Accordion title="A remote node does not support the inspect or execute capability required for the operation">
+    Hub-mediated image update checks require the `remote-image-inspect-v1` capability. Automatic checked updates additionally require `remote-image-update-execute-checked-v1`. If the target lacks one of these, the hub falls back to target-local checks or the operation fails with a clear error. Upgrade the target node to enable hub mediation.
+  </Accordion>
+
+  <Accordion title="A stale observation token was rejected">
+    The hub issued an observation token for a prior check and the target presented it after the five-minute maximum lifetime or after it was already consumed. The operation was refused with `IMAGE_UPDATE_OBSERVATION_STALE`. Retry the update; the hub will issue a fresh token on the next attempt.
+  </Accordion>
+
+  <Accordion title="A registry credential was rejected by the registry">
+    The credential the hub delivered was revoked or is invalid for the target registry. The pull fails with a 401/403. Re-enter the secret on the hub (or on the target, if the target is using its own credential) and use **Test connection** to verify it works.
   </Accordion>
 </AccordionGroup>

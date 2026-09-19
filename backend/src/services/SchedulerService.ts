@@ -44,7 +44,12 @@ import { excludeSelfContainers } from '../helpers/excludeSelfContainers';
 import { enforcePolicyPreDeploy } from './PolicyEnforcement';
 import { summarizeBlockReasons } from '../utils/policy-risk';
 import { resolveTaskPermissionScope, type BackendScheduledAction, type TargetType } from './scheduledActionRegistry';
-import { checkPermissionForSubject } from '../middleware/permissions';
+import { checkPermissionForSubject, type PermissionSubject } from '../middleware/permissions';
+import { AutoUpdateRemoteCoordinator, type RemoteAutoUpdateInput } from './AutoUpdateRemoteCoordinator';
+import { RemoteImageUpdateService } from './RemoteImageUpdateService';
+import { awaitHubPostUpdateVerification } from './hubPostUpdateVerification';
+
+type UpdateAuthorization = RemoteAutoUpdateInput['caller']['authorizeAll'];
 
 const TRIVY_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const TRIVY_UPDATE_CHECK_STARTUP_DELAY_MS = 5 * 60 * 1000;
@@ -294,7 +299,7 @@ export class SchedulerService {
 
     // Intentionally allows triggering disabled tasks, useful for testing before enabling a schedule.
     // Manual triggers are attributed as 'manual' in the run record (see triggered_by column).
-    public async triggerTask(taskId: number): Promise<void> {
+    public async triggerTask(taskId: number, actor?: PermissionSubject): Promise<void> {
         const db = DatabaseService.getInstance();
         const task = db.getScheduledTask(taskId);
         if (!task) throw new Error('Task not found');
@@ -302,13 +307,13 @@ export class SchedulerService {
         console.log(`[SchedulerService] Manual trigger: task "${task.name}" (id=${task.id})`);
         this.runningTasks.add(task.id);
         try {
-            await this.executeTask(task, 'manual');
+            await this.executeTask(task, 'manual', actor);
         } finally {
             this.runningTasks.delete(task.id);
         }
     }
 
-    private async executeTask(task: ScheduledTask, triggeredBy: 'scheduler' | 'manual' = 'scheduler'): Promise<void> {
+    private async executeTask(task: ScheduledTask, triggeredBy: 'scheduler' | 'manual' = 'scheduler', actor?: PermissionSubject): Promise<void> {
         const db = DatabaseService.getInstance();
         const runId = db.createScheduledTaskRun({
             task_id: task.id,
@@ -381,7 +386,7 @@ export class SchedulerService {
                     output = await this.executePrune(task);
                     break;
                 case 'update':
-                    output = await this.executeUpdate(task);
+                    output = await this.executeUpdate(task, this.updateAuthorization(task, triggeredBy, actor));
                     break;
                 case 'scan': {
                     const result = await this.executeScan(task);
@@ -472,11 +477,11 @@ export class SchedulerService {
             };
             if (cronInvalid) {
                 updates.enabled = 0;
-                console.warn(`[SchedulerService] Task "${task.name}" (id=${task.id}) auto-disabled: cron expression invalid`);
+                console.warn(`[SchedulerService] Task "${sanitizeForLog(task.name)}" (id=${task.id}) auto-disabled: cron expression invalid`);
             }
-            if (error instanceof TaskAuthorizationError) {
+            if (error instanceof TaskAuthorizationError && triggeredBy === 'scheduler') {
                 updates.enabled = 0;
-                console.warn(`[SchedulerService] Task "${task.name}" (id=${task.id}) auto-disabled: creator authorization revoked`);
+                console.warn(`[SchedulerService] Task "${sanitizeForLog(task.name)}" (id=${task.id}) auto-disabled: creator authorization revoked`);
             }
             db.updateScheduledTask(task.id, updates);
             db.updateScheduledTaskRun(runId, {
@@ -484,7 +489,10 @@ export class SchedulerService {
                 status: 'failure',
                 error: errMsg,
             });
-            console.error(`[SchedulerService] Task "${task.name}" (id=${task.id}) failed:`, errMsg);
+            console.error(
+                `[SchedulerService] Task "${sanitizeForLog(task.name)}" (id=${task.id}) failed:`,
+                sanitizeForLog(errMsg),
+            );
             this.safeDispatch(
                 'error',
                 'system',
@@ -794,9 +802,27 @@ export class SchedulerService {
         return `System prune completed${filterSuffix}: ${results.join('; ')}`;
     }
 
-    private async executeUpdate(task: ScheduledTask): Promise<string> {
+    private updateAuthorization(task: ScheduledTask, triggeredBy: 'scheduler' | 'manual', actor?: PermissionSubject): UpdateAuthorization {
+        return (nodeId, stacks) => {
+            const userId = triggeredBy === 'manual' ? actor?.userId : task.creator_user_id;
+            // Creator-less persisted schedules retain their existing system context.
+            if (triggeredBy === 'scheduler' && userId == null) return;
+            const user = userId == null ? undefined : DatabaseService.getInstance().getUserById(userId);
+            if (!user) throw new TaskAuthorizationError('Scheduled update caller no longer exists.');
+            const subject = { username: user.username, role: user.role, userId: user.id };
+            const scope = resolveTaskPermissionScope(task.action as BackendScheduledAction,
+                task.target_type as TargetType, task.target_id, task.node_id, task.selector_type);
+            if (!checkPermissionForSubject(subject, scope.action, scope.resourceType, scope.resourceId, scope.resourceNodeId)
+                || stacks.some(stack => !checkPermissionForSubject(subject, 'stack:deploy', 'stack', stack, nodeId))) {
+                throw new TaskAuthorizationError('Scheduled update caller no longer has permission for every target.');
+            }
+        };
+    }
+
+    private async executeUpdate(task: ScheduledTask, authorizeAll: UpdateAuthorization): Promise<string> {
+        await authorizeAll(task.node_id ?? NodeRegistry.getInstance().getDefaultNodeId(), []);
         if (task.selector_type === 'stack-label') {
-            return this.executeUpdateByStackLabel(task);
+            return this.executeUpdateByStackLabel(task, authorizeAll);
         }
 
         if (task.node_id == null) {
@@ -814,7 +840,7 @@ export class SchedulerService {
         // auto-update policy, so passing '*' for fleet is sufficient.
         const node = NodeRegistry.getInstance().getNode(task.node_id);
         if (node?.type === 'remote') {
-            return this.executeUpdateRemote(task.node_id, isFleet ? '*' : task.target_id!);
+            return this.executeUpdateRemote(task.node_id, isFleet ? '*' : task.target_id!, authorizeAll);
         }
 
         // Local node: execute directly
@@ -832,6 +858,8 @@ export class SchedulerService {
         if (isDebugEnabled()) {
             console.log(`[SchedulerService] executeUpdate: ${stackNames.length} stack(s) to check, fleet=${isFleet}, wildcard=${isWildcard}`);
         }
+
+        await authorizeAll(task.node_id, stackNames);
 
         const docker = DockerController.getInstance(task.node_id);
         const imageUpdateService = ImageUpdateService.getInstance();
@@ -856,7 +884,7 @@ export class SchedulerService {
      * existing per-stack auto-update path. Remotes receive an explicit stack
      * list; they do not evaluate the selector themselves.
      */
-    private async executeUpdateByStackLabel(task: ScheduledTask): Promise<string> {
+    private async executeUpdateByStackLabel(task: ScheduledTask, authorizeAll: UpdateAuthorization): Promise<string> {
         const labelName = (task.selector_value ?? '').trim();
         if (!labelName) {
             throw new Error('Label-targeted auto-update requires selector_value');
@@ -932,6 +960,7 @@ export class SchedulerService {
 
         let materialFailure = unreachableCount > 0;
         const work = plans.filter(p => p.reachable && p.stacks.length > 0);
+        for (const plan of work) await authorizeAll(plan.nodeId, plan.stacks);
         const NODE_CONCURRENCY = 3;
         // Label-targeted runs fail closed on material stack failures or
         // unreachable scoped nodes (unlike plain node fleet update, which
@@ -944,7 +973,7 @@ export class SchedulerService {
             const node = NodeRegistry.getInstance().getNode(plan.nodeId);
             try {
                 if (node?.type === 'remote') {
-                    const remoteOut = await this.executeUpdateRemoteTargets(plan.nodeId, plan.stacks);
+                    const remoteOut = await this.executeUpdateRemoteTargets(plan.nodeId, plan.stacks, authorizeAll);
                     lines.push(`Node "${plan.nodeName}" (id=${plan.nodeId}) results:\n${remoteOut}`);
                     if (looksLikeStackFailure(remoteOut)) materialFailure = true;
                 } else {
@@ -989,7 +1018,13 @@ export class SchedulerService {
      * Proxy auto-update execution to a remote Sencho instance.
      * The remote node runs the image checks and compose update locally.
      */
-    private async executeUpdateRemote(nodeId: number, target: string): Promise<string> {
+    private async executeUpdateRemote(nodeId: number, target: string, authorizeAll: UpdateAuthorization): Promise<string> {
+        const coordinated = await new AutoUpdateRemoteCoordinator().execute({
+            nodeId, selection: { target }, caller: { kind: 'scheduled', authorizeAll },
+            scanner: RemoteImageUpdateService.getInstance(),
+        });
+        if (coordinated.handled) return coordinated.result;
+        await authorizeAll(nodeId, target === '*' ? [] : [target]);
         const proxyTarget = this.requireRemoteProxyTarget(nodeId);
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
@@ -1024,7 +1059,13 @@ export class SchedulerService {
     }
 
     /** Proxy auto-update for an explicit stack list on a remote node (label selector). */
-    private async executeUpdateRemoteTargets(nodeId: number, targets: string[]): Promise<string> {
+    private async executeUpdateRemoteTargets(nodeId: number, targets: string[], authorizeAll: UpdateAuthorization): Promise<string> {
+        const coordinated = await new AutoUpdateRemoteCoordinator().execute({
+            nodeId, selection: { targets }, caller: { kind: 'scheduled', authorizeAll },
+            scanner: RemoteImageUpdateService.getInstance(),
+        });
+        if (coordinated.handled) return coordinated.result;
+        await authorizeAll(nodeId, targets);
         const proxyTarget = this.requireRemoteProxyTarget(nodeId);
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
@@ -1051,7 +1092,7 @@ export class SchedulerService {
                 if (/target/i.test(detail)) {
                     const parts: string[] = [];
                     for (const stackName of targets) {
-                        parts.push(await this.executeUpdateRemote(nodeId, stackName));
+                        parts.push(await this.executeUpdateRemote(nodeId, stackName, authorizeAll));
                     }
                     return parts.join('\n');
                 }
@@ -1291,6 +1332,28 @@ export class SchedulerService {
             }, proxyTarget.trustedLoopback);
             if (!response.ok) {
                 throw new Error(this.remoteProxyFailureMessage(nodeId, await this.remoteResponseDetail(response)));
+            }
+            // Only deploy changes the stack's image state on this lifecycle path.
+            const segment = routeSuffix.split('/').pop() ?? '';
+            if (segment !== 'deploy') return;
+            const stackName = decodeURIComponent(routeSuffix.split('/')[0] ?? '');
+            if (!stackName) return;
+            const payload: unknown = await response.json().catch((error: unknown) => {
+                console.warn('[SchedulerService] Could not read deploy verification context:', error);
+                return { applied: false };
+            });
+            const verification = await awaitHubPostUpdateVerification({
+                nodeId,
+                stack: stackName,
+                targetResponse: { status: response.status, body: payload },
+                caller: 'scheduler',
+                transport: {
+                    recheckRemoteStack: (id, stack, signal) =>
+                        RemoteImageUpdateService.getInstance().recheckRemoteStack(id, stack, signal),
+                },
+            });
+            if (verification.source === 'hub_authority' && verification.status !== 'verified') {
+                console.warn(`[SchedulerService] Remote deploy completed; verification incomplete for "${stackName}" on node ${nodeId}: ${verification.detail}`);
             }
         } catch (err) {
             this.rethrowRemoteProxyError(nodeId, err);

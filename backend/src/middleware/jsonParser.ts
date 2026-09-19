@@ -21,6 +21,10 @@ function jsonWithRawBody(limit?: string | number): RequestHandler {
 
 const jsonParser = jsonWithRawBody();
 
+// Invoke only after the proxy has selected a capable hub-owned POST handler.
+// Passthrough requests must retain their unread stream, including older nodes.
+export const hubImageUpdateJsonParser = jsonWithRawBody();
+
 // Larger-limit parser for the fleet sync receive endpoint. A control instance
 // can push up to MAX_SYNC_ROWS rows in a single payload; the default 100 KB
 // limit is too tight for that.

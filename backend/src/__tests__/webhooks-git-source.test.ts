@@ -221,6 +221,61 @@ describe('node-aware Git source webhooks', () => {
         vi.useRealTimers();
     });
 
+    it.each(['verified', 'failed', 'mixed'] as const)('preserves remote pull success after %s verification without retrying', async mode => {
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'remote-verification-webhook',
+            type: 'remote',
+            compose_dir: '/tmp',
+            is_default: false,
+            api_url: 'http://remote-verification.example',
+            api_token: 'remote-token',
+        });
+        const webhookId = db.addWebhook({
+            node_id: remoteNodeId,
+            name: 'verification remote git',
+            stack_name: 'remote-stack',
+            action: 'git-pull',
+            secret: WebhookService.getInstance().generateSecret(),
+            enabled: true,
+        });
+        let release!: () => void;
+        const recheck = vi.fn(() => new Promise<{ warning: null }>((resolve, reject) => {
+            release = () => mode === 'failed' ? reject(new Error('verification offline')) : resolve({ warning: null });
+        }));
+        vi.doMock('../services/RemoteImageUpdateService', () => ({
+            RemoteImageUpdateService: { getInstance: () => ({ recheckRemoteStack: recheck }) },
+        }));
+        const NodeRegistry = (await import('../services/NodeRegistry')).NodeRegistry;
+        const { OFFLINE_META } = await import('../services/CapabilityRegistry');
+        vi.spyOn(NodeRegistry.getInstance(), 'getNode').mockReturnValue(db.getNode(remoteNodeId));
+        vi.spyOn(NodeRegistry.getInstance(), 'probeRemoteMeta').mockResolvedValue({
+            kind: 'ok', meta: { ...OFFLINE_META, online: true, capabilities: mode === 'mixed' ? [] : ['remote-image-inspect-v1'] },
+        });
+        const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+            new Response(JSON.stringify({ success: true }), { status: 200 }),
+        );
+
+        let settled = false;
+        const execution = WebhookService.getInstance().execute(db.getWebhook(webhookId)!, 'git-pull', 'test')
+            .then(result => { settled = true; return result; });
+        if (mode !== 'mixed') {
+            await vi.waitFor(() => expect(recheck).toHaveBeenCalledWith(remoteNodeId, 'remote-stack', expect.any(AbortSignal)));
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+            expect(settled).toBe(false);
+            release();
+        }
+        const result = await execution;
+
+        expect(recheck).toHaveBeenCalledTimes(mode === 'mixed' ? 0 : 1);
+        vi.doUnmock('../services/RemoteImageUpdateService');
+        expect(result.success).toBe(true);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        const history = db.getWebhookExecutions(webhookId);
+        expect(history[0].status).toBe('success');
+        db.deleteNode(remoteNodeId);
+    });
+
     it('records a debounced (202 skipped) remote git-pull as success, not failure', async () => {
         const db = DatabaseService.getInstance();
         const remoteNodeId = db.addNode({

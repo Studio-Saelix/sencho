@@ -13,6 +13,7 @@ import {
   stripConditionalRequestHeaders,
 } from './gitopsIdentityProxy';
 import { satisfiesGitOpsRead } from '../services/gitops/readAuth';
+import { handleImageUpdateResponse } from './imageUpdateVerificationProxy';
 import { NodeRegistry } from '../services/NodeRegistry';
 import {
   PROXY_TIER_HEADER,
@@ -24,7 +25,8 @@ import {
 } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
-import { remoteSupportsCrossNodeRbac, remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
+import { remoteSupportsCrossNodeRbac, remoteAdvertisesCapability, probeRemoteCapability } from '../helpers/remoteCapabilities';
+import { hubImageUpdateJsonParser } from '../middleware/jsonParser';
 import {
   STACK_DOWN_REMOVE_VOLUMES_CAPABILITY,
   STACK_DELETE_PRUNE_VOLUMES_CAPABILITY,
@@ -329,6 +331,21 @@ export function createRemoteProxyMiddleware(): RequestHandler {
   const proxy = createStreamingProxy();
   const safeHttpProxy = createStreamingProxy(safeHttpAgent);
   const safeHttpsProxy = createStreamingProxy(safeHttpsAgent);
+
+  const createUpdateProxy = (agent?: typeof safeHttpAgent | typeof safeHttpsAgent) =>
+    createProxyMiddleware<Request, Response>({
+      ...baseOptions, ...(agent ? { agent } : {}), selfHandleResponse: true,
+      on: {
+        ...sharedOn,
+        proxyRes: (upstream, req, res) => {
+          sharedOn.proxyRes?.(upstream, req, res);
+          void handleImageUpdateResponse(upstream, req, res);
+        },
+      },
+    });
+  const updateProxy = createUpdateProxy();
+  const safeHttpUpdateProxy = createUpdateProxy(safeHttpAgent);
+  const safeHttpsUpdateProxy = createUpdateProxy(safeHttpsAgent);
 
   /**
    * The identity hop: buffers the response so node ids inside it can be
@@ -728,6 +745,31 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         req.proxyElevatedRole = 'node-admin';
       }
 
+      // Target settings, security and the recheck-target alias stay on the target.
+      // Exact image reads, previews and refreshes use the hub's authority.
+      const overlayPreview = (req.method === 'GET' || req.method === 'POST')
+        && /^\/stacks\/[^/]+\/update-preview\/?$/i.test(req.path);
+      const overlayRead = req.method === 'GET' && /^\/image-updates(?:\/detail)?\/?$/i.test(req.path);
+      const overlayRefresh = req.method === 'POST' && /^\/image-updates\/refresh(?:\/[^/]+)?\/?$/i.test(req.path);
+      if (overlayRead || overlayRefresh || overlayPreview) {
+        const capability = await probeRemoteCapability(req.nodeId, 'remote-image-inspect-v1');
+        if (capability.kind === 'supported') {
+          if (req.method === 'POST') hubImageUpdateJsonParser(req, res, next);
+          else next();
+          return;
+        }
+      }
+
+      if (req.method === 'POST' && /^\/auto-update\/execute\/?$/i.test(req.path)) {
+        const inspect = await probeRemoteCapability(req.nodeId, 'remote-image-inspect-v1');
+        const execute = inspect.kind === 'supported'
+          ? await probeRemoteCapability(req.nodeId, 'remote-auto-update-checked-v1') : null;
+        if (execute?.kind === 'supported') {
+          hubImageUpdateJsonParser(req, res, next);
+          return;
+        }
+      }
+
       // Registry credential delivery: when the remote supports the exact-ref
       // contract, run hop-1 discover and either attach the envelope to the
       // forwarded JSON body or refuse per the delivery matrix; a compressed
@@ -820,6 +862,14 @@ export function createRemoteProxyMiddleware(): RequestHandler {
 
       beginProxyTiming(req, res);
       if (req.registryDeliveryAbortController?.signal.aborted) {
+        return;
+      }
+      if (req.method === 'POST' && /^\/stacks\/[^/]+\/update\/?$/i.test(req.path)
+        && (await probeRemoteCapability(req.nodeId, 'remote-image-inspect-v1')).kind === 'supported') {
+        const selectedUpdateProxy = node.mode === 'pilot_agent'
+          ? updateProxy
+          : target.apiUrl.startsWith('https:') ? safeHttpsUpdateProxy : safeHttpUpdateProxy;
+        selectedUpdateProxy(req, res, next);
         return;
       }
       const selectedProxy = node.mode === 'pilot_agent'
@@ -937,9 +987,9 @@ function isSshHostKeyProbeRoute(req: Request): boolean {
   return req.method === 'POST' && /^\/git-sources\/ssh-host-key\/?$/.test(req.path);
 }
 
-/** POST /image-updates/refresh with no stack-name segment (node-wide, not per-stack). */
+/** Node-wide refresh and target-scanner alias share the same permission gate. */
 function isImageRefreshNodeWide(req: Request): boolean {
-  return req.method === 'POST' && /^\/image-updates\/refresh\/?$/.test(req.path);
+  return req.method === 'POST' && /^\/image-updates\/(?:refresh|recheck-target)\/?$/i.test(req.path);
 }
 
 /**

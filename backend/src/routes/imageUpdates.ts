@@ -4,6 +4,10 @@ import { CronExpressionParser } from 'cron-parser';
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { RemoteImageUpdateService } from '../services/RemoteImageUpdateService';
+import { AutoUpdateRemoteCoordinator } from '../services/AutoUpdateRemoteCoordinator';
+import { applyAutomaticStackUpdate } from '../services/automaticStackUpdate';
+import { probeRemoteCapability } from '../helpers/remoteCapabilities';
 import { safeRemoteFetch } from '../utils/outboundTarget';
 import { CacheService } from '../services/CacheService';
 import {
@@ -12,19 +16,17 @@ import {
   messageWhenNoDigestUpdate,
   recordAutoUpdateImageCheck,
 } from '../helpers/autoUpdateDigestGate';
-import { ImageUpdateService, UPDATE_VERIFICATION_INCOMPLETE_WARNING } from '../services/ImageUpdateService';
+import { ImageUpdateService } from '../services/ImageUpdateService';
+import { ImageUpdateFactsService, ImageUpdateFactsError } from '../services/ImageUpdateFactsService';
+import {
+  IMAGE_UPDATE_FACTS_BYTE_LIMIT,
+  IMAGE_UPDATE_FACTS_STACK_LIMIT,
+} from '../services/imageUpdateFacts';
 import { FileSystemService } from '../services/FileSystemService';
-import { StackUpdateOrchestrator } from '../services/StackUpdateOrchestrator';
-import { StackOpLockService, stackOpSkipMessage } from '../services/StackOpLockService';
-import { NotificationService } from '../services/NotificationService';
-import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
-import { HealthGateService } from '../services/HealthGateService';
 import { authMiddleware } from '../middleware/auth';
 import { checkPermission, requirePermission, type PermissionAction } from '../middleware/permissions';
 import { buildPolicyGateOptions } from '../helpers/policyGate';
 import { FLEET_UPDATE_CACHE_KEY, invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
-import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
-import { summarizeBlockReasons } from '../utils/policy-risk';
 import { isValidStackName } from '../utils/validation';
 import { sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
@@ -35,6 +37,182 @@ const FLEET_CACHE_TTL = 120_000;
 const REMOTE_NODE_FETCH_TIMEOUT_MS = 5000;
 
 export const imageUpdatesRouter = Router();
+
+imageUpdatesRouter.post('/inspect-facts', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  const body: unknown = req.body;
+  const input = typeof body === 'object' && body !== null && !Array.isArray(body)
+    ? body as Record<string, unknown> : {};
+  const requestNonce = typeof input.requestNonce === 'string' && /^[a-f0-9]{32,128}$/.test(input.requestNonce)
+    ? input.requestNonce : null;
+  const envelope = { contractVersion: 1, requestNonce };
+  if (req.machineAuthScope !== 'node_proxy' && req.machineAuthScope !== 'pilot_tunnel') {
+    res.status(403).json({ ...envelope, error: 'Machine authentication required' });
+    return;
+  }
+  const stackName = typeof input.stack === 'string' ? input.stack : null;
+  const mode = input.roster === true ? 'roster'
+    : input.allStacks === true ? 'allStacks'
+      : stackName !== null ? 'stack' : null;
+  const allowedKeys = (keys: string[]): boolean =>
+    Object.keys(input).every(key => ['contractVersion', 'requestNonce'].includes(key) || keys.includes(key));
+  if (input.contractVersion !== 1 || !requestNonce || !mode
+    || (mode === 'roster' && !allowedKeys(['roster']))
+    || (mode === 'allStacks' && !allowedKeys(['allStacks']))
+    || (mode === 'stack' && !(allowedKeys(['stack']) && stackName !== null && isValidStackName(stackName)))) {
+    res.status(400).json({ ...envelope, error: 'Invalid image update facts request' });
+    return;
+  }
+  const permitted = stackName !== null
+    ? checkPermission(req, 'stack:read', 'stack', stackName, req.nodeId)
+    : checkPermission(req, 'stack:read');
+  if (!permitted) {
+    res.status(403).json({ ...envelope, error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+    return;
+  }
+  const factsService = ImageUpdateFactsService.getInstance();
+  try {
+    if (mode === 'roster') {
+      const stacks = await FileSystemService.getInstance(req.nodeId).getStacksStrict();
+      if (stacks.length > IMAGE_UPDATE_FACTS_STACK_LIMIT) {
+        res.status(413).json({ ...envelope, error: 'Image update facts accepts at most 500 stacks' });
+        return;
+      }
+      res.json({ ...envelope, stacks });
+      return;
+    }
+    if (mode === 'stack' && stackName !== null) {
+      const names = await FileSystemService.getInstance(req.nodeId).getStacksStrict();
+      if (!names.includes(stackName)) {
+        res.status(404).json({ ...envelope, error: 'Stack not found' });
+        return;
+      }
+      const facts = await factsService.collect(req.nodeId, stackName, requestNonce);
+      res.json({ ...envelope, stacks: [facts] });
+      return;
+    }
+    const stacks = await FileSystemService.getInstance(req.nodeId).getStacksStrict();
+    if (stacks.length > IMAGE_UPDATE_FACTS_STACK_LIMIT) {
+      res.status(413).json({ ...envelope, error: 'Image update facts accepts at most 500 stacks' });
+      return;
+    }
+    const collected = [];
+    let bytes = Buffer.byteLength(JSON.stringify({ ...envelope, stacks: [] }));
+    for (const stackName of stacks) {
+      const facts = await factsService.collect(req.nodeId, stackName, requestNonce);
+      bytes += Buffer.byteLength(JSON.stringify(facts)) + (collected.length ? 1 : 0);
+      if (bytes > IMAGE_UPDATE_FACTS_BYTE_LIMIT) {
+        res.status(413).json({ ...envelope, error: 'Image update facts response exceeds the byte cap; request stacks by name' });
+        return;
+      }
+      collected.push(facts);
+    }
+    const wire = JSON.stringify({ ...envelope, stacks: collected });
+    if (Buffer.byteLength(wire) > IMAGE_UPDATE_FACTS_BYTE_LIMIT) {
+      res.status(413).json({ ...envelope, error: 'Image update facts response exceeds the byte cap; request stacks by name' });
+      return;
+    }
+    res.type('application/json').send(wire);
+  } catch (error) {
+    if (error instanceof ImageUpdateFactsError) {
+      res.status(error.status).json({ ...envelope, error: error.message, code: error.code });
+      return;
+    }
+    console.error('[ImageUpdates] Failed to collect image update facts:', error);
+    res.status(500).json({ ...envelope, error: 'Failed to collect image update facts' });
+  }
+});
+
+// Preserve the target scanner's state when hub inspection is unavailable.
+interface OverlayStatus {
+  enabled: boolean;
+  checking: boolean;
+  cooldownEndsAt: number | null;
+  lastCheckedAt: number | null;
+  nextRunAt: number | null;
+  mode: string | null;
+  cronExpression: string | null;
+  intervalMinutes: number;
+  intervalUnit: 'minutes';
+  scannerOwner: 'hub' | 'target';
+  capability: 'remote-image-inspect-v1' | null;
+  sidebarIndicators: boolean;
+}
+
+function normalizeTargetStatus(body: unknown): OverlayStatus {
+  const raw = typeof body === 'object' && body !== null && !Array.isArray(body)
+    ? body as Record<string, unknown> : {};
+  const enabled = raw.enabled === true;
+  return {
+    enabled,
+    checking: enabled && raw.checking === true,
+    cooldownEndsAt: typeof raw.manualCooldownRemainingMs === 'number' && raw.manualCooldownRemainingMs > 0
+      ? Date.now() + raw.manualCooldownRemainingMs : null,
+    lastCheckedAt: typeof raw.lastCheckedAt === 'number' ? raw.lastCheckedAt : null,
+    nextRunAt: typeof raw.nextCheckAt === 'number' ? raw.nextCheckAt : null,
+    mode: typeof raw.mode === 'string' ? raw.mode : null,
+    cronExpression: typeof raw.cronExpression === 'string' ? raw.cronExpression : null,
+    intervalMinutes: typeof raw.intervalMinutes === 'number' ? raw.intervalMinutes : 120,
+    intervalUnit: 'minutes',
+    scannerOwner: 'target',
+    capability: null,
+    sidebarIndicators: raw.sidebarIndicators === true,
+  };
+}
+
+// Hub-only selector: ?targetNodeId=<remote node id>. Distinct from the reserved
+// nodeId routing parameter; the hub overlay scanner owns the answer for
+// inspect-v1 remotes, otherwise the target's own /status is normalized.
+imageUpdatesRouter.get('/overlay-status', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  const requested = req.query.targetNodeId;
+  const parsed = typeof requested === 'string' ? Number.parseInt(requested, 10) : NaN;
+  if (!Number.isInteger(parsed) || String(parsed) !== requested) {
+    res.status(400).json({ error: 'targetNodeId must identify a remote node' });
+    return;
+  }
+  const node = NodeRegistry.getInstance().getNode(parsed);
+  if (!node) {
+    res.status(404).json({ error: 'Node not found' });
+    return;
+  }
+  if (node.type !== 'remote') {
+    res.status(400).json({ error: 'targetNodeId must identify a remote node' });
+    return;
+  }
+  try {
+    const capability = await probeRemoteCapability(parsed, 'remote-image-inspect-v1');
+    if (capability.kind === 'supported') {
+      const status = ImageUpdateService.getInstance().getRemoteScanStatus(parsed);
+      res.json({
+        ...status,
+        capability: 'remote-image-inspect-v1',
+      } satisfies OverlayStatus);
+      return;
+    }
+    const proxyTarget = NodeRegistry.getInstance().getProxyTarget(parsed);
+    if (!proxyTarget) {
+      res.status(503).json({ error: 'Node proxy target unavailable' });
+      return;
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REMOTE_NODE_FETCH_TIMEOUT_MS);
+    try {
+      const resp = await safeRemoteFetch(`${proxyTarget.apiUrl.replace(/\/$/, '')}/api/image-updates/status`, {
+        headers: proxyTarget.apiToken ? { Authorization: `Bearer ${proxyTarget.apiToken}` } : {},
+        signal: controller.signal,
+      }, proxyTarget.trustedLoopback);
+      if (!resp.ok) {
+        res.status(502).json({ error: 'Failed to read target image update status' });
+        return;
+      }
+      res.json(normalizeTargetStatus(await resp.json()));
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (error) {
+    console.error('[ImageUpdates] Failed to read overlay status:', error);
+    res.status(500).json({ error: 'Failed to read overlay status' });
+  }
+});
 
 imageUpdatesRouter.get('/', authMiddleware, (req: Request, res: Response): void => {
   try {
@@ -75,7 +253,7 @@ imageUpdatesRouter.get('/detail', authMiddleware, (req: Request, res: Response):
   }
 });
 
-imageUpdatesRouter.post('/refresh', authMiddleware, (req: Request, res: Response): void => {
+imageUpdatesRouter.post(['/refresh', '/recheck-target'], authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:manage', 'node', String(req.nodeId ?? 0))) return;
   try {
     if (!ImageUpdateService.isChecksEnabled()) {
@@ -85,7 +263,11 @@ imageUpdatesRouter.post('/refresh', authMiddleware, (req: Request, res: Response
       });
       return;
     }
-    const triggered = ImageUpdateService.getInstance().triggerManualRefresh();
+    const remoteOverlay = req.path.replace(/\/$/, '') === '/refresh'
+      && NodeRegistry.getInstance().getNode(req.nodeId)?.type === 'remote';
+    const triggered = remoteOverlay
+      ? await RemoteImageUpdateService.getInstance().checkRemoteNode(req.nodeId, true)
+      : ImageUpdateService.getInstance().triggerManualRefresh();
     if (!triggered) {
       const mins = ImageUpdateService.manualCooldownMinutes;
       res.status(429).json({ error: `Rate limited. Please wait at least ${mins} minute${mins !== 1 ? 's' : ''} between manual refreshes.` });
@@ -124,7 +306,9 @@ imageUpdatesRouter.post('/refresh/:stackName', authMiddleware, async (req: Reque
       });
       return;
     }
-    const result = await iu.recheckStack(req.nodeId, stackName);
+    const result = NodeRegistry.getInstance().getNode(req.nodeId)?.type === 'remote'
+      ? await RemoteImageUpdateService.getInstance().recheckRemoteStack(req.nodeId, stackName, AbortSignal.timeout(90_000))
+      : await iu.recheckStack(req.nodeId, stackName);
     res.json(result);
   } catch (error) {
     console.error('Failed to recheck stack for image updates:', error);
@@ -271,6 +455,10 @@ imageUpdatesRouter.get('/fleet', authMiddleware, async (req: Request, res: Respo
           .filter((entry): entry is { node: typeof entry.node; proxyTarget: NonNullable<typeof entry.proxyTarget> } => entry.proxyTarget !== null);
         const remoteResults = await Promise.allSettled(
           remoteCandidates.map(async ({ node, proxyTarget }) => {
+            const capability = await probeRemoteCapability(node.id, 'remote-image-inspect-v1');
+            if (capability.kind === 'supported') {
+              return { nodeId: node.id, data: db.getConfirmedStackUpdateStatus(node.id) };
+            }
             const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), REMOTE_NODE_FETCH_TIMEOUT_MS);
@@ -307,6 +495,23 @@ imageUpdatesRouter.get('/fleet', authMiddleware, async (req: Request, res: Respo
   } catch (error) {
     console.error('Failed to aggregate fleet update status:', error);
     res.status(500).json({ error: 'Failed to aggregate fleet update status' });
+  }
+});
+
+imageUpdatesRouter.get('/fleet/detail', authMiddleware, async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const db = DatabaseService.getInstance();
+    const data: Record<number, ReturnType<DatabaseService['getStackUpdateDetail']>> = {};
+    await Promise.all(db.getNodes().map(async node => {
+      if (node.type === 'local'
+        || (await probeRemoteCapability(node.id, 'remote-image-inspect-v1')).kind === 'supported') {
+        data[node.id] = db.getStackUpdateDetail(node.id);
+      }
+    }));
+    res.json(data);
+  } catch (error) {
+    console.error('Failed to aggregate fleet update detail:', error);
+    res.status(500).json({ error: 'Failed to aggregate fleet update detail' });
   }
 });
 
@@ -353,6 +558,13 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), REMOTE_NODE_FETCH_TIMEOUT_MS);
       try {
+        const capability = await probeRemoteCapability(node.id, 'remote-image-inspect-v1');
+        if (capability.kind === 'supported') {
+          clearTimeout(timeout);
+          const status = !ImageUpdateService.isChecksEnabled() ? 409
+            : await RemoteImageUpdateService.getInstance().checkRemoteNode(node.id, true) ? 200 : 429;
+          return { nodeId: node.id, status };
+        }
         const resp = await safeRemoteFetch(`${baseUrl}/api/image-updates/refresh`, {
           method: 'POST',
           headers: proxyTarget.apiToken
@@ -422,7 +634,8 @@ function requireExactStacks(
 
 autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   try {
-    const { target, targets } = req.body as { target?: string; targets?: unknown };
+    const { target, targets } = (req.body ?? {}) as { target?: string; targets?: unknown };
+    const remote = NodeRegistry.getInstance().getNode(req.nodeId)?.type === 'remote';
 
     let stackNames: string[];
     if (Array.isArray(targets)) {
@@ -456,8 +669,8 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
         // than a scoped grant, so an unauthorized caller cannot reach the
         // "no stacks found" no-op without ever being permission-checked.
         if (!requirePermission(req, res, 'stack:deploy')) return;
-        stackNames = await FileSystemService.getInstance(req.nodeId).getStacks();
-        if (stackNames.length === 0) {
+        stackNames = remote ? [] : await FileSystemService.getInstance(req.nodeId).getStacks();
+        if (!remote && stackNames.length === 0) {
           res.json({ result: 'No stacks found on node; skipped.' });
           return;
         }
@@ -470,6 +683,31 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
       }
     } else {
       res.status(400).json({ error: 'Missing "target" (stack name or "*") or "targets" (stack name array)' });
+      return;
+    }
+
+    if (remote) {
+      const denied = new Error('Automatic update permission denied');
+      try {
+        const result = await new AutoUpdateRemoteCoordinator().execute({
+          nodeId: req.nodeId,
+          selection: target === '*' && !Array.isArray(targets) ? { target: '*' } : { targets: stackNames },
+          caller: {
+            kind: 'interactive',
+            authorizeAll: (nodeId, stacks) => {
+              if (!requireExactStacks(req, res, 'stack:deploy', stacks, nodeId)) throw denied;
+            },
+          },
+          scanner: RemoteImageUpdateService.getInstance(),
+        });
+        if (!result.handled) {
+          res.status(503).json({ error: 'Remote automatic update capability changed. Retry the request.' });
+          return;
+        }
+        res.json({ result: result.result });
+      } catch (error) {
+        if (error !== denied) throw error;
+      }
       return;
     }
 
@@ -490,7 +728,6 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
 
     const docker = DockerController.getInstance(req.nodeId);
     const imageUpdateService = ImageUpdateService.getInstance();
-    const atomic = true;
     const results: string[] = [];
 
     for (const stackName of stackNames) {
@@ -534,82 +771,14 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           continue;
         }
 
-        const { updatedImages } = gate;
-
-        // Auto-update runs from the scheduler: a policy bypass is never
-        // appropriate. If updated images fail the gate, skip the stack and
-        // raise a notification so an operator can review before a manual retry.
-        const autoUpdateGate = await enforcePolicyPreDeploy(
-          stackName,
-          req.nodeId,
-          buildPolicyGateOptions(req, {
-            bypass: false,
-            actor: `auto-update:${req.user?.username ?? 'scheduler'}`,
+        const applied = await applyAutomaticStackUpdate({
+          nodeId: req.nodeId, stackName, updatedImages: gate.updatedImages,
+          policyOptions: buildPolicyGateOptions(req, {
+            bypass: false, actor: `auto-update:${req.user?.username ?? 'scheduler'}`,
           }),
-        );
-        if (!autoUpdateGate.ok) {
-          const blockedImages = autoUpdateGate.violations.map((v) => v.imageRef).join(', ');
-          const blockedMsg = `Policy "${autoUpdateGate.policy?.name}" blocked auto-update: ${autoUpdateGate.violations.length} image(s) matched ${summarizeBlockReasons(autoUpdateGate.violations)}${blockedImages ? ` (${blockedImages})` : ''}`;
-          NotificationService.getInstance().dispatchAlert('warning', 'scan_finding', blockedMsg, { stackName, actor: 'system:image-update' });
-          results.push(`Stack "${stackName}": ${blockedMsg}`);
-          continue;
-        }
-
-        const lock = await StackOpLockService.getInstance().runExclusive(
-          req.nodeId, stackName, 'update', 'system',
-          () => StackUpdateOrchestrator.getInstance().execute(
-            { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger: 'automatic', actor: `auto-update:${req.user?.username ?? 'scheduler'}` },
-            { atomic, terminalWs: null },
-          ),
-        );
-        if (!lock.ran) {
-          results.push(stackOpSkipMessage(stackName, lock.existing.action));
-          continue;
-        }
-
-        // Health observation starts immediately after Compose; registry recheck is
-        // isolated so a verification failure cannot turn Compose success into a failure.
-        const orchResult = lock.result;
-        const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', `auto-update:${req.user?.username ?? 'scheduler'}`, { deployedGenerationId: orchResult && orchResult.kind === 'stack_compose_done' ? orchResult.deployedGenerationId : null });
-        const recoveryId = orchResult && orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
-        if (recoveryId) {
-          const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
-          StackUpdateRecoveryService.getInstance().linkGateOrRetain(recoveryId, healthGateId);
-        }
-
-        // Recheck persists digest-cleared / tag-advisory state. Do not blind-clear.
-        let recheckWarning: string | undefined;
-        try {
-          const recheck = await imageUpdateService.recheckStack(req.nodeId, stackName);
-          if (recheck.warning) recheckWarning = recheck.warning;
-        } catch (recheckErr) {
-          console.warn(
-            '[AutoUpdate] Post-update recheck failed for %s: %s',
-            sanitizeForLog(stackName),
-            sanitizeForLog(getErrorMessage(recheckErr, 'unknown')),
-          );
-          recheckWarning = UPDATE_VERIFICATION_INCOMPLETE_WARNING;
-        }
-
-        invalidateNodeCaches(req.nodeId);
-        NotificationService.getInstance().broadcastEvent({
-          type: 'state-invalidate',
-          scope: 'image-updates',
-          nodeId: req.nodeId,
-          stackName,
-          action: 'stack-updated',
-          ts: Date.now(),
+          verificationOwner: 'target_local',
         });
-
-        NotificationService.getInstance().dispatchAlert(
-          'info',
-          'image_update_applied',
-          `Auto-update: stack "${stackName}" updated with new images`,
-          { stackName, actor: 'system:image-update' },
-        );
-
-        const base = `Stack "${stackName}": updated (${updatedImages.join(', ')}).`;
-        results.push(recheckWarning ? `${base} ${recheckWarning}` : base);
+        results.push(applied.message);
       } catch (e) {
         const msg = getErrorMessage(e, String(e));
         results.push(`Stack "${stackName}" failed: ${msg}`);

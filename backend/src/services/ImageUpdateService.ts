@@ -15,6 +15,7 @@ import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { buildEffectiveServiceModel } from './effectiveServiceModel';
 import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
+import type { ImageUpdateStackFacts } from './imageUpdateFacts';
 
 const BACKFILL_KEY = 'image_update_notifications_backfilled';
 
@@ -449,6 +450,7 @@ export class ImageUpdateService {
     // lands mid-scan from racing the in-flight tick into a duplicate timer.
     private scheduleGeneration = 0;
     private isRunning = false;
+    private remoteRuns = new Map<number, { checking: boolean; lastManualRefreshAt: number | null; lastCheckedAt: number | null }>();
     private checkStartedAt = 0;
     private lastManualRefreshAt = 0;
     // Per-stack recheck cooldown (key: `${nodeId}:${stackName}`). Enforces the
@@ -715,6 +717,53 @@ export class ImageUpdateService {
         return this.isRunning;
     }
 
+    public async runRemoteScan(nodeId: number, manual: boolean, scan: () => Promise<void>): Promise<boolean> {
+        if (!ImageUpdateService.isChecksEnabled()) return false;
+        let state = this.remoteRuns.get(nodeId);
+        if (!state) {
+            state = { checking: false, lastManualRefreshAt: null, lastCheckedAt: null };
+            this.remoteRuns.set(nodeId, state);
+        }
+        const now = Date.now();
+        if (state.checking || (manual && state.lastManualRefreshAt !== null
+            && now - state.lastManualRefreshAt < ImageUpdateService.MANUAL_COOLDOWN_MS)) return false;
+        state.checking = true;
+        state.lastCheckedAt = now;
+        if (manual) state.lastManualRefreshAt = now;
+        try {
+            await scan();
+            return true;
+        } finally {
+            state.checking = false;
+        }
+    }
+
+    public getRemoteScanStatus(nodeId: number) {
+        const status = this.getStatus();
+        const state = this.remoteRuns.get(nodeId);
+        return {
+            enabled: status.enabled, checking: state?.checking ?? false,
+            cooldownEndsAt: state?.lastManualRefreshAt == null ? null
+                : state.lastManualRefreshAt + ImageUpdateService.MANUAL_COOLDOWN_MS,
+            lastCheckedAt: state?.lastCheckedAt ?? null, nextRunAt: status.nextCheckAt,
+            mode: status.mode, cronExpression: status.cronExpression,
+            intervalMinutes: status.intervalMinutes, intervalUnit: 'minutes' as const,
+            scannerOwner: 'hub' as const, capability: 'supported' as const,
+            sidebarIndicators: status.sidebarIndicators,
+        };
+    }
+
+    public clearNodeRuntimeMaps(nodeId: number): void {
+        this.remoteRuns.delete(nodeId);
+        const prefix = `${nodeId}:`;
+        for (const key of this.stackWriteState.keys()) {
+            if (key.startsWith(prefix)) this.stackWriteState.delete(key);
+        }
+        for (const key of this.perStackRecheckAt.keys()) {
+            if (key.startsWith(prefix)) this.perStackRecheckAt.delete(key);
+        }
+    }
+
     /** Milliseconds left on the manual-refresh cooldown; 0 when a refresh is allowed. */
     public getManualCooldownRemainingMs(): number {
         return Math.max(0, this.lastManualRefreshAt + ImageUpdateService.MANUAL_COOLDOWN_MS - Date.now());
@@ -853,15 +902,22 @@ export class ImageUpdateService {
 
         try {
             const db = DatabaseService.getInstance();
-            // Only check local nodes - remote nodes run their own instance
-            for (const node of db.getNodes()) {
-                if (node.type !== 'local' || !node.id) continue;
+            await Promise.all(db.getNodes().map(async node => {
+                if (!node.id) return;
                 try {
-                    await this.checkNode(node.id, db);
+                    if (node.type === 'local') {
+                        await this.checkNode(node.id, db);
+                    } else {
+                        const { probeRemoteCapability } = await import('../helpers/remoteCapabilities');
+                        if ((await probeRemoteCapability(node.id, 'remote-image-inspect-v1')).kind === 'supported') {
+                            const { RemoteImageUpdateService } = await import('./RemoteImageUpdateService');
+                            await RemoteImageUpdateService.getInstance().checkRemoteNode(node.id);
+                        }
+                    }
                 } catch (e) {
                     console.error(`[ImageUpdateService] Error on node ${node.name}:`, e);
                 }
-            }
+            }));
             console.log('[ImageUpdateService] Image update check complete.');
         } catch (e) {
             console.error('[ImageUpdateService] Check failed:', e);
@@ -1209,13 +1265,72 @@ export class ImageUpdateService {
         return { outcome: 'cleared', warning: null };
     }
 
+    public async recordRemoteCheckFailure(nodeId: number, stack: string, generation: number): Promise<void> {
+        const db = DatabaseService.getInstance();
+        await this.withStackWriteLock(nodeId, stack, generation, gen => {
+            const previous = db.getStackUpdateDetail(nodeId)[stack];
+            if (!previous) return;
+            const services = previous.services?.map(service => ({
+                ...service, checkStatus: 'failed' as const, lastError: 'Target update check unavailable',
+            }));
+            db.recordStackCheckFailure(nodeId, stack, 'Target update check unavailable', Date.now(), services, gen);
+        });
+    }
+
+    public async commitRemoteObservation(
+        nodeId: number,
+        facts: ImageUpdateStackFacts,
+        imageResults: Map<string, ImageCheckResult>,
+        generation: number,
+    ): Promise<StackRecheckResult> {
+        const db = DatabaseService.getInstance();
+        const model = facts.model;
+        if (!model.renderable) {
+            // A render failure is a real observation, not silence: the target
+            // could not produce an effective model, so any prior update row is
+            // untrustworthy. Record the failure through the same generation
+            // chain a normal commit uses, then report verification failure.
+            const committed = await this.withStackWriteLock(nodeId, facts.name, generation, gen => {
+                db.recordStackCheckFailure(
+                    nodeId, facts.name,
+                    `Update check failed: ${model.error}`,
+                    Date.now(), db.getStackServicesJson(nodeId, facts.name).map(service => ({
+                        ...service, checkStatus: 'failed' as const, lastError: model.error,
+                    })), gen,
+                );
+            });
+            if (!committed) return { outcome: 'verification_incomplete', warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING };
+            return { outcome: 'verification_failed', warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING };
+        }
+        const prior = new Map(db.getStackServicesJson(nodeId, facts.name).map(service => [service.service, service]));
+        const services = facts.services.map(service => reduceServiceStatus(
+            service.name, service.declaredImage, service.runtimeImages, imageResults, prior.get(service.name),
+        ).status);
+        const checkStatus = aggregateServiceCheckStatus(services);
+        const hasUpdate = services.some(service => service.hasUpdate);
+        const lastError = stackStatusLastError(services);
+        const committed = await this.withStackWriteLock(nodeId, facts.name, generation, gen => {
+            if (checkStatus === 'failed') {
+                db.recordStackCheckFailure(nodeId, facts.name, lastError ?? 'Update check failed', Date.now(), services, gen);
+            } else {
+                db.upsertStackUpdateStatus(nodeId, facts.name, hasUpdate, Date.now(), checkStatus, lastError, services, gen);
+            }
+        });
+        if (!committed || checkStatus !== 'ok') {
+            return { outcome: 'verification_incomplete', warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING };
+        }
+        return hasUpdate
+            ? { outcome: 'still_present', warning: UPDATE_STILL_PRESENT_WARNING }
+            : { outcome: 'cleared', warning: null };
+    }
+
     private stackWriteKey(nodeId: number, stackName: string): string {
         return `${nodeId}:${stackName}`;
     }
 
     /** Bump the per-stack write generation before async registry work so a later
      *  slower scan cannot commit after a newer recheck reserved a higher gen. */
-    private reserveStackWriteGeneration(nodeId: number, stackName: string): number {
+    public reserveStackWriteGeneration(nodeId: number, stackName: string): number {
         const key = this.stackWriteKey(nodeId, stackName);
         let state = this.stackWriteState.get(key);
         if (!state) {

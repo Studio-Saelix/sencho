@@ -68,6 +68,8 @@ export const CAPABILITIES = [
   'scoped-stack-auth-evidence',
   'remote-registry-credentials',
   'remote-registry-exact-ref-proof-v1',
+  'remote-image-inspect-v1',
+  'remote-auto-update-checked-v1',
   'gitops-source-controller',
 ] as const;
 

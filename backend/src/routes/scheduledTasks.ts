@@ -739,7 +739,7 @@ scheduledTasksRouter.post('/:id/run', (req: Request, res: Response): void => {
     }
 
     console.log(`[ScheduledTasks] Manual run requested for task id=${id}`);
-    scheduler.triggerTask(id).catch((err: unknown) => {
+    scheduler.triggerTask(id, req.user).catch((err: unknown) => {
       const msg = getErrorMessage(err, String(err));
       console.error(`[ScheduledTasks] Background run error for task ${id}:`, msg);
     });

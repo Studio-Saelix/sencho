@@ -93,6 +93,55 @@ describe('useImageUpdates', () => {
     expect(result.current.stackUpdates).toEqual({});
   });
 
+  it('retains disabled hub observations and reads overlay status without remote routing', async () => {
+    mockedFetch.mockImplementation((url: string) => Promise.resolve({
+      ok: true, status: 200,
+      json: async () => url.includes('/overlay-status')
+        ? { enabled: false, sidebarIndicators: true, scannerOwner: 'hub', capability: 'remote-image-inspect-v1' }
+        : { web: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 5 } },
+    }));
+    const { result } = renderHook(() => useImageUpdates(2, true));
+    await waitFor(() => expect(result.current.stackUpdates.web).toBeDefined());
+    expect(result.current.checksEnabled).toBe(false);
+    expect(result.current.sidebarIndicators).toBe(true);
+    expect(mockedFetch).toHaveBeenCalledWith('/image-updates/overlay-status?targetNodeId=2', { nodeId: null });
+    expect(mockedFetch).not.toHaveBeenCalledWith('/image-updates/status', expect.anything());
+    expect(mockedFetch).toHaveBeenCalledWith('/image-updates/detail', { nodeId: 2 });
+  });
+
+  it('respects a target-owned response when remote inspection is no longer supported', async () => {
+    mockedFetch.mockImplementation((url: string) => Promise.resolve({
+      ok: true, status: 200,
+      json: async () => url.includes('/overlay-status')
+        ? { enabled: false, sidebarIndicators: false, scannerOwner: 'target', capability: null }
+        : { web: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 5 } },
+    }));
+    const { result } = renderHook(() => useImageUpdates(2, true));
+    await waitFor(() => expect(result.current.checksEnabled).toBe(false));
+    expect(result.current.stackUpdates).toEqual({});
+  });
+
+  it('ignores an overlay response after switching nodes', async () => {
+    let release!: (value: unknown) => void;
+    const held = new Promise(resolve => { release = resolve; });
+    mockedFetch.mockImplementation((url: string) => Promise.resolve({
+      ok: true, status: 200,
+      json: () => url.includes('targetNodeId=2') ? held : Promise.resolve(
+        url.includes('/overlay-status')
+          ? { enabled: true, sidebarIndicators: false, scannerOwner: 'hub', capability: 'remote-image-inspect-v1' }
+          : { current: { hasUpdate: false, checkStatus: 'ok', lastError: null, checkedAt: 6 } },
+      ),
+    }));
+    const { result, rerender } = renderHook(({ id }) => useImageUpdates(id, true), { initialProps: { id: 2 } });
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/image-updates/overlay-status?targetNodeId=2', { nodeId: null }));
+    rerender({ id: 3 });
+    await waitFor(() => expect(result.current.stackUpdates.current).toBeDefined());
+    await act(async () => release({ enabled: false, sidebarIndicators: true, scannerOwner: 'hub', capability: 'remote-image-inspect-v1' }));
+    expect(result.current.checksEnabled).toBe(true);
+    expect(result.current.sidebarIndicators).toBe(false);
+    expect(mockedFetch).not.toHaveBeenCalledWith('/image-updates/detail', { nodeId: 2 });
+  });
+
   it('refreshes when SENCHO_SETTINGS_CHANGED includes image_update_checks_enabled', async () => {
     let statusCalls = 0;
     mockedFetch.mockImplementation((url: string) => {

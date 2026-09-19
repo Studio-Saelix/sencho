@@ -85,6 +85,48 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('BlueprintService remote deploy', () => {
+    it.each(['verified', 'failed', 'mixed'] as const)('preserves apply success after %s verification without retrying', async mode => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+
+        let release!: () => void;
+        const recheck = vi.fn(() => new Promise<{ warning: null }>((resolve, reject) => {
+            release = () => mode === 'failed' ? reject(new Error('verification offline')) : resolve({ warning: null });
+        }));
+        vi.doMock('../services/RemoteImageUpdateService', () => ({
+            RemoteImageUpdateService: { getInstance: () => ({ recheckRemoteStack: recheck }) },
+        }));
+        const { OFFLINE_META } = await import('../services/CapabilityRegistry');
+        vi.spyOn(NodeRegistry.getInstance(), 'getNode').mockReturnValue(nodeObj);
+        vi.spyOn(NodeRegistry.getInstance(), 'probeRemoteMeta').mockResolvedValue({
+            kind: 'ok', meta: { ...OFFLINE_META, online: true, capabilities: mode === 'mixed' ? [] : ['remote-image-inspect-v1'] },
+        });
+
+        vi.spyOn(axios, 'get').mockResolvedValue({ status: 200, data: [] });
+        vi.spyOn(axios, 'put').mockResolvedValue({ status: 200, data: {} });
+        const postSpy = vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: { deployed: true } });
+
+        let settled = false;
+        const outcome = BlueprintService.getInstance().deployToNode(bpObj, nodeObj)
+            .then(result => { settled = true; return result; });
+        if (mode !== 'mixed') {
+            await vi.waitFor(() => expect(recheck).toHaveBeenCalledWith(node.id, bpObj.name, expect.any(AbortSignal)));
+            expect(settled).toBe(false);
+            release();
+        }
+        const result = await outcome;
+        expect(recheck).toHaveBeenCalledTimes(mode === 'mixed' ? 0 : 1);
+        vi.doUnmock('../services/RemoteImageUpdateService');
+
+        expect(result.status).toBe('active');
+        expect(postSpy).toHaveBeenCalledTimes(1);
+        expect(postSpy.mock.calls[0][0]).toMatch(/\/api\/blueprints\/apply-local$/);
+        const dep = DatabaseService.getInstance().getDeployment(bp.id, node.id);
+        expect(dep?.status).toBe('active');
+    });
+
     it('applies atomically via the remote apply-local endpoint in a single call', async () => {
         const node = seedRemoteNode();
         const bp = seedBlueprint([node.id]);

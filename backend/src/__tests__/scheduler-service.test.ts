@@ -21,6 +21,8 @@ const {
   mockCheckImage, mockRecheckStack,
   mockDispatchAlert, mockBroadcastEvent,
   mockGetProxyTarget,
+  mockProbeRemoteMeta,
+  mockRecheckRemoteStack,
   mockIsTrivyAvailable,
   mockScanAllNodeImages,
   mockDeleteScheduledTask,
@@ -64,6 +66,8 @@ const {
   mockDispatchAlert: vi.fn().mockResolvedValue({ persisted: true }),
   mockBroadcastEvent: vi.fn(),
   mockGetProxyTarget: vi.fn().mockReturnValue(null),
+  mockProbeRemoteMeta: vi.fn().mockResolvedValue({ kind: 'no_target' }),
+  mockRecheckRemoteStack: vi.fn().mockResolvedValue({ warning: null }),
   mockIsTrivyAvailable: vi.fn().mockReturnValue(true),
   mockScanAllNodeImages: vi.fn().mockResolvedValue({
     scanned: 0,
@@ -90,6 +94,7 @@ vi.mock('../services/DatabaseService', () => ({
       updateScheduledTask: mockUpdateScheduledTask,
       cleanupOldTaskRuns: mockCleanupOldTaskRuns,
       getScheduledTask: mockGetScheduledTask,
+      getUserById: (id: number) => id === 1 ? { id: 1, username: 'admin', role: 'admin' } : undefined,
       getNodes: mockGetNodes,
       getNode: mockGetNode,
       getGlobalSettings: mockGetGlobalSettings,
@@ -213,6 +218,7 @@ vi.mock('../services/NodeRegistry', () => ({
       getDefaultNodeId: () => 1,
       getNode: mockGetNode,
       getProxyTarget: mockGetProxyTarget,
+      probeRemoteMeta: mockProbeRemoteMeta,
     }),
   },
 }));
@@ -242,6 +248,12 @@ vi.mock('../helpers/registryDeliveryOutbound', async (importOriginal) => {
     ),
   };
 });
+
+vi.mock('../services/RemoteImageUpdateService', () => ({
+  RemoteImageUpdateService: {
+    getInstance: () => ({ recheckRemoteStack: mockRecheckRemoteStack }),
+  },
+}));
 
 import { SchedulerService } from '../services/SchedulerService';
 import { StackOpLockService } from '../services/StackOpLockService';
@@ -435,7 +447,7 @@ describe('SchedulerService - concurrent task prevention', () => {
       last_status: null,
     });
 
-    await svc.triggerTask(99);
+    await svc.triggerTask(99, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect((svc as any).runningTasks.has(99)).toBe(false);
   });
@@ -454,7 +466,7 @@ describe('SchedulerService - concurrent task prevention', () => {
       last_status: null,
     });
 
-    await svc.triggerTask(100);
+    await svc.triggerTask(100, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect((svc as any).runningTasks.has(100)).toBe(false);
     // Error should have been recorded
@@ -472,7 +484,7 @@ describe('SchedulerService - triggerTask', () => {
     mockGetScheduledTask.mockReturnValue(undefined);
 
     const svc = SchedulerService.getInstance();
-    await expect(svc.triggerTask(999)).rejects.toThrow('Task not found');
+    await expect(svc.triggerTask(999, { userId: 1, username: 'admin', role: 'admin' } as const)).rejects.toThrow('Task not found');
   });
 
   it('throws when task is already running', async () => {
@@ -481,7 +493,7 @@ describe('SchedulerService - triggerTask', () => {
     const svc = SchedulerService.getInstance();
     (svc as any).runningTasks.add(50);
 
-    await expect(svc.triggerTask(50)).rejects.toThrow('already running');
+    await expect(svc.triggerTask(50, { userId: 1, username: 'admin', role: 'admin' } as const)).rejects.toThrow('already running');
   });
 
   it('sets triggered_by to manual', async () => {
@@ -499,7 +511,7 @@ describe('SchedulerService - triggerTask', () => {
     mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Service: 'web' }]);
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(55);
+    await svc.triggerTask(55, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockCreateScheduledTaskRun).toHaveBeenCalledWith(
       expect.objectContaining({ triggered_by: 'manual' })
@@ -528,7 +540,7 @@ describe('SchedulerService - executeRestart', () => {
     ]);
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(60);
+    await svc.triggerTask(60, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockRestartContainer).toHaveBeenCalledTimes(2);
   });
@@ -552,7 +564,7 @@ describe('SchedulerService - executeRestart', () => {
     ]);
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(61);
+    await svc.triggerTask(61, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockRestartContainer).toHaveBeenCalledTimes(1);
     expect(mockRestartContainer).toHaveBeenCalledWith('c1');
@@ -573,7 +585,7 @@ describe('SchedulerService - executeRestart', () => {
     mockGetContainersByStack.mockResolvedValue([]);
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(62);
+    await svc.triggerTask(62, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       expect.any(Number),
@@ -603,7 +615,7 @@ describe('SchedulerService - executeRestart', () => {
     });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(63);
+    await svc.triggerTask(63, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockFindContainerByName).toHaveBeenCalledWith('watchtower');
     expect(mockRestartContainer).toHaveBeenCalledWith('abc123deadbeef');
@@ -632,7 +644,7 @@ describe('SchedulerService - executeRestart', () => {
     mockFindContainerByName.mockResolvedValue(null);
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(64);
+    await svc.triggerTask(64, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       expect.any(Number),
@@ -673,8 +685,8 @@ describe('SchedulerService - executeRestart', () => {
       });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(65);
-    await svc.triggerTask(65);
+    await svc.triggerTask(65, { userId: 1, username: 'admin', role: 'admin' } as const);
+    await svc.triggerTask(65, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockRestartContainer).toHaveBeenNthCalledWith(1, 'old-id-111');
     expect(mockRestartContainer).toHaveBeenNthCalledWith(2, 'new-id-222');
@@ -697,7 +709,7 @@ describe('SchedulerService - executePrune', () => {
     });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(70);
+    await svc.triggerTask(70, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     // Should prune all 4 targets
     expect(mockPruneSystem).toHaveBeenCalledTimes(4);
@@ -717,7 +729,7 @@ describe('SchedulerService - executePrune', () => {
     });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(71);
+    await svc.triggerTask(71, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockPruneSystem).toHaveBeenCalledTimes(2);
     expect(mockPruneSystem).toHaveBeenCalledWith('images', undefined, expect.any(Function));
@@ -739,7 +751,7 @@ describe('SchedulerService - executePrune', () => {
     });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(72);
+    await svc.triggerTask(72, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockPruneSystem).toHaveBeenCalledWith('containers', 'env=staging', expect.any(Function));
   });
@@ -759,7 +771,7 @@ describe('SchedulerService - executePrune', () => {
     mockPruneSystem.mockRejectedValueOnce(new Error('docker prune failed'));
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(74);
+    await svc.triggerTask(74, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       expect.any(Number),
@@ -788,7 +800,7 @@ describe('SchedulerService - executePrune', () => {
     mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(73);
+    await svc.triggerTask(73, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockPruneSystem).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
@@ -804,6 +816,35 @@ describe('SchedulerService - executePrune', () => {
 // ── executeUpdate ──────────────────────────────────────────────────────
 
 describe('SchedulerService - executeUpdate', () => {
+  it('rejects a missing manual actor even when the resolved roster is empty', async () => {
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('update', { target_id: '*' }));
+    mockGetStacks.mockResolvedValue([]);
+
+    await SchedulerService.getInstance().triggerTask(300);
+
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({
+      status: 'failure', error: 'Scheduled update caller no longer exists.',
+    }));
+    expect(mockUpdateStack).not.toHaveBeenCalled();
+    expect(mockCheckImage).not.toHaveBeenCalled();
+  });
+
+  it('authorizes the complete resolved roster before any stack mutation', async () => {
+    mockGetStacks.mockResolvedValue(['allowed', 'denied']);
+    const authorizeAll = vi.fn((_nodeId: number, stacks: readonly string[]) => {
+      if (stacks.includes('denied')) throw new Error('Roster denied');
+    });
+
+    await expect(SchedulerService.getInstance()['executeUpdate'](
+      makeLifecycleTask('update', { target_id: '*' }), authorizeAll,
+    )).rejects.toThrow('Roster denied');
+
+    expect(authorizeAll).toHaveBeenCalledWith(1, ['allowed', 'denied']);
+    expect(mockGetContainersByStack).not.toHaveBeenCalled();
+    expect(mockUpdateStack).not.toHaveBeenCalled();
+    expect(mockCheckImage).not.toHaveBeenCalled();
+  });
+
   it('updates stack when image update available', async () => {
     mockGetScheduledTask.mockReturnValue({
       id: 80,
@@ -822,7 +863,7 @@ describe('SchedulerService - executeUpdate', () => {
     mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: true }); // Update available
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(80);
+    await svc.triggerTask(80, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, true);
     expect(mockRecheckStack).toHaveBeenCalledWith(1, 'web-app');
@@ -855,7 +896,7 @@ describe('SchedulerService - executeUpdate', () => {
       .mockResolvedValueOnce({ hasUpdate: true, digestUpdate: true, tagUpdate: false })
       .mockResolvedValueOnce({ hasUpdate: false, error: 'registry timeout', checkStatus: 'failed' });
 
-    await SchedulerService.getInstance().triggerTask(186);
+    await SchedulerService.getInstance().triggerTask(186, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateStack).not.toHaveBeenCalled();
     expect(mockRecheckStack).not.toHaveBeenCalled();
@@ -887,7 +928,7 @@ describe('SchedulerService - executeUpdate', () => {
     mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: true });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(82);
+    await svc.triggerTask(82, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, true);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
@@ -922,7 +963,7 @@ describe('SchedulerService - executeUpdate', () => {
       mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }]);
       mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: true });
 
-      await SchedulerService.getInstance().triggerTask(83);
+      await SchedulerService.getInstance().triggerTask(83, { userId: 1, username: 'admin', role: 'admin' } as const);
 
       expect(beginSpy).toHaveBeenCalledWith(1, 'web-app', 'update', 'system:scheduler', { deployedGenerationId: null });
       expect(mockRecheckStack).toHaveBeenCalledWith(1, 'web-app');
@@ -950,7 +991,7 @@ describe('SchedulerService - executeUpdate', () => {
     mockCheckImage.mockResolvedValue({ hasUpdate: false }); // No update
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(81);
+    await svc.triggerTask(81, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateStack).not.toHaveBeenCalled();
   });
@@ -975,7 +1016,7 @@ describe('SchedulerService - executeUpdate', () => {
     mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: false, tagUpdate: true });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(84);
+    await svc.triggerTask(84, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateStack).not.toHaveBeenCalled();
     expect(mockClearStackUpdateStatus).not.toHaveBeenCalled();
@@ -1013,7 +1054,7 @@ describe('SchedulerService - executeUpdate', () => {
     mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: true });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(82);
+    await svc.triggerTask(82, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateStack).toHaveBeenCalledTimes(2);
   });
@@ -1036,7 +1077,7 @@ describe('SchedulerService - executeUpdate', () => {
     mockCheckImage.mockResolvedValue({ hasUpdate: false, error: 'Registry unreachable for registry-1.docker.io/library/nginx:latest' });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(83);
+    await svc.triggerTask(83, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     // Should succeed (not throw) but output should contain warning
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
@@ -1071,7 +1112,7 @@ describe('SchedulerService - executeUpdate', () => {
       .mockResolvedValueOnce({ hasUpdate: false, error: 'Registry unreachable' });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(84);
+    await svc.triggerTask(84, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
@@ -1097,7 +1138,7 @@ describe('SchedulerService - executeUpdate', () => {
     mockGetContainersByStack.mockResolvedValue([]);
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(85);
+    await svc.triggerTask(85, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     // Targeted (non-wildcard) stack with 0 containers should produce a WARNING
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
@@ -1129,7 +1170,7 @@ describe('SchedulerService - executeUpdate', () => {
     mockCheckImage.mockResolvedValue({ hasUpdate: false });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(86);
+    await svc.triggerTask(86, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     // Empty stack in wildcard mode should say "skipped", not "WARNING"
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
@@ -1163,7 +1204,7 @@ describe('SchedulerService - executeUpdate', () => {
     });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(88);
+    await svc.triggerTask(88, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     // Gate blocked it: the stack must not be updated.
     expect(mockUpdateStack).not.toHaveBeenCalled();
@@ -1199,7 +1240,7 @@ describe('SchedulerService - executeUpdate', () => {
     });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(89);
+    await svc.triggerTask(89, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     // Gate blocked it: the stack must not start.
     expect(mockDeployStack).not.toHaveBeenCalled();
@@ -1236,7 +1277,7 @@ describe('SchedulerService - executeUpdate', () => {
     mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: true });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(87);
+    await svc.triggerTask(87, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateStack).toHaveBeenCalledTimes(3);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
@@ -1261,7 +1302,7 @@ describe('SchedulerService - executeUpdate', () => {
     mockGetStacks.mockResolvedValue([]);
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(89);
+    await svc.triggerTask(89, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateStack).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
@@ -1291,7 +1332,7 @@ describe('SchedulerService - error handling', () => {
     });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(90);
+    await svc.triggerTask(90, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateScheduledTask).toHaveBeenCalledWith(
       90,
@@ -1313,7 +1354,7 @@ describe('SchedulerService - error handling', () => {
     });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(91);
+    await svc.triggerTask(91, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockDispatchAlert).toHaveBeenCalledWith('error', 'system', expect.stringContaining('failed'), { stackName: undefined, actor: 'system:scheduler' });
   });
@@ -1333,7 +1374,7 @@ describe('SchedulerService - error handling', () => {
     mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Service: 'web' }]);
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(92);
+    await svc.triggerTask(92, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'system', expect.stringContaining('recovered'), { stackName: 'my-stack', actor: 'system:scheduler' });
   });
@@ -1395,7 +1436,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
     mockScanAllNodeImages.mockResolvedValue(scanResult({ scanned: 3, skipped: 1 }));
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(200);
+    await svc.triggerTask(200, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockDispatchAlert).toHaveBeenCalledWith(
       'info',
@@ -1416,7 +1457,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
     mockScanAllNodeImages.mockResolvedValue(scanResult({ scanned: 5, failed: 2 }));
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(201);
+    await svc.triggerTask(201, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockDispatchAlert).toHaveBeenCalledWith(
       'warning',
@@ -1431,7 +1472,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
     mockScanAllNodeImages.mockResolvedValue(scanResult({ scanned: 1 }));
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(202);
+    await svc.triggerTask(202, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockDispatchAlert).toHaveBeenCalledWith(
       'info',
@@ -1450,7 +1491,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
     mockScanAllNodeImages.mockResolvedValue(scanResult({ scanned: 2 }));
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(204);
+    await svc.triggerTask(204, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
     expect(mockDispatchAlert).toHaveBeenCalledWith(
@@ -1476,7 +1517,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
     mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Service: 'web' }]);
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(203);
+    await svc.triggerTask(203, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockDispatchAlert).not.toHaveBeenCalled();
   });
@@ -1486,7 +1527,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
     mockIsTrivyAvailable.mockReturnValueOnce(false);
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(205);
+    await svc.triggerTask(205, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockDispatchAlert).toHaveBeenCalledWith(
       'error',
@@ -1503,7 +1544,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
       .mockReturnValueOnce({ id: 2, name: 'remote', type: 'remote', status: 'online' });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(210);
+    await svc.triggerTask(210, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockScanAllNodeImages).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
@@ -1522,7 +1563,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
     );
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(206);
+    await svc.triggerTask(206, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     const message = mockDispatchAlert.mock.calls[0][2] as string;
     expect(message).toContain('2 critical');
@@ -1535,7 +1576,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
     mockScanAllNodeImages.mockResolvedValue(scanResult());
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(207);
+    await svc.triggerTask(207, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockDispatchAlert).toHaveBeenCalledWith(
       'info',
@@ -1550,7 +1591,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
     mockScanAllNodeImages.mockResolvedValue(scanResult({ skipped: 12 }));
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(208);
+    await svc.triggerTask(208, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockDispatchAlert).toHaveBeenCalledWith(
       'info',
@@ -1571,7 +1612,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
     }));
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(211);
+    await svc.triggerTask(211, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     const message = mockDispatchAlert.mock.calls[0][2] as string;
     expect(message).toContain('Scan limited after 100 of 250 image(s)');
@@ -1584,7 +1625,7 @@ describe('SchedulerService - scheduled scan notifications', () => {
     mockDispatchAlert.mockRejectedValueOnce(new Error('webhook down'));
 
     const svc = SchedulerService.getInstance();
-    await expect(svc.triggerTask(209)).resolves.not.toThrow();
+    await expect(svc.triggerTask(209, { userId: 1, username: 'admin', role: 'admin' } as const)).resolves.not.toThrow();
 
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       expect.any(Number),
@@ -1679,7 +1720,7 @@ describe('SchedulerService - invalid cron at execution time', () => {
     });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(95);
+    await svc.triggerTask(95, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateScheduledTask).toHaveBeenCalledWith(
       95,
@@ -1720,7 +1761,7 @@ describe('SchedulerService - executeSnapshot', () => {
     mockGetStackContent.mockResolvedValue('version: "3"\nservices:\n  web:\n    image: nginx');
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(75);
+    await svc.triggerTask(75, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockCreateSnapshot).toHaveBeenCalledWith(
       expect.stringContaining('nightly-snapshot'),
@@ -1754,7 +1795,7 @@ describe('SchedulerService - executeSnapshot', () => {
     mockGetStacks.mockResolvedValue([]);
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(76);
+    await svc.triggerTask(76, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockCreateSnapshot).toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
@@ -1780,7 +1821,7 @@ describe('SchedulerService - executeSnapshot', () => {
     mockGetGlobalSettings.mockReturnValue({ snapshot_documentation: '1' });
     mockGetStackDossier.mockReturnValue({ purpose: 'documented', owner: '', access_urls: '', static_ip: '', vlan: '', firewall_notes: '', reverse_proxy_notes: '', backup_notes: '', upgrade_notes: '', recovery_notes: '', custom_notes: '' });
 
-    await SchedulerService.getInstance().triggerTask(77);
+    await SchedulerService.getInstance().triggerTask(77, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     const docArg = mockCreateSnapshot.mock.calls.at(-1)?.[6] as string;
     expect(docArg).toBeTruthy();
@@ -1821,7 +1862,7 @@ describe('SchedulerService - executeUpdateRemote', () => {
     });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(88);
+    await svc.triggerTask(88, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockFetch).toHaveBeenCalledWith(
       'http://remote:1852/api/auto-update/execute',
@@ -1867,7 +1908,7 @@ describe('SchedulerService - executeUpdateRemote', () => {
     });
 
     const svc = SchedulerService.getInstance();
-    await svc.triggerTask(89);
+    await svc.triggerTask(89, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
@@ -1907,21 +1948,21 @@ function makeLifecycleTask(action: ScheduledTask['action'], overrides: Partial<S
 describe('SchedulerService - lifecycle actions', () => {
   it('auto_stop calls runCommand with "stop"', async () => {
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop'));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockRunCommand).toHaveBeenCalledWith('my-stack', 'stop');
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
   });
 
   it('auto_down calls runCommand with "down"', async () => {
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_down'));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockRunCommand).toHaveBeenCalledWith('my-stack', 'down');
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
   });
 
   it('auto_start calls deployStack', async () => {
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_start'));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockDeployStack).toHaveBeenCalledWith('my-stack', undefined, undefined, {
       source: 'scheduler',
       actor: 'system:scheduler',
@@ -1931,7 +1972,7 @@ describe('SchedulerService - lifecycle actions', () => {
 
   it('auto_backup captures a current recovery generation', async () => {
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_backup'));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockCaptureCurrentBackup).toHaveBeenCalledWith({
       nodeId: 1,
       stackName: 'my-stack',
@@ -1943,14 +1984,14 @@ describe('SchedulerService - lifecycle actions', () => {
 
   it('auto_stop records failure when target_id is missing', async () => {
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop', { target_id: null }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockRunCommand).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'failure' }));
   });
 
   it('auto_backup records failure when node_id is missing', async () => {
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_backup', { node_id: null }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockCaptureCurrentBackup).not.toHaveBeenCalled();
     expect(mockBackupStackFiles).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'failure' }));
@@ -1961,7 +2002,7 @@ describe('SchedulerService - lifecycle actions', () => {
     // rather than race, and surface as a failed run instead of a silent success.
     StackOpLockService.getInstance().tryAcquire(1, 'my-stack', 'deploy', 'admin');
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop'));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockRunCommand).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'failure' }));
     expect(mockUpdateScheduledTask).toHaveBeenCalledWith(300, expect.objectContaining({ last_status: 'failure' }));
@@ -1983,6 +2024,10 @@ describe('SchedulerService - lifecycle actions', () => {
 // ── Lifecycle remote proxy ──────────────────────────────────────────────
 
 describe('SchedulerService - lifecycle remote proxy', () => {
+  beforeEach(() => {
+    mockProbeRemoteMeta.mockResolvedValue({ kind: 'no_target' });
+    mockRecheckRemoteStack.mockReset().mockResolvedValue({ warning: null });
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -1995,7 +2040,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
   function stubRemote(okBody: unknown = { success: true }) {
     mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
     mockGetProxyTarget.mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tkn' });
-    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => okBody });
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => okBody });
     vi.stubGlobal('fetch', mockFetch);
     return mockFetch;
   }
@@ -2003,7 +2048,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
   it('auto_stop proxies to the remote stop endpoint instead of running locally', async () => {
     const fetchMock = stubRemote();
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop', { node_id: 2 }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(fetchMock).toHaveBeenCalledWith(
       'http://remote:1852/api/stacks/my-stack/stop',
       expect.objectContaining({ method: 'POST', headers: remoteHeaders }),
@@ -2015,7 +2060,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
   it('auto_down proxies to the remote down endpoint', async () => {
     const fetchMock = stubRemote();
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_down', { node_id: 2 }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(fetchMock).toHaveBeenCalledWith(
       'http://remote:1852/api/stacks/my-stack/down',
       expect.objectContaining({ method: 'POST' }),
@@ -2026,7 +2071,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
   it('auto_start proxies to the remote deploy endpoint and skips the hub policy gate', async () => {
     const fetchMock = stubRemote();
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_start', { node_id: 2 }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(fetchMock).toHaveBeenCalledWith(
       'http://remote:1852/api/stacks/my-stack/deploy',
       expect.objectContaining({ method: 'POST' }),
@@ -2035,10 +2080,62 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     expect(mockEnforcePolicyPreDeploy).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])('auto_start awaits verification without retrying (verification failure: %s)', async verificationFails => {
+    const fetchMock = stubRemote({ success: true, applied: true, healthGateId: 'health' });
+    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
+    const { OFFLINE_META } = await import('../services/CapabilityRegistry');
+    mockProbeRemoteMeta.mockResolvedValue({
+      kind: 'ok', meta: { ...OFFLINE_META, capabilities: ['remote-image-inspect-v1'] },
+    });
+    let release!: () => void;
+    mockRecheckRemoteStack.mockImplementationOnce(() => new Promise<{ warning: null }>((resolve, reject) => {
+      release = () => verificationFails ? reject(new Error('verification offline')) : resolve({ warning: null });
+    }));
+
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_start', { node_id: 2 }));
+    const run = SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
+    await vi.waitFor(() => expect(mockRecheckRemoteStack).toHaveBeenCalledWith(2, 'my-stack', expect.any(AbortSignal)));
+    expect(mockUpdateScheduledTaskRun).not.toHaveBeenCalled();
+    release();
+    await run;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
+  });
+
+  it('preserves successful deploy for a mixed-version target without hub recheck', async () => {
+    const fetchMock = stubRemote({ success: true, healthGateId: 'health', recheckWarning: 'target warning' });
+    const { OFFLINE_META } = await import('../services/CapabilityRegistry');
+    mockProbeRemoteMeta.mockResolvedValue({ kind: 'ok', meta: { ...OFFLINE_META, capabilities: [] } });
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_start', { node_id: 2 }));
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' });
+    expect(mockRecheckRemoteStack).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
+  });
+
+  it.each(['auto_stop', 'auto_down', 'auto_backup', 'restart'] as const)('does not verify %s', async action => {
+    const fetchMock = stubRemote();
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask(action, { node_id: 2 }));
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(mockProbeRemoteMeta).not.toHaveBeenCalled();
+    expect(mockRecheckRemoteStack).not.toHaveBeenCalled();
+  });
+
+  it.each([{ success: false }, { applied: false }, { status: 'skipped' }])('does not verify a non-applied deploy response %j', async payload => {
+    vi.mocked(prepareOutboundRegistryDeliveryBody).mockResolvedValueOnce({ ok: true, body: {}, augmented: false });
+    const fetchMock = stubRemote(payload);
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_start', { node_id: 2 }));
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(mockProbeRemoteMeta).not.toHaveBeenCalled();
+    expect(mockRecheckRemoteStack).not.toHaveBeenCalled();
+  });
+
   it('auto_backup proxies to the remote backup endpoint', async () => {
     const fetchMock = stubRemote();
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_backup', { node_id: 2 }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(fetchMock).toHaveBeenCalledWith(
       'http://remote:1852/api/stacks/my-stack/backup',
       expect.objectContaining({ method: 'POST' }),
@@ -2050,7 +2147,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
   it('restart (all services) proxies to the remote restart endpoint', async () => {
     const fetchMock = stubRemote();
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('restart', { node_id: 2 }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(fetchMock).toHaveBeenCalledWith(
       'http://remote:1852/api/stacks/my-stack/restart',
       expect.objectContaining({ method: 'POST' }),
@@ -2063,7 +2160,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     mockGetScheduledTask.mockReturnValue(
       makeLifecycleTask('restart', { node_id: 2, target_services: JSON.stringify(['api', 'worker']) }),
     );
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(fetchMock).toHaveBeenCalledWith(
       'http://remote:1852/api/stacks/my-stack/services/api/restart',
       expect.objectContaining({ method: 'POST' }),
@@ -2084,7 +2181,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
       json: async () => ({ error: 'Docker daemon is unreachable' }),
     }));
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop', { node_id: 2 }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
       expect.objectContaining({ status: 'failure', error: expect.stringContaining('Remote node "remote" (id=2): Docker daemon is unreachable') }),
@@ -2100,7 +2197,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
       json: async () => { throw new Error('not json'); },
     }));
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_down', { node_id: 2 }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
       expect.objectContaining({ status: 'failure', error: expect.stringContaining('Remote node "remote" (id=2): HTTP 502') }),
@@ -2113,7 +2210,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop', { node_id: 2 }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
@@ -2135,7 +2232,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop', { node_id: 2 }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
@@ -2158,7 +2255,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     mockGetScheduledTask.mockReturnValue(
       makeLifecycleTask('restart', { node_id: 2, target_services: JSON.stringify(['api', 'worker', 'cache']) }),
     );
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     // Third service is never reached after the second fails.
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const call = (mockUpdateScheduledTaskRun as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
@@ -2184,7 +2281,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
       error: 'Registry credentials unavailable for challenged image hosts',
     });
 
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     // The refusal is answered before any proxy fetch leaves the hub.
     expect(fetchMock).not.toHaveBeenCalled();
@@ -2209,7 +2306,7 @@ describe('SchedulerService - remote container proxy error context', () => {
     mockGetProxyTarget.mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tkn' });
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED')));
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop', { node_id: 2 }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
       expect.objectContaining({
@@ -2232,7 +2329,7 @@ describe('SchedulerService - remote container proxy error context', () => {
       target_type: 'container',
       target_services: null,
     });
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
       expect.objectContaining({
@@ -2261,7 +2358,7 @@ describe('SchedulerService - remote container proxy error context', () => {
       target_type: 'container',
       target_services: null,
     });
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[1][0]).toContain('/api/containers/ctrdeadbeef01/stop');
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
@@ -2281,7 +2378,7 @@ describe('SchedulerService - community tier runs lifecycle actions', () => {
   it('executes a lifecycle action and records success on the community tier', async () => {
     mockGetTier.mockReturnValue('community');
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop'));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockRunCommand).toHaveBeenCalled();
     expect(mockCreateScheduledTaskRun).toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
@@ -2296,7 +2393,7 @@ describe('SchedulerService - community tier runs lifecycle actions', () => {
 describe('SchedulerService - delete_after_run', () => {
   it('deletes task after successful run when delete_after_run is 1', async () => {
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_backup', { delete_after_run: 1 }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockDeleteScheduledTask).toHaveBeenCalledWith(300);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
   });
@@ -2304,14 +2401,14 @@ describe('SchedulerService - delete_after_run', () => {
   it('does not delete task when run fails even if delete_after_run is 1', async () => {
     mockCaptureCurrentBackup.mockRejectedValueOnce(new Error('disk full'));
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_backup', { delete_after_run: 1 }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockDeleteScheduledTask).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'failure' }));
   });
 
   it('does not delete task when delete_after_run is 0', async () => {
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_backup', { delete_after_run: 0 }));
-    await SchedulerService.getInstance().triggerTask(300);
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
     expect(mockDeleteScheduledTask).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTask).toHaveBeenCalledWith(300, expect.objectContaining({ last_status: 'success' }));
   });
@@ -2338,7 +2435,7 @@ describe('SchedulerService - node-neutral failure alerts', () => {
     mockGetScheduledTask.mockReturnValue(makeContainerTask({ id: 400, name: 'offline-local', node_id: 1 }));
     mockGetNode.mockReturnValue({ id: 1, name: 'Local', type: 'local', status: 'offline' });
 
-    await SchedulerService.getInstance().triggerTask(400);
+    await SchedulerService.getInstance().triggerTask(400, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockDispatchAlert).toHaveBeenCalledWith(
       'error',
@@ -2352,7 +2449,7 @@ describe('SchedulerService - node-neutral failure alerts', () => {
     mockGetScheduledTask.mockReturnValue(makeContainerTask({ id: 401, name: 'offline-remote', node_id: 2 }));
     mockGetNode.mockReturnValue({ id: 2, name: 'sencho-test-02', type: 'remote', status: 'offline' });
 
-    await SchedulerService.getInstance().triggerTask(401);
+    await SchedulerService.getInstance().triggerTask(401, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockDispatchAlert).toHaveBeenCalledWith(
       'error',
@@ -2367,7 +2464,7 @@ describe('SchedulerService - node-neutral failure alerts', () => {
     mockGetNode.mockReturnValue({ id: 1, name: 'Local', type: 'local', status: 'online' });
     mockFindContainerByName.mockResolvedValue(null);
 
-    await SchedulerService.getInstance().triggerTask(402);
+    await SchedulerService.getInstance().triggerTask(402, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockDispatchAlert).toHaveBeenCalledWith(
       'error',
@@ -2390,7 +2487,7 @@ describe('SchedulerService - node-neutral failure alerts', () => {
     });
     vi.stubGlobal('fetch', mockFetch);
 
-    await SchedulerService.getInstance().triggerTask(403);
+    await SchedulerService.getInstance().triggerTask(403, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockDispatchAlert).toHaveBeenCalledWith(
       'error',

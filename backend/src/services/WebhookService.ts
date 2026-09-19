@@ -14,6 +14,7 @@ import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
+import { awaitHubPostUpdateVerification } from './hubPostUpdateVerification';
 import {
     appendRegistryDeliveryCode,
     prepareOutboundRegistryDeliveryBody,
@@ -319,7 +320,26 @@ export class WebhookService {
             // accepted and rate-limited, not failed. Record it as a success with
             // the debounce note rather than failure noise.
             const skipped = payload.status === 'skipped';
-            this.recordExecution(webhookId, action, 'success', triggerSource, durationMs, skipped ? (payload.message ?? null) : null);
+            // Keep verification warnings separate from the successful mutation.
+            let note = skipped ? (payload.message ?? null) : null;
+            if (!skipped && (action === 'deploy' || action === 'pull' || action === 'git-pull')) {
+                const verification = await awaitHubPostUpdateVerification({
+                    nodeId,
+                    stack: stackName,
+                    targetResponse: { status: response.status, body: payload },
+                    caller: 'webhook',
+                    transport: {
+                        recheckRemoteStack: (id, stack, signal) =>
+                            import('./RemoteImageUpdateService').then(
+                                m => m.RemoteImageUpdateService.getInstance().recheckRemoteStack(id, stack, signal),
+                            ),
+                    },
+                });
+                if (verification.source === 'hub_authority' && verification.status !== 'verified') {
+                    note = verification.detail;
+                }
+            }
+            this.recordExecution(webhookId, action, 'success', triggerSource, durationMs, note);
             return { success: true, duration_ms: durationMs };
         } catch (err) {
             const durationMs = Date.now() - startTime;

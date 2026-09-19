@@ -4,6 +4,7 @@ import semver from 'semver';
 import si from 'systeminformation';
 import type Dockerode from 'dockerode';
 import { DatabaseService, type Node, type StackDossierFields } from '../services/DatabaseService';
+import { awaitHubPostUpdateVerification } from '../services/hubPostUpdateVerification';
 import { ControlIdentityMismatchError, FleetSyncService, StaleSyncPushError } from '../services/FleetSyncService';
 import { MAX_SYNC_ROWS, SYNC_ERROR_CODES } from '../services/fleetSyncConstants';
 import { FleetUpdateTrackerService, type UpdateTracker, type TerminalStatus, UPDATE_TIMEOUT_MS, UPDATE_TIMEOUT_MSG, TERMINAL_TTL_MS } from '../services/FleetUpdateTrackerService';
@@ -2877,6 +2878,26 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
     signal: AbortSignal.timeout(30000),
   }, ctx.trustedLoopback);
   if (!deployRes.ok) throw await remoteStackError('Failed to redeploy stack', deployRes);
+  // Verification does not change the already completed redeploy outcome.
+  const payload: unknown = await deployRes.json().catch((error: unknown) => {
+    console.warn('[FleetSnapshot] Could not read redeploy verification context:', error);
+    return { applied: false };
+  });
+  const verification = await awaitHubPostUpdateVerification({
+    nodeId: node.id,
+    stack: stackName,
+    targetResponse: { status: deployRes.status, body: payload },
+    caller: 'fleet',
+    transport: {
+      recheckRemoteStack: (id, stack, signal) =>
+        import('../services/RemoteImageUpdateService').then(
+          m => m.RemoteImageUpdateService.getInstance().recheckRemoteStack(id, stack, signal),
+        ),
+    },
+  });
+  if (verification.source === 'hub_authority' && verification.status !== 'verified') {
+    console.warn(`[FleetSnapshot] Redeploy completed; verification incomplete for "${stackName}" on node ${node.id}: ${verification.detail}`);
+  }
 }
 
 // Looks up the dossier notes a snapshot preserved for one stack, or undefined
@@ -2991,7 +3012,10 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
           notesRestored = true;
         } catch (e) {
           notesError = getErrorMessage(e, 'Failed to restore documentation notes');
-          console.error(`[Fleet Snapshot] Note restore failed for stack "${sanitizeForLog(stackName)}":`, notesError);
+          console.error(
+            `[Fleet Snapshot] Note restore failed for stack "${sanitizeForLog(stackName)}":`,
+            sanitizeForLog(notesError),
+          );
         }
       }
     }
@@ -3022,7 +3046,7 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       res.status(refusal.status).json({ error: getErrorMessage(error, 'Registry delivery refused'), code: refusal.code });
       return;
     }
-    console.error('[Fleet Snapshot] Restore error:', error);
+    console.error('[Fleet Snapshot] Restore error:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to restore stack from snapshot' });
   }
 });

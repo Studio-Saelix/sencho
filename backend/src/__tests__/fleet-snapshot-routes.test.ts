@@ -1183,6 +1183,46 @@ describe('Snapshot restore: recovery generation contract', () => {
         expect(StackUpdateRecoveryService.getInstance().getCurrent(LOCAL_NODE_ID, 'all-fail')).toBeUndefined();
     });
 
+    it.each(['verified', 'failed', 'mixed'] as const)('preserves snapshot redeploy success after %s verification without retrying', async mode => {
+        const remoteId = addRemoteNode(`remote-verify-${mode}`);
+        const id = insertSnapshot('restore-verify', [
+            { nodeId: remoteId, nodeName: 'remote-verify', stackName: 'verified-stack', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        stubRemoteProxy();
+        const { OFFLINE_META } = await import('../services/CapabilityRegistry');
+        vi.spyOn(NodeRegistry.getInstance(), 'getNode').mockReturnValue(DatabaseService.getInstance().getNode(remoteId));
+        vi.spyOn(NodeRegistry.getInstance(), 'probeRemoteMeta').mockResolvedValue({
+            kind: 'ok', meta: { ...OFFLINE_META, capabilities: mode === 'mixed' ? [] : ['remote-image-inspect-v1'] },
+        });
+        const outbound = await import('../helpers/registryDeliveryOutbound');
+        vi.mocked(outbound.prepareOutboundRegistryDeliveryBody).mockResolvedValueOnce({ ok: true, body: {}, augmented: false });
+        let release!: () => void;
+        const recheck = vi.fn(() => new Promise<{ warning: null }>((resolve, reject) => {
+            release = () => mode === 'failed' ? reject(new Error('verification offline')) : resolve({ warning: null });
+        }));
+        vi.doMock('../services/RemoteImageUpdateService', () => ({
+            RemoteImageUpdateService: { getInstance: () => ({ recheckRemoteStack: recheck }) },
+        }));
+        const fetchMock = vi.fn(async () => new Response(JSON.stringify({ success: true, healthId: 'health' }), { status: 200 }));
+        vi.stubGlobal('fetch', fetchMock);
+        let settled = false;
+        const pending = request(app).post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie).send({ nodeId: remoteId, stackName: 'verified-stack', redeploy: true })
+            .then(response => { settled = true; return response; });
+        if (mode !== 'mixed') {
+            await vi.waitFor(() => expect(recheck).toHaveBeenCalledWith(remoteId, 'verified-stack', expect.any(AbortSignal)));
+            expect(settled).toBe(false);
+            expect(fetchMock).toHaveBeenCalledTimes(2);
+            release();
+        }
+        const response = await pending;
+        expect(recheck).toHaveBeenCalledTimes(mode === 'mixed' ? 0 : 1);
+        expect(response.status).toBe(200);
+        expect(response.body.redeployed).toBe(true);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        vi.doUnmock('../services/RemoteImageUpdateService');
+    });
+
     it('restores a remote stack through one node-local apply request', async () => {
         const remoteId = addRemoteNode('remote-gen');
         const id = insertSnapshot('restore-gen-remote', [

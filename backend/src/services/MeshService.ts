@@ -6,6 +6,7 @@ import { EventEmitter } from 'events';
 import * as YAML from 'yaml';
 import { ComposeService } from './ComposeService';
 import { StackOpLockService } from './StackOpLockService';
+import { awaitHubPostUpdateVerification } from './hubPostUpdateVerification';
 import { DatabaseService, type NodeMode } from './DatabaseService';
 import DockerController from './DockerController';
 import { FileSystemService } from './FileSystemService';
@@ -2671,11 +2672,27 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             const body = await res.text().catch(() => '');
             throw new Error(`HTTP ${res.status} from node ${node.name}: ${body.slice(0, 256)}`);
         }
+        // Confirm the hub's authoritative view before declaring success: the
+        // mutation already happened, so a verification problem must not enter
+        // the fire-and-forget failure branch and trigger another redeploy.
+        const payload = await res.json().catch(() => ({}));
+        const verification = await awaitHubPostUpdateVerification({
+            nodeId,
+            stack: stackName,
+            targetResponse: { status: res.status, body: payload },
+            caller: 'mesh',
+            transport: { recheckRemoteStack: (id, stack, signal) =>
+                import('./RemoteImageUpdateService').then(m => m.RemoteImageUpdateService.getInstance().recheckRemoteStack(id, stack, signal)) },
+        });
+        // Mesh redeploy success is the mutation result alone. The hub recheck
+        // status rides along as an activity detail so a failed verification
+        // can never flip this fire-and-forget path into the failure branch
+        // and queue a second redeploy.
         this.logActivity({
             source: 'mesh', level: 'info', type: 'mesh.enable',
             nodeId,
             message: `mesh redeploy ok for ${stackName}`,
-            details: { actor, stackName },
+            details: { actor, stackName, verification: verification.status },
         });
     }
 

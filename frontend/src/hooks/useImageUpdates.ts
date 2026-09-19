@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { apiFetch } from '@/lib/api';
 import { markMilestone } from '@/lib/hydrationTiming';
 import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
-import type { ImageUpdateStatus, StackUpdateInfo } from '@/types/imageUpdates';
+import type { ImageUpdateOverlayStatus, ImageUpdateStatus, StackUpdateInfo } from '@/types/imageUpdates';
 
 const IMAGE_UPDATE_POLL_MS = 5 * 60 * 1000;
 
@@ -17,7 +17,7 @@ const IMAGE_UPDATE_POLL_MS = 5 * 60 * 1000;
  * pinned to the captured node so a mid-flight node switch never
  * writes stale data.
  */
-export function useImageUpdates(activeNodeId: number | undefined) {
+export function useImageUpdates(activeNodeId: number | undefined, useOverlayStatus = false) {
   const [stackUpdates, setStackUpdates] = useState<Record<string, StackUpdateInfo>>({});
   const [sidebarIndicators, setSidebarIndicators] = useState(false);
   const [checksEnabled, setChecksEnabled] = useState(true);
@@ -44,18 +44,23 @@ export function useImageUpdates(activeNodeId: number | undefined) {
     // Self-contained status helper: owns fetch, parse, and state write.
     // A failure here never blocks the detail path below.
     let detectionOn = true;
+    let retainObservations = useOverlayStatus;
     const fetchStatus = async (): Promise<void> => {
       try {
-        const res = await apiFetch('/image-updates/status', { nodeId: targetNodeId });
+        const res = useOverlayStatus && targetNodeId !== null
+          ? await apiFetch(`/image-updates/overlay-status?targetNodeId=${targetNodeId}`, { nodeId: null })
+          : await apiFetch('/image-updates/status', { nodeId: targetNodeId });
         if (genRef.current !== gen) return;
         if (res.ok) {
-          const data = await res.json() as ImageUpdateStatus;
+          const data = await res.json() as ImageUpdateStatus | ImageUpdateOverlayStatus;
           if (genRef.current !== gen) return;
+          retainObservations = 'scannerOwner' in data && data.scannerOwner === 'hub'
+            && data.capability === 'remote-image-inspect-v1';
           setSidebarIndicators(data.sidebarIndicators ?? false);
           // Older remotes omit enabled; treat absence as on for badge logic.
           detectionOn = data.enabled !== false;
           setChecksEnabled(detectionOn);
-          if (!detectionOn) {
+          if (!detectionOn && !retainObservations) {
             setStackUpdates({});
           }
         } else {
@@ -72,14 +77,14 @@ export function useImageUpdates(activeNodeId: number | undefined) {
       try {
         const res = await apiFetch('/image-updates/detail', { nodeId: targetNodeId });
         if (genRef.current !== gen) return;
-        if (!detectionOn) {
+        if (!detectionOn && !retainObservations) {
           setStackUpdates({});
           return;
         }
         if (res.ok) {
           const data = await res.json() as Record<string, StackUpdateInfo>;
           if (genRef.current !== gen) return;
-          if (!detectionOn) {
+          if (!detectionOn && !retainObservations) {
             setStackUpdates({});
             return;
           }
@@ -124,7 +129,7 @@ export function useImageUpdates(activeNodeId: number | undefined) {
       imageUpdatesReadyNodeRef.current = targetNodeId;
       markMilestone('image_updates_ready');
     }
-  }, [activeNodeId]);
+  }, [activeNodeId, useOverlayStatus]);
 
   // Pin the interval to the latest closure without retriggering it on
   // every render the way putting `refresh` into the deps array would.
@@ -144,7 +149,7 @@ export function useImageUpdates(activeNodeId: number | undefined) {
     void refreshRef.current();
     const id = setInterval(() => { void refreshRef.current(); }, IMAGE_UPDATE_POLL_MS);
     return () => clearInterval(id);
-  }, [activeNodeId]);
+  }, [activeNodeId, useOverlayStatus]);
 
   // React to settings changes so toggling sidebar indicators or checks-enabled
   // propagates immediately without waiting for the 5-minute poll.

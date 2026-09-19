@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useId, useRef } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Input } from '@/components/ui/input';
 import { TogglePill } from '@/components/ui/toggle-pill';
@@ -21,7 +21,8 @@ import { getCronDescription, getCronFieldError } from '@/lib/scheduling';
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import { useMastheadStats } from './MastheadStatsContext';
-import type { ImageUpdateStatus } from '@/types/imageUpdates';
+import type { ImageUpdateOverlayStatus, ImageUpdateStatus } from '@/types/imageUpdates';
+import { REMOTE_IMAGE_INSPECT_V1_CAPABILITY } from '@/lib/capabilities';
 
 type ImageCheckMode = 'interval' | 'cron';
 
@@ -45,7 +46,47 @@ function SectionSkeleton() {
 }
 
 export function UpdatesSection() {
-    const { activeNode } = useNodes();
+    const { activeNode, activeNodeMeta } = useNodes();
+    const nodeId = activeNode?.id ?? null;
+    const usesHubScanner = activeNode?.type === 'remote'
+        && (activeNodeMeta?.capabilities.includes(REMOTE_IMAGE_INSPECT_V1_CAPABILITY) ?? false);
+    return <ScannerGroup key={`${nodeId}:${usesHubScanner}`} nodeId={nodeId} usesHubScanner={usesHubScanner} />;
+}
+
+function ScannerGroup({ nodeId, usesHubScanner }: { nodeId: number | null; usesHubScanner: boolean }) {
+    const [hubOwned, setHubOwned] = useState(usesHubScanner);
+    const useTargetScanner = useCallback(() => setHubOwned(false), []);
+    return hubOwned ? (
+        <div className="flex flex-col gap-10">
+            <ScannerControls key="hub" nodeId={null} overlayTargetNodeId={nodeId} onTargetOwner={useTargetScanner} />
+            <ScannerControls key="target" nodeId={nodeId} reportMasthead={false} />
+        </div>
+    ) : <ScannerControls key="node" nodeId={nodeId} />;
+}
+
+function ScannerMasthead({ status }: { status: ImageUpdateStatus | null }) {
+    useMastheadStats(status ? [{
+        label: status.enabled === false ? 'CHECKS' : 'INTERVAL',
+        value: status.enabled === false ? 'Off' : formatIntervalLabel(status.intervalMinutes),
+        tone: 'value',
+    }] : null);
+    return null;
+}
+
+function ScannerControls({ nodeId, overlayTargetNodeId, reportMasthead = true, onTargetOwner }: {
+    nodeId: number | null;
+    overlayTargetNodeId?: number | null;
+    reportMasthead?: boolean;
+    onTargetOwner?: () => void;
+}) {
+    const controlId = useId();
+    const mounted = useRef(false);
+    useEffect(() => {
+        mounted.current = true;
+        return () => { mounted.current = false; };
+    }, []);
+    const scannerTitle = overlayTargetNodeId != null ? 'Hub scanner' : reportMasthead ? 'Registry checks' : 'Node scanner';
+    const scannerScope = overlayTargetNodeId != null ? 'hub-owned' : 'node-scoped';
     const { can, permissionsReady } = useAuth();
     const readOnly = !permissionsReady || !can('system:settings');
     const [status, setStatus] = useState<ImageUpdateStatus | null>(null);
@@ -63,11 +104,6 @@ export function UpdatesSection() {
 
     const intervalMinutes = status?.intervalMinutes ?? null;
 
-    // Mirror activeNode.id in a ref so the PATCH handler can detect a node
-    // switch mid-flight and discard a stale write.
-    const activeNodeIdRef = useRef(activeNode?.id ?? null);
-    activeNodeIdRef.current = activeNode?.id ?? null;
-
     const checksEnabled = status?.enabled ?? true;
     const nodeSupportsEnabledSetting = status !== null && status.enabled !== undefined;
     const cadenceLocked = !checksEnabled || readOnly || isSaving;
@@ -77,13 +113,22 @@ export function UpdatesSection() {
     const sidebarIndicators = status?.sidebarIndicators ?? false;
     const nodeSupportsSidebarSetting = status !== null && status.sidebarIndicators !== undefined;
 
+    const applySettingsStatus = useCallback((data: ImageUpdateStatus) => {
+        setStatus(previous => overlayTargetNodeId != null && previous ? {
+            ...data,
+            checking: previous.checking,
+            lastCheckedAt: previous.lastCheckedAt,
+            manualCooldownMinutes: previous.manualCooldownMinutes,
+            manualCooldownRemainingMs: previous.manualCooldownRemainingMs,
+        } : data);
+    }, [overlayTargetNodeId]);
+
     const handleChecksEnabledChange = useCallback(async (next: boolean) => {
-        const targetNodeId = activeNodeIdRef.current;
         setIsSaving(true);
         try {
             const res = await apiFetch('/image-updates/enabled', {
                 method: 'PUT',
-                nodeId: targetNodeId ?? null,
+                nodeId,
                 body: JSON.stringify({ enabled: next }),
             });
             if (!res.ok) {
@@ -91,64 +136,44 @@ export function UpdatesSection() {
                 throw new Error(err?.error || 'Failed to update setting');
             }
             const data = await res.json() as ImageUpdateStatus;
-            if (activeNodeIdRef.current === targetNodeId) {
-                setStatus(data);
-                setUiMode(data.mode);
-                window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED, {
-                    detail: { changedKeys: ['image_update_checks_enabled'] },
-                }));
-            }
+            if (!mounted.current) return;
+            applySettingsStatus(data);
+            setUiMode(data.mode);
+            window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED, {
+                detail: { changedKeys: ['image_update_checks_enabled'] },
+            }));
         } catch (e) {
-            if (activeNodeIdRef.current === targetNodeId) {
-                toast.error((e as Error)?.message || 'Failed to update image update checks setting.');
-            }
+            if (!mounted.current) return;
+            toast.error((e as Error)?.message || 'Failed to update image update checks setting.');
         } finally {
             setIsSaving(false);
         }
-    }, []);
+    }, [nodeId, applySettingsStatus]);
 
     const handleSidebarIndicatorsChange = useCallback(async (next: boolean) => {
-        const targetNodeId = activeNodeIdRef.current;
         setIsSaving(true);
         try {
             const res = await apiFetch('/settings', {
                 method: 'PATCH',
-                nodeId: targetNodeId ?? null,
+                nodeId,
                 body: JSON.stringify({ image_update_sidebar_indicators: next ? '1' : '0' }),
             });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err?.error || 'Failed to update setting');
             }
-            // Guard: if the active node changed while the PATCH was in flight,
-            // discard the response; it belongs to a different node.
-            if (activeNodeIdRef.current === targetNodeId) {
-                setStatus(prev => prev ? { ...prev, sidebarIndicators: next } : prev);
-                window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED, {
-                    detail: { changedKeys: ['image_update_sidebar_indicators'] },
-                }));
-            }
+            if (!mounted.current) return;
+            setStatus(prev => prev ? { ...prev, sidebarIndicators: next } : prev);
+            window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED, {
+                detail: { changedKeys: ['image_update_sidebar_indicators'] },
+            }));
         } catch (e) {
-            // Only surface the error if the active node hasn't changed. A
-            // stale failure from node A must not toast while the user views
-            // node B.
-            if (activeNodeIdRef.current === targetNodeId) {
-                toast.error((e as Error)?.message || 'Failed to update sidebar indicator setting.');
-            }
+            if (!mounted.current) return;
+            toast.error((e as Error)?.message || 'Failed to update sidebar indicator setting.');
         } finally {
             setIsSaving(false);
         }
-    }, []);
-
-    useMastheadStats(
-        isLoading || intervalMinutes == null
-            ? null
-            : [{
-                label: checksEnabled ? 'INTERVAL' : 'CHECKS',
-                value: checksEnabled ? formatIntervalLabel(intervalMinutes) : 'Off',
-                tone: 'value',
-            }],
-    );
+    }, [nodeId]);
 
     useEffect(() => {
         let cancelled = false;
@@ -156,9 +181,25 @@ export function UpdatesSection() {
             setStatus(null);
             setIsLoading(true);
             try {
-                const res = await apiFetch('/image-updates/status');
+                const res = overlayTargetNodeId != null
+                    ? await apiFetch(`/image-updates/overlay-status?targetNodeId=${overlayTargetNodeId}`, { nodeId: null })
+                    : await apiFetch('/image-updates/status', { nodeId });
                 if (!res.ok) throw new Error('Failed to load image-update status');
-                const data = await res.json() as ImageUpdateStatus;
+                const raw = await res.json() as ImageUpdateStatus | ImageUpdateOverlayStatus;
+                if ('scannerOwner' in raw && raw.scannerOwner === 'target') {
+                    // The overlay response is authoritative over cached node
+                    // capabilities: the target runs its own scanner, so drop
+                    // the hub card and keep only the node-scoped controls.
+                    onTargetOwner?.();
+                    return;
+                }
+                const data: ImageUpdateStatus = 'scannerOwner' in raw ? {
+                    ...raw,
+                    mode: raw.mode === 'cron' ? 'cron' : 'interval',
+                    nextCheckAt: raw.nextRunAt,
+                    manualCooldownMinutes: 0,
+                    manualCooldownRemainingMs: Math.max(0, (raw.cooldownEndsAt ?? 0) - Date.now()),
+                } : raw;
                 if (!cancelled) {
                     setStatus(data);
                     setUiMode(data.mode);
@@ -175,7 +216,7 @@ export function UpdatesSection() {
         };
         fetchStatus();
         return () => { cancelled = true; };
-    }, [activeNode?.id]);
+    }, [nodeId, overlayTargetNodeId, onTargetOwner]);
 
     // ── Interval change (immediate save) ──────────────────────────────────
 
@@ -190,6 +231,7 @@ export function UpdatesSection() {
             body.mode = 'interval';
             const res = await apiFetch('/image-updates/interval', {
                 method: 'PUT',
+                nodeId,
                 body: JSON.stringify(body),
             });
             if (!res.ok) {
@@ -197,19 +239,22 @@ export function UpdatesSection() {
                 throw new Error(err?.error || 'Failed to update interval');
             }
             const data = await res.json() as ImageUpdateStatus;
-            setStatus(data);
+            if (!mounted.current) return;
+            applySettingsStatus(data);
             setUiMode('interval');
             setSaveError(null);
             toast.success(`Sencho now checks for image updates every ${formatIntervalLabel(data.intervalMinutes)}.`);
         } catch (e) {
+            if (!mounted.current) return;
             toast.error((e as Error)?.message || 'Failed to update interval.');
         } finally {
             setIsSaving(false);
         }
-    }, []);
+    }, [nodeId, applySettingsStatus]);
 
     // ── Mode toggle ───────────────────────────────────────────────────────
 
+    const savedCron = status?.cronExpression;
     const handleModeChange = useCallback((next: ImageCheckMode) => {
         setSaveError(null);
         if (next === 'interval') {
@@ -218,15 +263,18 @@ export function UpdatesSection() {
             const minutes = intervalMinutes ?? 120;
             apiFetch('/image-updates/interval', {
                 method: 'PUT',
+                nodeId,
                 body: JSON.stringify({ minutes, mode: 'interval' }),
             })
                 .then(async res => {
                     if (!res.ok) throw new Error('Failed to switch to interval mode');
                     const data = await res.json() as ImageUpdateStatus;
-                    setStatus(data);
+                    if (!mounted.current) return;
+                    applySettingsStatus(data);
                     setUiMode('interval');
                 })
                 .catch(e => {
+                    if (!mounted.current) return;
                     toast.error((e as Error)?.message || 'Failed to switch to interval mode.');
                     // Keep uiMode on 'cron' on failure; do not optimistically switch.
                 })
@@ -234,11 +282,11 @@ export function UpdatesSection() {
         } else {
             // Switching to Cron: local UI only. Draft input appears.
             setUiMode('cron');
-            if (!draftCron && status?.cronExpression) {
-                setDraftCron(status.cronExpression);
+            if (!draftCron && savedCron) {
+                setDraftCron(savedCron);
             }
         }
-    }, [intervalMinutes, status?.cronExpression, draftCron]);
+    }, [nodeId, intervalMinutes, savedCron, draftCron, applySettingsStatus]);
 
     // ── Cron save ─────────────────────────────────────────────────────────
 
@@ -255,6 +303,7 @@ export function UpdatesSection() {
         try {
             const res = await apiFetch('/image-updates/interval', {
                 method: 'PUT',
+                nodeId,
                 body: JSON.stringify({
                     minutes: intervalMinutes,
                     mode: 'cron',
@@ -269,16 +318,18 @@ export function UpdatesSection() {
                 return;
             }
             const data = await res.json() as ImageUpdateStatus;
-            setStatus(data);
+            if (!mounted.current) return;
+            applySettingsStatus(data);
             setUiMode('cron');
             setDraftCron(data.cronExpression ?? '');
             toast.success('Image update checks now run on a cron schedule.');
         } catch (e) {
+            if (!mounted.current) return;
             setSaveError((e as Error)?.message || 'Failed to save cron schedule.');
         } finally {
             setIsSaving(false);
         }
-    }, [canSaveCron, intervalMinutes, cronTrimmed]);
+    }, [nodeId, canSaveCron, intervalMinutes, cronTrimmed, applySettingsStatus]);
 
     if (isLoading && !status) return <SectionSkeleton />;
 
@@ -297,22 +348,28 @@ export function UpdatesSection() {
                 ? `in ${formatTimeUntil(status.nextCheckAt)}`
                 : 'not scheduled';
 
+    const hubCard = overlayTargetNodeId != null;
     const enableHelper = status !== null && status.enabled === undefined
         ? 'This node is running an older version of Sencho that does not support this setting. Upgrade the node to enable it.'
         : checksEnabled
-            ? 'When on, Sencho polls registries on a schedule, raises update notifications, and feeds Home, sidebar, Anatomy, and Fleet Readiness. Turn off when another tool is the update authority for this node.'
-            : 'Image update detection is off for this node. Scheduled registry checks and update notifications are stopped. Explicit stack Update, pull, and redeploy actions remain available.';
+            ? hubCard
+                ? "When on, the hub polls registries for this node's stacks on a schedule and raises update notifications in the hub UI. The node's own registry checks are configured separately below."
+                : 'When on, Sencho polls registries on a schedule, raises update notifications, and feeds Home, sidebar, Anatomy, and Fleet Readiness. Turn off when another tool is the update authority for this node.'
+            : hubCard
+                ? "Hub-based update detection is off for this node. Evidence already collected stays available, and the node's own registry checks are configured separately below."
+                : 'Image update detection is off for this node. Scheduled registry checks and update notifications are stopped. Explicit stack Update, pull, and redeploy actions remain available.';
 
     return (
         <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
-            <SettingsSection title="Registry checks" kicker="node-scoped">
+            {reportMasthead && <ScannerMasthead status={status} />}
+            <SettingsSection title={scannerTitle} kicker={scannerScope}>
                 <SettingsField
                     label="Enable image update checks"
                     helper={enableHelper}
-                    htmlFor="image-checks-enabled-toggle"
+                    htmlFor={`${controlId}-enabled`}
                 >
                     <TogglePill
-                        id="image-checks-enabled-toggle"
+                        id={`${controlId}-enabled`}
                         checked={checksEnabled && nodeSupportsEnabledSetting}
                         onChange={handleChecksEnabledChange}
                         disabled={status === null || !nodeSupportsEnabledSetting || readOnly || isSaving}
@@ -388,7 +445,7 @@ export function UpdatesSection() {
             </SettingsSection>
 
             {checksEnabled && (
-                <SettingsSection title="Sidebar" kicker="node-scoped">
+                <SettingsSection title="Sidebar" kicker={scannerScope}>
                     <SettingsField
                         label="Show update status in sidebar"
                         helper={
@@ -396,10 +453,10 @@ export function UpdatesSection() {
                                 ? "This node is running an older version of Sencho that does not support this setting. Upgrade the node to enable it."
                                 : "Show a pulsing dot when a stack has an available update and a warning icon when the check fails. The Stack Health table on the home page always shows update status regardless of this setting. Notifications are unaffected."
                         }
-                        htmlFor="sidebar-indicators-toggle"
+                        htmlFor={`${controlId}-sidebar`}
                     >
                         <TogglePill
-                            id="sidebar-indicators-toggle"
+                            id={`${controlId}-sidebar`}
                             checked={sidebarIndicators}
                             onChange={handleSidebarIndicatorsChange}
                             disabled={status === null || !nodeSupportsSidebarSetting || readOnly || isSaving}

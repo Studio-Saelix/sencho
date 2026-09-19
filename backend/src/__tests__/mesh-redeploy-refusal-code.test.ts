@@ -24,6 +24,11 @@ vi.mock('../helpers/registryDeliveryOutbound', async (importOriginal) => {
     };
 });
 
+const verificationMocks = vi.hoisted(() => ({ recheck: vi.fn() }));
+vi.mock('../services/RemoteImageUpdateService', () => ({
+    RemoteImageUpdateService: { getInstance: () => ({ recheckRemoteStack: verificationMocks.recheck }) },
+}));
+
 let tmpDir: string;
 let MeshService: typeof import('../services/MeshService').MeshService;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
@@ -45,6 +50,28 @@ afterEach(() => {
 });
 
 describe('MeshService.triggerRedeploy (registry delivery refusal)', () => {
+    it('awaits hub verification before logging success without repeating deploy', async () => {
+        const db = DatabaseService.getInstance();
+        const stackName = 'mesh-verification-stack';
+        const nodeId = db.addNode({ name: 'mesh-verification', type: 'remote', mode: 'proxy', compose_dir: '/tmp', is_default: false, api_url: 'https://remote.example.com:1852', api_token: 'token' });
+        vi.spyOn(NodeRegistry.getInstance(), 'getNode').mockReturnValue(db.getNode(nodeId));
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'token', trustedLoopback: false });
+        const { OFFLINE_META } = await import('../services/CapabilityRegistry');
+        vi.spyOn(NodeRegistry.getInstance(), 'probeRemoteMeta').mockResolvedValue({ kind: 'ok', meta: { ...OFFLINE_META, online: true, capabilities: ['remote-image-inspect-v1'] } });
+        const outbound = await import('../helpers/registryDeliveryOutbound');
+        vi.mocked(outbound.prepareOutboundRegistryDeliveryBody).mockResolvedValueOnce({ ok: true, body: {}, augmented: false });
+        const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ success: true, healthId: 'health' }), { status: 200 }));
+        let release!: (value: { warning: null }) => void;
+        verificationMocks.recheck.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+        const svc = MeshService.getInstance();
+        svc.triggerRedeploy(nodeId, stackName, 'admin');
+        await vi.waitFor(() => expect(verificationMocks.recheck).toHaveBeenCalledWith(nodeId, stackName, expect.any(AbortSignal)));
+        expect(svc.getActivity({ source: 'mesh' }).some(event => event.message === `mesh redeploy ok for ${stackName}`)).toBe(false);
+        release({ warning: null });
+        await vi.waitFor(() => expect(svc.getActivity({ source: 'mesh' }).some(event => event.message === `mesh redeploy ok for ${stackName}`)).toBe(true));
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        db.deleteNode(nodeId);
+    });
     it('carries the refusal code into the activity message and audit summary', async () => {
         const db = DatabaseService.getInstance();
         const stackName = 'mesh-refusal-stack';
