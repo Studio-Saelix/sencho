@@ -45,7 +45,6 @@ describe('registryEnvelopeSeal', () => {
     expect(first.fingerprint).toBe(fingerprintOf(first.publicKeyRaw));
 
     const keyFile = path.join(dataDir, 'registry-seal.key');
-    expect(fs.existsSync(keyFile)).toBe(true);
     const mode = fs.statSync(keyFile).mode & 0o777;
     expect(mode).toBe(0o600);
     expect(fs.readFileSync(keyFile, 'utf-8')).toContain('BEGIN PRIVATE KEY');
@@ -173,8 +172,8 @@ describe('registryEnvelopeSeal', () => {
     );
     const sealed = sealAuths(recipientRaw, SAMPLE_AUTHS, 'aad');
     const keyFile = path.join(dataDir, 'registry-seal.key');
-    expect(fs.existsSync(keyFile)).toBe(false);
+    expect(() => fs.statSync(keyFile)).toThrow(/ENOENT/);
     expect(() => openAuths(sealed, 'aad')).toThrow('Registry delivery envelope failed to decrypt');
-    expect(fs.existsSync(keyFile)).toBe(false);
+    expect(() => fs.statSync(keyFile)).toThrow(/ENOENT/);
   });
 });

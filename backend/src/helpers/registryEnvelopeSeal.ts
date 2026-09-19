@@ -120,29 +120,42 @@ export function parseSealingKeyBase64(value: unknown): Buffer | null {
   return raw;
 }
 
+function isEnoent(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+function isEexist(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException).code === 'EEXIST';
+}
+
 function loadOrCreateKey(): LoadedSealingKey {
   const filePath = keyPath();
   if (cached && cachedKeyPath === filePath) {
     return cached;
   }
 
-  let privateKey: crypto.KeyObject;
-  if (fs.existsSync(filePath)) {
+  try {
     const pem = fs.readFileSync(filePath, 'utf-8');
-    privateKey = crypto.createPrivateKey(pem);
+    const privateKey = crypto.createPrivateKey(pem);
     selfHealPermissions(filePath);
-  } else {
-    const generated = crypto.generateKeyPairSync('x25519');
-    privateKey = generated.privateKey;
-    const dir = dataDir();
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    const pem = privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
-    fs.writeFileSync(filePath, pem, { mode: 0o600 });
+    return cacheLoadedKey(privateKey, filePath);
+  } catch (err) {
+    if (!isEnoent(err)) throw err;
   }
 
-  return cacheLoadedKey(privateKey, filePath);
+  const generated = crypto.generateKeyPairSync('x25519');
+  const privateKey = generated.privateKey;
+  fs.mkdirSync(dataDir(), { recursive: true });
+  const pem = privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
+  try {
+    // Exclusive create: if another process wins the race, load their key.
+    fs.writeFileSync(filePath, pem, { mode: 0o600, flag: 'wx' });
+    return cacheLoadedKey(privateKey, filePath);
+  } catch (err) {
+    if (!isEexist(err)) throw err;
+    const existing = fs.readFileSync(filePath, 'utf-8');
+    return cacheLoadedKey(crypto.createPrivateKey(existing), filePath);
+  }
 }
 
 /** Load an existing keypair; never create. Used by openAuths so a missing key fails closed. */
@@ -151,13 +164,17 @@ function loadExistingKey(): LoadedSealingKey {
   if (cached && cachedKeyPath === filePath) {
     return cached;
   }
-  if (!fs.existsSync(filePath)) {
-    throw new Error('Registry sealing key not found');
+  try {
+    const pem = fs.readFileSync(filePath, 'utf-8');
+    const privateKey = crypto.createPrivateKey(pem);
+    selfHealPermissions(filePath);
+    return cacheLoadedKey(privateKey, filePath);
+  } catch (err) {
+    if (isEnoent(err)) {
+      throw new Error('Registry sealing key not found');
+    }
+    throw err;
   }
-  const pem = fs.readFileSync(filePath, 'utf-8');
-  const privateKey = crypto.createPrivateKey(pem);
-  selfHealPermissions(filePath);
-  return cacheLoadedKey(privateKey, filePath);
 }
 
 function cacheLoadedKey(privateKey: crypto.KeyObject, filePath: string): LoadedSealingKey {
