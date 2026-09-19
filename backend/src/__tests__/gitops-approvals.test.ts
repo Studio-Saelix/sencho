@@ -185,6 +185,155 @@ describe('gitops approvals', () => {
       },
     })).toBeNull();
   });
+
+  it('placementApproved opens a generation and clears the live legacy pointer', async () => {
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    GitOpsTransitions.resetForTests();
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    store.insertApplication({
+      ...directApp('app-place', 'place-web'),
+      target_mode: 'inline_blueprint',
+      lifecycle_key: 'inline_blueprint:99',
+      stack_name: null,
+      blueprint_id: 99,
+      configured_repo_url: null,
+      repo_identity_json: null,
+      configured_ref: null,
+      compose_paths_json: null,
+      materialization_fingerprint: null,
+      intent_revision_id: 'intent-place',
+      rollout_candidate_id: 'cand-place',
+      legacy_combined_approval_ref: 'legacy-place',
+    });
+    store.insertIntentRevision(intent('intent-place', 'app-place'));
+    store.insertRolloutCandidate(candidate('cand-place', 'app-place', 'intent-place', 'gen-a'));
+    store.insertApproval({
+      id: 'legacy-place',
+      kind: 'legacy_combined',
+      authority: 'legacy_combined',
+      authoritative: 0,
+      application_id: 'app-place',
+      generation_id: null,
+      intent_revision_id: null,
+      artifact_set_id: null,
+      rollout_candidate_id: null,
+      rollout_generation_id: null,
+      source_acceptance_ref: null,
+      placement_approval_ref: null,
+      required_targets_json: null,
+      preflight_fingerprint: null,
+      fingerprint: null,
+      blast_json: null,
+      policy_provenance_json: null,
+      actor: 'system',
+      created_at: 1,
+    });
+
+    tx.placementApproved({
+      applicationId: 'app-place',
+      approvalId: 'place-new',
+      intentRevisionId: 'intent-place',
+      blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId: 1, outcome: 'place' }]),
+      requiredNodeIds: [1],
+      fingerprint: 'fp'.repeat(32),
+      actor: 'admin',
+      envelope: { operationId: 'op-place', actor: 'admin', trigger: 'blueprint_apply', at: 50 },
+      rolloutGenerationId: 'rgen-place',
+      candidateId: 'cand-place',
+      strategyJson: '{"driftMode":"observe","enabled":true}',
+    });
+
+    const app = store.getApplication('app-place')!;
+    expect(app.placement_approval_ref).toBe('place-new');
+    expect(app.legacy_combined_approval_ref).toBeNull();
+    expect(app.rollout_generation_id).toBe('rgen-place');
+    expect(store.getApproval('legacy-place')).toBeDefined();
+    expect(store.getApproval('place-new')?.kind).toBe('placement_approval');
+    const generation = store.getRolloutGeneration('rgen-place')!;
+    expect(generation.provenance).toBe('legacy_inline');
+    expect(generation.placement_approval_ref).toBe('place-new');
+    expect(generation.rollout_strategy_json).toBe('{"driftMode":"observe","enabled":true}');
+  });
+
+  it('intent churn clears placement, supersedes the generation, and carries legacy_combined', async () => {
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    GitOpsTransitions.resetForTests();
+    const store = GitOpsStore.getInstance();
+    store.insertApplication({
+      ...directApp('app-churn', 'churn-web'),
+      target_mode: 'inline_blueprint',
+      lifecycle_key: 'inline_blueprint:98',
+      stack_name: null,
+      blueprint_id: 98,
+      configured_repo_url: null,
+      repo_identity_json: null,
+      configured_ref: null,
+      compose_paths_json: null,
+      materialization_fingerprint: null,
+      intent_revision_id: 'intent-churn',
+      rollout_generation_id: 'rgen-churn',
+      placement_approval_ref: 'place-churn',
+      legacy_combined_approval_ref: 'legacy-churn',
+    });
+    store.insertApproval({
+      id: 'legacy-churn',
+      kind: 'legacy_combined',
+      authority: 'legacy_combined',
+      authoritative: 0,
+      application_id: 'app-churn',
+      generation_id: null,
+      intent_revision_id: null,
+      artifact_set_id: null,
+      rollout_candidate_id: null,
+      rollout_generation_id: null,
+      source_acceptance_ref: null,
+      placement_approval_ref: null,
+      required_targets_json: null,
+      preflight_fingerprint: null,
+      fingerprint: null,
+      blast_json: null,
+      policy_provenance_json: null,
+      actor: 'system',
+      created_at: 1,
+    });
+    store.insertRolloutGeneration({
+      id: 'rgen-churn',
+      application_id: 'app-churn',
+      intent_revision_id: 'intent-churn',
+      rollout_candidate_id: 'cand-churn',
+      accepted_generation_id: null,
+      artifact_set_id: null,
+      placement_approval_ref: 'place-churn',
+      source_acceptance_ref: null,
+      rollout_authorization_ref: null,
+      required_targets_json: encodeGitOpsRequiredTargetsJson([1]),
+      preflight_fingerprint: null,
+      preflight_evidence_json: null,
+      rollout_strategy_json: '{}',
+      provenance: 'legacy_inline',
+      supersedes_generation_id: null,
+      superseded_at: null,
+      operation_id: 'op-churn-place',
+      actor: 'admin',
+      trigger: 'blueprint_apply',
+      created_at: 60,
+    });
+
+    GitOpsTransitions.getInstance().intentRevised({
+      applicationId: 'app-churn',
+      intent: intent('intent-churn-v2', 'app-churn'),
+      envelope: { operationId: 'op-churn-intent', actor: 'admin', trigger: 'blueprint_update', at: 70 },
+    });
+
+    const after = store.getApplication('app-churn')!;
+    expect(after.placement_approval_ref).toBeNull();
+    expect(after.rollout_generation_id).toBeNull();
+    expect(after.intent_revision_id).toBe('intent-churn-v2');
+    expect(after.legacy_combined_approval_ref).toBe('legacy-churn');
+    expect(store.getApproval('legacy-churn')).toBeDefined();
+    expect(store.getRolloutGeneration('rgen-churn')!.superseded_at).toBe(70);
+  });
 });
 
 function sourceAcceptance(id: string, applicationId: string, generationId: string): GitOpsApprovalRow {

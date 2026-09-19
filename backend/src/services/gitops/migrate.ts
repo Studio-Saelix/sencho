@@ -15,7 +15,7 @@ import { evaluateEffectiveApproval, intentFingerprint } from '../blueprintApprov
 import type { GitOpsApplicationRow, GitOpsGenerationRow, GitOpsTargetCurrentRow } from './types';
 
 /** Schema version this migration writes. Bumping it replays every scope. */
-const MIGRATION_SCHEMA_VERSION = 1;
+const MIGRATION_SCHEMA_VERSION = 2;
 
 /**
  * What the on-disk manifest proves about a stack.
@@ -397,6 +397,9 @@ function stackDirectoryPresent(stackName: string, nodeId: number): boolean {
  * deployment's applied revision are carried as display only, because neither
  * proves a node is running the intent this pass just minted, and recording them
  * as agreement would report convergence nobody verified.
+ *
+ * Schema version 2 also backfills non-authoritative legacy_combined markers for
+ * approved live apps that still lack a placement row.
  */
 export function migrateInlineBlueprints(): MigrationResult[] {
   const db = DatabaseService.getInstance();
@@ -412,7 +415,57 @@ export function migrateInlineBlueprints(): MigrationResult[] {
       results.push({ stackName: blueprint.name, outcome: 'failed' });
     }
   }
+  backfillLegacyCombinedApprovals(results);
   return results;
+}
+
+/**
+ * One-shot pass for apps migrated under schema version 1 (or created without
+ * an Apply): if the Blueprint columns still say approved and no placement row
+ * exists yet, record a non-authoritative legacy_combined marker.
+ *
+ * Does not invent placement_approval, source acceptance, generations, health,
+ * LKG, or artifact evidence.
+ */
+function backfillLegacyCombinedApprovals(results: MigrationResult[]): void {
+  const db = DatabaseService.getInstance();
+  const store = GitOpsStore.getInstance();
+  const tx = GitOpsTransitions.getInstance();
+  for (const blueprint of db.listBlueprints()) {
+    const app = store.getLiveBlueprintApplication(blueprint.id);
+    if (!app || app.lifecycle_status !== 'active') continue;
+    if (app.legacy_combined_approval_ref || app.placement_approval_ref) continue;
+    const { effectiveApproval } = evaluateEffectiveApproval(blueprint, []);
+    if (effectiveApproval !== 'approved') continue;
+
+    const at = Date.now();
+    const envelope: EventEnvelope = {
+      operationId: newGitOpsId(),
+      actor: 'system:migration',
+      trigger: 'migrate',
+      at,
+    };
+    try {
+      tx.legacyCombinedAppended({
+        applicationId: app.id,
+        approvalId: newGitOpsId(),
+        envelope,
+      });
+      const fingerprint = intentFingerprint(blueprint);
+      store.upsertMigrationCheckpoint(
+        `inline_blueprint:${blueprint.id}`,
+        MIGRATION_SCHEMA_VERSION,
+        fingerprint,
+        at,
+      );
+    } catch (error) {
+      console.error(
+        `[GitOps] Could not backfill legacy_combined for ${sanitizeForLog(blueprint.name)}:`,
+        error instanceof Error ? error.stack ?? error.message : String(error),
+      );
+      results.push({ stackName: blueprint.name, outcome: 'failed' });
+    }
+  }
 }
 
 function migrateOneBlueprint(blueprint: Blueprint): MigrationResult {
@@ -430,7 +483,8 @@ function migrateOneBlueprint(blueprint: Blueprint): MigrationResult {
   }
 
   // A Blueprint created through the new path already describes itself, and its
-  // rows were written with proof this pass does not have.
+  // rows were written with proof this pass does not have. Schema bumps still
+  // reach backfillLegacyCombinedApprovals for missing legacy markers.
   if (store.getLiveBlueprintApplication(blueprint.id)) {
     store.upsertMigrationCheckpoint(scope, MIGRATION_SCHEMA_VERSION, fingerprint, Date.now());
     return { stackName: blueprint.name, outcome: 'skipped_live_application' };
@@ -500,6 +554,17 @@ function migrateOneBlueprint(blueprint: Blueprint): MigrationResult {
       },
       envelope,
     });
+
+    // Approved blueprints get a non-authoritative legacy_combined marker only.
+    // Placement, source acceptance, and rollout generations wait for Apply.
+    const { effectiveApproval } = evaluateEffectiveApproval(blueprint, []);
+    if (effectiveApproval === 'approved') {
+      tx.legacyCombinedAppended({
+        applicationId,
+        approvalId: newGitOpsId(),
+        envelope,
+      });
+    }
 
     store.upsertMigrationCheckpoint(scope, MIGRATION_SCHEMA_VERSION, fingerprint, at);
     return { stackName: blueprint.name, outcome: 'migrated_inline' };

@@ -88,6 +88,42 @@ function approveRemove(blueprintId: number, nodeIds: number[]) {
     });
 }
 
+/** Migrate the blueprint into GitOps and open a placement-approved generation. */
+async function openGitOpsPlacement(opts: {
+    blueprintId: number;
+    placeNodeIds: number[];
+    requiredNodeIds: number[];
+}): Promise<{ id: string }> {
+    const { migrateInlineBlueprints } = await import('../services/gitops/migrate');
+    const { GitOpsStore } = await import('../services/gitops/store');
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    const { encodeGitOpsApprovedTargetEffectJson } = await import('../services/gitops/json');
+    const { newGitOpsId } = await import('../services/gitops/directApplication');
+    migrateInlineBlueprints();
+    const gitopsApp = GitOpsStore.getInstance().getLiveBlueprintApplication(opts.blueprintId)!;
+    const bp = DatabaseService.getInstance().getBlueprint(opts.blueprintId)!;
+    GitOpsTransitions.getInstance().placementApproved({
+        applicationId: gitopsApp.id,
+        approvalId: newGitOpsId(),
+        intentRevisionId: gitopsApp.intent_revision_id!,
+        blastJson: encodeGitOpsApprovedTargetEffectJson(
+            opts.placeNodeIds.map((nodeId) => ({ nodeId, outcome: 'place' as const })),
+        ),
+        requiredNodeIds: opts.requiredNodeIds,
+        fingerprint: intentFingerprint(bp),
+        actor: 'admin',
+        envelope: {
+            operationId: newGitOpsId(),
+            actor: 'admin',
+            trigger: 'test',
+            at: Date.now(),
+        },
+        rolloutGenerationId: newGitOpsId(),
+        candidateId: gitopsApp.rollout_candidate_id!,
+    });
+    return gitopsApp;
+}
+
 beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ app } = await import('../index'));
@@ -532,6 +568,86 @@ describe('approval defaults and corrupt-approval fail-closed', () => {
         const detail = await request(app).get(`/api/blueprints/${bp.id}`).set('Cookie', adminCookie);
         expect(detail.status).toBe(200);
         expect(detail.body.effectiveApproval).toBe('pending');
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+        expect(deploySpy).not.toHaveBeenCalled();
+    });
+
+    it('refuses place on a node outside a frozen GitOps placement set', async () => {
+        const nodeA = seedNode();
+        const nodeB = seedNode();
+        const bp = createBp({ nodeIds: [nodeA.id, nodeB.id] });
+        approvePlace(bp.id, [nodeA.id, nodeB.id]);
+        await openGitOpsPlacement({
+            blueprintId: bp.id,
+            placeNodeIds: [nodeA.id],
+            requiredNodeIds: [nodeA.id],
+        });
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+        expect(deploySpy).not.toHaveBeenCalled();
+    });
+
+    it('refuses remove of a node still required by a frozen GitOps placement set', async () => {
+        const nodeA = seedNode();
+        const bp = createBp({ nodeIds: [] });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: nodeA.id,
+            status: 'active',
+            last_deployed_at: Date.now(),
+        });
+        approveRemove(bp.id, [nodeA.id]);
+        await openGitOpsPlacement({
+            blueprintId: bp.id,
+            placeNodeIds: [nodeA.id],
+            requiredNodeIds: [nodeA.id],
+        });
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(withdrawSpy).not.toHaveBeenCalled();
+        const stored = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        expect(stored.approval_status).toBe('pending');
+        expect(stored.approved_intent_fingerprint).toBeNull();
+    });
+
+    it('allows dual-write legacy approval when placement_approval_ref is still null', async () => {
+        const node = seedNode();
+        const bp = createBp({ nodeIds: [node.id] });
+        approvePlace(bp.id, [node.id]);
+        const { migrateInlineBlueprints } = await import('../services/gitops/migrate');
+        const { GitOpsStore } = await import('../services/gitops/store');
+        migrateInlineBlueprints();
+        const gitopsApp = GitOpsStore.getInstance().getLiveBlueprintApplication(bp.id)!;
+        expect(gitopsApp.placement_approval_ref).toBeNull();
+        expect(gitopsApp.legacy_combined_approval_ref).not.toBeNull();
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        await BlueprintReconciler.getInstance().reconcileOne(bp.id);
+        expect(deploySpy).toHaveBeenCalled();
+        expect(deploySpy.mock.calls.map(c => (c[1] as { id: number }).id)).toContain(node.id);
+    });
+
+    it('refuses when placement_approval_ref is stale against the current intent', async () => {
+        const node = seedNode();
+        const bp = createBp({ nodeIds: [node.id] });
+        approvePlace(bp.id, [node.id]);
+        const gitopsApp = await openGitOpsPlacement({
+            blueprintId: bp.id,
+            placeNodeIds: [node.id],
+            requiredNodeIds: [node.id],
+        });
+        // Point placement at a different intent so resolveApprovalRef fails closed.
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_approvals SET intent_revision_id = ? WHERE id = (
+                SELECT placement_approval_ref FROM gitops_applications WHERE id = ?
+             )`,
+        ).run('intent-stale-missing', gitopsApp.id);
 
         const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
         await BlueprintReconciler.getInstance().reconcileOne(bp.id);

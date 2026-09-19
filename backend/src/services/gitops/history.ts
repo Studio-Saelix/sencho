@@ -62,9 +62,12 @@ export type GitOpsHistoryStage =
   | 'fetched_invalid'
   | 'health_finalized'
   | 'intent_revised'
+  | 'legacy_combined_appended'
   | 'operation_interrupted'
   | 'partial_cleared'
   | 'partially_rolled_out'
+  | 'placement_approved'
+  | 'placement_invalidated'
   | 'promotion_committed'
   | 'recovery_failed'
   | 'recovery_started'
@@ -73,6 +76,8 @@ export type GitOpsHistoryStage =
   | 'rollback_in_progress'
   | 'rollback_partial_failed'
   | 'rollout_candidate_opened'
+  | 'rollout_generation_opened'
+  | 'rollout_generation_superseded'
   | 'rollout_paused'
   | 'rollout_unpaused'
   | 'source_accepted'
@@ -144,6 +149,7 @@ export type HistoryInsert = {
   commitSha?: string | null;
   intentRevisionId?: string | null;
   rolloutCandidateId?: string | null;
+  rolloutGenerationId?: string | null;
   sourceAcceptanceRef?: string | null;
   placementApprovalRef?: string | null;
   rolloutAuthorizationRef?: string | null;
@@ -202,7 +208,7 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
     row.artifactSetId ?? null,
     row.intentRevisionId ?? row.application.intent_revision_id,
     row.rolloutCandidateId ?? row.application.rollout_candidate_id,
-    row.application.rollout_generation_id,
+    row.rolloutGenerationId ?? row.application.rollout_generation_id,
     row.sourceAcceptanceRef ?? row.application.source_acceptance_ref,
     row.placementApprovalRef ?? row.application.placement_approval_ref,
     row.rolloutAuthorizationRef ?? row.application.rollout_authorization_ref,

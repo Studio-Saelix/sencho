@@ -231,6 +231,34 @@ export type GitOpsRolloutCandidateRow = {
   created_at: number;
 };
 
+export type GitOpsRolloutGenerationProvenance =
+  | 'legacy_inline'
+  | 'placement_approval'
+  | 'rollout_authorization';
+
+export type GitOpsRolloutGenerationRow = {
+  id: string;
+  application_id: string;
+  intent_revision_id: string;
+  rollout_candidate_id: string;
+  accepted_generation_id: string | null;
+  artifact_set_id: string | null;
+  placement_approval_ref: string | null;
+  source_acceptance_ref: string | null;
+  rollout_authorization_ref: string | null;
+  required_targets_json: string;
+  preflight_fingerprint: string | null;
+  preflight_evidence_json: string | null;
+  rollout_strategy_json: string;
+  provenance: GitOpsRolloutGenerationProvenance;
+  supersedes_generation_id: string | null;
+  superseded_at: number | null;
+  operation_id: string;
+  actor: string | null;
+  trigger: string;
+  created_at: number;
+};
+
 export type GitOpsApprovalRow = {
   id: string;
   kind: GitOpsApprovalKind;

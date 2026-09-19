@@ -38,6 +38,12 @@ import { isValidStackName } from '../utils/validation';
 import { parseIntParam } from '../utils/parseIntParam';
 import { auditActorUsername } from '../helpers/auditActor';
 import { GitOpsStore } from '../services/gitops/store';
+import { GitOpsTransitionError, GitOpsTransitions } from '../services/gitops/transitions';
+import { newGitOpsId } from '../services/gitops/directApplication';
+import {
+    canonicalizeNodeIds,
+    encodeGitOpsApprovedTargetEffectJson,
+} from '../services/gitops/json';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isSqliteUniqueViolation, getErrorMessage } from '../utils/errors';
@@ -628,6 +634,102 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
             blastJson: serializeApprovedBlast(blast),
             approvedBy: req.user?.username ?? null,
         });
+        // Dual-write: blueprints.approval_* above remains the legacy surface.
+        // When a live GitOps app exists, also open placement_approval plus a
+        // legacy_inline generation so the reconciler can fail closed on
+        // place-outside-frozen or remove of a still-required node. Missing
+        // app (pre-migration edge) is logged and skipped; legacy columns
+        // still gate reconcileConfirmedPlan.
+        const store = GitOpsStore.getInstance();
+        const gitopsApp = store.getLiveBlueprintApplication(id);
+        const clearDualWrite = (applicationId: string | null) => {
+            DatabaseService.getInstance().clearBlueprintApproval(id);
+            if (!applicationId) return;
+            try {
+                GitOpsTransitions.getInstance().placementInvalidated({
+                    applicationId,
+                    envelope: {
+                        operationId: newGitOpsId(),
+                        actor: req.user?.username ?? null,
+                        trigger: 'blueprint_apply_refuse',
+                        at: Date.now(),
+                    },
+                });
+            } catch (error) {
+                console.error(
+                    '[Blueprints] Failed to invalidate GitOps placement after Apply refuse:',
+                    sanitizeForLog(getErrorMessage(error, 'placementInvalidated failed')),
+                );
+            }
+        };
+        const refuseStale = async (code: string, message: string): Promise<void> => {
+            const fresh = await buildBlueprintPreview(id);
+            res.status(409).json({ error: message, code, preview: fresh });
+        };
+
+        if (!gitopsApp) {
+            console.warn(
+                `[Blueprints] Apply: no live GitOps application for blueprint ${id}; legacy approval only`,
+            );
+        } else {
+            const intent = gitopsApp.intent_revision_id
+                ? store.getIntentRevision(gitopsApp.intent_revision_id)
+                : undefined;
+            const candidate = gitopsApp.rollout_candidate_id
+                ? store.getRolloutCandidate(gitopsApp.rollout_candidate_id)
+                : undefined;
+            if (!intent || !candidate) {
+                console.error(
+                    `[Blueprints] Apply: live GitOps application for blueprint ${id} lacks intent or candidate; refusing`,
+                );
+                clearDualWrite(gitopsApp.id);
+                await refuseStale(
+                    'GITOPS_PLACEMENT_FAILED',
+                    'Blueprint placement is not ready; refresh and confirm again',
+                );
+                return;
+            }
+            const requiredNodeIds = canonicalizeNodeIds(
+                blast.filter((entry) => entry.outcome === 'place').map((entry) => entry.nodeId),
+            );
+            const at = Date.now();
+            try {
+                GitOpsTransitions.getInstance().placementApproved({
+                    applicationId: gitopsApp.id,
+                    approvalId: newGitOpsId(),
+                    intentRevisionId: intent.id,
+                    blastJson: encodeGitOpsApprovedTargetEffectJson(blast),
+                    requiredNodeIds,
+                    fingerprint: preview.planFingerprint,
+                    actor: req.user?.username ?? null,
+                    envelope: {
+                        operationId: newGitOpsId(),
+                        actor: req.user?.username ?? null,
+                        trigger: 'blueprint_apply',
+                        at,
+                    },
+                    rolloutGenerationId: newGitOpsId(),
+                    candidateId: candidate.id,
+                    strategyJson: intent.rollout_strategy_json,
+                });
+            } catch (error) {
+                console.error(
+                    '[Blueprints] GitOps placement approval failed; clearing dual-write:',
+                    sanitizeForLog(getErrorMessage(error, 'placementApproved failed')),
+                );
+                clearDualWrite(gitopsApp.id);
+                const code = error instanceof GitOpsTransitionError
+                    ? 'GITOPS_PLACEMENT_FAILED'
+                    : 'PREVIEW_STALE';
+                await refuseStale(
+                    code,
+                    code === 'GITOPS_PLACEMENT_FAILED'
+                        ? 'Blueprint placement could not be recorded; refresh and confirm again'
+                        : 'Preview is stale; refresh and confirm again',
+                );
+                return;
+            }
+        }
         // planFingerprint is from an earlier preview. Concurrent compose/selector
         // edits can invalidate it before approval persists, or the reconciler can
         // refuse if the live gate no longer matches. Both paths clear and 409.
@@ -636,13 +738,8 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
             ? await BlueprintReconciler.getInstance().reconcileConfirmedPlan(id, preview.executorActions)
             : null;
         if (!plan || plan.refused) {
-            DatabaseService.getInstance().clearBlueprintApproval(id);
-            const fresh = await buildBlueprintPreview(id);
-            res.status(409).json({
-                error: 'Preview is stale; refresh and confirm again',
-                code: 'PREVIEW_STALE',
-                preview: fresh,
-            });
+            clearDualWrite(gitopsApp?.id ?? null);
+            await refuseStale('PREVIEW_STALE', 'Preview is stale; refresh and confirm again');
             return;
         }
         // Snapshot deploy may finish after a concurrent edit cleared approval.

@@ -33,6 +33,7 @@ describe('gitops schema', () => {
       'gitops_intent_revisions',
       'gitops_migration_checkpoints',
       'gitops_rollout_candidates',
+      'gitops_rollout_generations',
       'gitops_settled_outbox',
       'gitops_sops_identities',
       'gitops_target_current',
@@ -67,6 +68,14 @@ describe('gitops schema', () => {
     expect(candidateCols.has('source_acceptance_ref')).toBe(false);
     expect(candidateCols.has('placement_approval_ref')).toBe(false);
     expect(candidateCols.has('preflight_fingerprint')).toBe(false);
+    const generationCols = new Set(
+      (db.pragma('table_info(gitops_rollout_generations)') as Array<{ name: string }>).map((c) => c.name),
+    );
+    expect(generationCols.has('id')).toBe(true);
+    expect(generationCols.has('application_id')).toBe(true);
+    expect(generationCols.has('required_targets_json')).toBe(true);
+    expect(generationCols.has('provenance')).toBe(true);
+    expect(generationCols.has('supersedes_generation_id')).toBe(true);
   });
 
   it('retains a source stack reference when an application targets a Blueprint', async () => {

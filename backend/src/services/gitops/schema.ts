@@ -284,6 +284,33 @@ CREATE TABLE IF NOT EXISTS gitops_rollout_candidates (
 CREATE INDEX IF NOT EXISTS idx_gitops_rollout_app
   ON gitops_rollout_candidates(application_id, created_at);
 
+CREATE TABLE IF NOT EXISTS gitops_rollout_generations (
+  id TEXT PRIMARY KEY,
+  application_id TEXT NOT NULL,
+  intent_revision_id TEXT NOT NULL,
+  rollout_candidate_id TEXT NOT NULL,
+  accepted_generation_id TEXT NULL,
+  artifact_set_id TEXT NULL,
+  placement_approval_ref TEXT NULL,
+  source_acceptance_ref TEXT NULL,
+  rollout_authorization_ref TEXT NULL,
+  required_targets_json TEXT NOT NULL,
+  preflight_fingerprint TEXT NULL,
+  preflight_evidence_json TEXT NULL,
+  rollout_strategy_json TEXT NOT NULL DEFAULT '{}',
+  provenance TEXT NOT NULL CHECK (provenance IN (
+    'legacy_inline','placement_approval','rollout_authorization'
+  )),
+  supersedes_generation_id TEXT NULL,
+  superseded_at INTEGER NULL,
+  operation_id TEXT NOT NULL,
+  actor TEXT NULL,
+  trigger TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gitops_rollout_gen_app
+  ON gitops_rollout_generations(application_id, created_at);
+
 CREATE TABLE IF NOT EXISTS gitops_approvals (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL CHECK (kind IN (

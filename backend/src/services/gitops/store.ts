@@ -20,6 +20,7 @@ import type {
   GitOpsHistoryRow,
   GitOpsIntentRevisionRow,
   GitOpsRolloutCandidateRow,
+  GitOpsRolloutGenerationRow,
   GitOpsTargetCurrentRow,
   ResolveApprovalExpected,
 } from './types';
@@ -324,6 +325,10 @@ export class GitOpsStore {
 
   getRolloutCandidate(id: string): GitOpsRolloutCandidateRow | undefined {
     return this.db().prepare('SELECT * FROM gitops_rollout_candidates WHERE id = ?').get(id) as GitOpsRolloutCandidateRow | undefined;
+  }
+
+  getRolloutGeneration(id: string): GitOpsRolloutGenerationRow | undefined {
+    return this.db().prepare('SELECT * FROM gitops_rollout_generations WHERE id = ?').get(id) as GitOpsRolloutGenerationRow | undefined;
   }
 
   getApproval(id: string): GitOpsApprovalRow | undefined {
@@ -770,6 +775,34 @@ export class GitOpsStore {
       row.accepted_generation_id, row.artifact_set_id, row.required_targets_json,
       row.authoritative, row.provenance, row.operation_id, row.created_at,
     );
+  }
+
+  insertRolloutGeneration(row: GitOpsRolloutGenerationRow): void {
+    decodeGitOpsRequiredTargetsJson(row.required_targets_json);
+    if (row.preflight_fingerprint !== null && !isPreflightFingerprint(row.preflight_fingerprint)) {
+      throw new Error('preflight_fingerprint must be a 64-char hex digest');
+    }
+    this.db().prepare(
+      `INSERT INTO gitops_rollout_generations (
+        id, application_id, intent_revision_id, rollout_candidate_id, accepted_generation_id,
+        artifact_set_id, placement_approval_ref, source_acceptance_ref, rollout_authorization_ref,
+        required_targets_json, preflight_fingerprint, preflight_evidence_json, rollout_strategy_json,
+        provenance, supersedes_generation_id, superseded_at, operation_id, actor, trigger, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      row.id, row.application_id, row.intent_revision_id, row.rollout_candidate_id,
+      row.accepted_generation_id, row.artifact_set_id, row.placement_approval_ref,
+      row.source_acceptance_ref, row.rollout_authorization_ref, row.required_targets_json,
+      row.preflight_fingerprint, row.preflight_evidence_json, row.rollout_strategy_json,
+      row.provenance, row.supersedes_generation_id, row.superseded_at, row.operation_id,
+      row.actor, row.trigger, row.created_at,
+    );
+  }
+
+  markRolloutGenerationSuperseded(id: string, supersededAt: number): void {
+    this.db().prepare(
+      'UPDATE gitops_rollout_generations SET superseded_at = ? WHERE id = ? AND superseded_at IS NULL',
+    ).run(supersededAt, id);
   }
 
   upsertTarget(row: GitOpsTargetCurrentRow): void {
