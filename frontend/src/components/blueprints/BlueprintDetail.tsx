@@ -358,7 +358,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                                             state={placementStateMeta(gitopsPlacement)}
                                         />
                                     )}
-                                    {summary && <GitOpsCaveats revision={summary.gitopsRevision} />}
+                                    <GitOpsCaveats revision={summary.gitopsRevision} />
                                 </div>
                             </SheetSection>
                         )}

@@ -34,10 +34,13 @@ export { setRegistryReadinessDepsForTests };
 const PREFLIGHT_EVAL_TIMEOUT_MS = 30_000;
 
 /** Serialize one evaluation per application so concurrent dispatch cannot double-probe. */
-const inflightEvaluations = new Map<string, Promise<unknown>>();
+type InflightEvaluation = { token: number; promise: Promise<unknown> };
+const inflightEvaluations = new Map<string, InflightEvaluation>();
+let inflightEvaluationToken = 0;
 
 async function withSerializedEvaluation<T>(applicationId: string, fn: () => Promise<T>): Promise<T> {
-  const prior = inflightEvaluations.get(applicationId);
+  const prior = inflightEvaluations.get(applicationId)?.promise;
+  const token = ++inflightEvaluationToken;
   const run = (async () => {
     if (prior) {
       try {
@@ -48,11 +51,12 @@ async function withSerializedEvaluation<T>(applicationId: string, fn: () => Prom
     }
     return fn();
   })();
-  inflightEvaluations.set(applicationId, run);
+  inflightEvaluations.set(applicationId, { token, promise: run });
   try {
     return await run;
   } finally {
-    if (inflightEvaluations.get(applicationId) === run) {
+    // Only clear if we are still the latest queued evaluation for this app.
+    if (inflightEvaluations.get(applicationId)?.token === token) {
       inflightEvaluations.delete(applicationId);
     }
   }
