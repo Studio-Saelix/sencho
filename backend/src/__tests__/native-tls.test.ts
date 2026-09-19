@@ -20,7 +20,7 @@ import {
   rewriteHttpUrlToHttps,
 } from '../helpers/nativeTls';
 import { createServer } from '../server';
-import { loopbackTlsServername, probeLocalHealth } from '../helpers/healthcheckProbe';
+import { loopbackTlsServername, probeLocalHealth, trustHealthcheckCa } from '../helpers/healthcheckProbe';
 
 const TLS_ENV = [
   'SENCHO_TLS_CERT_FILE',
@@ -153,34 +153,35 @@ describe('createServer native TLS', () => {
 
   it('marks WebSocket upgrade sockets encrypted so the pilot confidentiality predicate can pass', async () => {
     await withTlsFiles(async (files) => {
-      const { server } = createServer(express());
-      const port = await listen(server);
-      try {
-        const encrypted = await new Promise<boolean>((resolve, reject) => {
-          server.on('upgrade', (req, socket) => {
-            resolve(req.socket instanceof TLSSocket && req.socket.encrypted === true);
-            socket.destroy();
+      await withTrustedCa(files.caPem, async () => {
+        const { server } = createServer(express());
+        const port = await listen(server);
+        try {
+          const encrypted = await new Promise<boolean>((resolve, reject) => {
+            server.on('upgrade', (req, socket) => {
+              resolve(req.socket instanceof TLSSocket && req.socket.encrypted === true);
+              socket.destroy();
+            });
+            const req = https.request({
+              hostname: '127.0.0.1',
+              port,
+              path: '/api/pilot/tunnel',
+              method: 'GET',
+              headers: {
+                Connection: 'Upgrade',
+                Upgrade: 'websocket',
+                'Sec-WebSocket-Version': '13',
+                'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+              },
+            });
+            req.on('error', reject);
+            req.end();
           });
-          const req = https.request({
-            hostname: '127.0.0.1',
-            port,
-            path: '/api/pilot/tunnel',
-            method: 'GET',
-            ca: files.caPem,
-            headers: {
-              Connection: 'Upgrade',
-              Upgrade: 'websocket',
-              'Sec-WebSocket-Version': '13',
-              'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
-            },
-          });
-          req.on('error', reject);
-          req.end();
-        });
-        expect(encrypted).toBe(true);
-      } finally {
-        await close(server);
-      }
+          expect(encrypted).toBe(true);
+        } finally {
+          await close(server);
+        }
+      });
     });
   });
 
@@ -200,6 +201,12 @@ describe('image HEALTHCHECK', () => {
     );
     expect(dockerfile).toContain('dist/healthcheck.js');
   });
+
+  it('loads SENCHO_TLS_CA_FILE into the process trust store before probing', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, '..', 'healthcheck.ts'), 'utf8');
+    expect(src).toContain('trustHealthcheckCa');
+    expect(src).toContain('TLS_CA_FILE_ENV');
+  });
 });
 
 describe('probeLocalHealth', () => {
@@ -211,19 +218,17 @@ describe('probeLocalHealth', () => {
 
   it('uses HTTPS when native TLS is on', async () => {
     await withTlsFiles(async (files) => {
-      process.env.SENCHO_TLS_CA_FILE = files.caFile;
       process.env.SENCHO_PUBLIC_URL = 'https://127.0.0.1:1852';
-      await expectHealthProbe();
+      await withTrustedCa(files.caPem, () => expectHealthProbe());
     });
   });
 
   it('rejects the HTTPS probe when SENCHO_PUBLIC_URL does not match the cert SAN', async () => {
     await withTlsFiles(async (files) => {
-      process.env.SENCHO_TLS_CA_FILE = files.caFile;
       process.env.SENCHO_PUBLIC_URL = 'https://sencho.example.com:1852';
-      await withHealthListener(async (port) => {
+      await withTrustedCa(files.caPem, () => withHealthListener(async (port) => {
         await expect(probeLocalHealth(port)).rejects.toThrow(/altname|certificate|unable to verify/i);
-      });
+      }));
     });
   });
 
@@ -254,6 +259,15 @@ async function withTlsFiles(run: (files: SelfSignedTlsFiles) => Promise<void> | 
     await run(files);
   } finally {
     fs.rmSync(files.dir, { recursive: true, force: true });
+  }
+}
+
+async function withTrustedCa<T>(caPem: string, run: () => Promise<T> | T): Promise<T> {
+  const restore = trustHealthcheckCa(caPem);
+  try {
+    return await run();
+  } finally {
+    restore();
   }
 }
 
@@ -318,16 +332,15 @@ function httpGet(port: number, pathName: string): Promise<string> {
 }
 
 function httpsGet(port: number, pathName: string, caPem: string): Promise<string> {
-  return new Promise((resolve, reject) => {
+  return withTrustedCa(caPem, () => new Promise<string>((resolve, reject) => {
     https.get({
       hostname: '127.0.0.1',
       port,
       path: pathName,
-      ca: caPem,
     }, (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => resolve(data));
     }).on('error', reject);
-  });
+  }));
 }

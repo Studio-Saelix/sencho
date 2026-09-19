@@ -1,19 +1,17 @@
-import fs from 'fs';
 import http from 'http';
 import https from 'https';
 import { isIP } from 'net';
-import { checkServerIdentity } from 'tls';
+import { checkServerIdentity, getCACertificates, setDefaultCACertificates } from 'tls';
 import { PORT } from './constants';
-import { isNativeTlsEnabled, TLS_CA_FILE_ENV } from './nativeTls';
+import { isNativeTlsEnabled } from './nativeTls';
 
 const LOOPBACK = '127.0.0.1';
 
 /**
- * TLS identity name used to verify the hub cert. TCP is always 127.0.0.1;
- * verification uses the SENCHO_PUBLIC_URL hostname (the name agents dial)
- * so a DNS or LAN-IP SAN still matches. Unset or unparsable SENCHO_PUBLIC_URL
- * falls back to 127.0.0.1. Bracketed IPv6 hostnames are unwrapped the same
- * way outbound URL checks unwrap them.
+ * TLS identity for the loopback HEALTHCHECK. TCP is always 127.0.0.1;
+ * verification uses SENCHO_PUBLIC_URL (the name agents dial) so a DNS or
+ * LAN-IP SAN still matches. Unset or unparsable values fall back to
+ * 127.0.0.1. Bracketed IPv6 hostnames are unwrapped.
  */
 export function loopbackTlsServername(env: NodeJS.ProcessEnv = process.env): string {
   const raw = env.SENCHO_PUBLIC_URL?.trim();
@@ -28,43 +26,52 @@ export function loopbackTlsServername(env: NodeJS.ProcessEnv = process.env): str
 }
 
 /**
- * Loopback GET /api/health used by the image HEALTHCHECK. When native TLS is
- * on, the probe speaks HTTPS to 127.0.0.1 with certificate verification
- * enabled. Identity is checked against SENCHO_PUBLIC_URL so the SAN matches
- * the name agents dial. SNI is sent only for DNS names (Node rejects an IP
- * as TLS servername). If set, SENCHO_TLS_CA_FILE is passed as `ca` so a
- * private issuer verifies.
+ * Add a PEM CA to this process's default trust store. Returns a restore
+ * function. HEALTHCHECK uses this so the loopback GET can verify a private
+ * issuer without putting file bytes into https.get options.
+ */
+export function trustHealthcheckCa(caPem: string): () => void {
+  const previous = getCACertificates();
+  setDefaultCACertificates([...previous, caPem]);
+  return () => setDefaultCACertificates(previous);
+}
+
+/**
+ * Loopback GET /api/health. With native TLS, speaks HTTPS to 127.0.0.1 and
+ * verifies identity against SENCHO_PUBLIC_URL. SNI is sent only for DNS
+ * names. Private issuers must already be in the process default CA list.
  */
 export function probeLocalHealth(port: number = PORT): Promise<number> {
   return new Promise((resolve, reject) => {
-    const base: http.RequestOptions = {
-      hostname: LOOPBACK,
-      port,
-      path: '/api/health',
-      timeout: 4000,
-    };
-    function onResponse(res: http.IncomingMessage): void {
+    const req = requestLocalHealth(port, (res) => {
       res.resume();
       resolve(res.statusCode ?? 0);
-    }
-    let req: http.ClientRequest;
-    if (isNativeTlsEnabled()) {
-      const expectedName = loopbackTlsServername();
-      const tlsOpts: https.RequestOptions = {
-        ...base,
-        checkServerIdentity: (_host, cert) => checkServerIdentity(expectedName, cert),
-      };
-      if (!isIP(expectedName)) tlsOpts.servername = expectedName;
-      const caPath = process.env[TLS_CA_FILE_ENV]?.trim();
-      if (caPath) tlsOpts.ca = fs.readFileSync(caPath);
-      req = https.get(tlsOpts, onResponse);
-    } else {
-      req = http.get(base, onResponse);
-    }
+    });
     req.on('error', reject);
     req.on('timeout', () => {
       req.destroy();
       reject(new Error('healthcheck timed out'));
     });
   });
+}
+
+function requestLocalHealth(
+  port: number,
+  onResponse: (res: http.IncomingMessage) => void,
+): http.ClientRequest {
+  const base: http.RequestOptions = {
+    hostname: LOOPBACK,
+    port,
+    path: '/api/health',
+    timeout: 4000,
+  };
+  if (!isNativeTlsEnabled()) return http.get(base, onResponse);
+
+  const expectedName = loopbackTlsServername();
+  const options: https.RequestOptions = {
+    ...base,
+    checkServerIdentity: (_host, cert) => checkServerIdentity(expectedName, cert),
+  };
+  if (!isIP(expectedName)) options.servername = expectedName;
+  return https.get(options, onResponse);
 }
