@@ -111,3 +111,15 @@ query-filters:
       id: js/file-access-to-http
       paths:
         - backend/src/services/NotificationService.ts
+
+  # native-tls tests pass a temp self-signed CA into https.get / https.request
+  # so the client can verify the test listener. The HEALTHCHECK probe reads
+  # SENCHO_TLS_CA_FILE to verify loopback GET /api/health; the bytes stay
+  # in-container and TCP is 127.0.0.1. Same query-filters path scoping as the
+  # NotificationService js/file-access-to-http exclude above, not the
+  # js/http-to-file-access case that needed paths-ignore.
+  - exclude:
+      id: js/file-access-to-http
+      paths:
+        - backend/src/__tests__/native-tls.test.ts
+        - backend/src/helpers/healthcheckProbe.ts

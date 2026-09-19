@@ -256,7 +256,7 @@ Both files must be set. Setting only one refuses to start rather than falling ba
 
 The certificate must include a Subject Alternative Name that matches how agents dial: a DNS name for a hostname, or an `iPAddress` SAN for a raw IP. A certificate with only a Common Name fails Node's verification.
 
-Set `SENCHO_PUBLIC_URL` to the matching `https://` URL. For a private or self-signed issuer, also set `SENCHO_TLS_CA_FILE` so enrollment can give agents the CA bundle. Publicly trusted certificates do not need a CA file.
+Set `SENCHO_PUBLIC_URL` to the matching `https://` URL. For a private or self-signed issuer, also set `SENCHO_TLS_CA_FILE` so enrollment can give agents the CA bundle and the image health check can verify the loopback HTTPS probe. Publicly trusted certificates do not need a CA file.
 
 Existing Pilot agents keep their persisted `pilot.jwt` across a scheme change. Edit the agent compose file so `SENCHO_PRIMARY_URL` uses `https://` (and add the CA bind-mount if enrollment now includes one), then recreate the agent container.
 

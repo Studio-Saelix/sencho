@@ -1,7 +1,8 @@
 /**
  * Native hub TLS: cert+key files opt the HTTP listener into https.createServer
  * so Pilot upgrades set socket.encrypted and registry delivery can proceed
- * without a reverse proxy.
+ * without a reverse proxy. Also covers the loopback HEALTHCHECK probe
+ * (HTTPS plus SAN check against SENCHO_PUBLIC_URL).
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import express from 'express';
@@ -19,7 +20,7 @@ import {
   rewriteHttpUrlToHttps,
 } from '../helpers/nativeTls';
 import { createServer } from '../server';
-import { probeLocalHealth } from '../helpers/healthcheckProbe';
+import { loopbackTlsServername, probeLocalHealth } from '../helpers/healthcheckProbe';
 
 const TLS_ENV = [
   'SENCHO_TLS_CERT_FILE',
@@ -27,6 +28,7 @@ const TLS_ENV = [
   'SENCHO_TLS_CA_FILE',
   'SENCHO_TLS_KEY_PASSPHRASE',
   'SENCHO_MODE',
+  'SENCHO_PUBLIC_URL',
 ] as const;
 
 const originalEnv: Record<string, string | undefined> = {};
@@ -74,7 +76,7 @@ describe('loadNativeTlsMaterial', () => {
       const material = loadNativeTlsMaterial();
       expect(material?.cert.includes('BEGIN CERTIFICATE')).toBe(true);
       expect(material?.key.includes('BEGIN')).toBe(true);
-      expect(material?.caPem).toBe(fs.readFileSync(files.caFile, 'utf8'));
+      expect(material?.caPem).toBe(files.caPem);
       expect(material?.passphrase).toBe('secret');
     });
   });
@@ -141,7 +143,7 @@ describe('createServer native TLS', () => {
       const { server } = createServer(app);
       const port = await listen(server);
       try {
-        expect(await httpsGet(port, '/ping', files.caFile)).toBe('ok');
+        expect(await httpsGet(port, '/ping', files.caPem)).toBe('ok');
         expect(encrypted).toBe(true);
       } finally {
         await close(server);
@@ -164,7 +166,7 @@ describe('createServer native TLS', () => {
             port,
             path: '/api/pilot/tunnel',
             method: 'GET',
-            ca: fs.readFileSync(files.caFile),
+            ca: files.caPem,
             headers: {
               Connection: 'Upgrade',
               Upgrade: 'websocket',
@@ -208,8 +210,20 @@ describe('probeLocalHealth', () => {
   });
 
   it('uses HTTPS when native TLS is on', async () => {
-    await withTlsFiles(async () => {
+    await withTlsFiles(async (files) => {
+      process.env.SENCHO_TLS_CA_FILE = files.caFile;
+      process.env.SENCHO_PUBLIC_URL = 'https://127.0.0.1:1852';
       await expectHealthProbe();
+    });
+  });
+
+  it('rejects the HTTPS probe when SENCHO_PUBLIC_URL does not match the cert SAN', async () => {
+    await withTlsFiles(async (files) => {
+      process.env.SENCHO_TLS_CA_FILE = files.caFile;
+      process.env.SENCHO_PUBLIC_URL = 'https://sencho.example.com:1852';
+      await withHealthListener(async (port) => {
+        await expect(probeLocalHealth(port)).rejects.toThrow(/altname|certificate|unable to verify/i);
+      });
     });
   });
 
@@ -218,6 +232,16 @@ describe('probeLocalHealth', () => {
       process.env.SENCHO_MODE = 'pilot';
       await expectHealthProbe();
     });
+  });
+});
+
+describe('loopbackTlsServername', () => {
+  it('uses SENCHO_PUBLIC_URL hostname, else 127.0.0.1', () => {
+    expect(loopbackTlsServername({ SENCHO_PUBLIC_URL: 'https://sencho.example.com:1852' })).toBe('sencho.example.com');
+    expect(loopbackTlsServername({ SENCHO_PUBLIC_URL: 'https://192.168.1.50:1852' })).toBe('192.168.1.50');
+    expect(loopbackTlsServername({ SENCHO_PUBLIC_URL: 'https://[2001:db8::1]:1852' })).toBe('2001:db8::1');
+    expect(loopbackTlsServername({})).toBe('127.0.0.1');
+    expect(loopbackTlsServername({ SENCHO_PUBLIC_URL: 'not a url' })).toBe('127.0.0.1');
   });
 });
 
@@ -245,16 +269,22 @@ async function expectHttpPing(): Promise<void> {
   }
 }
 
-async function expectHealthProbe(): Promise<void> {
+async function withHealthListener(run: (port: number) => Promise<void>): Promise<void> {
   const app = express();
   app.get('/api/health', (_req, res) => res.status(200).json({ status: 'ok' }));
   const { server } = createServer(app);
   const port = await listen(server);
   try {
-    await expect(probeLocalHealth(port)).resolves.toBe(200);
+    await run(port);
   } finally {
     await close(server);
   }
+}
+
+async function expectHealthProbe(): Promise<void> {
+  await withHealthListener(async (port) => {
+    await expect(probeLocalHealth(port)).resolves.toBe(200);
+  });
 }
 
 function listen(server: http.Server): Promise<number> {
@@ -287,13 +317,13 @@ function httpGet(port: number, pathName: string): Promise<string> {
   });
 }
 
-function httpsGet(port: number, pathName: string, caFile: string): Promise<string> {
+function httpsGet(port: number, pathName: string, caPem: string): Promise<string> {
   return new Promise((resolve, reject) => {
     https.get({
       hostname: '127.0.0.1',
       port,
       path: pathName,
-      ca: fs.readFileSync(caFile),
+      ca: caPem,
     }, (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });

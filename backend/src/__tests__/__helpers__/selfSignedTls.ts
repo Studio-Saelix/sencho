@@ -8,6 +8,7 @@ export interface SelfSignedTlsFiles {
   certFile: string;
   keyFile: string;
   caFile: string;
+  caPem: string;
 }
 
 /**
@@ -18,6 +19,7 @@ export function writeSelfSignedTls(prefix = 'sencho-tls-'): SelfSignedTlsFiles {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const keyFile = path.join(dir, 'key.pem');
   const certFile = path.join(dir, 'cert.pem');
+  const caFile = path.join(dir, 'ca.pem');
   execFileSync('openssl', [
     'req', '-x509', '-newkey', 'rsa:2048', '-sha256', '-days', '1',
     '-nodes',
@@ -26,7 +28,7 @@ export function writeSelfSignedTls(prefix = 'sencho-tls-'): SelfSignedTlsFiles {
     '-subj', '/CN=127.0.0.1',
     '-addext', 'subjectAltName=IP:127.0.0.1',
   ], { stdio: 'pipe' });
-  const caFile = path.join(dir, 'ca.pem');
-  fs.copyFileSync(certFile, caFile);
-  return { dir, certFile, keyFile, caFile };
+  const caPem = fs.readFileSync(certFile, 'utf8');
+  fs.writeFileSync(caFile, caPem);
+  return { dir, certFile, keyFile, caFile, caPem };
 }

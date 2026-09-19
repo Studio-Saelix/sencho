@@ -233,7 +233,7 @@ Sencho itself is lightweight. The majority of resource usage on your host comes 
 - **Inbound:** Only the listen port needs to be reachable (directly or through a reverse proxy)
 - **Outbound:** No outbound connections are required for local-only setups. If you use multi-node management, Sencho needs HTTP/HTTPS access to remote Sencho instances on their configured API URLs
 - **TLS:** Terminate TLS at a reverse proxy, or on the Sencho process itself with `SENCHO_TLS_CERT_FILE` and `SENCHO_TLS_KEY_FILE`. See [Native TLS on the control instance](/getting-started/configuration#native-tls-on-the-control-instance).
-- **Health check:** `GET /api/health` returns `200` when the application is ready. The Docker image includes a built-in `HEALTHCHECK` that polls this endpoint every 30 seconds, using HTTPS when native TLS is enabled.
+- **Health check:** `GET /api/health` returns `200` when the application is ready. The Docker image includes a built-in `HEALTHCHECK` that polls this endpoint every 30 seconds, using HTTPS when native TLS is enabled. The probe dials `127.0.0.1` and verifies the certificate against the hostname in `SENCHO_PUBLIC_URL` (or `127.0.0.1` if unset). Private issuers also need `SENCHO_TLS_CA_FILE` so the probe can trust the issuer.
 
 ---
 
