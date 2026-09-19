@@ -277,3 +277,28 @@ describe('DELETE /api/stacks/:stackName/git-source/provider-hooks/:id', () => {
         expect(deliveryCount(foreignEndpoint)).toBe(2);
     });
 });
+
+describe('POST /api/stacks/:stackName/git-source/provider-hooks/:id/rotate', () => {
+    it('rotates the secret without pruning the endpoint or its deliveries', async () => {
+        seedGitSource('prune-rotate');
+        const endpointId = seedEndpoint('prune-rotate');
+        seedDeliveries(endpointId, 2);
+        const before = GitProviderWebhookStore.getInstance().getEndpoint(endpointId);
+        expect(before).toBeDefined();
+        const priorSecret = before!.encrypted_secret;
+
+        const res = await request(app)
+            .post(`/api/stacks/prune-rotate/git-source/provider-hooks/${endpointId}/rotate`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+
+        expect(res.status).toBe(200);
+        expect(typeof res.body.secret).toBe('string');
+        expect(res.body.secret.length).toBeGreaterThan(0);
+        expect(endpointCount('prune-rotate')).toBe(1);
+        expect(deliveryCount(endpointId)).toBe(2);
+        const after = GitProviderWebhookStore.getInstance().getEndpoint(endpointId);
+        expect(after).toBeDefined();
+        expect(after!.encrypted_secret).not.toBe(priorSecret);
+        expect(after!.encrypted_secret_previous).toBe(priorSecret);
+    });
+});
