@@ -60,5 +60,11 @@
     "title": "Git-managed Blueprint content",
     "blurb": "Move a live Git source onto a Blueprint so that Blueprint's compose comes from Git instead of the editor. Git-managed Blueprints bind and show a blocked rollout state; they do not deploy from the stored snapshot. Detach restores Inline editing.",
     "docUrl": "https://docs.sencho.io/features/blueprint-model"
+  },
+  {
+    "id": "native-hub-tls",
+    "title": "HTTPS on the Sencho instance",
+    "blurb": "Terminate TLS on Sencho itself when you are not using a reverse proxy. Mount a certificate and key, set SENCHO_PUBLIC_URL to https, and Pilot agents enroll over a confidential tunnel so private-registry credentials can travel.",
+    "docUrl": "https://docs.sencho.io/getting-started/configuration#native-tls-on-the-control-instance"
   }
 ]

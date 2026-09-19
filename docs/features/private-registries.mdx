@@ -191,7 +191,7 @@ Delivery needs the remote target to run a Sencho version that supports exact-ref
 
 Credentials exist only in the forwarded delivery envelope and a temporary `DOCKER_CONFIG` for the duration of the Compose child process. They are not written to the target's registry table, responses, logs, or audit trail. Credentials the target already has configured win for their host; the hub fills only the hosts the target cannot cover.
 
-Two conditions stop an operation instead of letting it pull without the credentials it needs. When the hub has no usable credential for a host the operation proved requires one, it fails with `Registry credentials unavailable for challenged image hosts`; add the registry on the hub, or on the target itself. When the connection to the target is not confidential, it fails with `Registry credential delivery requires a confidential transport`; a confidential hop means an HTTPS node address or a Pilot tunnel terminated with TLS or a trusted reverse proxy, so secure the connection or configure the registry on the target so no credential needs to travel. Any other delivery failure also stops the operation with a clear error before Compose starts.
+Two conditions stop an operation instead of letting it pull without the credentials it needs. When the hub has no usable credential for a host the operation proved requires one, it fails with `Registry credentials unavailable for challenged image hosts`; add the registry on the hub, or on the target itself. When the connection to the target is not confidential, it fails with `Registry credential delivery requires a confidential transport`. A confidential hop is an HTTPS node address, a Pilot tunnel to a hub that terminates TLS itself, or a Pilot tunnel in front of a trusted reverse proxy. Secure the connection, or configure the registry on the target so no credential needs to travel. Any other delivery failure also stops the operation with a clear error before Compose starts.
 
 ## Troubleshooting
 
@@ -225,7 +225,7 @@ Two conditions stop an operation instead of letting it pull without the credenti
   </Accordion>
 
   <Accordion title="A remote operation fails with 'Registry credential delivery requires a confidential transport'">
-    The hub proved the operation references a private image, and the connection to that node does not guarantee confidentiality. Use an HTTPS URL for the node's API address, or reach the node through a Pilot tunnel terminated with TLS or a trusted reverse proxy. To keep operating over a plain HTTP connection, configure the registry on that node's own Sencho instance instead; credentials stored on the node itself never need to travel.
+    The hub proved the operation references a private image, and the connection to that node does not guarantee confidentiality. Use an HTTPS URL for the node's API address, terminate TLS on the hub with `SENCHO_TLS_CERT_FILE` and `SENCHO_TLS_KEY_FILE`, or reach the node through a Pilot tunnel in front of a trusted reverse proxy. See [Native TLS on the control instance](/getting-started/configuration#native-tls-on-the-control-instance). To keep operating over a plain HTTP connection, configure the registry on that node's own Sencho instance instead; credentials stored on the node itself never need to travel.
   </Accordion>
 
   <Accordion title="A remote operation fails with 'Registry credentials unavailable for challenged image hosts'">
@@ -241,7 +241,7 @@ Two conditions stop an operation instead of letting it pull without the credenti
   </Accordion>
 
   <Accordion title="A remote operation fails because the transport is not confidential after a challenged reference">
-    The operation requires a private image, the hub has credentials for the registry host, but the connection to the target does not guarantee confidentiality. Use an HTTPS URL for the node's API address, or reach the node through a Pilot tunnel terminated with TLS or a trusted reverse proxy. To keep operating over a plain HTTP connection, configure the registry on that node's own Sencho instance instead; credentials stored on the node itself never need to travel.
+    The operation requires a private image, the hub has credentials for the registry host, but the connection to the target does not guarantee confidentiality. Use an HTTPS URL for the node's API address, terminate TLS on the hub with `SENCHO_TLS_CERT_FILE` and `SENCHO_TLS_KEY_FILE`, or reach the node through a Pilot tunnel in front of a trusted reverse proxy. See [Native TLS on the control instance](/getting-started/configuration#native-tls-on-the-control-instance). To keep operating over a plain HTTP connection, configure the registry on that node's own Sencho instance instead; credentials stored on the node itself never need to travel.
   </Accordion>
 
   <Accordion title="A remote operation fails because credentials are missing for a challenged image host">

@@ -39,7 +39,7 @@ This tutorial does not cover **Distributed API Proxy** mode (for a remote host y
       <img src="/images/tutorials/enroll-a-remote-node/pilot-enroll-modal.png" alt="Enroll the pilot agent dialog. Step 1 shows a generated compose.yaml with SENCHO_MODE set to pilot, SENCHO_PRIMARY_URL pointing at the control instance, and a SENCHO_ENROLL_TOKEN. Step 2 shows the docker compose up -d start command. The footer reads Expires 14m from now, with a Copy compose file button." />
     </Frame>
 
-    Save Step 1's contents as `compose.yaml` in a directory on the remote host (it does not need to be the Compose Directory itself), then run Step 2's command in that same directory as the user that owns Docker:
+    Save Step 1's contents as `compose.yaml` in a directory on the remote host (it does not need to be the Compose Directory itself). If the dialog also shows a hub CA block, save that PEM as `sencho-hub-ca.pem` in the same directory. Then run Step 2's command in that directory as the user that owns Docker:
 
     ```bash
     docker compose up -d

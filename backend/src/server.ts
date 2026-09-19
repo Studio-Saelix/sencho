@@ -1,7 +1,9 @@
 import http from 'http';
+import https from 'https';
 import type { Express } from 'express';
 import { WebSocketServer } from 'ws';
 import { MAX_FRAME_SIZE_BYTES } from './pilot/protocol';
+import { loadNativeTlsMaterial, nativeTlsServerOptions } from './helpers/nativeTls';
 
 export interface SenchoServer {
   server: http.Server;
@@ -12,13 +14,22 @@ export interface SenchoServer {
 }
 
 /**
- * Wrap the Express app in an `http.Server` and create the two `noServer` WSS
- * instances used by `attachUpgrade`. Every WebSocket path dispatches out of
- * the HTTP server's `upgrade` event; the `WebSocketServer` instances only
- * negotiate the WS handshake, so they are created in `noServer: true` mode.
+ * Wrap the Express app in an `http.Server` (or `https.Server` when native TLS
+ * cert material is configured) and create the two `noServer` WSS instances
+ * used by `attachUpgrade`. Every WebSocket path dispatches out of the
+ * server's `upgrade` event; the `WebSocketServer` instances only negotiate
+ * the WS handshake, so they are created in `noServer: true` mode.
+ *
+ * https.Server extends http.Server, so attachUpgrade and startServer keep
+ * the same types. Native TLS sets `socket.encrypted` on upgrades; that is
+ * one input to the registry-delivery confidentiality check. The reverse-proxy
+ * path still uses forwarded proto from a trusted CIDR.
  */
 export function createServer(app: Express): SenchoServer {
-  const server = http.createServer(app);
+  const tls = loadNativeTlsMaterial();
+  const server = tls
+    ? https.createServer(nativeTlsServerOptions(tls), app)
+    : http.createServer(app);
   const wss = new WebSocketServer({ noServer: true });
 
   // Agents dial /api/pilot/tunnel; the handshake verifies a pilot_enroll or

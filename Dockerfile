@@ -362,9 +362,10 @@ RUN sed -i 's/\r//' /usr/local/bin/docker-entrypoint.sh \
 # Expose port
 EXPOSE 1852
 
-# Health check - polls the public /api/health endpoint every 30s
+# Health check - polls /api/health every 30s. The compiled probe is required
+# because an inline HTTP one-liner cannot speak TLS when native TLS is on.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD node -e "const h=require('http');h.get('http://localhost:1852/api/health',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"
+  CMD ["node", "dist/healthcheck.js"]
 
 # Tini owns PID 1 so orphaned Git transport helpers are reaped after a
 # process-group kill. The entrypoint still prepares /app/data before execing

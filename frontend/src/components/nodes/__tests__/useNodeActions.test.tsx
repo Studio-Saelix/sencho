@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/context/NodeContext', () => ({
@@ -11,6 +11,7 @@ vi.mock('@/components/ui/toast-store', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }));
 
+import { apiFetch } from '@/lib/api';
 import { useNodeActions } from '../useNodeActions';
 
 function Harness() {
@@ -21,6 +22,13 @@ function Harness() {
       {NodeActionModals}
     </>
   );
+}
+
+function enrollmentResponse(body: Record<string, unknown>): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }
 
 describe('useNodeActions Pilot defaults', () => {
@@ -50,5 +58,50 @@ describe('useNodeActions Pilot defaults', () => {
     fireEvent.click(screen.getByRole('button', { name: /Distributed API Proxy/i }));
 
     expect(composeDir).toHaveValue('/srv/stacks');
+  });
+
+  it('shows the hub CA step when enrollment includes caPem', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(enrollmentResponse({
+      id: 9,
+      enrollment: {
+        token: 'tok',
+        expiresAt: Date.now() + 15 * 60 * 1000,
+        composeYaml: 'name: sencho-agent\n',
+        caPem: '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n',
+      },
+    }));
+
+    render(<Harness />);
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'edge-tls' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add node' }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/save the hub CA as/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText('sencho-hub-ca.pem')).toBeInTheDocument();
+    expect(screen.getByText(/BEGIN CERTIFICATE/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy CA file' })).toBeInTheDocument();
+  });
+
+  it('omits the hub CA step when enrollment has no caPem', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(enrollmentResponse({
+      id: 10,
+      enrollment: {
+        token: 'tok',
+        expiresAt: Date.now() + 15 * 60 * 1000,
+        composeYaml: 'name: sencho-agent\n',
+      },
+    }));
+
+    render(<Harness />);
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'edge-plain' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add node' }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/save the file as/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/save the hub CA as/i)).not.toBeInTheDocument();
   });
 });

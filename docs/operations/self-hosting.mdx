@@ -232,7 +232,8 @@ Sencho itself is lightweight. The majority of resource usage on your host comes 
 - **Listen port:** 1852 (fixed). Map it to any host port using Docker's `-p` flag or `ports` in your compose file
 - **Inbound:** Only the listen port needs to be reachable (directly or through a reverse proxy)
 - **Outbound:** No outbound connections are required for local-only setups. If you use multi-node management, Sencho needs HTTP/HTTPS access to remote Sencho instances on their configured API URLs
-- **Health check:** `GET /api/health` returns `200` when the application is ready. The Docker image includes a built-in `HEALTHCHECK` that polls this endpoint every 30 seconds
+- **TLS:** Terminate TLS at a reverse proxy, or on the Sencho process itself with `SENCHO_TLS_CERT_FILE` and `SENCHO_TLS_KEY_FILE`. See [Native TLS on the control instance](/getting-started/configuration#native-tls-on-the-control-instance).
+- **Health check:** `GET /api/health` returns `200` when the application is ready. The Docker image includes a built-in `HEALTHCHECK` that polls this endpoint every 30 seconds, using HTTPS when native TLS is enabled. The probe dials `127.0.0.1` and verifies the certificate against the hostname in `SENCHO_PUBLIC_URL` (or `127.0.0.1` if unset). Private issuers also need `SENCHO_TLS_CA_FILE` so the healthcheck process can trust the issuer.
 
 ---
 
@@ -248,5 +249,9 @@ Quick reference for all environment variables. See [Configuration](/getting-star
 | `API_RATE_LIMIT` | `200` | Maximum API requests per minute per user session (production only) |
 | `API_POLLING_RATE_LIMIT` | `300` | Rate limit for dashboard polling endpoints (production only) |
 | `NODE_ENV` | `production` | Set automatically in the Docker image |
+| `SENCHO_PUBLIC_URL` | *(request host)* | Externally reachable URL baked into Pilot enrollment. Use `https://` when native TLS is enabled. |
+| `SENCHO_TLS_CERT_FILE` | *(unset)* | PEM certificate path that, with the key file, enables the HTTPS listener. |
+| `SENCHO_TLS_KEY_FILE` | *(unset)* | PEM private key path. Must be set with the cert file. |
+| `SENCHO_TLS_CA_FILE` | *(unset)* | Optional CA bundle copied into Pilot enrollment. |
 
 SSO variables are documented separately in the [SSO Quickstart](/getting-started/sso-quickstart).

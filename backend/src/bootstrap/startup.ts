@@ -36,6 +36,7 @@ import { SourceController } from '../services/gitops/SourceController';
 import { NotificationService } from '../services/NotificationService';
 import { sanitizeForLog } from '../utils/safeLog';
 import { PORT } from '../helpers/constants';
+import { isNativeTlsEnabled } from '../helpers/nativeTls';
 import { sweepDockerAuthTempDirs, classifyDockerAuthChildName } from '../helpers/dockerAuthTempDir';
 import { recordRegistryDeliveryEvent } from '../helpers/registryDeliveryEvidence';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
@@ -369,7 +370,8 @@ export async function startServer(server: Server): Promise<void> {
   const listenHost = isPilotAgent ? '127.0.0.1' : undefined;
 
   server.listen(PORT, listenHost, () => {
-    console.log(`Server running on ${listenHost || '0.0.0.0'}:${PORT}${isPilotAgent ? ' (pilot-agent mode)' : ''}`);
+    const scheme = isNativeTlsEnabled() ? 'https' : 'http';
+    console.log(`Server running on ${scheme}://${listenHost || '0.0.0.0'}:${PORT}${isPilotAgent ? ' (pilot-agent mode)' : ''}`);
     if (isPilotAgent) {
       import('../pilot/agent').then((m) => m.startPilotAgent(PORT)).catch((err) => {
         console.error('[Pilot] Agent startup failed:', err);
