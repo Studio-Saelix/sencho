@@ -12,12 +12,14 @@ import {
   ARTIFACT_STATE,
   ARTIFACT_STATE_LOOKUP,
   GITOPS_TONE_CLASS,
+  PLACEMENT_STATE,
   RUNTIME_STATE,
   SOURCE_STATE,
   absentFault,
   identityRefLabel,
   liveSourceFacet,
   pendingSourceStatus,
+  type GitOpsPlacementStatus,
   type GitOpsTone,
 } from '@/lib/gitopsState';
 import type { GitOpsArtifactStatus, GitOpsIdentityRef, GitOpsRuntimeStatus, GitOpsSourceStatus } from '@/types/gitops';
@@ -56,6 +58,19 @@ const ARTIFACT_STATUSES: GitOpsArtifactStatus[] = [
   'artifact_unavailable',
   'artifact_local_build_unverified',
   'artifact_identity_changed',
+];
+
+const PLACEMENT_STATUSES: GitOpsPlacementStatus[] = [
+  'not_applicable',
+  'unbound_direct',
+  'unknown',
+  'source_acceptance_pending',
+  'placement_review_pending',
+  'rollout_authorization_pending',
+  'rollout_authorization_stale',
+  'stateful_confirmation_required',
+  'preflight_blocked',
+  'blueprint_bound',
 ];
 
 const RUNTIME_STATUSES: GitOpsRuntimeStatus[] = [
@@ -106,12 +121,19 @@ describe('the state vocabulary', () => {
     expect(Object.keys(SOURCE_STATE).sort()).toEqual([...SOURCE_STATUSES].sort());
   });
 
+  it('names every placement status', () => {
+    expect(Object.keys(PLACEMENT_STATE).sort()).toEqual([...PLACEMENT_STATUSES].sort());
+    for (const status of PLACEMENT_STATUSES) {
+      expect(PLACEMENT_STATE[status].label.length).toBeGreaterThan(0);
+    }
+  });
+
   it('names every runtime status', () => {
     expect(Object.keys(RUNTIME_STATE).sort()).toEqual([...RUNTIME_STATUSES].sort());
   });
 
   it('gives every state a tone from the five semantic slots and copy that stands alone', () => {
-    for (const meta of [...Object.values(SOURCE_STATE), ...Object.values(RUNTIME_STATE)]) {
+    for (const meta of [...Object.values(SOURCE_STATE), ...Object.values(PLACEMENT_STATE), ...Object.values(RUNTIME_STATE)]) {
       expect(TONES).toContain(meta.tone);
       expect(meta.label.trim().length).toBeGreaterThan(0);
       // The line doubles as the sidebar tooltip, so it has to be a sentence.

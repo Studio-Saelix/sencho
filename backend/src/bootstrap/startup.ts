@@ -244,10 +244,14 @@ export async function startServer(server: Server): Promise<void> {
   }
 
   try {
-    const { reconstructBlueprintRolloutQueue } = await import('../services/gitops/handoff');
+    const { reconstructBlueprintRolloutQueue, backfillMissingPreflightEvaluations } = await import('../services/gitops/handoff');
     const resumed = await reconstructBlueprintRolloutQueue();
     if (resumed > 0) {
       console.log(`[GitOps] Resumed ${resumed} Blueprint rollout(s) after restart`);
+    }
+    const backfilled = await backfillMissingPreflightEvaluations();
+    if (backfilled > 0) {
+      console.log(`[GitOps] Backfilled preflight evidence for ${backfilled} Blueprint application(s)`);
     }
   } catch (err) {
     console.error('[GitOps] Blueprint rollout reconstruction failed:', err instanceof Error ? err.stack ?? err.message : String(err));

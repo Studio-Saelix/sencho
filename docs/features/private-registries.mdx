@@ -181,6 +181,12 @@ Registry credentials are stored on the Sencho instance where you enter them, and
 
 Because the Registries section is hidden when you view another node through the node switcher, manage a remote node's registries by signing into that node's own Sencho instance directly. Configure each private registry on every instance that deploys images from it, so a stack keeps pulling no matter which node it runs on.
 
+## GitOps placement preflight
+
+Git-managed Blueprint fleet place checks private registry readiness before any mutation runs. Public images need no credential delivery. Credentials already configured on the target node win for their registry host; the hub only fills hosts the target cannot cover. If nodes in the fleet run mixed Sencho versions and exact-reference proof is unavailable on a required target, preflight fails closed rather than forwarding without proof.
+
+When placement is blocked, the Blueprint detail sheet shows the redacted reason in its **GitOps** section. Re-run placement after you fix credentials or connectivity: open the Blueprint and use the ordinary **Confirm Apply** or Direct apply/dispatch flow. Sencho re-evaluates preflight on that action. You do not need to wait for a new Git commit.
+
 ## Remote fleet delivery
 
 When you manage remote nodes from a central Sencho instance, you can store private registry credentials once on the hub and have Sencho deliver them to a compatible remote target for a single Compose operation: stack deploys, updates, and rollbacks, service-level updates, template and blueprint deployments, Git-triggered deploys, and automated actions such as scheduled updates, fleet snapshots, and mesh redeployments.

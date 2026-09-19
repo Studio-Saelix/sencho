@@ -11,11 +11,16 @@ import type {
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import {
-  buildPreflightEvidence,
+  decodePreflightEvidenceJson,
   encodePreflightEvidenceJson,
   fingerprintPreflightEvidence,
   isPreflightBlocked,
+  registryPreflightBlockReason,
 } from './preflight';
+import {
+  evaluateRegistryReadiness,
+  type RegistryReadinessDeps,
+} from './registryReadiness';
 import { stackManagedRoot } from './directApplication';
 import { decodeGitOpsRequiredTargetsJson } from './json';
 import { DatabaseService } from '../DatabaseService';
@@ -23,6 +28,41 @@ import { BlueprintService } from '../BlueprintService';
 import { buildBlueprintMarker } from '../../helpers/blueprintMarker';
 import { sanitizeForLog } from '../../utils/safeLog';
 
+const PREFLIGHT_EVAL_TIMEOUT_MS = 30_000;
+
+/** Test-only injectable readiness deps. Production always uses defaults. */
+let readinessDepsForTests: Partial<RegistryReadinessDeps> | null = null;
+
+export function setRegistryReadinessDepsForTests(
+  deps: Partial<RegistryReadinessDeps> | null,
+): void {
+  readinessDepsForTests = deps;
+}
+
+/** Serialize one evaluation per application so concurrent dispatch cannot double-probe. */
+const inflightEvaluations = new Map<string, Promise<unknown>>();
+
+async function withSerializedEvaluation<T>(applicationId: string, fn: () => Promise<T>): Promise<T> {
+  const prior = inflightEvaluations.get(applicationId);
+  const run = (async () => {
+    if (prior) {
+      try {
+        await prior;
+      } catch {
+        // Prior failure must not block the next evaluation.
+      }
+    }
+    return fn();
+  })();
+  inflightEvaluations.set(applicationId, run);
+  try {
+    return await run;
+  } finally {
+    if (inflightEvaluations.get(applicationId) === run) {
+      inflightEvaluations.delete(applicationId);
+    }
+  }
+}
 /**
  * A portable projection of the managed-project manifest: authored file set
  * and per-file content digests, without node id, stack name, or generation
@@ -194,68 +234,147 @@ function liveRolloutBinding(app: GitOpsApplicationRow): FutureRolloutAuthorizati
 
 /**
  * Ensure a live rollout_authorization exists for the application, minting
- * one when every binding ingredient is present and preflight is not blocked.
+ * one when every binding ingredient is present and registry preflight is ready.
+ * Recomputes registry readiness on every call; remints when the fingerprint drifts.
  */
-export function ensureRolloutAuthorization(
+export async function ensureRolloutAuthorization(
   applicationId: string,
   actor: string | null,
   trigger = 'blueprint_dispatch',
-): { ok: true; binding: FutureRolloutAuthorizationBinding } | { ok: false; reason: string } {
-  const store = GitOpsStore.getInstance();
-  const app = store.getApplication(applicationId);
-  if (!app) return { ok: false, reason: 'The application could not be read.' };
-  if (app.target_mode !== 'blueprint') {
-    return { ok: false, reason: 'Rollout authorization is only for Blueprint target mode.' };
-  }
-
-  const existing = liveRolloutBinding(app);
-  if (existing) return { ok: true, binding: existing };
-  // Stale or missing live ref: fall through and remint (same CAS as rolloutAuthorized).
-
-  const ingredients = store.authorizationIngredients(app);
-  if (!ingredients) {
-    if (!app.placement_approval_ref) {
-      return { ok: false, reason: 'Placement approval is required before rollout authorization.' };
+  depsPartial?: Partial<RegistryReadinessDeps>,
+): Promise<{ ok: true; binding: FutureRolloutAuthorizationBinding } | { ok: false; reason: string }> {
+  return withSerializedEvaluation(applicationId, async () => {
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(applicationId);
+    if (!app) return { ok: false, reason: 'The application could not be read.' };
+    if (app.target_mode !== 'blueprint') {
+      return { ok: false, reason: 'Rollout authorization is only for Blueprint target mode.' };
     }
-    return {
-      ok: false,
-      reason: 'Source acceptance, artifact set, and placement must all be current before rollout authorization.',
-    };
-  }
 
-  const preflight = buildPreflightEvidence();
-  if (isPreflightBlocked(preflight)) {
-    return { ok: false, reason: 'Preflight is blocked; rollout cannot be authorized.' };
-  }
-  const preflightFingerprint = fingerprintPreflightEvidence(preflight);
-  const preflightEvidenceJson = encodePreflightEvidenceJson(preflight);
-  const approvalId = randomUUID();
-  const rolloutGenerationId = randomUUID();
-  try {
-    GitOpsTransitions.getInstance().rolloutAuthorized({
+    const ingredients = store.authorizationIngredients(app);
+    if (!ingredients) {
+      if (!app.placement_approval_ref) {
+        return { ok: false, reason: 'Placement approval is required before rollout authorization.' };
+      }
+      return {
+        ok: false,
+        reason: 'Source acceptance, artifact set, and placement must all be current before rollout authorization.',
+      };
+    }
+
+    let composeContent: string | null = null;
+    const genRow = store.getGeneration(ingredients.acceptedGenerationId);
+    if (genRow) {
+      try {
+        composeContent = await readAppliedComposeContent(app, genRow);
+      } catch (err) {
+        console.warn(
+          '[GitOps] Could not read applied compose for preflight:',
+          sanitizeForLog(applicationId),
+          sanitizeForLog(err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+
+    const abortSignal = depsPartial?.abortSignal
+      ?? readinessDepsForTests?.abortSignal
+      ?? AbortSignal.timeout(PREFLIGHT_EVAL_TIMEOUT_MS);
+    const deps = { ...readinessDepsForTests, ...depsPartial, abortSignal };
+
+    const preflight = await evaluateRegistryReadiness(
+      {
+        artifactSetId: ingredients.artifactSetId,
+        requiredNodeIds: ingredients.requiredNodeIds,
+        stackName: app.configured_source_stack_name,
+        composeContent,
+      },
+      deps,
+    );
+    const preflightEvidenceJson = encodePreflightEvidenceJson(preflight);
+    const preflightFingerprint = fingerprintPreflightEvidence(preflight);
+    const transitions = GitOpsTransitions.getInstance();
+    transitions.recordPreflightEvaluation({
       applicationId: app.id,
-      approvalId,
-      rolloutGenerationId,
-      preflightFingerprint,
-      preflightEvidenceJson,
-      actor,
-      envelope: envelopeFor(actor, trigger),
+      evidenceJson: preflightEvidenceJson,
     });
-  } catch (err) {
-    const message = errorMessage(err);
-    if (/already live/i.test(message)) {
-      const raced = store.getApplication(applicationId);
-      const binding = raced ? liveRolloutBinding(raced) : null;
-      if (binding) return { ok: true, binding };
-    }
-    return { ok: false, reason: `Rollout authorization failed: ${message}` };
-  }
 
-  const refreshed = store.getApplication(applicationId);
-  if (!refreshed) return { ok: false, reason: 'The application could not be read after authorization.' };
-  const binding = store.currentAuthorizationBinding(refreshed);
-  if (!binding) return { ok: false, reason: 'Authorization was written but the live binding could not be formed.' };
-  return { ok: true, binding };
+    if (isPreflightBlocked(preflight)) {
+      const existing = liveRolloutBinding(store.getApplication(applicationId) ?? app);
+      if (existing) {
+        transitions.invalidateAuthorizationOnPreflightDrift({
+          applicationId: app.id,
+          envelope: envelopeFor(actor, trigger),
+        });
+      }
+      return { ok: false, reason: registryPreflightBlockReason(preflight) };
+    }
+
+    const live = liveRolloutBinding(store.getApplication(applicationId) ?? app);
+    if (live && live.preflightFingerprint === preflightFingerprint) {
+      return { ok: true, binding: live };
+    }
+    if (live && live.preflightFingerprint !== preflightFingerprint) {
+      transitions.invalidateAuthorizationOnPreflightDrift({
+        applicationId: app.id,
+        envelope: envelopeFor(actor, trigger),
+      });
+    }
+
+    const approvalId = randomUUID();
+    const rolloutGenerationId = randomUUID();
+    try {
+      transitions.rolloutAuthorized({
+        applicationId: app.id,
+        approvalId,
+        rolloutGenerationId,
+        preflightFingerprint,
+        preflightEvidenceJson,
+        actor,
+        envelope: envelopeFor(actor, trigger),
+      });
+    } catch (err) {
+      const message = errorMessage(err);
+      if (/already live/i.test(message)) {
+        const raced = store.getApplication(applicationId);
+        const binding = raced ? liveRolloutBinding(raced) : null;
+        if (binding && binding.preflightFingerprint === preflightFingerprint) {
+          return { ok: true, binding };
+        }
+        if (binding && binding.preflightFingerprint !== preflightFingerprint) {
+          transitions.invalidateAuthorizationOnPreflightDrift({
+            applicationId: app.id,
+            envelope: envelopeFor(actor, `${trigger}:preflight_race`),
+          });
+          try {
+            transitions.rolloutAuthorized({
+              applicationId: app.id,
+              approvalId: randomUUID(),
+              rolloutGenerationId: randomUUID(),
+              preflightFingerprint,
+              preflightEvidenceJson,
+              actor,
+              envelope: envelopeFor(actor, trigger),
+            });
+          } catch (retryErr) {
+            return { ok: false, reason: `Rollout authorization failed: ${errorMessage(retryErr)}` };
+          }
+        } else if (!binding) {
+          return { ok: false, reason: `Rollout authorization failed: ${message}` };
+        }
+      } else {
+        return { ok: false, reason: `Rollout authorization failed: ${message}` };
+      }
+    }
+
+    const refreshed = store.getApplication(applicationId);
+    if (!refreshed) return { ok: false, reason: 'The application could not be read after authorization.' };
+    const binding = store.currentAuthorizationBinding(refreshed);
+    if (!binding) return { ok: false, reason: 'Authorization was written but the live binding could not be formed.' };
+    if (binding.preflightFingerprint !== preflightFingerprint) {
+      return { ok: false, reason: 'Authorization fingerprint drifted during mint.' };
+    }
+    return { ok: true, binding };
+  });
 }
 
 async function readAppliedComposeContent(
@@ -324,7 +443,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
     }
 
     const trigger = generation.trigger || 'blueprint_dispatch';
-    const auth = ensureRolloutAuthorization(app.id, generation.actor ?? null, trigger);
+    const auth = await ensureRolloutAuthorization(app.id, generation.actor ?? null, trigger);
     if (!auth.ok) return { status: 'blocked', reason: auth.reason };
     const binding = auth.binding;
 
@@ -479,6 +598,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
 /**
  * After interrupted operations are reclassified, continue sequential rollout
  * for authorized Blueprint applications that still have unacked frozen targets.
+ * Does not probe: skips blocked or missing stored evidence (backfill owns those).
  */
 export async function reconstructBlueprintRolloutQueue(): Promise<number> {
   const store = GitOpsStore.getInstance();
@@ -486,6 +606,9 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
   let resumed = 0;
   for (const app of apps) {
     if (!app.accepted_generation_id || !app.rollout_authorization_ref) continue;
+    if (!app.latest_preflight_evidence_json) continue;
+    const stored = decodePreflightEvidenceJson(app.latest_preflight_evidence_json);
+    if (isPreflightBlocked(stored)) continue;
     const binding = liveRolloutBinding(app);
     if (!binding) continue;
 
@@ -514,6 +637,33 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
     );
   }
   return resumed;
+}
+
+/**
+ * One-shot startup backfill: live-authorized Blueprint apps that still lack
+ * stored preflight evidence are evaluated once so derive can project honestly
+ * without painting them blocked for a missing column.
+ */
+export async function backfillMissingPreflightEvaluations(): Promise<number> {
+  const store = GitOpsStore.getInstance();
+  const apps = store.listAuthorizedBlueprintApplications().filter(
+    (app) => app.latest_preflight_evidence_json == null,
+  );
+  let filled = 0;
+  for (const app of apps) {
+    if (!liveRolloutBinding(app)) continue;
+    const result = await ensureRolloutAuthorization(app.id, null, 'preflight_backfill');
+    if (store.getApplication(app.id)?.latest_preflight_evidence_json) {
+      filled += 1;
+    } else if (!result.ok) {
+      console.warn(
+        '[GitOps] Preflight backfill could not authorize %s: %s',
+        sanitizeForLog(app.id),
+        sanitizeForLog(result.reason),
+      );
+    }
+  }
+  return filled;
 }
 
 /** Exported for tests that assert frozen-set decoding stays aligned with the adapter. */

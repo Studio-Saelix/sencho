@@ -2018,6 +2018,7 @@ export class DatabaseService {
         maybeAddCol('gitops_applications', 'next_poll_at', 'INTEGER NULL');
         maybeAddCol('gitops_applications', 'attempt_seq', 'INTEGER NOT NULL DEFAULT 0');
         maybeAddCol('gitops_applications', 'configured_source_stack_name', 'TEXT NULL');
+        maybeAddCol('gitops_applications', 'latest_preflight_evidence_json', 'TEXT NULL');
         this.db.exec(GITOPS_DUE_INDEX_SQL);
 
         // Distributed API model columns

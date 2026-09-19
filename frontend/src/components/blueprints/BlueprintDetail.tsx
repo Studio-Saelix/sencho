@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Pencil, Pin, Play, Power, Trash2, GitBranch, Unlink, CornerDownLeft } from 'lucide-react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
-import { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
+import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
 import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
-import { absentFault, liveCaveats } from '@/lib/gitopsState';
+import { absentFault, liveCaveats, placementStateMeta } from '@/lib/gitopsState';
+import type { PlacementFacet } from '@/types/gitops';
 import { Modal, ModalDestructiveHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -98,6 +99,10 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
     const gitopsFaults = summary ? absentFault(summary.gitopsRevision) : [];
     // Caveats qualify this Blueprint (reapproval, Git-managed rollout), not a node rollout.
     const gitopsCaveats = summary ? liveCaveats(summary.gitopsRevision) : [];
+    const gitopsPlacement: PlacementFacet | null = summary && summary.gitopsRevision.targetMode !== 'not_applicable'
+        ? summary.gitopsRevision.facets.placement
+        : null;
+    const showGitopsPlacement = gitopsPlacement !== null && gitopsPlacement.status !== 'not_applicable';
     const gitManaged = blueprint?.content_origin === 'git';
     const hasActiveDeployments = summary?.deployments.some(
         (dep) => dep.status !== 'withdrawn',
@@ -342,10 +347,19 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                             </SheetSection>
                         )}
 
-                        {(gitopsFaults.length > 0 || gitopsCaveats.length > 0) && (
+                        {(gitopsFaults.length > 0 || gitopsCaveats.length > 0 || showGitopsPlacement) && (
                             <SheetSection title="GitOps">
-                                {gitopsFaults.length > 0 && <GitOpsFaultCard message={gitopsFaults[0].message} />}
-                                {summary && <GitOpsCaveats revision={summary.gitopsRevision} />}
+                                <div className="space-y-2">
+                                    {gitopsFaults.length > 0 && <GitOpsFaultCard message={gitopsFaults[0].message} />}
+                                    {showGitopsPlacement && gitopsPlacement && (
+                                        <GitOpsStateCard
+                                            data-testid="gitops-placement"
+                                            stateKey={gitopsPlacement.status}
+                                            state={placementStateMeta(gitopsPlacement)}
+                                        />
+                                    )}
+                                    {summary && <GitOpsCaveats revision={summary.gitopsRevision} />}
+                                </div>
                             </SheetSection>
                         )}
 
