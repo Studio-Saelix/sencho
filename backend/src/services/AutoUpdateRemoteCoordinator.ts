@@ -9,6 +9,8 @@ import { PROXY_TIER_HEADER } from './license-headers';
 import { prepareOutboundRegistryDeliveryBody, throwRegistryDeliveryRefusal } from '../helpers/registryDeliveryOutbound';
 import { createAutoUpdateDigestGateState, recordAutoUpdateImageCheck, messageWhenNoDigestUpdate, messageWhenDigestApplyBlockedByCheckErrors } from '../helpers/autoUpdateDigestGate';
 import { awaitHubPostUpdateVerification, type HubVerificationTransport } from './hubPostUpdateVerification';
+import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
 
 export interface RemoteAutoUpdateScanner extends HubVerificationTransport {
   inspectRemoteStack(nodeId: number, stack: string, signal: AbortSignal): Promise<{
@@ -67,7 +69,10 @@ export class AutoUpdateRemoteCoordinator {
       try {
         results.push(await this.executeStack(input, stack));
       } catch (error) {
-        console.error('[AutoUpdateCoordinator] Remote stack update failed:', error);
+        console.error(
+          `[AutoUpdateCoordinator] Remote stack update failed for ${sanitizeForLog(stack)}:`,
+          sanitizeForLog(getErrorMessage(error, 'unknown')),
+        );
         results.push(`Stack "${stack}" failed: Remote automatic update did not complete.`);
       }
     }

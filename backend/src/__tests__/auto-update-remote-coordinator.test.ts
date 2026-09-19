@@ -130,4 +130,15 @@ describe('remote automatic update coordinator', () => {
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
     expect(mocks.recheck).not.toHaveBeenCalled();
   });
+
+  it('strips control characters from failure logs', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mocks.fetch.mockRejectedValue(new Error('boom\n[INFO] forged\rline'));
+    await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(errorSpy).toHaveBeenCalled();
+    const logged = errorSpy.mock.calls.flat().map(String).join(' ');
+    expect(logged).not.toMatch(/[\r\n]/);
+    expect(logged).toContain('boom[INFO] forgedline');
+    errorSpy.mockRestore();
+  });
 });
