@@ -406,6 +406,7 @@ export class DeployedStackDeletionService {
       db.clearStackScanAttempts(nodeId, stackName);
       db.deleteRoleAssignmentsByStack(nodeId, stackName);
       db.deleteGitSource(stackName);
+      db.deleteGitProviderEndpointsForStack(stackName);
       // R6: the managed-project area must not outlive the stack; failures are
       // logged inside, never fatal to the deletion.
       await GitProjectManifestService.getInstance().deleteManagedArea(stackName);

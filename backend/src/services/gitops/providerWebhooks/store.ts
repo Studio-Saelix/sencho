@@ -54,6 +54,10 @@ export class GitProviderWebhookStore {
     DatabaseService.getInstance().deleteGitProviderEndpoint(id);
   }
 
+  public deleteEndpointsForStack(stackName: string): number {
+    return DatabaseService.getInstance().deleteGitProviderEndpointsForStack(stackName);
+  }
+
   public upsertDelivery(args: {
     endpointId: string;
     deliveryId: string;
