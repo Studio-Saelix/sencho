@@ -283,7 +283,7 @@ async function readAppliedComposeContent(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') {
-      throw new Error('accepted generation materialization is missing compose.yaml');
+      throw new Error('accepted generation materialization is missing compose.yaml', { cause: err });
     }
     throw err;
   }

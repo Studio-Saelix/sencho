@@ -1800,6 +1800,7 @@ export class GitOpsTransitions {
         };
         this.store().insertRolloutGeneration(generation);
 
+        const previousAuthorizationRef = app.rollout_authorization_ref;
         app.rollout_authorization_ref = args.approvalId;
         app.preflight_fingerprint = args.preflightFingerprint;
         app.rollout_generation_id = args.rolloutGenerationId;
@@ -1814,7 +1815,7 @@ export class GitOpsTransitions {
           artifactSetId: ingredients.artifactSetId,
           sourceAcceptanceRef: ingredients.sourceAcceptanceRef,
           placementApprovalRef: ingredients.placementApprovalRef,
-          before: { rolloutAuthorizationRef: null },
+          before: { rolloutAuthorizationRef: previousAuthorizationRef },
           after: {
             rolloutAuthorizationRef: args.approvalId,
             rolloutGenerationId: args.rolloutGenerationId,
